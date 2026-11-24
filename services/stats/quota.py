@@ -377,6 +377,7 @@ def quota_snapshot(db, *, owner, account_id=None, session_id=None, period="30d",
         from core.stats_models import StatsEvent
         event_rows = db.query(StatsEvent).filter(
             StatsEvent.owner == owner,
+            StatsEvent.event_kind != "context_receipt",
             StatsEvent.event_time >= now - timedelta(hours=24),
         ).order_by(StatsEvent.event_time.desc(), StatsEvent.id.desc()).limit(1001).all()
         token_volume_truncated = len(event_rows) > 1000
@@ -395,7 +396,7 @@ def quota_snapshot(db, *, owner, account_id=None, session_id=None, period="30d",
     if session_id:
         from core.stats_models import StatsEvent
         from services.stats.ledger import select_admitted_events
-        session_query = db.query(StatsEvent).filter(StatsEvent.owner == owner, StatsEvent.session_id == session_id).order_by(StatsEvent.event_time.desc(), StatsEvent.id.desc())
+        session_query = db.query(StatsEvent).filter(StatsEvent.owner == owner, StatsEvent.session_id == session_id, StatsEvent.event_kind != "context_receipt").order_by(StatsEvent.event_time.desc(), StatsEvent.id.desc())
         session_rows = session_query.limit(10001).all()
         session_rows.reverse()
         session_has_more = len(session_rows) > 10000

@@ -432,6 +432,28 @@ test(
 )
 
 test(
+  "metadata-only lifecycle capability keeps per-tool identity and skips notification",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "metadata-only-server"
+      const serverState = getOrCreateClientState("metadata-only-server")
+      serverState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1, notifications: false } },
+      }
+      yield* mcp.add("metadata-only-server", { type: "local", command: ["echo", "test"] })
+      const context = { sessionId: "ses_1", turnId: "turn_1", actorId: "main" }
+      const tools = yield* mcp.tools(context)
+      const execute = tools["metadata-only-server_test_tool"]?.execute
+      expect(execute).toBeDefined()
+      yield* Effect.promise(() => Promise.resolve(execute?.({}, { toolCallId: "call_1", messages: [], abortSignal: new AbortController().signal })))
+      expect(serverState.toolCalls).toEqual([{ name: "test_tool", arguments: {}, _meta: { "com.xiaomi.mimo/turn-lifecycle": context } }])
+      yield* MCP.notifyTurnLifecycle(yield* mcp.clients(), context, "completed")
+      expect(serverState.notifications).toEqual([])
+    }),
+  ),
+)
+
+test(
   "cancelling tool execution aborts the in-flight MCP request before terminal notification",
   withInstance({}, (mcp) =>
     Effect.gen(function* () {
@@ -1402,6 +1424,106 @@ test(
       expect(serverStatus.status).toBe("failed")
       // Both StreamableHTTP and SSE transports should be closed
       expect(transportCloseCount).toBeGreaterThanOrEqual(2)
+    }),
+  ),
+)
+
+test(
+  "managed MCP dispatch checks the exact tuple, bound private client and canonical host admission",
+  withInstance({}, (mcp) => Effect.gen(function* () {
+    const memory = yield* Effect.promise(() => import("../../src/memory/mcp-client"))
+    lastCreatedClientName = "lifetools_private"
+    const privateState = getOrCreateClientState("lifetools_private")
+    privateState.tools = [
+      { name: "browser_status", inputSchema: { type: "object", properties: {} } },
+      { name: "browser_control", inputSchema: { type: "object", properties: {} } },
+      { name: "unverified_tool", inputSchema: { type: "object", properties: {} } },
+    ]
+    privateState.serverCapabilities = { experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } } }
+    yield* mcp.add("lifetools_private", { type: "local", command: ["echo", "test"] })
+    memory.bindMemorySessionClient("ses_root", "lifetools_private", "owner", "workspace")
+    lastCreatedClientName = "other"
+    const otherState = getOrCreateClientState("other")
+    otherState.tools = [{ name: "browser_status", inputSchema: { type: "object", properties: {} } }]
+    otherState.serverCapabilities = { experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } } }
+    yield* mcp.add("other", { type: "local", command: ["echo", "test"] })
+    const context = { sessionId: "ses_child", turnId: "inner-1", actorId: "child", sessionID: "ses_child",
+      rootOperationID: "root-1", actorID: "child", executionRevision: 2, innerTurnID: "inner-1" }
+    const admitted: Array<[string, string]> = []
+    const options = { managedPrivateRootSessionID: "ses_root", admit: async (name: string, kind: "tool" | "mcp_tool" | "memory_read"): Promise<string | undefined> => {
+      admitted.push([name, kind])
+      if (name === "unverified_tool") throw new Error("host denied")
+      return undefined
+    } }
+    const tools = yield* mcp.tools(context, options)
+    expect(Object.keys(tools).sort()).toEqual(["lifetools_private_browser_control", "lifetools_private_browser_status", "lifetools_private_unverified_tool", "other_browser_status"])
+    const execute = tools.lifetools_private_browser_status?.execute
+    yield* Effect.promise(() => Promise.resolve(execute?.({}, { toolCallId: "call", messages: [], abortSignal: new AbortController().signal })))
+    expect(privateState.toolCalls).toEqual([{ name: "browser_status", arguments: {}, _meta: { "com.xiaomi.mimo/turn-lifecycle": context } }])
+    const denied = tools.lifetools_private_unverified_tool?.execute
+    yield* Effect.promise(async () => { await expect(Promise.resolve(denied?.({}, { toolCallId: "deny", messages: [], abortSignal: new AbortController().signal }))).rejects.toThrow("host denied") })
+    const external = tools.other_browser_status?.execute
+    yield* Effect.promise(() => Promise.resolve(external?.({}, { toolCallId: "external", messages: [], abortSignal: new AbortController().signal })))
+    expect(admitted).toEqual([["browser_status", "tool"], ["unverified_tool", "tool"], ["mcp__other__browser_status", "mcp_tool"]])
+    expect(otherState.toolCalls).toEqual([{ name: "browser_status", arguments: {} }])
+    expect(Object.keys(yield* mcp.tools({ ...context, executionRevision: -1 }, options))).toEqual([])
+    privateState.serverCapabilities = {}
+    expect(Object.keys(yield* mcp.tools(context, options))).toEqual(["other_browser_status"])
+    memory.unbindMemorySessionClient("ses_root")
+  })),
+)
+
+test(
+  "prefix provenance binds current MCP client and refuses changed or unknown turn",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      const identity = { sessionID:"session", rootOperationID:"root", actorID:"main", executionRevision:1, innerTurnID:"turn" }
+      expect(yield* mcp.prefixGeneration!(identity)).toBeUndefined()
+      lastCreatedClientName = "prefix-server"
+      yield* mcp.add("prefix-server", {type:"local",command:["echo","test"]})
+      const context = {...identity,sessionId:identity.sessionID,actorId:identity.actorID,turnId:identity.innerTurnID}
+      const options = {managedPrivateRootSessionID:"unavailable",admit:async () => undefined}
+      yield* mcp.tools(context, options)
+      const first = yield* mcp.prefixGeneration!(identity)
+      expect(first?.length).toBe(1)
+      expect(yield* mcp.prefixGeneration!({...identity,innerTurnID:"other"})).toBeUndefined()
+      const handler = Array.from(getOrCreateClientState("prefix-server").notificationHandlers.values())[0]!
+      const rediscovery = handler()
+      expect(yield* mcp.prefixGeneration!(identity)).toBeUndefined()
+      yield* Effect.promise(() => rediscovery)
+      yield* mcp.tools(context, options)
+      const refreshed = yield* mcp.prefixGeneration!(identity)
+      expect(refreshed?.[0]?.instanceID).toBe(first?.[0]?.instanceID)
+      expect(refreshed?.[0]?.revision).toBeGreaterThan(first?.[0]?.revision ?? -1)
+      yield* mcp.disconnect("prefix-server")
+      expect(yield* mcp.prefixGeneration!(identity)).toBeUndefined()
+      lastCreatedClientName = "prefix-server"
+      yield* mcp.add("prefix-server", {type:"local",command:["echo","test"]})
+      yield* mcp.tools(context, options)
+      const second = yield* mcp.prefixGeneration!(identity)
+      expect(second?.length).toBe(1)
+      expect(second?.[0]?.instanceID).not.toBe(first?.[0]?.instanceID)
+    }),
+  ),
+)
+
+test(
+  "passive MCP health never initializes and binds candidate evidence to turn and client generation",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      const identity = { sessionID: "session", rootOperationID: "root", actorID: "main", executionRevision: 1, innerTurnID: "turn" }
+      expect((yield* mcp.healthSnapshot!(identity)).status).toBe("unavailable")
+      expect(clientCreateCount).toBe(0)
+      lastCreatedClientName = "health-server"
+      yield* mcp.add("health-server", { type: "local", command: ["echo", "test"] })
+      const context = { ...identity, sessionId: identity.sessionID, actorId: identity.actorID, turnId: identity.innerTurnID }
+      yield* mcp.tools(context, { managedPrivateRootSessionID: "unavailable", admit: async () => undefined })
+      const observed = yield* mcp.healthSnapshot!(identity)
+      expect(observed.status).toBe("observed")
+      expect(observed.servers.find((server) => server.serverKey === "health-server")?.offeredToPromptCount).toBe(1)
+      expect((yield* mcp.healthSnapshot!({ ...identity, innerTurnID: "other" })).status).toBe("unavailable")
+      yield* mcp.disconnect("health-server")
+      expect((yield* mcp.healthSnapshot!(identity)).status).toBe("unavailable")
     }),
   ),
 )

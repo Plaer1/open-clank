@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import HTTPException, UploadFile
 
 DEFAULT_CHAT_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
-CHAT_UPLOAD_MAX_BYTES_ENV = "ODYSSEUS_CHAT_UPLOAD_MAX_BYTES"
+CHAT_UPLOAD_MAX_BYTES_ENV = "OPEN_CLANK_CHAT_UPLOAD_MAX_BYTES"
 
 
 def format_byte_limit(limit: int) -> str:
@@ -36,38 +36,38 @@ def get_chat_upload_max_bytes() -> int:
 
 # Per-route upload byte-limits, single-sourced here (issue #3364). Each is
 # validated + env-overridable via read_byte_limit_env: set the matching
-# ODYSSEUS_*_MAX_BYTES env var to an integer byte count to tune it; an invalid
+# OPEN_CLANK_*_MAX_BYTES env var to an integer byte count to tune it; an invalid
 # value fails fast at import rather than crashing mid-request. Defaults match
 # the prior per-route values, so behavior is unchanged unless an env var is set.
 GALLERY_UPLOAD_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES", 100 * 1024 * 1024
+    "OPEN_CLANK_GALLERY_UPLOAD_MAX_BYTES", 100 * 1024 * 1024
 )
 GALLERY_TRANSFORM_UPLOAD_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES", 25 * 1024 * 1024
+    "OPEN_CLANK_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES", 25 * 1024 * 1024
 )
 MEMORY_IMPORT_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_MEMORY_IMPORT_MAX_BYTES", 10 * 1024 * 1024
+    "OPEN_CLANK_MEMORY_IMPORT_MAX_BYTES", 10 * 1024 * 1024
 )
 PERSONAL_UPLOAD_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_PERSONAL_UPLOAD_MAX_BYTES", 25 * 1024 * 1024
+    "OPEN_CLANK_PERSONAL_UPLOAD_MAX_BYTES", 25 * 1024 * 1024
 )
 EMAIL_COMPOSE_UPLOAD_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_EMAIL_COMPOSE_UPLOAD_MAX_BYTES", 25 * 1024 * 1024
+    "OPEN_CLANK_EMAIL_COMPOSE_UPLOAD_MAX_BYTES", 25 * 1024 * 1024
 )
 STT_MAX_AUDIO_BYTES = read_byte_limit_env(
-    "ODYSSEUS_STT_MAX_AUDIO_BYTES", 25 * 1024 * 1024
+    "OPEN_CLANK_STT_MAX_AUDIO_BYTES", 25 * 1024 * 1024
 )
 ICS_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_ICS_MAX_BYTES", 10 * 1024 * 1024
+    "OPEN_CLANK_ICS_MAX_BYTES", 10 * 1024 * 1024
 )
 COPAL_IMPORT_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_COPAL_IMPORT_MAX_BYTES", 256 * 1024 * 1024
+    "OPEN_CLANK_COPAL_IMPORT_MAX_BYTES", 256 * 1024 * 1024
 )
 # Files OS drops use the same ceiling as Copal imports unless the target
 # provider advertises a lower limit.  The route streams through provider-owned
 # staging and never creates a whole-file base64 payload.
 FILES_IMPORT_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_FILES_IMPORT_MAX_BYTES", COPAL_IMPORT_MAX_BYTES
+    "OPEN_CLANK_FILES_IMPORT_MAX_BYTES", COPAL_IMPORT_MAX_BYTES
 )
 
 

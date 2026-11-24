@@ -21,7 +21,7 @@ AUDITED_LOCAL_ARTIFACTS = (
     "frankenmemory.db-shm",
 )
 AUDITED_BUILD_OUTPUTS = (
-    "mcp_servers/frankenmemory/target",
+    "native/memery/target",
     "packages/Copal/.node_modules.bak-20260708-143848",
     "packages/Copal/.next",
     "packages/Copal/db",
@@ -138,16 +138,12 @@ def test_scanner_failure_discards_scanner_output(tmp_path: Path):
     assert marker not in str(failure.value)
 
 
-def test_context_materialization_does_not_follow_symlinks(tmp_path: Path):
+def test_public_export_rejects_external_symlinks(tmp_path: Path):
     source = tmp_path / "source"
     source.mkdir()
     outside = tmp_path / "outside"
     outside.write_text("outside fixture", encoding="utf-8")
     os.symlink(outside, source / "link")
-    destination = tmp_path / "destination"
 
-    hygiene._materialize_context(source, ("link",), destination)
-
-    materialized = destination / "link"
-    assert not materialized.is_symlink()
-    assert materialized.read_text(encoding="utf-8") == str(outside)
+    with pytest.raises(hygiene.ArtifactHygieneError, match="external symlink"):
+        hygiene.check_export(tmp_path, source, gitleaks=None, paths_only=True)

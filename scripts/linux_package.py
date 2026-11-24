@@ -20,9 +20,12 @@ TARGET = 'linux-x64'
 PYTHON_URL = 'https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-x86_64-unknown-linux-gnu-install_only.tar.gz'
 PYTHON_SHA256 = 'cbda6f7767884fc456860b11fd184391a9320cae00a86c0f49a1c7ac6e236f7a'
 PYTHON_FULL_SHA256 = '344eec7e761e7b3dccce0ce2d91a3e70d40f8ff5d3ce7d907d979c23e8451fc7'
+HISTORY_HELPERS = ('openclank-history-service', 'openclank-history-prepare-copy', 'openclank-history-index-copy')
 HELPERS = ('odysseus-files-service', 'odysseus-linux-thumbnail-helper',
-           'odysseus-kde-thumbnail-adapter', 'openclank-history-service', 'fm-mcp',
-           'openclank-linux-host-apps')
+           'odysseus-kde-thumbnail-adapter', 'openclank-history-service', 'memery-worker',
+           'memery-migrate', *HISTORY_HELPERS[1:], 'openclank-linux-host-apps')
+OPTIONAL_CAPTURE = 'openclank-native-capture'
+OPTIONAL_FRAME = 'openclank-native-capture-frame'
 MANIFEST = 'linux-package-manifest.json'
 EXCLUDED = {MANIFEST, 'SHA256SUMS'}
 
@@ -81,6 +84,82 @@ def verify_elf(path):
         raise RuntimeError('Expected x86_64 little-endian ELF: ' + path.name)
 
 
+def stage_optional_capture(native_bin, bindir, notices, name=OPTIONAL_CAPTURE):
+    """Stage an operator-provided Linux helper; never build at app runtime."""
+    if name not in (OPTIONAL_CAPTURE, OPTIONAL_FRAME): raise RuntimeError('Invalid optional helper name')
+    source = native_bin / name
+    if not source.exists():
+        return None
+    if source.is_symlink() or not source.is_file() or not os.access(source, os.X_OK):
+        raise RuntimeError('Invalid optional capture helper')
+    verify_elf(source)
+    try:
+        notice_inventory = json.loads((notices / 'inventory.json').read_text())
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Capture notices unavailable') from exc
+    if not any(item.get('kind') == 'rust' and item.get('name') == OPTIONAL_CAPTURE
+               and item.get('version') == '0.1.0' for item in notice_inventory.get('components', []) if isinstance(item, dict)):
+        raise RuntimeError('Capture dependency notices missing')
+    if name == OPTIONAL_FRAME:
+        components = notice_inventory.get('components', [])
+        marker = {'kind':'rust-feature', 'manifest':'native/capture/Cargo.toml', 'features':['frames'],
+                  'lock_sha256':digest(ROOT / 'native/capture/Cargo.lock')}
+        required = {('gstreamer','0.24.2'), ('gstreamer-app','0.24.2'), ('gstreamer-video','0.24.2')}
+        found = {(item.get('name'),item.get('version')) for item in components if isinstance(item, dict) and item.get('kind') == 'rust'}
+        runtime = {(item.get('name'),item.get('license'),item.get('provision')) for item in components if isinstance(item, dict) and item.get('kind') == 'system-runtime'}
+        required_runtime = {('gstreamer','LGPL-2.1-or-later','system'),
+                            ('pipewire-gstreamer-plugin','MIT','system'),
+                            ('gstreamer-core-elements','LGPL-2.1-or-later','system'),
+                            ('gstreamer-good-matroska','LGPL-2.1-or-later','system'),
+                            ('gstreamer-good-vpx','LGPL-2.1-or-later','system'),
+                            ('libvpx','BSD-3-Clause','system')}
+        libvpx_notice = {'kind':'system-runtime', 'name':'libvpx', 'license':'BSD-3-Clause',
+                         'provision':'system', 'additional_notice_url':
+                         'https://chromium.googlesource.com/webm/libvpx/+/master/PATENTS'}
+        if marker not in components or not required.issubset(found) or not required_runtime.issubset(runtime) or libvpx_notice not in components:
+            raise RuntimeError('Frame feature dependency notices missing or stale')
+    from scripts.windows_helper_artifacts import source_inputs as helper_source_inputs
+    destination = bindir / name
+    shutil.copy2(source, destination)
+    return {'name': name, 'target': TARGET, 'sha256': digest(destination),
+            'bytes': destination.stat().st_size, 'source_inputs': helper_source_inputs(ROOT, 'native/capture'),
+            'requirement': 'optional', 'readiness': 'unqualified', 'source_binding': 'declared-build-inputs'}
+
+
+def verify_optional_capture(internal, name=OPTIONAL_CAPTURE):
+    if name not in (OPTIONAL_CAPTURE, OPTIONAL_FRAME): raise RuntimeError('Invalid optional helper name')
+    binary = internal / 'bin' / name
+    inventory_path = internal / 'bin/helper-artifacts.json'
+    if not binary.exists():
+        if inventory_path.is_file():
+            inventory = json.loads(inventory_path.read_text())
+            if any(isinstance(row, dict) and row.get('name') == name for row in inventory.get('artifacts', [])):
+                raise RuntimeError('Optional capture inventory has no binary')
+        return
+    if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise RuntimeError('Invalid optional capture helper')
+    verify_elf(binary)
+    try:
+        inventory = json.loads(inventory_path.read_text())
+        matches = [row for row in inventory['artifacts'] if isinstance(row, dict) and row.get('name') == name]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError('Optional capture inventory unavailable') from exc
+    if len(matches) != 1:
+        raise RuntimeError('Optional capture inventory invalid')
+    record = matches[0]
+    inputs = record.get('source_inputs')
+    if (inventory.get('target') != TARGET or record.get('target') != TARGET
+            or record.get('requirement') != 'optional' or record.get('readiness') != 'unqualified'
+            or record.get('source_binding') != 'declared-build-inputs'
+            or record.get('sha256') != digest(binary) or record.get('bytes') != binary.stat().st_size
+            or not isinstance(inputs, list) or not inputs
+            or any(not isinstance(item, dict) or set(item) != {'path', 'sha256'}
+                   or not isinstance(item['path'], str) or not item['path'].startswith('native/capture/')
+                   or '..' in PurePosixPath(item['path']).parts
+                   or not re.fullmatch(r'[0-9a-f]{64}', str(item['sha256'])) for item in inputs)):
+        raise RuntimeError('Optional capture provenance invalid')
+
+
 def verify_bundle(root):
     root = root.resolve()
     for name in (MANIFEST, 'SHA256SUMS'):
@@ -96,6 +175,7 @@ def verify_bundle(root):
     if (root / 'SHA256SUMS').read_text() != expected:
         raise RuntimeError('Linux package manifest checksum changed')
     internal = root / '_internal'
+    for name in (OPTIONAL_CAPTURE, OPTIONAL_FRAME): verify_optional_capture(internal, name)
     critical = [root / 'openclank', internal / 'python/bin/python3', *(internal / 'bin' / name for name in HELPERS)]
     for path in critical:
         if not path.is_file() or not os.access(path, os.X_OK):
@@ -274,18 +354,21 @@ def build(args):
     from scripts.windows_helper_artifacts import source_inputs as helper_source_inputs
     helper_sources = {}
     for manifest, names in [('packages/odysseus-files', HELPERS[:2]),
-                            ('packages/openclank-history', (HELPERS[3],)),
-                            ('mcp_servers/frankenmemory', (HELPERS[4],))]:
+                            ('packages/openclank-history', HISTORY_HELPERS),
+                            ('native/memery', (HELPERS[4], HELPERS[5]))]:
         for name in names: helper_sources[name] = helper_source_inputs(ROOT, manifest)
     helper_sources[HELPERS[2]] = [{'path': 'native/linux/' + name, 'sha256': digest(ROOT / 'native/linux' / name)}
                                 for name in ('CMakeLists.txt', 'kde-thumbnail-adapter.cpp')]
-    helper_sources[HELPERS[5]] = [{'path': 'src/openclank/linux_host_apps.py', 'sha256': digest(ROOT / 'src/openclank/linux_host_apps.py')}]
+    helper_sources[HELPERS[-1]] = [{'path': 'src/openclank/linux_host_apps.py', 'sha256': digest(ROOT / 'src/openclank/linux_host_apps.py')}]
     host = bindir / HELPERS[-1]
     host.write_text('#!/bin/sh\nif [ "${LD_LIBRARY_PATH_ORIG+x}" = x ]; then export LD_LIBRARY_PATH="$LD_LIBRARY_PATH_ORIG"; else unset LD_LIBRARY_PATH; fi\nHERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$HERE/../python/bin/python3" -B -m src.openclank.linux_host_apps --worker "$@"\n')
     host.chmod(0o755)
-    write_json(bindir / 'helper-artifacts.json', {'schema_version': 1, 'target': TARGET, 'artifacts': [
-        {'name': name, 'sha256': digest(bindir / name), 'bytes': (bindir / name).stat().st_size,
-         'source_inputs': helper_sources[name]} for name in HELPERS]})
+    artifacts = [{'name': name, 'sha256': digest(bindir / name), 'bytes': (bindir / name).stat().st_size,
+                  'source_inputs': helper_sources[name]} for name in HELPERS]
+    for name in (OPTIONAL_CAPTURE, OPTIONAL_FRAME):
+        capture = stage_optional_capture(args.native_bin, bindir, args.notices, name)
+        if capture is not None: artifacts.append(capture)
+    write_json(bindir / 'helper-artifacts.json', {'schema_version': 1, 'target': TARGET, 'artifacts': artifacts})
     shutil.copy2(ROOT / 'LICENSE', bundle / 'LICENSE')
     shutil.copy2(ROOT / 'docs/linux-package.md', bundle / 'README.md')
     packages = json.loads(subprocess.check_output([sys.executable, '-I', '-m', 'pip', 'list', '--format=json'], text=True))

@@ -1,11 +1,14 @@
+import { registerAdapter } from '../custom-context-menu.js';
 import {
   activeSheetView,
   cellEditorKind,
+  clearSelection,
   copySelection,
   formatCellValue,
   isReadOnlyColumn,
   readCell,
   rowKey,
+  selectCell,
   sheetTitle,
   visibleColumnIndexes,
 } from './sheetModel.js';
@@ -167,33 +170,87 @@ function showPastePreview(target, preview, state, apply, execute = (operation) =
   return dialog;
 }
 
-export function renderSheet(target, state, { controller = null, onToolbar = null, onOverflow = null, onOpenSource = null, onColumnMenu = null, onColumnResize = null, onColumnReorder = null, onViewCommand = null, onContextCommand = null, onClear = null, onClearOperation = null, onCopy = null, onValidationError = null, schema = {} } = {}) {
+export function renderSheet(target, state, { controller = null, onToolbar = null, onOverflow = null, onOpenSource = null, onColumnMenu = null, onColumnResize = null, onColumnReorder = null, onViewCommand = null, onEditCell = null, canWriteCell = null, canChangeViews = true, onClear = null, onClearOperation = null, onCopy = null, onValidationError = null, schema = {} } = {}) {
   if (!target) throw new TypeError('A sheet target is required');
   const view = activeSheetView(state);
   const root = element('section', { class:`copal-sheet-surface density-${state.density || 'compact'}`, 'data-sheet-status':state.status, 'aria-busy':state.status === 'loading' });
-  root.__openClankSheetContextCommand = async (command, node) => {
-    if (command === 'edit-sheet-cell') { node.dispatchEvent(new MouseEvent('dblclick', { bubbles:true })); return true; }
-    if (command === 'clear-sheet-cell') {
-      const cells = controller?.clear?.() || []; const current = controller?.getState?.();
-      const result = onClearOperation ? await onClearOperation(cells, current) : await onClear?.(cells, current);
-      return result !== false;
-    }
-    if (command === 'copy-sheet-cell') {
-      const text = copySelection(controller?.getState?.() || state); onCopy?.(text);
+  const currentSheet = () => controller?.getState?.() || state;
+  const scopeKey = value => JSON.stringify([value.scope, value.resourceKey, value.viewId]);
+  const scope = scopeKey(state);
+  const sheetCurrent = () => root.isConnected && scope === scopeKey(currentSheet()) && state.definition === currentSheet().definition;
+  const captureCell = cell => {
+    if (!cell?.isConnected || !root.contains(cell) || !sheetCurrent()) return null;
+    const current = currentSheet();
+    const rowIndex = Number(cell.dataset.sheetRowIndex);
+    const columnIndex = Number(cell.dataset.sheetColumnIndex);
+    const row = current.rows[rowIndex];
+    const column = activeSheetView(current)?.columns[columnIndex];
+    if (!row || !column || column.visible === false || rowKey(row) !== cell.dataset.sheetRowKey || column.property !== cell.dataset.sheetColumnKey) return null;
+    return { cell, row, column, rowIndex, columnIndex };
+  };
+  const cellCurrent = request => {
+    const saved = request.adapterContext;
+    const current = captureCell(saved?.cell);
+    return !!current && current.row === saved.row && current.column === saved.column;
+  };
+  const cellCommands = ({ row, column }) => [
+    ...(!isReadOnlyColumn(column, schema) && canWriteCell?.(row) !== false ? [
+      ...(onEditCell ? [{ id:'edit-sheet-cell', label:'Edit cell' }] : []),
+      ...(onClear || onClearOperation ? [{ id:'clear-sheet-cell', label:'Clear cell', destructive:true }] : []),
+    ] : []),
+    { id:'copy-sheet-cell', label:'Copy cell' },
+    ...(onOpenSource ? [{ id:'open-base-document', label:'Open source note' }] : []),
+  ];
+  registerAdapter(root, {
+    editingCommands:false,
+    hitTest:target => target.closest('input, textarea, select, [contenteditable="true"]') ? 'native' : true,
+    capture:target => captureCell(target.closest('.copal-sheet-cell[data-sheet-row-index][data-sheet-column-index]')),
+    isCurrent:cellCurrent,
+    commands:request => cellCurrent(request) ? cellCommands(request.adapterContext) : [],
+    execute:async (id, request) => {
+      if (!cellCurrent(request) || !cellCommands(request.adapterContext).some(item => item.id === id)) return false;
+      const { cell, row, column, rowIndex, columnIndex } = request.adapterContext;
+      if (id === 'edit-sheet-cell') return onEditCell(cell);
+      if (id === 'open-base-document') { await onOpenSource(row, column); return true; }
+      const current = currentSheet();
+      const selectedCellState = selectCell(current, rowIndex, columnIndex);
+      if (id === 'clear-sheet-cell') {
+        const cells = clearSelection(selectedCellState, { schema });
+        if (onClearOperation) return onClearOperation(cells, current, () => cellCurrent(request) && canWriteCell?.(row) !== false);
+        return onClear(cells, current);
+      }
+      const text = copySelection(selectedCellState);
+      onCopy?.(text);
       if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
         try { await navigator.clipboard.writeText(text); }
-        catch (error) { onValidationError?.({ outcome:'failed', code:'clipboard-denied', message:'Clipboard access was denied.', error }); return false; }
+        catch (error) { onValidationError?.({ outcome:'failed', code:'clipboard-denied', message:'Clipboard access was denied.', error }); }
       }
       return true;
-    }
-    return onContextCommand?.(command, node, state, controller) || false;
-  };
+    },
+  });
   const exactTitle = state.definition?.extensions?.title || state.definition?.name || 'Sheet'; const title = sheetTitle(exactTitle);
   const errorCode = String(state.error?.code || state.error?.detail?.code || '').toLowerCase();
   const stateLabel = state.status === 'error' ? (state.error?.status === 403 || errorCode.includes('permission') ? 'Permission denied' : errorCode.includes('invalid') ? 'Invalid sheet' : state.error?.message || 'Query failed') : state.status === 'indexing' ? 'Indexing…' : state.status === 'loading' ? 'Loading…' : 'Ready';
   const heading = element('header', { class:'copal-sheet-header', title:String(exactTitle) }, element('div', { class:'copal-sheet-title' }, element('h2', { text:title })), element('span', { class:'copal-sheet-state', role:'status', text:stateLabel }));
   const tabs = element('div', { class:'copal-sheet-tabs', role:'tablist', 'aria-label':'Saved sheet views' }, ...(state.definition?.views || []).map((item, index) => {
-    const tab = element('button', { type:'button', role:'tab', class:`copal-sheet-tab${item.id === state.viewId ? ' active' : ''}`, 'aria-selected':item.id === state.viewId ? 'true' : 'false', tabindex:item.id === state.viewId ? '0' : '-1', 'data-sheet-view-id':item.id, text:item.name, title:`${item.name} view · double-click to rename`, onclick:() => controller?.setView(item.id), ondblclick:(event) => { event.preventDefault(); onViewCommand?.('rename-view', item, state); }, oncontextmenu:(event) => { event.preventDefault(); onViewCommand?.('view-menu', item, state); } });
+    const tab = element('button', { type:'button', role:'tab', class:`copal-sheet-tab${item.id === state.viewId ? ' active' : ''}`, 'aria-selected':item.id === state.viewId ? 'true' : 'false', tabindex:item.id === state.viewId ? '0' : '-1', 'data-sheet-view-id':item.id, text:item.name, title:`${item.name} view · double-click to rename`, onclick:() => controller?.setView(item.id), ondblclick:(event) => { if (canChangeViews) { event.preventDefault(); onViewCommand?.('rename-view', item, state); } } });
+    if (onViewCommand && canChangeViews) {
+      const commands = [
+        { id:'rename-view', label:'Rename view', dialog:true },
+        { id:'duplicate-view', label:'Duplicate view' },
+        ...(index > 0 ? [{ id:'move-view-left', label:'Move left' }] : []),
+        ...(index < state.definition.views.length - 1 ? [{ id:'move-view-right', label:'Move right' }] : []),
+        ...(state.definition.views.length > 1 ? [{ id:'remove-view', label:'Delete view', dialog:true, destructive:true }] : []),
+      ];
+      const tabCurrent = () => sheetCurrent() && tab.isConnected && currentSheet().definition?.views?.[index] === item;
+      registerAdapter(tab, {
+        editingCommands:false,
+        capture:() => tabCurrent() ? { viewId:item.id } : null,
+        isCurrent:request => tabCurrent() && request.adapterContext?.viewId === item.id,
+        commands:() => commands,
+        execute:(id) => tabCurrent() && commands.some(item => item.id === id) ? onViewCommand(id, item, state) : false,
+      });
+    }
     tab.addEventListener('keydown', (event) => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const targetIndex = event.key === 'Home' ? 0 : event.key === 'End' ? state.definition.views.length - 1 : Math.max(0, Math.min(state.definition.views.length - 1, index + (event.key === 'ArrowRight' ? 1 : -1))); controller?.setView(state.definition.views[targetIndex].id); });
     return tab;
   }));
@@ -218,7 +275,7 @@ export function renderSheet(target, state, { controller = null, onToolbar = null
       const item = element(view.type === 'card' ? 'article' : 'div', { class:`copal-sheet-${view.type}`, role:'listitem', 'data-sheet-row-key':rowKey(row) });
       for (const [visibleIndex, column] of visibleColumns.entries()) {
         const columnIndex = view.columns.indexOf(column); const value = readCell(row, column); const readonly = isReadOnlyColumn(column, schema); const selected = selectedCell(state, rowIndex, column); const focus = selectedCell(state, rowIndex, column, true) || (!state.selected && rowIndex === 0 && visibleIndex === 0);
-        item.append(element('div', { class:'copal-sheet-field' }, element('span', { class:'copal-sheet-field-label', text:column.label }), element('button', { type:'button', class:`copal-sheet-cell${selected ? ' selected' : ''}${readonly ? ' readonly' : ''}`, role:'gridcell', tabindex:focus ? '0' : '-1', 'aria-selected':selected ? 'true' : 'false', 'aria-readonly':readonly ? 'true' : 'false', 'data-copal-context-object':'base-cell', 'data-sheet-row-index':rowIndex, 'data-sheet-column-index':columnIndex, 'data-sheet-row-key':rowKey(row), 'data-sheet-column-key':column.property, title:readonly ? `Open source for ${row.name || rowKey(row)}` : `Edit ${column.label}` }, renderValue(value, state.wrap))));
+        item.append(element('div', { class:'copal-sheet-field' }, element('span', { class:'copal-sheet-field-label', text:column.label }), element('button', { type:'button', class:`copal-sheet-cell${selected ? ' selected' : ''}${readonly ? ' readonly' : ''}`, role:'gridcell', tabindex:focus ? '0' : '-1', 'aria-selected':selected ? 'true' : 'false', 'aria-readonly':readonly ? 'true' : 'false', 'data-sheet-row-index':rowIndex, 'data-sheet-column-index':columnIndex, 'data-sheet-row-key':rowKey(row), 'data-sheet-column-key':column.property, title:readonly ? `Open source for ${row.name || rowKey(row)}` : `Edit ${column.label}` }, renderValue(value, state.wrap))));
       }
       surface.append(item);
     }
@@ -257,7 +314,7 @@ export function renderSheet(target, state, { controller = null, onToolbar = null
       const cell = element('td', {
         role:'gridcell', tabindex:focus ? '0' : '-1', 'aria-colindex':visibleIndex + 1, 'aria-selected':selected ? 'true' : 'false',
         'aria-readonly':readonly ? 'true' : 'false', class:`copal-sheet-cell${selected ? ' selected' : ''}${readonly ? ' readonly' : ''}`,
-        'data-copal-context-object':'base-cell',
+
         'data-sheet-row-index':rowIndex, 'data-sheet-column-index':columnIndex, 'data-sheet-row-key':rowKey(row), 'data-sheet-column-key':column.property,
         title:readonly ? `Open source for ${row.name || rowKey(row)}` : `Edit ${column.label}`,
       }, renderValue(value, state.wrap));
@@ -335,7 +392,7 @@ export function mountSheet(target, controller, options = {}) {
     const focusedAction = ownedFocus && !focusedTab && !focusedCell && !ownedFocus.classList?.contains('copal-sheet-search') && (ownedFocus.classList?.contains('copal-sheet-tool') || ownedFocus.dataset?.sheetAction || ownedFocus.getAttribute?.('aria-label'))
       ? { sheetAction:ownedFocus.dataset?.sheetAction || null, ariaLabel:ownedFocus.getAttribute?.('aria-label') || null, text:ownedFocus.textContent || '' } : null;
     const searching = ownedFocus?.classList?.contains('copal-sheet-search'); if (searching) searchCaret = [active.selectionStart, active.selectionEnd]; const preserveSearch = searching; const searchStart = preserveSearch ? searchCaret?.[0] : null; const searchEnd = preserveSearch ? searchCaret?.[1] : null;
-    root = renderSheet(target, state, { ...options, controller, onClearOperation:(cells, current) => runGridOperation(() => performClear(cells, current)), onPaste:(preview, current) => performPaste(preview, current) }); target.replaceChildren(root);
+    root = renderSheet(target, state, { ...options, controller, onEditCell:cell => beginEdit(cell), onClearOperation:(cells, current, isCurrent) => runGridOperation(() => isCurrent() && performClear(cells, current)), onPaste:(preview, current) => performPaste(preview, current) }); target.replaceChildren(root);
     renderedState = state;
     const nextGrid = root.querySelector('.copal-sheet-grid-wrap'); if (nextGrid) { nextGrid.scrollTop = gridScrollTop; nextGrid.scrollLeft = gridScrollLeft; }
     if (focusedTab != null) { const tabs = [...root.querySelectorAll('.copal-sheet-tab')]; (tabs.find((tab) => tab.getAttribute('aria-selected') === 'true') || tabs.find((tab) => (focusedTab.id && tab.dataset.sheetViewId === focusedTab.id) || (!focusedTab.id && tab.textContent === focusedTab.text)))?.focus({ preventScroll:true }); }

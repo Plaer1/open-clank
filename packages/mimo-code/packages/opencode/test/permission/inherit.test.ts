@@ -47,7 +47,7 @@ describe("Permission.ask parent-grant inheritance", () => {
         const perm = yield* Permission.Service
         // Parent already holds an "always"-approved grant for /granted/dir.
         forwardRef.setParentGrants("ses_parent", {
-          ruleset: [],
+          rulesets: [[]],
           approved: [{ permission: "edit", pattern: "/granted/dir/*", action: "allow" }],
         })
         let asked = 0
@@ -70,7 +70,7 @@ describe("Permission.ask parent-grant inheritance", () => {
       Effect.gen(function* () {
         const perm = yield* Permission.Service
         forwardRef.setParentGrants("ses_parent", {
-          ruleset: [],
+          rulesets: [[]],
           approved: [{ permission: "edit", pattern: "/granted/dir/*", action: "allow" }],
         })
         let asked = 0
@@ -105,10 +105,10 @@ describe("Permission.ask parent-grant inheritance", () => {
       Effect.gen(function* () {
         const perm = yield* Permission.Service
         forwardRef.setParentGrants("ses_parent", {
-          ruleset: [
+          rulesets: [[
             { permission: "edit", pattern: "/granted/*", action: "allow" },
             { permission: "edit", pattern: "/granted/secret/*", action: "deny" },
-          ],
+          ]],
           approved: [],
         })
         const result = yield* perm.ask(childAsk(["/granted/secret/x.ts"])).pipe(Effect.exit)
@@ -130,12 +130,30 @@ describe("Permission.ask parent-grant inheritance", () => {
         // allow must NOT be able to out-rank the ruleset deny (which a flattened
         // [...ruleset, ...approved] + findLast snapshot would wrongly permit).
         forwardRef.setParentGrants("ses_parent", {
-          ruleset: [{ permission: "edit", pattern: "**", action: "deny" }],
+          rulesets: [[{ permission: "edit", pattern: "**", action: "deny" }]],
           approved: [{ permission: "edit", pattern: "/x/*", action: "allow" }],
         })
         const result = yield* perm.ask(childAsk(["/x/file.ts"])).pipe(Effect.exit)
         expect(result._tag).toBe("Failure")
         expect((yield* perm.list()).length).toBe(0)
+      }),
+    ),
+  )
+
+  it.live(
+    "preserves a nested source deny when another parent ruleset and an approval allow",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const perm = yield* Permission.Service
+        forwardRef.setParentGrants("ses_parent", {
+          rulesets: [
+            [{ permission: "edit", pattern: "**", action: "allow" }],
+            [{ permission: "edit", pattern: "/secret/*", action: "deny" }],
+          ],
+          approved: [{ permission: "edit", pattern: "/secret/*", action: "allow" }],
+        })
+        const result = yield* perm.ask(childAsk(["/secret/file.ts"])).pipe(Effect.exit)
+        expect(result._tag).toBe("Failure")
       }),
     ),
   )

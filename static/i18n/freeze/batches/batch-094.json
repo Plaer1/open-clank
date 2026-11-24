@@ -1,0 +1,35 @@
+{
+  "id": "batch-094",
+  "group": "docs.openclank-docs-search-media",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 2598,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-search-media.title",
+      "source": "Search and Media",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-search-media.body",
+      "source": "# Search and Media\n\n## Find a chat or search the web\n\nUse **Search conversations** on the sidebar or rail, or press Ctrl+K, to find text in saved chats. For web retrieval, enable **Web search** in the composer and open the returned source cards. If retrieval is unavailable, check the reported route. The administrator sets search providers, credentials and fallback order in **Settings → Search**.\n\n## Run Deep Research\n\nOpen **Deep Research** from the sidebar or rail, enter a question and choose **Start**. Follow progress in Research, then reopen the saved report and sources. The model comes from **Settings → AI Defaults** and the research search route from **Settings → Search → Deep Research**. Unavailable pages and timeouts can leave gaps in the source list.\n\nFor YouTube captions, give the chat a video URL and ask for the passage with timestamps. Check the language and whether the captions are manual, automatic or translated. If captions are unavailable, provide an accessible source.\n\n## Keep or export an output\n\nIn Files, open **Media jobs…** for an eligible resource or folder. Choose the operation and profile, review the source and destination, then start. If the result is unclear, check or reconcile the existing job. When ready, collect it if requested and reopen the saved file. [[Desktop Capture and Host Opening]] covers recording and [[Wiki Recipes]] covers embedding saved media.\n\nFor a ZIP, select one to sixteen downloadable Host files and choose **File → Review selected outputs…**. Check the files for private data, confirm the review, and record known license, attribution and omissions. Choose **Preview exact outputs**, then check the file list and findings before **Download reviewed ZIP**. If a file changed, review the selection again. For HTML, see [[Chat and Workspaces#Preview or move work|Preview a saved result]].\n\n## Use speech or a connected chat channel\n\nWhere available, allow microphone access and review the transcription before sending. **Read aloud** on a response uses the supported voice settings under **AI Defaults → Text to Speech**.\n\nIn **Settings → Integrations → Chat channels**, turn on **Allow chat channels**. Enter the channel details, choose its endpoint and model, then select **Switch this channel on → Save**. Approve the intended pairings and check **Allowed people**. Use **Allow group** where supported and check delivery. See [[Calendar and Email]] for those connections.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

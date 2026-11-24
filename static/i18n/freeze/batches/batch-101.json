@@ -1,0 +1,35 @@
+{
+  "id": "batch-101",
+  "group": "docs.openclank-docs-index",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1851,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-index.title",
+      "source": "Manual Index",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-index.body",
+      "source": "# Manual Index\n\n## Get started\n- [[Home|What is Open Clank?]]\n- [[Setup and First Run]]\n- [[Accounts and Models|Connect a provider and choose a model]]\n- [[Getting Work Done|From a request to a deliverable]]\n- [[App Windows and Navigation|Find and arrange applets]]\n- [[Buddy|Ask Buddy about a control]]\n\n## Work with your agent\n- [[Chat and Workspaces|Give a chat project files and steer a run]]\n- [[Agent Settings and Compaction|Manage context and model defaults]]\n- [[Memory and Lore|Keep memories and recover earlier work]]\n- [[Compare and Cookbook|Compare answers and run local models]]\n- [[Usage and Stats|Inspect usage]]\n- [[Clankshop|Watch worker activity]]\n\n## Research and learn\n- [[Search and Media|Find sources and media]]\n- [[Journal|Keep a linked journal]]\n- [[Wiki Recipes|Link and embed pages]]\n- [[Markdown Formatting Demo|See Markdown examples]]\n- [[Graph|Explore page links and code relationships]]\n- [[TreeHouse|Follow a course or build one]]\n\n## Create and review files\n- [[Editor|Work in the Editor]]\n- [[Source Editing|Edit code and rich comments]]\n- [[Files and Imps|Browse files and edit images]]\n- [[Desktop Capture and Host Opening|Capture the screen and open host files]]\n- [[Deliverables|Review workbooks, slides and recordings]]\n\n## Organize and schedule\n- [[Tasks and Continuations|Assign work and schedule agent runs]]\n- [[Calendar and Email|Manage calendars, Timeline and email]]\n\n## Configure and troubleshoot\n- [[Settings and Themes|Change settings and appearance]]\n- [[Workspace Hexes|Set workspace rules]]\n- [[Recovery|Recover after an interruption]]\n- [[Limits and Platform Support|Check platform support]]\n- [[Credits and Included Components|Look up components and credits]]\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

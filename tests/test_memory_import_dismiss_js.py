@@ -6,9 +6,6 @@ server truth, POSTs every awaiting-review batch, and toasts typed errors while
 keeping the banner visible. Skipped when node is unavailable,
 mirroring tests/test_memory_export_ui_js.py.
 
-The DOM-coupled wiring in static/js/memory.js (banner dismiss button →
-helper) is pinned here with source anchors, matching
-tests/test_memory_export_ui_js.py's idiom for browser-coupled code.
 """
 
 import shutil
@@ -36,16 +33,3 @@ def test_memory_import_dismiss_ui_suite():
         raise AssertionError(
             f"node --test failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         )
-
-
-def test_banner_dismiss_posts_server_side_instead_of_hiding():
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    assert "dismissAllPendingImportBatches" in source
-    assert "origin: window.location.origin" in source
-    helper = (_REPO / "static" / "js" / "memoryImportDismiss.js").read_text()
-    assert "/api/memory/import-batches`" in helper
-    assert "String(batch?.state) === 'awaiting_review'" in helper
-    assert "/dismiss`" in helper
-    assert "method: 'POST'" in helper
-    assert "credentials: 'same-origin'" in helper
-    assert "'Import dismiss failed'" in helper

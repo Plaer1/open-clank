@@ -35,12 +35,12 @@ class DocsService:
     """
 
     def __init__(self, persist_dir: Optional[str] = None):
-        # The app singleton is the canonical Frankenmemory RAG authority.
+        # The app singleton is the canonical Memery RAG authority.
         # ``persist_dir`` remains accepted for source compatibility but never
         # selects the retired Chroma backend.
         self.rag = get_rag_manager()
         if self.rag is None:
-            raise RuntimeError("Frankenmemory RAG is unavailable")
+            raise RuntimeError("Memery RAG is unavailable")
 
     async def query(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> List[DocChunk]:
         """

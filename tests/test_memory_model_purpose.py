@@ -29,22 +29,6 @@ def test_memory_workloads_keep_their_own_audit_purpose():
     assert 'purpose="memory"' in actions
 
 
-def test_settings_projection_renders_memory_separately_from_utility():
-    provider_control = (ROOT / "static/js/providerControl.js").read_text(encoding="utf-8")
-    settings = (ROOT / "static/js/settings.js").read_text(encoding="utf-8")
-    html = (ROOT / "static/index.html").read_text(encoding="utf-8")
-    assert "['utility', 'Utility'" in provider_control
-    assert "['memory', 'Memory', ['chat.complete']]" in provider_control
-    assert "memory_endpoint_id" in (ROOT / "src/settings.py").read_text(encoding="utf-8")
-    assert "async function initMemoryModel()" in settings
-    assert "initMemoryModel();" in settings
-    assert "'/api/models'" in settings
-    assert "'/api/v1/providers/connections'" not in settings
-    assert 'id="set-memoryEpSelect"' in html
-    assert 'id="set-memoryModelSelect"' in html
-    assert html.count("Same as Utility") >= 2
-
-
 def test_memory_ai_default_reads_current_utility_selection_each_time(monkeypatch):
     from src.openclank.modality_facade import _configured_text_route
 

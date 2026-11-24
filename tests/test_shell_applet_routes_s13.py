@@ -28,13 +28,21 @@ import json, os, sys
 os.environ["AUTH_ENABLED"] = "false"
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 sys.path.insert(0, {root!r})
+import secrets
 import app as app_module
 from fastapi.testclient import TestClient
+# Auth is always on. Direct applet paths are only served to a signed-in browser, so the first account of this
+# throwaway data directory signs in; a second, signed-out client proves the redirect to /login.
 c = TestClient(app_module.app)
+anon = TestClient(app_module.app)
+password = secrets.token_urlsafe(24)
+assert c.post("/api/auth/setup", json={{"username": "s13fixture", "password": password}}).status_code == 200
+assert c.post("/api/auth/login", json={{"username": "s13fixture", "password": password}}).status_code == 200
 results = {{}}
 checks = json.loads(sys.argv[1])
 for key, path, follow in checks:
-    r = c.get(path, follow_redirects=False)
+    client = anon if key.startswith("anon:") else c
+    r = client.get(path, follow_redirects=False)
     results[key] = {{
         "status": r.status_code,
         "content_type": r.headers.get("content-type", ""),
@@ -45,14 +53,23 @@ print(json.dumps(results))
 """
 
 
+def _isolated_data_env(root):
+    """Every store the app opens at import and in the first requests lives under a throwaway directory."""
+    return {
+        "OPEN_CLANK_DATA_DIR": f"{root}/data", "COPAL_DATA_DIR": f"{root}/copal",
+        "DATABASE_URL": f"sqlite:///{root}/app.db", "FM_DB_PATH": f"{root}/fm.db", "OPENCLANK_CONVERSATION_ARCHIVE_DB": f"{root}/archive.db",
+    }
+
+
 def _client_results():
     import json
+    import tempfile
     checks = []
     def add(key, path, follow=False):
         checks.append([key, path, follow])
     add("files", "/files")
     for path in [
-        "/editor", "/wiki", "/graph", "/treehouse", "/timeline", "/todo",
+        "/editor", "/wiki", "/graph", "/treehouse", "/clankshop", "/timeline", "/todo",
         "/calendar", "/notes", "/code", "/bases", "/mind", "/galaxy",
         "/settings", "/settings/history", "/settings/file-access",
     ]:
@@ -70,12 +87,18 @@ def _client_results():
     add("/no-such-applet", "/no-such-applet")
     add("/api/no-such-route-s13", "/api/no-such-route-s13")
 
+    add("anon:/editor", "/editor")
+    add("anon:/clankshop", "/clankshop")
+    add("/gallery", "/gallery")
+
     import subprocess
+    data_dir = tempfile.TemporaryDirectory(prefix="s13-")
     proc = subprocess.run(
         [sys.executable, "-c", _CLIENT_SCRIPT.format(root=str(ROOT)), json.dumps(checks)],
         capture_output=True, text=True, cwd=str(ROOT), timeout=120,
-        env={**os.environ, "DEBUG": "false", "OPENCLANK_DEBUG": "false"},
+        env={**os.environ, "DEBUG": "false", "OPENCLANK_DEBUG": "false", **_isolated_data_env(data_dir)},
     )
+    data_dir.cleanup()
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 
@@ -97,7 +120,7 @@ def test_files_refresh_serves_shell_html(client_results):
 @pytest.mark.parametrize(
     "path",
     [
-        "/editor", "/wiki", "/graph", "/treehouse", "/timeline", "/todo",
+        "/editor", "/wiki", "/graph", "/treehouse", "/clankshop", "/timeline", "/todo",
         "/calendar", "/notes", "/code", "/bases", "/mind", "/galaxy",
         "/settings", "/settings/history", "/settings/file-access",
     ],
@@ -187,7 +210,9 @@ def test_applet_path_is_direct_never_copal():
     assert _node_eval("appletPath('editor')") == "/editor"
     assert _node_eval("appletPath('notes')") == "/editor"
     assert _node_eval("appletPath('files')") == "/files"
-    assert _node_eval("appletPath('wiki')") == "/editor"
+    # Wiki keeps its own applet and address (it shares the Editor's document core, not its window or URL).
+    assert _node_eval("appletPath('wiki')") == "/wiki"
+    assert _node_eval("appletPath('clankshop')") == "/clankshop"
     assert _node_eval("appletPath('graph', { mode: 'mind' })") == "/graph?mode=mind"
     assert _node_eval("appletPath('treehouse')") == "/treehouse"
     assert _node_eval("appletPath('editor', { doc: 'x1' })") == "/editor?doc=x1"
@@ -209,7 +234,11 @@ def test_resolve_accepts_direct_and_legacy_aliases():
     assert gallery["canonicalPath"] == "/files"
     wiki = _node_eval("resolveAppletLocation('/wiki', '')")
     assert wiki["target"] == "editor"
-    assert wiki["canonicalPath"] == "/editor"
+    assert wiki["view"] == "wiki"
+    assert wiki["canonicalPath"] == "/wiki"
+    clankshop = _node_eval("resolveAppletLocation('/clankshop', '')")
+    assert clankshop["view"] == "clankshop"
+    assert clankshop["canonicalPath"] == "/clankshop"
     resolved = _node_eval("resolveAppletLocation('/mind', '')")
     assert resolved["target"] == "editor"
     assert resolved["mode"] == "mind"
@@ -325,12 +354,24 @@ def test_app_py_registers_files_and_direct_applets():
     ).group(1)
     paths = set(re.findall(r'"(/[^"]*)"', block))
     assert "/files" in paths
-    for required in ("/editor", "/graph", "/treehouse", "/timeline", "/todo", "/calendar"):
+    for required in ("/editor", "/wiki", "/graph", "/treehouse", "/clankshop", "/timeline", "/todo", "/calendar"):
         assert required in paths
-    assert 'async def serve_wiki_alias' in source
-    assert 'async def serve_gallery_alias' in source
     assert "/settings" in source
-    assert "_COPAL_VIEW_TO_PATH" in source
+    mapping = re.search(r"_COPAL_VIEW_TO_PATH = \{(.*?)\n\}", source, re.S).group(1)
+    assert '"wiki": "/wiki"' in mapping and '"clankshop": "/clankshop"' in mapping
+
+
+def test_gallery_alias_redirects_to_files(client_results):
+    result = client_results["/gallery"]
+    assert result["status"] == 302
+    assert result["location"] == "/files"
+
+
+@pytest.mark.parametrize("key", ["anon:/editor", "anon:/clankshop"])
+def test_signed_out_direct_path_redirects_to_login(client_results, key):
+    result = client_results[key]
+    assert result["status"] == 302
+    assert result["location"].endswith("/login")
 
 
 def test_settings_panels_include_history_and_file_access():

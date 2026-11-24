@@ -13,6 +13,7 @@ const objectiveInput = document.getElementById('goal-objective');
 let sessionId = null;
 let view = null;
 let busy = false;
+let goalAuthEpoch = 0;
 
 function currentSession() {
   const sessions = window.sessionModule?.getSessions?.() || [];
@@ -228,8 +229,8 @@ function render(data) {
   }
 }
 
-async function request(method, payload) {
-  const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/goal`, {
+async function request(method, payload, targetSession = sessionId) {
+  const response = await fetch(`/api/session/${encodeURIComponent(targetSession)}/goal`, {
     method,
     headers: payload ? { 'Content-Type': 'application/json' } : undefined,
     body: payload ? JSON.stringify(payload) : undefined,
@@ -243,31 +244,53 @@ async function request(method, payload) {
 
 async function reload() {
   if (!sessionId) return;
+  const chat=sessionId,account=document.body?.dataset?.accountId || '',auth=goalAuthEpoch;
+  const navigation=window.sessionModule?.getSessionNavigationToken?.();
+  const current=()=>!!account && goalAuthEpoch===auth && document.body?.dataset?.accountId===account && sessionId===chat &&
+    window.sessionModule?.getCurrentSessionId?.()===chat && window.sessionModule?.getSessionNavigationToken?.()===navigation;
+  if (!current()) return;
   setStatus('Loading goals…');
   try {
-    render(await request('GET'));
+    const result=await request('GET',undefined,chat);
+    if (!current()) return;
+    render(result);
     setStatus('');
   } catch (error) {
+    if (!current()) return;
     setStatus(error.message);
   }
 }
 
 async function mutate(payload) {
   if (busy || !sessionId) return false;
+  const chat = sessionId, account = document.body?.dataset?.accountId || '', auth = goalAuthEpoch;
+  const navigation = window.sessionModule?.getSessionNavigationToken?.();
+  const current = () => !!account && goalAuthEpoch === auth && document.body?.dataset?.accountId === account &&
+    sessionId === chat && window.sessionModule?.getCurrentSessionId?.() === chat &&
+    window.sessionModule?.getSessionNavigationToken?.() === navigation;
+  if (!current()) return false;
+  const token = {};
+  const signal = state => document.dispatchEvent(new CustomEvent('openclank:goal-observation-change', {detail:{chat,account,token,state}}));
   busy = true;
   render(view);
   setStatus(payload.action === 'verify' ? 'Verifying…' : 'Saving…');
+  signal('issued');
   try {
-    render(await request('POST', payload));
+    const result = await request('POST', payload, chat);
+    if (!current()) return false;
+    render(result);
+    signal('committed');
     setStatus(payload.action === 'verify' ? 'Verification finished.' : 'Saved.');
     return true;
   } catch (error) {
+    if (!current()) return false;
     setStatus(error.message);
     if (/changed|revision|stale/i.test(error.message)) await reload();
     return false;
   } finally {
     busy = false;
-    render(view);
+    if (current()) render(view);
+    else { view = null; if (dialog?.open) dialog.close(); }
   }
 }
 
@@ -275,7 +298,7 @@ function syncButton() {
   const session = currentSession();
   const available = session?.endpoint_url === 'mimo://acp';
   button.hidden = !available;
-  if (!available && dialog.open) dialog.close();
+  if ((!available || (sessionId && session?.id !== sessionId)) && dialog.open) { view=null; dialog.close(); }
 }
 
 button?.addEventListener('click', () => {
@@ -308,4 +331,7 @@ clearHistoryButton?.addEventListener('click', () => {
   });
 });
 document.addEventListener('odysseus:session-selected', syncButton);
+function goalAuthChanged() { goalAuthEpoch++; view=null; if (dialog?.open) dialog.close(); }
+document.addEventListener('openclank:auth-context-changed', goalAuthChanged);
+window.addEventListener('openclank:auth-context-changed', goalAuthChanged);
 document.addEventListener('DOMContentLoaded', syncButton);

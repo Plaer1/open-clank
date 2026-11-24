@@ -1,0 +1,300 @@
+import { protectTerminalDiagnostic } from './terminal-diagnostic'
+import { projectBrowserSnapshotReceipt } from "./browser-snapshot-source-proof"
+import { NotFoundError, eq, and, sql, type Database } from "../storage"
+import type { MessageID, PartID, SessionID } from "./schema"
+import { SyncEvent } from "@/sync"
+import * as Session from "./session"
+import { MessageV2 } from "./message-v2"
+import { projectGcfReceipt } from "./gcf-source-proof"
+import { currentToolView } from "./tool-view-source"
+import { peekToolTiming } from "./tool-timing"
+import { createHash } from "node:crypto"
+import { projectMembership } from "./capture-membership"
+import { SessionTable, MessageTable, PartTable } from "./session.sql"
+import { ActorRegistryTable } from "@/actor/actor.sql"
+import { ACTIVITY_COALESCE_MS } from "@/actor/schema"
+import { Log } from "../util"
+
+const log = Log.create({ service: "session.projector" })
+
+function foreign(err: unknown) {
+  if (typeof err !== "object" || err === null) return false
+  if ("code" in err && err.code === "SQLITE_CONSTRAINT_FOREIGNKEY") return true
+  return "message" in err && typeof err.message === "string" && err.message.includes("FOREIGN KEY constraint failed")
+}
+
+export type DeepPartial<T> = T extends object ? { [K in keyof T]?: DeepPartial<T[K]> | null } : T
+
+function grab<T extends object, K1 extends keyof T, X>(
+  obj: T,
+  field1: K1,
+  cb?: (val: NonNullable<T[K1]>) => X,
+): X | undefined {
+  if (obj == undefined || !(field1 in obj)) return undefined
+
+  const val = obj[field1]
+  if (val && typeof val === "object" && cb) {
+    return cb(val)
+  }
+  if (val === undefined) {
+    throw new Error(
+      "Session update failure: pass `null` to clear a field instead of `undefined`: " + JSON.stringify(obj),
+    )
+  }
+  return val as X | undefined
+}
+
+export function toPartialRow(info: DeepPartial<Session.Info>) {
+  const obj = {
+    id: grab(info, "id"),
+    project_id: grab(info, "projectID"),
+    workspace_id: grab(info, "workspaceID"),
+    parent_id: grab(info, "parentID"),
+    context_from: grab(info, "contextFrom"),
+    context_watermark: grab(info, "contextWatermark"),
+    slug: grab(info, "slug"),
+    directory: grab(info, "directory"),
+    title: grab(info, "title"),
+    title_source: grab(info, "titleSource"),
+    title_revision: grab(info, "titleRevision"),
+    version: grab(info, "version"),
+    summary_additions: grab(info, "summary", (v) => grab(v, "additions")),
+    summary_deletions: grab(info, "summary", (v) => grab(v, "deletions")),
+    summary_files: grab(info, "summary", (v) => grab(v, "files")),
+    summary_diffs: grab(info, "summary", (v) => grab(v, "diffs")),
+    revert: grab(info, "revert"),
+    permission: grab(info, "permission"),
+    prompt: grab(info, "prompt"),
+    time_created: grab(info, "time", (v) => grab(v, "created")),
+    time_updated: grab(info, "time", (v) => grab(v, "updated")),
+    time_compacting: grab(info, "time", (v) => grab(v, "compacting")),
+    time_archived: grab(info, "time", (v) => grab(v, "archived")),
+  }
+
+  return Object.fromEntries(Object.entries(obj).filter(([_, val]) => val !== undefined))
+}
+
+function assertMessageOwner(db: Database.TxOrDb, sessionID: SessionID, messageID: MessageID) {
+  const current = db.select({ sessionID: MessageTable.session_id }).from(MessageTable).where(eq(MessageTable.id, messageID)).get()
+  if (current && current.sessionID !== sessionID) throw new SyncEvent.ReplayValidationError("Message ID belongs to another session")
+}
+
+function assertPartOwner(db: Database.TxOrDb, sessionID: SessionID, messageID: MessageID, partID: PartID) {
+  assertMessageOwner(db, sessionID, messageID)
+  const current = db.select({ sessionID: PartTable.session_id, messageID: PartTable.message_id }).from(PartTable).where(eq(PartTable.id, partID)).get()
+  if (current && (current.sessionID !== sessionID || current.messageID !== messageID))
+    throw new SyncEvent.ReplayValidationError("Part ID belongs to another message or session")
+}
+
+export default [
+  SyncEvent.project(Session.Event.Created, (db, data) => {
+    if (data.info.id !== data.sessionID) throw new SyncEvent.ReplayValidationError("Created session ID does not match aggregate")
+    db.insert(SessionTable).values(Session.toRow(data.info)).run()
+  }),
+
+  SyncEvent.project(Session.LegacyUpdated, (db, data) => {
+    if (data.info.id !== undefined && data.info.id !== data.sessionID) throw new SyncEvent.ReplayValidationError("Updated session ID does not match aggregate")
+    const current = db.select().from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get()
+    if (!current) throw new NotFoundError({ message: `Session not found: ${data.sessionID}` })
+    const { title, ...rest } = data.info
+    // Schema migration initializes old data at revision zero. Rebuilding the
+    // legacy prefix must produce that same baseline before any v2 transition.
+    // Once a revisioned title command exists, no v1 title can follow it.
+    if (title !== undefined && current.title_revision !== 0) throw new Error("Legacy title event after revisioned title command")
+    const values = {
+      ...toPartialRow(rest),
+      ...(title !== undefined ? { title: title || "Untitled", title_source: "user" as const, title_revision: 0 } : {}),
+    }
+    // Share-only events from removed cloud sharing have nothing left to write.
+    if (Object.keys(values).length === 0) return
+    db.update(SessionTable).set(values).where(eq(SessionTable.id, data.sessionID)).run()
+  }),
+
+  SyncEvent.project(Session.Event.Updated, (db, data) => {
+    if (data.info.id !== undefined && data.info.id !== data.sessionID) throw new SyncEvent.ReplayValidationError("Updated session ID does not match aggregate")
+    const info = data.info
+    if ("title" in info || "titleSource" in info || "titleRevision" in info) {
+      const current = db.select().from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get()
+      if (!current) throw new NotFoundError({ message: `Session not found: ${data.sessionID}` })
+      const next = Session.TitleSnapshot.parse({ sessionID: data.sessionID, ...info })
+      if (data.previousRevision !== current.title_revision || next.titleRevision !== current.title_revision + 1)
+        throw new Error("Title event revision mismatch")
+      if (current.title_source === "user" && next.titleSource !== "user") throw new Error("Protected title cannot be unlocked")
+      if (next.titleSource === "fallback" && current.title_source !== "fallback") throw new Error("Generated title cannot return to fallback")
+    } else if (data.previousRevision !== undefined) throw new Error("Title event is missing its snapshot")
+    const values = toPartialRow(info)
+    // Share-only events from removed cloud sharing have nothing left to write.
+    const row = Object.keys(values).length === 0
+      ? db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get()
+      : db.update(SessionTable).set(values).where(eq(SessionTable.id, data.sessionID)).returning().get()
+    if (!row) throw new NotFoundError({ message: `Session not found: ${data.sessionID}` })
+  }),
+
+  SyncEvent.project(Session.Event.Deleted, (db, data) => {
+    if (data.info.id !== data.sessionID) throw new SyncEvent.ReplayValidationError("Deleted session ID does not match aggregate")
+    db.delete(SessionTable).where(eq(SessionTable.id, data.sessionID)).run()
+  }),
+
+  SyncEvent.project(MessageV2.Event.Updated, (db, data) => {
+    MessageV2.Event.Updated.schema.parse(data)
+    if (data.info.sessionID !== data.sessionID) throw new SyncEvent.ReplayValidationError("Message belongs to another session")
+    assertMessageOwner(db, data.sessionID, data.info.id)
+    const time_created = data.info.time.created
+    const { id, sessionID, agentID, ...rest } = data.info
+
+    const previousMessage = db.select().from(MessageTable).where(and(eq(MessageTable.id,id),eq(MessageTable.session_id,sessionID))).get()
+    const protectedData = protectTerminalDiagnostic(previousMessage?.data, rest)
+    const priorExecution = (previousMessage?.data as any)?.metadata?.managedExecution
+    const nextExecution = (rest as any)?.metadata?.managedExecution
+    if (previousMessage && (previousMessage.agent_id !== (agentID ?? "main") || JSON.stringify(priorExecution) !== JSON.stringify(nextExecution)) &&
+        db.all<{name:string}>(sql`PRAGMA table_info('part')`).some(column => column.name === 'openclank_step_recovery')) {
+      db.run(sql`UPDATE part SET openclank_step_recovery=NULL WHERE message_id=${id} AND session_id=${sessionID} AND openclank_step_recovery IS NOT NULL`)
+    }
+
+    try {
+      db.insert(MessageTable)
+        .values({
+          id,
+          session_id: sessionID,
+          agent_id: agentID ?? "main",
+          time_created,
+          data: protectedData,
+        })
+        .onConflictDoUpdate({ target: MessageTable.id, set: { agent_id: agentID ?? "main", data: protectedData } })
+        .run()
+    } catch (err) {
+      if (!foreign(err)) throw err
+      log.warn("ignored late message update", { messageID: id, sessionID })
+    }
+  }),
+
+  SyncEvent.project(MessageV2.Event.Removed, (db, data) => {
+    MessageV2.Event.Removed.schema.parse(data)
+    assertMessageOwner(db, data.sessionID, data.messageID)
+    db.delete(MessageTable)
+      .where(and(eq(MessageTable.id, data.messageID), eq(MessageTable.session_id, data.sessionID)))
+      .run()
+  }),
+
+  SyncEvent.project(MessageV2.Event.PartRemoved, (db, data) => {
+    MessageV2.Event.PartRemoved.schema.parse(data)
+    assertPartOwner(db, data.sessionID, data.messageID, data.partID)
+    db.delete(PartTable)
+      .where(and(eq(PartTable.id, data.partID), eq(PartTable.session_id, data.sessionID)))
+      .run()
+  }),
+
+  SyncEvent.project(MessageV2.Event.PartUpdated, (db, data, source) => {
+    MessageV2.Event.PartUpdated.schema.parse(data)
+    if (data.part.sessionID !== data.sessionID) throw new SyncEvent.ReplayValidationError("Part belongs to another session")
+    assertPartOwner(db, data.sessionID, data.part.messageID, data.part.id)
+    const identity = db.select().from(PartTable).where(eq(PartTable.id,data.part.id)).get()
+    if (identity && (identity.message_id !== data.part.messageID || identity.session_id !== data.part.sessionID))
+      throw new Error("part identity changed")
+    const current = identity
+    const previous = current ? {...current.data,id:current.id,messageID:current.message_id,sessionID:current.session_id} : undefined
+    const issuedPart = data.part
+    const safePart = projectMembership(projectBrowserSnapshotReceipt(projectGcfReceipt(issuedPart,previous as typeof data.part | undefined), previous as typeof data.part | undefined), previous as typeof data.part | undefined)
+    const safeUnchanged = JSON.stringify(safePart) === JSON.stringify(issuedPart)
+    const { id, messageID, sessionID, ...rest } = safePart
+    const beforeToolFences = JSON.stringify(rest)
+    if (current?.data.type === "tool" && rest.type !== "tool") throw new Error("Tool part type changed")
+    if (rest.type === "tool") {
+      if (current && (current.session_id !== sessionID || current.message_id !== messageID ||
+        current.data.type !== "tool")) throw new Error("Tool part identity mismatch")
+      if (source.replay && rest.execution === "not-started") rest.execution = undefined
+      if (current) {
+        const tool = MessageV2.ToolPart.parse({ ...current.data, id: current.id, sessionID: current.session_id, messageID: current.message_id })
+        if (tool.callID !== rest.callID) throw new Error("Tool call identity mismatch")
+        if (tool.execution === "started") rest.execution = "started"
+        if ((tool.state.status === "completed" || tool.state.status === "error") &&
+          (source.replay || rest.state.status !== tool.state.status)) rest.state = tool.state
+        if (tool.metadata?.providerExecuted) rest.metadata = { ...rest.metadata, providerExecuted: true }
+      }
+    }
+    const projectedPart = { ...rest, id, messageID, sessionID } as typeof data.part
+    const issuedUnchanged = safeUnchanged && JSON.stringify(rest) === beforeToolFences
+    data.part = issuedUnchanged ? issuedPart : projectedPart
+    // Optional decision state is never accepted from an event. A changed
+    // canonical part invalidates it in the same projector transaction.
+    if (current && db.all<{name:string}>(sql`PRAGMA table_info('part')`).some((column) => column.name === 'openclank_view_decision')) {
+      const prior = db.get<{decision:string | null}>(sql`SELECT openclank_view_decision AS decision FROM part WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID}`)
+      if (prior?.decision != null && JSON.stringify(current.data) !== JSON.stringify(rest))
+        db.run(sql`UPDATE part SET openclank_view_decision=NULL WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID}`)
+    }
+
+    if (current && (current.data as any)?.type === "step-start" && JSON.stringify(current.data) !== JSON.stringify(rest) &&
+        db.all<{name:string}>(sql`PRAGMA table_info('part')`).some(column => column.name === 'openclank_step_recovery')) {
+      db.run(sql`UPDATE part SET openclank_step_recovery=NULL WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID}`)
+    }
+
+    try {
+      db.insert(PartTable)
+        .values({
+          id,
+          message_id: messageID,
+          session_id: sessionID,
+          time_created: data.time,
+          data: rest,
+        })
+        .onConflictDoUpdate({ target: PartTable.id, set: { data: rest } })
+        .run()
+      // Activity heartbeat for actor liveness (actor/schema.ts deriveLiveness).
+      // This projector is the single writer of `part` rows, so it is the one
+      // place that already fires on every part write — no new hook in the session
+      // loop. Sequenced after the insert so activity is recorded only if the part
+      // actually landed. `part` carries no agent id (the agent slice lives on
+      // `message`), so the owning actor is resolved through the message's primary
+      // key; together with session_id that hits actor_registry's PK directly. A
+      // 0-row no-op when the session has no registry row, exactly like updateTurn.
+      //
+      // Coalesced to at most one write per actor per ACTIVITY_COALESCE_MS. The
+      // part-write path this hangs off is unthrottled — the bash tool's
+      // ctx.metadata fires per decoded stdout chunk — which measured 539-867 of
+      // these UPDATEs per second, each running the correlated subquery below,
+      // while the only consumers (deriveLiveness's 6m stall display and 10m
+      // abandonment bound) cannot resolve anything finer than tens of seconds.
+      // The staleness predicate is part of the WHERE rather than a process-local
+      // cache so it stays correct across instances and restarts, and it also
+      // makes the column monotonic: an out-of-order event carrying an older
+      // `data.time` no longer drags it backwards. `IS NULL` is the first
+      // disjunct because the column is nullable and a fresh row records NULL,
+      // which must still take its first write (AGENTS.md, "Reading a nullable
+      // column").
+      db.update(ActorRegistryTable)
+        .set({ last_activity_time: data.time })
+        .where(
+          and(
+            eq(ActorRegistryTable.session_id, sessionID),
+            eq(
+              ActorRegistryTable.actor_id,
+              sql`(SELECT ${MessageTable.agent_id} FROM ${MessageTable} WHERE ${MessageTable.id} = ${messageID})`,
+            ),
+            sql`(${ActorRegistryTable.last_activity_time} IS NULL OR ${ActorRegistryTable.last_activity_time} < ${data.time - ACTIVITY_COALESCE_MS})`,
+          ),
+        )
+        .run()
+      const capture = issuedUnchanged ? currentToolView(issuedPart) : undefined
+      if (capture && current && (current.data as any)?.state?.status === 'running') {
+        try {
+          const timing=peekToolTiming(issuedPart)
+          if (!timing || timing.proof.clockID!==capture.admission.clockID || timing.proof.actorID!==capture.admission.actorID ||
+              timing.proof.rootOperationID!==capture.admission.rootOperationID || timing.proof.innerTurnID!==capture.admission.innerTurnID ||
+              timing.proof.messageID!==messageID || timing.proof.partID!==id) return
+          if (db.all<{name:string}>(sql`PRAGMA table_info('part')`).some(column=>column.name==='openclank_view_decision')) {
+            const row=db.get<{data:string; decision:string | null}>(sql`SELECT data,openclank_view_decision AS decision FROM part WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID} AND length(CAST(data AS BLOB))<=262144`)
+            if (row && typeof row.data==='string' && row.decision===null) {
+              const {on:_on,...scope}=capture.admission
+              const candidate=JSON.stringify({version:scope.profile==='line-cap-v1' ? 2 : 1,state:'candidate',...scope,dataSHA256:createHash('sha256').update(row.data,'utf8').digest('hex'),contentSHA256:timing.proof.contentSHA256})
+              if (Buffer.byteLength(candidate,'utf8')<=4096)
+                db.run(sql`UPDATE part SET openclank_view_decision=${candidate} WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID} AND data=${row.data} AND openclank_view_decision IS NULL`)
+            }
+          }
+        } catch { /* Optional candidate persistence must not fail the tool. */ }
+      }
+    } catch (err) {
+      if (!foreign(err)) throw err
+      log.warn("ignored late part update", { partID: id, messageID, sessionID })
+    }
+  }),
+]

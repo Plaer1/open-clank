@@ -38,17 +38,22 @@ export function buildCommandCatalog({ commands = {}, legacyAliases = {}, skills 
   for (const [name, help] of Object.entries(modes)) add({ identity: `mode:${name}`, token: name, help, category: 'Interaction modes', executor: 'mode', origin: 'host', arguments: '[prompt]', name });
   add({ identity: 'host:literal', token: 'literal', help: 'Send the following text literally, including a leading slash', executor: 'literal', origin: 'host', arguments: '<text>', category: 'Chats' });
   for (const [name, help, argumentsHint] of [
+    ['timeline', 'List user-turn boundaries for Native fork and undo', ''],
+    ['native-fork', 'Fork Native history, optionally before a mapped user turn', '[host-message-id]'],
+    ['fork-status', 'Read the receipt for an original Native fork request', '[candidate-id]'],
+    ['fork-reconcile', 'Check the original Native receipt and settle the candidate if confirmed', '[candidate-id]'],
+  ]) add({ identity: `operation:${name}`, token: name, name, help, arguments: argumentsHint,
+    origin: 'host/native', executor: 'operation', category: 'Session operations' });
+  for (const [name, help, argumentsHint] of [
     ['btw', 'Ask a read-only side question in an ephemeral native fork; answer is dismissible', '<question>'],
+    ['rebuild', 'Rebuild checkpoint context, or inspect an unresolved request', '[status]'],
     ['recover', 'List interrupted candidates; pass a candidate ID to explicitly resume it (busy/retry fenced)', '[assistantMessageID]'],
-    ['timeline', 'List user-turn boundaries available for native undo', ''],
     ['undo', 'Revert native history to a mapped user-turn boundary', '[host-message-id]'],
     ['redo', 'Restore the last reversible native history boundary', ''],
     ['history-reconcile', 'Explicitly reconcile an interrupted native history change', ''],
-    ['native-fork', 'Fork visible native chat history, optionally before a user turn', '[host-message-id]'],
-    ['fork-reconcile', 'Explicitly settle an interrupted native fork candidate', '<child-session-id>'],
     ['agent-profile', 'List or select an eligible named profile for the next Agent turn; the main model stays unchanged', '[id|reset]']
   ]) add({ identity: `operation:${name}`, token: name, name, help, arguments: argumentsHint, origin: 'host/native', executor: 'operation', category: 'Session operations',
-    availability: nativeState.available ? 'available' : ['timeline','undo','redo','history-reconcile','native-fork','fork-reconcile','agent-profile'].includes(name) ? 'unavailable' : nativeState.native_route_selected ? 'requires-start' : 'unavailable', reason: ['timeline','undo','redo','history-reconcile','native-fork','fork-reconcile','agent-profile'].includes(name) ? 'Start a native chat before using its session controls' : nativeState.native_route_selected ? 'Explicit invocation starts the selected native session owner' : nativeState.reason || 'Native session is not ready' });
+    availability: nativeState.available ? 'available' : ['undo','redo','history-reconcile','agent-profile'].includes(name) ? 'unavailable' : nativeState.native_route_selected ? 'requires-start' : 'unavailable', reason: ['undo','redo','history-reconcile','agent-profile'].includes(name) ? 'Start a native chat before using its session controls' : nativeState.native_route_selected ? 'Explicit invocation starts the selected native session owner' : nativeState.reason || 'Native session is not ready' });
   const hostRows = new Map();
   // Canonical host names are reserved before aliases are considered.
   for (const [name, def] of Object.entries(commands)) {

@@ -1,3 +1,4 @@
+import { renderManagedMcpHealth, renderExecCapabilities } from './mcpHealthPanel.js';
 import { renderConversation, renderVitals, sessionMeta, identityLabels } from './usageTranscript.js';
 // Ordinary archive browser inside the existing Usage window, with bounded pages.
 let active = null;
@@ -6,16 +7,15 @@ function button(text, action) { const node = el('button', text, 'admin-btn-sm');
 function input(label, value = '') { const wrap = el('label', '', 'logs-field'); const control = el('input'); control.value = value; control.className = 'settings-select'; wrap.append(el('span', label), control); return { wrap, control }; }
 function localZone(value) { return !value || value === 'local' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' : value; }
 function saveFile(name, payload, container) {
-  const json = JSON.stringify(payload, null, 2);
+  const json = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
   JSON.parse(json); // The download and the visible retry link share these exact bytes.
   container._releaseDownload?.();
   const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
   const link = el('a', `Download ${name}`); link.href = url; link.download = name;
-  container.replaceChildren(el('span', 'Export ready. '), link);
-  container._releaseDownload = () => { URL.revokeObjectURL(url); container.replaceChildren(); container._releaseDownload = null; };
-  // A mounted link remains available for an explicit user click if the browser
-  // blocks the automatic download after the asynchronous export request.
   link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  container.replaceChildren(el('span', 'Download requested. Prepare a new preview to download again.'));
+
 }
 function openOwnedSession(handle) {
   return new Promise((resolve, reject) => {
@@ -52,6 +52,16 @@ export function mountNativeLogs(root, scope, options = {}) {
   const state = { detailGeneration: 0, detailController: null, detailPending: false, generation: 0, controller: null, cursor: null, prior: [], next: null, filters: {}, pinnedFilters: null, selected: null, checks: new Set(), actionAvailability: new Map(), policy: null, sessionPage: null, ready: false, attemptController: null, attemptGeneration: 0, attemptCursor: null, attemptPrior: [], attemptNext: null, disposed: false, actionBusy: false, focusPart: null, focusSession: null, catalogController: null, catalogGeneration: 0 };
   const status = el('p', '', 'logging-status'); status.setAttribute('role', 'status');
   const downloadStatus = el('p', '', 'logging-status'); downloadStatus.setAttribute('role', 'status');
+  let exportEpoch = 0, authEpoch = 0;
+  const accountScope = () => document.body?.dataset?.accountId || window.currentAccountId || '';
+  const currentSession = () => window.sessionModule?.getCurrentSessionId?.() || '';
+  const currentMcpFacts = advanced ? el('div', '', 'settings-hint') : null;
+  const onCurrentSessionChange = () => { state.currentMcpController?.abort(); currentMcpFacts?.replaceChildren(el('p', 'Current chat changed. Refresh its MCP observation.')); };
+  document.addEventListener('odysseus:session-selected', onCurrentSessionChange);
+  const invalidateExport = () => { exportEpoch++; downloadStatus._releaseDownload?.(); downloadStatus.replaceChildren(); };
+  const onAuthChange = () => { authEpoch++; state.inspectorController?.abort(); state.currentMcpController?.abort(); currentMcpFacts?.replaceChildren(el('p', 'Account changed. Refresh current-chat MCP observation.')); invalidateDetail(); };
+  document.addEventListener('openclank:auth-context-changed', onAuthChange);
+  window.addEventListener('openclank:auth-context-changed', onAuthChange);
   const catalogStatus = el('p', '', 'logging-status'); catalogStatus.setAttribute('role', 'status');
   const search = input('Search saved message/tool text'); search.control.type = 'search'; search.control.placeholder = 'Search conversations…'; search.control.setAttribute('aria-label', 'Search saved message/tool text');
   const searchMode = el('select', '', 'settings-select'); searchMode.setAttribute('aria-label', 'Search mode');
@@ -62,6 +72,7 @@ export function mountNativeLogs(root, scope, options = {}) {
   const toolbar = el('div', '', 'logs-toolbar');
   const follow = el('input'); follow.type = 'checkbox'; follow.checked = true; const followLabel = el('label', ' Follow visible updates'); followLabel.prepend(follow);
   const exportBodies = el('input'); exportBodies.type = 'checkbox'; const exportLabel = el('label', ' Include saved bodies in export'); exportLabel.prepend(exportBodies);
+  for (const control of [search.control, searchMode, tool.control, completion.control, exportBodies, exportSelection]) { control.addEventListener('input', invalidateExport); control.addEventListener('change', invalidateExport); }
   toolbar.append(search.wrap, modeLabel, tool.wrap, completion.wrap, button('Save filters', () => action(async () => {
     if (!state.policy) throw new Error('Wait for the current logging policy.');
     const saved = { ...state.filters }; delete saved.tool_name; delete saved.status; const current = filters(); for (const field of ['provider_id', 'account_id', 'actual_model', 'workspace_id']) { if (current[field]) saved[field] = current[field]; else delete saved[field]; }
@@ -85,7 +96,33 @@ export function mountNativeLogs(root, scope, options = {}) {
   railTools.append(collection, sort);
   const mobile = button('Sessions', () => { root.classList.toggle('usage-rail-open'); mobile.setAttribute('aria-expanded', String(root.classList.contains('usage-rail-open'))); }); mobile.classList.add('usage-rail-toggle'); mobile.setAttribute('aria-expanded', 'false');
   const rail = el('aside', '', 'usage-session-rail');
-  if (advanced) root.replaceChildren(el('p', 'Saved Open Clank conversations and observed tool evidence.', 'settings-hint'), toolbar, catalogToolbar, catalogStatus, status, downloadStatus, panels, attempts);
+  if (advanced) {
+    const currentMcp = el('section', '', 'logs-current-mcp');
+    currentMcp.append(el('h3', 'Current chat MCP observation'), el('p', 'This is separate from any selected saved conversation. It reads existing live state only.', 'settings-hint'), button('Refresh current chat MCP', async () => {
+      state.currentMcpController?.abort();
+      const controller = new AbortController(); state.currentMcpController = controller;
+      const chat = currentSession(), account = accountScope(), ownerEpoch = authEpoch, scopeEpoch = state.generation, selectionEpoch = state.detailGeneration;
+      if (!chat || !account) { currentMcpFacts.replaceChildren(el('p', 'Current chat observation is unavailable.')); return; }
+      currentMcpFacts.replaceChildren(el('p', 'Reading passive current-chat MCP observation…'));
+      const stillCurrent = () => !controller.signal.aborted && !state.disposed && root.isConnected && chat === currentSession() && account === accountScope() && ownerEpoch === authEpoch && scopeEpoch === state.generation && selectionEpoch === state.detailGeneration;
+      try {
+        const result = await request(`/current-chat/${encodeURIComponent(chat)}/mcp-health`, {}, controller.signal);
+        if (stillCurrent()) renderManagedMcpHealth(currentMcpFacts, result);
+      } catch (_) { if (stillCurrent()) currentMcpFacts.replaceChildren(el('p', 'Current chat MCP observation is unavailable.')); }
+    }), button('Refresh current chat exec capability', async () => {
+      state.currentMcpController?.abort();
+      const controller = new AbortController(); state.currentMcpController = controller;
+      const chat = currentSession(), account = accountScope(), ownerEpoch = authEpoch, scopeEpoch = state.generation, selectionEpoch = state.detailGeneration;
+      if (!chat || !account) { currentMcpFacts.replaceChildren(el('p', 'Current chat observation is unavailable.')); return; }
+      currentMcpFacts.replaceChildren(el('p', 'Reading passive current-chat exec capability…'));
+      const stillCurrent = () => !controller.signal.aborted && !state.disposed && root.isConnected && chat === currentSession() && account === accountScope() && ownerEpoch === authEpoch && scopeEpoch === state.generation && selectionEpoch === state.detailGeneration;
+      try {
+        const result = await request(`/current-chat/${encodeURIComponent(chat)}/tools-capabilities`, {}, controller.signal);
+        if (stillCurrent()) renderExecCapabilities(currentMcpFacts, result);
+      } catch (_) { if (stillCurrent()) currentMcpFacts.replaceChildren(el('p', 'Current chat exec capability is unavailable.')); }
+    }), currentMcpFacts);
+    root.replaceChildren(el('p', 'Saved Open Clank conversations and observed tool evidence.', 'settings-hint'), currentMcp, toolbar, catalogToolbar, catalogStatus, status, downloadStatus, panels, attempts);
+  }
   else {
     sessions.classList.add('usage-session-list'); detail.classList.add('usage-session-center');
     filterDrawer.append(toolbar, catalogToolbar, catalogStatus, downloadStatus);
@@ -108,6 +145,9 @@ export function mountNativeLogs(root, scope, options = {}) {
     return result;
   }
   function invalidateDetail() {
+    invalidateExport();
+    state.inspectorController?.abort(); state.inspectorController = null;
+    state.similarController?.abort(); state.similarController = null;
     state.detailGeneration++; state.detailController?.abort(); state.detailController = null;
     state.detailPending = false; state.selected = null; detail.replaceChildren();
   }
@@ -126,6 +166,27 @@ export function mountNativeLogs(root, scope, options = {}) {
     } finally { if (generation === state.detailGeneration) state.detailPending = false; }
   }
   const post = value => ({ method: 'POST', body: JSON.stringify(value) });
+  const exportSignature = () => JSON.stringify({ account: accountScope(), session: currentSession(), filters: filters(), selected: state.selected?.handle || null,
+    search: search.control.value, mode: searchMode.value, bodies: exportBodies.checked, selectedOnly: exportSelection.checked,
+    collection: options.collection || 'all', generation: state.generation, detailGeneration: state.detailGeneration, epoch: exportEpoch });
+  async function previewExport(name, payload, categories, signature, ownerPolicy) {
+    if (!ownerPolicy?.owner_scope || !Number.isInteger(ownerPolicy.policy?.revision) || signature !== exportSignature() || !root.isConnected || state.disposed)
+      throw new Error('Export scope changed. Prepare the preview again.');
+    const json = JSON.stringify(payload, null, 2); JSON.parse(json);
+    const bytes = new TextEncoder().encode(json).length, asOf = new Date().toISOString();
+    const preview = el('section', '', 'logs-export-preview');
+    preview.append(el('strong', 'Local as-of export preview'), el('p', `Prepared ${asOf} · ${bytes.toLocaleString()} UTF-8 bytes · categories: ${categories.join(', ')}`),
+      el('p', 'This is the sanitized snapshot shown below. Redaction is imperfect; inspect sensitive content. Source deletion or edits after preview do not change these reviewed bytes. Coverage may be partial or truncated as indicated in the artifact.', 'settings-hint'));
+    const contents = el('details'); contents.append(el('summary', 'Review exact JSON to download'), el('pre', json, 'logging-source')); preview.append(contents);
+    const download = button('Download reviewed snapshot', () => action(async () => {
+      if (signature !== exportSignature() || !root.isConnected || state.disposed) { invalidateExport(); throw new Error('Export scope changed. Prepare the preview again.'); }
+      const current = await request('/policy');
+      if (signature !== exportSignature() || current.owner_scope !== ownerPolicy.owner_scope || current.policy?.revision !== ownerPolicy.policy.revision || !root.isConnected || state.disposed)
+        { invalidateExport(); throw new Error('Owner or logging policy changed. Prepare the preview again.'); }
+      saveFile(name, json, downloadStatus);
+    }));
+    preview.append(download); downloadStatus._releaseDownload?.(); downloadStatus.replaceChildren(preview);
+  }
   function getQuery(values) { const copy = { ...values }; for (const key of ['start', 'end']) if (typeof copy[key] === 'number') copy[key] = new Date(copy[key]).toISOString(); return new URLSearchParams(copy); }
   function filters() {
     if (state.pinnedFilters) return state.pinnedFilters;
@@ -221,6 +282,8 @@ export function mountNativeLogs(root, scope, options = {}) {
     sessions.append(viewport);
   }
   function selectSession(item, cursor = null) {
+    invalidateExport();
+    state.inspectorController?.abort(); state.inspectorController = null;
     state.selected = item; root.classList.remove('usage-rail-open'); root.classList.add('usage-has-session'); options.onSessionChange?.(item.handle); for (const row of sessions.querySelectorAll('[data-session-handle]')) row.classList.toggle('is-selected', row.dataset.sessionHandle === item.handle); state.attemptController?.abort(); state.attemptGeneration++;
     const params = new URLSearchParams(location.search); params.set('log_session', item.handle); history.replaceState(history.state, '', `${location.pathname}?${params}`);
     state.attemptCursor = null; state.attemptPrior = [];
@@ -228,6 +291,7 @@ export function mountNativeLogs(root, scope, options = {}) {
   }
   async function openSession(item, cursor = null, background = false, seekPages = 0) {
     if (background && state.detailPending) return;
+    state.inspectorController?.abort(); state.inspectorController = null;
     const params = getQuery({ ...filters(), limit: '50' }); if (cursor) params.set('cursor', cursor);
     const result = await detailRequest('/sessions/' + encodeURIComponent(item.handle) + '?' + params);
     if (!result || state.selected?.handle !== item.handle) return; const { data } = result;
@@ -254,7 +318,109 @@ export function mountNativeLogs(root, scope, options = {}) {
     const actors = el('details'); actors.append(el('summary', 'Observed actor / subagent tree'));
     for (const actor of data.actors?.items || []) actors.append(el('p', `${actor.actor_id} ← ${actor.parent_actor_id || 'root'} · ${actor.status || actor.state || 'observed'}`), button('Filter this actor', () => { state.filters.actor_id = actor.actor_id; state.pinnedFilters = null; state.cursor = null; invalidateScope(); query(); }));
     if (!data.actors?.items?.length) actors.append(el('p', data.actors?.coverage?.reason || 'Actor history is unavailable.'));
-    detail.append(actors); actors.classList.add('usage-actor-tree'); renderParts(data, detail, session);
+    detail.append(actors); actors.classList.add('usage-actor-tree');
+    if (advanced) {
+      // Explicit, bounded, local-only: nothing is stored or sent. Editing, copy and download stay in this panel.
+      const similar = el('details', '', 'logs-similar'); const similarOut = el('div', '', 'settings-hint');
+      similar.append(el('summary', 'Similar sessions and issue draft'),
+        el('p', 'Compares this one session with the 50 most recent sessions by provider route, model, tool outcome and observed failing-tool signatures. Shows session handles, counts, and available Native processor diagnostic names, never conversation text.', 'settings-hint'),
+        button('Find similar sessions', async () => {
+          state.similarController?.abort(); const controller = new AbortController(); state.similarController = controller;
+          const account = accountScope(), ownerEpoch = authEpoch;
+          const live = () => !controller.signal.aborted && !state.disposed && root.isConnected && similar.isConnected && state.selected?.handle === item.handle && accountScope() === account && authEpoch === ownerEpoch;
+          similarOut.replaceChildren(el('p', 'Comparing recent sessions…'));
+          try {
+            const result = await request(`/sessions/${encodeURIComponent(item.handle)}/similar`, { method: 'POST' }, controller.signal);
+            if (!live()) return;
+            similarOut.replaceChildren(el('p', `Compared ${result.compared_sessions} recent sessions · ${result.items.length} similar${result.coverage?.state === 'partial' ? ' · recent window only' : ''}`));
+            for (const [field, n] of Object.entries(result.counts || {})) similarOut.append(el('p', `${field}: ${n}`));
+            for (const diagnostic of result.native_processor_diagnostics || []) similarOut.append(el('p', `Selected session · recorded Native processor diagnostic: ${diagnostic.errorName} · ${diagnostic.stage} (provider and context outcomes unknown)`));
+            for (const row of result.items) {
+              similarOut.append(el('p', `${row.handle} · ${row.matched_fields.join(', ')}`));
+              for (const diagnostic of row.native_processor_diagnostics || []) {
+                similarOut.append(el('p', `Recorded Native processor diagnostic: ${diagnostic.errorName} · ${diagnostic.stage} (provider and context outcomes unknown)`));
+              }
+            }
+            if (result.field_coverage?.native_processor_diagnostic) similarOut.append(el('p', 'Recorded Native diagnostics cover only currently authorized Host sources in a bounded subset; missing matches do not prove absence.'));
+            similarOut.append(el('p', 'Not available in ordinary rows: ' + Object.keys(result.unavailable_fields || {}).join(', ')));
+            if (result.field_coverage?.failing_tool_name?.state !== 'reported') similarOut.append(el('p', 'Failing-tool metadata is partial or unavailable; absent matches do not prove different causes.'));
+          } catch (error) { if (live()) similarOut.replaceChildren(el('p', 'Similar-session comparison is unavailable.')); }
+        }),
+        button('Prepare issue draft', async () => {
+          state.similarController?.abort(); const controller = new AbortController(); state.similarController = controller;
+          const account = accountScope(), ownerEpoch = authEpoch;
+          const live = () => !controller.signal.aborted && !state.disposed && root.isConnected && similar.isConnected && state.selected?.handle === item.handle && accountScope() === account && authEpoch === ownerEpoch;
+          similarOut.replaceChildren(el('p', 'Preparing a local draft…'));
+          try {
+            const result = await request(`/sessions/${encodeURIComponent(item.handle)}/issue-draft`, { method: 'POST' }, controller.signal);
+            if (!live()) return;
+            const area = el('textarea'); area.value = result.draft_markdown; area.rows = 16; area.className = 'settings-select'; area.setAttribute('aria-label', 'Issue draft (editable)');
+            const note = el('p', 'Local draft only. It is not stored or sent. Redaction is imperfect; review and edit before you share it.', 'settings-hint');
+            similarOut.replaceChildren(note, area, button('Copy draft', () => { navigator.clipboard?.writeText(area.value); }), button('Download draft', () => {
+              const url = URL.createObjectURL(new Blob([area.value], { type: 'text/markdown' })); const link = el('a'); link.href = url; link.download = 'open-clank-issue-draft.md'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }));
+          } catch (error) { if (live()) similarOut.replaceChildren(el('p', 'Issue draft is unavailable.')); }
+        }), similarOut);
+      detail.append(similar);
+    }
+    if (advanced) {
+      const inspector = el('details'); const facts = el('div', '', 'settings-hint');
+      inspector.append(el('summary', 'Current operation inspector'), button('Refresh observation', async () => {
+        state.inspectorController?.abort(); const controller = new AbortController(); state.inspectorController = controller;
+        const account = accountScope(), ownerEpoch = authEpoch;
+        facts.replaceChildren(el('p', 'Reading the selected live session…'));
+        try {
+          const result = await request(`/sessions/${encodeURIComponent(item.handle)}/operation`, {}, controller.signal);
+          if (controller.signal.aborted || state.disposed || !root.isConnected || !inspector.isConnected || !inspector.open || state.selected?.handle !== item.handle || accountScope() !== account || authEpoch !== ownerEpoch) return;
+          facts.replaceChildren();
+          if (result.availability !== 'available') { facts.append(el('p', 'Current operation observation is unavailable.')); return; }
+          facts.append(el('p', `Worker: ${result.worker.status} · generation ${result.worker.generation}`));
+          for (const [label, page] of [['Actors', result.actors], ['Tasks', result.tasks]]) {
+            const observed = Number.isFinite(page.observedAt) ? ` · observed ${new Date(page.observedAt).toLocaleString()}` : '';
+            facts.append(el('p', `${label}: ${page.availability} · ${page.items.length} observed${observed}`));
+            for (const row of page.items) facts.append(el('p', `${row.handle} · ${row.status}${row.outcome ? ` · ${row.outcome}` : ''}`));
+          }
+          for (const [label, key] of [['Shell jobs', 'shell_job'], ['Media jobs', 'media_job']]) {
+            const page = result.backgroundJobs?.sources?.[key];
+            if (!page || !['available', 'partial'].includes(page.availability) || !Array.isArray(page.items)) {
+              facts.append(el('p', `${label}: unavailable`)); continue;
+            }
+            facts.append(el('p', `${label}: ${page.availability} · ${page.items.length} observed`));
+            for (const row of page.items) facts.append(el('p', `${row.handle} · ${row.status || 'unknown'}${Number.isInteger(row.revision) ? ` · revision ${row.revision}` : ''}`));
+          }
+          facts.append(el('p', 'Reconnect cause and process resources are unavailable.'));
+        } catch (error) {
+          if (!controller.signal.aborted && root.isConnected && inspector.isConnected && !state.disposed && inspector.open && state.selected?.handle === item.handle && accountScope() === account && authEpoch === ownerEpoch) facts.replaceChildren(el('p', 'Current operation observation is unavailable.'));
+        }
+      }), facts);
+      inspector.append(button('Refresh managed MCP observation', async () => {
+        state.inspectorController?.abort(); const controller = new AbortController(); state.inspectorController = controller;
+        const account = accountScope(), ownerEpoch = authEpoch;
+        facts.replaceChildren(el('p', 'Reading passive MCP observations for the selected live turn…'));
+        try {
+          const result = await request(`/sessions/${encodeURIComponent(item.handle)}/mcp-health`, {}, controller.signal);
+          if (controller.signal.aborted || state.disposed || !root.isConnected || !inspector.isConnected || !inspector.open || state.selected?.handle !== item.handle || account !== accountScope() || ownerEpoch !== authEpoch) return;
+          renderManagedMcpHealth(facts, result);
+        } catch (error) {
+          if (!controller.signal.aborted && root.isConnected && !state.disposed && inspector.open) facts.replaceChildren(el('p', 'Managed MCP observation is unavailable.'));
+        }
+      }));
+      inspector.append(button('Refresh exec capability', async () => {
+        state.inspectorController?.abort(); const controller = new AbortController(); state.inspectorController = controller;
+        const account = accountScope(), ownerEpoch = authEpoch;
+        facts.replaceChildren(el('p', 'Reading passive exec capability for the selected live turn…'));
+        try {
+          const result = await request(`/sessions/${encodeURIComponent(item.handle)}/tools-capabilities`, {}, controller.signal);
+          if (controller.signal.aborted || state.disposed || !root.isConnected || !inspector.isConnected || !inspector.open || state.selected?.handle !== item.handle || account !== accountScope() || ownerEpoch !== authEpoch) return;
+          renderExecCapabilities(facts, result);
+        } catch (_) {
+          if (!controller.signal.aborted && root.isConnected && !state.disposed && inspector.open) facts.replaceChildren(el('p', 'Exec capability is unavailable.'));
+        }
+      }));
+      inspector.addEventListener('toggle', () => { if (!inspector.open) state.inspectorController?.abort(); });
+      detail.append(inspector);
+    }
+    renderParts(data, detail, session);
     const pages = el('div', '', 'logs-toolbar'); if (cursor) pages.append(button('Latest/current page', () => selectSession(session))); if (data.page?.next_cursor) pages.append(button('Next transcript page', () => selectSession(session, data.page.next_cursor))); detail.append(pages);
   }
   function renderParts(data, container, session) {
@@ -272,6 +438,10 @@ export function mountNativeLogs(root, scope, options = {}) {
   }
   async function partChunk(part, offset, row) { const result = await request('/parts/get', post({ source_ref: part.source_ref, offset, length: 16384 })); const panel = el('div'); panel.append(el('pre', result.text || '', 'logging-source')); if (result.next_offset != null) panel.append(button('Next body chunk', () => action(() => partChunk(part, result.next_offset, row)))); row.querySelector('[data-body-chunk]')?.remove(); panel.dataset.bodyChunk = ''; row.append(panel); }
   async function exportScope() {
+    invalidateExport();
+    const signature = exportSignature();
+    const ownerPolicy = await request('/policy');
+    if (signature !== exportSignature()) throw new Error('Export scope changed. Prepare the preview again.');
     const pages = []; let cursor = null;
     const selectedFilters = { ...filters() };
     const includeBodies = exportBodies.checked, mode = searchMode.value, queryText = search.control.value;
@@ -284,7 +454,7 @@ export function mountNativeLogs(root, scope, options = {}) {
       if (pages.length >= 100 && cursor) throw new Error('Export exceeds the bounded client window. Narrow the filter and retry.');
     } while (cursor);
     if (!root.isConnected) throw new Error('Logs closed before the export was ready. Reopen Logs and retry.');
-    saveFile('open-clank-logs.json', { schema: 'open-clank.logging.export.pages.v1', include_bodies: includeBodies, scope: selectedFilters, search_mode: mode, query: queryText || null, pages }, downloadStatus);
+    await previewExport('open-clank-logs.json', { schema: 'open-clank.logging.export.pages.v1', include_bodies: includeBodies, scope: selectedFilters, search_mode: mode, query: queryText || null, pages }, ['metadata', ...(includeBodies ? ['saved bodies'] : [])], signature, ownerPolicy);
   }
   async function loadAttempts() {
     if (!advanced || state.disposed) return;
@@ -295,34 +465,70 @@ export function mountNativeLogs(root, scope, options = {}) {
       state.attemptNext = data.next_cursor;
       for (const item of data.items || []) attempts.append(button(`${item.outcome || 'incomplete'} · ${item.capture_state || 'unknown'} · ${item.actual_model || 'captured attempt'}`, () => action(() => inspectAttempt(item.handle))));
       const pages = el('div', '', 'logs-toolbar'); if (state.attemptPrior.length) pages.append(button('Previous captured page', () => { state.attemptCursor = state.attemptPrior.pop(); loadAttempts(); })); if (state.attemptNext) pages.append(button('Next captured page', () => { state.attemptPrior.push(state.attemptCursor); state.attemptCursor = state.attemptNext; loadAttempts(); })); attempts.append(pages, el('p', data.coverage?.state || 'unavailable', 'settings-hint'));
-      if (!data.items?.length) attempts.append(el('p', 'No captured attempts in this owner scope. Ordinary logs remain available.'));
+      if (!data.items?.length) attempts.append(el('p', 'No captured attempts in this owner scope. Provider attempt details are unavailable when advanced capture is off, the operation is private, or no detail was retained.'));
     } catch (error) { if (error.name === 'AbortError' || !root.isConnected) return; attempts.replaceChildren(el('h3', 'Advanced attempt inspector'), el('p', 'Advanced capture detail is unavailable: ' + error.message, 'settings-hint')); }
   }
   async function inspectAttempt(handle, includeBodies = false) {
+    invalidateExport();
     state.selected = null;
+    const epoch = authEpoch, account = accountScope();
+    const attemptPolicy = await request('/policy');
+    if (epoch !== authEpoch || account !== accountScope() || !root.isConnected || state.disposed) return;
     const result = await detailRequest(`/attempts/${encodeURIComponent(handle)}?include_bodies=${includeBodies}`);
-    if (!result) return; const { data, generation } = result; const resource = data.resource; detail.replaceChildren(el('h3', 'Captured provider attempt'), el('p', `${resource.outcome || 'incomplete'} · ${resource.capture_state || 'unknown'}`));
+    if (!result || epoch !== authEpoch || account !== accountScope()) return; const { data, generation } = result; const resource = data.resource; detail.replaceChildren(el('h3', 'Captured provider attempt'), el('p', `${resource.outcome || 'incomplete'} · ${resource.capture_state || 'unknown'}`));
     const tabs = el('div', '', 'logs-toolbar logs-inspector-tabs'); tabs.setAttribute('role', 'tablist');
     const panel = el('section', '', 'logs-inspector-panel'); panel.setAttribute('role', 'tabpanel'); panel.id = `logging-inspector-panel-${generation}`;
     const valueText = value => value == null ? 'Missing · no observation' : typeof value === 'object' ? JSON.stringify(value) : String(value);
     function rows(entries) { const list = el('dl', '', 'logs-facts'); for (const [label, value] of entries) list.append(el('dt', label), el('dd', valueText(value))); return list; }
+    function dispatchTiming() {
+      const timing = resource.timing || {};
+      const observed = key => typeof timing[key] === 'number' && Number.isFinite(timing[key]) && timing[key] >= 0
+        ? `${timing[key].toFixed(1)} ms · measured` : 'Not observed';
+      const clock = timing.clock_domain === 'engine' ? 'Engine request clock' : timing.clock_domain ? 'Other recorded clock' : 'Clock not observed';
+      return rows([['Source clock', clock], ['Dispatch', observed('dispatch_ms')], ['Response headers', observed('headers_ms')],
+        ['First response byte', observed('first_byte_ms')], ['First parsed output', observed('first_output_ms')],
+        ['Last response byte', observed('last_output_ms')], ['Terminal', observed('terminal_ms')]]);
+    }
     function evidence(label, value) { const item = el('details'); item.append(el('summary', label), el('pre', JSON.stringify(value ?? { state: 'missing' }, null, 2), 'logging-source')); return item; }
     const contentCoverage = resource.content_coverage || {};
     const http = resource.http || {}; const measurement = resource.measurement || {};
     const categories = new Map([['request', false], ['response', false], ['events', false]]);
     const exportControls = el('div', '', 'logs-toolbar');
-    for (const [key, label] of [['request', 'Request bodies'], ['response', 'Response bodies'], ['events', 'Provider events']]) { const check = el('input'); check.type = 'checkbox'; check.disabled = !includeBodies; check.addEventListener('change', () => categories.set(key, check.checked)); const wrap = el('label', ' ' + label); wrap.prepend(check); exportControls.append(wrap); }
+    for (const [key, label] of [['request', 'Request bodies'], ['response', 'Response bodies'], ['events', 'Provider events']]) { const check = el('input'); check.type = 'checkbox'; check.disabled = !includeBodies; check.addEventListener('change', () => { categories.set(key, check.checked); invalidateExport(); }); const wrap = el('label', ' ' + label); wrap.prepend(check); exportControls.append(wrap); }
+    function appendAttemptObservation(item) {
+      const observed = item.evidence || {}, reset = observed.providerReset, codex = observed.codexWindows;
+      const dispatchObservation = item.dispatchObservation, match = resource.provider_attempts?.dispatch_match;
+      const correlation = dispatch => typeof dispatch !== 'string' || !dispatch ? 'Uncorrelated: no native dispatch ID' :
+        match?.state === 'exact' && match.attempt === item.attempt && dispatchObservation?.captureDispatchID === resource.dispatch_id && dispatchObservation?.upstreamDispatchID === dispatch
+          ? `Observed upstream send ${dispatch}; linked to this captured dispatch` :
+        `Native dispatch ${dispatch}; no verified attempt link to this capture`;
+      panel.append(rows([['Attempt', item.attempt], ['Outcome', item.outcome], ['Classification', observed.kind],
+        ['Observed HTTP status', observed.httpStatus], ['Local not-before', observed.localNotBefore],
+        ...(dispatchObservation ? [['Observed send correlation', correlation(dispatchObservation.upstreamDispatchID)]] : []),
+        ['Anthropic API request-rate reset', reset?.at], ['Request-rate reset observed at', reset?.observedAt],
+        ...(reset ? [['Request-rate reset correlation', correlation(reset.dispatchID)]] : [])]));
+      if (codex && Array.isArray(codex.windows)) {
+        panel.append(el('p', 'Provider-observed Codex subscription windows; these do not establish account exhaustion.', 'settings-hint'),
+          rows([['Observed at', codex.observedAt], ['Native dispatch correlation', correlation(codex.dispatchID)]]));
+        for (const window of codex.windows.slice(0, 2)) {
+          if (!window || typeof window !== 'object') continue;
+          const percent = typeof window.usedPercent === 'number' && Number.isFinite(window.usedPercent) ? `${window.usedPercent}%` : 'Unknown';
+          const minutes = typeof window.windowMinutes === 'number' && Number.isFinite(window.windowMinutes) ? `${window.windowMinutes} minutes` : 'Unknown';
+          panel.append(rows([['Window', window.window], ['Provider-observed used', percent], ['Duration', minutes], ['Reset', window.resetAt || 'Unknown']]));
+        }
+      }
+    }
     const views = {
-      Overview: () => panel.append(rows([['Provider outcome', resource.outcome], ['Capture state', resource.capture_state], ['HTTP status', http.status], ['Operation', resource.operation_type], ['Requested model', resource.requested_model], ['Actual model', resource.actual_model], ['Dispatch', resource.dispatch_id], ['Dispatch index', resource.dispatch_index], ['Retry of dispatch', resource.retry_of_dispatch_id ?? 'No retry link reported'], ['Identity coverage', resource.identity_coverage], ['Pinned policy revision', resource.policy_revision], ['Capture losses', resource.loss_reasons?.length ? resource.loss_reasons.join(', ') : 'None reported']]), evidence('Timing milestones', resource.timing)),
+      Overview: () => { const attempts = resource.provider_attempts || {}; panel.append(rows([['Provider outcome', resource.outcome], ['Capture state', resource.capture_state], ['HTTP status', http.status], ['Operation', resource.operation_type], ['Requested model', resource.requested_model], ['Actual model', resource.actual_model], ['Dispatch', resource.dispatch_id], ['Dispatch index', resource.dispatch_index], ['Retry of dispatch', resource.retry_of_dispatch_id ?? 'No retry link reported'], ['Identity coverage', resource.identity_coverage], ['Pinned policy revision', resource.policy_revision], ['Capture losses', resource.loss_reasons?.length ? resource.loss_reasons.join(', ') : 'None reported']]), evidence('Timing milestones', resource.timing), el('h4', 'Provider attempts for this operation'), el('p', 'Attempt observations correlate to this captured request only when native dispatch IDs match.', 'settings-hint')); if (attempts.state !== 'reported') panel.append(el('p', 'Attempt evidence unavailable.', 'settings-hint')); else { if (attempts.truncated) panel.append(el('p', 'Showing the most recent 32 recorded attempts.', 'settings-hint')); if (!attempts.items?.length) panel.append(el('p', 'No provider attempts were recorded.', 'settings-hint')); for (const item of attempts.items || []) appendAttemptObservation(item); } },
       HTTP: () => { panel.append(rows([['Method', http.method], ['Endpoint origin', http.endpoint?.origin], ['Endpoint path', http.endpoint?.path], ['Response status', http.status], ['HTTP coverage', http.coverage]]), el('p', 'Headers are sanitized at capture. Redacted values remain marked; missing headers do not imply an empty upstream response.', 'settings-hint')); for (const [key, label] of [['requestHeaders', 'Safe request headers'], ['responseHeaders', 'Safe response headers']]) { panel.append(el('h4', label)); const headers = http[key]; if (Array.isArray(headers) && headers.length) panel.append(rows(headers.map(header => [header.name, header.state === 'redacted' ? 'Redacted' : header.state === 'omitted' ? 'Omitted · capture limit' : Array.isArray(header.values) ? (header.values.length ? header.values.map(value => value === '' ? '(empty value)' : String(value)).join(' · ') : 'Empty · no retained values') : 'Missing · no header value']))); else panel.append(el('p', headers ? 'No retained safe header fields.' : 'Missing · headers were not observed or retained.', 'settings-hint')); } },
       Tokens: () => { panel.append(el('p', `Measurement coverage: ${measurement.coverage || 'missing'} · normalization profile: ${measurement.normalization_profile || 'unavailable'}`, 'settings-hint')); const table = el('table', '', 'logs-metrics'); const heading = el('tr'); for (const label of ['Metric', 'Value', 'Coverage', 'Provenance']) heading.append(el('th', label)); const head = el('thead'); head.append(heading); const body = el('tbody'); const metrics = new Set(['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens', ...Object.keys(measurement.metrics || {})]); for (const key of metrics) { const row = el('tr'); const coverage = measurement.metric_coverage?.[key]; const provenance = measurement.provenance?.[key]; const coverageCell = el('td', typeof coverage === 'object' && coverage ? [coverage.state, coverage.coverage].filter(Boolean).join(' · ') || 'Unknown coverage' : valueText(coverage)); const provenanceCell = el('td', typeof provenance === 'object' && provenance ? [provenance.source || 'Unknown source', provenance.normalization_profile].filter(Boolean).join(' · ') : valueText(provenance)); if (coverage != null || provenance != null) provenanceCell.append(evidence('Full metric evidence', { coverage, provenance })); row.append(el('th', key.replaceAll('_', ' ')), el('td', valueText(measurement.metrics?.[key])), coverageCell, provenanceCell); body.append(row); } table.append(head, body); const scroll = el('div', '', 'logs-table-scroll'); scroll.append(table); panel.append(scroll, el('p', 'Reported zero is a measurement. Missing is unknown. Covered totals are reconciled by the shared Usage authority; unqualified overlap stays explicit.', 'settings-hint'), evidence('Measurement loss reasons', measurement.loss_reasons)); },
-      Timing: () => panel.append(rows(Object.entries(resource.timing || {})), evidence('Capture losses', resource.loss_reasons), evidence('Measurement losses', measurement.loss_reasons), el('p', 'Only observed milestones are shown. Missing timing is unknown; capture loss does not change the provider outcome.', 'settings-hint')),
+      Timing: () => panel.append(dispatchTiming(), el('p', 'These are offsets on this captured dispatch clock, not durations to add together. They do not measure local preparation, whole-root time or child/tool work. Missing timing is unknown.', 'settings-hint'), evidence('Raw timing evidence', resource.timing), evidence('Capture losses', resource.loss_reasons), evidence('Measurement losses', measurement.loss_reasons)),
       Bodies: () => { panel.append(rows(Object.entries(contentCoverage).map(([category, coverage]) => [category.replaceAll('_', ' '), coverage.state])), el('p', 'Retained, disabled and pruned are historical evidence. Unknown means the capture has no recorded historical preference; missing means enabled content was not retained. Embedded media enabled is a preference, not proof of captured bytes.', 'settings-hint')); if (!includeBodies) { panel.append(el('p', 'Bodies and events have not been requested. Capture preferences and retention determine historical availability.', 'settings-hint'), button('Include sanitized bodies and raw events', () => action(() => inspectAttempt(handle, true)))); return; } for (const body of resource.bodies || []) { const section = el('section', '', 'logs-part'); section.append(el('h4', `${body.category}${body.truncated ? ' · truncated' : ''}`)); let payload; try { payload = JSON.parse(body.text); } catch {} const blocks = payload?.messages || (Array.isArray(payload?.input) ? payload.input : null) || (Array.isArray(payload?.output) ? payload.output : null) || payload?.choices?.map(choice => choice.message).filter(Boolean); if (Array.isArray(blocks)) for (const block of blocks.slice(0, 256)) section.append(el('p', block.role || block.type || 'Observed block', 'settings-hint'), el('pre', typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? block, null, 2), 'logging-source')); section.append(evidence('Sanitized captured structure / tool arguments', payload ?? body.text)); panel.append(section); } if (!resource.bodies?.length) panel.append(el('p', 'No retained body records. See the historical content coverage above; current settings do not determine historical state.', 'settings-hint')); panel.append(evidence('Bounded raw provider events', resource.events || [])); },
       Source: () => panel.append(evidence('Source JSON', data)),
     };
     function show(label) { panel.replaceChildren(); for (const tab of tabs.children) { const selected = tab.textContent === label; tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1; } panel.setAttribute('aria-labelledby', `logging-inspector-tab-${generation}-${label}`); views[label](); }
     for (const label of Object.keys(views)) { const tab = button(label, () => show(label)); tab.setAttribute('role', 'tab'); tab.id = `logging-inspector-tab-${generation}-${label}`; tab.setAttribute('aria-controls', panel.id); tab.addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const labels = Object.keys(views); let index = labels.indexOf(label); index = event.key === 'Home' ? 0 : event.key === 'End' ? labels.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + labels.length) % labels.length; show(labels[index]); tabs.children[index].focus(); }); tabs.append(tab); }
-    exportControls.append(button('Export selected attempt categories', () => { const selected = [...categories].filter(([, chosen]) => chosen).map(([key]) => key); const exported = { ...resource }; delete exported.bodies; delete exported.events; if (selected.some(key => key !== 'events')) exported.bodies = (resource.bodies || []).filter(body => selected.includes(body.category?.startsWith('request') ? 'request' : body.category?.startsWith('response') ? 'response' : 'unselected')); if (selected.includes('events')) exported.events = resource.events || []; saveFile('open-clank-attempt.json', { ...data, resource: exported, export: { scope: { attempt_handle: handle }, categories: ['metadata', ...selected], include_bodies: selected.some(key => key !== 'events') } }, downloadStatus); }));
+    exportControls.append(button('Preview selected attempt categories', () => action(async () => { invalidateExport(); const signature = exportSignature(); const ownerPolicy = await request('/policy'); if (ownerPolicy.owner_scope !== attemptPolicy.owner_scope || ownerPolicy.policy?.revision !== attemptPolicy.policy?.revision || account !== accountScope() || epoch !== authEpoch) throw new Error('Attempt scope changed. Reopen the attempt.'); const selected = [...categories].filter(([, chosen]) => chosen).map(([key]) => key); const exported = { ...resource }; delete exported.bodies; delete exported.events; if (selected.some(key => key !== 'events')) exported.bodies = (resource.bodies || []).filter(body => selected.includes(body.category?.startsWith('request') ? 'request' : body.category?.startsWith('response') ? 'response' : 'unselected')); if (selected.includes('events')) exported.events = resource.events || []; await previewExport('open-clank-attempt.json', { ...data, resource: exported, export: { scope: { attempt_handle: handle }, categories: ['metadata', ...selected], include_bodies: selected.some(key => key !== 'events') } }, ['metadata', ...selected], signature, ownerPolicy); })));
     detail.append(tabs, panel, exportControls); show('Overview');
   }
 
@@ -386,7 +592,7 @@ export function mountNativeLogs(root, scope, options = {}) {
     if (changedScope || newOptions.force || follow.checked) { await query(); await loadAttempts(); }
   };
   for (const control of [search.control, tool.control, completion.control]) control.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); invalidateScope(); state.pinnedFilters = null; state.cursor = null; state.prior = []; query(); } });
-  const dispose = () => { state.disposed = true; state.catalogGeneration++; state.catalogController?.abort(); downloadStatus._releaseDownload?.(); invalidateDetail(); state.generation++; state.controller?.abort(); state.attemptGeneration++; state.attemptController?.abort(); };
+  const dispose = () => { document.removeEventListener('odysseus:session-selected', onCurrentSessionChange); state.currentMcpController?.abort(); document.removeEventListener('openclank:auth-context-changed', onAuthChange); window.removeEventListener('openclank:auth-context-changed', onAuthChange); invalidateExport(); state.disposed = true; state.catalogGeneration++; state.catalogController?.abort(); downloadStatus._releaseDownload?.(); invalidateDetail(); state.generation++; state.controller?.abort(); state.attemptGeneration++; state.attemptController?.abort(); };
   active = { root, refresh, update: refresh, showDashboard, openSession: handle => selectSession(typeof handle === 'string' ? { handle, name: 'Saved conversation' } : handle), dispose }; initialize(); return active;
 }
 export function refreshNativeLogs(scope, options = {}) { return active?.refresh(scope, options); }

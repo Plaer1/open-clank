@@ -1,0 +1,506 @@
+{
+  "version": 1,
+  "purpose": "Host side of the engine separation (slice E6). Names the Host places that mention the engine's old names or paths and what the Host change does to each. Read by host_dry_run.py, which prints the diff and applies nothing. The engine table is rename_table.json; this table is deliberately narrower: it only touches Host files, and only the engine's names, never the Host's own.",
+  "names": {
+    "environment": "MIMOCODE_<X> becomes OPENCLANK_<X> (no fallback); MIMOCODE_DATA_DIR becomes OPENCLANK_ENGINE_DATA_DIR",
+    "home": "OPENCLANK_HOME (the Host sets it per owner)",
+    "xdg_folder": "openclank-engine (was mimocode)",
+    "database": "openclank.db, OPENCLANK_DB (was mimocode.db)",
+    "project_folder": ".openclank/ with openclank.json(c) (was .mimocode/)",
+    "binary": "openclank-engine (was mimo)",
+    "engine_source_folder": "packages/opencode becomes packages/cli, inside the vendored packages/mimo-code"
+  },
+  "scan": {
+    "dirs": [
+      "src",
+      "routes",
+      "services",
+      "core",
+      "scripts",
+      "static/js",
+      "tests",
+      "docs",
+      "contracts",
+      "app.py",
+      "OpenClank.spec",
+      "build-windows-portable.ps1",
+      ".gitleaks.toml"
+    ],
+    "skip_dirs": [
+      "node_modules",
+      "__pycache__",
+      ".git",
+      "engine_separation",
+      "codemirror"
+    ],
+    "skip_files": [
+      "tests/test_engine_separation.py",
+      "tests/test_engine_separation_host.py",
+      "services/hwfit/data/hf_models.json"
+    ],
+    "never": [
+      "data",
+      "~/.open-clank",
+      "~/.local/opt/open-clank",
+      "the home folder",
+      "frankenmemory.db*",
+      ".env",
+      "history-credentials.json"
+    ],
+    "reference_pattern": "MIMOCODE|mimocode|Mimocode|\\.mimocde|\\.mimo-worktrees|packages/opencode|\"packages\" / \"opencode\"|mimo\\.(?:js|exe)|bin/mimo\\b|x-mimo|MiMoCode"
+  },
+  "not_renamed": [
+    {
+      "name": "Host data folder ~/.open-clank and OPEN_CLANK_DATA_DIR / OPEN_CLANK_* variables",
+      "why": "Host names, not engine names"
+    },
+    {
+      "name": "provider id and scheme \"mimo\", \"mimo:auto\", endpoint \"mimo\", $.mimo.part.* archive keys, MIMO_API_KEY",
+      "why": "Vendor identity, persisted archive keys and provider credential"
+    },
+    {
+      "name": ".mimo-question-card, .mimo-plan-dock (CSS classes)",
+      "why": "Host UI class names; the engine table does not rename them"
+    },
+    {
+      "name": "com.xiaomi.mimo/* MCP capability names (lifetools_server.py: 7 places)",
+      "why": "wire names, changed only together with the engine; the engine table keeps them"
+    },
+    {
+      "name": "packages/mimo-code (the vendor folder), vendor name \"MiMo Code\", upstream repository URL",
+      "why": "vendor record, changed only by the parent when the vendor manifest is regenerated"
+    },
+    {
+      "name": "OPEN_CLANK_ENGINE_HISTORY_CONTEXT",
+      "why": "Host and engine use the same Open Clank history selector"
+    }
+  ],
+  "rules": [
+    {
+      "id": "env-data-dir",
+      "pattern": "\\bMIMOCODE_DATA_DIR\\b",
+      "replace": "OPENCLANK_ENGINE_DATA_DIR"
+    },
+    {
+      "id": "env",
+      "pattern": "\\bMIMOCODE_(?=[A-Z0-9])",
+      "replace": "OPENCLANK_"
+    },
+    {
+      "id": "src-folder",
+      "pattern": "packages/opencode\\b",
+      "replace": "packages/cli"
+    },
+    {
+      "id": "src-folder-parts",
+      "pattern": "\"packages\" / \"opencode\"",
+      "replace": "\"packages\" / \"cli\""
+    },
+    {
+      "id": "project-folder",
+      "pattern": "\\.mimocode(?![A-Za-z0-9_])",
+      "replace": ".openclank"
+    },
+    {
+      "id": "worktrees",
+      "pattern": "\\.mimo-worktrees",
+      "replace": ".openclank-worktrees"
+    },
+    {
+      "id": "runtime-folder",
+      "pattern": "/ \"mimocode\"",
+      "replace": "/ \"openclank-engine\"",
+      "only_lines_containing": [
+        "_runtime_home",
+        "runtime_home(",
+        "control /",
+        "alice_data",
+        "bob_data",
+        "runtime /"
+      ]
+    },
+    {
+      "id": "database",
+      "pattern": "\\bmimocode\\.db\\b",
+      "replace": "openclank.db"
+    }
+  ],
+  "files": [
+    {
+      "path": "src/openclank/mimo_supervisor.py",
+      "mode": "hand",
+      "rules": [
+        "env",
+        "runtime-folder"
+      ],
+      "hand": [
+        {
+          "match": "(root / \"mimocode\").exists()",
+          "why": "legacy-layout guard: keep the OLD folder name, it detects a pre-upgrade runtime; do not rename"
+        },
+        {
+          "match": "root / \"mimocode\" / \"data\"",
+          "why": "Managed Open Clank runtime only: replace this component with openclank-engine. Never dual-read a real MiMo location; offline conversion is separate."
+        },
+        {
+          "match": "generation / \"mimocode\" / \"data\"",
+          "why": "Managed Open Clank runtime only: replace this component with openclank-engine. Never dual-read a real MiMo location; offline conversion is separate."
+        },
+        {
+          "match": "data_dir / \"mimocode.db\"",
+          "why": "Managed Open Clank database only: use openclank.db. No live fallback to mimocode.db; manual offline conversion is separate."
+        },
+        {
+          "match": "personal mimocode",
+          "why": "comment about a real MiMo install: reword by hand"
+        },
+        {
+          "match": "~/.config/mimocode",
+          "why": "comment about a real MiMo install: reword by hand"
+        },
+        {
+          "match": "~/.local/share/mimocode",
+          "why": "comment: reword by hand"
+        },
+        {
+          "match": "never mimocode dirs",
+          "why": "comment: reword by hand"
+        },
+        {
+          "match": "data/mimocode",
+          "why": "comment pointing at the old per-owner log folder: reword by hand"
+        }
+      ],
+      "why": "the supervisor builds the engine environment and reads the engine's data folder"
+    },
+    {
+      "path": "src/agent_settings.py",
+      "mode": "table",
+      "rules": [
+        "env"
+      ]
+    },
+    {
+      "path": "src/openclank/provider_startup.py",
+      "mode": "hand",
+      "rules": [
+        "env"
+      ],
+      "why": "scrub list of provider authority variables: the renamed names stay scrubbed",
+      "hand": [
+        {
+          "match": "\"MIMOCODE_",
+          "why": "Retain scrubbing of retired external MiMo variables alongside current engine names; this is protection, never a fallback read."
+        }
+      ]
+    },
+    {
+      "path": "src/shell_policy.py",
+      "mode": "table",
+      "rules": [
+        "env"
+      ]
+    },
+    {
+      "path": "src/tool_execution.py",
+      "mode": "hand",
+      "rules": [
+        "env"
+      ],
+      "hand": [
+        {
+          "match": "\"mimocode\",",
+          "why": "control-data roots under each XDG base: ADD openclank-engine and keep mimocode (a real MiMo install must stay protected)"
+        }
+      ]
+    },
+    {
+      "path": "src/constants.py",
+      "mode": "hand",
+      "rules": [
+        "env"
+      ],
+      "hand": [
+        {
+          "match": "\".mimocode\"",
+          "why": "Remove the legacy THESIUS_AGENT_HOME block that writes MIMOCODE_HOME/.mimocode. Keep Host agent-home compatibility without touching real MiMo environment or locations."
+        }
+      ]
+    },
+    {
+      "path": "src/openclank/acp_bridge.py",
+      "mode": "table",
+      "rules": [
+        "env",
+        "src-folder"
+      ],
+      "why": "comments and the compaction prompt path"
+    },
+    {
+      "path": "src/openclank/engine_build.py",
+      "mode": "hand",
+      "rules": [
+        "env",
+        "src-folder",
+        "src-folder-parts",
+        "project-folder",
+        "worktrees"
+      ],
+      "hand": [
+        {
+          "match": "\".mimocode\"",
+          "why": "Retain this exact legacy runtime/retired-source exclusion alongside current names; never transform it into an active CLI exclusion."
+        },
+        {
+          "match": "\".mimo-worktrees\"",
+          "why": "Retain this exact legacy runtime/retired-source exclusion alongside current names; never transform it into an active CLI exclusion."
+        },
+        {
+          "match": "\".mimocode-test-fixtures-\"",
+          "why": "Retain this exact legacy runtime/retired-source exclusion alongside current names; never transform it into an active CLI exclusion."
+        },
+        {
+          "match": "\"packages/opencode\"",
+          "why": "Retain this exact legacy runtime/retired-source exclusion alongside current names; never transform it into an active CLI exclusion."
+        }
+      ],
+      "why": "source-input exclusions, build environment (MIMOCODE_CHANNEL, _COMMIT_SHA, _VERSION, _RELEASE), packages/opencode build paths; vendor name and repository checks stay"
+    },
+    {
+      "path": "scripts/check_agent_driver_contract.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "scripts/prepare_mimo_profiles.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "scripts/prepare_prefix_provenance_profile.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "scripts/prepare_queued_source_profile.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "scripts/prepare_tool_view_profile.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "scripts/inspect_session_residency.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "scripts/generate_managed_protocol.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ],
+      "why": "output path of the generated TypeScript contract; the file itself must then be REGENERATED by the parent"
+    },
+    {
+      "path": "scripts/check_release_artifacts.py",
+      "mode": "hand",
+      "rules": [],
+      "hand": [
+        {
+          "match": "\".mimocode\"",
+          "why": "private-folder name that must never ship: ADD \".openclank\" and keep \".mimocode\""
+        }
+      ]
+    },
+    {
+      "path": "scripts/odysseus-backup",
+      "mode": "hand",
+      "rules": [],
+      "hand": [
+        {
+          "match": "\"mimocode.db\"",
+          "why": "Retain legacy store recognition; the implementation also recognizes openclank.db and openclank-*.db. These are deliberate backup inputs, not live engine discovery."
+        },
+        {
+          "match": "is_mimocode_store",
+          "why": "Retain legacy store recognition; the implementation also recognizes openclank.db and openclank-*.db. These are deliberate backup inputs, not live engine discovery."
+        },
+        {
+          "match": "name == \"mimocode.db\"",
+          "why": "Retain legacy store recognition; the implementation also recognizes openclank.db and openclank-*.db. These are deliberate backup inputs, not live engine discovery."
+        },
+        {
+          "match": "name.startswith(\"mimocode-\")",
+          "why": "Retain legacy store recognition; the implementation also recognizes openclank.db and openclank-*.db. These are deliberate backup inputs, not live engine discovery."
+        }
+      ]
+    },
+    {
+      "path": ".gitleaks.toml",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "contracts/openclank/mimo-runtime-delta-ledger-v1.json",
+      "mode": "regenerate",
+      "why": "historical record of the engine files that differed from upstream on 2026-08-16 (130 paths under packages/opencode, compared with a git snapshot by scripts/check_agent_supervisor_test_matrix.py:56): not a rename; the parent decides whether to retire or regenerate it against the upgraded vendor tree"
+    },
+    {
+      "path": "docs/architecture/open-clank-system-flow.html",
+      "mode": "table",
+      "rules": [
+        "env"
+      ]
+    },
+    {
+      "path": "tests/test_engine_build.py",
+      "mode": "table",
+      "rules": [
+        "src-folder",
+        "src-folder-parts",
+        "project-folder"
+      ],
+      "why": "fixtures follow engine_build.py"
+    },
+    {
+      "path": "tests/test_provider_family_catalog.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "tests/test_copilot.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "tests/test_discovery_contract_bridge.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "tests/test_media_host_native_integration.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "tests/test_permission_ask_ux.py",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "tests/js/test_native_settings_reference.mjs",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "tests/js/test_command_catalog.mjs",
+      "mode": "table",
+      "rules": [
+        "src-folder"
+      ]
+    },
+    {
+      "path": "tests/test_mimo_provider_routes.py",
+      "mode": "table",
+      "rules": [
+        "env"
+      ]
+    },
+    {
+      "path": "tests/test_managed_provider_callbacks.py",
+      "mode": "table",
+      "rules": [
+        "env"
+      ]
+    },
+    {
+      "path": "tests/test_mimo_owner_lifecycle.py",
+      "mode": "table",
+      "rules": [
+        "env",
+        "runtime-folder",
+        "database"
+      ],
+      "why": "layout of the owner runtime: <runtime>/openclank-engine/data/openclank.db"
+    },
+    {
+      "path": "tests/test_mimo_account_lifecycle.py",
+      "mode": "table",
+      "rules": [
+        "runtime-folder"
+      ]
+    },
+    {
+      "path": "tests/test_shell_contract.py",
+      "mode": "table",
+      "rules": [
+        "env",
+        "runtime-folder"
+      ]
+    },
+    {
+      "path": "tests/test_tool_path_confinement.py",
+      "mode": "hand",
+      "rules": [
+        "env"
+      ],
+      "hand": [
+        {
+          "match": "\"mimocode\"",
+          "why": "XDG config folder asserted as control data: assert BOTH openclank-engine and mimocode (matches the hand edit in src/tool_execution.py)"
+        }
+      ]
+    },
+    {
+      "path": "tests/test_model_dispatch.py",
+      "mode": "hand",
+      "rules": [],
+      "hand": [
+        {
+          "match": "mimocode",
+          "why": "legacy-layout guard fixtures (a folder named mimocode must still stop the supervisor): they keep the OLD name on purpose"
+        }
+      ]
+    },
+    {
+      "path": "tests/test_backup_cli_security.py",
+      "mode": "hand",
+      "rules": [],
+      "hand": [
+        {
+          "match": "mimocode",
+          "why": "dynamic store name mimocode-beta.db: add openclank-beta.db next to it (follows scripts/odysseus-backup)"
+        }
+      ]
+    }
+  ]
+}

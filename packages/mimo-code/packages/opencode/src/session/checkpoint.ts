@@ -8,8 +8,11 @@ import { MemoryFtsTable } from "@/memory/fts.sql"
 import { TaskRegistry } from "@/task/registry"
 import { ActorRegistry } from "@/actor/registry"
 import type { AgentOutcome, ForkContext } from "@/actor/spawn"
+import { encodeForkContext } from "@/actor/fork-context"
 import { spawnRef } from "@/actor/spawn-ref"
 import { prefixCaptureRef } from "./prefix-capture-ref"
+import { Flag } from "@/flag/flag"
+import { ManagedProvider } from "@/acp/managed-provider"
 import { Database, and, eq, or } from "@/storage"
 import { Instance } from "@/project/instance"
 import { ProjectID } from "@/project/schema"
@@ -19,7 +22,7 @@ import { SessionStatus } from "./status"
 import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Log, Token } from "../util"
-import { Effect, Layer, Deferred, Context, Scope } from "effect"
+import { Cause, Effect, Exit, Layer, Deferred, Context, Scope } from "effect"
 import { makeRuntime } from "@/effect/run-service"
 import type { ActorPromptOps } from "@/tool/actor"
 import type { ProviderID, ModelID } from "../provider/schema"
@@ -118,7 +121,13 @@ function toolResultContinueReminder(): string {
 async function ensureCheckpointTemplate(checkpointFile: string): Promise<void> {
   if (!(await Bun.file(checkpointFile).exists())) {
     await fs.mkdir(path.dirname(checkpointFile), { recursive: true })
-    await Bun.write(checkpointFile, CHECKPOINT_TEMPLATE)
+    const template = ManagedProvider.enabled()
+      ? CHECKPOINT_TEMPLATE
+          .replace("_This session's specific working style. Project-level rules are in projects/<pid>/MEMORY.md — do not duplicate them here. Only put items that are session-specific._", "_This session's specific working style and applicable user and repository agreements._")
+          .replace("_Facts learned during this session that may apply to future tasks. Items here are candidates for promotion to projects/<pid>/MEMORY.md if they prove durable._", "_Facts needed to continue the current session._")
+          .replace("_Decisions reached through discussion that produced no immediate code/file artifact. Captures user intent or trade-off rationale future agents need to understand \"why we did it this way\". Promote to MEMORY.md ## Architecture decisions when proven cross-session-durable._", "_Decisions and rationale needed to continue this session._")
+      : CHECKPOINT_TEMPLATE
+    await Bun.write(checkpointFile, template)
   }
 }
 
@@ -326,6 +335,17 @@ function composeWriterPrompt(input: {
   rangeDesc: string
   progressDiff: string  // Spec ② Chain 2: empty string when nothing to reconcile
 }): string {
+  if (ManagedProvider.enabled()) return [
+    "<system-reminder>",
+    "You are the checkpoint writer. Preserve the existing checkpoint structure and record the current session's operational continuity. Follow user and repository agreements for plans and notes. Durable knowledge is governed by current Memery policy and advertised tools and receipts.",
+    `CHECKPOINT_PATH = ${input.checkpointFile}`,
+    `TASK_MEM_DIR = ${input.taskMemDir}`,
+    `NOTES_PATH = ${input.notesFile}`,
+    input.progressDiff,
+    input.rangeDesc,
+    "Use the task tool for task state and the declared session paths for checkpoint and task narratives. Do not write project or global semantic memory files. Stop after the checkpoint is complete.",
+    "</system-reminder>",
+  ].join("\n")
   return [
     "<system-reminder>",
     "You are now operating in checkpoint-writer mode. Ignore the general coding-assistant framing in the system prompt above. The read, write, edit, glob, grep, and task tools are available; do not invoke others.",
@@ -407,6 +427,7 @@ export type TryStartCheckpointWriterInput = {
   sessionID: SessionID
   model: { providerID: string; modelID: string }
   promptOps: ActorPromptOps
+  toolViewContext?: import('./tool-view-assembly').ToolViewContext
 }
 
 /**
@@ -490,6 +511,7 @@ export interface Interface {
   readonly lastBoundary: (sessionID: SessionID) => Effect.Effect<MessageID | undefined>
 
   readonly isWriterRunning: (sessionID: SessionID) => Effect.Effect<boolean>
+  readonly busyGuard?: (sessionID: SessionID) => () => boolean
 
   /**
    * Insert a synthetic checkpoint-boundary user message (boundary marker +
@@ -526,7 +548,10 @@ interface WriterState {
   // Holds the AgentOutcome Deferred returned by Actor.spawn so callers can
   // await writer settlement (waitForWriter / drainWriters). The public
   // WriterOutcome translation happens in waitForWriter.
-  writing: Deferred.Deferred<AgentOutcome>
+  phase: "preparing" | "running" | "draining"
+  preparing: Deferred.Deferred<{ status: "started"; writing: Deferred.Deferred<AgentOutcome> } | { status: "skipped" | "failed" }>
+  done: Deferred.Deferred<void>
+  writing?: Deferred.Deferred<AgentOutcome>
   // F40: 1-slot pending queue. When set, holds the input for a writer that
   // should fire as soon as `writing` settles. Newer requests evict older
   // pending values — the newest range is always a strict superset of the
@@ -556,26 +581,36 @@ export const layer: Layer.Layer<
     // Plain Map in the layer closure — same approach as compaction.ts
     const writers = new Map<SessionID, WriterState>()
 
-    const tryStartCheckpointWriter: (
-      input: TryStartCheckpointWriterInput,
-    ) => Effect.Effect<TryStartCheckpointWriterResult> = Effect.fn("SessionCheckpoint.tryStartCheckpointWriter")(function* (
-      input: TryStartCheckpointWriterInput,
-    ) {
-      // F40: writer1 still running. Evict any prior pending and queue this
-      // request — newest wins because its range is a strict superset of the
-      // older pending range, so older pending checkpoints would only
-      // duplicate the work.
+    const tryStartCheckpointWriter = Effect.fn("SessionCheckpoint.tryStartCheckpointWriter")(function* (input: TryStartCheckpointWriterInput) {
+      if (Flag.OPEN_CLANK_PRIVATE_RUNTIME) return "skipped" as const
       const existing = writers.get(input.sessionID)
       if (existing) {
-        if (existing.pending) {
-          log.info("writer pending evicted (newer range arrived)", { sessionID: input.sessionID })
-        } else {
-          log.info("writer already running, queueing", { sessionID: input.sessionID })
-        }
         existing.pending = input
         return "queued" as const
       }
+      const slot: WriterState = { phase: "preparing", preparing: Deferred.makeUnsafe(), done: Deferred.makeUnsafe() }
+      writers.set(input.sessionID, slot)
+      return yield* startReserved(input, slot)
+    })
 
+    const handoff = (sessionID: SessionID, slot: WriterState, generation: WriterState["preparing"]) => Effect.gen(function* () {
+      if (writers.get(sessionID) !== slot || slot.preparing !== generation) return
+      const pending = slot.pending
+      slot.pending = undefined
+      if (pending) {
+        slot.phase = "preparing"
+        slot.writing = undefined
+        slot.preparing = Deferred.makeUnsafe()
+        yield* startReserved(pending, slot).pipe(Effect.ignore)
+      } else if (writers.get(sessionID) === slot) {
+        writers.delete(sessionID)
+        Deferred.doneUnsafe(slot.done, Effect.void)
+      }
+    })
+
+    const startReserved = (input: TryStartCheckpointWriterInput, slot: WriterState): Effect.Effect<TryStartCheckpointWriterResult> => {
+      const generation = slot.preparing
+      return Effect.gen(function* () {
       // Defensive: skip if called for a system-spawned session. With Task 27's
       // writer-as-subagent migration this becomes mostly impossible, but the
       // guard stays so future paths that fold a system-spawn actor into the
@@ -647,24 +682,26 @@ export const layer: Layer.Layer<
       // Ensure dirs exist before writer fires
       yield* Effect.promise(() => fs.mkdir(sessMemDir, { recursive: true }))
       yield* Effect.promise(() => fs.mkdir(taskMemDir, { recursive: true }))
-      yield* Effect.promise(() => fs.mkdir(projectMemDir, { recursive: true }))
+      if (!ManagedProvider.enabled()) yield* Effect.promise(() => fs.mkdir(projectMemDir, { recursive: true }))
 
       // Refuse historical filenames before templating/reading.
-      yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
+      if (!ManagedProvider.enabled()) yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
 
       // Test first-run state before bootstrapping; creating the template first
       // made the first-checkpoint prompt branch unreachable.
       const checkpointExists = yield* Effect.promise(() => Bun.file(checkpointFile).exists())
-      const memoryExists = yield* Effect.promise(() => Bun.file(memoryFile).exists())
+      const memoryExists = !ManagedProvider.enabled() && (yield* Effect.promise(() => Bun.file(memoryFile).exists()))
 
       // Bootstrap checkpoint.md, memory.md, and notes.md from templates if missing.
       // Self-contained helpers also mkdir parent so they're safe in isolation.
       yield* Effect.promise(() => ensureCheckpointTemplate(checkpointFile))
-      yield* Effect.promise(() => ensureMemoryTemplate(memoryFile))
+      if (!ManagedProvider.enabled()) yield* Effect.promise(() => ensureMemoryTemplate(memoryFile))
       yield* Effect.promise(() => ensureNotesTemplate(notesFile))
 
       // v5: single-file checkpoint, using the pre-bootstrap state above.
-      const rangeDesc = checkpointExists
+      const rangeDesc = ManagedProvider.enabled()
+        ? (checkpointExists ? `Read the previous session checkpoint: ${checkpointFile}` : "This is the first checkpoint of this session.")
+        : checkpointExists
         ? [
             `Previous checkpoint: ${checkpointFile}`,
             memoryExists ? `Previous memory: ${memoryFile}` : "",
@@ -795,6 +832,7 @@ export const layer: Layer.Layer<
                 providerID: input.model.providerID,
                 modelID: input.model.modelID,
                 msgs: msgsAtWatermark,
+                toolViewContext: input.toolViewContext,
               })
               return {
                 system: prefix.system,
@@ -841,7 +879,28 @@ export const layer: Layer.Layer<
               },
             } satisfies ForkContext
           })
-        : Effect.succeed(undefined as ForkContext | undefined))
+        : Effect.succeed(undefined as ForkContext | undefined)).pipe(
+        Effect.catchCause((cause) =>
+          Effect.sync(() => {
+            log.warn("tryStartCheckpointWriter: full-context capture unavailable, skipping before child creation", {
+              sessionID: input.sessionID,
+              error: String(Cause.squash(cause)),
+            })
+          }).pipe(Effect.as(undefined as ForkContext | undefined)),
+        ),
+      )
+      if (!forkCtx) return "skipped" as const
+      const encodedForkContext = yield* Effect.tryPromise({
+        try: () => encodeForkContext(forkCtx, { sessionID: input.sessionID, actorID: "main" }),
+        catch: (error) => error instanceof Error ? error : new Error(String(error)),
+      }).pipe(
+        Effect.tapError((error) => Effect.sync(() => log.warn("checkpoint fork snapshot unavailable before child creation", {
+          sessionID: input.sessionID,
+          error: error.message,
+        }))),
+        Effect.orElseSucceed(() => undefined),
+      )
+      if (!encodedForkContext) return "skipped" as const
 
       // Axis A: writer always runs in a fresh child session. This isolates the
       // writer's messages and actor registration from the parent so:
@@ -870,6 +929,8 @@ export const layer: Layer.Layer<
         rangeDesc,
       })
 
+      const priorTitles = yield* Effect.promise(() => loadPriorDiscoveredTitles(input.sessionID))
+      return yield* Effect.uninterruptible(Effect.gen(function* () {
       const result = yield* actor.spawn({
         mode: "subagent",
         sessionID: writerChildSession.id,
@@ -892,6 +953,8 @@ export const layer: Layer.Layer<
         },
         background: true,
         forkContext: forkCtx,
+        forkContextSource: { sessionID: input.sessionID, actorID: "main" },
+        encodedForkContext,
       })
 
       const actorID = result.actorID
@@ -901,13 +964,14 @@ export const layer: Layer.Layer<
       // turn so the splitover plugin's preStop hook can read it. The set
       // runs in microseconds; the writer's first LLM round-trip takes
       // seconds — no race in practice. See spec §6.1.
-      const priorTitles = yield* Effect.promise(() => loadPriorDiscoveredTitles(input.sessionID))
+      slot.writing = result.outcome
+      slot.phase = "running"
+      Deferred.doneUnsafe(slot.preparing, Effect.succeed({ status: "started" as const, writing: result.outcome }))
       CheckpointContext.set(input.sessionID, actorID, {
         priorTitles,
         expectedRevisions: [],
       })
 
-      writers.set(input.sessionID, { writing: result.outcome })
 
       // Bookkeeping: the parent's last_checkpoint_message_id (the delta
       // watermark — the point future rebuilds compute the message tail from)
@@ -921,8 +985,12 @@ export const layer: Layer.Layer<
       // delta, so nothing is lost. Fork into the layer's scope so the watcher
       // survives tryStartCheckpointWriter returning (background: true) but stays
       // tied to the layer's lifetime — no orphan fiber on shutdown.
+      let settled = false
       yield* Effect.gen(function* () {
         const outcome = yield* Deferred.await(result.outcome)
+        settled = writers.get(input.sessionID) === slot && slot.preparing === generation && slot.writing === result.outcome
+        if (!settled) return
+        slot.phase = "draining"
         if (outcome.status === "success") {
           yield* Effect.sync(() =>
             Database.use((d) =>
@@ -939,11 +1007,6 @@ export const layer: Layer.Layer<
             endMessageID,
           })
         }
-
-        // F40: capture pending before deleting the slot so a queued writer
-        // (held while writer1 was running) can fire as a fresh writer.
-        const pending = writers.get(input.sessionID)?.pending
-        writers.delete(input.sessionID)
 
         // F44: aggregate writer slice tokens and emit cache-perf metric so
         // prefix-cache reuse is empirically observable. Degrades to zeros if
@@ -971,19 +1034,23 @@ export const layer: Layer.Layer<
         // F40: drain pending. If a queued request exists, fire a fresh writer
         // for it. Errors are swallowed — the queued writer's failure should
         // not interrupt the original writer's settlement watcher.
-        if (pending) {
-          log.info("draining pending writer", { sessionID: input.sessionID })
-          yield* tryStartCheckpointWriter(pending).pipe(Effect.ignore)
-        }
       }).pipe(
-        Effect.ensuring(
-          Effect.sync(() => CheckpointContext.remove(input.sessionID, actorID)),
-        ),
+        Effect.ensuring(Effect.gen(function* () {
+          CheckpointContext.remove(input.sessionID, actorID)
+          if (settled) yield* handoff(input.sessionID, slot, generation)
+        })),
         Effect.forkIn(scope),
       )
 
       return "started" as const
-    })
+      }))
+      }).pipe(Effect.onExit((exit) => Effect.gen(function* () {
+        if (writers.get(input.sessionID) !== slot || slot.preparing !== generation || slot.phase !== "preparing") return
+        Deferred.doneUnsafe(slot.preparing, Effect.succeed({ status: Exit.isSuccess(exit) ? "skipped" as const : "failed" as const }))
+        slot.phase = "draining"
+        yield* handoff(input.sessionID, slot, generation)
+      })))
+    }
 
     const waitForWriter = Effect.fn("SessionCheckpoint.waitForWriter")(function* (sessionID: SessionID) {
       const state = writers.get(sessionID)
@@ -1005,11 +1072,16 @@ export const layer: Layer.Layer<
       // session whose every writer had actually succeeded. Report "timeout" so
       // callers can distinguish "still in flight" from "settled unsuccessfully"
       // (prune's `result !== "failure"` guard already skips the counter).
-      const outcome = yield* Deferred.await(state.writing).pipe(
+      const outcome = yield* Effect.gen(function* () {
+        const prepared = yield* Deferred.await(state.preparing)
+        if (prepared.status === "failed") return "failure" as const
+        if (prepared.status !== "started") return "no-writer" as const
+        return yield* Deferred.await(prepared.writing)
+      }).pipe(
         Effect.timeout(300_000),
         Effect.catch(() => Effect.succeed("timeout" as const)),
       )
-      if (outcome === "timeout") return "timeout" as const
+      if (outcome === "timeout" || outcome === "no-writer" || outcome === "failure") return outcome
       return outcome.status === "success" ? ("success" as const) : ("failure" as const)
     })
 
@@ -1026,7 +1098,7 @@ export const layer: Layer.Layer<
       // it resolves via Deferred.succeed in the detached writer. We only
       // need a collective upper bound so a stuck writer doesn't block exit.
       yield* Effect.all(
-        pending.map((state) => Deferred.await(state.writing)),
+        pending.map((state) => Deferred.await(state.done)),
         { concurrency: "unbounded" },
       ).pipe(
         Effect.timeout(timeoutMs),
@@ -1154,7 +1226,7 @@ export const layer: Layer.Layer<
         // bounded only to survive a writer whose Deferred never resolves.
         const bound = watermarkBefore ? REBUILD_WAIT_MS : FIRST_CHECKPOINT_WAIT_MS
         const waited = yield* Effect.race(
-          Deferred.await(inFlight.writing).pipe(Effect.as("settled" as const)),
+          Deferred.await(inFlight.done).pipe(Effect.as("settled" as const)),
           Effect.sleep(bound).pipe(Effect.as("timeout" as const)),
         ).pipe(Effect.catch(() => Effect.succeed("settled" as const)))
         log.info("rebuild proceeding after writer wait", { sessionID, waited, hadCheckpoint: !!watermarkBefore })
@@ -1183,18 +1255,19 @@ export const layer: Layer.Layer<
       )
       const checkpointText = checkpointResult?.text ?? ""
 
-      yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
-      const memoryResult = yield* Effect.promise(() =>
-        readBudgetedSectionAware(memoryPath(projectID), caps.memory ?? 10_000),
-      )
-      const memoryText = memoryResult?.text ?? ""
+      let memoryText = ""
+      if (!ManagedProvider.enabled()) {
+        yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
+        const memoryResult = yield* Effect.promise(() => readBudgetedSectionAware(memoryPath(projectID), caps.memory ?? 10_000))
+        memoryText = memoryResult?.text ?? ""
+      }
 
       const notesResult = yield* Effect.promise(() =>
         readBudgeted(notesPath(sessionID), caps.notes ?? 6000),
       )
       const notesText = notesResult?.text ?? ""
 
-      const globalResult = yield* Effect.promise(() =>
+      const globalResult = ManagedProvider.enabled() ? undefined : yield* Effect.promise(() =>
         readBudgetedSectionAware(globalMemoryPath(), caps.global ?? 6000),
       )
       const globalText = globalResult?.text ?? ""
@@ -1349,7 +1422,7 @@ export const layer: Layer.Layer<
       // scope when the current project is the global/non-git fallback.
       // Reconcile first so files written off-tool (e.g. by the checkpoint
       // writer subagent) are visible in the FTS index here.
-      yield* memory.reconcile().pipe(Effect.ignore)
+      if (!ManagedProvider.enabled()) yield* memory.reconcile().pipe(Effect.ignore)
       const pushedPaths = new Set(
         [
           memoryPath(projectID),
@@ -1358,8 +1431,9 @@ export const layer: Layer.Layer<
         ].filter((p) => p.length > 0),
       )
 
-      const scopeFilter =
-        currentProjectID && currentProjectID !== ProjectID.global
+      const scopeFilter = ManagedProvider.enabled()
+        ? and(eq(MemoryFtsTable.scope, "sessions"), eq(MemoryFtsTable.scope_id, sessionID as string))
+        : currentProjectID && currentProjectID !== ProjectID.global
           ? or(
               eq(MemoryFtsTable.scope, "global"),
               and(eq(MemoryFtsTable.scope, "sessions"), eq(MemoryFtsTable.scope_id, sessionID as string)),
@@ -1369,7 +1443,7 @@ export const layer: Layer.Layer<
               eq(MemoryFtsTable.scope, "global"),
               and(eq(MemoryFtsTable.scope, "sessions"), eq(MemoryFtsTable.scope_id, sessionID as string)),
             )
-      const scopedPaths = yield* Effect.sync(() =>
+      const scopedPaths = ManagedProvider.enabled() ? [] : yield* Effect.sync(() =>
         Database.use((db) =>
           db.select({ path: MemoryFtsTable.path }).from(MemoryFtsTable).where(scopeFilter).all(),
         ),
@@ -1599,6 +1673,7 @@ export const layer: Layer.Layer<
       renderRebuildContext,
       lastBoundary,
       isWriterRunning,
+      busyGuard: (sessionID) => () => writers.has(sessionID),
       insertRebuildBoundary,
     })
   }),

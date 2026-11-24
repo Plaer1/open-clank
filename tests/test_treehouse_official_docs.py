@@ -25,44 +25,53 @@ def test_learning_body_contains_no_private_author_payload_or_executable_source()
     assert properties["builtin"] is True
 
 
-def test_current_treehouse_media_uses_qualified_unchanged_masters_and_same_readme_hub():
+def test_treehouse_media_resolves_with_provenance_and_file_integrity():
     from pathlib import Path
     import hashlib
     from src.openclank.official_docs_assets import ASSETS
     from src.openclank.official_docs_content import ARTICLE_ASSETS
-    active=ARTICLE_ASSETS['openclank-docs-treehouse']
-    assert active and all(asset_id.endswith('-20261014') for asset_id in active)
-    assert active == ('treehouse-four-main-quests-20261014', 'treehouse-connected-topics-20261014', 'treehouse-openclank-work-20261014', 'treehouse-current-work-20261014')
+    active = ARTICLE_ASSETS["openclank-docs-treehouse"]
+    assert active
+    body = article_by_id("openclank-docs-treehouse")["body"]
     for asset_id in active:
-        asset=ASSETS[asset_id]
-        assert asset['qualification']=='source-candidate-normal-auth'
-        assert asset['provenance']['source_digest'].startswith('sha256:')
-        for item in asset['masters']+asset['variants']:
-            file=Path(item.get('path') or item['url'].lstrip('/'))
-            assert file.stat().st_size==item['bytes']
-            assert hashlib.sha256(file.read_bytes()).hexdigest()==item['sha256']
-        assert asset['masters'][0]['mime']=='image/png'
-    hub=ASSETS['treehouse-four-main-quests-20261014']
-    variant=next(v for v in hub['variants'] if v['role']=='image-960')
-    assert variant['url'].lstrip('/') in Path('README.md').read_text()
-    body=article_by_id('openclank-docs-treehouse')['body']
-    assert all(next(v['url'] for v in ASSETS[key]['variants'] if v['role']=='image') in body for key in active)
+        asset = ASSETS[asset_id]
+        assert asset["state"] == "ready"
+        assert asset["alt"] and asset["caption"] and asset["qualification"]
+        provenance = asset["provenance"]
+        assert provenance["kind"] and provenance["license"]
+        if asset["qualification"] == "source-candidate-normal-auth":
+            assert provenance["source_digest"].startswith("sha256:")
+            assert asset["masters"][0]["mime"] == "image/png"
+        else:
+            assert provenance.get("source_digest") or provenance.get("source")
+        assert next(item["url"] for item in asset["variants"] if item["role"] == "image") in body
+
+    readme = Path("README.md").read_text()
+    assert any(
+        item["url"].lstrip("/") in readme
+        for asset_id in active
+        for item in ASSETS[asset_id]["variants"]
+        if item["role"] in {"image", "image-960"}
+    ), "the README illustration must resolve to a current handbook asset"
+    for asset_id in active:
+        asset = ASSETS[asset_id]
+        for item in asset["masters"] + asset["variants"]:
+            file = Path(item.get("path") or item["url"].lstrip("/"))
+            assert file.stat().st_size == item["bytes"]
+            assert hashlib.sha256(file.read_bytes()).hexdigest() == item["sha256"]
     assert 'treehouse-player-20261007' not in body
 
 
-def test_four_root_guidance_preserves_honest_updates_drafts_and_practical_scope():
+def test_four_root_guidance_distinguishes_draft_submission_and_practical_evidence():
     body = article_by_id("openclank-docs-treehouse")["body"]
+    intro = body.split("## Explore a Quest", 1)[0]
     for name in ("Programming", "Games", "AI", "Open Clank"):
-        assert f"**{name}**" in body
-    assert "all four roots" in body
+        assert name in intro
     assert "all-global reset includes the three" not in body
-    assert "Historical completions keep the requirements" in body
-    assert "Opening a Quest records a visit" in body
-    assert "Previous answer" in body and "not a submission or practical success" in body
-    assert "closing or reloading can lose it" in body
-    assert "only confirmed practical success waits" in body
-    assert "Required conceptual work has supplied inputs" in body
-    assert "synthetic practice in an isolated source candidate" in body
+    for control in ("Save draft", "Submit response", "Save attempt", "I achieved the stated outcome", "Previous answer"):
+        assert f"**{control}**" in body
+    assert "blocked or failed attempt stays pending" in body
+    assert "Self-reported work keeps that status until reviewed or verified" in body
     assert "earlier three-Main-Quest source candidate" not in body
 
 
@@ -72,9 +81,11 @@ def test_storage_activation_guidance_is_separate_from_retiring_edited_defaults()
     import sys
     body = article_by_id("openclank-docs-treehouse")["body"]
     guide = Path("docs/upgrading.md").read_text()
-    assert "Recheck shared quests" in body and "only reads availability" in body
-    assert "schema-only activation" in body and "safe private learning stays available" in body
-    assert "both pristine and edited recognized defaults" in body and "revokes their grants" in body
+    assert "Recheck shared quests" in body and "private learning stays available" in body
+    assert "docs/upgrading.md" in body
+    assert "schema-only activation" in guide
+    assert "both pristine and edited\nrecognized defaults" in guide
+    assert "revokes/deactivates their grants" in guide
     assert "only recognized pristine defaults" not in guide
     assert "not preserved as active courses" in guide
     for mode in ("preview", "apply", "verify", "restore"):
@@ -88,12 +99,10 @@ def test_storage_activation_guidance_is_separate_from_retiring_edited_defaults()
 
 def test_current_learner_discovery_and_solo_navigation_guidance():
     body = article_by_id("openclank-docs-treehouse")["body"]
-    for label in ("Explore Quests", "Open Quest", "Resume Quest", "Quest lessons", "Connected lessons",
-                  "Skills", "Library", "Search learning", "All Main Quests", "Records",
-                  "Request completion record", "Back", "Forward", "Reset this Quest"):
+    for label in ("Explore Quests", "Connected lessons", "Skills", "Library → Search learning", "Records",
+                  "Copal → Achievements", "Completion evidence", "How to earn it", "Author → Open source"):
         assert f"**{label}**" in body
     for obsolete in ("Explore topics", "Explore subject", "Resume subject", "Reset this subject", "Discuss & board"):
         assert obsolete not in body
-    assert "not a proficiency score" in body
-    assert "not a new issuer for shared Main Quests" in body
-    assert "Navigation labels may differ" in body
+    assert "Eligible courses offer completion records" in body
+    assert "Course sharing uses separate grants" in body

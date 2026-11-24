@@ -1,0 +1,35 @@
+{
+  "id": "batch-090",
+  "group": "docs.openclank-docs-credits",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1330,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-credits.title",
+      "source": "Credits and Included Components",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-credits.body",
+      "source": "# Credits and Included Components\n\nOpen Clank ships under AGPL-3.0-or-later. Each included component keeps its own notices.\n\n- Open Clank builds on [Odysseus](https://github.com/odysseus-dev/odysseus) and integrates Copal’s document workspace, the [MiMo Code](https://github.com/XiaomiMiMo/mimo-code) and [opencode](https://github.com/anomalyco/opencode) agent foundations, and [Epic Games’ Lore](https://github.com/EpicGames/lore) for History.\n- Google supplies Noto Emoji and Emoji Kitchen artwork. [Xavier Salazar’s catalogue](https://github.com/xsalazar/emoji-kitchen) supplies the Kitchen combination data. The Apache-2.0 notice applies to the Noto SVG artwork. See **Settings → Help → Emoji credits**.\n- The wordmark uses the Comic Clank Project Authors’ **Comic Clank Mono Bold 0.300**, bundled under the SIL Open Font License 1.1. The installed notice is `static/fonts/ComicClank-OFL.txt`.\n\nThe repository records editors, renderers, fonts, design studies and their notices. [Acknowledgments](https://github.com/Plaer1/open-clank/blob/main/ACKNOWLEDGMENTS.md) · [Bundled components](https://github.com/Plaer1/open-clank/blob/main/licenses/BUNDLED-COMPONENTS.md)\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

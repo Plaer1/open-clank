@@ -1189,6 +1189,19 @@ class TreeHouseRepository:
             db.commit()
         return {"inserted": True, "achievementId": achievement_id}
 
+    def bounded_earned_achievement_ids(self, account_id: str) -> list[str]:
+        """Read at most 64 existing award IDs without initializing or scoring."""
+        from contextlib import closing
+        from src.openclank.treehouse_achievements import BY_ID
+        if type(account_id) is not str or not account_id:
+            raise ValueError('award references unavailable')
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.1)) as db:
+            rows = db.execute('SELECT achievement_id FROM treehouse_achievement_awards WHERE account_id=? ORDER BY achievement_id LIMIT 65', (account_id,)).fetchall()
+        ids = [row[0] for row in rows]
+        if len(ids) > 64 or any(type(value) is not str or value not in BY_ID for value in ids) or ids != sorted(set(ids)):
+            raise ValueError('award references unavailable')
+        return ids
+
     def earned_achievement_ids(self, account_id: str) -> list[str]:
         with self._connect() as db:
             rows = db.execute(

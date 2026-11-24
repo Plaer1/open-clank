@@ -2,6 +2,8 @@ import { recordPresentation, achievementOwner, activityDigest, visiblePresentati
 import {mountImageRegion} from './graphics/imageRegion.js';
 import { LANGUAGE_REGISTRY } from './editor/languageRegistry.js';
 import { filesFacadeClient } from './filesFacadeClient.js';
+import { fileResourceCanCopyPath, fileResourceCanOpenCodeGraph, fileResourceCanReveal, fileResourceCopyPath } from './filesResourceActions.js';
+import { changedTextRange, createHostFileWatch, replaceEditorTextPreservingView } from './editor/hostFileUpdates.js';
 import { createOpenClankWindow } from './copal/windows.js';
 import { appletPath } from './appletRoutes.js';
 import workspaceModule from './workspace.js';
@@ -14,10 +16,11 @@ import { languageForPath as sharedLanguageForPath, languageDialectForPath as sha
 import { fileIcon, glyphIcon } from './langIcons.js';
 import { initCustomContextMenu, registerAdapter, createCodeMirrorContextAdapter } from './custom-context-menu.js';
 import {CODE_GRAPH_LABEL,graphDisabledReason,executeCodeGraphNavigation} from './copal/resourceGraphCommands.js';
+import { createGitWorkbench, loadGitWorkbenchStatus } from './gitWorkbench.js';
 
-const CODE_WORKSPACE_KEY = 'odysseus-code-workspace';
-const CODE_WORKSPACE_ID_KEY = 'odysseus-code-workspace-id';
-const CODE_RICH_COMMENTS_KEY = 'odysseus-editor-rich-comments';
+const CODE_WORKSPACE_KEY = 'openclank-code-workspace';
+const CODE_WORKSPACE_ID_KEY = 'openclank-code-workspace-id';
+const CODE_RICH_COMMENTS_KEY = 'openclank-editor-rich-comments';
 const hydratedCodeTreeContextEvents = new WeakSet();
 const codeTreeContextHydration = new WeakMap();
 let codeTreeContextRequestSequence = 0;
@@ -69,6 +72,7 @@ const state = {
   rootTreeController: null,
   resourceOpenController: null,
   bufferReconcileController: null,
+  hostFileWatch: null,
   workspacePicker: null,
   pane: null,
   editorFactory: null,
@@ -77,9 +81,10 @@ const state = {
   editorLoadError: null,
   closedBuffers: [],
   closePromise: null,
-  tabMenu: null,
   richCommentsDefault: false,
   markdownRenderer: null,
+  gitWorkbench: null,
+  gitWorkbenchListeners: null,
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -207,6 +212,7 @@ function abortPendingFileReads() {
 }
 
 function clearWorkspaceOwnerState(nextOwner = '') {
+  state.gitWorkbench?.dispose(); state.gitWorkbench = null;
   releaseEditorIndex();
   state.workspaceEpoch += 1;
   state.resourceOpenController?.abort?.();
@@ -241,12 +247,13 @@ function clearWorkspaceOwnerState(nextOwner = '') {
   state.richCommentsDefault = savedRichCommentsDefault(state.workspaceOwner);
   const rootLabel = state.shell?.querySelector('[data-code-root]');
   if (rootLabel) rootLabel.textContent = '';
-  closeTabMenu();
   updateReopenClosedAction();
   state.pane?.refresh?.();
 }
 
-function abortWorkspaceAuthorityRequests() {
+function abortWorkspaceAuthorityRequests({ retainGitStatus = false } = {}) {
+  if (retainGitStatus) state.gitWorkbench?.enterStatusOnly();
+  else { state.gitWorkbench?.dispose(); state.gitWorkbench = null; }
   releaseEditorIndex();
   const generation = ++state.requestGeneration;
   state.workspaceEpoch += 1;
@@ -263,7 +270,6 @@ function abortWorkspaceAuthorityRequests() {
     buffer.saveController?.abort?.();
     buffer.reloadController?.abort?.();
   }
-  closeTabMenu();
   return generation;
 }
 
@@ -318,12 +324,20 @@ function rebaseWorkspaceBuffers(nextRoot) {
   return true;
 }
 
-async function handleCodeFilePolicyChanged() {
+async function handleCodeFilePolicyChanged({ retainGitStatus = false } = {}) {
   if (!state.nativeWindow?.visible) return false;
   const priorOwner = state.workspaceOwner;
   const priorRoot = state.root;
-  const generation = abortWorkspaceAuthorityRequests();
+  const generation = abortWorkspaceAuthorityRequests({ retainGitStatus });
   setStatus('Revalidating workspace access…');
+  const clearAuthority = message => {
+    state.rootResourceRef = '';
+    state.activeDirectoryRef = '';
+    for (const buffer of state.buffers.values()) buffer.resourceRef = '';
+    mountCodeExplorer([]);
+    renderEditor();
+    setStatus(message, true);
+  };
 
   const identity = await authenticatedOwner();
   if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
@@ -360,10 +374,8 @@ async function handleCodeFilePolicyChanged() {
         setStatus('Workspace access could not be revalidated; unsaved changes were retained', true);
         return false;
       }
-      purgeWorkspaceAuthority(identity.owner, 'Workspace access was revoked');
-      const fallback = await workspaceRoot();
-      if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
-      return displayWorkspaceRoot(fallback, generation);
+      clearAuthority('Workspace access was revoked; open text was retained. Choose a folder again.');
+      return false;
     }
     if (typeof filesFacadeClient.workspaceResource === 'function') {
       try {
@@ -372,69 +384,38 @@ async function handleCodeFilePolicyChanged() {
         const rootRef = String(target?.resource?.ref || target?.parent?.ref || '').trim();
         const rootKind = String(target?.resource?.kind || target?.parent?.kind || '').toLowerCase();
         if (!rootRef || !['folder', 'provider_root', 'virtual_folder'].includes(rootKind)) {
-          purgeWorkspaceAuthority(identity.owner, 'Workspace resource is unavailable');
+          clearAuthority('Workspace resource is unavailable; open text was retained.');
           return false;
         }
         state.rootResourceRef = rootRef;
       } catch (error) {
         if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
-        if (confirmedWorkspaceFailure(error)) purgeWorkspaceAuthority(identity.owner, 'Workspace access was revoked');
+        if (confirmedWorkspaceFailure(error)) clearAuthority('Workspace access was revoked; open text was retained.');
         else { renderEditor(); setStatus('Workspace access could not be revalidated; unsaved changes were retained', true); }
         return false;
       }
     }
-  } else if (state.rootResourceRef && typeof filesFacadeClient.stat === 'function') {
-    try {
-      const checked = await filesFacadeClient.stat(state.rootResourceRef, {});
-      if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
-      const rootRef = String(checked?.resource?.ref || checked?.ref || state.rootResourceRef).trim();
-      const rootKind = String(checked?.resource?.kind || checked?.kind || '').toLowerCase();
-      if (!rootRef || !['folder', 'provider_root', 'virtual_folder'].includes(rootKind)) {
-        purgeWorkspaceAuthority(identity.owner, 'Workspace resource is unavailable');
-        return false;
-      }
-      state.rootResourceRef = rootRef;
-    } catch (error) {
-      if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
-      if (confirmedWorkspaceFailure(error)) purgeWorkspaceAuthority(identity.owner, 'Workspace access was revoked');
-      else { renderEditor(); setStatus('Workspace access could not be revalidated; unsaved changes were retained', true); }
-      return false;
-    }
+  } else if (state.rootResourceRef) {
+    // Host refs cannot be renewed after a policy generation change. Keep the
+    // text, but require a fresh picker selection before any Files operation.
+    clearAuthority('File access changed. Choose the folder again; open text was retained.');
+    return false;
   } else if (priorRoot) {
     // A path-only prior root is stale compatibility state. Do not reauthorize
     // it through the workspace browse API during a policy transition.
-    state.rootResourceRef = '';
-    state.activeDirectoryRef = '';
-    purgeWorkspaceAuthority(identity.owner, 'Workspace access must be reauthorized through Files.');
+    clearAuthority('Workspace access must be reauthorized through Files; open text was retained.');
     return false;
-
-    state.rootResourceRef = '';
-    state.activeDirectoryRef = '';
-    const validated = await resolveWorkspaceRoot(priorRoot);
-    if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
-    if (validated.status === 'unavailable') {
-      renderEditor();
-      setStatus('Workspace access could not be revalidated; unsaved changes were retained', true);
-      return false;
-    }
-    if (validated.status !== 'resolved') {
-      purgeWorkspaceAuthority(identity.owner, 'Workspace access was revoked');
-      const fallback = await workspaceRoot();
-      if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
-      return displayWorkspaceRoot(fallback, generation);
-    }
-    resolvedRoot = validated.path;
   } else {
     resolvedRoot = await workspaceRoot();
   }
 
   if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
   if (!resolvedRoot) {
-    purgeWorkspaceAuthority(identity.owner, 'No assigned folder');
+    clearAuthority('No assigned folder; open text was retained.');
     return false;
   }
   if (!rebaseWorkspaceBuffers(resolvedRoot)) {
-    purgeWorkspaceAuthority(identity.owner, 'Workspace location changed; prior buffers were removed');
+    clearAuthority('Workspace location changed; open text was retained.');
     return false;
   }
 
@@ -445,13 +426,13 @@ async function handleCodeFilePolicyChanged() {
     if (rootLabel) rootLabel.textContent = resolvedRoot;
     mountCodeExplorer(page.items, page.nextCursor, resolvedRoot);
     renderEditor();
-    await reconcileOpenBuffers(generation);
+    await reconcileOpenBuffers(generation, { refreshAuthority:true });
     if (generation === state.requestGeneration) setStatus(resolvedRoot);
     return generation === state.requestGeneration;
   } catch (error) {
     if (error?.name === 'AbortError' || generation !== state.requestGeneration) return false;
     if (confirmedWorkspaceFailure(error)) {
-      purgeWorkspaceAuthority(identity.owner, 'Workspace access was revoked');
+      clearAuthority('Workspace access was revoked; open text was retained.');
     } else {
       renderEditor();
       setStatus('Workspace refresh failed; unsaved changes were retained', true);
@@ -777,31 +758,57 @@ async function openLegacyResourceGraph(resource,{current,dirty=false}) {
 }
 function bufferResourceCommands(buffer) {
   const revision=buffer.revision,ref=buffer.resourceRef,owner=state.workspaceOwner,epoch=state.workspaceEpoch,generation=state.fileGeneration;
-  const resource=buffer.graphResource;
+  const resource=buffer.graphResource, expectedRevision=buffer.expectedRevision;
+  const chat=String(window.sessionModule?.getCurrentSessionId?.()||'');
   const current=()=>Boolean(state.nativeWindow?.visible&&state.buffers.get(buffer.path)===buffer&&buffer.loaded
-    &&buffer.revision===revision&&buffer.resourceRef===ref&&state.workspaceOwner===owner&&state.workspaceEpoch===epoch&&state.fileGeneration===generation);
+    &&buffer.revision===revision&&buffer.resourceRef===ref&&buffer.expectedRevision===expectedRevision
+    &&state.workspaceOwner===owner&&state.workspaceEpoch===epoch&&state.fileGeneration===generation);
   return [{id:'editor.code-graph',label:CODE_GRAPH_LABEL,disabledReason:graphDisabledReason(resource?[resource]:[]),run:()=>openLegacyResourceGraph(resource,{current,dirty:buffer.dirty===true})},
+    {id:'editor.plan-feedback',label:'Plan feedback on file or selection…',dialog:true,
+      disabledReason:resource && !buffer.dirty && chat && expectedRevision?.kind==='hostFingerprint' ? '' : 'Open the saved Host file and the original chat first.',run:async()=>{
+      if(!current() || buffer.dirty || expectedRevision?.kind!=='hostFingerprint')throw new Error('Save the current file before selecting plan feedback.');
+      if(!chat || String(window.sessionModule?.getCurrentSessionId?.()||'')!==chat)throw new Error('Open the original chat first.');
+      const text=buffer.editor?.getValue?.(),selection=buffer.editor?.getSelection?.();
+      if(typeof text!=='string'||text!==buffer.text)throw new Error('The saved Editor buffer is unavailable.');
+      const {feedbackSelection}=await import('./planFeedback.js');const selected=await feedbackSelection(text,selection);
+      const stillCurrent=()=>{const now=buffer.editor?.getSelection?.();return current()&&state.activePath===buffer.path&&buffer.editor?.view?.dom?.isConnected
+        &&!buffer.dirty&&buffer.editor?.getValue?.()===text&&now?.anchor===selection?.anchor&&now?.head===selection?.head&&String(window.sessionModule?.getCurrentSessionId?.()||'')===chat;};
+      if(!stillCurrent())throw new Error('Editor selection changed; choose it again.');
+      const detail={chat,target:{resourceRef:ref,expectedRevision,...(selected?{selection:selected}:{})},isCurrent:stillCurrent,accepted:false};
+      document.dispatchEvent(new CustomEvent('openclank:plan-feedback-target',{detail}));
+      if(!detail.accepted)throw new Error('Open the current plan feedback panel first.');return true;
+    }},
     {id:'editor.reveal-files',label:'Reveal in Files',disabledReason:resource?'':'No authorized Host resource.',run:async()=>{if(!current())return false;const files=await import('./files.js');return current()&&files.revealResource(ref);}}];
 }
-function bindBufferContextMenu(buffer, host) {
+function bindBufferContextMenu(buffer) {
   buffer.contextMenuDispose?.();
   const editing=createCodeMirrorContextAdapter(buffer.editor, {
     // These values are read when a command is invoked. A resource rename,
     // workspace switch, or account transition therefore invalidates a menu
     // capture even when the replacement has the same byte length.
     bufferIdentity: () => buffer,
-    revision: () => `${buffer.path}:${buffer.revision || 0}`,
+    revision: () => JSON.stringify([buffer.path, buffer.revision, buffer.expectedRevision, buffer.resourceRef]),
+    readOnly: () => buffer.readOnly,
     scope: () => `${state.workspaceOwner}:${state.root}:${state.workspaceEpoch}`,
   });
-  buffer.contextMenuDispose=registerAdapter(host,{
-    ...editing,groupCommands:true,
-    capture:(...args)=>({...editing.capture(...args),resourceCommands:bufferResourceCommands(buffer)}),
-    commands:request=>[...editing.commands(request).map(item=>({...item,menu:'Text & selection'})),...request.adapterContext.resourceCommands.map(item=>({...item,menu:'Go',disabled:Boolean(item.disabledReason)}))],
-    execute:async(command,request)=>{
-      if(!command.startsWith('editor.'))return editing.execute(command,request);
-      if(!editing.isCurrent(request))throw new Error('The captured Editor buffer changed. Reopen its menu.');
-      const action=request.adapterContext.resourceCommands.find(item=>item.id===command);
-      if(!action||action.disabledReason)return false;await action.run();return true;
+  const isCurrent = request => state.nativeWindow?.visible && state.buffers.get(buffer.path) === buffer && buffer.loaded
+    && state.activePath === buffer.path && editing.isCurrent(request);
+  buffer.contextMenuDispose = registerAdapter(buffer.editor.view.dom, {
+    ...editing, isCurrent,
+    capture:(...args) => {
+      const target = editing.capture(...args);
+      const feedback = target.atSelection && !target.widget && target.ranges.length === 1
+        ? bufferResourceCommands(buffer).find(command => command.id === 'editor.plan-feedback' && !command.disabledReason) : null;
+      return { ...target, feedback };
+    },
+    commands:request => {
+      const { feedback } = request.adapterContext;
+      return feedback ? [...editing.commands(request), feedback] : editing.commands(request);
+    },
+    execute:(command, request) => {
+      if (!isCurrent(request)) throw new Error('The captured Editor buffer changed. Reopen its menu.');
+      if (command === 'editor.plan-feedback') return request.adapterContext.feedback?.run() ?? false;
+      return editing.execute(command, request);
     },
   });
 }
@@ -1050,7 +1057,7 @@ function codeTreeIsFolderResource(resource) {
 }
 
 function codeTreeIdentityStillCurrent(identity) {
-  if (!identity?.row?.isConnected || state.workspaceOwner !== identity.owner || state.workspaceEpoch !== identity.workspaceEpoch
+  if (!state.nativeWindow?.visible || !identity?.row?.isConnected || state.workspaceOwner !== identity.owner || state.workspaceEpoch !== identity.workspaceEpoch
     || state.fileGeneration !== identity.fileGeneration || state.requestGeneration !== identity.requestGeneration
     || state.rootResourceRef !== identity.rootResourceRef) return false;
   const node = state.explorerTree?.getNode(identity.treeId);
@@ -1094,14 +1101,21 @@ async function refreshCodeTreeResource(identity, { includeDestination = false } 
 function codeTreeCommands(identity) {
   const resource = identity.resource;
   const commands = [];
-  commands.push({id:'editor.code-graph',label:CODE_GRAPH_LABEL,disabled:Boolean(graphDisabledReason([resource]))});
+  if (fileResourceCanOpenCodeGraph(resource)) commands.push({id:'editor.code-graph',label:CODE_GRAPH_LABEL,menu:'Tools'});
+  if (resource?.provider==='host' && resource?.kind==='file' && codeTreeHasCapability(resource,'download') && resource.resourceId) {
+    commands.push({id:'editor.analysis-note',label:'Human analysis note…',menu:'Tools'});
+    commands.push({id:'editor.analysis-result',label:'Save verified analysis result…',menu:'Tools'});
+    commands.push({id:'editor.history-preview',label:'Preview selected history…',menu:'Tools'});
+  }
   if (entryIsDirectory(identity.entry) && codeTreeHasCapability(resource, 'children')) commands.push({ id:'code-tree-open-folder', label:'Open folder' });
   else if (!entryIsDirectory(identity.entry) && codeTreeHasCapability(resource, 'open') && codeTreeHasCapability(resource, 'read')) commands.push({ id:'code-tree-open-file', label:'Open file' });
   if (codeTreeHasCapability(resource, 'rename')) commands.push({ id:'code-tree-rename', label:'Rename' });
   if (codeTreeCanMove(identity.entry, resource)) commands.push({ id:'code-tree-move', label:'Move' });
   if (codeTreeCanCopy(resource) && codeTreeIsFolderResource(identity.destination) && codeTreeCanCreate(identity.destination)) commands.push({ id:'code-tree-copy', label:'Copy' });
   if (codeTreeHasCapability(resource, 'trash')) commands.push({ id:'code-tree-trash', label:'Move to Trash' });
-  return commands.length ? commands : [{ id:'code-tree-no-actions', label:'No supported actions', disabled:true }];
+  if (fileResourceCanReveal(resource)) commands.push({ id:'editor.reveal-files', label:'Reveal in Files' });
+  if (fileResourceCanCopyPath({path:resource.logicalPath})) commands.push({ id:'copy-file-path', label:'Copy path' });
+  return commands;
 }
 
 async function executeCodeTreeAction(action, identity, treeContext) {
@@ -1134,18 +1148,20 @@ async function executeCodeTreeAction(action, identity, treeContext) {
       const changedDuringTrash = treeMutationBuffersChanged(reservation);
       if (changedDuringTrash) {
         const trashEntry = trashed?.resource || null;
+        const hostTrashEntry = trashed?.history?.receipt?.trash_entry || null;
+        let notPutBack = false;
         if (trashEntry) {
           try {
-            await filesFacadeClient.action(String(trashEntry.ref || source.ref), 'restore', {}, { actionId:operationId('editor-restore') });
+            await filesFacadeClient.action(String(trashEntry.ref || source.ref), 'restore', hostTrashEntry ? { entry:hostTrashEntry } : {}, { actionId:operationId('editor-restore') });
             await refreshExplorer();
             setStatus(`Kept ${entry.name}; it changed while Trash was running`, true);
             return true;
-          } catch (_) { /* retain the in-memory buffers below */ }
+          } catch (_) { notPutBack = Boolean(hostTrashEntry); /* retain the in-memory buffers below */ }
         }
         const retained = retainOrphanedTrashBuffers(child);
         if (retained.length) renderEditor();
         await refreshExplorer();
-        setStatus(`Newer edits to ${entry.name} were retained after Trash`, true);
+        setStatus(notPutBack ? `${entry.name} was moved to the trash and could not be confirmed put back; your newer edits were retained` : `Newer edits to ${entry.name} were retained after Trash`, true);
         return true;
       }
       const currentAffected = subtreeBufferEntries(child).map(([path]) => path);
@@ -1207,33 +1223,65 @@ async function handleCodeTreeContextMenu(event, entry, treeContext) {
   const contextMenu = window.openClankContextMenu;
   if (!contextMenu?.enabled?.() || typeof contextMenu.registerAdapter !== 'function') return;
   const row = event.currentTarget;
+  if (event.target.closest?.('button,input,summary')) return;
   if (hydratedCodeTreeContextEvents.has(event)) {
     hydratedCodeTreeContextEvents.delete(event);
     const identity = codeTreeContextHydration.get(row);
     if (!identity || !codeTreeIdentityStillCurrent(identity)) return;
     registerAdapter(row, {
       capture:() => identity,
+      hitTest:node => node.closest('button,input,summary') ? 'native' : true,
+      isCurrent:request => request.adapterContext === identity && codeTreeIdentityStillCurrent(identity),
+      ownsObjectCommands:true,
       commands:() => codeTreeCommands(identity),
       execute:async (command, request) => {
         const captured = request?.adapterContext;
         if (captured !== identity || !codeTreeIdentityStillCurrent(identity)) throw new Error('This Editor item changed. Reopen its menu and try again.');
+        if (command === 'copy-file-path') return fileResourceCopyPath({path:identity.resource.logicalPath});
+        if (command === 'editor.reveal-files') {
+          const { revealResource } = await import('./files.js');
+          return codeTreeIdentityStillCurrent(identity) && revealResource(identity.resource.ref);
+        }
         if(command==='editor.code-graph')return openLegacyResourceGraph(identity.resource,{current:()=>codeTreeIdentityStillCurrent(identity)});
+        if(command==='editor.history-preview') {
+          const chatID=String(window.sessionModule?.getCurrentSessionId?.()||'');
+          const current=()=>Boolean(state.nativeWindow?.visible && state.nativeWindow?.root?.isConnected && codeTreeIdentityStillCurrent(identity) && String(window.sessionModule?.getCurrentSessionId?.()||'')===chatID);
+          const {runSessionTransferPreview}=await import('./sessionTransfer.js');
+          await runSessionTransferPreview({client:filesFacadeClient,sourceRef:identity.resource.ref,sourceResourceID:identity.resource.resourceId,current,scopeRoot:state.nativeWindow?.root,status:(message,error=false)=>setStatus(message,error)});
+          return true;
+        }
+        if(command==='editor.analysis-result') {
+          const chatID=String(window.sessionModule?.getCurrentSessionId?.()||'');
+          if(!chatID)throw new Error('Open the original chat before selecting an analysis result.');
+          const current=()=>Boolean(state.nativeWindow?.visible && state.nativeWindow?.root?.isConnected && codeTreeIdentityStillCurrent(identity) && String(window.sessionModule?.getCurrentSessionId?.()||'')===chatID);
+          const {runAnalysisResultFlow}=await import('./analysisNoteFlow.js');
+          await runAnalysisResultFlow({client:filesFacadeClient,sourceRef:identity.resource.ref,sourceResourceID:identity.resource.resourceId,chatID,current,scopeRoot:state.nativeWindow?.root,status:(message,error=false)=>setStatus(message,error),openResult:async ref=>{if(current())await openResource(ref);}});
+          return true;
+        }
+        if(command==='editor.analysis-note') {
+          const current=()=>Boolean(state.nativeWindow?.visible && state.nativeWindow?.root?.isConnected && codeTreeIdentityStillCurrent(identity));
+          const {runAnalysisNoteFlow}=await import('./analysisNoteFlow.js');
+          await runAnalysisNoteFlow({client:filesFacadeClient,sourceRef:identity.resource.ref,sourceResourceID:identity.resource.resourceId,
+            current,scopeRoot:state.nativeWindow?.root,status:(message,error=false)=>setStatus(message,error),
+            openResult:async ref=>{if(current())await openResource(ref);}});
+          return true;
+        }
         const action = {
           'code-tree-open-folder':'open-folder', 'code-tree-open-file':'open-file',
           'code-tree-rename':'rename', 'code-tree-move':'move', 'code-tree-copy':'copy', 'code-tree-trash':'trash',
         }[command];
-        if (!action) return command === 'code-tree-no-actions';
+        if (!action) return false;
         return executeCodeTreeAction(action, identity, treeContext);
       },
     });
     return;
   }
 
+  const resourceRef = String(entry.resource_ref || entry.resourceRef || '').trim();
+  if (!resourceRef) return;
   event.preventDefault();
   event.stopPropagation();
   const requestId = ++codeTreeContextRequestSequence;
-  const resourceRef = String(entry.resource_ref || entry.resourceRef || '').trim();
-  if (!resourceRef) { setStatus('Refresh the authorized Editor folder before changing this item.', true); return; }
   const treeId = String(entry.resource_id || entry.resource_ref || entry.path || '');
   const scope = {
     row, entry, treeId, path:String(entry.path || ''), owner:state.workspaceOwner,
@@ -1241,10 +1289,17 @@ async function handleCodeTreeContextMenu(event, entry, treeContext) {
     requestGeneration:state.requestGeneration, rootResourceRef:state.rootResourceRef,
   };
   if (!codeTreeIdentityStillCurrent(scope)) { setStatus('Refresh the authorized Editor folder before changing this item.', true); return; }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const options = { capture:true, once:true, signal:controller.signal };
+  document.addEventListener('pointerdown', abort, options);
+  document.addEventListener('keydown', abort, options);
+  const pending = () => !controller.signal.aborted
+    && requestId === codeTreeContextRequestSequence && codeTreeIdentityStillCurrent(scope);
   try {
     const listed = normalizeCodeTreeResource(entry, entry.parent_resource_ref);
-    const sourceResponse = await filesFacadeClient.stat(resourceRef);
-    if (requestId !== codeTreeContextRequestSequence || !codeTreeIdentityStillCurrent(scope)) return;
+    const sourceResponse = await filesFacadeClient.stat(resourceRef, { signal:controller.signal });
+    if (!pending()) return;
     const resource = normalizeCodeTreeResource(sourceResponse?.resource || sourceResponse, entry.parent_resource_ref);
     if (resource.resourceKey !== listed.resourceKey || entryIsDirectory(entry) !== (resource.kind === 'folder')) {
       throw new Error('Files returned a different Editor resource. Refresh the folder and try again.');
@@ -1256,15 +1311,15 @@ async function handleCodeTreeContextMenu(event, entry, treeContext) {
     let destination = null;
     if (destinationRef && codeTreeCanCopy(resource)) {
       try {
-        const destinationResponse = await filesFacadeClient.stat(destinationRef);
-        if (requestId !== codeTreeContextRequestSequence || !codeTreeIdentityStillCurrent(scope)) return;
+        const destinationResponse = await filesFacadeClient.stat(destinationRef, { signal:controller.signal });
+        if (!pending()) return;
         destination = normalizeAuthorizedResource(destinationResponse?.resource || destinationResponse, {
           purpose:'folder', generation:Number(state.fileGeneration) || 0,
           accountScope:String(state.workspaceOwner || ''),
         });
       } catch (_) { destination = null; }
     }
-    if (requestId !== codeTreeContextRequestSequence || !codeTreeIdentityStillCurrent(scope)) return;
+    if (!pending()) return;
     const identity = Object.freeze({
       ...scope, resource, destination, destinationResourceKey:destination?.resourceKey || '',
       destinationRef, resourceRef:resource.ref,
@@ -1272,15 +1327,15 @@ async function handleCodeTreeContextMenu(event, entry, treeContext) {
     codeTreeContextHydration.set(row, identity);
     if (!contextMenu.enabled?.() || !event.target?.isConnected) return;
     const synthetic = new MouseEvent('contextmenu', {
-      bubbles:true, cancelable:true, clientX:event.clientX, clientY:event.clientY,
+      bubbles:true, cancelable:true, button:event.button, clientX:event.clientX, clientY:event.clientY,
       detail:event.detail, shiftKey:event.shiftKey, ctrlKey:event.ctrlKey,
       metaKey:event.metaKey, altKey:event.altKey,
     });
     hydratedCodeTreeContextEvents.add(synthetic);
     event.target.dispatchEvent(synthetic);
   } catch (error) {
-    if (requestId === codeTreeContextRequestSequence) setStatus(error.message || 'Files could not authorize this Editor item.', true);
-  }
+    if (pending()) setStatus(error.message || 'Files could not authorize this Editor item.', true);
+  } finally { controller.abort(); }
 }
 
 function mountCodeExplorer(entries = [], nextCursor = null, rootPath = state.root) {
@@ -1358,7 +1413,122 @@ async function refreshExplorer() {
   }
 }
 
-async function reconcileOpenBuffers(generation = state.requestGeneration) {
+function stopCodeFileWatch() {
+  state.hostFileWatch?.dispose();
+  state.hostFileWatch=null;
+}
+
+function syncCodeFileWatch() {
+  if (!state.nativeWindow?.visible || !state.root) { stopCodeFileWatch(); return; }
+  const epoch=state.workspaceEpoch, root=state.root, owner=state.workspaceOwner;
+  if (!state.hostFileWatch || state.hostFileWatch.epoch !== epoch || state.hostFileWatch.root !== root || state.hostFileWatch.owner !== owner) {
+    stopCodeFileWatch();
+    const events=new AbortController();
+    const isCurrent=()=>state.nativeWindow?.visible && state.workspaceEpoch === epoch && state.root === root &&
+      state.workspaceOwner === owner && !events.signal.aborted;
+    const registry=createHostFileWatch({
+      client:filesFacadeClient,isCurrent,
+      reconcile:(entry,current)=>reconcileCodeBuffer(entry.id,current,entry.controller.signal),
+      unavailable:(entry,stage)=>{
+        const buffer=state.buffers.get(entry.id);
+        if (buffer && (!buffer.externalChange || stage === 'read')) {
+          buffer.externalChange={state:stage === 'watch' ? 'watch-unavailable' : 'resource-unavailable'};
+          refreshCodeFileNotice(buffer);
+        }
+      },
+    });
+    for (const eventName of ['online','focus']) window.addEventListener(eventName,()=>registry.reconcileAll({reconnect:true}),{signal:events.signal});
+    window.addEventListener('openclank-files-watch-dirty',()=>registry.reconcileAll(),{signal:events.signal});
+    state.hostFileWatch={...registry,epoch,root,owner,dispose(){events.abort();registry.dispose();}};
+  }
+  state.hostFileWatch.sync([...state.buffers.values()].filter(buffer=>buffer.loaded && buffer.resourceRef && buffer.resourceIdentity?.provider === 'host')
+    .map(buffer=>({id:buffer.path,ref:buffer.resourceRef,resourceId:buffer.resourceIdentity.resourceId})));
+}
+
+function sameCodeResource(left,right) {
+  return Boolean(left && right && ['accountId','workspaceId','provider','resourceId'].every(field=>left[field] === right[field]));
+}
+
+function applyCodeDiskSnapshot(buffer, opened) {
+  const payload=opened?.payload || {}, resource=payload.resource;
+  const text=payload.text ?? payload.content;
+  if (!sameCodeResource(buffer.resourceIdentity,resource?.key) || resource.revision?.kind !== 'hostFingerprint' || typeof text !== 'string') throw new Error('Original file identity is unavailable.');
+  replaceEditorTextPreservingView(buffer.editor,text);
+  buffer.text=text;
+  buffer.originalText=text;
+  buffer.fingerprint=resource.revision.value;
+  buffer.expectedRevision=resource.revision;
+  buffer.resourceRef=resource.locator?.opaqueRef || buffer.resourceRef;
+  buffer.encoding=payload.encoding || resource.metadata?.encoding || buffer.encoding;
+  buffer.newline=payload.newline || resource.metadata?.newline || buffer.newline;
+  buffer.revision=(buffer.revision || 0)+1;
+  buffer.savedRevision=buffer.revision;
+  return resource.revision;
+}
+
+async function reconcileCodeBuffer(path, isCurrent, signal) {
+  const buffer=state.buffers.get(path);
+  if (!buffer?.loaded || !buffer.resourceRef || !isCurrent()) return;
+  const current=()=>isCurrent() && !signal.aborted && state.buffers.get(path) === buffer;
+  try {
+    if (buffer.savePromise) await buffer.savePromise;
+    if (!current()) return;
+    const revision=buffer.revision, expected=buffer.expectedRevision?.value;
+    const hasLocalWork=()=>Boolean(buffer.dirty || buffer.saveUncertain || buffer.pendingSourceEdits?.size ||
+      buffer.reloadController || buffer.editor?.view?.composing || buffer.editor?.view?.compositionStarted);
+    const hadLocalWork=hasLocalWork();
+    const stat=await filesFacadeClient.stat(buffer.resourceRef,{signal});
+    if (!current()) return;
+    const row=stat?.resource || stat;
+    if (row?.provider !== 'host' || row.id !== buffer.resourceIdentity?.resourceId || !row.ref || row.revision?.kind !== 'hostFingerprint') throw new Error('Original file identity is unavailable.');
+    if (row.revision.value === buffer.expectedRevision?.value) {
+      if (['conflict','resource-unavailable'].includes(buffer.externalChange?.state)) {buffer.externalChange=null;refreshCodeFileNotice(buffer);}
+      return;
+    }
+    if (expected !== buffer.expectedRevision?.value || buffer.savePromise) {
+      if (buffer.savePromise) await buffer.savePromise;
+      if (current()) state.hostFileWatch?.manual(path);
+      return;
+    }
+    const opened=await filesFacadeClient.openResource(row.ref,{expectedRevision:row.revision,signal});
+    if (!current()) return;
+    if (expected !== buffer.expectedRevision?.value || buffer.savePromise) {
+      if (buffer.savePromise) await buffer.savePromise;
+      if (current()) state.hostFileWatch?.manual(path);
+      return;
+    }
+    if (!sameCodeResource(buffer.resourceIdentity,opened?.payload?.resource?.key) ||
+        opened.payload.resource.revision?.value !== row.revision.value) throw new Error('Exact disk revision is unavailable.');
+    if (hadLocalWork || revision !== buffer.revision || hasLocalWork()) {
+      buffer.externalChange={state:'conflict',revision:row.revision};
+    } else {
+      const range=changedTextRange(buffer.originalText,opened.payload.text ?? opened.payload.content);
+      applyCodeDiskSnapshot(buffer,opened);
+      buffer.externalChange={state:'refreshed',range};
+      buffer.saveError=null;
+    }
+    refreshCodeFileNotice(buffer);
+  } catch (_) {
+    if (current()) { buffer.externalChange={state:'resource-unavailable'}; refreshCodeFileNotice(buffer); }
+  }
+}
+
+function refreshCodeFileNotice(buffer) {
+  if (state.activePath !== buffer.path) return;
+  const banner=state.shell?.querySelector('[data-code-external-file-status]');
+  if (!banner) return;
+  const notice=buffer.externalChange;
+  banner.hidden=!notice;
+  if (!notice) {banner.replaceChildren();return;}
+  const label={refreshed:notice.range ? `Updated from disk · lines ${notice.range.firstLine}–${notice.range.lastLine}` : 'Disk revision updated',
+    conflict:'Changed on disk · edits kept','watch-unavailable':'Live updates unavailable','resource-unavailable':'Original file unavailable'}[notice.state];
+  banner.replaceChildren(el('span',{text:label,title:notice.revision?.value}));
+  if (notice.state === 'conflict') banner.append(el('button',{type:'button',text:'Reload disk copy',onclick:()=>void reloadBufferFromDisk(buffer.path)}));
+  if (notice.state !== 'refreshed') banner.append(el('button',{type:'button',text:'Refresh from disk',onclick:()=>state.hostFileWatch?.manual(buffer.path)}));
+  if (notice.range) banner.append(el('button',{type:'button',text:'Jump to change',onclick:()=>buffer.editor?.focusLine?.(notice.range.firstLine)}));
+}
+
+async function reconcileOpenBuffers(generation = state.requestGeneration, { refreshAuthority = false } = {}) {
   state.bufferReconcileController?.abort?.();
   const controller = new AbortController();
   state.bufferReconcileController = controller;
@@ -1367,25 +1537,33 @@ async function reconcileOpenBuffers(generation = state.requestGeneration) {
     await Promise.all(paths.map(async path => {
       const buffer = state.buffers.get(path);
       if (!buffer || controller.signal.aborted) return;
-      if (!buffer.resourceRef) {
+      if (!buffer.resourceRef && !refreshAuthority) {
         buffer.saveError = { code: 'resource_reference_missing', message: 'Files authorization expired; reopen this file from the authorized folder.' };
         return;
       }
       try {
-        const response = await filesFacadeClient.stat(buffer.resourceRef, { signal: controller.signal });
-        if (generation !== state.requestGeneration || controller.signal.aborted) return;
-        const fingerprint = response?.resource?.revision?.value || response?.revision?.value || null;
-        if (!fingerprint || !buffer.fingerprint || fingerprint === buffer.fingerprint) return;
-        buffer.saveError = {
-          code: 'external_change',
-          message: buffer.dirty ? 'The file changed on disk; your local edits remain unsaved.' : 'The file changed on disk. Reload to update this buffer.',
-        };
+        if (refreshAuthority) {
+          const identity = buffer.resourceIdentity;
+          buffer.resourceRef = '';
+          const found = await resolveEditorRelativeResource(workspaceRelativePath(path));
+          const fresh = await filesFacadeClient.stat(found.resourceRef, { signal: controller.signal });
+          const row=fresh?.resource || fresh;
+          if (identity?.provider !== 'host' || row?.provider !== 'host' || row.id !== identity.resourceId || !row.ref) throw new Error('File identity changed');
+          if (generation !== state.requestGeneration || controller.signal.aborted || state.buffers.get(path) !== buffer) return;
+          buffer.resourceRef=row.ref;
+        }
+        const current=()=>generation === state.requestGeneration && !controller.signal.aborted && state.buffers.get(path) === buffer;
+        await reconcileCodeBuffer(path,current,controller.signal);
       } catch (error) {
         if (error?.name === 'AbortError' || generation !== state.requestGeneration) return;
         buffer.saveError = { code: 'external_missing', message: 'The file is no longer available at this path.' };
       }
     }));
-    if (generation === state.requestGeneration && state.activePath && state.buffers.get(state.activePath)?.saveError) renderEditor();
+    if (generation === state.requestGeneration) {
+      syncCodeFileWatch();
+      const active=state.buffers.get(state.activePath);
+      if (active) refreshCodeFileNotice(active);
+    }
   } finally {
     if (state.bufferReconcileController === controller) state.bufferReconcileController = null;
   }
@@ -1396,6 +1574,7 @@ async function prepareWorkspaceChange(nextRoot, { isCurrent = () => true, onPrep
   if (!state.root || state.root === nextRoot) return true;
   const dirty = [...state.buffers.keys()].filter(path => state.buffers.get(path)?.dirty);
   if (!(await resolveDirtyBuffers(dirty, `Switching workspace to ${displayName(nextRoot)}`, isCurrent)) || !isCurrent()) return false;
+  state.gitWorkbench?.dispose(); state.gitWorkbench = null;
   state.workspaceEpoch += 1;
   onPrepared?.();
   for (const buffer of state.buffers.values()) {
@@ -1567,11 +1746,17 @@ async function createWorkspaceFile() {
     if (!parentRef) throw new Error('Choose an authorized Editor folder before creating a file.');
     if (!/\.(?:md|markdown)$/i.test(name)) throw new Error('The Files facade currently creates Markdown files only.');
     const created = await filesFacadeClient.createResource(parentRef, { name, text: '', actionId: operationId('editor-create') });
-    await refreshExplorer();
+    try { await refreshExplorer(); } catch (error) { if (created?.outcome !== 'created') throw error; }
     const createdRef = String(created?.resource?.ref || '').trim();
+    if (!createdRef && created?.outcome === 'created') {
+      setStatus(`Created ${name}, but its current contents could not be opened. Refresh before further changes.`, true);
+      return;
+    }
     if (!createdRef) throw new Error('Files did not return the created resource reference.');
-    await openFile(childPath(directory, name), null, createdRef);
-    setStatus(`Created ${name}`);
+    try { await openFile(childPath(directory, name), null, createdRef); }
+    catch (error) { if (created?.outcome !== 'created') throw error; setStatus(`Created ${name}, but could not open it.`, true); return; }
+    setStatus(created?.outcome === 'created' && created?.history?.state !== 'complete'
+      ? `Created ${name}; History completion is unavailable.` : `Created ${name}`);
   } catch (error) { setStatus(error.message || 'Create file failed', true); }
 }
 
@@ -1680,6 +1865,7 @@ async function openFile(path, viewState = null, resourceRef = '') {
       Object.assign(buffer, {
         text,
         originalText: text,
+        readOnly:payload.read_only === true || resource.capabilities?.edit === false,
         fingerprint: resource.revision?.value || payload.fingerprint?.value || null,
         expectedRevision: resource.revision || null,
         resourceRef: String(resource.ref || entry.resourceRef || ''),
@@ -1718,55 +1904,6 @@ async function openFile(path, viewState = null, resourceRef = '') {
     }
   })();
   return entry.promise;
-}
-
-function closeTabMenu() {
-  state.tabMenu?.remove();
-  state.tabMenu = null;
-}
-
-function tabMenuAction(label, action, path, handler) {
-  const button = el('button', {
-    type: 'button',
-    role: 'menuitem',
-    class: 'dropdown-item-compact code-editor-tab-menu-item',
-    'data-code-tab-action': action,
-    'aria-label': `${label} · ${path}`,
-    text: label,
-    style: 'width:100%;border:0;color:inherit;text-align:left;font:inherit;',
-  });
-  button.addEventListener('click', async () => {
-    closeTabMenu();
-    await handler();
-  });
-  return button;
-}
-
-function showTabMenu(event, path) {
-  closeTabMenu();
-  const otherPaths = loadedBufferPaths().filter(candidate => candidate !== path);
-  const savedPaths = loadedBufferPaths().filter(candidate => !state.buffers.get(candidate)?.dirty);
-  const menu = el('div', {
-    class: 'doc-tab-dropdown code-editor-tab-menu',
-    role: 'menu',
-    'aria-label': `Tab actions for ${path}`,
-    style: 'position:fixed;z-index:1000;min-width:150px;padding:4px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.3);backdrop-filter:blur(12px);font-size:12px;',
-  });
-  menu.append(
-    tabMenuAction('Close', 'close', path, () => closeBuffer(path)),
-    tabMenuAction('Close Others', 'close-others', path, () => closeBuffers(otherPaths, `Close other tabs beside ${displayName(path)}`)),
-    tabMenuAction('Close Saved', 'close-saved', path, () => closeBuffers(savedPaths, 'Close saved tabs')),
-  );
-  const captured=state.buffers.get(path);
-  for(const command of captured?bufferResourceCommands(captured):[]){
-    const button=tabMenuAction(command.label,command.id,path,command.run);button.disabled=Boolean(command.disabledReason);menu.append(button);
-  }
-  document.body.append(menu);
-  const bounds = menu.getBoundingClientRect();
-  menu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - bounds.width - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - bounds.height - 8))}px`;
-  state.tabMenu = menu;
-  menu.querySelector('[role=menuitem]')?.focus({ preventScroll: true });
 }
 
 function markBufferDirty(buffer) {
@@ -1818,6 +1955,10 @@ export function runCommand(name) {
 export function getEditorStatus() { return state.buffers.get(state.activePath)?.editor?.getStatus?.() || null; }
 
 function renderEditor() {
+  syncCodeFileWatch();
+  if (state.gitWorkbench && state.gitWorkbenchActivePath !== state.activePath) {
+    state.gitWorkbench.dispose(); state.gitWorkbench = null;
+  }
   const main = state.shell?.querySelector('[data-code-editor-main]');
   if (!main) return;
   state.explorerTree?.setActive(state.activePath);
@@ -1828,6 +1969,18 @@ function renderEditor() {
   }
   const buffer = bufferFor(state.activePath);
   const tabs = el('div', { class: 'code-editor-tabs', role: 'tablist', 'aria-label': 'Open files' });
+  const tabStripCurrent = request => request.adapterContext && tabs.isConnected && state.nativeWindow?.visible
+    && state.workspaceEpoch === request.adapterContext.epoch
+    && state.closedBuffers.length === request.adapterContext.count
+    && state.closedBuffers.at(-1) === request.adapterContext.top && canReopenClosedBuffer();
+  registerAdapter(tabs, {
+    hitTest:node => node === tabs,
+    capture:() => canReopenClosedBuffer()
+      ? { epoch:state.workspaceEpoch, count:state.closedBuffers.length, top:state.closedBuffers.at(-1) } : null,
+    isCurrent:tabStripCurrent,
+    commands:() => [{ id:'code-tab-reopen', label:'Reopen last closed file' }],
+    execute:async (command, request) => command === 'code-tab-reopen' && tabStripCurrent(request) && reopenLastClosedBuffer(),
+  });
   for (const [path, item] of state.buffers) {
     if (!item.loaded) continue;
     const tabWrap = el('div', { class: `code-editor-tab-wrap ${path === state.activePath ? 'active' : ''}` });
@@ -1839,29 +1992,37 @@ function renderEditor() {
     close.addEventListener('click', (event) => { event.stopPropagation(); void closeBuffer(path); });
     tabWrap.append(tab, close);
     tabWrap.addEventListener('auxclick', (event) => { if (event.button === 1) { event.preventDefault(); void closeBuffer(path); } });
+    const tabCurrent = request => {
+      const target = request.adapterContext;
+      return target && tabWrap.isConnected && state.nativeWindow?.visible && state.buffers.get(path) === item
+        && item.loaded && item.revision === target.revision && state.workspaceEpoch === target.epoch;
+    };
     registerAdapter(tabWrap, {
-      capture:()=>({resourceCommands:bufferResourceCommands(item)}),
-      commands: request => [
-        ...request.adapterContext.resourceCommands.map(command=>({...command,disabled:Boolean(command.disabledReason)})),
-        { id: 'code-tab-close', label: 'Close tab' },
-        { id: 'code-tab-close-others', label: 'Close other tabs', disabled: loadedBufferPaths().filter(candidate => candidate !== path).length === 0 },
-        { id: 'code-tab-close-saved', label: 'Close saved tabs', disabled: loadedBufferPaths().filter(candidate => !state.buffers.get(candidate)?.dirty).length === 0 },
+      hitTest:node => node.closest('.code-editor-tab-close') ? 'native' : true,
+      capture:() => ({
+        revision:item.revision, epoch:state.workspaceEpoch,
+        resourceCommands:bufferResourceCommands(item).filter(command => command.id !== 'editor.plan-feedback' && !command.disabledReason),
+        others:loadedBufferPaths().filter(candidate => candidate !== path).map(candidate => [candidate, state.buffers.get(candidate)]),
+      }),
+      isCurrent:tabCurrent,
+      commands:request => [
+        { id:'code-tab-close', label:'Close tab' },
+        ...(request.adapterContext.others.length ? [{ id:'code-tab-close-others', label:'Close other tabs' }] : []),
+        ...request.adapterContext.resourceCommands,
       ],
-      execute: async (command,request) => {
-        if(command.startsWith('editor.')){
-          const action=request.adapterContext?.resourceCommands.find(item=>item.id===command);
-          if(!action||action.disabledReason)return false;await action.run();return true;
-        }
+      execute:async (command, request) => {
+        if (!tabCurrent(request)) throw new Error('This Editor tab changed. Reopen its menu.');
         if (command === 'code-tab-close') { await closeBuffer(path); return true; }
         if (command === 'code-tab-close-others') {
-          await closeBuffers(loadedBufferPaths().filter(candidate => candidate !== path), `Close other tabs beside ${displayName(path)}`);
+          const others = request.adapterContext.others;
+          if (others.some(([other, buffer]) => state.buffers.get(other) !== buffer || !buffer.loaded)) return false;
+          await closeBuffers(others.map(([other]) => other), `Close other tabs beside ${displayName(path)}`);
           return true;
         }
-        if (command === 'code-tab-close-saved') {
-          await closeBuffers(loadedBufferPaths().filter(candidate => !state.buffers.get(candidate)?.dirty), 'Close saved tabs');
-          return true;
-        }
-        return false;
+        const action = request.adapterContext.resourceCommands.find(item => item.id === command);
+        if (!action) return false;
+        await action.run();
+        return true;
       },
     });
     tabs.append(tabWrap);
@@ -1909,9 +2070,9 @@ function renderEditor() {
         if (label) label.textContent = status.message;
         queueCodeCycle(buffer);
       },
-      onSelection: selection => { buffer.selection = selection; },
+      onSelection: selection => { buffer.selection = selection; document.dispatchEvent(new Event('openclank:editor-feedback-scope-changed')); },
       onScroll: scrollTop => { buffer.scrollTop = scrollTop; },
-      onChange: value => { buffer.cycleSignature = null; buffer.cycleOccurrenceId = null; buffer.text = value; buffer.revision = (buffer.revision || 0) + 1; markBufferDirty(buffer); },
+      onChange: value => { buffer.cycleSignature = null; buffer.cycleOccurrenceId = null; buffer.text = value; buffer.revision = (buffer.revision || 0) + 1; markBufferDirty(buffer); document.dispatchEvent(new Event('openclank:editor-feedback-scope-changed')); },
       // Rename/move rekeys the same buffer and mutates buffer.path. Resolve the
       // destination at command time rather than capturing the original path.
       onCommand: command => {
@@ -1926,7 +2087,7 @@ function renderEditor() {
     buffer.editor.focus();
   }
   if (buffer.editor) {
-    bindBufferContextMenu(buffer, editorHost);
+    bindBufferContextMenu(buffer);
     if(!buffer.graphicalMedia){
       buffer.graphicalMedia=mountImageRegion({root:editorHost,selector:'img.copal-attachment',isCurrent:()=>state.activePath===buffer.path});
       const destroy=buffer.editor.destroy?.bind(buffer.editor);
@@ -1962,7 +2123,9 @@ function renderEditor() {
     reload.addEventListener('click', () => { void reloadBufferFromDisk(state.activePath); });
     errorBanner.append(reload);
   }
-  main.append(el('div', { class: 'code-editor-toolbar' }, tabs, title, mode, syntaxStatus, richComments, showInFiles, save), ...(errorBanner ? [errorBanner] : []), editorHost);
+  main.append(el('div', { class: 'code-editor-toolbar' }, tabs, title, mode, syntaxStatus, richComments, showInFiles, save), ...(errorBanner ? [errorBanner] : []),
+    el('div',{'data-code-external-file-status':'',role:'status'}),editorHost);
+  refreshCodeFileNotice(buffer);
   queueCodeCycle(buffer);
   requestAnimationFrame(() => { if (state.activePath === buffer.path && editorHost.isConnected && (document.activeElement === document.body || main.contains(document.activeElement))) buffer.editor?.focus(); });
 }
@@ -1981,33 +2144,24 @@ async function reloadBufferFromDisk(path) {
     `Discard local edits in ${displayName(path)} and reload the disk copy?`,
     { title: 'Reload from disk', confirmText: 'Reload', alternateText: 'Keep edits', cancelText: 'Cancel' },
   );
-  if (choice !== true || !stillCurrent()) return false;
+  if (choice !== true || !stillCurrent() || buffer.savePromise || buffer.saveUncertain ||
+      buffer.pendingSourceEdits?.size || buffer.editor?.view?.composing || buffer.editor?.view?.compositionStarted) return false;
   buffer.reloadController?.abort?.();
   const controller = new AbortController();
   const reloadRevision = buffer.revision || 0;
   buffer.reloadController = controller;
   const ownsCompletion = () => !controller.signal.aborted
     && stillCurrent()
-    && (buffer.revision || 0) === reloadRevision;
+    && (buffer.revision || 0) === reloadRevision && !buffer.savePromise && !buffer.saveUncertain &&
+    !buffer.pendingSourceEdits?.size && !buffer.editor?.view?.composing && !buffer.editor?.view?.compositionStarted;
   try {
     if (!buffer.resourceRef) throw new Error('Files authorization expired; reopen this file from the authorized folder.');
     const response = await filesFacadeClient.openResource(buffer.resourceRef, { signal: controller.signal });
     if (!ownsCompletion()) return false;
-    const payload = response?.payload || {};
-    const resource = payload?.resource || response?.resource || {};
-    const text = String(payload.text ?? payload.content ?? '');
-    buffer.editor?.setValue?.(text);
-    buffer.text = text;
-    buffer.originalText = text;
-    buffer.fingerprint = resource.revision?.value || payload.fingerprint?.value || null;
-    buffer.expectedRevision = resource.revision || buffer.expectedRevision || null;
-    buffer.resourceRef = String(resource.ref || buffer.resourceRef || '');
-    buffer.encoding = payload.encoding || resource.metadata?.encoding || buffer.encoding;
-    buffer.newline = payload.newline || resource.metadata?.newline || buffer.newline;
-    buffer.dirty = false;
-    buffer.saveError = null;
-    buffer.revision = (buffer.revision || 0) + 1;
-    buffer.savedRevision = buffer.revision;
+    applyCodeDiskSnapshot(buffer,response);
+    buffer.dirty=false;
+    buffer.saveError=null;
+    buffer.externalChange=null;
     if (state.activePath === path) renderEditor();
     setStatus(`Reloaded ${displayName(path)} from disk`);
     return true;
@@ -2110,6 +2264,13 @@ async function recordCodeSave(buffer, text, acceptedRevision, accountId, workspa
   } catch (_) { /* Exact accepted syntax evidence only. */ }
 }
 
+function acceptedHostSaveRevision(response) {
+  const revision = response?.revision;
+  return response?.outcome === 'applied' && revision?.kind === 'hostFingerprint'
+    && typeof revision.value === 'string' && revision.value.length <= 128
+    && /^sha256:[0-9a-f]{64}:[0-9]+$/.test(revision.value) ? revision : null;
+}
+
 async function saveBuffer(path) {
   if (!path) return false;
   const buffer = bufferFor(path);
@@ -2139,6 +2300,10 @@ async function saveBuffer(path) {
   const revision = buffer.revision || 0;
   const text = buffer.editor?.getValue?.() ?? buffer.text;
   buffer.text = text;
+  if (buffer.saveUncertain) {
+    setStatus('The previous save outcome is unknown. Reload or use Save As before another save.', true);
+    return false;
+  }
   if (text === buffer.originalText) {
     buffer.dirty = false;
     buffer.saveError = null;
@@ -2167,9 +2332,24 @@ async function saveBuffer(path) {
       conflict.code = 'conflict';
       throw conflict;
     }
+    const acceptedRevision = acceptedHostSaveRevision(response);
+    if (!acceptedRevision) {
+      buffer.saveUncertain = true;
+      buffer.saveError = {code:'mutation_outcome_unknown', message:'The save outcome is unknown. Your draft remains open; reload or Save As.'};
+      if (state.activePath === path) renderEditor();
+      setStatus(buffer.saveError.message, true);
+      return false;
+    }
+    if (response?.changedAfterSave === true) {
+      buffer.saveError = { code:'changed_after_save', message:'The file changed after this save. Your draft remains open; reload or Save As.' };
+      buffer.saveUncertain = true;
+      if (state.activePath === path) renderEditor();
+      setStatus(buffer.saveError.message, true);
+      return false;
+    }
     const result = response?.data || response || {};
-    buffer.expectedRevision = result.revision || result.snapshot?.expectedRevision || buffer.expectedRevision;
-    buffer.fingerprint = buffer.expectedRevision?.value || result.new_fingerprint?.value || result.Replaced?.fingerprint?.value || result.Created?.fingerprint?.value || result.fingerprint?.value || null;
+    buffer.expectedRevision = acceptedRevision;
+    buffer.fingerprint = acceptedRevision.value;
     if ((response?.outcome || result.outcome) === 'applied' && buffer.expectedRevision?.value) void recordCodeSave(buffer, text, buffer.expectedRevision.value, achievementAccount, achievementWorkspace);
     buffer.cycleSignature = null;
     buffer.cycleOccurrenceId = null;
@@ -2182,6 +2362,7 @@ async function saveBuffer(path) {
     return !buffer.dirty;
   } catch (error) {
     if (error?.name === 'AbortError' || !ownsCompletion()) return false;
+    if (['mutation_outcome_unknown','operation_pending'].includes(error?.code) || !error?.status || Number(error.status) >= 500 || [408,429].includes(Number(error.status))) buffer.saveUncertain = true;
     buffer.saveError = { code: error?.code || 'save_failed', message: error.message || 'Save failed; your edits remain unsaved.' };
     if (state.activePath === path) renderEditor();
     setStatus(buffer.saveError.code === 'conflict' ? 'File changed on disk; your edits remain unsaved.' : buffer.saveError.message, true);
@@ -2233,7 +2414,7 @@ function createShell() {
     subtitle: 'Workspace',
     minWidth: 600,
     minHeight: 460,
-    sizeKey: 'odysseus-code-editor-window-size',
+    sizeKey: 'openclank-code-editor-window-size',
     className: 'code-editor-window',
     onActivate: () => markLauncherActive(true),
     onBeforeClose: () => resolveDirtyBuffers(
@@ -2255,13 +2436,97 @@ function createShell() {
     toolButton('Refresh', 'refresh', refreshExplorer),
   );
   const files = el('aside', { class: 'code-editor-files', 'aria-label': 'Workspace files' }, filesHead, el('div', { class: 'code-editor-root', 'data-code-root': true }), el('div', { class: 'code-tree', role: 'tree', 'aria-label': 'Workspace files', 'data-code-tree': true }));
+  let ownGitPolicyView = null;
+  let gitOpening = 0;
+  async function openGitWorkbench() {
+    const opening = ++gitOpening;
+    const rootRef = state.rootResourceRef, owner = state.workspaceOwner, epoch = state.workspaceEpoch;
+    const activePath = state.activePath, buffer = state.buffers.get(activePath), workspaceID = savedWorkspaceId(owner), root = state.root;
+    const chatID = window.sessionModule?.getCurrentSessionId?.() || '', account = document.body.dataset.accountId;
+    const chatNavigation = window.sessionModule?.getSessionNavigationToken?.();
+    state.gitWorkbench?.dispose(); state.gitWorkbench = null;
+    if (!rootRef) { setStatus('Open a workspace folder to use the Git workbench.', true); return false; }
+    let activeFile = '';
+    if (activePath) { try { activeFile = workspaceRelativePath(activePath); } catch { setStatus('Active file is outside this workspace.', true); return false; } }
+    const isStatusCurrent = () => opening === gitOpening && nativeWindow.visible && account === document.body.dataset.accountId
+      && state.root === root && savedWorkspaceId(owner) === workspaceID && state.activePath === activePath
+      && state.buffers.get(activePath) === buffer && state.workspaceOwner === owner
+      && (window.sessionModule?.getCurrentSessionId?.() || '') === chatID
+      && window.sessionModule?.getSessionNavigationToken?.() === chatNavigation;
+    const isCurrent = () => isStatusCurrent() && state.rootResourceRef === rootRef && state.workspaceEpoch === epoch;
+    let initialStatus;
+    try { initialStatus = await loadGitWorkbenchStatus({ rootRef, chatID, isCurrent }); }
+    catch (error) {
+      if (isCurrent()) setStatus(error.message || 'Git workbench is unavailable.', true);
+      return false;
+    }
+    if (!initialStatus || !isCurrent()) return false;
+    let lastTransition = null, picker = null;
+    const view = createGitWorkbench({rootRef, chatID, activeFile, activeFileRef:buffer?.resourceRef || '', initialStatus, isCurrent, isStatusCurrent,
+      selectFile:async () => {
+        const {createResourcePicker} = await import('./copal/resourcePicker.js');
+        if (!isCurrent()) return null;
+        return await new Promise(resolve => {
+          let settled = false;
+          const finish = value => { if (!settled) { settled = true; resolve(value); } };
+          picker = createResourcePicker({client:filesFacadeClient,purpose:'snapshot-file',accountScope:owner,workspaceScope:rootRef,
+            generation:state.fileGeneration,originWindow:nativeWindow,getGeneration:()=>state.fileGeneration,
+            getAccountScope:()=>state.workspaceOwner,getWorkspaceScope:()=>state.rootResourceRef,isOriginCurrent:isCurrent,
+            onSelect:resource=>{ finish(resource.ref); return true; },onCancel:()=>finish(null),onClose:()=>finish(null)});
+          picker.open();
+        });
+      },
+      selectFolder:async (purpose = 'cleanup') => {
+        const {createResourcePicker} = await import('./copal/resourcePicker.js');
+        if (!isCurrent()) return null;
+        return await new Promise(resolve => {
+          let settled = false;
+          const finish = value => { if (!settled) { settled = true; resolve(value); } };
+          picker = createResourcePicker({client:filesFacadeClient,purpose:'folder',accountScope:owner,
+            generation:state.fileGeneration,originWindow:nativeWindow,getGeneration:()=>state.fileGeneration,
+            getAccountScope:()=>state.workspaceOwner,isOriginCurrent:isCurrent,
+            isCompatible:resource=>resource.provider==='host' && resource.kind==='folder' && resource.capabilities.children===true && (purpose==='remote-read' || resource.capabilities.write===true),
+            onSelect:resource=>{ finish(resource.ref); return true; },onCancel:()=>finish(null),onClose:()=>finish(null)});
+          picker.open();
+        });
+      },
+      onPolicyTransition:(result, request) => {
+        const t = result?.policyTransition;
+        if (!isStatusCurrent() || !request || !t || !Number.isSafeInteger(t.fromGeneration) || !Number.isSafeInteger(t.toGeneration)
+          || t.toGeneration <= t.fromGeneration || t.toGeneration > t.fromGeneration + 2 || (lastTransition !== null && t.toGeneration <= lastTransition)) return;
+        lastTransition = t.toGeneration;
+        ownGitPolicyView = view;
+        try { document.dispatchEvent(new CustomEvent('openclank:file-policy-changed')); } finally { ownGitPolicyView = null; }
+      }});
+    const dispose = view.dispose; view.dispose = () => { picker?.destroy(); dispose(); };
+    files.append(view.element); state.gitWorkbench = view; state.gitWorkbenchActivePath = activePath;
+    return true;
+  }
+  const workspaceHeading = filesHead.querySelector('span');
+  const gitWorkbenchCurrent = ({ adapterContext:target } = {}) => target && workspaceHeading.isConnected && nativeWindow.visible
+    && state.rootResourceRef === target.ref && state.root === target.root && state.workspaceEpoch === target.epoch;
+  registerAdapter(workspaceHeading, {
+    capture:() => state.rootResourceRef ? { ref:state.rootResourceRef, root:state.root, epoch:state.workspaceEpoch } : null,
+    isCurrent:gitWorkbenchCurrent,
+    commands:() => [{ id:'git-workbench', label:'Git workbench…' }],
+    execute:(command, request) => {
+      if (command !== 'git-workbench' || !gitWorkbenchCurrent(request)) return false;
+      return openGitWorkbench();
+    },
+  });
+  state.openGitWorkbench = openGitWorkbench;
+  const invalidateGitWorkbench = () => { gitOpening += 1; state.gitWorkbench?.dispose(); state.gitWorkbench = null; };
+  document.addEventListener('odysseus:session-selected', invalidateGitWorkbench);
+  document.addEventListener('openclank:auth-context-changed', invalidateGitWorkbench);
+  window.addEventListener('openclank:auth-context-changed', invalidateGitWorkbench);
+  state.gitWorkbenchListeners = invalidateGitWorkbench;
   const separator = el('div', { class: 'oc-explorer-separator', role: 'separator', tabindex: '0', 'aria-orientation': 'vertical', 'aria-label': 'Resize workspace explorer' });
   const main = el('main', { class: 'code-editor-main', 'data-code-editor-main': true });
   shell.append(files, separator, main);
   nativeWindow.body.replaceChildren(shell);
   state.nativeWindow = nativeWindow;
   state.shell = shell;
-  state.pane = createResizablePane({ container: shell, sidebar: files, main, separator, cssVar: '--code-editor-sidebar-width', storageKey: 'odysseus-code-pane-width', defaultWidth: 240, minWidth: 180, maxWidth: 420, mainMin: 320, getOwner: () => state.workspaceOwner });
+  state.pane = createResizablePane({ container: shell, sidebar: files, main, separator, cssVar: '--code-editor-sidebar-width', storageKey: 'openclank-code-pane-width', defaultWidth: 240, minWidth: 180, maxWidth: 420, mainMin: 320, getOwner: () => state.workspaceOwner });
   nativeWindow.root.addEventListener('keydown', async (event) => {
     if (event.defaultPrevented || event.isComposing) return;
     if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 't') { event.preventDefault(); await reopenLastClosedBuffer(); return; }
@@ -2270,15 +2535,6 @@ function createShell() {
     event.preventDefault();
     await quickOpen();
   });
-  document.addEventListener('pointerdown', (event) => {
-    if (state.tabMenu && !state.tabMenu.contains(event.target)) closeTabMenu();
-  });
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && state.tabMenu) {
-      event.preventDefault();
-      closeTabMenu();
-    }
-  }, true);
   // Mobile sheet dismissal happens outside the window API. Route it back
   // through the same close lifecycle so routing, launcher state, and stale
   // async generations are cleaned up exactly once.
@@ -2286,6 +2542,7 @@ function createShell() {
     if (event.detail?.id === nativeWindow.id) nativeWindow.requestClose();
   });
   window.addEventListener('workspace-change', async (event) => {
+    state.gitWorkbench?.dispose(); state.gitWorkbench = null;
     // Every chat-scope transition invalidates an older pending root load. An
     // empty event is deliberate while a newly selected chat's opaque
     // Workspace ID is being resolved, and must not allow the old result to
@@ -2344,7 +2601,7 @@ function createShell() {
     void handleAuthenticatedOwnerReady(event.detail?.username);
   });
   document.addEventListener('openclank:file-policy-changed', () => {
-    void handleCodeFilePolicyChanged();
+    void handleCodeFilePolicyChanged({ retainGitStatus: ownGitPolicyView !== null && ownGitPolicyView === state.gitWorkbench });
   });
   return shell;
 }
@@ -2483,17 +2740,24 @@ export async function saveResourceSnapshot(snapshot, { resource } = {}) {
       text:String(snapshot.envelope?.text ?? ''),
     });
     if (response?.outcome === 'conflict') return response;
-    if (response?.outcome !== 'applied' || !response.revision) {
-      return { outcome:'failed', uncertain:true, message:'Host save did not return an accepted fingerprint; its outcome needs reconciliation' };
+    const acceptedRevision = acceptedHostSaveRevision(response);
+    if (!acceptedRevision) {
+      return { outcome:'failed', uncertain:true, retryable:false, message:'Host save did not return an accepted fingerprint; its outcome needs reconciliation' };
     }
-    const accepted = response.snapshot && typeof response.snapshot === 'object' ? response.snapshot : {};
+    const observed = response.readback !== 'unavailable' && response.snapshot && typeof response.snapshot === 'object';
+    const accepted = observed ? response.snapshot : {};
     return {
       outcome:'applied',
-      revision:response.revision,
+      revision:acceptedRevision,
+      snapshotOrigin:observed ? 'observed' : 'submitted',
+      ...(response.history ? {history:response.history} : {}),
+      ...(response.readback ? {readback:response.readback} : {}),
+      ...(response.unchanged === true ? {unchanged:true} : {}),
+      ...(response.changedAfterSave === true ? {changedAfterSave:true, remote:response.remote} : {}),
       snapshot:{
         ...snapshot,
         ...accepted,
-        expectedRevision:response.revision,
+        expectedRevision:acceptedRevision,
         envelope:{
           ...snapshot.envelope,
           ...(accepted.envelope || {}),
@@ -2504,7 +2768,8 @@ export async function saveResourceSnapshot(snapshot, { resource } = {}) {
     };
   } catch (error) {
     const status = Number(error?.status || 0);
-    return { outcome:'failed', code:error?.code, status, uncertain:status === 0 || status >= 500 || [408, 429].includes(status), message:error.message || 'Host save failed' };
+    const uncertain = ['mutation_outcome_unknown','operation_pending'].includes(error?.code) || status === 0 || status >= 500 || [408, 429].includes(status);
+    return { outcome:'failed', code:error?.code, status, uncertain, ...(uncertain ? {retryable:false} : {}), message:error.message || 'Host save failed' };
   }
 }
 
@@ -2516,6 +2781,14 @@ export async function openPath(path, { directory = false } = {}) {
 }
 
 function handleWindowClosed() {
+  stopCodeFileWatch();
+  state.gitWorkbench?.dispose(); state.gitWorkbench = null;
+  if (state.gitWorkbenchListeners) {
+    document.removeEventListener('odysseus:session-selected', state.gitWorkbenchListeners);
+    document.removeEventListener('openclank:auth-context-changed', state.gitWorkbenchListeners);
+    window.removeEventListener('openclank:auth-context-changed', state.gitWorkbenchListeners);
+    state.gitWorkbenchListeners = null;
+  }
   releaseEditorIndex();
   state.workspacePicker?.destroy();
   state.workspacePicker = null;
@@ -2536,7 +2809,6 @@ function handleWindowClosed() {
     buffer.contextMenuDispose?.();
     buffer.contextMenuDispose = null;
   }
-  closeTabMenu();
   markLauncherActive(false);
   window._restoreSidebarIfRouteCollapsed?.();
   if (location.pathname === '/code') history.pushState({}, '', '/');

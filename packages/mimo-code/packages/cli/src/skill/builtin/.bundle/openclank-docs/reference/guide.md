@@ -1,0 +1,192 @@
+# Open Clank Usage Guide
+
+How-to for the features users most often ask about. For config keys see @config.md; for permissions see @permissions.md; for commands see @commands.md.
+
+## Getting started & auth
+
+1. **Sign in** — `mimo account login <url>` runs a device flow: it prints a URL + code and opens your browser. `/connect` does the same from inside the TUI (e.g. to add OpenRouter). OAuth logins are available for Xiaomi MiMo, Codex (ChatGPT Pro/Plus), and xAI (Grok); Claude Code auth can be imported from `~/.claude/settings*.json`. Other account subcommands: `logout`, `switch`, `orgs`, `open`, `console`.
+2. **Pick a model** — set `"model": "provider/model"` in config, or switch live in the TUI model dialog. Provider API keys are auto-detected from environment variables (unless `OPENCLANK_ISOLATED_CONFIG=1`).
+3. **List what's available** — `openclank-engine models`, `openclank-engine providers`.
+
+For a custom base URL, API key, or OpenAI-/Anthropic-compatible model, read @providers.md before editing config; it covers protocol selection, adapter names, provider reuse, secret handling, and local verification.
+
+## TUI rendering, lag & remote use
+
+**macOS default terminal** — Open Clank does not support the built-in Terminal.app. For misaligned output, flicker, or other rendering problems, use the VS Code integrated terminal or install iTerm2:
+
+```bash
+brew install --cask iterm2
+```
+
+**SSH rendering** — if running the TUI directly over SSH is slow, render it locally and run only the server from the remote project directory:
+
+```bash
+# Remote host
+openclank-engine serve --port 4096
+
+# Local host: keep this tunnel open
+ssh -N -L 4096:127.0.0.1:4096 user@remote-host
+
+# Local host: connect from another terminal
+openclank-engine attach http://127.0.0.1:4096
+```
+
+**Decorative animation** — run `/vivid`, or configure the visual-mode option in `ctrl+p`, to switch between Vivid and Minimal visuals as needed. The separate animation override can stop high-frequency motion without changing the selected visual mode.
+
+## Memory: making Open Clank remember
+
+Memory persists across sessions and is auto-injected on resume, so the agent doesn't relearn project context.
+
+- **Project rules / architecture** — edit `MEMORY.md` (project memory). Durable rules go under `## Rules`, design decisions under `## Architecture decisions`. The agent may also write here at checkpoint time.
+- **`/dream`** — scans recent session traces, promotes durable knowledge into `MEMORY.md`, and prunes stale entries. Runs automatically per `dream.interval_days` (default 7).
+- **Checkpoints** (`checkpoint.md`) are maintained *only* by the checkpoint-writer subagent — don't hand-edit them.
+- **Scratch notes** (`notes.md`) are the agent's free-form scratchpad.
+- To make a rule stick immediately without waiting for a checkpoint, just tell the agent — it can edit `MEMORY.md` directly.
+
+Tune memory behavior with `checkpoint.*`, `compaction.*`, and `memory.cc_index` (see @config.md).
+
+## Custom slash commands
+
+Drop a markdown file at `.openclank/command/<name>.md` (or `.openclank/commands/`, `.claude/command(s)/` are also read). The frontmatter configures it; the body is the prompt template.
+
+```markdown
+---
+description: Review the current diff for security issues
+agent: build
+model: standard
+subtask: false
+---
+Review the staged diff. Focus on: $ARGUMENTS
+```
+
+- Invoke with `/name your args here`.
+- Placeholders: `$ARGUMENTS` (all args), `$1`, `$2`, … (positional). If none are present, args are appended.
+- `agent` picks which agent runs it; `model` accepts a `provider/model` or a group name; `subtask: true` runs it as a subagent.
+
+Commands hot-reload on the next turn.
+
+## Custom agents & modes (file-based system prompts)
+
+A "mode" is just a **primary agent** with its own system prompt. To give Open Clank a custom mode (e.g. a `general` chat mode alongside the coding-focused `build`), drop a markdown file — no code, no server changes. The frontmatter is config; the **markdown body becomes the agent's system prompt**.
+
+```markdown
+---
+description: A friendly general-purpose assistant for everyday chat and Q&A
+mode: primary
+temperature: 0.7
+---
+You are "General" — a warm, concise, general-purpose assistant.
+Keep replies short unless asked to elaborate; you are not focused on coding.
+```
+
+Where to put the file (all hot-reloaded on the next turn; `.claude/agent(s)` are also read):
+
+| Path | Scope |
+|------|-------|
+| `.openclank/agent/<name>.md` (or `agents/`) | project agent — most common |
+| `.openclank/mode/<name>.md` (or `modes/`) | project mode — same as an agent forced to `mode: primary` |
+| `~/.config/openclank-engine/agent/<name>.md` | global agent, available in every project |
+
+Frontmatter fields (all optional except that the body should be non-empty):
+
+- `mode` — `primary` (selectable with `Tab`, replaces the base prompt for the session), `subagent` (spawnable by a primary via the `actor`/`task` tools), or `all`. Files under `mode/` are always primary.
+- `model` — a `provider/model` or a group name (`ultra`/`standard`/`lite`); `variant`, `temperature`, `top_p` tune generation.
+- `description` — when to use it (shown in the `@` autocomplete for subagents).
+- `permission`, `tool_allowlist`, `tools`, `steps`, `color`, `hidden` — see @config.md.
+
+**How it reaches the model:** for a primary agent the body is used as the base system prompt in place of the model's default prompt; the usual environment/skills/instructions blocks are still appended. Selecting the mode is session-scoped — the TUI `Tab` picker or, over the SDK, the `agent` field on `session.prompt`. So a desktop/SDK client switches modes by sending `agent: "general"` vs `agent: "build"` per session; the prompt itself lives in the file, server-side.
+
+Verify a file loaded with `openclank-engine agent list` — your agent shows up with its `(primary)` / `(subagent)` mode.
+
+Config-file alternative: instead of a `.md` file you can inline an agent under the `agent` config key (`agent.<name>.prompt`, plus `model`, `mode`, …); the markdown form is preferred for anything beyond a couple of lines.
+
+## Keybinds
+
+All TUI keybinds are remappable under the `keybinds` config. The leader key defaults to `ctrl+x`, so `<leader>` in a binding means "press ctrl+x then …".
+
+Common defaults: `Tab` cycle agents · `<leader>n` new session · `<leader>l` list sessions · `<leader>e` open external editor · `<leader>t` themes · `<leader>b` toggle sidebar · `ctrl+r` rename session. Set a binding to `"none"` to disable it.
+
+```jsonc
+{ "keybinds": { "session_new": "<leader>c", "sidebar_toggle": "none" } }
+```
+
+## MCP servers
+
+Add servers under the `mcp` key. Two kinds:
+
+```jsonc
+{
+  "mcp": {
+    // local: spawn a process over stdio
+    "fs": { "type": "local", "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."] },
+    // remote: connect to an HTTP endpoint (OAuth auto-detected; set "oauth": false to disable)
+    "docs": { "type": "remote", "url": "https://mcp.example.com", "headers": { "Authorization": "Bearer ..." } },
+    // disable one without deleting it
+    "old": { "enabled": false }
+  }
+}
+```
+
+Inspect/manage with `openclank-engine mcp`. Request timeout defaults to 5000ms (`timeout` per server, or `experimental.mcp_timeout` globally).
+
+### Web search
+
+To give the agent web search, either set `OPENCLANK_ENABLE_EXA=1` (enables the built-in `websearch` and `codesearch` tools backed by Exa; an `EXA_API_KEY` from https://dashboard.exa.ai/api-keys raises its limits) or add a search MCP server, for example:
+
+```jsonc
+{
+  "mcp": {
+    // Exa key optional: https://dashboard.exa.ai/api-keys, appended as ?exaApiKey=<key>
+    "exa": { "type": "remote", "url": "https://mcp.exa.ai/mcp" },
+    "tavily": { "type": "remote", "url": "https://mcp.tavily.com/mcp/", "headers": { "Authorization": "Bearer {env:TAVILY_API_KEY}" } },
+    "doubao-search": {
+      "type": "local",
+      "command": ["uvx", "--from", "mcp-server-askecho-search-infinity>=0.2.0", "mcp-server-askecho-search-infinity"],
+      "environment": { "ASK_ECHO_SEARCH_INFINITY_API_KEY": "{env:ASK_ECHO_SEARCH_INFINITY_API_KEY}" }
+    }
+  }
+}
+```
+
+Doubao Search (Volcengine) needs `uv` with Python 3.12/3.13 and a key from https://console.volcengine.com/search-infinity/api-key.
+
+## Compose mode
+
+Use the `compose-next` skill for end-to-end feature delivery:
+
+- **`compose-next`** — one self-contained skill covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. Do not combine it with plan mode.
+
+Artifacts land under `docs/compose/spec/` by default.
+
+For well-defined tasks that split into independent subtasks, prefer a deterministic **workflow** (fire-and-forget, auto-parallelized) — see @workflows.md.
+
+## Jupyter notebooks
+
+The `notebook-edit` tool edits `.ipynb` cells directly (replace / insert / delete a single cell) while preserving the surrounding JSON, outputs, and metadata — prefer it over raw text edits on notebooks.
+
+## Scheduled prompts (cron) & loops
+
+**Cron** schedules a prompt to be injected into a session on a recurring or one-shot basis. It is driven by the `cron` tool (no `/cron` slash command); `OPENCLANK_EXPERIMENTAL_CRON` is **on by default** (kill switch: `OPENCLANK_DISABLE_CRON`).
+
+The `cron` tool has six verbs:
+
+| Verb | Purpose |
+|------|---------|
+| `schedule` | Add a job: `cron` (5-field expression), `prompt`, optional `one_shot`, `durable`, `session_id` |
+| `loop` | Arm a repeating loop by `delay_seconds` (clamped 60–3600) + `prompt` |
+| `list` | List jobs (filter by `kind`, `durable_only`) |
+| `get` | Show one job by `id` |
+| `rename` | Replace a job's prompt body |
+| `delete` (alias `cancel`) | Remove a job by `id` |
+
+- **Expressions are 5-field** (`minute hour dom month dow`) and evaluated in **UTC** — there is no timezone config.
+- **Durable** jobs persist to `<project>/.openclank/scheduled_tasks.json` and survive restart; non-durable jobs live only for the session.
+- When a job fires, the prompt is injected with an `[cron fire @ <ISO>]` prefix; the TUI shows a `🕒 cron fire` clock-row before the reply.
+
+**Loop** — `/loop [interval] <prompt>` (a built-in skill) is a friendly front end: it parses an interval (e.g. `30m`, `2h`), maps it to a recurring cron job, and also runs the prompt once immediately. Manage loops with `/loops` (lists jobs; `/loops cancel <id>` stops one). Loops auto-stop after a keepalive budget of missed turns or a 7-day max age.
+
+`/loop` (cadence) and `/goal` (stop condition) are complementary and independent: `/goal` decides *whether* an autonomous agent may stop; `/loop` decides *how often* it runs.
+
+## Extending Open Clank
+
+To add reusable task instructions, use the `skill-creator` skill and save them under `.openclank/skills/<name>/SKILL.md`. For additional tools, configure an MCP server or use the plugin API.

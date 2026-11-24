@@ -1,0 +1,162 @@
+.browser-applet-window .browser-applet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  color: var(--text-primary, #e8e8ea);
+}
+
+.browser-applet-window .browser-applet-status {
+  margin: 0;
+  min-height: 1.35rem;
+  color: var(--text-secondary, #b8b8be);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.browser-applet-window .browser-applet-status.is-error {
+  color: var(--danger, #f08b8b);
+}
+
+.browser-applet-window .browser-applet-retry {
+  align-self: flex-start;
+  min-height: 2.25rem;
+  padding: 0.35rem 0.8rem;
+}
+
+.browser-applet-window .browser-applet-progress-tools {
+  display: block;
+  padding: 0.5rem;
+  border: 1px solid var(--border-subtle, #39393f);
+  border-radius: 0.45rem;
+  background: var(--surface-raised, #25252a);
+}
+
+.browser-applet-window .browser-applet-progress-tools > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.browser-applet-window .browser-applet-progress-tools[hidden] {
+  display: none;
+}
+
+.browser-applet-window .browser-applet-progress-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding-top: 0.45rem;
+}
+
+.browser-applet-window .browser-applet-progress-controls button {
+  min-height: 2rem;
+  padding: 0.3rem 0.65rem;
+}
+
+.browser-applet-window .browser-applet-progress-status {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--text-secondary, #b8b8be);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.browser-applet-window .browser-applet-viewport {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle, #39393f);
+  border-radius: 0.55rem;
+  background: #fff;
+}
+
+.browser-applet-window .browser-applet-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 20rem;
+  border: 0;
+  background: #fff;
+}
+
+.browser-applet-window .copal-workspace-header {
+  position: relative;
+}
+
+.browser-applet-window .browser-applet-centered-title {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 1;
+  max-width: min(42vw, 30rem);
+  overflow: hidden;
+  color: var(--text-primary, #e8e8ea);
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.browser-applet-window .browser-applet-connection {
+  position: absolute;
+  z-index: 4;
+  left: 0.7rem;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.9rem;
+}
+
+.browser-applet-window .browser-applet-connection > summary {
+  cursor: pointer;
+  color: var(--text-primary, #e8e8ea);
+  user-select: none;
+}
+
+.browser-applet-window .browser-applet-connection-menu {
+  position: absolute;
+  top: calc(100% + 0.55rem);
+  left: 0;
+  display: grid;
+  gap: 0.45rem;
+  width: min(24rem, 78vw);
+  max-height: min(70vh, 32rem);
+  overflow: auto;
+  padding: 0.7rem;
+  border: 1px solid var(--border-subtle, #39393f);
+  border-radius: 0.55rem;
+  background: var(--surface-raised, #25252a);
+  box-shadow: 0 0.5rem 1.5rem #0008;
+}
+
+.browser-applet-window .browser-applet-connection-menu p,
+.browser-applet-window .browser-applet-connection-menu label {
+  margin: 0;
+  color: var(--text-secondary, #b8b8be);
+  line-height: 1.4;
+}
+
+.browser-applet-window .browser-applet-connection-menu input {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+}
+
+.browser-applet-window .browser-applet-connection-tabs {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.browser-applet-window .browser-applet-connection-tabs button {
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

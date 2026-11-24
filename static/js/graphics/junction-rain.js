@@ -7,10 +7,8 @@
  *   animations.js SHA-256: 6b5bd745f863304880b30a04009243dc1656f00fd496afc5f9651a8e18ec5dfc
  *   animation-registry.js SHA-256: d29260acacdbc6eb3c6d7bcbe9666ace78d3078d01663d9682f448db898e28f8
  *
- * Host adaptations are deliberately narrow: Open Clank keeps normal downward
- * rain plus its enabled 1-in-10,000 upward spawn, uses cached DOM paint masks
- * supplied by the caller instead of Junction's wordmark canvas, and advances
- * source frame constants at bounded 60 Hz under the existing graphics owner.
+ * Glyphs travel at a constant speed in fixed lanes. Open Clank retains the
+ * Junction spawn styling and its own rare upward drop.
  */
 
 export const JUNCTION_RAIN_DEFAULTS = Object.freeze({
@@ -22,15 +20,11 @@ export const JUNCTION_RAIN_DEFAULTS = Object.freeze({
   reverseChance: 0,
   rareUpward: true,
   waves: false,
-  sideBounce: true,
   charVariety: 1,
   minOpacity: .2,
   maxOpacity: 1,
   sizeVariance: .45,
   colorVariance: 0,
-  bounce: 1.3,
-  gravity: .2,
-  collisionForce: 2.2,
   emojiMix: false,
   emojiRarity: 10000000,
 });
@@ -67,15 +61,11 @@ function sourceControls(raw = {}) {
     reverseChance: clamp(number(raw.reverseChance, JUNCTION_RAIN_DEFAULTS.reverseChance), 0, 100),
     rareUpward: raw.rareUpward == null ? JUNCTION_RAIN_DEFAULTS.rareUpward : !!raw.rareUpward,
     waves: !!raw.waves,
-    sideBounce: raw.sideBounce == null ? JUNCTION_RAIN_DEFAULTS.sideBounce : !!raw.sideBounce,
     charVariety: clamp(number(raw.charVariety, JUNCTION_RAIN_DEFAULTS.charVariety), .05, 1),
     minOpacity,
     maxOpacity: clamp(number(raw.maxOpacity, JUNCTION_RAIN_DEFAULTS.maxOpacity), minOpacity, 1),
     sizeVariance: clamp(number(raw.sizeVariance, JUNCTION_RAIN_DEFAULTS.sizeVariance), 0, 1.4),
     colorVariance: clamp(number(raw.colorVariance, JUNCTION_RAIN_DEFAULTS.colorVariance), 0, 1),
-    bounce: clamp(number(raw.bounce, JUNCTION_RAIN_DEFAULTS.bounce), 0, 3),
-    gravity: clamp(number(raw.gravity, JUNCTION_RAIN_DEFAULTS.gravity), .1, 4),
-    collisionForce: clamp(number(raw.collisionForce, JUNCTION_RAIN_DEFAULTS.collisionForce), 0, 4),
     emojiMix: !!raw.emojiMix,
     emojiRarity: Math.max(1, Math.round(number(raw.emojiRarity, JUNCTION_RAIN_DEFAULTS.emojiRarity))),
   };
@@ -118,10 +108,20 @@ function randomSplashChar(scene, controls, random) {
   return scene.variety[Math.floor(random() * scene.variety.length)] || scene.charset[0] || '◆';
 }
 
+function setSplashEmoji(drop, scene) {
+  const emoji = scene.emojiIdentities.has(drop.ch);
+  if (!emoji && drop.emoji) {
+    drop.emojiAssetId = null;
+    drop.themeEmojiAssetAssigned = false;
+  }
+  drop.emoji = emoji;
+}
+
 // Direct port of assignSplashStyle. Palette choice and RGB shift are consumed
 // by the Open Clank adapter; the renderer always receives a hex colour plus alpha.
 function assignSplashStyle(drop, scene, controls, random) {
   drop.scale = clamp(1 + ((random() * 2 - 1) * controls.sizeVariance), .45, 2.4);
+  drop.drawSize = Math.max(2, Math.round(scene.fontSize * drop.scale));
   drop.behind = random() < .34;
   drop.alpha = controls.minOpacity + random() * (controls.maxOpacity - controls.minOpacity);
   if (drop.behind) drop.alpha *= .66;
@@ -131,17 +131,17 @@ function assignSplashStyle(drop, scene, controls, random) {
   drop.colorShift = random();
   // A Matrix drop can become a rare native emoji, so identity follows the
   // selected glyph on every restyle rather than just the scene mode.
-  drop.emoji = scene.emojiIdentities.has(drop.ch);
+  setSplashEmoji(drop, scene);
 }
 
 function resetSplashDrop(drop, scene, controls, random) {
+  drop._achievementPainted = false;
   drop.x = drop.laneX + (random() - .5) * scene.fontSize * .12;
   const heading = directionForSpawn(controls, random);
   drop.direction = heading.direction;
   drop.rare = heading.rare;
   drop.y = splashEntryY(scene, controls, heading.goesDown, random);
-  drop.vy = heading.direction * (.8 + random() * 1.4) * controls.gravity;
-  drop.vx = (random() - .5) * .04;
+  drop.rate = .55 + random() * .8;
   drop.ch = randomSplashChar(scene, controls, random);
   assignSplashStyle(drop, scene, controls, random);
 }
@@ -150,11 +150,11 @@ function initialSplashDrop(index, scene, controls, random) {
   const laneX = (index + .5) * (scene.width / scene.columns);
   const heading = directionForSpawn(controls, random);
   const drop = {
+    index,
     x: laneX,
     laneX,
-    y: splashEntryY(scene, controls, heading.goesDown, random),
-    vy: heading.direction * (.8 + random() * 1.6) * controls.gravity,
-    vx: (random() - .5) * .04,
+    y: random() * scene.height,
+    rate: .55 + random() * .8,
     direction: heading.direction,
     rare: heading.rare,
     ch: randomSplashChar(scene, controls, random),
@@ -185,13 +185,14 @@ export function createJunctionRainScene({ width, height, size = 1, mode = 'matri
     width: safeWidth,
     height: safeHeight,
     fontSize,
-    columns: Math.min(4096, Math.max(2, Math.floor((safeWidth / fontSize) * controls.quantity))),
+    columns: Math.min(640, Math.max(2, Math.floor((safeWidth / fontSize) * controls.quantity))),
     charset: charset.length ? charset : ['◆'],
     emojiCharset: emoji.length ? emoji : ['✨'],
     emojiIdentities: new Set(emoji.length ? emoji : ['✨']),
     variety: [],
     drops: [],
-    accumulator: 0,
+    controlSource: rawControls,
+    controls,
     reducedFrameSeeded: false,
   };
   scene.variety = sourceVariety(scene.charset, controls.charVariety);
@@ -199,58 +200,8 @@ export function createJunctionRainScene({ width, height, size = 1, mode = 'matri
   return scene;
 }
 
-function sourceFrame(scene, controls, hitAt, random) {
-  for (const drop of scene.drops) {
-    // Source order: full charset flicker, gravity, friction, optional lane pull,
-    // position, painted-letter shove, then respawn/bounce.
-    if (random() < controls.flicker) {
-      drop.ch = randomSplashChar(scene, controls, random);
-      // Full-charset flicker may select a rare emoji in Matrix mode.
-      drop.emoji = scene.emojiIdentities.has(drop.ch);
-    }
-    // Source is `vy -= .015 * gravity` because its default travels upward.
-    // The Open Clank host keeps downward as the normal direction.
-    drop.vy += drop.direction * .015 * controls.gravity;
-    drop.vx *= .88;
-    if (!controls.sideBounce) drop.vx += (drop.laneX - drop.x) * .0025;
-    let nextX = drop.x + drop.vx * scene.fontSize;
-    let nextY = drop.y + drop.vy * scene.fontSize * .36 * controls.speed;
-    if (!drop.behind && typeof hitAt === 'function') {
-      const surface = hitAt(
-        nextX + scene.fontSize * .3,
-        nextY - scene.fontSize * .35,
-        scene.fontSize * .5,
-      );
-      if (surface) {
-        const centerX = (surface.left + surface.right) / 2;
-        const side = nextX < centerX ? -1 : 1;
-        const shove = scene.fontSize * (
-          .04 + controls.collisionForce * .02 + controls.bounce * (.03 + random() * .05)
-        );
-        nextX += side * shove;
-        drop.vx += side * shove * .015;
-      }
-    }
-    drop.x = nextX;
-    drop.y = nextY;
-    const offscreen = drop.x < -scene.fontSize || drop.x > scene.width + scene.fontSize
-      || drop.y < -scene.fontSize * 4 || drop.y > scene.height + scene.fontSize;
-    if (controls.sideBounce) {
-      if (drop.x < 0) { drop.x = 0; drop.vx = Math.abs(drop.vx) * .7; }
-      if (drop.x > scene.width) { drop.x = scene.width; drop.vx = -Math.abs(drop.vx) * .7; }
-      if (drop.y < -scene.fontSize * 4 || drop.y > scene.height + scene.fontSize) {
-        resetSplashDrop(drop, scene, controls, random);
-      }
-    } else if (offscreen) {
-      resetSplashDrop(drop, scene, controls, random);
-    }
-  }
-}
-
-/** Advance source frame constants at a bounded 60 Hz cadence. */
-export function stepJunctionRain(scene, { controls: rawControls = {}, deltaSeconds = 0, reduced = false, hitAt = null, random = Math.random } = {}) {
-  if (!scene) return;
-  const controls = sourceControls(rawControls);
+/** Advance each falling stream once per paint, independently of frame cadence. */
+export function stepJunctionRain(scene, { controls: rawControls = scene.controls, deltaSeconds = 0, reduced = false, random = Math.random } = {}) {
   if (reduced) {
     if (!scene.reducedFrameSeeded) {
       scene.drops.forEach((drop, index) => {
@@ -262,11 +213,22 @@ export function stepJunctionRain(scene, { controls: rawControls = {}, deltaSecon
     }
     return;
   }
-  scene.accumulator = Math.min(3 / 60, scene.accumulator + Math.max(0, Math.min(.05, number(deltaSeconds, 0))));
-  let frames = 0;
-  while (scene.accumulator >= 1 / 60 && frames < 3) {
-    sourceFrame(scene, controls, hitAt, random);
-    scene.accumulator -= 1 / 60;
-    frames += 1;
+  const elapsed = clamp(number(deltaSeconds, 0), 0, .05);
+  if (!elapsed) return;
+  if (rawControls !== scene.controlSource && rawControls !== scene.controls) {
+    scene.controls = sourceControls(rawControls);
+    scene.controlSource = rawControls;
+  }
+  const controls = scene.controls;
+  const distance = elapsed * scene.fontSize * 18 * controls.speed;
+  const flicker = scene.mode === 'emoji' ? 0 : 1 - (1 - controls.flicker) ** (elapsed * 60);
+  for (const drop of scene.drops) {
+    drop.y += drop.direction * drop.rate * distance;
+    if (drop.direction > 0 ? drop.y > scene.height + drop.drawSize : drop.y < -drop.drawSize) {
+      resetSplashDrop(drop, scene, controls, random);
+    } else if (flicker && random() < flicker) {
+      drop.ch = randomSplashChar(scene, controls, random);
+      setSplashEmoji(drop, scene);
+    }
   }
 }

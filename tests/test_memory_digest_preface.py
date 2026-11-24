@@ -80,7 +80,7 @@ def _preface(processor, **kwargs):
 
 
 class _DigestProvider:
-    provider_id = "frankenmemory"
+    provider_id = "memery"
 
     def __init__(self, digest=SAMPLE_DIGEST, fail=False):
         self._digest = digest

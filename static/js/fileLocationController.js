@@ -6,26 +6,25 @@ async function checkedFetch(input, init = {}) {
   let payload = {};
   try { payload = await response.clone().json(); } catch (_) {}
   const detail = payload?.detail;
-  throw new Error(String(detail?.message || detail || payload?.error || `Request failed (${response.status})`));
+  const error = new Error(String(detail?.message || detail || payload?.error || `Request failed (${response.status})`));
+  error.status = response.status;
+  throw error;
 }
 
 async function requireAdministrator() {
   const response = await checkedFetch('/api/auth/status', { cache: 'no-store' });
   const status = await response.json();
-  if (!status?.username || status?.is_admin !== true) {
+  if (!status?.username || !status?.account_id || status?.is_admin !== true) {
     throw new Error('Only an administrator can register a host Location.');
   }
+  return status.account_id;
 }
 
-async function policyBackend() {
-  const response = await window.fetch('/api/file-policy/state', {
-    credentials: 'same-origin', cache: 'no-store',
-  });
-  if (response.ok) return 'canonical';
-  if (response.status === 404) return 'legacy';
-  let payload = {};
-  try { payload = await response.json(); } catch (_) {}
-  throw new Error(String(payload?.detail?.message || payload?.detail || `Policy request failed (${response.status})`));
+async function readPolicy(owner) {
+  const response = await checkedFetch('/api/file-policy/state', { cache: 'no-store' });
+  const state = await response.json();
+  if (state?.subject_id !== owner || state?.is_admin !== true) throw new Error('The managing account changed.');
+  return state;
 }
 
 async function locationPresets() {
@@ -49,59 +48,85 @@ async function browseFolder(initialPath = '') {
   const workspace = await import('./workspace.js');
   return new Promise(resolve => {
     workspace.openWorkspaceBrowser({
-      selectionKind: 'app_folder',
+      selectionKind: 'register_location',
       initialPath,
       title: 'Choose host folder',
       note: 'Choose a folder on the Open Clank host. Nothing is granted until you review and add the Location.',
       useLabel: 'Choose folder',
       successLabel: 'Host folder selected',
       onSelect: async path => {
-        workspace.closeWorkspaceBrowser();
         resolve(String(path || ''));
+        workspace.closeWorkspaceBrowser();
       },
+      onCancel: () => resolve(''),
     });
   });
 }
 
-async function submitLocation(backend, { path, kind, capabilities, agentAccess }) {
-  if (backend === 'canonical') {
-    const inferredWholeRoot = path === '/' || /^[A-Za-z]:[\\/]?$/.test(path);
-    await checkedFetch('/api/file-policy/locations', {
+function exactRegistration(state, request) {
+  const candidates = state.locations.filter(location => location.enabled && location.kind === request.kind &&
+    (location.canonical_path === request.path || location.display_path === request.path));
+  if (candidates.length !== 1) return null;
+  const [location] = candidates;
+  if (location.availability !== 'available' || !request.capabilities.every(cap => location.capabilities.includes(cap))) return null;
+  const covers = kind => state.bindings.some(binding => binding.binding_class === kind &&
+    binding.subject_id === state.subject_id && binding.location_id === location.id &&
+    binding.status === 'active' && binding.lifetime === 'always' &&
+    request.capabilities.every(cap => binding.capabilities.includes(cap)));
+  const access = state.effective_scope?.locations?.find(row => row.location_id === location.id);
+  const appAccess = access?.app_capabilities?.includes('read');
+  const agentAccess = access?.agent_capabilities?.includes('read');
+  const access_pending = [];
+  if (request.app_access && !(appAccess && covers('people'))) access_pending.push('app');
+  if (request.agent_access && !covers('agent')) access_pending.push('agent');
+  return {location, app_access:Boolean(appAccess), agent_access:Boolean(agentAccess), access_pending};
+}
+
+async function submitLocation(owner, { path, kind, capabilities, appAccess, agentAccess }) {
+  const inferredWholeRoot = path === '/' || /^[A-Za-z]:[\/]?$/.test(path);
+  const request = {
+    path, kind: kind === 'whole_root' || inferredWholeRoot ? 'whole_root' : kind,
+    capabilities, app_access: appAccess, agent_access: agentAccess,
+  };
+  await readPolicy(owner);
+  let value;
+  try {
+    const response = await checkedFetch('/api/file-policy/locations', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        path,
-        kind: kind === 'whole_root' || inferredWholeRoot ? 'whole_root' : kind,
-        capabilities,
-        agent_access: agentAccess,
-      }),
+      headers: { 'Content-Type': 'application/json', 'X-Openclank-Account': owner },
+      body: JSON.stringify(request),
     });
-  } else {
-    await checkedFetch('/api/odysseus-files/roots', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        path,
-        kind: kind === 'exact_file' ? 'exact_file' : 'recursive_directory',
-        capabilities,
-      }),
-    });
+    value = await response.json();
+  } catch (error) {
+    if (error.status && error.status < 500) throw error;
+    try { value = exactRegistration(await readPolicy(owner), request); } catch (_) {}
+    if (!value) {
+      throw Object.assign(new Error('The result is unknown. Check Locations and People access before opening a new request.'), {unknown:true});
+    }
   }
   document.dispatchEvent(new CustomEvent('openclank:file-policy-changed'));
-  return true;
+  if (value?.access_pending?.length) {
+    const missing = value.access_pending.map(scope => scope === 'app' ? 'Files and Editor' : 'Agents').join(' and ');
+    throw Object.assign(new Error(`Location registered. Review and retry the pending ${missing} access.`), {
+      remaining: value.access_pending,
+      path: value.location.canonical_path,
+    });
+  }
+  if (!value?.location?.id) throw Object.assign(new Error('The result is unknown. Check Locations and People access.'), {unknown:true});
+  return {path: value.location.canonical_path, appAccess: value.app_access === true, agentAccess: value.agent_access === true};
 }
 
 export async function openFileLocationWizard({ suggestedPath = '', onAdded = null } = {}) {
-  await requireAdministrator();
-  const backend = await policyBackend();
+  const owner = await requireAdministrator();
+  await readPolicy(owner);
   return openFileLocationWizardDialog({
     suggestedPath,
     resolveHome,
     resolveWholeRoot,
     browseFolder,
     submit: async input => {
-      const result = await submitLocation(backend, input);
-      await onAdded?.(input);
+      const result = await submitLocation(owner, input);
+      await onAdded?.({...input, ...result});
       return result;
     },
   });

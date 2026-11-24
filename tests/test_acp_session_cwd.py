@@ -427,6 +427,22 @@ def test_normal_turn_and_config_keep_the_mapped_mimo_session(tmp_path):
     assert deleted == []
 
 
+def test_private_config_targets_transient_session_without_projection(tmp_path, monkeypatch):
+    from src.openclank import transcript_projection, conversation_archive
+
+    monkeypatch.setattr(conversation_archive, "get_conversation_archive", lambda: object())
+    bridge = _bridge(tmp_path, None)
+    bridge._session_context["private-native"] = {"incognito": True, "owner": "alice", "odysseus_session_id": "ghost"}
+    bridge._session_state["private-native"] = {"config_options": [{"id": "mode", "options": [{"value": "build"}]}]}
+    def no_projection(*_args, **_kwargs):
+        pytest.fail("private state must not be persisted")
+    monkeypatch.setattr(transcript_projection, "save_mimo_state", no_projection)
+    asyncio.run(bridge._set_session_config_option("private-native", "mode", "build"))
+    assert bridge._client.configured == [("private-native", "mode", "build")]
+    assert bridge._persist_session_state("private-native") is False
+    assert bridge._session_map.get("ghost") is None
+
+
 def test_two_normal_turns_resume_one_mimo_session_and_retain_chat_state(tmp_path, monkeypatch):
     from src.openclank import transcript_projection
 

@@ -1,12 +1,14 @@
 """Idempotent, scoped Memory principals and late identity rendering.
 
 The authenticated owner remains the authorization boundary.  This module only
-projects two reserved ontology principals into the existing FrankenMemory v2
+projects two reserved ontology principals into the existing Memery v2
 entity/role tables: the assistant's self and the human Handler.  Names are
 presentation data and never participate in the stable IDs.
 """
 
 from __future__ import annotations
+
+from src.memery_writer_fence import connect_writer
 
 import hashlib
 import json
@@ -256,22 +258,8 @@ def _reviewed_handler_label(
 
 
 def _ensure_binding_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS fm_v2_principal_bindings (
-            owner_id TEXT NOT NULL,
-            workspace_key TEXT NOT NULL DEFAULT '',
-            project_key TEXT NOT NULL DEFAULT '',
-            binding_key TEXT NOT NULL,
-            assistant_entity_id TEXT NOT NULL,
-            handler_entity_id TEXT NOT NULL,
-            revision INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(owner_id, workspace_key, project_key, binding_key)
-        )
-        """
-    )
+    from src.openclank.memory_optional_schema import apply_optional_schema
+    apply_optional_schema(conn, 'principal')
 
 
 def ensure_principal_context(
@@ -330,12 +318,19 @@ def ensure_principal_context(
         if not required.issubset(tables):
             conn.close()
             return None
+        # This legacy semantic producer supports exactly the v16 epoch.
+        # Reserve a write transaction before any optional-table DDL.
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA user_version").fetchone()[0] != 16:
+            conn.rollback()
+            conn.close()
+            return None
         _ensure_binding_table(conn)
         conn.commit()
         # The schema probe connection is done; release it before the binding
         # upsert opens its own write connection below.
         conn.close()
-        from src.frankenmemory_v2 import V2OperationError, V2Repository
+        from src.memery_v2 import V2OperationError, V2Repository
 
         repo = V2Repository(str(db_path))
 
@@ -447,9 +442,13 @@ def ensure_principal_context(
         ensure_entity(assistant_id, kind="assistant", label=assistant_display_label, role=f"assistant_self:{assistant_key}", principal=assistant_key)
         ensure_entity(handler_id, kind="handler", label=handler_display_label, role="handler", principal=handler_key)
         now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
-        conn = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
+        conn = connect_writer(str(db_path), timeout=30, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA user_version").fetchone()[0] != 16:
+            conn.rollback()
+            conn.close()
+            return None
         conn.execute(
             """INSERT INTO fm_v2_principal_bindings
                (owner_id,workspace_key,project_key,binding_key,assistant_entity_id,handler_entity_id,revision,created_at,updated_at)
@@ -480,6 +479,22 @@ def ensure_principal_context(
             except Exception:
                 pass
         return None
+
+
+def principal_context_applies(db_path: str) -> bool:
+    """Whether this store carries the legacy principal group (exactly the v16 epoch).
+
+    The same rule ensure_principal_context applies before any optional-table DDL.
+    Read-only; an unreadable store answers True so callers keep their failure path.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+        try:
+            return conn.execute("PRAGMA user_version").fetchone()[0] == 16
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return True
 
 
 def invalidate_principal_cache(owner: Optional[str]) -> None:
@@ -635,7 +650,7 @@ def resolve_handler_display_label(
     handler_id = _stable_id("handler", owner_key, workspace, project, handler_key)
     label = ""
     try:
-        from src.frankenmemory_v2 import V2Repository
+        from src.memery_v2 import V2Repository
 
         entity = V2Repository(str(db_path)).get_entity(
             owner=owner_key,
@@ -678,3 +693,67 @@ def render_identity_template(text: str, *, handler_label: str = "Handler", assis
     for token, value in replacements.items():
         result = result.replace(token, value)
     return result
+
+
+def guarded_seed_slots_present(*, preparation, owner: str, account_id: str, workspace_id: str) -> bool:
+    """Positive read-only shortcut; False is unavailable, never absence proof."""
+    from contextlib import closing
+    from pathlib import Path
+    import time
+    from src.memery_database import GuardedStorePreparation
+    if (type(preparation) is not GuardedStorePreparation or any(type(v) is not str or not v or v != v.strip() or len(v) > 512
+            for v in (owner, account_id, workspace_id))):
+        return False
+    try:
+        preparation.assert_valid()
+        deadline = time.monotonic() + 0.05
+        remaining = 1000
+        def stop():
+            nonlocal remaining
+            remaining -= 1
+            return remaining <= 0 or time.monotonic() >= deadline
+        with closing(sqlite3.connect(Path(preparation.database_path).as_uri() + '?mode=ro', uri=True, timeout=0)) as db:
+            db.set_progress_handler(stop, 1000)
+            db.execute('BEGIN')
+            if (db.execute('PRAGMA user_version').fetchone() != (preparation.schema_version,)
+                    or db.execute("SELECT value FROM fm_meta WHERE key='database_id'").fetchone() != (preparation.database_id,)):
+                return False
+            rows = db.execute("SELECT CASE WHEN length(CAST(binding_key AS BLOB))<=1024 THEN binding_key END,CASE WHEN length(CAST(assistant_entity_id AS BLOB))<=512 THEN assistant_entity_id END,CASE WHEN length(CAST(handler_entity_id AS BLOB))<=512 THEN handler_entity_id END FROM fm_v2_principal_bindings WHERE owner_id=? AND workspace_key=? AND project_key='' LIMIT 2", (owner, workspace_id)).fetchall()
+            if len(rows) != 1 or rows[0][0] != f'assistant:default:handler:{account_id}':
+                return False
+            assistant, handler = rows[0][1:]
+            if not all(type(value) is str and value for value in (assistant, handler)) or assistant == handler:
+                return False
+            for entity, role in ((assistant, 'assistant_self:default'), (handler, 'handler')):
+                present = db.execute("""SELECT EXISTS(SELECT 1 FROM fm_v2_entities e
+                    JOIN fm_v2_entity_revisions v ON v.owner_id=e.owner_id AND v.entity_id=e.entity_id AND v.revision=e.current_revision
+                    JOIN fm_v2_entity_roles r ON r.owner_id=e.owner_id AND r.entity_id=e.entity_id AND r.revision=e.current_revision AND r.is_current=1
+                    WHERE e.owner_id=? AND e.workspace_key=? AND e.project_key='' AND e.entity_id=? AND r.role=?
+                    AND CASE WHEN length(CAST(v.payload AS BLOB))<=16384 THEN CASE WHEN json_valid(v.payload) THEN json_extract(v.payload,'$.status')='active' ELSE 0 END ELSE 0 END)""", (owner, workspace_id, entity, role)).fetchone()
+                if present != (1,):
+                    return False
+            legacy_checked = False
+            for entity, predicate, slot, question_id in ((handler, 'preferred_name', 'identity.preferred_name', 'handler-preferred-name'), (assistant, 'operating_boundaries', 'assistant.operating_boundaries', 'assistant-operating-boundary')):
+                present = db.execute("SELECT EXISTS(SELECT 1 FROM fm_v2_knowledge_blocks b INDEXED BY idx_fm_v2_blocks_scope JOIN fm_v2_knowledge_revisions r ON r.owner_id=b.owner_id AND r.block_id=b.block_id AND r.revision=b.current_revision WHERE b.owner_id=? AND b.workspace_key=? AND b.project_key='' AND b.subject_entity_id=? AND b.predicate=? AND b.claim_slot=? AND b.current_revision>0)", (owner, workspace_id, entity, predicate, slot)).fetchone()
+                if present == (1,):
+                    continue
+                unknown = db.execute("""SELECT EXISTS(SELECT 1 FROM fm_v2_knowledge_blocks b INDEXED BY idx_fm_v2_blocks_scope JOIN fm_v2_knowledge_revisions r ON r.owner_id=b.owner_id AND r.block_id=b.block_id WHERE b.owner_id=? AND b.workspace_key=? AND b.project_key='' AND b.subject_entity_id=? AND r.kind='open_question' AND CASE WHEN length(CAST(r.activation_rationale AS BLOB))<=16384 THEN CASE WHEN json_valid(r.activation_rationale) THEN CASE WHEN json_type(r.activation_rationale,'$.question_context')='object' AND json_extract(r.activation_rationale,'$.question_context.target.kind')='entity' AND json_type(r.activation_rationale,'$.question_context.target.id')='text' AND json_extract(r.activation_rationale,'$.question_context.target.id')=b.subject_entity_id AND ((json_type(r.activation_rationale,'$.question_context.question_id')='text' AND length(json_extract(r.activation_rationale,'$.question_context.question_id'))>0) OR (json_type(r.activation_rationale,'$.question_context.predicate')='text' AND length(json_extract(r.activation_rationale,'$.question_context.predicate'))>0 AND json_type(r.activation_rationale,'$.question_context.claim_slot')='text' AND length(json_extract(r.activation_rationale,'$.question_context.claim_slot'))>0)) THEN 0 ELSE 1 END ELSE 1 END ELSE 1 END)""", (owner, workspace_id, entity)).fetchone()
+                if unknown != (0,):
+                    return False
+                known = db.execute("""SELECT EXISTS(SELECT 1 FROM fm_v2_knowledge_blocks b INDEXED BY idx_fm_v2_blocks_scope JOIN fm_v2_knowledge_revisions r ON r.owner_id=b.owner_id AND r.block_id=b.block_id WHERE b.owner_id=? AND b.workspace_key=? AND b.project_key='' AND b.subject_entity_id=? AND r.kind='open_question' AND CASE WHEN length(CAST(r.activation_rationale AS BLOB))<=16384 THEN CASE WHEN json_valid(r.activation_rationale) THEN json_extract(r.activation_rationale,'$.question_context.question_id')=? ELSE 0 END ELSE 0 END)""", (owner, workspace_id, entity, question_id)).fetchone()
+                if known == (1,):
+                    continue
+                # Only exact known legacy association can establish a positive;
+                # any unclassifiable question makes the shortcut unavailable.
+                if not legacy_checked:
+                    ambiguous = db.execute("""SELECT EXISTS(SELECT 1 FROM curated WHERE owner=? AND workspace_id=? AND kind IN ('unknown','open_question') AND CASE WHEN length(CAST(metadata AS BLOB))<=16384 THEN CASE WHEN json_valid(metadata) THEN CASE WHEN json_type(metadata,'$.question_context')='object' AND json_extract(metadata,'$.question_context.target.kind')='entity' AND json_type(metadata,'$.question_context.target.id')='text' AND length(json_extract(metadata,'$.question_context.target.id'))>0 AND ((json_type(metadata,'$.question_context.question_id')='text' AND length(json_extract(metadata,'$.question_context.question_id'))>0) OR (json_type(metadata,'$.question_context.predicate')='text' AND length(json_extract(metadata,'$.question_context.predicate'))>0 AND json_type(metadata,'$.question_context.claim_slot')='text' AND length(json_extract(metadata,'$.question_context.claim_slot'))>0)) THEN 0 ELSE 1 END ELSE 1 END ELSE 1 END)""", (owner, workspace_id)).fetchone()
+                    if ambiguous != (0,):
+                        return False
+                    legacy_checked = True
+                present = db.execute("""SELECT EXISTS(SELECT 1 FROM curated WHERE owner=? AND workspace_id=? AND kind IN ('unknown','open_question') AND CASE WHEN length(CAST(metadata AS BLOB))<=16384 THEN CASE WHEN json_valid(metadata) THEN (json_extract(metadata,'$.question_context.target.kind')='entity' AND json_extract(metadata,'$.question_context.target.id')=? AND (json_extract(metadata,'$.question_context.question_id')=? OR (json_extract(metadata,'$.question_context.predicate')=? AND json_extract(metadata,'$.question_context.claim_slot')=?))) ELSE 0 END ELSE 0 END)""", (owner, workspace_id, entity, question_id, predicate, slot)).fetchone()
+                if present != (1,):
+                    return False
+            preparation.assert_valid()
+            return time.monotonic() < deadline
+    except (OSError, ValueError, sqlite3.Error):
+        return False

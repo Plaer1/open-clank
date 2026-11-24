@@ -78,6 +78,9 @@ class AcpRuntimeAdapter:
     async def refresh_model_catalog(self, *, owner: str | None = None) -> list:
         return await self._runtime.refresh_model_catalog(owner=owner)
 
+    def supports_provider_method_policy(self) -> bool:
+        return self._runtime.supports_provider_method_policy()
+
     async def managed_control_call(
         self,
         method: str,
@@ -170,13 +173,18 @@ class AcpRuntimeAdapter:
         owner: str | None = None,
         runtime_session_id: str | None = None,
         mimo_session_id: str | None = None,
+        _chat_guard=None,
     ) -> None:
         # The old keyword remains accepted only on this compatibility adapter.
         mapped_session_id = runtime_session_id or mimo_session_id
+        if _chat_guard is None:
+            await self._runtime.delete_session(session_id, owner=owner, mimo_session_id=mapped_session_id)
+            return
         await self._runtime.delete_session(
             session_id,
             owner=owner,
             mimo_session_id=mapped_session_id,
+            _chat_guard=_chat_guard,
         )
 
     async def stop(self) -> None:
@@ -186,9 +194,10 @@ class AcpRuntimeAdapter:
 class AcpRuntimeLease:
     """Neutral generation lease over the current pool lease."""
 
-    def __init__(self, lease: Any, runtime: AcpRuntimeAdapter) -> None:
+    def __init__(self, lease: Any, runtime: AcpRuntimeAdapter, *, on_release=None) -> None:
         self._lease = lease
         self._released = False
+        self._on_release = on_release
         self.owner = str(lease.owner)
         self.runtime = runtime
         # Compatibility for callers not yet migrated to the neutral noun.
@@ -197,11 +206,26 @@ class AcpRuntimeLease:
         self.fingerprint = str(lease.fingerprint)
         self.projection_pending = bool(lease.projection_pending)
 
+    async def attach_direct_foreground(self, barrier, admission, account, runtime, handle, *, account_only=False):
+        return await self._lease.attach_direct_foreground(barrier, admission, account, runtime, handle, account_only=account_only)
+
+    def _private_agent_lease(self):
+        """Project only the still-owned ACP lease for private bridge checks."""
+        from src.openclank.mimo_supervisor import AgentWorkerLease
+        lease = self._lease
+        if (self._released or type(lease) is not AgentWorkerLease or lease._released
+                or type(self.runtime) is not AcpRuntimeAdapter or self.runtime._runtime is not lease.worker
+                or self.owner != lease.owner or self.generation != lease.generation):
+            return None
+        return lease
+
     async def release(self, *, successful_terminal: bool = False) -> None:
         if self._released:
             return
-        self._released = True
         await self._lease.release(successful_terminal=successful_terminal)
+        self._released = True
+        if self._on_release is not None:
+            self._on_release()
 
     async def __aenter__(self) -> "AcpRuntimeLease":
         return self
@@ -218,6 +242,105 @@ class AcpSupervisorAdapter:
     def __init__(self, pool: Any) -> None:
         self._pool = pool
         self._runtime_adapters: dict[int, AcpRuntimeAdapter] = {}
+
+    def owner_lifecycle_pool(self):
+        """Return the existing ACP owner pool, without admitting a worker."""
+        from src.openclank.mimo_supervisor import MimoSupervisorPool
+        if not isinstance(self._pool, MimoSupervisorPool):
+            raise RuntimeError('ACP owner lifecycle unavailable')
+        return self._pool
+
+    def _runtime_home(self, owner: str):
+        return self.owner_lifecycle_pool()._runtime_home(owner)
+
+    @property
+    def _s05_foreground_runtime(self):
+        return getattr(self._pool, '_s05_foreground_runtime', None)
+
+    @_s05_foreground_runtime.setter
+    def _s05_foreground_runtime(self, value):
+        self._pool._s05_foreground_runtime = value
+
+    @property
+    def _memory_provider(self):
+        return self._pool._memory_provider
+
+    def canonical_source_provider(self):
+        return self.owner_lifecycle_pool().canonical_source_provider()
+
+    def set_managed_policy_installer(self, owner: str, installer) -> None:
+        return self._pool.set_managed_policy_installer(owner, installer)
+
+    def owner_lifecycle_inventory(self, owner: str) -> dict[str, object]:
+        return self._pool.owner_lifecycle_inventory(owner)
+
+    async def preview_owner_rename(self, old_owner: str, new_owner: str) -> dict[str, object]:
+        return await self._pool.preview_owner_rename(old_owner, new_owner)
+
+    async def preview_owner_deletion(self, owner: str, tombstone: str, subject_id: str, *, original=None):
+        return await self._pool.preview_owner_deletion(owner, tombstone, subject_id, original=original)
+
+    async def reconcile_owner_rename(self, old_owner: str, new_owner: str, manifest: dict):
+        return await self._pool.reconcile_owner_rename(old_owner, new_owner, manifest)
+
+    async def compensate_owner_rename(self, old_owner: str, new_owner: str, manifest: dict):
+        return await self._pool.compensate_owner_rename(old_owner, new_owner, manifest)
+
+    async def purge_owner_lifecycle(self, owner: str, *, expected: dict):
+        return await self._pool.purge_owner_lifecycle(owner, expected=expected)
+
+    async def ready_effective_agent_settings(self, owner: str, provider_id: str, model_id: str, *, session_id: str) -> dict:
+        return await self._pool.ready_effective_agent_settings(owner, provider_id, model_id, session_id=session_id)
+
+    async def prepare_managed_handoff(self, **identity) -> dict:
+        return await self._pool.prepare_managed_handoff(**identity)
+
+    async def clear_managed_handoff(self, **identity) -> bool:
+        return await self._pool.clear_managed_handoff(**identity)
+
+    async def session_observation_request(self, host_chat_id: str, target_session_id: str | None, source: str,
+                                          limit: int, after: str | None, *, owner: str, timeout: float = 20.0):
+        return await self._pool.session_observation_request(host_chat_id, target_session_id, source, limit, after, owner=owner, timeout=timeout)
+
+    async def session_fork_operation(self, session_id: str, *, owner: str, operation: str, payload: dict, manager) -> dict:
+        return await self._pool.session_fork_operation(session_id, owner=owner, operation=operation, payload=payload, manager=manager)
+
+    async def session_history_operation(self, session_id: str, *, owner: str, operation: str, payload: dict, file_authority=None) -> dict:
+        return await self._pool.session_history_operation(session_id, owner=owner, operation=operation, payload=payload, file_authority=file_authority)
+
+    async def session_goal_observation(self, host_chat_id, native_id, workspace, *, owner, timeout=5.0):
+        return await self._pool.session_goal_observation(host_chat_id, native_id, workspace, owner=owner, timeout=timeout)
+
+    async def session_native_analysis_proof(self, host_chat_id, native_id, workspace, payload, *, owner, timeout=5.0):
+        return await self._pool.session_native_analysis_proof(host_chat_id, native_id, workspace, payload, owner=owner, timeout=timeout)
+
+    async def session_native_analysis_candidates(self, host_chat_id, native_id, workspace, payload, *, owner, timeout=5.0):
+        return await self._pool.session_native_analysis_candidates(host_chat_id, native_id, workspace, payload, owner=owner, timeout=timeout)
+
+    async def session_actor_inspection(self, host_chat_id, target, actor_id, revision, *, owner, message_before=None, receipt_after=None, timeout=5.0):
+        return await self._pool.session_actor_inspection(host_chat_id, target, actor_id, revision, owner=owner,
+            message_before=message_before, receipt_after=receipt_after, timeout=timeout)
+
+    async def session_context_selection_request(self, host_chat_id: str, native_id: str, workspace: str, payload: dict, *, owner: str, timeout: float = 20.0):
+        return await self._pool.session_context_selection_request(host_chat_id, native_id, workspace, payload, owner=owner, timeout=timeout)
+
+    async def session_child_http_request(self, root_session_id: str, child_native_session_id: str, suffix: str, *, owner: str, timeout: float = 20.0):
+        return await self._pool.session_child_http_request(root_session_id, child_native_session_id, suffix, owner=owner, timeout=timeout)
+
+    async def session_child_input_request(self, root_session_id: str, child_native_session_id: str, method: str, suffix: str,
+                                          payload: dict | None, *, owner: str, timeout: float = 20.0):
+        return await self._pool.session_child_input_request(root_session_id, child_native_session_id, method, suffix, payload, owner=owner, timeout=timeout)
+
+    async def workflow_availability_request(self, root_session_id: str, target_native_session_id: str, *, owner: str, timeout: float = 20.0):
+        return await self._pool.workflow_availability_request(root_session_id, target_native_session_id, owner=owner, timeout=timeout)
+
+    @property
+    def _s05_profile(self):
+        return getattr(self._pool, '_s05_profile', None)
+
+    @_s05_profile.setter
+    def _s05_profile(self, value):
+        self._pool._s05_profile = value
 
     def _runtime(self, runtime: Any | None) -> AcpRuntimeAdapter | None:
         if runtime is None:
@@ -269,6 +392,15 @@ class AcpSupervisorAdapter:
         assert runtime is not None
         return AcpRuntimeLease(lease, runtime)
 
+    async def admit_private_agent(self, owner: str, ghost_id: str, provider_id: str, model_id: str) -> AcpRuntimeLease:
+        lease = await self._pool.admit_private_agent(owner, ghost_id, provider_id, model_id)
+        runtime = self._runtime(lease.worker)
+        assert runtime is not None
+        def forget():
+            if self._runtime_adapters.get(id(lease.worker)) is runtime:
+                self._runtime_adapters.pop(id(lease.worker), None)
+        return AcpRuntimeLease(lease, runtime, on_release=forget)
+
     async def admit_shared_agent(
         self,
         access: Any,
@@ -291,8 +423,8 @@ class AcpSupervisorAdapter:
     async def refresh_model_catalog(self, *, owner: str | None = None) -> list:
         return await self._pool.refresh_model_catalog(owner=owner)
 
-    async def execute_operation(self, owner: str | None, payload: dict) -> dict:
-        return await self._pool.execute_operation(owner, payload)
+    async def execute_operation(self, owner: str | None, payload: dict, *, utility=None) -> dict:
+        return await self._pool.execute_operation(owner, payload, utility=utility)
 
     async def negotiate_session(
         self,
@@ -367,11 +499,16 @@ class AcpSupervisorAdapter:
         owner: str | None = None,
         runtime_session_id: str | None = None,
         mimo_session_id: str | None = None,
+        _chat_guard=None,
     ) -> None:
+        if _chat_guard is None:
+            await self._pool.delete_session(session_id, owner=owner, mimo_session_id=runtime_session_id or mimo_session_id)
+            return
         await self._pool.delete_session(
             session_id,
             owner=owner,
             mimo_session_id=runtime_session_id or mimo_session_id,
+            _chat_guard=_chat_guard,
         )
 
     def mapped_sessions(self, owner: str | None = None) -> dict[str, str]:

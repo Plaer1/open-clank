@@ -14,6 +14,7 @@ ids.  Every mutation shares one SQLite generation and audit transaction.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sqlite3
 import time
@@ -25,6 +26,34 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from src.constants import APP_DB
 from src.secret_storage import decrypt, encrypt
 from src.openclank.file_policy_compat import CanonicalCompatibility, COMPAT_SCHEMA
+
+
+def is_closed_managed_file_plan(plan: Any) -> bool:
+    """Recognize only the existing frozen managed-file wire shape."""
+    if not isinstance(plan, Mapping) or plan.get("kind") is not None:
+        return False
+    payload = plan.get("payload")
+    if not isinstance(payload, Mapping) or set(payload) not in ({"operation_id", "participants", "guards"}, {"operation_id", "participants", "guards", "directory_guard"}):
+        return False
+    parts, guards = payload.get("participants"), payload.get("guards")
+    if (payload.get("operation_id") != plan.get("native_operation_id") or not isinstance(parts, list) or not parts
+            or not isinstance(guards, list) or len(parts) + len(guards) > 128):
+        return False
+    if any(not isinstance(part, Mapping) or set(part) != {"kind", "source", "destination", "expected_fingerprint", "replacement"}
+           or part.get("kind") not in {"document", "asset", "reference"} or not isinstance(part.get("source"), str)
+           or not isinstance(part.get("expected_fingerprint"), str) for part in parts):
+        return False
+    if any(not isinstance(guard, Mapping) or set(guard) != {"source", "expected_fingerprint"}
+           or not isinstance(guard.get("source"), str) or not isinstance(guard.get("expected_fingerprint"), str) for guard in guards):
+        return False
+    documents = [part for part in parts if part.get("kind") == "document"]
+    if len(documents) != 1 or documents[0].get("source") != plan.get("source") or documents[0].get("destination") != plan.get("destination"):
+        return False
+    directory_guard = payload.get("directory_guard")
+    if directory_guard is not None and (not isinstance(directory_guard, Mapping) or set(directory_guard) != {"path", "revision"}
+            or not isinstance(directory_guard.get("path"), str) or not isinstance(directory_guard.get("revision"), str)):
+        return False
+    return isinstance(plan.get("native_operation_id"), str) and type(plan.get("generation")) is int
 
 
 SCHEMA_VERSION = 1
@@ -376,6 +405,15 @@ class _ClosingConnection(sqlite3.Connection):
             self.close()
 
 
+_FILESYSTEM_ACCESS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS file_policy_full_filesystem_access (
+    subject_id TEXT PRIMARY KEY,
+    human INTEGER NOT NULL DEFAULT 0 CHECK (human IN (0, 1)),
+    agent INTEGER NOT NULL DEFAULT 0 CHECK (agent IN (0, 1))
+)
+"""
+
+
 class FilePolicyRepository(CanonicalCompatibility):
     """SQLite repository and monotonic resolver for canonical file authority."""
 
@@ -383,6 +421,7 @@ class FilePolicyRepository(CanonicalCompatibility):
         self.db_path = str(db_path or os.environ.get("OPEN_CLANK_AUTHORITY_DB_PATH") or APP_DB)
         path = Path(self.db_path).expanduser().resolve()
         existing = False
+        has_filesystem_access = False
         # Admission is read-only: even switching SQLite journal mode is a
         # mutation and must wait until the store passes the current contract.
         if path.is_file() and path.stat().st_size:
@@ -391,6 +430,9 @@ class FilePolicyRepository(CanonicalCompatibility):
                 if not existing and admission.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='permission_grants'").fetchone():
                     raise FilePolicyError("Files permission store does not match this release. Stop writers and keep a complete backup; restore the matching release or prepare an offline conversion.", code="policy_store_unavailable")
                 if existing:
+                    has_filesystem_access = bool(admission.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_policy_full_filesystem_access'"
+                    ).fetchone())
                     required = {'file_policy_meta': ['singleton', 'schema_version', 'generation'], 'file_policy_locations': ['id', 'kind', 'canonical_path', 'canonical_key', 'display_path', 'capabilities_json', 'platform_identity_json', 'availability', 'enabled', 'generation', 'revision', 'created_by_subject_id', 'created_unix_ms', 'updated_unix_ms', 'migration_source', 'migration_key'], 'file_policy_workspaces': ['id', 'owner_subject_id', 'name', 'location_id', 'relative_folder', 'archived', 'generation', 'revision', 'created_unix_ms', 'updated_unix_ms', 'migration_source', 'migration_key'], 'file_policy_bindings': ['id', 'binding_class', 'subject_kind', 'subject_id', 'location_id', 'workspace_id', 'chat_id', 'resource_ref', 'operation', 'capabilities_json', 'lifetime', 'status', 'remaining_uses', 'expires_unix_ms', 'created_by_subject_id', 'generation', 'revision', 'created_unix_ms', 'updated_unix_ms', 'migration_source', 'migration_key'], 'file_policy_audit': ['id', 'generation', 'event', 'actor_subject_id', 'target_type', 'target_id', 'reason_code', 'details_json', 'created_unix_ms'], 'sqlite_sequence': ['name', 'seq'], 'file_places': ['id', 'owner_subject_id', 'provider', 'stable_resource_id', 'origin_ciphertext', 'kind', 'display_name', 'created_unix_ms', 'updated_unix_ms'], 'file_recents': ['id', 'owner_subject_id', 'provider', 'stable_resource_id', 'origin_ciphertext', 'kind', 'display_name', 'accessed_unix_ms'], 'file_saved_searches': ['id', 'owner_subject_id', 'name', 'provider_scope', 'query', 'sort_json', 'created_unix_ms', 'updated_unix_ms'], 'file_operations': ['owner_subject_id', 'operation_id', 'request_digest', 'generation', 'receipt_ciphertext', 'created_unix_ms', 'lifecycle_phase'], 'file_policy_subject_aliases': ['username', 'subject_id', 'is_admin'], 'file_policy_legacy_aliases': ['kind', 'legacy_id', 'target_id'], 'file_policy_import_sources': ['id', 'source_hash', 'source_ciphertext', 'complete', 'created_unix_ms'], 'file_policy_import_items': ['id', 'kind', 'legacy_id', 'subject_id', 'owner_username', 'source_json', 'status', 'reason', 'canonical_id'], 'file_policy_approval_details': ['binding_id', 'permission_type', 'pattern', 'resource']}
                     for table, names in required.items():
                         found = {row[1] for row in admission.execute(f"PRAGMA table_info({table})")}
@@ -406,12 +448,17 @@ class FilePolicyRepository(CanonicalCompatibility):
                 connection.executescript(_SCHEMA)
                 connection.executescript(COMPAT_SCHEMA)
                 connection.execute("CREATE INDEX IF NOT EXISTS ix_file_operations_lifecycle ON file_operations(owner_subject_id,lifecycle_phase,created_unix_ms ASC)")
+            if not has_filesystem_access:
+                connection.execute(_FILESYSTEM_ACCESS_SCHEMA)
             connection.execute("SELECT lifecycle_phase FROM file_operations LIMIT 0")
             version = int(connection.execute(
                 "SELECT schema_version FROM file_policy_meta WHERE singleton=1"
             ).fetchone()[0])
             if version != SCHEMA_VERSION:
                 raise FilePolicyError("unsupported file-policy schema", code="policy_store_unavailable")
+            # Shared writable roots require a phase-leading lookup across all
+            # accounts. This additive index contains active claims only.
+            connection.execute("CREATE INDEX IF NOT EXISTS ix_file_operations_active_claim ON file_operations(lifecycle_phase,owner_subject_id) WHERE lifecycle_phase='host_path_claim'")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None, factory=_ClosingConnection)
@@ -482,6 +529,947 @@ class FilePolicyRepository(CanonicalCompatibility):
                 })
         return result
 
+    def list_host_media_operations(self, *, owner_subject_id: str, select) -> list[dict[str, Any]]:
+        """Select affected receipts from a consistent, paged owner snapshot."""
+        result = []
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            cursor = 0
+            while True:
+                rows = connection.execute(
+                    "SELECT rowid,operation_id,request_digest,generation,receipt_ciphertext FROM file_operations "
+                    "WHERE owner_subject_id=? AND substr(operation_id,1,14)=? AND rowid>? ORDER BY rowid LIMIT 128",
+                    (str(owner_subject_id), "__host_media__", cursor),
+                ).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    cursor = int(row["rowid"])
+                    try:
+                        receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+                    except Exception as exc:
+                        raise FilePolicyError("Host media provenance is unavailable", code="provider_unavailable") from exc
+                    if not isinstance(receipt, Mapping):
+                        raise FilePolicyError("Host media provenance is invalid", code="provider_unavailable")
+                    entry = {"operation_id": str(row["operation_id"]), "digest": str(row["request_digest"]),
+                             "generation": int(row["generation"]), "receipt": dict(receipt)}
+                    if select(entry):
+                        result.append(entry)
+                        if len(result) > 256:
+                            raise FilePolicyError("Host media move exceeds its safe participant bound", code="provider_unavailable")
+            connection.commit()
+        return result
+
+    def freeze_managed_transfer_item(self, *, owner_subject_id: str, operation_id: str,
+                                     item_id: str, plan: Mapping[str, Any], provenance_selector=None) -> dict[str, Any]:
+        """Freeze server-built item intent in the existing parent operation receipt."""
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute(
+                "SELECT receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                (str(owner_subject_id), str(operation_id)),
+            ).fetchone()
+            if row is None:
+                raise FilePolicyError("transfer reservation is unavailable", code="provider_unavailable")
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+            if not isinstance(receipt, dict):
+                raise FilePolicyError("transfer reservation is invalid", code="provider_unavailable")
+            if receipt.get("_managed_batch_ready") == "aborted":
+                raise FilePolicyError("Managed batch was aborted", code="operation_pending")
+            if provenance_selector is not None:
+                expected_rows = plan.get("provenance_rows")
+                if not callable(provenance_selector) or not isinstance(expected_rows, list) or len(expected_rows) > 256:
+                    raise FilePolicyError("managed provenance plan is invalid", code="provider_unavailable")
+                expected = {str(item.get("operation_id")): (str(item.get("digest")), item.get("before"))
+                            for item in expected_rows if isinstance(item, Mapping)}
+                if len(expected) != len(expected_rows):
+                    raise FilePolicyError("managed provenance plan is invalid", code="provider_unavailable")
+                seen = {}
+                cursor = 0
+                while True:
+                    page = connection.execute(
+                        "SELECT rowid,operation_id,request_digest,generation,receipt_ciphertext FROM file_operations "
+                        "WHERE owner_subject_id=? AND substr(operation_id,1,14)=? AND rowid>? ORDER BY rowid LIMIT 128",
+                        (str(owner_subject_id), "__host_media__", cursor),
+                    ).fetchall()
+                    if not page:
+                        break
+                    for provenance_row in page:
+                        cursor = int(provenance_row["rowid"])
+                        value = _parse_json(decrypt(str(provenance_row["receipt_ciphertext"])), None)
+                        if not isinstance(value, Mapping):
+                            raise FilePolicyError("managed provenance is invalid", code="provider_unavailable")
+                        candidate = {"operation_id": str(provenance_row["operation_id"]),
+                                     "digest": str(provenance_row["request_digest"]),
+                                     "generation": int(provenance_row["generation"]), "receipt": dict(value)}
+                        if provenance_selector(candidate):
+                            seen[candidate["operation_id"]] = (candidate["digest"], candidate["receipt"])
+                            if len(seen) > 256:
+                                raise FilePolicyError("managed provenance exceeds its safe bound", code="provider_unavailable")
+                if seen != expected:
+                    raise FilePolicyError("managed provenance changed", code="resource_changed")
+            items = dict(receipt.get("_managed_items") or {})
+            current = items.get(str(item_id))
+            if current is not None:
+                if not isinstance(current, dict) or current.get("plan") != dict(plan):
+                    raise FilePolicyError("managed transfer item changed", code="idempotency_conflict")
+                connection.commit()
+                return dict(current)
+            if str(item_id) not in (receipt.get("_item_ids") or []):
+                raise FilePolicyError("transfer item is not reserved", code="idempotency_conflict")
+            current = {"plan": dict(plan), "phase": "prepared"}
+            items[str(item_id)] = current
+            receipt["_managed_items"] = items
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=?",
+                               (encrypt(_json(receipt)), str(owner_subject_id), str(operation_id)))
+            connection.commit()
+            return dict(current)
+
+    @staticmethod
+    def _host_claim_paths(paths: Sequence[str]) -> list[str]:
+        result = set()
+        for path in paths:
+            if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path) or os.path.normpath(path) != path:
+                raise FilePolicyError("Host mutation claim path is invalid", code="invalid_operation")
+            result.add(path)
+        if not result:
+            raise FilePolicyError("Host mutation claim is empty", code="invalid_operation")
+        return sorted(result)
+
+    @classmethod
+    def _host_claim_conflict(cls, connection: sqlite3.Connection, owner: str, paths: list[str],
+                             *, skip_operation: str = "", skip_item: str = "", include_legacy_cleanup: bool = False) -> bool:
+        """Check active claims; rare Git cleanup also checks bounded legacy custody."""
+        # Completed managed operations historically stored cleanup custody in
+        # encrypted NULL-phase receipts. Scan those bounded legacy candidates
+        # too, so a pre-upgrade unknown cleanup cannot be silently bypassed.
+        sql = "SELECT owner_subject_id,operation_id,receipt_ciphertext FROM file_operations WHERE lifecycle_phase='host_path_claim'"
+        if include_legacy_cleanup:
+            sql += " OR lifecycle_phase IS NULL LIMIT 4097"
+        rows = connection.execute(sql)
+        if include_legacy_cleanup:
+            rows = rows.fetchall()
+            if len(rows) > 4096:
+                raise FilePolicyError("Host mutation inventory exceeds its safe bound", code="provider_unavailable")
+        for row in rows:
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+            if not isinstance(receipt, Mapping):
+                raise FilePolicyError("Host mutation claim is unavailable", code="provider_unavailable")
+            existing = []
+            writer = receipt.get("_host_writer_claim")
+            if isinstance(writer, Mapping):
+                existing.append(writer.get("paths"))
+            managed = receipt.get("_managed_items")
+            if isinstance(managed, Mapping):
+                for item_id, item in managed.items():
+                    if str(row["owner_subject_id"]) == owner and str(row["operation_id"]) == skip_operation and str(item_id) == skip_item:
+                        continue
+                    if isinstance(item, Mapping) and item.get("phase") in {"claimed", "dispatched", "metadata_pending", "native_committed", "needs_review"}:
+                        existing.append(item.get("claim_paths"))
+                    if isinstance(item, Mapping) and item.get("cleanup_phase") in {"claimed", "dispatched", "pending"}:
+                        existing.append(item.get("cleanup_claim_paths"))
+                    if isinstance(item, Mapping) and item.get("undo_phase") in {"claimed", "dispatched", "metadata_pending"}:
+                        existing.append(item.get("undo_claim_paths"))
+            for candidate in existing:
+                if not isinstance(candidate, list):
+                    raise FilePolicyError("Host mutation claim is invalid", code="provider_unavailable")
+                for old in cls._host_claim_paths(candidate):
+                    for new in paths:
+                        try:
+                            common = os.path.commonpath((old, new))
+                        except ValueError:
+                            continue
+                        if common == old or common == new:
+                            return True
+        return False
+
+    def has_unsettled_host_mutation(self, *, owner_subject_id: str) -> bool:
+        """Report only whether this immutable subject has an active claim."""
+        owner = str(owner_subject_id or '').strip()
+        if not owner:
+            raise FilePolicyError('subject is required', code='subject_required')
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM file_operations WHERE lifecycle_phase='host_path_claim' AND owner_subject_id=? LIMIT 1",
+                (owner,),
+            ).fetchone() is not None
+
+    def claim_host_mutation(self, *, owner_subject_id: str, workspace_id: str | None,
+                            generation: int, paths: Sequence[str], recovery: Mapping[str, Any] | None = None) -> dict[str, str]:
+        """Claim authorized canonical paths for one cooperating ordinary writer."""
+        return self._claim_host_mutation(owner_subject_id=owner_subject_id, workspace_id=workspace_id,
+            generation=generation, paths=paths, recovery=recovery, include_legacy_cleanup=False)
+
+    def claim_git_cleanup_host_mutation(self, *, owner_subject_id: str, workspace_id: str | None,
+                                        generation: int, paths: Sequence[str], recovery: Mapping[str, Any] | None = None) -> dict[str, str]:
+        """Private rare cleanup claim; the caller independently owns Files authority."""
+        return self._claim_host_mutation(owner_subject_id=owner_subject_id, workspace_id=workspace_id,
+            generation=generation, paths=paths, recovery=recovery, include_legacy_cleanup=True)
+
+    def claim_collaboration_text(self, *, owner_subject_id: str, operation_id: str, request_digest: str,
+                                 generation: int, workspace_id: str, path: str, binding: Mapping[str, Any],
+                                 capture_identity: Mapping[str, str]) -> dict[str, str]:
+        """Atomically bind the original edit, native identity and exact Host claim."""
+        import re
+        owner, operation = str(owner_subject_id), str(operation_id)
+        fields={'operation_id','action_id','request_digest','timestamp_millis','expected_fingerprint','desired_sha256','desired_size'}
+        checked=self._host_claim_paths([path])
+        if (not isinstance(capture_identity,Mapping) or set(capture_identity)!={'account_id','actor_id','workspace_id'}
+            or capture_identity.get('account_id')!=owner or any(not isinstance(value,str) or not value or len(value)>256 for value in capture_identity.values())):
+            raise FilePolicyError('Collaboration capture unavailable',code='invalid_operation')
+        if (not isinstance(binding,Mapping) or set(binding)!=fields or len(checked)!=1 or checked[0]!=path
+            or binding.get('operation_id')!=operation or not isinstance(binding.get('action_id'),str)
+            or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',binding['action_id'])
+            or not isinstance(binding.get('expected_fingerprint'),str)
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}:(0|[1-9][0-9]*)',binding['expected_fingerprint'])
+            or not isinstance(binding.get('desired_sha256'),str) or not re.fullmatch(r'[0-9a-f]{64}',binding['desired_sha256'])
+            or type(binding.get('desired_size')) is not int or not 0<=binding['desired_size']<=262144
+            or type(binding.get('timestamp_millis')) is not int or not 0<=binding['timestamp_millis']<=2**63-1):
+            raise FilePolicyError('Collaboration binding unavailable',code='invalid_operation')
+        raw=json.dumps(['openclank.files.ordinary-replace.v1',owner,path,binding['expected_fingerprint'],
+            binding['desired_sha256'],operation,binding['action_id']],ensure_ascii=False,separators=(',',':')).encode('utf-8')
+        if binding.get('request_digest')!=hashlib.sha256(raw).hexdigest():
+            raise FilePolicyError('Collaboration binding unavailable',code='invalid_operation')
+        token=uuid.uuid4().hex; claim_operation='__host_path_claim__'+token
+        with self._connect() as connection:
+            self._begin(connection)
+            row=connection.execute('SELECT request_digest,generation,lifecycle_phase,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?',(owner,operation)).fetchone()
+            receipt=_parse_json(decrypt(str(row['receipt_ciphertext'])),None) if row else None
+            kind=row['lifecycle_phase'] if row else None
+            if (not row or row['request_digest']!=request_digest or row['generation']!=generation or self._generation(connection)!=generation
+                or kind not in {'collaboration.text.v1','collaboration.workbook.v1','collaboration.slides.v1','workflow.artifact.v1','ordinary.model.v1','git.discard.v1'} or not isinstance(receipt,dict) or receipt.get('kind')!=kind
+                or receipt.get('state')!='pending' or receipt.get('claim') is not None):
+                raise FilePolicyError('Collaboration reservation changed',code='operation_pending')
+            if self._host_claim_conflict(connection,owner,checked):raise FilePolicyError('Host resource has an active mutation',code='operation_pending')
+            claim={'operation_id':claim_operation,'token':token}
+            marker={'_host_writer_claim':{'token':token,'workspace_id':workspace_id,'paths':checked,
+                'recovery':{'kind':kind,'operation_id':operation,'request_digest':request_digest}}}
+            connection.execute('INSERT INTO file_operations(owner_subject_id,operation_id,request_digest,generation,receipt_ciphertext,created_unix_ms,lifecycle_phase) VALUES (?,?,?,?,?,?,?)',
+                (owner,claim_operation,token,generation,encrypt(_json(marker)),_now_ms(),'host_path_claim'))
+            receipt.update(claim=claim,native_binding=dict(binding),capture_identity=dict(capture_identity),issued=False,retired=False)
+            connection.execute('UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=? AND request_digest=?',
+                (encrypt(_json(receipt)),owner,operation,request_digest))
+            connection.commit();return claim
+
+    def _collaboration_claimed_row(self, connection, *, owner: str, operation: str, digest: str, claim: Mapping[str, str]):
+        row=connection.execute('SELECT request_digest,lifecycle_phase,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?',(owner,operation)).fetchone()
+        kind=row['lifecycle_phase'] if row else None
+        receipt=_parse_json(decrypt(str(row['receipt_ciphertext'])),None) if row else None
+        held=connection.execute("SELECT request_digest,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=? AND lifecycle_phase='host_path_claim'",(owner,claim.get('operation_id'))).fetchone()
+        payload=_parse_json(decrypt(str(held['receipt_ciphertext'])),None) if held else None
+        marker=payload.get('_host_writer_claim') if isinstance(payload,Mapping) else None
+        if (not row or row['request_digest']!=digest or kind not in {'collaboration.text.v1','collaboration.workbook.v1','collaboration.slides.v1','workflow.artifact.v1','ordinary.model.v1','git.discard.v1'} or not isinstance(receipt,dict)
+            or receipt.get('kind')!=kind or receipt.get('state')!='pending' or receipt.get('claim')!=dict(claim)
+            or not held or held['request_digest']!=claim.get('token') or not isinstance(marker,Mapping)
+            or marker.get('token')!=claim.get('token') or marker.get('recovery')!={'kind':kind,'operation_id':operation,'request_digest':digest}):
+            raise FilePolicyError('Collaboration custody changed',code='operation_pending')
+        return receipt
+
+    def mark_collaboration_issued(self, *, owner_subject_id: str, operation_id: str, request_digest: str, claim: Mapping[str,str]) -> None:
+        owner,operation=str(owner_subject_id),str(operation_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            receipt=self._collaboration_claimed_row(connection,owner=owner,operation=operation,digest=request_digest,claim=claim)
+            if receipt.get('issued') is not False:raise FilePolicyError('Collaboration already issued',code='operation_pending')
+            receipt['issued']=True
+            connection.execute('UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=? AND request_digest=?',
+                (encrypt(_json(receipt)),owner,operation,request_digest));connection.commit()
+
+    def retire_collaboration_io(self, *, owner_subject_id: str, operation_id: str, request_digest: str, claim: Mapping[str,str]) -> None:
+        """Original producer records positively settled exchange or process exit."""
+        owner,operation=str(owner_subject_id),str(operation_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            receipt=self._collaboration_claimed_row(connection,owner=owner,operation=operation,digest=request_digest,claim=claim)
+            if receipt.get('issued') is not True:raise FilePolicyError('Collaboration was not issued',code='operation_pending')
+            receipt['retired']=True
+            connection.execute('UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=? AND request_digest=?',
+                (encrypt(_json(receipt)),owner,operation,request_digest));connection.commit()
+
+    def refuse_collaboration_unclaimed(self, *, owner_subject_id: str, operation_id: str, request_digest: str, state: str) -> None:
+        if state not in {'unavailable','conflict'}:raise FilePolicyError('Collaboration outcome unavailable',code='invalid_operation')
+        owner,operation=str(owner_subject_id),str(operation_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            row=connection.execute('SELECT request_digest,lifecycle_phase,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?',(owner,operation)).fetchone()
+            receipt=_parse_json(decrypt(str(row['receipt_ciphertext'])),None) if row else None
+            if (not row or row['request_digest']!=request_digest or row['lifecycle_phase'] not in {'collaboration.text.v1','collaboration.workbook.v1','collaboration.slides.v1','workflow.artifact.v1','ordinary.model.v1','git.discard.v1'}
+                or not isinstance(receipt,dict) or receipt.get('kind')!=row['lifecycle_phase']
+                or receipt.get('state')!='pending' or receipt.get('claim') is not None):
+                raise FilePolicyError('Collaboration custody changed',code='operation_pending')
+            receipt['state']=state
+            connection.execute('UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=? AND request_digest=?',
+                (encrypt(_json(receipt)),owner,operation,request_digest));connection.commit()
+
+    def settle_collaboration_text(self, *, owner_subject_id: str, operation_id: str, request_digest: str,
+                                  claim: Mapping[str,str], native_status: Mapping[str,Any] | None = None,
+                                  known_unsent: bool = False) -> dict:
+        """Release exact claim only for known-unsent or matching committed status."""
+        owner,operation=str(owner_subject_id),str(operation_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            receipt=self._collaboration_claimed_row(connection,owner=owner,operation=operation,digest=request_digest,claim=claim)
+            binding=receipt.get('native_binding') or {}
+            if native_status is None and (receipt.get('issued') is False or known_unsent is True):
+                receipt['state']='unavailable'
+            elif (receipt.get('issued') is True and receipt.get('retired') is True and isinstance(native_status,Mapping) and set(native_status)=={'state','fingerprint'}
+                  and native_status.get('state')=='committed'
+                  and native_status.get('fingerprint')==f"sha256:{binding.get('desired_sha256')}:{binding.get('desired_size')}"):
+                receipt.update(state='complete',revision={'kind':'hostFingerprint','value':native_status['fingerprint']},
+                    history={'state':'complete','actionId':binding['action_id']})
+            else:
+                raise FilePolicyError('Collaboration outcome unknown',code='operation_pending')
+            connection.execute('UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=? AND request_digest=?',
+                (encrypt(_json(receipt)),owner,operation,request_digest))
+            connection.execute('DELETE FROM file_operations WHERE owner_subject_id=? AND operation_id=? AND request_digest=?',
+                (owner,claim['operation_id'],claim['token']));connection.commit();return receipt
+
+    def claim_checkpoint_restore(self, *, owner_subject_id: str, operation_id: str, request_digest: str,
+                                 generation: int, workspace_id: str | None, path: str) -> dict[str, str]:
+        return self._claim_restore_v1(owner_subject_id=owner_subject_id,operation_id=operation_id,request_digest=request_digest,generation=generation,workspace_id=workspace_id,path=path,kind="selected_checkpoint_restore_v1")
+
+    def claim_regular_file_restore(self, *, owner_subject_id: str, operation_id: str, request_digest: str,
+                                   generation: int, workspace_id: str | None, path: str) -> dict[str, str]:
+        return self._claim_restore_v1(owner_subject_id=owner_subject_id,operation_id=operation_id,request_digest=request_digest,generation=generation,workspace_id=workspace_id,path=path,kind="regular_file_restore_v1")
+
+    def _claim_restore_v1(self, *, owner_subject_id: str, operation_id: str, request_digest: str,
+                          generation: int, workspace_id: str | None, path: str, kind: str) -> dict[str, str]:
+        """Join the original reserved restore and its exact Host claim atomically."""
+        if kind not in {"selected_checkpoint_restore_v1","regular_file_restore_v1"}:raise FilePolicyError("Restore kind unavailable",code="invalid_operation")
+        owner, operation = str(owner_subject_id), str(operation_id)
+        checked = self._host_claim_paths([path]); token = uuid.uuid4().hex
+        claim_operation = "__host_path_claim__" + token
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT request_digest,generation,lifecycle_phase,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?", (owner, operation)).fetchone()
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None) if row else None
+            if (not row or row["request_digest"] != request_digest or row["generation"] != generation
+                    or row["lifecycle_phase"] != kind or self._generation(connection) != generation
+                    or not isinstance(receipt, dict) or receipt.get("kind") != kind
+                    or receipt.get("state") != "pending" or receipt.get("claim") is not None):
+                raise FilePolicyError("Checkpoint restore reservation changed", code="operation_pending")
+            if self._host_claim_conflict(connection, owner, checked):
+                raise FilePolicyError("Host resource has an active mutation", code="operation_pending")
+            claim = {"operation_id": claim_operation, "token": token}
+            marker = {"_host_writer_claim": {"token": token, "workspace_id": workspace_id, "paths": checked,
+                "recovery": {"kind": kind, "operation_id": operation, "request_digest": request_digest}}}
+            connection.execute("INSERT INTO file_operations(owner_subject_id,operation_id,request_digest,generation,receipt_ciphertext,created_unix_ms,lifecycle_phase) VALUES (?,?,?,?,?,?,?)",
+                (owner, claim_operation, token, generation, encrypt(_json(marker)), _now_ms(), "host_path_claim"))
+            receipt["claim"] = claim
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=? AND request_digest=?",
+                (encrypt(_json(receipt)), owner, operation, request_digest))
+            connection.commit()
+            return claim
+
+    def settle_checkpoint_restore(self, *, owner_subject_id: str, operation_id: str, request_digest: str,
+                                  claim: Mapping[str, str], state: str, verified: bool) -> None:
+        return self._settle_restore_v1(owner_subject_id=owner_subject_id,operation_id=operation_id,request_digest=request_digest,claim=claim,state=state,verified=verified,kind="selected_checkpoint_restore_v1")
+
+    def settle_regular_file_restore(self, *, owner_subject_id: str, operation_id: str, request_digest: str,
+                                    claim: Mapping[str, str], state: str, verified: bool) -> None:
+        return self._settle_restore_v1(owner_subject_id=owner_subject_id,operation_id=operation_id,request_digest=request_digest,claim=claim,state=state,verified=verified,kind="regular_file_restore_v1")
+
+    def _settle_restore_v1(self, *, owner_subject_id: str, operation_id: str, request_digest: str,
+                           claim: Mapping[str, str], state: str, verified: bool, kind: str) -> None:
+        """Settle only an exact original claim after positive original evidence."""
+        if kind not in {"selected_checkpoint_restore_v1","regular_file_restore_v1"}:raise FilePolicyError("Restore kind unavailable",code="invalid_operation")
+        if state not in {"complete", "conflict", "partial", "refused"} or type(verified) is not bool:
+            raise FilePolicyError("Checkpoint restore outcome unavailable", code="invalid_operation")
+        owner, operation = str(owner_subject_id), str(operation_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT request_digest,lifecycle_phase,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?", (owner, operation)).fetchone()
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None) if row else None
+            saved = receipt.get("claim") if isinstance(receipt, dict) else None
+            if (not row or row["request_digest"] != request_digest or row["lifecycle_phase"] != kind
+                    or not isinstance(receipt, dict) or receipt.get("kind") != kind or saved != dict(claim)):
+                raise FilePolicyError("Checkpoint restore custody changed", code="operation_pending")
+            if receipt.get("state") == state and receipt.get("verified") is verified:
+                connection.commit()
+                return
+            if receipt.get("state") != "pending":
+                raise FilePolicyError("Checkpoint restore custody changed", code="operation_pending")
+            claimed = connection.execute("SELECT request_digest,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=? AND lifecycle_phase='host_path_claim'", (owner, claim.get("operation_id"))).fetchone()
+            payload = _parse_json(decrypt(str(claimed["receipt_ciphertext"])), None) if claimed else None
+            writer = payload.get("_host_writer_claim") if isinstance(payload, Mapping) else None
+            if (not claimed or claimed["request_digest"] != claim.get("token") or not isinstance(writer, Mapping)
+                    or writer.get("token") != claim.get("token") or writer.get("recovery") != {"kind": kind, "operation_id": operation, "request_digest": request_digest}):
+                raise FilePolicyError("Checkpoint restore custody changed", code="operation_pending")
+            receipt.update(state=state, verified=verified)
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=? AND request_digest=?", (encrypt(_json(receipt)), owner, operation, request_digest))
+            connection.execute("DELETE FROM file_operations WHERE owner_subject_id=? AND operation_id=? AND request_digest=?", (owner, claim["operation_id"], claim["token"]))
+            connection.commit()
+
+    def refuse_unclaimed_checkpoint_restore(self, *, owner_subject_id: str, operation_id: str, request_digest: str) -> None:
+        return self._refuse_unclaimed_restore_v1(owner_subject_id=owner_subject_id,operation_id=operation_id,request_digest=request_digest,kind="selected_checkpoint_restore_v1")
+
+    def refuse_unclaimed_regular_file_restore(self, *, owner_subject_id: str, operation_id: str, request_digest: str) -> None:
+        return self._refuse_unclaimed_restore_v1(owner_subject_id=owner_subject_id,operation_id=operation_id,request_digest=request_digest,kind="regular_file_restore_v1")
+
+    def _refuse_unclaimed_restore_v1(self, *, owner_subject_id: str, operation_id: str, request_digest: str, kind: str) -> None:
+        """Record refusal only while the original reservation never acquired custody."""
+        if kind not in {"selected_checkpoint_restore_v1","regular_file_restore_v1"}:raise FilePolicyError("Restore kind unavailable",code="invalid_operation")
+        owner, operation = str(owner_subject_id), str(operation_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT request_digest,lifecycle_phase,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?", (owner, operation)).fetchone()
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None) if row else None
+            if (not row or row["request_digest"] != request_digest or row["lifecycle_phase"] != kind or not isinstance(receipt, dict)
+                    or receipt.get("kind") != kind or receipt.get("state") != "pending"
+                    or receipt.get("claim") is not None):
+                raise FilePolicyError("Checkpoint restore custody changed", code="operation_pending")
+            receipt.update(state="refused", verified=False)
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=? AND request_digest=?", (encrypt(_json(receipt)), owner, operation, request_digest))
+            connection.commit()
+
+    def _claim_host_mutation(self, *, owner_subject_id: str, workspace_id: str | None,
+                             generation: int, paths: Sequence[str], recovery: Mapping[str, Any] | None,
+                             include_legacy_cleanup: bool) -> dict[str, str]:
+        owner = str(owner_subject_id)
+        checked = self._host_claim_paths(paths)
+        token = uuid.uuid4().hex
+        operation = "__host_path_claim__" + token
+        receipt = {"_host_writer_claim": {"token": token, "workspace_id": None if workspace_id is None else str(workspace_id), "paths": checked}}
+        if recovery is not None:
+            receipt["_host_writer_claim"]["recovery"] = dict(recovery)
+        with self._connect() as connection:
+            self._begin(connection)
+            if self._generation(connection) != int(generation):
+                raise FilePolicyError("File policy generation changed", code="policy_generation_changed")
+            if self._host_claim_conflict(connection, owner, checked, include_legacy_cleanup=include_legacy_cleanup):
+                raise FilePolicyError("Host resource has an active mutation", code="operation_pending")
+            connection.execute(
+                "INSERT INTO file_operations(owner_subject_id,operation_id,request_digest,generation,receipt_ciphertext,created_unix_ms,lifecycle_phase) VALUES (?,?,?,?,?,?,?)",
+                (owner, operation, token, int(generation), encrypt(_json(receipt)), _now_ms(), "host_path_claim"),
+            )
+            connection.commit()
+        return {"operation_id": operation, "token": token}
+
+    def inspect_host_mutation(self, *, owner_subject_id: str, operation_id: str, token: str) -> Mapping[str, Any] | None:
+        """Read the exact owner-bound pending claim; absence proves no outcome."""
+        with self._connect() as connection:
+            row = connection.execute("SELECT request_digest,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=? AND lifecycle_phase='host_path_claim'", (str(owner_subject_id), str(operation_id))).fetchone()
+            if row is None or str(row["request_digest"]) != str(token):
+                return None
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+            claim = receipt.get("_host_writer_claim") if isinstance(receipt, Mapping) else None
+            return dict(claim) if isinstance(claim, Mapping) and claim.get("token") == str(token) else None
+
+    def release_host_mutation(self, *, owner_subject_id: str, operation_id: str, token: str) -> None:
+        """Release only the exact ordinary claim after definite I/O completion."""
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute(
+                "SELECT request_digest,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=? AND lifecycle_phase=?",
+                (str(owner_subject_id), str(operation_id), "host_path_claim"),
+            ).fetchone()
+            if row is None:
+                raise FilePolicyError("Host mutation claim is unavailable", code="operation_pending")
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+            claim = receipt.get("_host_writer_claim") if isinstance(receipt, Mapping) else None
+            if not isinstance(claim, Mapping) or claim.get("token") != str(token) or str(row["request_digest"]) != str(token):
+                raise FilePolicyError("Host mutation claim identity changed", code="idempotency_conflict")
+            connection.execute("DELETE FROM file_operations WHERE owner_subject_id=? AND operation_id=? AND request_digest=?",
+                               (str(owner_subject_id), str(operation_id), str(token)))
+            connection.commit()
+
+    @classmethod
+    def _managed_plan_claim_paths(cls, plan: Mapping[str, Any]) -> list[str]:
+        paths = [plan.get("source"), plan.get("destination")]
+        for proof in [*(plan.get("asset_proofs") or []), *(plan.get("reference_proofs") or [])]:
+            paths.append(proof.get("path") if isinstance(proof, Mapping) else None)
+            if plan.get("kind") == "folder" and isinstance(proof, Mapping) and proof.get("destination") is not None:
+                paths.append(proof.get("destination"))
+        for participant in (plan.get("payload") or {}).get("participants", []):
+            if not isinstance(participant, Mapping):
+                raise FilePolicyError("Managed transfer plan is invalid", code="provider_unavailable")
+            paths.append(participant.get("source"))
+            if participant.get("destination") is not None:
+                paths.append(participant.get("destination"))
+        return cls._host_claim_paths(paths)
+
+    @staticmethod
+    def _managed_items_claimed(items: Mapping[str, Any]) -> bool:
+        return any(isinstance(value, Mapping) and (
+            value.get("phase") in {"claimed", "dispatched", "metadata_pending", "native_committed", "needs_review"}
+            or value.get("cleanup_phase") in {"claimed", "dispatched", "pending"}
+            or value.get("undo_phase") in {"claimed", "dispatched", "metadata_pending"}
+        ) for value in items.values())
+
+    def claim_managed_folder_cleanup(self, *, owner_subject_id: str, operation_id: str, item_id: str,
+                                     native_operation_id: str, generation: int) -> dict[str, Any]:
+        """Recover the same exact settled folder's cleanup identity."""
+        owner, operation, item_id = str(owner_subject_id), str(operation_id), str(item_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT generation,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?", (owner, operation)).fetchone()
+            if row is None or int(row["generation"]) != int(generation) or self._generation(connection) != int(generation):
+                raise FilePolicyError("Managed cleanup authority changed", code="policy_generation_changed")
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+            items = receipt.get("_managed_items") if isinstance(receipt, dict) else None
+            item = items.get(item_id) if isinstance(items, dict) else None
+            plan = item.get("plan") if isinstance(item, dict) else None
+            if (not isinstance(plan, dict) or not (plan.get("kind") == "folder" or is_closed_managed_file_plan(plan)) or item.get("phase") != "complete"
+                    or plan.get("native_operation_id") != str(native_operation_id) or plan.get("generation") != int(generation)):
+                raise FilePolicyError("Managed cleanup identity changed", code="idempotency_conflict")
+            if item.get("undo_phase") in {"claimed", "dispatched", "metadata_pending"}:
+                raise FilePolicyError("Managed Undo is pending", code="operation_pending")
+            phase = item.get("cleanup_phase")
+            if phase == "complete":
+                connection.commit(); return {**item, "acquired": False}
+            checked = self._managed_plan_claim_paths(plan)
+            if phase in {"claimed", "dispatched", "pending"}:
+                if not item.get("cleanup_token") or item.get("cleanup_claim_paths") != checked:
+                    raise FilePolicyError("Managed cleanup claim changed", code="idempotency_conflict")
+            else:
+                if phase is not None:
+                    raise FilePolicyError("Managed cleanup identity changed", code="idempotency_conflict")
+                if self._host_claim_conflict(connection, owner, checked, skip_operation=operation, skip_item=item_id):
+                    raise FilePolicyError("Host resource has an active mutation", code="operation_pending")
+                item["cleanup_token"] = uuid.uuid4().hex
+                item["cleanup_claim_paths"] = checked
+                item["cleanup_phase"] = "claimed"
+                connection.execute("UPDATE file_operations SET receipt_ciphertext=?,lifecycle_phase='host_path_claim' WHERE owner_subject_id=? AND operation_id=?",
+                                   (encrypt(_json(receipt)), owner, operation))
+            connection.commit(); return {**item, "acquired": True}
+
+    def mark_managed_folder_cleanup(self, *, owner_subject_id: str, operation_id: str, item_id: str,
+                                    native_operation_id: str, token: str, phase: str) -> None:
+        if phase not in {"dispatched", "pending", "complete"}:
+            raise FilePolicyError("Managed cleanup phase is invalid", code="idempotency_conflict")
+        owner, operation, item_id = str(owner_subject_id), str(operation_id), str(item_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?", (owner, operation)).fetchone()
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None) if row else None
+            items = receipt.get("_managed_items") if isinstance(receipt, dict) else None
+            item = items.get(item_id) if isinstance(items, dict) else None
+            plan = item.get("plan") if isinstance(item, dict) else None
+            if (not isinstance(plan, dict) or plan.get("native_operation_id") != str(native_operation_id)
+                    or item.get("cleanup_token") != str(token) or item.get("cleanup_phase") not in {"claimed", "dispatched", "pending", "complete"}
+                    or item.get("cleanup_claim_paths") != self._managed_plan_claim_paths(plan)):
+                raise FilePolicyError("Managed cleanup claim changed", code="idempotency_conflict")
+            if item.get("cleanup_phase") == "complete":
+                connection.commit(); return
+            if phase == "dispatched" and self._generation(connection) != int(plan.get("generation", -1)):
+                raise FilePolicyError("Managed cleanup authority changed", code="policy_generation_changed")
+            if phase == "dispatched" and self._host_claim_conflict(connection, owner, item["cleanup_claim_paths"], skip_operation=operation, skip_item=item_id):
+                raise FilePolicyError("Host resource has an active mutation", code="operation_pending")
+            if phase != "dispatched" and item.get("cleanup_phase") not in {"dispatched", "pending"}:
+                raise FilePolicyError("Managed cleanup was not dispatched", code="idempotency_conflict")
+            item["cleanup_phase"] = phase
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=?,lifecycle_phase=? WHERE owner_subject_id=? AND operation_id=?",
+                               (encrypt(_json(receipt)), "host_path_claim" if self._managed_items_claimed(items) else None, owner, operation))
+            connection.commit()
+
+    def claim_managed_transfer_item(self, *, owner_subject_id: str, operation_id: str,
+                                    item_id: str, native_operation_id: str, generation: int) -> dict[str, Any]:
+        """Fence a frozen managed item without holding a transaction across I/O."""
+        owner, operation, item_id = str(owner_subject_id), str(operation_id), str(item_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            if self._generation(connection) != int(generation):
+                raise FilePolicyError("File policy generation changed", code="policy_generation_changed")
+            row = connection.execute("SELECT generation,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                                     (owner, operation)).fetchone()
+            if row is None or int(row["generation"]) != int(generation):
+                raise FilePolicyError("Managed transfer reservation changed", code="resource_changed")
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+            items = receipt.get("_managed_items") if isinstance(receipt, dict) else None
+            if isinstance(receipt, dict) and receipt.get("_managed_batch_ready") == "aborted":
+                raise FilePolicyError("Managed batch was aborted", code="operation_pending")
+            item = items.get(item_id) if isinstance(items, dict) else None
+            plan = item.get("plan") if isinstance(item, dict) else None
+            if not isinstance(plan, dict) or plan.get("native_operation_id") != str(native_operation_id) or plan.get("generation") != int(generation):
+                raise FilePolicyError("Managed transfer identity changed", code="idempotency_conflict")
+            checked = self._managed_plan_claim_paths(plan)
+            if item.get("phase") == "claimed":
+                if item.get("claim_paths") != checked:
+                    raise FilePolicyError("Managed transfer claim changed", code="idempotency_conflict")
+                # Preflight is read-only. Replacing its token atomically fences
+                # any older preflight before it can dispatch or reject.
+                item["claim_token"] = uuid.uuid4().hex
+                connection.execute("UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=?",
+                                   (encrypt(_json(receipt)), owner, operation))
+                connection.commit()
+                return {**item, "acquired": True}
+            if item.get("phase") in {"dispatched", "metadata_pending", "native_committed", "needs_review"}:
+                if item.get("claim_paths") != checked:
+                    raise FilePolicyError("Managed transfer claim changed", code="idempotency_conflict")
+                connection.commit()
+                return {**item, "acquired": False}
+            if item.get("phase") != "prepared" or self._host_claim_conflict(connection, owner, checked, skip_operation=operation, skip_item=item_id):
+                raise FilePolicyError("Host resource has an active mutation", code="operation_pending")
+            # Recheck the complete app-known set in the same transaction that
+            # publishes the claim. A new asset between freeze and claim must
+            # not escape the frozen plan merely because document bytes match.
+            from src.openclank.media_ownership import MediaProvenance
+            expected_rows = plan.get("provenance_rows")
+            if not isinstance(expected_rows, list) or len(expected_rows) > 256:
+                raise FilePolicyError("managed provenance plan is invalid", code="provider_unavailable")
+            expected = {str(value.get("operation_id")): (str(value.get("digest")), value.get("before"))
+                        for value in expected_rows if isinstance(value, Mapping)}
+            if len(expected) != len(expected_rows):
+                raise FilePolicyError("managed provenance plan is invalid", code="provider_unavailable")
+            seen = {}
+            cursor = 0
+            while True:
+                page = connection.execute(
+                    "SELECT rowid,operation_id,request_digest,receipt_ciphertext FROM file_operations "
+                    "WHERE owner_subject_id=? AND substr(operation_id,1,14)=? AND rowid>? ORDER BY rowid LIMIT 128",
+                    (owner, "__host_media__", cursor),
+                ).fetchall()
+                if not page:
+                    break
+                for provenance_row in page:
+                    cursor = int(provenance_row["rowid"])
+                    value = _parse_json(decrypt(str(provenance_row["receipt_ciphertext"])), None)
+                    if not isinstance(value, Mapping):
+                        raise FilePolicyError("managed provenance is invalid", code="provider_unavailable")
+                    provenance = value.get("provenance")
+                    if not isinstance(provenance, Mapping):
+                        continue
+                    try:
+                        record = MediaProvenance.from_receipt(provenance)
+                        document = os.path.normpath(os.path.join(record.canonical_root, record.document_path))
+                    except Exception as exc:
+                        raise FilePolicyError("managed provenance is invalid", code="provider_unavailable") from exc
+                    source = plan.get("source")
+                    affected = document == source
+                    if not affected and plan.get("kind") == "folder" and isinstance(source, str):
+                        try:
+                            affected = os.path.commonpath((source, document)) == source
+                        except ValueError:
+                            affected = False
+                    if affected:
+                        seen[str(provenance_row["operation_id"])] = (str(provenance_row["request_digest"]), dict(value))
+                        if len(seen) > 256:
+                            raise FilePolicyError("managed provenance exceeds its safe bound", code="provider_unavailable")
+            if seen != expected:
+                raise FilePolicyError("managed provenance changed before claim", code="resource_changed")
+            item["claim_paths"] = checked
+            item["claim_token"] = uuid.uuid4().hex
+            item["phase"] = "claimed"
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=?,lifecycle_phase=? WHERE owner_subject_id=? AND operation_id=?",
+                               (encrypt(_json(receipt)), "host_path_claim", owner, operation))
+            connection.commit()
+            return {**item, "acquired": True}
+
+    def activate_managed_transfer_batch(self, *, owner_subject_id: str, operation_id: str,
+                                        generation: int, claim_tokens: Mapping[str, str]) -> None:
+        """Publish the existing batch barrier only for the exact frozen claims."""
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT generation,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                                     (str(owner_subject_id), str(operation_id))).fetchone()
+            if row is None or int(row["generation"]) != int(generation) or self._generation(connection) != int(generation):
+                raise FilePolicyError("Managed batch authority changed", code="policy_generation_changed")
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+            items = receipt.get("_managed_items") if isinstance(receipt, dict) else None
+            expected = receipt.get("_item_ids") if isinstance(receipt, dict) else None
+            if (receipt.get("_managed_batch_ready") is not False or not isinstance(expected, list) or len(expected) < 2 or len(set(expected)) != len(expected)
+                    or set(expected) != set(claim_tokens) or not isinstance(items, dict)):
+                raise FilePolicyError("Managed batch identity changed", code="idempotency_conflict")
+            roots = set()
+            for item_id in expected:
+                item = items.get(item_id)
+                plan = item.get("plan") if isinstance(item, dict) else None
+                if not isinstance(plan, dict) or item.get("phase") != "claimed" or item.get("claim_token") != claim_tokens[item_id]:
+                    raise FilePolicyError("Managed batch claim changed", code="idempotency_conflict")
+                selected = plan.get("managed_root")
+                if not isinstance(selected, Mapping):
+                    raise FilePolicyError("Managed batch root is unavailable", code="idempotency_conflict")
+                roots.add((str(selected.get("root_id")), str(selected.get("root")), int(selected.get("generation", -1))))
+            if len(roots) != 1:
+                raise FilePolicyError("Managed batch roots differ", code="idempotency_conflict")
+            receipt["_managed_batch_ready"] = True
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=?",
+                               (encrypt(_json(receipt)), str(owner_subject_id), str(operation_id)))
+            connection.commit()
+
+    def abort_managed_transfer_batch(self, *, owner_subject_id: str, operation_id: str,
+                                     claim_tokens: Mapping[str, str]) -> None:
+        """Abort only an unactivated batch without stealing another caller's claim."""
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                                     (str(owner_subject_id), str(operation_id))).fetchone()
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None) if row is not None else None
+            if not isinstance(receipt, dict) or receipt.get("_managed_batch_ready") is not False:
+                raise FilePolicyError("Managed batch is no longer abortable", code="operation_pending")
+            items = receipt.get("_managed_items") or {}
+            if not isinstance(items, dict):
+                raise FilePolicyError("Managed batch identity changed", code="idempotency_conflict")
+            for item_id, item in items.items():
+                if not isinstance(item, dict) or item.get("phase") not in {"prepared", "claimed"}:
+                    raise FilePolicyError("Managed batch is no longer abortable", code="operation_pending")
+                if item.get("phase") == "claimed" and item.get("claim_token") != claim_tokens.get(item_id):
+                    raise FilePolicyError("Managed batch claim changed", code="operation_pending")
+            for item in items.values():
+                item["phase"] = "rejected"
+            receipt["_managed_batch_ready"] = "aborted"
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=?,lifecycle_phase=? WHERE owner_subject_id=? AND operation_id=?",
+                               (encrypt(_json(receipt)), "host_path_claim" if self._managed_items_claimed(items) else None, str(owner_subject_id), str(operation_id)))
+            connection.commit()
+
+    def mark_managed_transfer_item(self, *, owner_subject_id: str, operation_id: str, item_id: str,
+                                   native_operation_id: str, claim_token: str, phase: str,
+                                   review_outcome: str | None = None) -> dict[str, Any]:
+        """Persist the exact dispatch/commit boundary without releasing its claim."""
+        if phase not in {"dispatched", "native_committed", "needs_review"}:
+            raise FilePolicyError("Managed transfer phase is invalid", code="invalid_operation")
+        if phase == "needs_review" and review_outcome not in {"rejected_needs_review", "partial_needs_review", "committed_needs_review"}:
+            raise FilePolicyError("Managed review outcome is invalid", code="invalid_operation")
+        owner, operation, item_id = str(owner_subject_id), str(operation_id), str(item_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                                     (owner, operation)).fetchone()
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None) if row is not None else None
+            items = receipt.get("_managed_items") if isinstance(receipt, dict) else None
+            item = items.get(item_id) if isinstance(items, dict) else None
+            plan = item.get("plan") if isinstance(item, dict) else None
+            if (not isinstance(plan, dict) or plan.get("native_operation_id") != str(native_operation_id)
+                    or not isinstance(item.get("claim_paths"), list) or item.get("claim_token") != str(claim_token)):
+                raise FilePolicyError("Managed transfer identity changed", code="idempotency_conflict")
+            previous = item.get("phase")
+            if previous in {"complete", "metadata_pending"} and phase == "native_committed":
+                connection.commit()
+                return dict(item)
+            if previous == phase:
+                if phase == "needs_review" and item.get("review_outcome") != review_outcome:
+                    raise FilePolicyError("Managed review outcome changed", code="idempotency_conflict")
+                connection.commit()
+                return dict(item)
+            if (previous, phase) not in {("claimed", "dispatched"), ("dispatched", "native_committed"), ("dispatched", "needs_review")}:
+                raise FilePolicyError("Managed transfer phase changed", code="idempotency_conflict")
+            if phase == "dispatched" and "_managed_batch_ready" in receipt and receipt.get("_managed_batch_ready") is not True:
+                raise FilePolicyError("Managed batch is not ready", code="operation_pending")
+            if phase == "dispatched" and self._generation(connection) != int(plan.get("generation", -1)):
+                raise FilePolicyError("File policy generation changed", code="policy_generation_changed")
+            item["phase"] = phase
+            if phase == "needs_review": item["review_outcome"] = review_outcome
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=?,lifecycle_phase=? WHERE owner_subject_id=? AND operation_id=?",
+                               (encrypt(_json(receipt)), "host_path_claim", owner, operation))
+            connection.commit()
+            return dict(item)
+
+    def reject_unstarted_managed_transfer_item(self, *, owner_subject_id: str, operation_id: str, item_id: str,
+                                               native_operation_id: str, claim_token: str) -> None:
+        """Retire only the acquiring caller's item before any native dispatch."""
+        owner, operation, item_id = str(owner_subject_id), str(operation_id), str(item_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                                     (owner, operation)).fetchone()
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None) if row is not None else None
+            items = receipt.get("_managed_items") if isinstance(receipt, dict) else None
+            item = items.get(item_id) if isinstance(items, dict) else None
+            plan = item.get("plan") if isinstance(item, dict) else None
+            if (not isinstance(plan, dict) or plan.get("native_operation_id") != str(native_operation_id)
+                    or item.get("claim_token") != str(claim_token) or item.get("phase") != "claimed"):
+                raise FilePolicyError("Managed transfer is not safely rejectable", code="operation_pending")
+            item["phase"] = "rejected"
+            still_claimed = self._managed_items_claimed(items)
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=?,lifecycle_phase=? WHERE owner_subject_id=? AND operation_id=?",
+                               (encrypt(_json(receipt)), "host_path_claim" if still_claimed else None, owner, operation))
+            connection.commit()
+
+    def claim_managed_folder_undo(self, *, owner_subject_id: str, operation_id: str,
+                                  item_id: str, native_operation_id: str, undo_operation_id: str,
+                                  generation: int) -> dict[str, Any]:
+        """Fence an inverse using the settled forward receipt and exact provenance."""
+        owner, operation, item_id = str(owner_subject_id), str(operation_id), str(item_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT generation,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?", (owner, operation)).fetchone()
+            if row is None or int(row["generation"]) != int(generation) or self._generation(connection) != int(generation):
+                raise FilePolicyError("Managed Undo authority changed", code="policy_generation_changed")
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+            items = receipt.get("_managed_items") if isinstance(receipt, dict) else None
+            item = items.get(item_id) if isinstance(items, dict) else None
+            plan = item.get("plan") if isinstance(item, dict) else None
+            if (not isinstance(plan, dict) or plan.get("kind") != "folder" or plan.get("destination_frame") is None
+                    or plan.get("native_operation_id") != str(native_operation_id) or item.get("phase") != "complete"
+                    or item.get("cleanup_phase") in {"claimed", "dispatched", "pending"}):
+                raise FilePolicyError("Managed Undo identity changed", code="idempotency_conflict")
+            paths = self._managed_plan_claim_paths(plan)
+            phase = item.get("undo_phase")
+            if phase is not None:
+                if item.get("undo_operation_id") != str(undo_operation_id) or item.get("undo_claim_paths") != paths:
+                    raise FilePolicyError("Managed Undo identity changed", code="idempotency_conflict")
+                if phase not in {"claimed", "dispatched", "metadata_pending", "complete", "refused"}:
+                    raise FilePolicyError("Managed Undo state changed", code="idempotency_conflict")
+                connection.commit(); return {"phase": phase}
+            if self._host_claim_conflict(connection, owner, paths, skip_operation=operation, skip_item=item_id):
+                raise FilePolicyError("Host resource has an active mutation", code="operation_pending")
+            rows = plan.get("provenance_rows")
+            if not isinstance(rows, list) or len(rows) > 256:
+                raise FilePolicyError("Managed provenance plan is invalid", code="provider_unavailable")
+            seen = set()
+            for expected in rows:
+                if not isinstance(expected, dict):
+                    raise FilePolicyError("Managed provenance plan is invalid", code="provider_unavailable")
+                key = str(expected.get("operation_id") or "")
+                if not key.startswith("__host_media__") or key in seen or key == operation:
+                    raise FilePolicyError("Managed provenance identity is invalid", code="provider_unavailable")
+                seen.add(key)
+                current = connection.execute("SELECT request_digest,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?", (owner, key)).fetchone()
+                if (current is None or str(current["request_digest"]) != str(expected.get("digest") or "")
+                        or not isinstance(expected.get("before"), dict) or not isinstance(expected.get("after"), dict)
+                        or _parse_json(decrypt(str(current["receipt_ciphertext"])), None) != expected["after"]):
+                    raise FilePolicyError("Managed provenance changed", code="resource_changed")
+            # Reject a newly introduced managed document in the moved subtree;
+            # the frozen inverse cannot account for its provenance or assets.
+            from src.openclank.media_ownership import MediaProvenance
+            expected_ids = {str(value["operation_id"]) for value in rows}
+            seen_ids, cursor = set(), 0
+            while True:
+                page = connection.execute(
+                    "SELECT rowid,operation_id,receipt_ciphertext FROM file_operations "
+                    "WHERE owner_subject_id=? AND substr(operation_id,1,14)=? AND rowid>? ORDER BY rowid LIMIT 128",
+                    (owner, "__host_media__", cursor),
+                ).fetchall()
+                if not page: break
+                for provenance_row in page:
+                    cursor = int(provenance_row["rowid"])
+                    value = _parse_json(decrypt(str(provenance_row["receipt_ciphertext"])), None)
+                    if not isinstance(value, Mapping):
+                        raise FilePolicyError("Managed provenance is invalid", code="provider_unavailable")
+                    provenance = value.get("provenance")
+                    if not isinstance(provenance, Mapping): continue
+                    try:
+                        record = MediaProvenance.from_receipt(provenance)
+                        document = os.path.normpath(os.path.join(record.canonical_root, record.document_path))
+                        affected = os.path.commonpath((str(plan["destination"]), document)) == str(plan["destination"])
+                    except Exception as exc:
+                        raise FilePolicyError("Managed provenance is invalid", code="provider_unavailable") from exc
+                    if affected:
+                        seen_ids.add(str(provenance_row["operation_id"]))
+                        if len(seen_ids) > 256:
+                            raise FilePolicyError("Managed provenance exceeds its safe bound", code="provider_unavailable")
+            if seen_ids != expected_ids:
+                raise FilePolicyError("Managed provenance changed", code="resource_changed")
+            item.update(undo_phase="claimed", undo_operation_id=str(undo_operation_id), undo_claim_paths=paths)
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=?,lifecycle_phase='host_path_claim' WHERE owner_subject_id=? AND operation_id=?", (encrypt(_json(receipt)), owner, operation))
+            connection.commit(); return {"phase": "claimed"}
+
+    def finish_managed_folder_undo(self, *, owner_subject_id: str, operation_id: str, item_id: str,
+                                   undo_operation_id: str, outcome: str) -> bool:
+        """Settle all exact inverse provenance rows atomically after Native commits."""
+        if outcome not in {"dispatched", "committed", "refused"}:
+            raise FilePolicyError("Managed Undo outcome is invalid", code="idempotency_conflict")
+        owner, operation, item_id = str(owner_subject_id), str(operation_id), str(item_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?", (owner, operation)).fetchone()
+            receipt = _parse_json(decrypt(str(row["receipt_ciphertext"])), None) if row else None
+            items = receipt.get("_managed_items") if isinstance(receipt, dict) else None
+            item = items.get(item_id) if isinstance(items, dict) else None
+            plan = item.get("plan") if isinstance(item, dict) else None
+            if (not isinstance(plan, dict) or plan.get("kind") != "folder" or item.get("phase") != "complete"
+                    or item.get("undo_operation_id") != str(undo_operation_id)
+                    or item.get("undo_claim_paths") != self._managed_plan_claim_paths(plan)
+                    or item.get("undo_phase") not in {"claimed", "dispatched", "metadata_pending", "complete", "refused"}):
+                raise FilePolicyError("Managed Undo identity changed", code="idempotency_conflict")
+            phase = item["undo_phase"]
+            if phase in {"complete", "refused"}:
+                connection.commit(); return phase == "complete"
+            if outcome == "dispatched":
+                if phase == "claimed": item["undo_phase"] = "dispatched"
+            elif outcome == "refused":
+                if phase == "metadata_pending":
+                    raise FilePolicyError("Managed Undo already committed", code="idempotency_conflict")
+                item["undo_phase"] = "refused"
+            else:
+                rows = plan.get("provenance_rows")
+                if not isinstance(rows, list) or len(rows) > 256:
+                    raise FilePolicyError("Managed provenance plan is invalid", code="provider_unavailable")
+                checked, seen, valid = [], set(), True
+                for expected in rows:
+                    if not isinstance(expected, dict):
+                        raise FilePolicyError("Managed provenance plan is invalid", code="provider_unavailable")
+                    key = str(expected.get("operation_id") or "")
+                    if not key.startswith("__host_media__") or key in seen or key == operation:
+                        raise FilePolicyError("Managed provenance identity is invalid", code="provider_unavailable")
+                    seen.add(key)
+                    current = connection.execute("SELECT request_digest,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?", (owner, key)).fetchone()
+                    before, after = expected.get("before"), expected.get("after")
+                    if current is None or str(current["request_digest"]) != str(expected.get("digest") or "") or not isinstance(before, dict) or not isinstance(after, dict):
+                        valid = False; continue
+                    value = _parse_json(decrypt(str(current["receipt_ciphertext"])), None)
+                    if value not in (before, after): valid = False
+                    checked.append((key, value, before, after))
+                if valid:
+                    for key, value, before, after in checked:
+                        if value == after:
+                            connection.execute("UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=?", (encrypt(_json(before)), owner, key))
+                item["undo_phase"] = "complete" if valid else "metadata_pending"
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=?,lifecycle_phase=? WHERE owner_subject_id=? AND operation_id=?", (encrypt(_json(receipt)), "host_path_claim" if self._managed_items_claimed(items) else None, owner, operation))
+            connection.commit(); return item["undo_phase"] == "complete"
+
+    def settle_managed_transfer_item(self, *, owner_subject_id: str, operation_id: str,
+                                     item_id: str, native_operation_id: str, claim_token: str) -> bool:
+        """Atomically settle frozen provenance after the exact native commit.
+
+        A conflicting receipt retains the known native commit and frozen plan
+        for explicit reconciliation; no partial metadata update is published.
+        """
+        owner, operation, item = str(owner_subject_id), str(operation_id), str(item_id)
+        with self._connect() as connection:
+            self._begin(connection)
+            parent = connection.execute(
+                "SELECT receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                (owner, operation),
+            ).fetchone()
+            if parent is None:
+                raise FilePolicyError("transfer reservation is unavailable", code="provider_unavailable")
+            receipt = _parse_json(decrypt(str(parent["receipt_ciphertext"])), None)
+            items = receipt.get("_managed_items") if isinstance(receipt, dict) else None
+            entry = items.get(item) if isinstance(items, dict) else None
+            plan = entry.get("plan") if isinstance(entry, dict) else None
+            if (not isinstance(plan, dict) or plan.get("native_operation_id") != str(native_operation_id)
+                    or entry.get("claim_token") != str(claim_token)):
+                raise FilePolicyError("managed transfer identity changed", code="idempotency_conflict")
+            if entry.get("phase") not in {"native_committed", "metadata_pending", "complete"}:
+                raise FilePolicyError("managed transfer was not claimed", code="operation_pending")
+            rows = plan.get("provenance_rows")
+            if not isinstance(rows, list) or len(rows) > 256:
+                raise FilePolicyError("managed provenance plan is invalid", code="provider_unavailable")
+            checked = []
+            seen = set()
+            valid = True
+            for expected in rows:
+                if not isinstance(expected, dict):
+                    raise FilePolicyError("managed provenance plan is invalid", code="provider_unavailable")
+                key = str(expected.get("operation_id") or "")
+                if not key.startswith("__host_media__") or key in seen or key == operation:
+                    raise FilePolicyError("managed provenance identity is invalid", code="provider_unavailable")
+                seen.add(key)
+                row = connection.execute(
+                    "SELECT request_digest,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                    (owner, key),
+                ).fetchone()
+                if row is None or str(row["request_digest"]) != str(expected.get("digest") or ""):
+                    valid = False
+                    continue
+                current = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+                before, after = expected.get("before"), expected.get("after")
+                if not isinstance(before, dict) or not isinstance(after, dict) or current not in (before, after):
+                    valid = False
+                checked.append((key, current, before, after))
+            if valid:
+                for key, current, before, after in checked:
+                    if current == before:
+                        connection.execute("UPDATE file_operations SET receipt_ciphertext=? WHERE owner_subject_id=? AND operation_id=?",
+                                           (encrypt(_json(after)), owner, key))
+            entry["phase"] = "complete" if valid else "metadata_pending"
+            still_claimed = self._managed_items_claimed(items)
+            connection.execute("UPDATE file_operations SET receipt_ciphertext=?,lifecycle_phase=? WHERE owner_subject_id=? AND operation_id=?",
+                               (encrypt(_json(receipt)), "host_path_claim" if still_claimed else None, owner, operation))
+            connection.commit()
+            return valid
+
     def reserve_operation(
         self,
         *,
@@ -538,6 +1526,7 @@ class FilePolicyRepository(CanonicalCompatibility):
         """Update one owner-scoped Files receipt atomically after reservation."""
         payload = encrypt(_json(dict(receipt)))
         with self._connect() as connection:
+            self._begin(connection)
             try:
                 connection.execute(
                     "INSERT INTO file_operations(owner_subject_id,operation_id,request_digest,generation,receipt_ciphertext,created_unix_ms,lifecycle_phase) VALUES (?,?,?,?,?,?,?)",
@@ -553,6 +1542,17 @@ class FilePolicyRepository(CanonicalCompatibility):
                 current = _parse_json(decrypt(str(existing["receipt_ciphertext"])), None)
                 if not isinstance(current, Mapping):
                     raise FilePolicyError("Files operation receipt is unavailable", code="provider_unavailable")
+                if "_host_writer_claim" in current:
+                    raise FilePolicyError("Host mutation claim requires its exact release", code="operation_pending")
+                incoming_receipt = dict(receipt)
+                if "_managed_items" in current:
+                    incoming_receipt["_managed_items"] = current["_managed_items"]
+                    for key in ("_provider_names", "_request_kind", "_item_ids", "_managed_batch_ready"):
+                        if key in current:
+                            incoming_receipt[key] = current[key]
+                else:
+                    incoming_receipt.pop("_managed_items", None)
+                payload = encrypt(_json(incoming_receipt))
                 current_owner = str(current.get("lease_owner") or "")
                 incoming_owner = str(receipt.get("lease_owner") or "")
                 # Adoption receipts are fenced by the claimant that acquired
@@ -564,7 +1564,7 @@ class FilePolicyRepository(CanonicalCompatibility):
                 if current_owner and not incoming_owner:
                     raise FilePolicyError("operation lease owner is required", code="operation_pending")
                 if current_owner:
-                    incoming = dict(receipt)
+                    incoming = incoming_receipt
                     incoming["lease_owner"] = current_owner
                     duration = max(1_000, min(int(current.get("lease_duration_ms") or 30_000), 120_000))
                     incoming["lease_duration_ms"] = duration
@@ -574,6 +1574,7 @@ class FilePolicyRepository(CanonicalCompatibility):
                     "UPDATE file_operations SET generation=?,receipt_ciphertext=?,lifecycle_phase=COALESCE(?, lifecycle_phase) WHERE owner_subject_id=? AND operation_id=? AND request_digest=?",
                     (int(generation), payload, str(phase) if phase is not None else None, str(owner_subject_id), str(operation_id), str(request_digest)),
                 )
+            connection.commit()
 
     def claim_operation(
         self,
@@ -675,6 +1676,114 @@ class FilePolicyRepository(CanonicalCompatibility):
                 _now_ms(),
             ),
         )
+
+    def ensure_self_location_access(self, subject_id: str, location: Location, capabilities: Iterable[str],
+                                    *, binding_class: str) -> str:
+        """Keep a current compatible personal grant, or create a fresh one."""
+        caps = set(_capabilities(capabilities))
+        if binding_class not in {"people", "agent"} or not subject_id:
+            raise FilePolicyError("Invalid personal location access", code="invalid_scope")
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT * FROM file_policy_locations WHERE id=?", (location.id,)).fetchone()
+            if (not row or not row["enabled"] or row["availability"] != "available"
+                    or int(row["revision"]) != location.revision
+                    or not caps.issubset(set(_parse_json(row["capabilities_json"], [])))):
+                raise FilePolicyError("Current location cannot grant the chosen capabilities", code="capability_escalation")
+            active = connection.execute(
+                "SELECT id,capabilities_json FROM file_policy_bindings "
+                "WHERE binding_class=? AND subject_kind='user' AND subject_id=? AND location_id=? "
+                "AND lifetime='always' AND status='active' AND expires_unix_ms IS NULL ORDER BY id",
+                (binding_class, subject_id, location.id),
+            ).fetchall()
+            compatible = next((part["id"] for part in active
+                               if caps.issubset(set(_parse_json(part["capabilities_json"], [])))), None)
+            if compatible:
+                connection.rollback()
+                return str(compatible)
+            # Extend this explicit personal grant without reviving revoked rows.
+            generation = self._bump(connection)
+            now = _now_ms()
+            if active:
+                base = active[0]
+                identifier = str(base["id"])
+                combined_caps = caps | set(_parse_json(base["capabilities_json"], []))
+                connection.execute(
+                    "UPDATE file_policy_bindings SET capabilities_json=?,generation=?,revision=revision+1,updated_unix_ms=? WHERE id=?",
+                    (_json(sorted(combined_caps)), generation, now, identifier),
+                )
+                event = "update"
+            else:
+                identifier = f"binding-{uuid.uuid4().hex}"
+                connection.execute(
+                    "INSERT INTO file_policy_bindings(id,binding_class,subject_kind,subject_id,location_id,"
+                    "capabilities_json,lifetime,status,created_by_subject_id,generation,revision,created_unix_ms,updated_unix_ms) "
+                    "VALUES (?,?,'user',?,?,?,'always','active',?,?,1,?,?)",
+                    (identifier, binding_class, subject_id, location.id, _json(sorted(caps)), subject_id, generation, now, now),
+                )
+                event = "create"
+            self._audit(connection, generation=generation, event=event, actor_subject_id=subject_id,
+                        target_type="binding", target_id=identifier, reason_code="personal_location_access",
+                        details={"location_id": location.id, "binding_class": binding_class})
+            connection.commit()
+            return identifier
+
+    def full_filesystem_access(self, subject_id: str) -> dict[str, bool]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT human,agent FROM file_policy_full_filesystem_access WHERE subject_id=?", (subject_id,),
+            ).fetchone()
+        return {scope: bool(row and row[scope] == 1) for scope in ("human", "agent")}
+
+    def set_full_filesystem_access(self, subject_id: str, scope: str, enabled: bool):
+        if not subject_id or scope not in {"human", "agent"} or type(enabled) is not bool:
+            raise FilePolicyError("Invalid full filesystem access choice", code="invalid_scope")
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute(
+                "SELECT human,agent FROM file_policy_full_filesystem_access WHERE subject_id=?", (subject_id,),
+            ).fetchone()
+            choices = {name: bool(row and row[name] == 1) for name in ("human", "agent")}
+            changed = choices[scope] != enabled
+            generation = self._generation(connection)
+            if changed:
+                choices[scope] = enabled
+                connection.execute(
+                    "INSERT INTO file_policy_full_filesystem_access(subject_id,human,agent) VALUES (?,?,?) "
+                    "ON CONFLICT(subject_id) DO UPDATE SET human=excluded.human,agent=excluded.agent",
+                    (subject_id, int(choices["human"]), int(choices["agent"])),
+                )
+                generation = self._bump(connection)
+                self._audit(connection, generation=generation, event="full_filesystem_access_changed",
+                            actor_subject_id=subject_id, target_type="subject", target_id=subject_id,
+                            reason_code=scope, details={"enabled": enabled})
+            connection.commit()
+        return choices, generation, changed
+
+    def retire_full_filesystem_access(self, subject_id: str) -> bool:
+        with self._connect() as connection:
+            self._begin(connection)
+            changed = connection.execute(
+                "DELETE FROM file_policy_full_filesystem_access WHERE subject_id=?", (subject_id,),
+            ).rowcount > 0
+            if changed:
+                generation = self._bump(connection)
+                self._audit(connection, generation=generation, event="full_filesystem_access_retired",
+                            actor_subject_id=subject_id, target_type="subject", target_id=subject_id,
+                            reason_code="eligibility_lost")
+            connection.commit()
+        return changed
+
+    def invalidate_account_access(self, subject_id: str) -> None:
+        with self._connect() as connection:
+            self._begin(connection)
+            generation = self._bump(connection)
+            self._audit(
+                connection, generation=generation, event="account_access_changed",
+                actor_subject_id=subject_id, target_type="subject", target_id=subject_id,
+                reason_code="owner_access_mode",
+            )
+            connection.commit()
 
     def generation(self) -> int:
         self.expire_bindings()
@@ -1478,6 +2587,200 @@ class FilePolicyRepository(CanonicalCompatibility):
             connection.commit()
         return self.get_workspace(identifier)
 
+    @staticmethod
+    def _git_once_profile(profile: str) -> tuple[str, str, str, str, str, str]:
+        # Closed internal profiles: public entry points select one fixed domain.
+        profiles = {
+            'index': ('git-once-', 'git-index-action:sha256:', 'git_index_pending', 'git_index_update', 'git_index_once_created', 'git_index_once_consumed'),
+            'commit': ('git-commit-once-', 'git-commit-action:sha256:', 'git_commit_pending', 'git_commit', 'git_commit_once_created', 'git_commit_once_consumed'),
+            'cleanup': ('git-cleanup-once-', 'git-cleanup-action:sha256:', 'git_cleanup_pending', 'git_worktree_cleanup', 'git_cleanup_once_created', 'git_cleanup_once_consumed'),
+            'branch_create': ('git-branch-create-once-', 'git-branch-create-action:sha256:', 'git_branch_create_pending', 'git_branch_create', 'git_branch_create_once_created', 'git_branch_create_once_consumed'),
+            'fetch': ('git-fetch-once-', 'git-fetch-action:sha256:', 'git_fetch_pending', 'git_fetch', 'git_fetch_once_created', 'git_fetch_once_consumed'),
+            'push': ('git-push-once-', 'git-push-action:sha256:', 'git_push_pending', 'git_push', 'git_push_once_created', 'git_push_once_consumed'),
+            'checkout': ('git-checkout-once-', 'git-checkout-action:sha256:', 'git_checkout_pending', 'git_checkout', 'git_checkout_once_created', 'git_checkout_once_consumed'),
+            'worktree_stage': ('git-worktree-stage-once-', 'git-worktree-stage-action:sha256:', 'git_worktree_stage_pending', 'git_worktree_stage', 'git_worktree_stage_once_created', 'git_worktree_stage_once_consumed'),
+            'worktree_inverse': ('git-worktree-inverse-once-', 'git-worktree-inverse-action:sha256:', 'git_worktree_inverse_pending', 'git_worktree_inverse', 'git_worktree_inverse_once_created', 'git_worktree_inverse_once_consumed'),
+            'worktree_redo': ('git-worktree-redo-once-', 'git-worktree-redo-action:sha256:', 'git_worktree_redo_pending', 'git_worktree_redo', 'git_worktree_redo_once_created', 'git_worktree_redo_once_consumed'),
+        }
+        if profile not in profiles:
+            raise ValueError('unsupported Git approval profile')
+        return profiles[profile]
+
+    def _create_git_once(self, profile: str, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                              operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        """Create one exact Git action approval against its already-reserved request."""
+        identifier_prefix, resource_prefix, phase, operation, created_reason, _ = self._git_once_profile(profile)
+        values=(subject_id,location_id,chat_id,operation_id)
+        if (any(type(v) is not str or not v or v!=v.strip() or len(v.encode('utf-8'))>512 for v in values)
+            or (workspace_id is not None and (type(workspace_id) is not str or not workspace_id or workspace_id!=workspace_id.strip() or len(workspace_id.encode('utf-8'))>512))
+            or type(request_digest) is not str or len(request_digest)!=64 or any(c not in '0123456789abcdef' for c in request_digest)
+            or type(expected_generation) is not int or expected_generation<0 or type(expires_unix_ms) is not int
+            or not _now_ms()<expires_unix_ms<=_now_ms()+300000):
+            raise FilePolicyError('Git approval unavailable',code='invalid_request')
+        identifier=identifier_prefix+hashlib.sha256(_json([subject_id,operation_id]).encode()).hexdigest()
+        resource=resource_prefix+request_digest; now=_now_ms()
+        with self._connect() as connection:
+            self._begin(connection)
+            if self._generation(connection)!=expected_generation:raise FilePolicyError('File policy generation changed',code='policy_generation_changed')
+            reservation=connection.execute("SELECT request_digest,generation,lifecycle_phase FROM file_operations WHERE owner_subject_id=? AND operation_id=?",(subject_id,operation_id)).fetchone()
+            location=connection.execute("SELECT capabilities_json FROM file_policy_locations WHERE id=? AND enabled=1",(location_id,)).fetchone()
+            workspace=connection.execute("SELECT location_id,owner_subject_id FROM file_policy_workspaces WHERE id=? AND archived=0",(workspace_id,)).fetchone() if workspace_id is not None else None
+            if (not reservation or reservation['request_digest']!=request_digest or reservation['generation']!=expected_generation
+                or reservation['lifecycle_phase']!=phase or not location or 'write' not in _parse_json(location['capabilities_json'],[])
+                or (workspace_id is not None and (not workspace or workspace['owner_subject_id']!=subject_id or workspace['location_id']!=location_id))):
+                raise FilePolicyError('Git approval unavailable',code='provider_unavailable')
+            generation=self._bump(connection)
+            try:
+                connection.execute("INSERT INTO file_policy_bindings(id,binding_class,subject_kind,subject_id,location_id,workspace_id,chat_id,resource_ref,operation,capabilities_json,lifetime,status,remaining_uses,expires_unix_ms,created_by_subject_id,generation,revision,created_unix_ms,updated_unix_ms,migration_source,migration_key) VALUES (?,'operation','user',?,?,?,?,?,?,?,'once','active',1,?,?,?,1,?,?,NULL,NULL)",
+                    (identifier,subject_id,location_id,workspace_id,chat_id,resource,operation,_json(['write']),expires_unix_ms,subject_id,generation,now,now))
+            except sqlite3.IntegrityError as exc:raise FilePolicyError('Git approval already exists',code='duplicate_binding') from exc
+            self._audit(connection,generation=generation,event='create',actor_subject_id=subject_id,target_type='binding',target_id=identifier,reason_code=created_reason,details={'operation':operation,'location_id':location_id})
+            connection.commit();return {'binding_id':identifier,'generation':generation}
+
+    def _consume_git_once(self, profile: str, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                               operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        """Consume only the exact previously created approval, never a broad match."""
+        identifier_prefix, resource_prefix, phase, operation, _, consumed_reason = self._git_once_profile(profile)
+        values=(subject_id,location_id,chat_id,operation_id,binding_id)
+        if (any(type(v) is not str or not v or v!=v.strip() or len(v.encode('utf-8'))>512 for v in values)
+            or (workspace_id is not None and (type(workspace_id) is not str or not workspace_id or workspace_id!=workspace_id.strip() or len(workspace_id.encode('utf-8'))>512))
+            or type(request_digest) is not str or len(request_digest)!=64 or any(c not in '0123456789abcdef' for c in request_digest)
+            or type(expected_generation) is not int or expected_generation<0):raise FilePolicyError('Git approval unavailable',code='invalid_request')
+        expected_id=identifier_prefix+hashlib.sha256(_json([subject_id,operation_id]).encode()).hexdigest()
+        with self._connect() as connection:
+            self._begin(connection)
+            if self._generation(connection)!=expected_generation:raise FilePolicyError('File policy generation changed',code='policy_generation_changed')
+            reservation=connection.execute("SELECT request_digest,generation,lifecycle_phase FROM file_operations WHERE owner_subject_id=? AND operation_id=?",(subject_id,operation_id)).fetchone()
+            row=connection.execute("SELECT * FROM file_policy_bindings WHERE id=?",(binding_id,)).fetchone()
+            workspace=connection.execute("SELECT location_id,owner_subject_id FROM file_policy_workspaces WHERE id=? AND archived=0",(workspace_id,)).fetchone() if workspace_id is not None else None
+            if (binding_id!=expected_id or not reservation or reservation['request_digest']!=request_digest or reservation['generation']!=expected_generation-1 or reservation['lifecycle_phase']!=phase
+                or (workspace_id is not None and (not workspace or workspace['owner_subject_id']!=subject_id or workspace['location_id']!=location_id))
+                or not row or row['binding_class']!='operation' or row['subject_kind']!='user' or row['subject_id']!=subject_id
+                or row['location_id']!=location_id or row['workspace_id']!=workspace_id or row['chat_id']!=chat_id
+                or row['resource_ref']!=resource_prefix+request_digest or row['operation']!=operation
+                or _parse_json(row['capabilities_json'],[])!=['write'] or row['lifetime']!='once' or row['status']!='active'
+                or row['remaining_uses']!=1 or row['generation']!=expected_generation or row['revision']!=1 or row['created_by_subject_id']!=subject_id or row['expires_unix_ms'] is None or row['expires_unix_ms']<=_now_ms()):
+                raise FilePolicyError('Git approval unavailable',code='provider_unavailable')
+            generation=self._bump(connection)
+            changed=connection.execute("UPDATE file_policy_bindings SET status='consumed',remaining_uses=0,generation=?,revision=revision+1,updated_unix_ms=? WHERE id=? AND status='active' AND remaining_uses=1",(generation,_now_ms(),binding_id))
+            if changed.rowcount!=1:raise FilePolicyError('Git approval unavailable',code='provider_unavailable')
+            self._audit(connection,generation=generation,event='consume',actor_subject_id=subject_id,target_type='binding',target_id=binding_id,reason_code=consumed_reason,details={'operation':operation,'location_id':location_id})
+            connection.commit();return {'binding_id':binding_id,'generation':generation}
+
+    def create_git_index_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                              operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('index', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_index_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                               operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('index', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            binding_id=binding_id, expected_generation=expected_generation)
+
+    def create_git_commit_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                              operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('commit', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_commit_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                               operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('commit', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            binding_id=binding_id, expected_generation=expected_generation)
+
+    def create_git_cleanup_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('cleanup', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_cleanup_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                 operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('cleanup', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            binding_id=binding_id, expected_generation=expected_generation)
+
+    def create_git_branch_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                               operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('branch_create', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_branch_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('branch_create', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            binding_id=binding_id, expected_generation=expected_generation)
+
+    def create_git_fetch_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                              operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('fetch', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_fetch_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                               operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('fetch', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            binding_id=binding_id, expected_generation=expected_generation)
+
+    def create_git_push_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                             operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('push', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_push_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                              operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('push', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            binding_id=binding_id, expected_generation=expected_generation)
+
+    def create_git_worktree_stage_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                       operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('worktree_stage', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest, expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_worktree_stage_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                        operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('worktree_stage', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest, binding_id=binding_id, expected_generation=expected_generation)
+
+    def create_git_worktree_inverse_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                         operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('worktree_inverse', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest, expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_worktree_inverse_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                          operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('worktree_inverse', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest, binding_id=binding_id, expected_generation=expected_generation)
+
+    def create_git_worktree_redo_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                      operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('worktree_redo', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest, expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_worktree_redo_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                       operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('worktree_redo', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest, binding_id=binding_id, expected_generation=expected_generation)
+
+    def create_git_checkout_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                 operation_id: str, request_digest: str, expected_generation: int, expires_unix_ms: int) -> dict[str, Any]:
+        return self._create_git_once('checkout', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            expected_generation=expected_generation, expires_unix_ms=expires_unix_ms)
+
+    def consume_git_checkout_once(self, *, subject_id: str, location_id: str, workspace_id: str | None, chat_id: str,
+                                  operation_id: str, request_digest: str, binding_id: str, expected_generation: int) -> dict[str, Any]:
+        return self._consume_git_once('checkout', subject_id=subject_id, location_id=location_id, workspace_id=workspace_id,
+            chat_id=chat_id, operation_id=operation_id, request_digest=request_digest,
+            binding_id=binding_id, expected_generation=expected_generation)
+
     def create_binding(
         self,
         *,
@@ -1618,6 +2921,124 @@ class FilePolicyRepository(CanonicalCompatibility):
         if not row:
             raise FilePolicyError("binding was not found", code="binding_not_found")
         return self._binding(row)
+
+    def create_resource_role(self, *, owner_subject_id: str, recipient_subject_id: str,
+                             location_id: str, resource_id: str, role: str,
+                             owner_is_admin: bool, expected_generation: int,
+                             expires_unix_ms: int | None = None, owner_workspace_id: str | None = None,
+                             relative_resource: str = '') -> PolicyBinding:
+        """Create one exact-resource known-user role, never a location grant.
+
+        Caller separately proves the server-resolved resource belongs to this
+        location and pins its revision. The generation CAS joins that proof to
+        the existing policy transaction; a string selector grants nothing.
+        """
+        import re
+        owner = str(owner_subject_id or '').strip(); recipient = str(recipient_subject_id or '').strip()
+        location = str(location_id or '').strip(); selected = str(resource_id or '').strip()
+        if (not owner or not recipient or not location or not re.fullmatch(r'resource-[0-9a-f]{64}', selected)
+                or role not in {'viewer','commenter','editor'} or type(owner_is_admin) is not bool
+                or type(expected_generation) is not int or expected_generation < 0
+                or (expires_unix_ms is not None and (type(expires_unix_ms) is not int or expires_unix_ms <= _now_ms()))):
+            raise FilePolicyError('resource role unavailable', code='invalid_binding')
+        relative = _relative_folder(relative_resource)
+        caps = ('read','write') if role == 'editor' else ('read',)
+        identifier = uuid.uuid4().hex; now = _now_ms()
+        with self._connect() as connection:
+            self._begin(connection)
+            if self._generation(connection) != expected_generation:
+                raise FilePolicyError('File access changed; retry', code='policy_generation_changed')
+            loc = connection.execute('SELECT * FROM file_policy_locations WHERE id=?', (location,)).fetchone()
+            if not loc or not loc['enabled'] or loc['availability'] != 'available':
+                raise FilePolicyError('resource location unavailable', code='location_unavailable')
+            if owner_workspace_id is not None:
+                workspace = connection.execute('SELECT * FROM file_policy_workspaces WHERE id=? AND archived=0', (owner_workspace_id,)).fetchone()
+                if (not workspace or workspace['owner_subject_id'] != owner or workspace['location_id'] != location
+                        or not _relative_contains(workspace['relative_folder'], relative)):
+                    raise FilePolicyError('owner workspace unavailable', code='workspace_unavailable')
+            ceiling = set(_parse_json(loc['capabilities_json'], []))
+            available = ceiling if owner_is_admin else self.people_capabilities(owner, location, workspace_id=owner_workspace_id, connection=connection) & ceiling
+            if not set(caps).issubset(available):
+                raise FilePolicyError('resource role exceeds owner access', code='capability_denied')
+            if not connection.execute('SELECT 1 FROM file_policy_subject_aliases WHERE subject_id=? LIMIT 1', (recipient,)).fetchone():
+                raise FilePolicyError('recipient unavailable', code='subject_required')
+            generation = self._bump(connection)
+            connection.execute("""INSERT INTO file_policy_bindings(id,binding_class,subject_kind,subject_id,location_id,
+                workspace_id,chat_id,resource_ref,operation,capabilities_json,lifetime,status,remaining_uses,
+                expires_unix_ms,created_by_subject_id,generation,revision,created_unix_ms,updated_unix_ms,migration_source,migration_key)
+                VALUES (?,'people','user',?,?,NULL,NULL,?,?,?,'always','active',NULL,?,?,?,1,?,?,NULL,NULL)""",
+                (identifier, recipient, location, selected, 'share-role:v1:'+role, _json(list(caps)), expires_unix_ms, owner, generation, now, now))
+            self._audit(connection,generation=generation,event='create',actor_subject_id=owner,target_type='binding',
+                target_id=identifier,reason_code='resource_role_created',details={'role':role})
+            connection.commit()
+        return self.get_binding(identifier)
+
+    def list_owned_resource_roles(self, *, owner_subject_id: str, location_id: str,
+                                  resource_id: str) -> tuple[list[dict], bool]:
+        """Bounded exact-resource active role metadata; caller owns current source proof."""
+        import re
+        owner = str(owner_subject_id or '').strip(); location = str(location_id or '').strip()
+        if not owner or not location or not re.fullmatch(r'resource-[0-9a-f]{64}', str(resource_id or '')):
+            raise FilePolicyError('Resource roles unavailable', code='invalid_binding')
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT id,subject_id,operation,capabilities_json,expires_unix_ms
+                FROM file_policy_bindings WHERE created_by_subject_id=? AND location_id=? AND resource_ref=?
+                  AND binding_class='people' AND subject_kind='user' AND status='active' AND lifetime='always'
+                  AND workspace_id IS NULL AND chat_id IS NULL
+                  AND operation IN ('share-role:v1:viewer','share-role:v1:commenter','share-role:v1:editor')
+                  AND (expires_unix_ms IS NULL OR expires_unix_ms>?) ORDER BY id LIMIT 101""",
+                (owner,location,resource_id,_now_ms())).fetchall()
+        result=[]; partial=len(rows)>100
+        for row in rows[:100]:
+            role = row['operation'][len('share-role:v1:'):]
+            expected = {'read','write'} if role == 'editor' else {'read'}
+            if (not row['subject_id'] or set(_parse_json(row['capabilities_json'], [])) != expected):
+                partial=True; continue
+            result.append({'binding_id':row['id'],'recipient_subject_id':row['subject_id'],
+                           'role':role,'expires_unix_ms':row['expires_unix_ms']})
+        return result, partial
+
+    def recipient_share_role_owners(self, *, recipient_subject_id: str) -> tuple[list[str], bool]:
+        """Bounded creator candidates; exact target authority is checked separately."""
+        recipient = str(recipient_subject_id or '').strip()
+        if not recipient: return [], False
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT DISTINCT created_by_subject_id FROM file_policy_bindings
+                WHERE subject_kind='user' AND subject_id=? AND binding_class='people' AND status='active'
+                  AND lifetime='always' AND workspace_id IS NULL AND chat_id IS NULL
+                  AND resource_ref IS NOT NULL AND created_by_subject_id IS NOT NULL
+                  AND operation IN ('share-role:v1:viewer','share-role:v1:commenter','share-role:v1:editor')
+                  AND (expires_unix_ms IS NULL OR expires_unix_ms>?)
+                ORDER BY created_by_subject_id LIMIT 33""", (recipient, _now_ms())).fetchall()
+        return [str(row['created_by_subject_id']) for row in rows[:32]], len(rows) > 32
+
+    def resolve_resource_role(self, *, owner_subject_id: str, recipient_subject_id: str,
+                              location_id: str, resource_id: str, connection: sqlite3.Connection | None = None) -> str | None:
+        """Return only an active exact resource role; never expand path access."""
+        import re
+        owner = str(owner_subject_id or '').strip(); recipient = str(recipient_subject_id or '').strip()
+        location = str(location_id or '').strip(); selected = str(resource_id or '').strip()
+        if not owner or not recipient or not location or not re.fullmatch(r'resource-[0-9a-f]{64}', selected): return None
+        if connection is None:
+            with self._connect() as owned:
+                owned.execute('BEGIN')
+                return self.resolve_resource_role(owner_subject_id=owner, recipient_subject_id=recipient, location_id=location, resource_id=selected, connection=owned)
+        if connection is not None:
+            loc = connection.execute('SELECT enabled,availability,capabilities_json FROM file_policy_locations WHERE id=?',(location,)).fetchone()
+            if not loc or not loc['enabled'] or loc['availability'] != 'available': return None
+            rows = connection.execute("""SELECT operation,capabilities_json FROM file_policy_bindings
+                WHERE binding_class='people' AND subject_kind='user' AND subject_id=? AND created_by_subject_id=?
+                  AND location_id=? AND resource_ref=? AND status='active' AND lifetime='always'
+                  AND workspace_id IS NULL AND chat_id IS NULL AND (expires_unix_ms IS NULL OR expires_unix_ms>?)""",
+                (recipient,owner,location,selected,_now_ms())).fetchall()
+            ranks = {'viewer':1,'commenter':2,'editor':3}; best = None
+            for row in rows:
+                op = row['operation']; role = op[len('share-role:v1:'):] if isinstance(op,str) and op.startswith('share-role:v1:') else None
+                expected = {'read','write'} if role == 'editor' else {'read'}
+                if (role in ranks and set(_parse_json(row['capabilities_json'], [])) == expected
+                        and expected.issubset(set(_parse_json(loc['capabilities_json'], [])))
+                        and (best is None or ranks[role] > ranks[best])): best = role
+            return best
 
     def list_bindings(
         self,
@@ -1765,6 +3186,13 @@ class FilePolicyRepository(CanonicalCompatibility):
                 continue
             if row["chat_id"] and row["chat_id"] != chat_id:
                 continue
+            # Exact share roles use only their closed reader. Other legacy
+            # resource-scoped bindings may match only an explicit resource.
+            if binding_class in {"people", "agent"}:
+                if isinstance(row["operation"], str) and row["operation"].startswith("share-role:v1:"):
+                    continue
+                if resource_ref is None and row["resource_ref"] is not None:
+                    continue
             if resource_ref is not None and row["resource_ref"] != resource_ref:
                 continue
             if operation is not None and row["operation"] != operation:
@@ -1786,8 +3214,12 @@ class FilePolicyRepository(CanonicalCompatibility):
         group_ids: Sequence[str] = (),
         required_operation: str | None = None,
         resource_ref: str | None = None,
+        observation_only: bool = False,
     ) -> EffectiveScope:
         """Resolve and, when needed, atomically consume one Once approval."""
+        if observation_only:
+            if required_operation is not None:
+                raise FilePolicyError("Observation cannot consume an operation approval", code="invalid_observation")
         subject = str(subject_id or "").strip()
         origin = str(origin or "").strip().lower()
         capability = str(capability or "").strip().lower()
@@ -1799,7 +3231,8 @@ class FilePolicyRepository(CanonicalCompatibility):
         if capability not in CAPABILITIES:
             raise FilePolicyError("unsupported capability", code="invalid_capability")
         relative = _relative_folder(relative_resource)
-        self.expire_bindings()
+        if not observation_only:
+            self.expire_bindings()
         now = _now_ms()
         with self._connect() as connection:
             if required_operation:

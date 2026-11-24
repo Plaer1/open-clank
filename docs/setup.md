@@ -1,15 +1,6 @@
 # Open Clank Setup Guide
 
-This guide covers installation, deployment, troubleshooting and configuration.
-**Beta 2 is the second beta release.** macOS is the current
-build/dogfood focus. Windows source support is working and tested, including
-Files, Editor save/reopen and History restore, and native image/video thumbnails.
-Install only the native ARM64 or x64 Windows architectures offered by the
-published release, and check the artifact provenance. The native Linux x86_64
-GNU/glibc build and local tarball workflow is described in [Linux packaging](linux-package.md).
-Linux qualification is scoped to the recorded KDE host; it is not a published
-release or a universal distribution compatibility claim. See [known limits](known-limits.md) and
-[Beta 2 notes](beta2.md). Machine version: `1.0.3`.
+**Beta 3 (1.0.3)** ships a [Windows x64 installer](#windows-release-package) and two [Linux x86_64 downloads](#linux). The Beta 3 macOS installer is pending. For an existing installation, see [Upgrading](upgrading.md) before switching packages.
 
 Docker is not officially supported or tested. Docker/Compose instructions in
 this guide are retained only as unsupported legacy reference, not an official
@@ -17,22 +8,18 @@ installation path or a Beta 2 release qualification requirement.
 
 Native setup is the primary path, especially on Apple Silicon when local
 serving needs Metal. The commands below describe a **fresh installation**.
-For existing data, begin with [upgrading](upgrading.md). Some environment/helper
-names retain the `ODYSSEUS_` prefix; use identifiers as written.
+For existing data, begin with [upgrading](upgrading.md).
 
 ## Find the handbook
 
-**Settings → Help** has two buttons: **Wiki documentation** opens Wiki, and
-**Copal handbook** opens the Editor presentation of the same official articles.
-Official pages are read-only. Practice examples in a new personal Wiki page or
-Editor document.
+Open **Tools → Instruction Manual**. In **Settings → Help**, choose **Instruction Manual** or **Wiki documentation** to read the same official pages in Editor or Wiki mode. To try an example, open **Copal → Journal** and create a journal page.
 
 Start document work in Files with **File → New file…**;
 choose destination/name and continue in Editor. Wiki handles linked pages,
 rich authoring and section embeds. The inherited Odysseus document editor is no longer
 an improvement target; existing document data and email compatibility remain.
 
-Media in the shared Copal/Wiki handbook describes the visible scene. Setup or empty
+Media in the Instruction Manual describes the visible scene. Setup or empty
 screens do not attest to provider access, OS privileges or completed external
 actions.
 
@@ -42,10 +29,7 @@ actions.
 
 #### macOS app package
 
-The Apple Silicon download for macOS 15 or later is `Open-Clank-1.0.3-macos-arm64.dmg` from
-the [`v1.0.3-beta.2` application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2)
-when published. Check the release checksum and artifact provenance for its
-source revision and target. No Intel/universal or older macOS support is claimed. This Beta app is
+The most recent packaged Mac download is the [Beta 2 Apple Silicon DMG](https://github.com/Plaer1/open-clank/releases/download/v1.0.3-beta.2/Open-Clank-1.0.3-macos-arm64.dmg) for macOS 15 or later. See its [release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2) for the checksum, source revision and target. No Intel/universal or older macOS support is claimed. This Beta app is
 ad-hoc signed, without Developer ID signing or notarization. Check its release
 checksum and signing information before deciding to open it; these instructions
 do not disable Gatekeeper.
@@ -91,16 +75,11 @@ Install Homebrew, ARM-native Python 3.11 or later, [Rust/Cargo](https://rustup.r
 and Xcode Command Line Tools (`xcode-select --install`). This alternative builds
 locally; Intel Macs remain unqualified.
 
-Downloads become available when `v1.0.3-beta.2` is published on the
-[application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2). Obtain
-`open-clank-1.0.3-beta.2-source.tar.gz` from the application release. Obtain
-`emoji-assets.parts.json` and `emoji-assets.pack.part-001` from the separate `v1.0.2-beta.1-artwork-compact` supporting
-[release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact), which is already public. Check the source archive against the release checksum
-file. Keep both artwork files together in a separate directory.
+For the Beta 3 source, clone the release tag and obtain the [offline artwork](#offline-emoji-artwork) if needed.
 
 ```bash
-tar -xzf open-clank-1.0.3-beta.2-source.tar.gz
-cd open-clank-1.0.3-beta.2
+git clone --branch v1.0.3-beta.3 --depth 1 https://github.com/Plaer1/open-clank.git
+cd open-clank
 python3 scripts/emoji_asset_bundle.py assemble --parts /path/to/emoji-parts
 python3 scripts/emoji_asset_bundle.py verify
 ./start-macos.sh
@@ -120,15 +99,31 @@ setup. The first build may take several minutes and needs additional disk space
 for dependency and compiler outputs. Python requirements alone are insufficient.
 
 The default address is `http://127.0.0.1:7777`. The launcher loads missing values
-from `.env`; exported shell values win. Legacy `ODYSSEUS_PORT` / `ODYSSEUS_HOST`
+from `.env`; exported shell values win. `OPEN_CLANK_PORT` / `OPEN_CLANK_HOST`
 then take precedence over `APP_PORT` / `APP_BIND`. Keep loopback until a trusted
 network path and HTTPS are configured.
 
 ### Linux
 
-**Experimental in Beta 2.** Files/native integration remains unfinished;
-support is coming as soon as possible. Commands and engine builds do not prove
-parity with macOS dogfooding.
+For an x86_64 GNU/glibc system with AVX2, download the [Beta 3 AppImage](https://github.com/Plaer1/open-clank/releases/download/v1.0.3-beta.3/Open-Clank-Beta-3-Setup-x86_64.AppImage), make it executable, and open the setup window:
+
+```sh
+chmod +x Open-Clank-Beta-3-Setup-x86_64.AppImage
+./Open-Clank-Beta-3-Setup-x86_64.AppImage
+```
+
+Choose **Add to my applications** or **Run this AppImage once**. The graphical setup uses system Python 3, PyGObject, GTK 3 and WebKitGTK 4.1.
+
+For manual installation, download the [Beta 3 tarball](https://github.com/Plaer1/open-clank/releases/download/v1.0.3-beta.3/Open-Clank-Beta-3-linux-x86_64.tar.gz) and run these commands in a fresh directory containing the download:
+
+```sh
+tar -xzf Open-Clank-Beta-3-linux-x86_64.tar.gz
+./openclank/openclank server start --open-browser
+```
+
+Keep the extracted directory together. Run `./openclank/openclank server stop` to stop it. See [Linux packaging](linux-package.md) for host requirements.
+
+#### Linux from source
 
 From a fresh source checkout, create a virtual environment, install the
 matching artwork, and run setup:
@@ -147,28 +142,16 @@ openclank server status
 ```
 
 Python 3.11 or later, Rust/Cargo and a C/C++ compiler are required. Setup builds
-the memory and History workers; Linux native Files remains unsupported and
-unqualified. Setup verifies the managed engine and may
+the memory and History workers. Setup verifies the managed engine and may
 fetch the pinned Bun toolchain if that engine needs rebuilding. Local model
 serving is optional; GPU, runtime, model and memory requirements depend on the
 selected model. Cookbook background downloads and serves use `tmux`.
 
 ### Windows release package
 
-The simplest installation is the per-user Setup executable:
-`Open-Clank-1.0.3-windows-x64-Setup.exe` or
-`Open-Clank-1.0.3-windows-arm64-Setup.exe`. Downloads become available after
-publication; install only architectures actually offered by the release, and
-check the checksum and artifact provenance.
-This Beta is unsigned. Windows may show an unsigned-app warning; check the
-release source and checksum before deciding to run it.
+Download the [Beta 3 Windows x64 installer](https://github.com/Plaer1/open-clank/releases/download/v1.0.3-beta.3/Open-Clank-1.0.3-windows-x64-Setup.exe) and run it from your Windows account. This build is unsigned and Windows may warn when opening it.
 
-Setup installs beneath your account's
-`%LOCALAPPDATA%\Programs\Open Clank Beta\windows-x64` (or `windows-arm64`)
-without administrator installation or global Python/PATH changes. Its private
-Python runtime, managed engine and native workers require no system Python,
-Cargo or Bun. The ARM64 package contains a native ARM64 application payload;
-the Inno Setup launcher itself is x64 and uses Windows ARM x64 emulation.
+Setup defaults to `%LOCALAPPDATA%\Programs\Open Clank Beta\windows-x64` and preserves your global Python and PATH settings. The private Python runtime, managed engine and native workers ship with the installer.
 
 The complete offline-artwork task is selected by default. It downloads about
 449 MB of pinned release artwork with progress and retry, or accepts a folder
@@ -185,17 +168,11 @@ create the first administrator, then sign in normally. The server remains on
 loopback by default. Uninstall removes the installed program and shortcuts,
 while preserving personal data and installed artwork; it is not a data reset.
 
-For a portable alternative, download `Open-Clank-1.0.3-windows-x64.zip` or
-`Open-Clank-1.0.3-windows-arm64.zip` from the same application release.
-Extract the ZIP and keep its entire `openclank` directory together, including
-`_internal` and checksum files. Download the shared artwork part and
-`emoji-assets.parts.json` into a separate directory. From the extracted app
-directory, run in PowerShell:
+If you skipped offline artwork during setup, download the [artwork parts](#offline-emoji-artwork). From the installation's `payload` folder, run in PowerShell:
 
 ```powershell
 .\openclank.exe assets assemble --parts C:\path\to\emoji-parts
 .\openclank.exe assets verify
-.\openclank.exe server start --open-browser
 ```
 
 Assembly installs the pinned pack in normal writable application data, outside
@@ -242,13 +219,12 @@ unsupported legacy Docker GPU and host-daemon integrations.
 Interactive setup asks you to create the first Open Clank administrator. A
 non-interactive setup can use `OPEN_CLANK_ADMIN_USER` and
 `OPEN_CLANK_ADMIN_PASSWORD`, or it generates a temporary password and prints
-it in local setup output. Existing `ODYSSEUS_ADMIN_USER` and
-`ODYSSEUS_ADMIN_PASSWORD` aliases remain accepted. Keep the credential private
+it in local setup output. Keep the credential private
 and change it after the first login.
 
 The Open Clank administrator account is separate from a model provider
-account. In **Settings → Add Models**, choose the **Local**, **API**, or
-**Subscription** setup card, then select a model in Chat. **Added Models** is
+account. In **Settings → Provider/Model Management → Add provider**, choose the **Local**, **API**, or
+**Subscription** setup card, then select a model in Chat. **Connected models** is
 the inventory of connections already added to the account. A subscription
 login and API key may have different billing and quota rules; check the
 provider's account controls before sending requests.
@@ -319,7 +295,7 @@ They carry no official support, testing or release qualification requirement.
 The native macOS notes describe the native launcher separately.
 
 **Unsupported legacy Docker bundled services.** Compose starts Open Clank, SearXNG, and ntfy.
-Frankenmemory stores memory/RAG locally in the mounted SQLite data directory;
+Memery stores memory/RAG locally in the mounted SQLite data directory;
 it does not need a second vector service. The bundled service ports bind to
 `127.0.0.1` by default, so
 they are reachable from the host but not exposed to your LAN/public internet
@@ -553,7 +529,7 @@ install usually only need to add the endpoint in Settings.
 ```bash
 docker compose ps
 docker compose logs --tail=120 odysseus
-  docker compose logs odysseus | grep -E 'Frankenmemory|DEGRADED|ERROR'
+  docker compose logs odysseus | grep -E 'Memery|DEGRADED|ERROR'
 ```
 
 **macOS details.** The launcher attempts optional Homebrew installs for `tmux`,
@@ -561,7 +537,7 @@ docker compose logs --tail=120 odysseus
 Apfel endpoint on port `11435`. Metal/Apple-native and GGUF serving depend on
 the backend and model format. Apfel availability does not promise every
 MLX/Apple model works. vLLM/SGLang GPU workflows need their supported Linux
-CUDA/ROCm environment. Connect compatible endpoints through Add Models.
+CUDA/ROCm environment. Connect compatible endpoints through **Provider/Model Management → Add provider**.
 
 </details>
 
@@ -605,7 +581,7 @@ If `python` points at an older interpreter, use `py -3.12` (or another installed
 3.11+ version) for the venv step.
 
 **Exposing on a LAN/Tailscale (Windows):** the launcher binds to `127.0.0.1` and
-does **not** read `APP_BIND` / `ODYSSEUS_HOST` from `.env`, so editing `.env`
+does **not** read `APP_BIND` / `OPEN_CLANK_HOST` from `.env`, so editing `.env`
 alone leaves the native Windows server on loopback. Pass the launcher's
 `-BindHost` flag instead:
 
@@ -625,12 +601,12 @@ This source build wiring does not qualify frozen ARM64 or x64 packages. For Cook
 also install
 [Git for Windows](https://git-scm.com/download/win) (provides `bash.exe`).
 Local GPU *serving* of vLLM/SGLang needs Linux/WSL2; for a local model on Windows,
-[Ollama](https://ollama.com/download) is one endpoint option — connect it in Add Models at
+[Ollama](https://ollama.com/download) is one endpoint option — connect it under **Provider/Model Management → Add provider** at
 `http://localhost:11434/v1` in Settings.
 
 Open the address printed by the launcher, normally `http://127.0.0.1:7777`,
 and sign in with the administrator created during setup. Configure model
-connections in **Settings → Add Models**.
+connections in **Settings → Provider/Model Management → Add provider**.
 
 ## Troubleshooting & Advanced Setup
 
@@ -640,7 +616,7 @@ Chroma is retired as a live vector/RAG authority. An environment switch cannot
 enable a second Chroma backend. Preserve old payloads as historical data for
 reviewed explicit conversion matched to the installation; tools and receipts
 are kept privately by the operator and are not included in a source clone.
-Frankenmemory is the default intended memory/RAG authority.
+Memery is the default intended memory/RAG authority.
 `NativeMemoryProvider` compatibility selection remains in source; it does not
 restore Chroma and is not a second recommended deployment path.
 
@@ -653,7 +629,7 @@ verified HTTPS. See [private deployments](#private-or-proxied-deployments) and
 [SECURITY.md](../SECURITY.md).
 
 When a proxy must reach the app across a private network, choose the bind with
-the actual interface: macOS `APP_BIND` (or `ODYSSEUS_HOST`), Windows `-BindHost`,
+the actual interface: macOS `APP_BIND` (or `OPEN_CLANK_HOST`), Windows `-BindHost`,
 or foreground bootstrap `--host`. `openclank server` lifecycle management uses
 loopback profiles. Changing `.env` does not change a running process or override
 an explicit launcher flag.
@@ -751,9 +727,9 @@ Common internal-only service ports (legacy Compose examples do not establish Doc
 | `8000-8020` | Common local model/provider APIs |
 
 ## Configuration
-Most model setup is done in **Settings**. Use **Add Models** to choose the
+Most model setup is done in **Settings**. Open **Provider/Model Management → Add provider** to choose the
 **Local**, **API**, or **Subscription** setup card, then choose the model in
-Chat. **Added Models** is the inventory of connections already added to the
+Chat. **Connected models** is the inventory of connections already added to the
 account. Provider credentials belong in the supported connection form, not in
 chat prompts or source control. Use `.env` for application and non-model
 integration settings needed before first boot. Some older provider environment
@@ -770,20 +746,20 @@ Key settings:
 | `APP_LOGS_DIR` | `./logs` | Unsupported legacy Compose host directory for application logs. |
 | `ALLOWED_ORIGINS` | `http://localhost,http://127.0.0.1` | Comma-separated exact permitted origins for cross-origin browser/API clients. |
 | `SECURE_COOKIES` | request scheme | When unset, HTTPS ASGI requests receive Secure cookies and HTTP requests do not. Set `true` behind a trusted proxy or private access gateway unless its configured proxy middleware establishes the HTTPS ASGI scheme; a caller-supplied `X-Forwarded-Proto` header is never trusted directly. |
-| `OPEN_CLANK_DATA_DIR` | source `data/`; frozen `~/.open-clank/data` | Native data root; legacy `ODYSSEUS_DATA_DIR` alias accepted. Does not move existing data. |
+| `OPEN_CLANK_DATA_DIR` | source `data/`; frozen `~/.open-clank/data` | Native data root. Does not move existing data. |
 | `DATABASE_URL` | SQLite `app.db` under resolved data root | Validated startup requires that installation SQLite URL. External/historical stores need separate backup/migration review. |
-| `FM_DB_PATH` | `frankenmemory.db` under resolved data root | Memory/RAG store; independent overrides need independent backup. |
+| `OPEN_CLANK_MEMERY_DB_PATH` | `memery.db` under the resolved data root | Existing installations reuse `frankenmemory.db` in place. Back up externally configured stores separately. |
 | `OPENCLANK_HISTORY_ROOT` | `history/` beside History settings | History root override; preserve separately if outside live `data/`. |
 | `COPAL_LOOSE_ROOT` | `copal-vaults/` under resolved data root | Loose vault root; preserve the entire vault, including `.copal` metadata and associated media. Back up separately when outside repository `data/`. |
 | `FM_CODE_INDEX_LEASE_SECONDS` | `99999` | Code-index stale-run recovery lease in seconds (60–99999). This is not an indexing timeout; lower it only when faster abandoned-run recovery is preferred. |
-| `ODYSSEUS_CHAT_UPLOAD_MAX_BYTES` | `10485760` | Chat/agent attachment cap in bytes. Raise for larger local PDFs or text documents. |
-| `ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES` | `104857600` | Legacy-named Files/Imps image upload cap in bytes (100 MB). |
-| `ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES` | `26214400` | Legacy-named Imps transform input cap in bytes (25 MB). |
-| `ODYSSEUS_MEMORY_IMPORT_MAX_BYTES` | `10485760` | Memory import file cap in bytes (10 MB). |
-| `ODYSSEUS_PERSONAL_UPLOAD_MAX_BYTES` | `26214400` | Personal document upload cap in bytes (25 MB). |
-| `ODYSSEUS_EMAIL_COMPOSE_UPLOAD_MAX_BYTES` | `26214400` | Email compose attachment cap in bytes (25 MB). |
-| `ODYSSEUS_STT_MAX_AUDIO_BYTES` | `26214400` | Speech-to-text audio cap in bytes (25 MB). |
-| `ODYSSEUS_ICS_MAX_BYTES` | `10485760` | Calendar `.ics` import cap in bytes (10 MB). |
+| `OPEN_CLANK_CHAT_UPLOAD_MAX_BYTES` | `10485760` | Chat/agent attachment cap in bytes. Raise for larger local PDFs or text documents. |
+| `OPEN_CLANK_GALLERY_UPLOAD_MAX_BYTES` | `104857600` | Files/Imps image upload cap in bytes (100 MB). |
+| `OPEN_CLANK_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES` | `26214400` | Imps transform input cap in bytes (25 MB). |
+| `OPEN_CLANK_MEMORY_IMPORT_MAX_BYTES` | `10485760` | Memory import file cap in bytes (10 MB). |
+| `OPEN_CLANK_PERSONAL_UPLOAD_MAX_BYTES` | `26214400` | Personal document upload cap in bytes (25 MB). |
+| `OPEN_CLANK_EMAIL_COMPOSE_UPLOAD_MAX_BYTES` | `26214400` | Email compose attachment cap in bytes (25 MB). |
+| `OPEN_CLANK_STT_MAX_AUDIO_BYTES` | `26214400` | Speech-to-text audio cap in bytes (25 MB). |
+| `OPEN_CLANK_ICS_MAX_BYTES` | `10485760` | Calendar `.ics` import cap in bytes (10 MB). |
 
 Setup/app dotenv loading preserves exported environment values. Bootstrap resolves
 data/host/port before app import: export critical native path settings or pass
@@ -814,7 +790,7 @@ src/       llm_core, agent_loop, agent_tools, chat_processor, search/
 routes/    chat, session, document, memory, model … endpoints
 services/  docs, memory, search, hwfit (Cookbook) …
 static/    index.html + app.js + style.css + js/ (modular front-end)
-static/docs/media/       reusable media for the shared Copal/Wiki handbook
+static/docs/media/       reusable media for the Instruction Manual
 docs/      operator setup, upgrade and reference guides
 ```
 
@@ -822,7 +798,7 @@ docs/      operator setup, upgrade and reference guides
 
 Source defaults put application state in repository `data/` (gitignored).
 Frozen builds default to `~/.open-clank/data`; native overrides use
-`OPEN_CLANK_DATA_DIR` (with `ODYSSEUS_DATA_DIR` compatibility). Compose host
+`OPEN_CLANK_DATA_DIR`. Compose host
 mounts use `APP_DATA_DIR`. Current hosted source uses one Files-backed backend:
 Editor/Wiki uses the loose vault at `COPAL_LOOSE_ROOT` or `DATA_DIR/copal-vaults`.
 Preserve that entire root, including document files, `.copal` identity/revision/
@@ -834,7 +810,7 @@ select that backend. Standalone Copal’s native store is separate.
 
 Inventory the installed build's selected backend and actual configured root;
 do not infer active storage from a source default or switch backends to match
-these docs. History, Frankenmemory, mail attachments and approved host workspaces
+these docs. History, Memery, mail attachments and approved host workspaces
 may also live separately. Preserve every actual path, database and encryption
 key. Historical Chroma data is migration input, not an optional live backend.
 
@@ -843,12 +819,12 @@ To back up or restore the configured data paths, see the
 
 ## Offline emoji artwork
 
-**Complete this step before first launch from source or a packaged app.**
-Git checkouts, source archives, macOS DMGs and Windows ZIPs omit the large pack; the shared
-one part installs the full offline artwork once. The supporting artwork release
-is already public; application downloads remain separate and become available
-when the application release is published. Source code alone does not complete
-installation.
+Install this pack if you want the full artwork available offline on first launch.
+Git checkouts, source archives, macOS DMGs and Windows ZIPs omit the large pack.
+Emoji Drift starts with regular emoji and replaces them with artwork as it is
+downloaded after you grant consent. The shared one-part download below installs
+the full offline artwork once. The supporting artwork release is separate from
+application downloads.
 
 Obtain these two installation files from the release matching your source or package on the
 [artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact):
@@ -858,9 +834,9 @@ Obtain these two installation files from the release matching your source or pac
 
 Save them together in one directory. With GitHub CLI installed, the equivalent
 commands below download assets only; they do not create or publish a release.
-Beta 2 continues to use the separate `v1.0.2-beta.1-artwork-compact` supporting release. Use the
+Beta 3 uses the separate `v1.0.2-beta.1-artwork-compact` supporting release. Use the
 command to obtain the already-published artwork and confirm both installation files are present.
-The application binaries and source use the separate `v1.0.3-beta.2` release.
+The application downloads are on the [Beta 3 release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.3).
 
 ```bash
 gh release download v1.0.2-beta.1-artwork-compact --repo Plaer1/open-clank --dir emoji-parts --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*'

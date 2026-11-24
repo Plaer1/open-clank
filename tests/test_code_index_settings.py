@@ -83,9 +83,9 @@ async def test_readback_distinguishes_saved_pending_draining_and_applied():
 
 @pytest.mark.asyncio
 async def test_provider_status_never_initializes_and_broker_never_forwards(monkeypatch):
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
     from src.memory_provider import MemoryTransportError, MemoryRequestRejectedError
-    provider = FrankenmemoryProvider(command="must-not-execute")
+    provider = MemeryProvider(command="must-not-execute")
     async def forbidden():
         pytest.fail("Settings must not cold-start a native owner")
     monkeypatch.setattr(provider, "initialize", forbidden)
@@ -99,8 +99,8 @@ async def test_provider_status_never_initializes_and_broker_never_forwards(monke
 
 @pytest.mark.asyncio
 async def test_ready_provider_uses_actual_queue_and_strict_app_wire(monkeypatch):
-    from src.frankenmemory_provider import FrankenmemoryProvider
-    provider = FrankenmemoryProvider(command="must-not-execute")
+    from src.memery_provider import MemeryProvider
+    provider = MemeryProvider(command="must-not-execute")
     provider._requests = asyncio.Queue()
     provider._ready = asyncio.get_running_loop().create_future()
     provider._ready.set_result(None)
@@ -125,10 +125,10 @@ async def test_ready_provider_uses_actual_queue_and_strict_app_wire(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_normal_index_admission_restores_latest_saved_value_first(monkeypatch):
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
     from src.memory_provider import MemoryTransportError
     from src import settings
-    provider = FrankenmemoryProvider(command="must-not-execute")
+    provider = MemeryProvider(command="must-not-execute")
     saved = {THREADS_KEY: 1, REVISION_KEY: 3}
     calls = []
     monkeypatch.setattr(settings, "load_settings", lambda: dict(saved))
@@ -185,7 +185,7 @@ async def test_optional_startup_restore_cannot_block_memory_or_swallow_cancellat
     import mcp
     import mcp.client.stdio
     from src import constants, settings
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
     entered, abandoned = asyncio.Event(), asyncio.Event()
     closed, calls = [], []
     monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
@@ -235,7 +235,7 @@ async def test_optional_startup_restore_cannot_block_memory_or_swallow_cancellat
 
     monkeypatch.setattr(mcp, "ClientSession", Session)
     monkeypatch.setattr(mcp.client.stdio, "stdio_client", stdio)
-    provider = FrankenmemoryProvider(command="must-not-execute")
+    provider = MemeryProvider(command="must-not-execute")
     initializing = asyncio.create_task(provider.initialize())
     await asyncio.wait_for(entered.wait(), 3)
     try:

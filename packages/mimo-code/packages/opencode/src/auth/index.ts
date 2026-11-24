@@ -18,6 +18,13 @@ export class Oauth extends Schema.Class<Oauth>("OAuth")({
   expires: Schema.Number,
   accountId: Schema.optional(Schema.String),
   enterpriseUrl: Schema.optional(Schema.String),
+  metadata: Schema.optional(
+    Schema.Struct({
+      device_id: Schema.String,
+      kimi_region: Schema.Literals(["cn", "global"]),
+      credential_profile: Schema.Literal("kimi-code-device-v1"),
+    }),
+  ),
 }) {}
 
 export class Api extends Schema.Class<Api>("ApiAuth")({

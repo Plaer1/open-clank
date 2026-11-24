@@ -65,14 +65,17 @@ async def action_tidy_sessions(owner: str, **kwargs) -> Tuple[str, bool]:
 async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
     """Consolidate/deduplicate memories for the owner.
 
-    When a provider (frankenmemory) is active, routes through
-    ``audit_provider_memories`` so the tidy hits the real store, not the
-    empty legacy ``memory.json``.  Falls back to the native JSON path when
-    no provider is configured.
+    Canonical Memery maintenance is unavailable until guarded
+    admission and review are joined. Explicit native mode retains its JSON
+    path; missing scope or provider does not select a fallback.
     """
     try:
         # Provider path: use the active store, not the legacy JSON file.
         from src.ai_interaction import _memory_lifecycle, _memory_provider
+        if not (owner or "").strip() or not getattr(_memory_provider, "provider_id", ""):
+            return "Memory Tidy is unavailable without an owner and active memory provider.", False
+        if getattr(_memory_provider, "provider_id", "") == "memery":
+            return "Memory Tidy is unavailable until guarded memory admission and review are available.", False
         if (
             (owner or "").strip()
             and _memory_provider
@@ -103,6 +106,8 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
 
         manager = MemoryManager(DATA_DIR)
         all_memories = manager.load_all()
+        import copy
+        memory_snapshot = copy.deepcopy(all_memories)
 
         _owner_clean = (owner or "").strip()
         text_limit = 2000
@@ -355,7 +360,8 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
             total_removed += group_removed
 
         if total_removed or total_cleaned:
-            manager.save(all_memories)
+            scoped_owners = {m.get("owner") for m in memory_snapshot if _memory_owner(m) == _owner_clean} if _owner_clean else None
+            manager.commit_owner_snapshot(memory_snapshot, all_memories, scoped_owners)
             if ai_used:
                 reasons = ai_reasons[:3]
                 reason_text = f": {'; '.join(reasons)}" if reasons else ""
@@ -416,7 +422,7 @@ async def action_run_script(owner: str, script: str = "", host: str = "", **kwar
     """Run a script locally, or via SSH when a host is configured."""
     if not script:
         return "No script specified", False
-    target_host = (host or os.getenv("ODYSSEUS_SCRIPT_HOST", "localhost")).strip()
+    target_host = (host or os.getenv("OPEN_CLANK_SCRIPT_HOST", "localhost")).strip()
     if target_host in ("", "localhost", "127.0.0.1", "local"):
         if IS_WINDOWS and find_bash():
             return await _run_subprocess([find_bash(), "-c", script], timeout=300, label="Script")
@@ -2601,13 +2607,19 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
 
 def _save_cookbook_model_defaults(owner: str, connection_id: str, model: str) -> None:
     if owner:
-        from routes.prefs_routes import _load_for_user, _save_for_user
-        settings = _load_for_user(owner)
-        save = lambda value: _save_for_user(owner, value)
-    else:
-        from src.settings import load_settings, save_settings
-        settings = load_settings()
-        save = save_settings
+        from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user, _update_for_user
+        with PREFERENCE_LOCK:
+            settings = _load_for_user(owner)
+            patch = {"default_endpoint_id": connection_id, "default_model": model}
+            for prefix in ("task", "utility"):
+                if not (settings.get(f"{prefix}_endpoint_id") or "").strip():
+                    patch[f"{prefix}_endpoint_id"] = connection_id
+                    patch[f"{prefix}_model"] = model
+            _update_for_user(owner, patch)
+        return
+
+    from src.settings import load_settings, save_settings
+    settings = load_settings()
 
     settings["default_endpoint_id"] = connection_id
     settings["default_model"] = model
@@ -2615,7 +2627,7 @@ def _save_cookbook_model_defaults(owner: str, connection_id: str, model: str) ->
         if not (settings.get(f"{prefix}_endpoint_id") or "").strip():
             settings[f"{prefix}_endpoint_id"] = connection_id
             settings[f"{prefix}_model"] = model
-    save(settings)
+    save_settings(settings)
 
 
 async def action_cookbook_serve(
@@ -2784,55 +2796,50 @@ async def action_cookbook_serve(
     # state, so the Cookbook tab never shows it. We do the write here.
     if sid:
         try:
-            # Re-read fresh (the route may have updated state already).
-            try:
-                fresh = json.loads(state_path.read_text(encoding="utf-8"))
-            except Exception:
-                fresh = {}
-            if not isinstance(fresh, dict):
-                fresh = {}
-            tasks = fresh.get("tasks") if isinstance(fresh.get("tasks"), list) else []
-            existing = next(
-                (t for t in tasks if isinstance(t, dict) and t.get("sessionId") == sid),
-                None,
-            )
-            if existing is None:
-                display_name = repo_id.split("/")[-1] if "/" in repo_id else repo_id
-                ssh_port = str(body.get("ssh_port") or cfg.get("ssh_port") or "")
-                platform = str(body.get("platform") or cfg.get("platform") or "linux")
-                placeholder = (
-                    f"Launched by scheduled task {task_name!r} — waiting for tmux output…\n"
-                    f"  session: {sid}\n"
-                    f"  target:  {host or 'local'}\n"
-                    f"  cmd:     {cmd[:200]}{'…' if len(cmd) > 200 else ''}"
+            from src.openclank.cookbook_state import transaction, save
+            with transaction(state_path) as fresh:
+                tasks = fresh.get("tasks") if isinstance(fresh.get("tasks"), list) else []
+                existing = next(
+                    (t for t in tasks if isinstance(t, dict) and t.get("sessionId") == sid),
+                    None,
                 )
-                existing = {
-                    "id": sid,
-                    "sessionId": sid,
-                    "name": display_name,
-                    "modelId": repo_id,
-                    "type": "serve",
-                    "status": "running",
-                    "output": placeholder,
-                    "ts": int(_time.time() * 1000),
-                    "payload": {"repo_id": repo_id, "remote_host": host or "", "_cmd": cmd},
-                    "remoteHost": host or "",
-                    "sshPort": ssh_port or "",
-                    "platform": platform or "linux",
-                    "_serveReady": False,
-                    "_providerConnectionId": connection_id,
-                }
-                tasks.append(existing)
-            # Stamp ownership + end-at on the task entry.
-            existing["_scheduledByTask"] = task_name or ""
-            existing["_scheduledByOwner"] = owner or ""
-            existing["owner"] = owner or ""
-            if connection_id:
-                existing["_providerConnectionId"] = connection_id
-            if end_after_min > 0:
-                existing["_scheduledStopAtMs"] = int(_time.time() * 1000) + end_after_min * 60 * 1000
-            fresh["tasks"] = tasks
-            atomic_write_json(state_path, fresh)
+                if existing is None:
+                    display_name = repo_id.split("/")[-1] if "/" in repo_id else repo_id
+                    ssh_port = str(body.get("ssh_port") or cfg.get("ssh_port") or "")
+                    platform = str(body.get("platform") or cfg.get("platform") or "linux")
+                    placeholder = (
+                        f"Launched by scheduled task {task_name!r} — waiting for tmux output…\n"
+                        f"  session: {sid}\n"
+                        f"  target:  {host or 'local'}\n"
+                        f"  cmd:     {cmd[:200]}{'…' if len(cmd) > 200 else ''}"
+                    )
+                    existing = {
+                        "id": sid,
+                        "sessionId": sid,
+                        "name": display_name,
+                        "modelId": repo_id,
+                        "type": "serve",
+                        "status": "running",
+                        "output": placeholder,
+                        "ts": int(_time.time() * 1000),
+                        "payload": {"repo_id": repo_id, "remote_host": host or "", "_cmd": cmd},
+                        "remoteHost": host or "",
+                        "sshPort": ssh_port or "",
+                        "platform": platform or "linux",
+                        "_serveReady": False,
+                        "_providerConnectionId": connection_id,
+                    }
+                    tasks.append(existing)
+                # Stamp ownership + end-at on the task entry.
+                existing["_scheduledByTask"] = task_name or ""
+                existing["_scheduledByOwner"] = owner or ""
+                existing["owner"] = owner or ""
+                if connection_id:
+                    existing["_providerConnectionId"] = connection_id
+                if end_after_min > 0:
+                    existing["_scheduledStopAtMs"] = int(_time.time() * 1000) + end_after_min * 60 * 1000
+                fresh["tasks"] = tasks
+                save(state_path, fresh)
         except Exception as e:
             logger.warning(f"cookbook_serve: state register/stamp failed: {e}")
     # Don't try to render absolute clock time in the message — the
@@ -2849,7 +2856,31 @@ async def action_cookbook_serve(
     return f"Launched {repo_id} (session {sid})", True
 
 
+class ThemeEmojiRetryPaused(TaskDeferred):
+    """Source requested a delay outside the supported automatic horizon."""
+    pause = True
+
+
+async def action_theme_emoji_refresh(owner: str, *, theme_emoji_run=None, **kwargs) -> Tuple[str, bool]:
+    """Only the scheduler's fenced adapter may perform this local obligation."""
+    if theme_emoji_run is None:
+        raise TaskNoop("Theme artwork acquisition is unavailable")
+    import httpx
+    from src.openclank.theme_emoji_discovery import SourceHTTPError
+    try:
+        return await theme_emoji_run(owner)
+    except SourceHTTPError as exc:
+        if exc.status in (429, 502, 503, 504):
+            if exc.retry_after is None:
+                raise ThemeEmojiRetryPaused('Emoji source retry delay exceeds the automatic horizon')
+            raise TaskDeferred('Emoji source asked to retry later', exc.retry_after)
+        raise
+    except httpx.HTTPError as exc:
+        raise TaskDeferred('Emoji source temporarily unavailable', 1200) from exc
+
+
 BUILTIN_ACTIONS = {
+    "theme_emoji_refresh": action_theme_emoji_refresh,
     "tidy_sessions": action_tidy_sessions,
     "consolidate_memory": action_consolidate_memory,
     "tidy_research": action_tidy_research,
@@ -2885,7 +2916,7 @@ BUILTIN_ACTION_INFO = {
     "daily_brief": "Build a morning digest: today's calendar, unread email count + top senders, active todos",
     "learn_sender_signatures": "LLM learns each sender's signature from 3+ of their recent emails; cached per address so future renders fold sigs reliably without heuristics",
     "ssh_command": "Run a shell command on a local or remote host",
-    "run_script": "Run a script locally or on ODYSSEUS_SCRIPT_HOST",
+    "run_script": "Run a script locally or on OPEN_CLANK_SCRIPT_HOST",
     "test_skills": "Run the per-skill Test on every skill: agent run + LLM judge → records verdict on the skill (pass/needs_work/fail/inconclusive). Advisory only — never rewrites or demotes anything.",
     "audit_skills": "Audit unaudited skills after enough new skills are added: test, narrow metadata, self-edit/retry, optional teacher rewrite, tag duplicates/trivial skills, and publish/draft using the auto-approve threshold.",
     "check_email_urgency": "Scan unread emails hourly, tag urgent/reply-soon/newsletter/marketing/spam, and send a reminder when a new email needs a fast reply.",

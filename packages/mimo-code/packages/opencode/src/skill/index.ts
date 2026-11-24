@@ -1,6 +1,7 @@
 import os from "os"
 import path from "path"
 import { createHash } from "crypto"
+import { open, stat } from "node:fs/promises"
 import { pathToFileURL } from "url"
 import z from "zod"
 import { Effect, Layer, Context } from "effect"
@@ -19,7 +20,8 @@ import { Log } from "../util"
 import { Discovery } from "./discovery"
 import { extractComposeBundle } from "./compose/extract"
 import { extractBuiltinBundle, OFFICIAL_SKILL_NAMES } from "./builtin/extract"
-import { callMemoryTool, getSharedMcpClient } from "@/memory/mcp-client"
+import { callBoundOpenClankTool } from "@/memory/mcp-client"
+import type { ActorExecutionIdentity } from "@/actor/turn"
 
 const log = Log.create({ service: "skill" })
 const EXTERNAL_DIRS = [".claude", ".agents", ".codex", ".opencode"]
@@ -34,6 +36,13 @@ export const Info = z.object({
   aliases: z.array(z.string()).optional(),
   location: z.string(),
   content: z.string(),
+  sourceFileHash: z.string().optional(),
+  sourceFileDevice: z.number().optional(),
+  sourceFileInode: z.number().optional(),
+  metadataClaim: z.boolean().optional(),
+  metadataReceiptSHA256: z.string().optional(),
+  metadataSnapshotSHA256: z.string().optional(),
+  domainRefs: z.array(z.object({ block_id: z.string(), revision: z.number().int().positive() })).max(64).optional(),
   hidden: z.boolean().optional(),
   bundled: z.boolean().optional(),
   skillID: z.string().optional(),
@@ -161,6 +170,58 @@ export function evaluateInvocation(skill: Info | undefined, mode: InvocationMode
     return { ok: false, reason: "untrusted", name: skill.name }
   }
   return { ok: true, info: skill }
+}
+
+/** Parse a bounded published-snapshot claim. Provenance here is not authority. */
+export function parseResourceMetadataClaim(encoded: unknown): { metadata: {name?:string, aliases?:string[], domain_refs?:Array<{block_id:string,revision:number}>, types?:string[], processing_role?:string} } | undefined {
+  if (typeof encoded !== "string" || !/^[A-Za-z0-9_-]{1,21846}$/.test(encoded)) return undefined
+  try {
+    const bytes=Buffer.from(encoded,"base64url"); if(bytes.length>16384 || bytes.toString("base64url")!==encoded) return undefined
+    const raw=bytes.toString("utf8"); if(!Buffer.from(raw,"utf8").equals(bytes)) return undefined
+    const value=JSON.parse(raw)
+    const object=(v:unknown):v is Record<string,unknown> => !!v && typeof v==="object" && !Array.isArray(v)
+    const exact=(v:Record<string,unknown>, keys:string[]) => Object.keys(v).sort().join("\0")===keys.sort().join("\0")
+    const item=(v:unknown):v is string => typeof v==="string" && !!v && v===v.trim() && Buffer.byteLength(v,"utf8")<=512 && Buffer.from(v,"utf8").toString("utf8")===v
+    if(!object(value)||!exact(value,["version","metadata","provenance"])||value.version!==1||!object(value.metadata)||!object(value.provenance)) return undefined
+    const metadata=value.metadata, provenance=value.provenance
+    if(!exact(provenance,["origin","actor"]) || !["manual","inferred","inherited","legacy_unknown"].includes(String(provenance.origin)) || !item(provenance.actor)) return undefined
+    if(Object.keys(metadata).some((key)=>!["name","aliases","domain_refs","types","processing_role"].includes(key))) return undefined
+    for(const key of ["name","processing_role"]) if(key in metadata && !item(metadata[key])) return undefined
+    for(const key of ["aliases","types"]) if(key in metadata) {
+      const values=metadata[key]; if(!Array.isArray(values)||values.length>64||values.some((v)=>!item(v))||new Set(values).size!==values.length)return undefined
+    }
+    if("domain_refs" in metadata) {
+      const refs=metadata.domain_refs; if(!Array.isArray(refs)||refs.length>64)return undefined
+      const seen=new Set<string>()
+      for(const ref of refs) {if(!object(ref)||!exact(ref,["block_id","revision"])||!item(ref.block_id)||!Number.isSafeInteger(ref.revision)||Number(ref.revision)<1)return undefined; const key=JSON.stringify([ref.block_id,ref.revision]);if(seen.has(key))return undefined;seen.add(key)}
+    }
+    const sorted=(v:unknown):unknown => Array.isArray(v) ? v.map(sorted) : object(v) ? Object.fromEntries(Object.keys(v).sort().map((key)=>[key,sorted(v[key])])) : v
+    if(JSON.stringify(sorted(value))!==raw)return undefined
+    return {metadata:metadata as {name?:string,aliases?:string[],domain_refs?:Array<{block_id:string,revision:number}>,types?:string[],processing_role?:string}}
+  } catch {return undefined}
+}
+
+/** Exact aliases are selectors only; ambiguous or gated aliases reveal no candidate. */
+export function resolveSkillInvocation(skills: Record<string, Info>, name: string, mode: InvocationMode): InvocationResult {
+  const direct = skills[name]
+  if (direct) return evaluateInvocation(direct, mode)
+  const candidates = Object.values(skills).filter((item) => item.aliases?.includes(name))
+    .map((item) => evaluateInvocation(item, mode)).filter((result): result is { ok: true; info: Info } => result.ok)
+  if (candidates.length !== 1) return { ok: false, reason: "not_found", name: "" }
+  return candidates[0]!
+}
+
+/** Bounded, content-free explanation; canonical authorization precedes projection. */
+export function resolutionCandidateViews(
+  skills: Record<string,Info>, priorities: Record<string,number>, shadows: Array<{info:Info;priority:number}>,
+  incomplete: boolean, name: string, mode: InvocationMode, canSee: (name:string)=>boolean,
+) {
+  const selected=Object.values(skills).map((info)=>({info,priority:priorities[info.name] ?? Number.MAX_SAFE_INTEGER,selected:true}))
+  const shadowed=shadows.map(({info,priority})=>({info,priority,selected:false}))
+  const items=[...selected,...shadowed].filter(({info}) => (info.name===name || info.aliases?.includes(name))
+    && evaluateInvocation(info,mode).ok && canSee(info.name))
+    .map(({info,priority,selected})=>({name:info.name,skillID:info.skillID,revision:info.revision,contentHash:info.contentHash,selected,priority}))
+  return {items,complete:!incomplete}
 }
 
 // Open Clank injects its central lifecycle catalogue separately from each
@@ -365,6 +426,7 @@ async function _publishedOpenClankSkill(
   const lifecyclePath = path.join(path.dirname(match), "_lifecycle.json")
   try {
     const state = JSON.parse(await fs.readFile(lifecyclePath, "utf-8"))
+    if (state?.metadata_pending != null) return undefined
     const pointer = state?.published
     if (pointer?.snapshot) {
       const base = path.resolve(path.dirname(match))
@@ -449,20 +511,62 @@ async function _publishedOpenClankSkill(
   return undefined
 }
 
+/** Verify the original catalogue file, without switching to a newer source. */
+export async function _sourceStillCurrent(skill: Info): Promise<boolean> {
+  if (!skill.sourceFileHash || skill.sourceFileDevice === undefined || skill.sourceFileInode === undefined) return false
+  let file: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    file = await open(skill.location, "r")
+    const metadata = await file.stat()
+    if (!metadata.isFile() || metadata.size > 4 * 1024 * 1024 ||
+        metadata.dev !== skill.sourceFileDevice || metadata.ino !== skill.sourceFileInode) return false
+    const bytes = await file.readFile()
+    const after = await file.stat()
+    return bytes.length === metadata.size && after.size === metadata.size && after.mtimeMs === metadata.mtimeMs &&
+      createHash("sha256").update(bytes).digest("hex") === skill.sourceFileHash
+  } catch {
+    return false
+  } finally {
+    await file?.close()
+  }
+}
+
+/** Check a body load after canonical permission. Metadata-qualified loads do not record a use count. */
+export async function _prepareBody(skill: Info, sessionID: string, actor?: ActorExecutionIdentity): Promise<boolean> {
+  if (!(await _sourceStillCurrent(skill))) return false
+  if (skill.metadataClaim) {
+    if (!actor || actor.sessionID!==sessionID || !actor.rootOperationID || !actor.innerTurnID || !skill.skillID || !skill.revision ||
+        !skill.contentHash || !skill.metadataSnapshotSHA256 || !skill.metadataReceiptSHA256) return false
+    try {
+      const managed=await import("@/acp/managed-provider")
+      if (!managed.enabled()) return false
+      const result=await managed.managedHostCall("_openclank/session/v1/skill/metadata-current",{
+        sessionID,rootOperationID:actor.rootOperationID,actorID:actor.actorID,executionRevision:actor.executionRevision,innerTurnID:actor.innerTurnID,
+        skillID:skill.skillID,revision:skill.revision,contentHash:skill.contentHash,snapshotSHA256:skill.metadataSnapshotSHA256,metadataReceiptSHA256:skill.metadataReceiptSHA256,
+      })
+      if (result.state!=="ready" || !(await _sourceStillCurrent(skill))) return false
+      // The existing child usage writer cannot revalidate the host's domain
+      // authority. Do not fabricate a usage event for this optional path.
+      return true
+    } catch { return false }
+  }
+  return _writeUsage(skill,sessionID,actor)
+}
+
 export async function _writeUsage(
   skill: Pick<Info, "name" | "skillID" | "revision" | "contentHash" | "owner" | "location">,
   sessionID: string,
+  actorExecution?: ActorExecutionIdentity,
 ): Promise<boolean> {
   if (!_isOpenClankSkill(skill.location)) return true
   if (!skill.skillID || !skill.revision || !skill.contentHash) return false
   try {
-    const client = await getSharedMcpClient(sessionID)
-    const result = await callMemoryTool(client, "record_skill_usage", {
+    const result = await callBoundOpenClankTool(sessionID, "record_skill_usage", {
       name: skill.name,
       skill_id: skill.skillID,
       revision: skill.revision,
       content_hash: skill.contentHash,
-    })
+    }, actorExecution, "skill")
     const block = result.content.find((item) => item.type === "text")
     if (!block || block.type !== "text") return false
     const payload = JSON.parse(block.text)
@@ -501,6 +605,8 @@ type State = {
   skills: Record<string, Info>
   dirs: Set<string>
   priorities: Record<string, number>
+  shadows: Array<{info: Info; priority: number}>
+  shadowsIncomplete: boolean
 }
 
 type DiscoveryState = {
@@ -521,9 +627,13 @@ export interface Interface {
   readonly all: () => Effect.Effect<Info[]>
   readonly dirs: () => Effect.Effect<string[]>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Info[]>
+  /** Optional process-local evidence, invalidated with the actual catalog scope. */
+  readonly availableWithProvenance?: (agent?: Agent.Info) => Effect.Effect<{items:Info[]; current:()=>boolean}>
   readonly reload: () => Effect.Effect<void>
   /** Resolve a skill for model or user-explicit invocation with trust/visibility gates. */
   readonly getForInvocation: (name: string, mode: InvocationMode) => Effect.Effect<InvocationResult>
+  /** Content-free candidates, filtered through the current actor's canonical skill permission. */
+  readonly resolutionCandidates: (name: string, agent: Agent.Info, mode: InvocationMode) => Effect.Effect<{items: Array<{name: string; skillID?: string; revision?: number; contentHash?: string; selected: boolean; priority: number}>, complete: boolean}>
   /** Skills a user may explicitly invoke (slash/mention), including trusted hidden. */
   readonly explicit: () => Effect.Effect<Info[]>
 }
@@ -568,6 +678,12 @@ const add = Effect.fnUntraced(function* (
   if (!activation) return
   const activeMd = activation.md
 
+  const hasClaim=Object.prototype.hasOwnProperty.call(activeMd.data,"openclank_metadata_v1")
+  const claim=hasClaim ? parseResourceMetadataClaim(activeMd.data.openclank_metadata_v1) : undefined
+  if(hasClaim && !claim)return
+  const declaredAliases=activeMd.data.aliases
+  const claimAliases=claim?.metadata.aliases
+  if(claimAliases && declaredAliases && JSON.stringify(claimAliases)!==JSON.stringify(declaredAliases))return
   const parsed = Info.pick({
     name: true,
     description: true,
@@ -577,7 +693,7 @@ const add = Effect.fnUntraced(function* (
   }).safeParse({
     name: activeMd.data.name,
     description: activeMd.data.description,
-    aliases: activeMd.data.aliases,
+    aliases: claimAliases ?? declaredAliases,
     hidden: activeMd.data.hidden,
     disableModelInvocation: activeMd.data["disable-model-invocation"] ?? activeMd.data.disableModelInvocation,
   })
@@ -586,11 +702,12 @@ const add = Effect.fnUntraced(function* (
   const isBundled = bundledRoots.some((root) => match.startsWith(root))
   const existing = state.skills[parsed.data.name]
 
+  let candidateWins = true
   if (existing) {
     const existingPriority = state.priorities[parsed.data.name] ?? Number.MAX_SAFE_INTEGER
     const explicitBundledOverride = process.env.MIMOCODE_ALLOW_BUNDLED_SKILL_OVERRIDE === "1"
     const bundledProtected = existing.bundled && !isBundled && !explicitBundledOverride
-    const candidateWins =
+    candidateWins =
       !bundledProtected &&
       (
         (explicitBundledOverride && existing.bundled && !isBundled) ||
@@ -606,18 +723,28 @@ const add = Effect.fnUntraced(function* (
       existingPriority,
       duplicatePriority: priority,
     })
-    if (!candidateWins) return
   }
 
   const activeLocation = activation.location ?? match
-  state.dirs.add(path.dirname(activeLocation))
-  state.priorities[parsed.data.name] = priority
-  state.skills[parsed.data.name] = {
+  // Record the file identity associated with the parsed catalogue snapshot.
+  const identity = yield* Effect.promise(() => stat(activeLocation).catch(() => undefined))
+  const sourceFileHash = activeMd.orig ? createHash("sha256").update(activeMd.orig).digest("hex") : undefined
+  const metadataRows=Object.values(activation.state?.metadata_receipts ?? {}).filter((row:any)=>row && row.content_hash===activeMd.data.content_hash && row.revision===activeMd.data.revision)
+  const metadataReceipt=metadataRows.length===1 ? metadataRows[0] as any : undefined
+  const candidate: Info = {
     name: parsed.data.name,
     description: parsed.data.description,
     aliases: parsed.data.aliases,
     location: activeLocation,
     content: activeMd.content,
+    sourceFileHash,
+    sourceFileDevice: identity?.dev,
+    sourceFileInode: identity?.ino,
+    metadataClaim:hasClaim || undefined,
+    metadataReceiptSHA256:hasClaim && activation.state?.metadata_profile==="skill-metadata-writer.v1" && typeof metadataReceipt?.receipt_sha256==="string" ? metadataReceipt.receipt_sha256 : undefined,
+    metadataSnapshotSHA256:hasClaim && typeof activation.state?.published?.snapshot_sha256==="string" ? activation.state.published.snapshot_sha256 : undefined,
+    domainRefs:hasClaim && activation.state?.metadata_profile==="skill-metadata-writer.v1" && metadataReceipt && activation.state?.published
+      ? claim?.metadata.domain_refs : undefined,
     hidden: remote ? true : parsed.data.hidden ?? (activation.state?.published ? false : undefined),
     disableModelInvocation: parsed.data.disableModelInvocation,
     bundled: isBundled || undefined,
@@ -682,6 +809,15 @@ const add = Effect.fnUntraced(function* (
         ? activation.state.attestations[activeMd.data.content_hash].audited_at
         : undefined,
   }
+  if (existing) {
+    const shadow = candidateWins ? {info:existing, priority:state.priorities[parsed.data.name] ?? Number.MAX_SAFE_INTEGER} : {info:candidate, priority}
+    if (state.shadows.length < 128) state.shadows.push({info:{...shadow.info,content:""},priority:shadow.priority})
+    else state.shadowsIncomplete = true
+  }
+  if (!candidateWins) return
+  state.dirs.add(path.dirname(activeLocation))
+  state.priorities[parsed.data.name] = priority
+  state.skills[parsed.data.name] = candidate
 })
 
 const scan = Effect.fnUntraced(function* (
@@ -835,6 +971,8 @@ const loadSkills = Effect.fnUntraced(function* (state: State, discovered: Discov
   log.info("init", { count: Object.keys(state.skills).length })
 })
 
+const catalogLifetimes = new WeakMap<State, {alive:boolean}>()
+
 export class Service extends Context.Service<Service, Interface>()("@opencode/Skill") {}
 
 export const layer = Layer.effect(
@@ -851,8 +989,11 @@ export const layer = Layer.effect(
     )
     const state = yield* InstanceState.make(
       Effect.fn("Skill.state")(function* (ctx) {
-        const s: State = { skills: {}, dirs: new Set(), priorities: {} }
+        const s: State = { skills: {}, dirs: new Set(), priorities: {}, shadows: [], shadowsIncomplete: false }
         yield* loadSkills(s, yield* InstanceState.get(discovered), bus)
+        const lifetime = {alive:true}
+        catalogLifetimes.set(s, lifetime)
+        yield* Effect.addFinalizer(() => Effect.sync(() => { lifetime.alive = false }))
         return s
       }),
     )
@@ -872,22 +1013,44 @@ export const layer = Layer.effect(
       return (yield* InstanceState.get(discovered)).dirs
     })
 
+    const selectAvailable = (s:State, agent?:Agent.Info) => {
+      const list = Object.values(s.skills).filter((item) => isModelInvocable(item)).toSorted((a, b) => a.name.localeCompare(b.name))
+      return agent ? list.filter((item) => Permission.evaluate("skill", item.name, agent.permission).action !== "deny") : list
+    }
     const available = Effect.fn("Skill.available")(function* (agent?: Agent.Info) {
+      return selectAvailable(yield* InstanceState.get(state), agent)
+    })
+    const availableWithProvenance = Effect.fn("Skill.availableWithProvenance")(function* (agent?: Agent.Info) {
       const s = yield* InstanceState.get(state)
-      // Model-facing catalog: only authorized, trusted, enabled, model-invocable
-      // skills. Hidden, disabled, untrusted, revoked, staged, and
-      // disable-model-invocation skills stay out of autonomous discovery.
-      let list: Info[] = Object.values(s.skills).filter((skill) => isModelInvocable(skill))
-
-      list = list.toSorted((a, b) => a.name.localeCompare(b.name))
-      if (!agent) return list
-      return list.filter((skill) => Permission.evaluate("skill", skill.name, agent.permission).action !== "deny")
+      const lifetime = catalogLifetimes.get(s)
+      const items = selectAvailable(s, agent)
+      const catalogSnapshot = (list:Info[]) => {
+        if (list.length > 128) return
+        for (const item of list) {
+          const fields = [item.name,item.description,item.skillID,item.source,item.sourceStatus,item.sourceRevision,item.owner,item.location,item.trust,item.status]
+          if (fields.some(value=>typeof value === "string" && Buffer.byteLength(value,"utf8") > 4096) ||
+              (item.platforms?.length ?? 0)>128 || (item.requiresToolsets?.length ?? 0)>128 || (item.domainRefs?.length ?? 0)>128 ||
+              [...(item.platforms ?? []),...(item.requiresToolsets ?? []),...(item.domainRefs ?? []).map(ref=>ref.block_id)].some(value=>typeof value !== "string" || Buffer.byteLength(value,"utf8")>4096)) return
+        }
+        const value=fmt(list,{verbose:true})
+        return Buffer.byteLength(value,"utf8")<=65536 ? value : undefined
+      }
+      const snapshot = catalogSnapshot(items)
+      return {items, current: () => {
+        try { return !!lifetime?.alive && snapshot !== undefined && catalogSnapshot(selectAvailable(s, agent)) === snapshot } catch { return false }
+      }}
     })
 
     const getForInvocation = Effect.fn("Skill.getForInvocation")(function* (name: string, mode: InvocationMode) {
       const s = yield* InstanceState.get(state)
-      const item = s.skills[name]
-      return evaluateInvocation(item, mode) as InvocationResult
+      return resolveSkillInvocation(s.skills, name, mode)
+    })
+
+    const resolutionCandidates = Effect.fn("Skill.resolutionCandidates")(function* (name: string, agent: Agent.Info, mode: InvocationMode) {
+      const s=yield* InstanceState.get(state)
+      if (!agent || !agent.permission) return {items: [], complete: false}
+      return resolutionCandidateViews(s.skills,s.priorities,s.shadows,s.shadowsIncomplete,name,mode,
+        (canonical)=>Permission.evaluate("skill",canonical,agent.permission).action!=="deny")
     })
 
     const explicit = Effect.fn("Skill.explicit")(function* () {
@@ -902,7 +1065,7 @@ export const layer = Layer.effect(
       yield* InstanceState.invalidate(state)
     })
 
-    return Service.of({ get, all, dirs, available, reload, getForInvocation, explicit })
+    return Service.of({ get, all, dirs, available, availableWithProvenance, reload, getForInvocation, resolutionCandidates, explicit })
   }),
 )
 
@@ -915,12 +1078,27 @@ export const defaultLayer = layer.pipe(
 
 export function fmt(list: Info[], opts: { verbose: boolean }) {
   if (list.length === 0) return "No skills are currently available."
+  const domains = (skill:Info) => {
+    if (!skill.domainRefs) return ""
+    const refs=skill.domainRefs.slice(0,8).map(({block_id,revision})=>({block_id,revision}))
+    const encoded=JSON.stringify(refs).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    return `recorded domain refs ${encoded}; ${skill.domainRefs.length>refs.length ? "additional refs omitted; " : ""}revalidated on load`
+  }
+  const sorted=list.toSorted((a,b)=>a.name.localeCompare(b.name))
+  const marker=opts.verbose ? "  <recorded_domains_omitted>additional domain annotations omitted</recorded_domains_omitted>" : "Additional domain annotations omitted."
+  let remaining=8192-Buffer.byteLength(marker,"utf8")-1, omitted=false
+  const annotated=sorted.map(skill=>{
+    const annotation=domains(skill)
+    const wrapped=annotation ? (opts.verbose ? `    <recorded_domains>${annotation}</recorded_domains>` : ` (${annotation})`) : ""
+    const bytes=Buffer.byteLength(wrapped,"utf8")+(opts.verbose && wrapped ? 1 : 0)
+    if(bytes>remaining) {omitted=true;return {skill,wrapped:""}}
+    remaining-=bytes
+    return {skill,wrapped}
+  })
   if (opts.verbose) {
     return [
       "<available_skills>",
-      ...list
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .flatMap((skill) => [
+      ...annotated.flatMap(({skill,wrapped}) => [
           "  <skill>",
           `    <name>${skill.name}</name>`,
           `    <description>${skill.description}</description>`,
@@ -931,6 +1109,7 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
           `    <source>${skill.source ?? "unknown"}</source>`,
           `    <source_status>${skill.sourceStatus ?? ""}</source_status>`,
           `    <source_revision>${skill.sourceRevision ?? ""}</source_revision>`,
+          ...(wrapped ? [wrapped] : []),
           `    <owner>${skill.owner ?? ""}</owner>`,
           `    <last_audit>${skill.lastAudit ?? ""}</last_audit>`,
           `    <platforms>${(skill.platforms ?? []).join(",")}</platforms>`,
@@ -938,18 +1117,18 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
           `    <location>${pathToFileURL(skill.location).href}</location>`,
           "  </skill>",
         ]),
+      ...(omitted ? [marker] : []),
       "</available_skills>",
     ].join("\n")
   }
 
   return [
     "## Available Skills",
-    ...list
-      .toSorted((a, b) => a.name.localeCompare(b.name))
-      .map(
-        (skill) =>
-          `- **${skill.name}** [${skill.trust ?? "unknown"} r${skill.revision ?? 1}; ${skill.source ?? "unknown"}${skill.sourceRevision ? `@${skill.sourceRevision}` : ""}]: ${skill.description}`,
+    ...annotated.map(
+        ({skill,wrapped}) =>
+          `- **${skill.name}** [${skill.trust ?? "unknown"} r${skill.revision ?? 1}; ${skill.source ?? "unknown"}${skill.sourceRevision ? `@${skill.sourceRevision}` : ""}]: ${skill.description}${wrapped}`,
       ),
+    ...(omitted ? [marker] : []),
   ].join("\n")
 }
 

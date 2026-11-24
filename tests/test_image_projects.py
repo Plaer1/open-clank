@@ -12,10 +12,12 @@ import base64
 import hashlib
 import json
 import threading
+import io
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from PIL import Image
 
 from core.database import Base, ManagedImageProject
 from src.openclank import image_projects as image_projects_module
@@ -34,6 +36,22 @@ from src.openclank.image_projects import (
     default_lore_capture,
     read_captured_preimage,
 )
+
+
+def test_portable_manifest_validates_additive_inpaint_sidecars():
+    output = io.BytesIO()
+    Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(output, format="PNG")
+    data = "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+    layer = {"id": "layer", "canvasW": 1, "canvasH": 1, "dataUrl": data}
+    base = image_projects_module.portable_manifest({"state": {"layers": [layer]}})
+    part = {"width": 1, "height": 1, "dataUrl": data}
+    layer["inpaintSource"] = {"v": 1, "padPx": 20, "ai": part, "base": part, "mask": part}
+    result = image_projects_module.portable_manifest({"state": {"layers": [layer]}})
+    assert len(base["payloads"]) == 1
+    assert [entry["path"] for entry in result["payloads"]][1:] == [f"/state/layers/0/inpaintSource/{key}/dataUrl" for key in ("ai", "base", "mask")]
+    layer["inpaintSource"]["mask"] = {**part, "width": 2}
+    with pytest.raises(ImageProjectError):
+        image_projects_module.portable_manifest({"state": {"layers": [layer]}})
 
 
 @pytest.fixture(autouse=True)

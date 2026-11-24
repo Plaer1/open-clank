@@ -182,12 +182,12 @@ def retrieve_personal(personal_index: List[Dict], query: str, k: int = 5,
     # First try vector search if RAGManager is available
     if rag_manager:
         try:
-            # Canonical Frankenmemory RAG is tenant-scoped.  A caller that
+            # Canonical Memery RAG is tenant-scoped.  A caller that
             # cannot prove its owner must not fall through to a global
             # keyword/vector result and accidentally leak another user's
             # documents. Older injected test doubles may still use the
             # ownerless signature.
-            if getattr(rag_manager, "backend", None) == "frankenmemory" and not owner:
+            if getattr(rag_manager, "backend", None) == "memery" and not owner:
                 return []
             try:
                 vector_results = rag_manager.search(
@@ -331,9 +331,9 @@ class PersonalDocsManager:
     ):
         """Remove a tracked directory and optionally its canonical RAG rows.
 
-        Account deletion stages personal bytes before the Frankenmemory owner
+        Account deletion stages personal bytes before the Memery owner
         purge.  That saga passes ``remove_rag=False`` so this manager updates
-        only its file-backed path registry; Frankenmemory remains the single
+        only its file-backed path registry; Memery remains the single
         transactional authority for tenant-row deletion.
         """
         # Normalize the path
@@ -360,7 +360,7 @@ class PersonalDocsManager:
                     except TypeError as exc:
                         # Older compatibility stores did not accept tenant
                         # context. Keep their test/legacy adapter working;
-                        # canonical Frankenmemory implements the scoped form
+                        # canonical Memery implements the scoped form
                         # and therefore never takes this fallback.
                         if "owner" not in str(exc):
                             raise

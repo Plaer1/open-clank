@@ -41,7 +41,7 @@ def test_spares_concurrent_app_py_child():
 
 def test_ignores_personal_mimo_serve():
     assert _is_orphaned_open_clank_agent_worker(
-        "/workspace/bin/mimo serve --hostname 127.0.0.1 --port 0",
+        "/workspace/bin/openclank-engine serve --hostname 127.0.0.1 --port 0",
         ppid=1,
         me=1447823,
         parent_cmd=None,

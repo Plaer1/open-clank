@@ -16,16 +16,14 @@ MiMo Auto is built in as a free-for-limited-time channel, so you can start with 
 
 ## Quick Start
 
+npm is in limited support. Prefer the native installer over `npm install -g @mimo-ai/cli`:
+
 ```bash
 # One-line install (macOS / Linux)
 curl -fsSL https://mimo.xiaomi.com/install | bash
 
 # One-line install (Windows PowerShell)
 powershell -ep Bypass -c "irm https://mimo.xiaomi.com/install.ps1 | iex"
-
-# Or install via npm (all platforms)
-# Mirror registries (e.g. cnpm/taobao) may have delayed platform package sync
-npm install -g @mimo-ai/cli --registry https://registry.npmjs.org
 
 # Run
 mimo
@@ -43,15 +41,15 @@ The first launch guides you through configuration automatically. Supported optio
 
 ## Core Features
 
-- **Multiple Agents** — build (default), plan (read-only analysis), compose (specs-driven orchestration); press `Tab` to switch
+- **Multiple Agents** — build (default), plan (read-only analysis); press `Tab` to switch
 - **Persistent Memory** — cross-session project knowledge, checkpoints, and task progress powered by SQLite FTS5
 - **Intelligent Context Management** — automatic checkpoints, context reconstruction, and budgeted injection to stay within model limits
 - **Task Tracking** — tree-shaped task system integrated with the checkpoint system
 - **Subagent System** — parallel subagents with lifecycle tracking, cancellation, and background execution
 - **Goal / Stop Condition** — judge model prevents premature stops during autonomous work
-- **Compose Mode** — structured workflow for specs-driven development; recommended via the `/compose-next` skill on the build agent
+- **Compose Mode** — end-to-end feature delivery via the `/compose-next` skill
 - **Builtin Skills** — 20+ reusable instruction sets (PDF/Office generation, research, design, and more), invoked via `/skill-name` or auto-matched by relevance
-- **Workflows** — deterministic multi-agent orchestration scripts, including built-in compose, deep-research, fact-check, and research-experiment pipelines
+- **Dynamic Workflow** — deterministic multi-agent orchestration scripts, including built-in deep-research, fact-check, and research-experiment pipelines
 - **Voice Input** — real-time streaming voice input powered by TenVAD and MiMo ASR
 - **Dream & Distill** — extract knowledge into memory (`/dream`) and discover reusable workflows (`/distill`)
 

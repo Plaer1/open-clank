@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open Clank Setup · Theme preview</title>
+<link rel="stylesheet" href="theme.css">
+<main>
+  <div id="setup" class="oc-setup"></div>
+  <form class="preview-controls" aria-label="Preview controls">
+    <strong>Preview</strong>
+    <label>Platform <select name="platform"><option value="linux">Linux · AppImage</option><option value="mac">macOS</option><option value="windows">Windows</option></select></label>
+    <label>Scenario <select name="scenario"><option value="fresh">New installation</option><option value="update">Existing installation</option><option value="error">Interrupted install</option></select></label>
+    <button type="button" id="restart">Restart preview</button>
+  </form>
+</main>
+<script src="setup.js"></script><script src="preview.js"></script>
+</html>

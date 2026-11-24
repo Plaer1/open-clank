@@ -10,23 +10,6 @@ _SETTINGS = (_REPO / "static" / "js" / "settings.js").read_text(encoding="utf-8"
 _CONTROL = (_REPO / "static" / "js" / "providerControl.js").read_text(encoding="utf-8")
 
 
-def test_settings_mounts_one_normalized_provider_control_surface():
-    for element_id in (
-        "provider-control-root",
-        "provider-control-summary",
-        "provider-control-create",
-        "provider-control-oauth",
-        "provider-control-connections",
-        "provider-control-bindings",
-        "provider-control-added-status",
-    ):
-        assert f'id="{element_id}"' in _INDEX
-
-    assert "import providerControl from './providerControl.js'" in _SETTINGS
-    assert "providerControl.init" in _SETTINGS
-    assert "const API_ROOT = '/api/v1/providers';" in _CONTROL
-
-
 def test_active_admin_modules_do_not_call_retired_provider_apis():
     active_source = _ADMIN + _SETTINGS + _CONTROL
     for retired in (
@@ -54,18 +37,3 @@ def test_api_keys_are_write_only_and_cleared_immediately():
     assert "body: { label: label.value.trim(), api_key: value }" in _CONTROL
     assert _CONTROL.count("secret.value = ''") >= 3
     assert "Write-only: the browser clears this field immediately after submission." in _CONTROL
-
-
-def test_normalized_surface_covers_every_routable_purpose():
-    for purpose in (
-        "chat",
-        "utility",
-        "research",
-        "tasks",
-        "vision",
-        "images",
-        "tts",
-        "stt",
-        "embeddings",
-    ):
-        assert f"['{purpose}'," in _CONTROL

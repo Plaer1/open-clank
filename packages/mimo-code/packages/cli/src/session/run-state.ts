@@ -1,0 +1,361 @@
+import { EffectLogger, InstanceState } from "@/effect"
+import { Instance } from "@/project/instance"
+import { Runner } from "@/effect"
+import { Effect, Fiber, Layer, Scope, Context } from "effect"
+import * as Session from "./session"
+import { MessageV2 } from "./message-v2"
+import { SessionID } from "./schema"
+import { SessionStatus } from "./status"
+import { ActorRegistry } from "@/actor/registry"
+import { orphanToolIdleSweepRef, assistantMessageIdsSnapshotRef } from "./orphan-tool-idle-hook"
+import { Database } from "@/storage"
+import { ExecutionOwnership } from "./execution-ownership"
+
+export type ManagedFinalizingIdentity = { rootSessionID: string; rootOperationID: string; innerTurnID: string; executionRevision: number; turnOutcome: "completed" | "cancelled" | "error"; executionOutcome: "success" | "failure" | "cancelled" }
+
+export interface Interface {
+  readonly armManagedFinalizing: (sessionID: SessionID, agentID: string, identity: ManagedFinalizingIdentity) => Effect.Effect<(() => void) | undefined>
+  readonly hasManagedFinalizing: (sessionID: SessionID, agentID: string, identity: ManagedFinalizingIdentity) => Effect.Effect<boolean>
+  readonly busyGuard?: (sessionID: SessionID, agentID?: string) => Effect.Effect<() => boolean>
+  readonly assertNotBusy: (sessionID: SessionID, agentID?: string) => Effect.Effect<void, Session.BusyError>
+  readonly sessionExecutionSnapshot: (sessionID: SessionID, agentID?: string) => Effect.Effect<{ readonly isIdle: () => boolean; readonly isCancelled: () => boolean }>
+  readonly executionSnapshot: (sessionID: SessionID, agentID: string) => Effect.Effect<{
+    readonly fiber: Fiber.Fiber<MessageV2.WithParts> | undefined
+    readonly isCurrent: () => boolean
+  }>
+  readonly start: (sessionID: SessionID, agentID: string, onInterrupt: Effect.Effect<MessageV2.WithParts>, work: Effect.Effect<MessageV2.WithParts>, admit?: Effect.Effect<void>) => Effect.Effect<void, Session.BusyError>
+  /** [C001] Start and return cancel bound to this run id only. */
+  readonly startOwned: (
+    sessionID: SessionID,
+    agentID: string,
+    onInterrupt: Effect.Effect<MessageV2.WithParts>,
+    work: Effect.Effect<MessageV2.WithParts>,
+    admit?: Effect.Effect<void>,
+  ) => Effect.Effect<{ readonly runId: number; readonly interruptOwned: Effect.Effect<void>; readonly awaitExit: Effect.Effect<void> }, Session.BusyError>
+  readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly cancelActor: (sessionID: SessionID, agentID: string) => Effect.Effect<void>
+  readonly ensureRunning: (
+    sessionID: SessionID,
+    agentID: string,
+    onInterrupt: Effect.Effect<MessageV2.WithParts>,
+    work: Effect.Effect<MessageV2.WithParts>,
+  ) => Effect.Effect<MessageV2.WithParts>
+  /** [R003] Exclusive: run work only if idle; busy → BusyError. Never join. */
+  readonly ensureExclusive: (
+    sessionID: SessionID,
+    agentID: string,
+    onInterrupt: Effect.Effect<MessageV2.WithParts>,
+    work: Effect.Effect<MessageV2.WithParts>,
+  ) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
+  /** Open Clank name for the same guarantee as `ensureExclusive` (run only when idle, wait for the result). */
+  readonly startAndWait: Interface["ensureExclusive"]
+  readonly startShell: (
+    sessionID: SessionID,
+    onInterrupt: Effect.Effect<MessageV2.WithParts>,
+    work: Effect.Effect<MessageV2.WithParts>,
+  ) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@opencode/SessionRunState") {}
+
+/**
+ * Runners are keyed by session then agentID — NOT a flat `${sessionID}:${agentID}`
+ * string. Flat prefixes are ambiguous when a legal imported session id itself
+ * contains a colon (`ses_example` vs `ses_example:child`).
+ */
+type RunnersBySession = Map<SessionID, Map<string, Runner.Runner<MessageV2.WithParts, never, Session.BusyError>>>
+
+export const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const status = yield* SessionStatus.Service
+    const registry = yield* ActorRegistry.Service
+    const elog = EffectLogger.create({ service: "SessionRunState" })
+
+    const state = yield* InstanceState.make(
+      Effect.fn("SessionRunState.state")(function* () {
+        const scope = yield* Scope.Scope
+        const runners: RunnersBySession = new Map()
+        const cancellations = new Map<SessionID, number>()
+        const actorCancellations = new Map<SessionID, Map<string, number>>()
+        const finalizing = new WeakMap<object, { identity: ManagedFinalizingIdentity; fiber: Fiber.Fiber<MessageV2.WithParts> }>()
+        yield* Effect.addFinalizer(
+          Effect.fnUntraced(function* () {
+            const all = [...runners.values()].flatMap((byAgent) => [...byAgent.values()])
+            yield* Effect.forEach(all, (runner) => runner.cancel, {
+              concurrency: "unbounded",
+              discard: true,
+            })
+            runners.clear()
+          }),
+        )
+        return { runners, scope, cancellations, actorCancellations, finalizing }
+      }),
+    )
+
+    const runner = Effect.fn("SessionRunState.runner")(function* (
+      sessionID: SessionID,
+      agentID: string,
+      onInterrupt: Effect.Effect<MessageV2.WithParts>,
+    ) {
+      const data = yield* InstanceState.get(state)
+      let byAgent = data.runners.get(sessionID)
+      if (!byAgent) {
+        byAgent = new Map()
+        data.runners.set(sessionID, byAgent)
+      }
+      const existing = byAgent.get(agentID)
+      if (existing) return existing
+      const isMain = agentID === "main"
+      const directory = yield* InstanceState.directory
+      const next = Runner.make<MessageV2.WithParts, never, Session.BusyError>(data.scope, {
+        onRunStart: Effect.sync(() => Instance.claim(directory)),
+        onShellStart: Effect.sync(() => Instance.claim(directory)),
+        label: `${sessionID}:${agentID}`,
+        onReentryWarn: (info) => elog.warn("runner-reentry", info),
+        // Do NOT delete Runners on idle: a waiter parked on Cancelling retries
+        // on this same instance after Idle — deleting it would start B on an
+        // unregistered Runner (RL-ORPHAN-C01). Applies to main AND non-main
+        // (Cancelling-wait is agent-agnostic in Runner.ensureRunning).
+        // Session idle status is main-only (actors do not publish session idle).
+        onIdle: isMain ? status.set(sessionID, { type: "idle" }) : Effect.void,
+        // Do not clobber session.status{retry} with busy: request-ladder retries
+        // re-enter the runner and would wipe the reconnect row mid-wait.
+        onBusy: isMain
+          ? Effect.gen(function* () {
+              const current = yield* status.get(sessionID)
+              if (current.type !== "retry") yield* status.set(sessionID, { type: "busy" })
+            })
+          : Effect.void,
+        // Child executors must observe cancellation, not a stale assistant.
+        onInterrupt: isMain ? onInterrupt : Effect.interrupt,
+        busy: () => new Session.BusyError(sessionID),
+      })
+      byAgent.set(agentID, next)
+      return next
+    })
+
+    const busyGuard = Effect.fn("SessionRunState.busyGuard")(function* (sessionID: SessionID, agentID = "main") {
+      const data = yield* InstanceState.get(state)
+      // Runners are kept after idle (upstream), so "busy" is the runner's own state, not its presence.
+      return () => data.runners.get(sessionID)?.get(agentID)?.busy === true
+    })
+
+    const ownedRunner = Effect.fn("SessionRunState.ownedRunner")(function* (
+      sessionID: SessionID,
+      agentID: string,
+      onInterrupt: Effect.Effect<MessageV2.WithParts>,
+    ) {
+      const identity = yield* ExecutionOwnership.captureIdentity
+      const check = Effect.sync(() => Database.use((db) => ExecutionOwnership.assertOwnership(db, sessionID, identity)))
+      yield* check
+      const active = yield* runner(sessionID, agentID, onInterrupt)
+      return { active, check, guard: (work: Effect.Effect<MessageV2.WithParts>) => check.pipe(Effect.andThen(work)) }
+    })
+
+    const sessionExecutionSnapshot = Effect.fn("SessionRunState.sessionExecutionSnapshot")(function* (sessionID: SessionID, agentID?: string) {
+      const data = yield* InstanceState.get(state)
+      const generation = data.cancellations.get(sessionID) ?? 0
+      const actorGeneration = agentID === undefined ? undefined : data.actorCancellations.get(sessionID)?.get(agentID) ?? 0
+      return {
+        isIdle: () => ![...(data.runners.get(sessionID)?.values() ?? [])].some((entry) => entry.busy),
+        isCancelled: () => (data.cancellations.get(sessionID) ?? 0) !== generation ||
+          (agentID !== undefined && (data.actorCancellations.get(sessionID)?.get(agentID) ?? 0) !== actorGeneration),
+      }
+    })
+
+    const executionSnapshot = Effect.fn("SessionRunState.executionSnapshot")(function* (sessionID: SessionID, agentID: string) {
+      const data = yield* InstanceState.get(state)
+      const current = () => {
+        const entry = data.runners.get(sessionID)?.get(agentID)?.state
+        if (!entry || entry._tag === "Idle") return undefined
+        return entry._tag === "Shell" ? entry.shell.fiber : entry.run.fiber
+      }
+      const fiber = current()
+      return { fiber, isCurrent: () => current() === fiber }
+    })
+
+    const armManagedFinalizing: Interface["armManagedFinalizing"] = (sessionID, agentID, identity) => Effect.gen(function* () {
+      const data = yield* InstanceState.get(state)
+      const runner = data.runners.get(sessionID)?.get(agentID)
+      const snapshot = yield* executionSnapshot(sessionID, agentID)
+      if (!runner || !snapshot.fiber || !snapshot.isCurrent() || data.finalizing.has(runner)) return undefined
+      const witness = { identity: Object.freeze({ ...identity }), fiber: snapshot.fiber }
+      data.finalizing.set(runner, witness)
+      return () => { if (data.finalizing.get(runner) === witness) data.finalizing.delete(runner) }
+    })
+    const hasManagedFinalizing: Interface["hasManagedFinalizing"] = (sessionID, agentID, identity) => Effect.gen(function* () {
+      const data = yield* InstanceState.get(state)
+      const runner = data.runners.get(sessionID)?.get(agentID)
+      const witness = runner && data.finalizing.get(runner)
+      const snapshot = yield* executionSnapshot(sessionID, agentID)
+      return !!witness && snapshot.fiber === witness.fiber && snapshot.isCurrent() &&
+        Object.keys(identity).every((key) => identity[key as keyof ManagedFinalizingIdentity] === witness.identity[key as keyof ManagedFinalizingIdentity])
+    })
+
+    const assertNotBusy = Effect.fn("SessionRunState.assertNotBusy")(function* (sessionID: SessionID, agentID = "main") {
+      const data = yield* InstanceState.get(state)
+      const existing = data.runners.get(sessionID)?.get(agentID)
+      if (existing?.busy) yield* Effect.fail(new Session.BusyError(sessionID))
+      return
+    })
+
+    /**
+     * Snapshot assistant message IDs while work is still exiting, then sweep
+     * orphans only on that set (RL-ORPHAN-D01). Field evidence: the original
+     * orphan sat on an INCOMPLETE assistant (completed only stamped at next
+     * prompt entry as Abandoned). Snapshot covers those messages; new turns
+     * create new message IDs and cannot enter an earlier snapshot.
+     */
+    const withOrphanSweep = (sessionID: SessionID, agentID: string, work: Effect.Effect<MessageV2.WithParts>) => {
+      if (agentID !== "main") return work
+      return work.pipe(
+        Effect.ensuring(
+          Effect.suspend(() =>
+            Effect.gen(function* () {
+              const sweep = orphanToolIdleSweepRef.current
+              const snapshot = assistantMessageIdsSnapshotRef.current
+              if (!sweep || !snapshot) return
+              const ownedMessageIds = yield* snapshot(sessionID)
+              yield* sweep(sessionID, { ownedMessageIds }).pipe(Effect.ignore)
+            }),
+          ),
+        ),
+      )
+    }
+
+    const start: Interface["start"] = Effect.fn("SessionRunState.start")(function* (
+      sessionID: SessionID,
+      agentID: string,
+      onInterrupt: Effect.Effect<MessageV2.WithParts>,
+      work: Effect.Effect<MessageV2.WithParts>,
+      admit?: Effect.Effect<void>,
+    ) {
+      const { active, check, guard } = yield* ownedRunner(sessionID, agentID, onInterrupt)
+      yield* active.start(guard((admit ?? Effect.void).pipe(Effect.andThen(withOrphanSweep(sessionID, agentID, guardedWork(sessionID, agentID, work))))), check)
+      return
+    })
+
+    const startOwned: Interface["startOwned"] = Effect.fn("SessionRunState.startOwned")(function* (
+      sessionID: SessionID,
+      agentID: string,
+      onInterrupt: Effect.Effect<MessageV2.WithParts>,
+      work: Effect.Effect<MessageV2.WithParts>,
+      admit?: Effect.Effect<void>,
+    ) {
+      const { active, check, guard } = yield* ownedRunner(sessionID, agentID, onInterrupt)
+      return yield* active.startOwned(guard((admit ?? Effect.void).pipe(Effect.andThen(withOrphanSweep(sessionID, agentID, guardedWork(sessionID, agentID, work))))), check)
+    })
+
+    // Process-group kill: session abort cancels EVERY runner under this session
+    // (main + actor/subagent slices). Orchestrator is unrelated.
+    //
+    // Do NOT unconditionally delete the captured runner after cancel: Runner.cancel
+    // transitions that Runner to Idle, but a replacement ensureRunning may already
+    // have reused it (or installed a newer fiber) before interrupt finishes.
+    // Unconditional delete orphans still-running work and makes assertNotBusy
+    // false-negative. onIdle is the identity-safe cleanup. Below, idle leftovers
+    // are removed only when NO runner under this session is still busy.
+    const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
+      const data = yield* InstanceState.get(state)
+      data.cancellations.set(sessionID, (data.cancellations.get(sessionID) ?? 0) + 1)
+      const byAgent = data.runners.get(sessionID)
+      if (!byAgent || byAgent.size === 0) {
+        yield* status.set(sessionID, { type: "idle" })
+        return
+      }
+      const targets = [...byAgent.values()]
+      yield* Effect.forEach(targets, (existing) => existing.cancel, {
+        concurrency: "unbounded",
+        discard: true,
+      })
+      // Idle only when nothing under this session is still busy (replacement
+      // work may have started on a reused Runner while cancel was interrupting).
+      const after = yield* InstanceState.get(state)
+      const current = after.runners.get(sessionID)
+      const stillBusy = current ? [...current.values()].some((r) => r.busy) : false
+      if (stillBusy) return
+      if (current) {
+        // Keep Runners registered (Idle): waiters parked on Cancelling retry
+        // on this instance (RL-ORPHAN-C01). Do not delete here.
+      }
+      // Main onIdle also sets idle; force-clear when main was already gone so
+      // `/session/status` never stays busy after a successful abort.
+      yield* status.set(sessionID, { type: "idle" })
+    })
+
+    const cancelActor = Effect.fn("SessionRunState.cancelActor")(function* (
+      sessionID: SessionID,
+      agentID: string,
+    ) {
+      const data = yield* InstanceState.get(state)
+      let cancellations = data.actorCancellations.get(sessionID)
+      if (!cancellations) {
+        cancellations = new Map()
+        data.actorCancellations.set(sessionID, cancellations)
+      }
+      cancellations.set(agentID, (cancellations.get(agentID) ?? 0) + 1)
+      const existing = data.runners.get(sessionID)?.get(agentID)
+      if (!existing || !existing.busy) return
+      yield* existing.cancel
+    })
+
+    // The lease is acquired by the owned work fiber, not by its caller: start()
+    // may return before that fiber and its children have actually settled.
+    const guardedWork = (sessionID: SessionID, agentID: string, work: Effect.Effect<MessageV2.WithParts>) =>
+      Effect.acquireUseRelease(
+        Effect.gen(function* () {
+          if (!(yield* registry.assertDirectoryActive(sessionID))) return yield* Effect.die(new Error("Execution directory is retired"))
+          const actor = yield* registry.get(sessionID, agentID)
+          if (actor && !(yield* registry.assertDirectoryActive(sessionID, agentID))) return yield* Effect.die(new Error("Execution directory is retired"))
+          const cwd = yield* InstanceState.directory
+          const directory = yield* Effect.tryPromise({try: async () => (await import("node:fs/promises")).realpath(cwd), catch: () => new Error("Execution directory unavailable")}).pipe(Effect.orDie)
+          const lease = yield* registry.admitExecutionDirectory(directory)
+          if (!lease) return yield* Effect.die(new Error("Execution directory unavailable"))
+          return lease
+        }),
+        (lease) => Effect.gen(function* () {
+          if (!(yield* registry.assertDirectoryActive(sessionID))) return yield* Effect.die(new Error("Execution directory is retired"))
+          const actor = yield* registry.get(sessionID, agentID)
+          if (actor && !(yield* registry.assertDirectoryActive(sessionID, agentID))) return yield* Effect.die(new Error("Execution directory is retired"))
+          return yield* work
+        }),
+        (lease) => Effect.sync(() => { lease.release() }),
+      )
+
+    const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
+      sessionID: SessionID,
+      agentID: string,
+      onInterrupt: Effect.Effect<MessageV2.WithParts>,
+      work: Effect.Effect<MessageV2.WithParts>,
+    ) {
+      const { active, check, guard } = yield* ownedRunner(sessionID, agentID, onInterrupt)
+      return yield* active.ensureRunning(guard(withOrphanSweep(sessionID, agentID, guardedWork(sessionID, agentID, work))), check)
+    })
+
+    const ensureExclusive = Effect.fn("SessionRunState.ensureExclusive")(function* (
+      sessionID: SessionID,
+      agentID: string,
+      onInterrupt: Effect.Effect<MessageV2.WithParts>,
+      work: Effect.Effect<MessageV2.WithParts>,
+    ) {
+      const { active, check, guard } = yield* ownedRunner(sessionID, agentID, onInterrupt)
+      return yield* active.ensureExclusive(guard(guardedWork(sessionID, agentID, work)), check)
+    })
+
+    const startShell = Effect.fn("SessionRunState.startShell")(function* (
+      sessionID: SessionID,
+      onInterrupt: Effect.Effect<MessageV2.WithParts>,
+      work: Effect.Effect<MessageV2.WithParts>,
+    ) {
+      const { active, check, guard } = yield* ownedRunner(sessionID, "main", onInterrupt)
+      return yield* active.startShell(guard(guardedWork(sessionID, "main", work)), check)
+    })
+
+    return Service.of({ busyGuard, assertNotBusy, executionSnapshot, sessionExecutionSnapshot, armManagedFinalizing, hasManagedFinalizing, cancel, cancelActor, ensureRunning, ensureExclusive, startAndWait: ensureExclusive, start, startOwned, startShell })
+  }),
+)
+
+export const defaultLayer = layer.pipe(Layer.provide(SessionStatus.defaultLayer), Layer.provide(ActorRegistry.defaultLayer))
+
+export * as SessionRunState from "./run-state"

@@ -2,12 +2,12 @@ import { createExplorerLayout, showExplorerCustomization } from './editor/explor
 import { isChatResource, dispatchFilesDestination, destinationLabel } from './copal/resourceDestinations.js';
 import { acknowledgeVisible } from './achievementProducer.js';
 import { filesServiceClient } from './filesServiceClient.js';
-import { filesFacadeClient } from './filesFacadeClient.js';
+import { filesFacadeClient, transferRootsToAsk } from './filesFacadeClient.js';
 import { createOpenClankWindow } from './copal/windows.js';
 import { fileIcon, fileIconKey, glyphIcon } from './langIcons.js';
 import { createResizablePane } from './editor/resizablePane.js';
 import { createExplorerTree } from './editor/explorerTree.js';
-import { createThumbnailLoader } from './editor/thumbnailLoader.js';
+import { createThumbnailLoader, thumbnailCacheKey } from './editor/thumbnailLoader.js';
 import { mountImageRegion } from './graphics/imageRegion.js';
 import { markTrustedJpegRepresentation } from './graphics/mediaImageAuthority.js';
 import {
@@ -17,8 +17,8 @@ import {
   sortEntries as sortEntryList,
   normalizeSortSpec,
 } from './editor/entryModel.js';
-import { isPreviewable, previewKind, readBoundedTextResponse } from './editor/previewModel.js';
-import { isTextPath, EDITOR_BINARY_SUFFIX_PATTERN } from './editor/languageRegistry.js';
+import { isPreviewable, previewKind, previewMime, readBoundedTextResponse, readIwiPreview, isMetadataInspection, metadataFormatId, metadataDetails, metadataLabel } from './editor/previewModel.js';
+import { acquirePreviewDependencies, createDependencyAcquisitionGuard, isDirectPreviewChild } from './browser/dependencyManifest.js';
 import uiModule from './ui.js';
 import * as Modals from './modalManager.js';
 import {
@@ -35,16 +35,20 @@ import {
 } from './filesSelectionModel.js';
 import { createWindowNavigation } from './copal/navigation.js';
 import { createFilesCanvasImagePayload, FILES_CANVAS_IMAGE_MIME } from './editor/clipboard-and-drop.js';
-import { openResourceHistory } from './historyView.js';
-import { registerAdapter } from './custom-context-menu.js';
-import { registerMenuDismiss } from './escMenuStack.js';
+import { openFolderHistory, openResourceHistory } from './historyView.js';
+import { openGitWorkbenchWindow } from './gitWorkbench.js';
+import { openContextActionMenu, registerAdapter } from './custom-context-menu.js';
 import { CODE_GRAPH_LABEL, graphDisabledReason, executeCodeGraphNavigation } from './copal/resourceGraphCommands.js';
 import { safeExternalDropSegment, safeExternalDropPath, applyRectangleSelection } from './filesDropModel.js';
+import {
+  fileResourceIsDirectory as isDirectory, fileResourceIsTextual as isTextualEntry, fileResourceCanOpen,
+  fileResourceCanOpenInEditor, fileResourceCanOpenCodeGraph, fileResourceCanShare, fileResourceCanBrowseHostFolder,
+  fileResourceCanReveal, fileResourceCanCopyPath, fileResourceCopyPath,
+} from './filesResourceActions.js';
 
-const FILES_FAVORITES_KEY = 'odysseus-files-favorites';
-const FILES_VIEW_PREFS_KEY = 'odysseus-files-view-preferences';
+const FILES_FAVORITES_KEY = 'openclank-files-favorites';
+const FILES_VIEW_PREFS_KEY = 'openclank-files-view-preferences';
 
-const EDITOR_BINARY_SUFFIX = new RegExp(EDITOR_BINARY_SUFFIX_PATTERN, 'i');
 const FILE_SORT_OPTIONS = Object.freeze([
   ['name:asc', 'Name ↑'],
   ['name:desc', 'Name ↓'],
@@ -70,6 +74,7 @@ const DEFAULT_FILES_SORT = Object.freeze({
 });
 const MAX_EXTERNAL_DROP_ENTRIES = FILES_MAX_DRAG_ITEMS * 5;
 const MAX_EXTERNAL_DROP_DEPTH = 16;
+const FILES_READ_RETRY_DELAYS = [1500, 4000, 10000, 20000];
 const CLANKER_HOME_PROVIDER = 'clanker';
 const LIBRARY_COLLECTION_VIEWS = Object.freeze({
   documents: 'documents:active',
@@ -95,6 +100,10 @@ export function createFilesBrowser(options = {}) {
   if (!document.querySelector('[data-files-workbench-style]')) { const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = new URL('../css/filesWorkbench.css', import.meta.url).href; link.dataset.filesWorkbenchStyle = ''; document.head.append(link); }
   let localMenu = null;
   let browserResize = null;
+  const readRecoveries = new Map();
+  let activeReadRetry = null;
+  let readRetryTimer = null;
+  let readRetryAttempt = 0;
   const id = options.id || `files-window-${++browserSequence}`;
   const hooks = {};
   const listeners = new AbortController();
@@ -116,6 +125,7 @@ const state = {
   lifecycleGeneration: 0,
   revealGeneration: 0,
   owner: '',
+  accountId: '',
   defaultPath: '',
   navigationGeneration: null,
   navigationController: null,
@@ -124,6 +134,8 @@ const state = {
   navigationRoots: [],
   explorerTree: null,
   favorites: [],
+  managedRootPicker: null,
+  libraryImportCapture: null,
   workspaces: [],
   currentWorkspaceId: '',
   favoritePaths: new Set(),
@@ -137,15 +149,17 @@ const state = {
   thumbnailObserver: null,
   thumbnailLoader: null,
   searchQuery: '',
-  actionMenu: null,
   watchController: null,
   watchResourceRef: '',
   watchEpoch: 0,
+  watchRetryRef: '',
+  watchFailures: 0,
   watchRefreshTimer: null,
   selectionModel: null,
   selectionModels: new Map(),
   activeColumnIndex: -1,
   pendingKeepBoth: null,
+  cleanupEpoch: 0,
   pendingImport: null,
   importControllers: new Set(),
   importCapabilities: null,
@@ -169,7 +183,7 @@ function syncCollectionLayout(tree = state.collectionTree) {
     if (!['copal','library','files'].includes(provider)) continue;
     const id = `collection:${provider}`;
     const find = () => [...tree.container.querySelectorAll('[data-explorer-id]')].find(item => item.dataset.explorerId === node.id);
-    const label = {copal:'Copal collections',library:'Library · documents, research and downloads',files:'Gallery collections'}[provider];
+    const label = {copal:'Workspace collections',library:'Library · documents, research and downloads',files:'Gallery collections'}[provider];
     explorerLayout.register({id,label,group:'application-collections',element:find,
       content:() => find()?.querySelector(':scope > [role="group"]'),
       getCollapsed:() => tree.getNode(node.id)?.expanded !== true,
@@ -222,23 +236,6 @@ function childPath(directory, name) {
   return base + '/' + child;
 }
 
-function isDirectory(entry) {
-  const kind = String(entry?.kind || '').toLowerCase();
-  return Array.isArray(entry?.capabilities) && entry.capabilities.includes('children')
-    || ['directory', 'recursive_directory', 'folder', 'virtual_folder', 'provider_root', 'album'].includes(kind);
-}
-
-function isTextualEntry(entry) {
-  const name = String(entry?.name || '');
-  if (EDITOR_BINARY_SUFFIX.test(name)) return false;
-  const capabilities = new Set(Array.isArray(entry?.capabilities) ? entry.capabilities : []);
-  if (capabilities.has('open_editor') || capabilities.has('edit') || capabilities.has('text')) return true;
-  if (entry?.open_target?.app === 'editor') return true;
-  const mime = String(entry?.mime_type || entry?.media_type || '').toLowerCase();
-  if (mime.startsWith('text/') || /(?:json|javascript|typescript|xml|yaml|toml|sql|markdown)/.test(mime)) return true;
-  return isTextPath(name);
-}
-
 function editorResourceAllowed(resource) { return options.surface !== 'editor' || !isChatResource(resource); }
 function confirmPickerEntry(entry) {
   if (!editorResourceAllowed(entry)) { setStatus('Chats belong in Chats or Library, outside Editor.', true); return false; }
@@ -263,11 +260,17 @@ function facadeEntry(resource) {
   if (capabilities.includes('download')) {
     entry.download_url = filesFacadeClient.contentUrl(entry.resource_ref, { purpose: 'download' });
   }
+  const iwiPreview = entry.format?.formatId === 'iwi' && entry.format?.operations?.preview?.available === true;
+  if (iwiPreview) entry.preview_kind = 'image';
   if (capabilities.includes('preview') && entry.preview_kind) {
-    entry.preview_url = filesFacadeClient.contentUrl(entry.resource_ref, { purpose: 'preview' });
-    if (entry.preview_kind === 'image') entry.thumbnail_url = entry.preview_url;
+    const expectedRevision = iwiPreview ? entry.format?.providerRevision : null;
+    if (!iwiPreview || expectedRevision) {
+      entry.preview_url = filesFacadeClient.contentUrl(entry.resource_ref, { purpose:'preview', expectedRevision });
+      if (entry.preview_kind === 'image') entry.thumbnail_url = iwiPreview
+        ? filesFacadeClient.thumbnailUrl(entry.resource_ref, { width:192, height:192, expectedRevision }) : entry.preview_url;
+    }
   }
-  if (entry.provider === 'host' && capabilities.includes('preview') && entry.native_thumbnail_available !== false) {
+  if (!iwiPreview && entry.provider === 'host' && capabilities.includes('preview') && entry.native_thumbnail_available !== false) {
     // macOS Quick Look supplies content pixels only. The request is lazy and
     // failures retain the universal Open Clank glyph already in the tile.
     entry.native_thumbnail_url = filesFacadeClient.thumbnailUrl(entry.resource_ref, {
@@ -404,20 +407,250 @@ function copalWorkspace() {
   const context = typeof window.__odysseusGetActiveCopalContext === 'function'
     ? window.__odysseusGetActiveCopalContext()
     : null;
-  const workspace = String(context?.workspace || localStorage.getItem('odysseus-copal-workspace') || 'default').trim();
+  const workspace = String(context?.workspace || localStorage.getItem('openclank-copal-workspace') || 'default').trim();
   return /^[A-Za-z0-9._-]{1,64}$/.test(workspace) ? workspace : 'default';
 }
 
-function setStatus(message, bad = false) {
+function setStatus(message, bad = false, { keepUndo = false } = {}) {
   const paneStatus = state.shell?.querySelector('.files-pane-status');
-  if (paneStatus) { paneStatus.textContent = message || ''; paneStatus.classList.toggle('error', !!bad); }
+  // Only the passive item-count line may coexist with a pending trash Undo; any other message ends it.
+  if (!keepUndo) state.pendingUndo = null;
+  else if (state.pendingUndo && state.pendingUndo.path !== state.path) state.pendingUndo = null;
+  if (paneStatus) {
+    paneStatus.textContent = message || ''; paneStatus.classList.toggle('error', !!bad);
+    if (keepUndo && state.pendingUndo) paneStatus.append(' ', state.pendingUndo.button);
+  }
   const split = splits.get(id);
   if (!split || activeBrowser === api) state.nativeWindow?.setStatus(message, bad);
+}
+
+function filesReadErrorMessage(error, label) {
+  if (error?.status === 401 || error?.code === 'sign_in_required') return 'Your sign-in expired. Sign in again to open Files.';
+  if (error?.status === 403 || error?.code === 'permission_denied') return `Access to ${label} was refused.`;
+  if (error?.code === 'read_timeout') return `The host did not answer in time while reading ${label}.`;
+  if (error?.code === 'transport_unavailable') return `Could not connect to the host to read ${label}.`;
+  if (error?.status >= 500 || error?.code === 'provider_unavailable') return `The host or its file helper could not read ${label}.`;
+  if (error?.status === 404 || error?.code === 'resource_unavailable') return `The folder for ${label} could not be opened. It may have moved or be unavailable to the host OS.`;
+  return error?.message || `${label} could not be loaded.`;
+}
+
+function clearFilesReadRecovery(kind) {
+  if (!kind) {
+    for (const key of readRecoveries.keys()) clearFilesReadRecovery(key);
+    clearTimeout(readRetryTimer);
+    readRetryTimer = null;
+    return;
+  }
+  const recovery = readRecoveries.get(kind);
+  recovery?.notice.remove();
+  readRecoveries.delete(kind);
+}
+
+function nextFilesReadRecovery({automatic = false} = {}) {
+  return ['roots','folder','navigation','library','watch'].find(kind => {
+    const recovery = readRecoveries.get(kind);
+    return recovery?.current() && (!automatic || recovery.automatic);
+  });
+}
+
+function retryableFilesRead(error) {
+  if (confirmedFilesPolicyFailure(error) || error?.code === 'sign_in_required') return false;
+  return ['read_timeout','transport_unavailable','provider_unavailable','root_unavailable','policy_generation_changed','resource_ref_stale'].includes(error?.code)
+    || [500, 502, 503, 504].includes(error?.status);
+}
+
+function resetFilesReadRetry() {
+  clearTimeout(readRetryTimer);
+  readRetryTimer = null;
+  readRetryAttempt = 0;
+}
+
+function scheduleFilesReadRetry() {
+  if (readRetryTimer != null || activeReadRetry || document.hidden || !state.nativeWindow?.visible) return;
+  const kind = nextFilesReadRecovery({automatic:true});
+  if (!kind) {
+    if (!nextFilesReadRecovery()) resetFilesReadRetry();
+    return;
+  }
+  const attempt = kind === 'watch' ? Math.max(0, state.watchFailures - 1) : readRetryAttempt;
+  if (attempt >= FILES_READ_RETRY_DELAYS.length) return;
+  readRetryTimer = setTimeout(() => {
+    readRetryTimer = null;
+    if (document.hidden || !state.nativeWindow?.visible) return;
+    const next = nextFilesReadRecovery({automatic:true});
+    if (!next) return;
+    if (next !== 'watch') readRetryAttempt += 1;
+    void retryFilesRead(next);
+  }, FILES_READ_RETRY_DELAYS[attempt]);
+}
+
+function retryFilesRead(kind) {
+  const recovery = readRecoveries.get(kind);
+  if (!recovery || !recovery.current()) return;
+  if (activeReadRetry) return activeReadRetry;
+  clearTimeout(readRetryTimer);
+  readRetryTimer = null;
+  recovery.button.disabled = true;
+  activeReadRetry = Promise.resolve().then(() => recovery.current() && recovery.retry()).catch(error => {
+    if (readRecoveries.get(kind) !== recovery || !recovery.current()) return;
+    recovery.message.textContent = filesReadErrorMessage(error, recovery.label);
+    recovery.error = error;
+    recovery.automatic = retryableFilesRead(error);
+  }).finally(() => {
+    activeReadRetry = null;
+    if (readRecoveries.get(kind) === recovery) recovery.button.disabled = false;
+    scheduleFilesReadRetry();
+  });
+  return activeReadRetry;
+}
+
+function showFilesReadRetry(kind, label, error, retry) {
+  clearFilesReadRecovery(kind);
+  const account = String(document.body?.dataset?.accountId || '');
+  const owner = state.owner;
+  const workspace = state.currentWorkspaceId, copal = copalWorkspace(), lifecycle = state.lifecycleGeneration;
+  const intentGeneration = state.contentGeneration;
+  const current = () => state.nativeWindow?.visible === true && !listeners.signal.aborted
+    && account === String(document.body?.dataset?.accountId || '') && owner === state.owner && workspace === state.currentWorkspaceId
+    && copal === copalWorkspace() && lifecycle === state.lifecycleGeneration
+    && (['navigation','roots'].includes(kind) || intentGeneration === state.contentGeneration);
+  const text = filesReadErrorMessage(error, label);
+  const message = el('span',{text});
+  const button = el('button',{type:'button',class:'files-toolbar-button',text:'Retry'});
+  button.addEventListener('click', () => retryFilesRead(kind));
+  const notice = el('div',{class:'files-error',role:'status'},message,' ',button);
+  const inSidebar = kind === 'navigation' || options.navigationOnly;
+  const parent = inSidebar ? state.sidebar : state.shell?.querySelector('[data-files-body]');
+  if (!parent) return;
+  if (inSidebar) parent.append(notice);
+  else parent.before(notice);
+  readRecoveries.set(kind,{current,retry,notice,message,button,label,error,automatic:retryableFilesRead(error)});
+  if (['folder','roots','watch'].includes(kind)) setStatus(text,true);
+  scheduleFilesReadRetry();
+}
+
+function suspendFilesNavigation() {
+  destroyExplorerTree();
+  state.navigationRoots = [];
+  state.managedRoots = [];
+  state.favorites = [];
+  state.workspaces = [];
+  state.favoritePaths.clear();
+  state.navigationGeneration = null;
+  state.importCapabilities = null;
+  renderFavorites();
+  renderWorkspaces();
+  const add = state.shell?.querySelector('[data-files-add-host]');
+  if (add) { add.hidden = true; add.disabled = true; }
+  const sidebar = state.sidebar?.querySelector('[data-files-navigation-status]');
+  if (sidebar) sidebar.textContent = '';
 }
 
 function clearKeepBothRetry() {
   state.pendingKeepBoth = null;
   state.shell?.querySelector('.files-retry-keep-both')?.remove();
+  state.cleanupEpoch += 1;
+  state.shell?.querySelector('.files-finish-cleanup')?.remove();
+  state.shell?.querySelector('.files-undo-move')?.remove();
+}
+
+/** "Undo move" for a completed cross-root file move, next to "Finish cleanup". Refusals are shown in the server's plain words. */
+function addUndoMoveButton(operation, itemId, current) {
+  const toolbar = state.shell?.querySelector('.files-toolbar');
+  if (!toolbar || toolbar.querySelector('.files-undo-move')) return;
+  const button = el('button', { type:'button', class:'files-toolbar-button files-undo-move', title:'Move the file and its media back to where they were', text:'Undo move' });
+  button.addEventListener('click', async () => {
+    if (!current()) return;
+    button.disabled = true;
+    try {
+      const result = await filesFacadeClient.undoMove(operation, itemId);
+      if (!current()) return;
+      if (result.undo === 'committed') {
+        button.remove();
+        setStatus('Move undone.');
+        if (usesFacadeListing()) await refreshBrowser({ hierarchyProvider: null });
+      } else {
+        button.disabled = false;
+        setStatus('The undo is still finishing. Try again in a moment.', true);
+      }
+    } catch (error) {
+      if (current()) { button.disabled = false; setStatus(error?.message || 'The move could not be undone.', true); }
+    }
+  });
+  toolbar.append(button);
+}
+
+async function offerFinishCleanup(operation, generation, owner, lifecycle) {
+  const epoch = ++state.cleanupEpoch;
+  state.shell?.querySelector('.files-finish-cleanup')?.remove();
+  state.shell?.querySelector('.files-undo-move')?.remove();
+  const current = () => epoch === state.cleanupEpoch && owner === state.owner
+    && generation === filesPolicyGeneration() && lifecycle === state.lifecycleGeneration;
+  try {
+    const receipt = await filesFacadeClient.operationReceipt(operation, { generation });
+    if (!current()) return;
+    const undoable = receipt.items.find(item => item.outcome === 'committed' && item.undo === 'available');
+    if (undoable) addUndoMoveButton(operation, undoable.item_id, current);
+    const pending = receipt.items.find(item => item.outcome === 'committed' && item.cleanup === 'pending');
+    if (!pending) return;
+    const itemId = pending.item_id;
+    const toolbar = state.shell?.querySelector('.files-toolbar');
+    if (!toolbar) return;
+    const button = el('button', { type:'button', class:'files-toolbar-button files-finish-cleanup', title:'Finish cleanup for the completed move', text:'Finish cleanup' });
+    button.addEventListener('click', async () => {
+      if (!current()) return;
+      button.disabled = true;
+      try {
+        const before = await filesFacadeClient.operationReceipt(operation, { generation });
+        if (!current()) return;
+        const exact = before.items.find(item => item.item_id === itemId && item.outcome === 'committed');
+        if (!exact || exact.cleanup !== 'pending') {
+          button.remove();
+          if (exact?.cleanup === 'complete') setStatus('Move completed; cleanup is complete.');
+          return;
+        }
+        try {
+          await filesFacadeClient.finishFolderCleanup(operation, itemId);
+        } catch (error) {
+          if (error?.code !== 'operation_pending' || !current()) throw error;
+          const {createResourcePicker} = await import('./copal/resourcePicker.js');
+          if (!current()) return;
+          const selectedRoot = await new Promise(resolve => {
+            let selected = null;
+            state.managedRootPicker?.destroy();
+            const picker = createResourcePicker({client:filesFacadeClient, purpose:'folder', accountScope:owner,
+              workspaceScope:copalWorkspace(), generation, originWindow:state.nativeWindow,
+              getGeneration:()=>filesPolicyGeneration(), getAccountScope:()=>state.owner, getWorkspaceScope:()=>copalWorkspace(),
+              isOriginCurrent:current, rootLabel:'Choose the selected folder for cleanup',
+              isCompatible:resource=>resource.provider === 'host' && resource.capabilities.write ? '' : 'Choose a writable Host folder.',
+              onSelect:resource=>{ selected=resource; return true; },
+              onClose:cancelled=>{ if (state.managedRootPicker === picker) state.managedRootPicker=null; resolve(cancelled ? null : selected); }});
+            state.managedRootPicker=picker; void picker.open();
+          });
+          if (!selectedRoot || !current()) { if (current()) button.disabled=false; return; }
+          if (!selectedRoot.revision) throw new Error('Folder revision is unavailable.');
+          await filesFacadeClient.finishFolderCleanup(operation, itemId, {managedRoot:selectedRoot});
+        }
+        const after = await filesFacadeClient.operationReceipt(operation, { generation });
+        if (!current()) return;
+        const result = after.items.find(item => item.item_id === itemId && item.outcome === 'committed');
+        if (result?.cleanup === 'complete') {
+          button.remove();
+          setStatus('Move completed; cleanup is complete.');
+          void offerFinishCleanup(operation, generation, owner, lifecycle);
+        } else {
+          button.disabled = false;
+          setStatus('Move completed; cleanup is still pending.', true);
+        }
+      } catch (_) {
+        if (current()) { button.disabled = false; setStatus('Move completed; cleanup could not be confirmed.', true); }
+      }
+    });
+    toolbar.append(button);
+    setStatus('Move completed; cleanup is pending.');
+  } catch (_) {
+    // An unavailable or stale receipt is not authority to offer cleanup.
+  }
 }
 
 function offerKeepBothRetry(payload, destination, response) {
@@ -583,7 +816,8 @@ function rememberViewPreferences() {
 
 async function authenticatedOwner(signal = null) {
   try {
-    const response = await fetch('/api/auth/status', { credentials: 'same-origin', signal });
+    const response = await fetch('/api/auth/status', { credentials:'same-origin', cache:'no-store',
+      signal:AbortSignal.any([...(signal ? [signal] : []),AbortSignal.timeout(12_000)]) });
     if (!response.ok) {
       return {
         status: [401, 403].includes(response.status) ? 'invalid' : 'unavailable',
@@ -591,10 +825,11 @@ async function authenticatedOwner(signal = null) {
       };
     }
     const data = await response.json();
-    return { status: 'confirmed', owner: String(data?.username || '').trim() };
+    if (data?.authenticated !== true) return {status:'invalid',owner:''};
+    return {status:'confirmed',owner:String(data.username || '').trim(),account:String(data.account_id || ''),manager:data.is_admin === true};
   } catch (error) {
     if (error?.name === 'AbortError') throw error;
-    return { status: 'unavailable', owner: '' };
+    return {status:'unavailable',owner:'',code:error?.name === 'TimeoutError' ? 'read_timeout' : 'transport_unavailable'};
   }
 }
 
@@ -634,7 +869,7 @@ function filterTree(query = '') {
   state.treeFilter = String(query || '').trim().toLowerCase();
   const input = state.sidebar?.querySelector('.files-tree-filter');
   if (input && input.value !== String(query || '')) input.value = String(query || '');
-  for (const tree of [state.explorerTree, state.workspaceTree, state.favoriteTree, state.collectionTree]) {
+  for (const tree of [state.explorerTree, state.workspaceTree, state.favoriteTree, state.collectionTree, state.editorRootTree]) {
     if (!tree?.container) continue;
     const nodes = tree.snapshot().nodes;
     const allowed = new Set();
@@ -658,7 +893,7 @@ function mountExplorerTree(roots = state.navigationRoots, alternateContainer = n
     getId: entry => entry.tree_namespace ? entry.tree_namespace + ':' + entry.tree_id : entry.tree_id,
     getLabel: entry => entry.name + (entry.unavailable ? ' · unavailable' : ''),
     isBranch: node => !node.unavailable && isDirectory(node),
-    ariaLabel: 'Available host files and folders',
+    ariaLabel: treeOptions.ariaLabel || 'Available host files and folders',
     emptyLabel: treeOptions.emptyLabel || 'No locations available',
     loadPage: async (node, { cursor, signal }) => {
       const resourceRef = String(node.resource_ref || '').trim();
@@ -680,7 +915,8 @@ function mountExplorerTree(roots = state.navigationRoots, alternateContainer = n
     },
     onActivate: async (node, context) => {
       cancelReveal();
-      state.treeSelection = node; options.onSelection?.(node);
+      state.treeSelection = node;
+      options.onSelection?.(node);
       if (node.unavailable) { setStatus('This saved location is unavailable. Retry or remove its shortcut.',true); return; }
       if (isDirectory(node)) {
         if (node.resource_ref) await openManagedDirectory(node, null);
@@ -694,14 +930,6 @@ function mountExplorerTree(roots = state.navigationRoots, alternateContainer = n
         else if (isPreviewable(node, entryPath(node))) await previewEntry(node, entryPath(node));
         else setStatus('Refresh the authorized Files roots before downloading this file.', true);
       }
-    },
-    onContextMenu: (event, node, context) => {
-      cancelReveal();
-      // Runs on the row before the document context adapter captures it.
-      // Use the controller descriptor, never a DOM-derived locator.
-      state.treeSelection = node;
-      controller.setActive(context.id);
-      options.onSelection?.(node);
     },
     onDoubleActivate: node => {
       if (!isDirectory(node)) {
@@ -741,7 +969,7 @@ function mountExplorerTree(roots = state.navigationRoots, alternateContainer = n
   });
   const tree = { ...controller, container };
   if (!alternateContainer) state.explorerTree = tree;
-  const presentationKey = state.owner ? `files-tree:${options.surface || "files"}:${state.owner}:${state.currentWorkspaceId}:${treeOptions.persistenceKey || (alternateContainer ? 'collections' : 'locations')}` : '';
+  const presentationKey = state.owner && treeOptions.persist !== false ? `files-tree:${options.surface || "files"}:${state.owner}:${state.currentWorkspaceId}:${treeOptions.persistenceKey || (alternateContainer ? 'collections' : 'locations')}` : '';
   const treeLifetime = new AbortController();
   const savePresentation = () => { if (!presentationKey) return; try { localStorage.setItem(presentationKey,JSON.stringify(tree.snapshot().nodes.filter(node => node.expanded).map(node => node.id))); } catch (_) {} };
   const persistAfterInteraction = () => requestAnimationFrame(() => { if (!treeLifetime.signal.aborted) { savePresentation(); filterTree(state.treeFilter); } });
@@ -749,18 +977,32 @@ function mountExplorerTree(roots = state.navigationRoots, alternateContainer = n
   container.addEventListener('click',persistAfterInteraction,{signal:treeLifetime.signal});
   container.addEventListener('keydown',persistAfterInteraction,{signal:treeLifetime.signal});
   tree.destroy = () => { savePresentation(); treeLifetime.abort(); controller.destroy(); };
-  if (state.owner) {
+  if (presentationKey) {
     let expanded = [];
     try { expanded = JSON.parse(localStorage.getItem(`files-tree:${options.surface || "files"}:${state.owner}:${state.currentWorkspaceId}:${treeOptions.persistenceKey || (alternateContainer ? 'collections' : 'locations')}`) || '[]'); } catch (_) {}
     void (async () => { for (const identity of expanded) { if (listeners.signal.aborted) break; await tree.expand(identity); } })();
   }
-  if (alternateContainer?.matches('[data-files-collections]')) {
-    container.addEventListener('contextmenu',event=>{
-      if (event.target.closest('.files-tree-toggle') || event.target === container) {event.preventDefault();event.stopPropagation();customizeExplorer();}
-    },{signal:treeLifetime.signal});
-  }
   updateTreeHighlight();
   return tree;
+}
+
+function setEditorRoot(entry, bound) {
+  if (!options.editorRootProjection || !state.sidebar) return;
+  const host=state.sidebar.querySelector('[data-files-editor-root]');
+  const root=entry ? explorerEntry(entry) : null;
+  const identity=root ? JSON.stringify([root.resource_id,root.resource_ref]) : null;
+  if (bound === state.editorRootBound && identity === state.editorRootIdentity) return;
+  state.editorRootBound=bound;
+  state.editorRootIdentity=identity;
+  state.sidebar.toggleAttribute('data-editor-root-bound',bound);
+  host.hidden=!bound;
+  state.editorRootTree?.destroy();
+  state.editorRootTree=null;
+  if (!root) { host.replaceChildren(); return; }
+  const tree=state.editorRootTree=mountExplorerTree([root],host,
+    {persist:false,ariaLabel:root.name,emptyLabel:'Folder unavailable'});
+  const id=tree.snapshot().roots[0];
+  if (id) void tree.expand(id);
 }
 
 async function loadFavorites(serverFavorites = [], savedPlaces = []) {
@@ -855,9 +1097,11 @@ async function loadLegacyNavigationRoots({ force = false } = {}) {
       fetch('/api/odysseus-files/navigation-roots', { credentials: 'same-origin', signal: controller.signal }),
       authenticatedOwner(controller.signal),
     ]);
-    if (identity.status !== 'confirmed' || !identity.owner) {
-      clearFilesAuthorityContent('Files owner could not be verified');
-      throw new Error('Files owner could not be verified');
+    const browserAccount = String(document.body?.dataset?.accountId || '');
+    if (identity.status !== 'confirmed' || !identity.owner || !identity.account || (browserAccount && identity.account !== browserAccount)) {
+      throw Object.assign(new Error('Files owner could not be verified'), {
+        code:identity.status === 'invalid' ? 'sign_in_required' : identity.code || 'identity_unverified',
+      });
     }
     const owner = identity.owner;
     if (!response.ok) {
@@ -908,87 +1152,188 @@ async function loadLegacyNavigationRoots({ force = false } = {}) {
   }
 }
 
-async function loadOpaqueNavigationRoots({ force = false } = {}) {
+async function loadOpaqueNavigationRoots({ deferSidebar = false, expectedGeneration = null } = {}) {
   const startingContent = state.contentGeneration;
+  const startingLifecycle = state.lifecycleGeneration;
+  const copalWorkspaceScope = copalWorkspace();
+  const startingFilesWorkspace = state.currentWorkspaceId;
   state.navigationController?.abort();
   const controller = new AbortController();
   state.navigationController = controller;
+  let requestContent = startingContent;
+  let requestOwner = null;
+  let requestAccount = null;
+  let filesWorkspaceId = startingFilesWorkspace;
+  const requestScopeCurrent = () => !controller.signal.aborted
+    && state.navigationController === controller
+    && state.lifecycleGeneration === startingLifecycle
+    && copalWorkspace() === copalWorkspaceScope
+    && state.currentWorkspaceId === filesWorkspaceId
+    && state.nativeWindow?.visible === true;
+  const requestCurrent = () => requestScopeCurrent() && state.contentGeneration === requestContent;
+  const ownerScopeCurrent = () => {
+    const account = String(document.body?.dataset?.accountId || '');
+    return requestScopeCurrent() && requestOwner !== null && state.owner === requestOwner
+      && state.accountId === requestAccount && (!account || account === requestAccount);
+  };
+  const releaseNavigation = () => {
+    if (state.navigationController === controller) state.navigationController = null;
+  };
+  const sidebarStatus = state.sidebar?.querySelector('[data-files-navigation-status]')
+    || el('div', { role:'status', 'data-files-navigation-status':'' });
+  if (state.sidebar && !sidebarStatus.parentElement) state.sidebar.append(sidebarStatus);
+  sidebarStatus.textContent = '';
+  let sidebarDeferred = false;
   try {
-    const [rootsResponse, identity] = await Promise.all([
-      filesFacadeClient.roots({ copalWorkspace: copalWorkspace(), signal: controller.signal }),
+    const [rootsResponse, identity, workspaceModule] = await Promise.all([
+      filesFacadeClient.roots({ copalWorkspace: copalWorkspaceScope, signal: controller.signal }),
       authenticatedOwner(controller.signal),
+      import('./workspace.js'),
     ]);
-    if (identity.status !== 'confirmed' || !identity.owner) {
-      clearFilesAuthorityContent('Files owner could not be verified');
-      throw new Error('Files owner could not be verified');
+    if (!requestCurrent()) return null;
+    const browserAccount = String(document.body?.dataset?.accountId || '');
+    if (identity.status !== 'confirmed' || !identity.owner || !identity.account || (browserAccount && identity.account !== browserAccount)) {
+      throw Object.assign(new Error('Files owner could not be verified'), {
+        code:identity.status === 'invalid' ? 'sign_in_required' : identity.code || 'identity_unverified',
+      });
+    }
+    if (expectedGeneration != null && (rootsResponse.policy_generation !== expectedGeneration || identity.account !== state.accountId)) {
+      throw Object.assign(new Error('File access changed'), {code:'policy_generation_changed'});
     }
     const owner = identity.owner;
+    requestOwner = owner;
+    requestAccount = identity.account;
+    const ownerChanged = Boolean(state.owner && (owner !== state.owner || identity.account !== state.accountId));
+    if (ownerChanged) {
+      // A confirmed owner transition retires all old-owner projections before
+      // the new owner's optional catalogs begin resolving.
+      clearFilesAuthorityContent('Account file access changed');
+      destroyExplorerTree();
+      state.navigationRoots = [];
+      state.managedRoots = [];
+      state.favorites = [];
+      state.workspaces = [];
+      state.favoritePaths.clear();
+      state.currentWorkspaceId = startingFilesWorkspace;
+      mountExplorerTree([]);
+      renderFavorites();
+      renderWorkspaces();
+      requestContent = state.contentGeneration;
+    }
+    if (!requestCurrent()) return null;
+    state.owner = owner;
+    state.accountId = identity.account;
+    state.navigation?.setScope({ account: owner, workspace: copalWorkspaceScope }, { clear: ownerChanged });
+    state.viewPreferences = readViewPreferences();
+    if (state.contentGeneration === requestContent) applyViewPreferences(state.provider);
+    state.pane?.refresh?.();
+
     const managedRoots = (rootsResponse?.entries || []).map(facadeEntry).filter(editorResourceAllowed);
     const hostRoot = managedRoots.find(entry => entry.provider === 'host' && isDirectory(entry));
-    const hostNavigation = hostRoot
-      ? filesFacadeClient.children(hostRoot.resource_ref, {
-        limit: 200,
-        sort: managedSortRequest({ key: 'name', direction: 'asc', directoriesFirst: true }),
-        signal: controller.signal,
-      }).catch((error) => ({ error }))
-      : Promise.resolve({ error: new Error('The opaque Host provider is unavailable') });
-    const [hostResponse, placesResponse, workspacesResponse] = await Promise.all([
-      hostNavigation,
-      filesFacadeClient.places({ signal: controller.signal }).catch(error => {
-        // Places were added after the first ResourceRef deployment. A server
-        // lacking only this preference endpoint may still provide the secure
-        // opaque worktree and pinned Home anchor.
-        return { entries: [], error };
-      }),
-      filesFacadeClient.workspaces({ signal: controller.signal }).catch(error => {
-        return { entries: [], error };
-      }),
-    ]);
-    if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    const roots = hostResponse?.error ? [] : (hostResponse?.entries || []).map(explorerEntry).filter(editorResourceAllowed);
-    const pinned = roots.filter(item => item.provenance?.favorite);
-    if (state.owner && owner !== state.owner) {
-      // The current roots have already been authenticated for the new owner;
-      // invalidate only stale projected content, not this roots load.
-      clearFilesAuthorityContent('Account file access changed');
-    }
-    state.owner = owner;
-    state.navigation?.setScope({ account: owner, workspace: copalWorkspace() }, { clear: false });
-    state.viewPreferences = readViewPreferences();
-    if (state.contentGeneration === startingContent) applyViewPreferences(state.provider);
-    state.pane?.refresh?.();
+    filesWorkspaceId = workspaceModule.getWorkspaceId();
+    state.currentWorkspaceId = filesWorkspaceId;
+    explorerLayout.apply();
     state.defaultPath = '';
     state.managedRoots = managedRoots;
     state.importCapabilities = rootsResponse?.import_capabilities && typeof rootsResponse.import_capabilities === 'object'
       ? rootsResponse.import_capabilities : null;
-    state.navigationRoots = roots;
-    state.workspaces = Array.isArray(workspacesResponse?.entries) ? workspacesResponse.entries : [];
-    const workspace = await import('./workspace.js');
-    if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    state.currentWorkspaceId = workspace.getWorkspaceId();
-    explorerLayout.apply();
     state.navigationGeneration = rootsResponse?.policy_generation ?? null;
-    // Refreshing the projection also refreshes every expiring ResourceRef.
-    // Rebuild only on this policy/navigation event; ordinary current-folder
-    // navigation never calls this function and cannot reshape the worktree.
-    mountExplorerTree();
+    const navigationGeneration = state.navigationGeneration;
+    const sidebarCurrent = () => ownerScopeCurrent() && state.navigationGeneration === navigationGeneration;
+    const setup = state.shell?.querySelector('[data-files-add-host]');
+    if (setup) { setup.hidden = !identity.manager; setup.disabled = !identity.manager; }
+
+    state.collectionTree?.destroy();
     state.collectionTree = mountExplorerTree(managedRoots.filter(root => root.provider !== 'host'), state.sidebar?.querySelector('[data-files-collections]'));
-    if ((force || roots.length === 1) && roots.length === 1 && isDirectory(roots[0])) {
-      await state.explorerTree?.expand(roots[0].tree_id);
-    }
-    await loadFavorites(pinned, placesResponse?.entries || []);
-    renderWorkspaces();
-    if (hostResponse?.error || placesResponse?.error || workspacesResponse?.error) {
-      setStatus('Some Host navigation data is unavailable; managed Files remain available.', true);
+    const warnings = {};
+    const warn = (source, message) => {
+      warnings[source] = message;
+      sidebarStatus.textContent = Object.values(warnings).filter(Boolean).join(' ');
+    };
+    let pinned = [];
+    let places = [];
+    const hostReady = (async () => {
+      let roots = [];
+      try {
+        if (!hostRoot) throw Object.assign(new Error('Host file access is unavailable.'), {code:'provider_unavailable'});
+        const response = await filesFacadeClient.children(hostRoot.resource_ref, {
+          limit: 200,
+          sort: managedSortRequest({ key:'name', direction:'asc', directoriesFirst:true }),
+          signal: controller.signal,
+        });
+        if (!sidebarCurrent()) return [];
+        roots = response.entries.map(explorerEntry).filter(editorResourceAllowed);
+        clearFilesReadRecovery('navigation');
+        if (!roots.length) warn('host', identity.manager ? 'No Host folders are shared with you. Use Add folder to choose one.'
+          : 'No Host folders are shared with your account. Ask a manager to share a folder.');
+      } catch (error) {
+        if (!sidebarCurrent() || error?.name === 'AbortError') return [];
+        showFilesReadRetry('navigation','Host locations',error,async () => {
+          try {
+            const result = await loadNavigationRoots({deferSidebar:true, expectedGeneration:navigationGeneration});
+            await result?.hostReady;
+          } catch (retryError) {
+            if (!['policy_generation_changed','sign_in_required','identity_unverified'].includes(retryError?.code)
+              && ![401,403].includes(retryError?.status)) throw retryError;
+            await handleFilesPolicyChanged();
+          }
+        });
+      }
+      state.navigationRoots = roots;
+      pinned = roots.filter(item => item.provenance?.favorite);
+      // The Host tree and managed collections have independent load states.
+      const container = state.sidebar?.querySelector('[data-files-tree]');
+      state.explorerTree?.destroy();
+      state.explorerTree = container ? mountExplorerTree(roots, container) : null;
+      await loadFavorites(pinned, places);
+      if (sidebarCurrent() && roots.length === 1 && isDirectory(roots[0])) {
+        void state.explorerTree?.expand(roots[0].tree_id).catch(() => {
+          if (sidebarCurrent()) warn('expansion','The initial location could not be expanded.');
+        });
+      }
+      return roots;
+    })();
+    const placesReady = filesFacadeClient.places({ signal:controller.signal }).then(response => {
+      if (!sidebarCurrent()) return;
+      places = response.entries;
+      return loadFavorites(pinned, places);
+    }).catch(error => {
+      if (sidebarCurrent() && error?.name !== 'AbortError') {
+        warn('places','Saved places are unavailable.');
+        return error;
+      }
+    });
+    const workspacesReady = filesFacadeClient.workspaces({ signal:controller.signal }).then(response => {
+      if (!sidebarCurrent()) return;
+      state.workspaces = Array.isArray(response?.entries) ? response.entries : [];
+      renderWorkspaces();
+    }).catch(error => {
+      if (sidebarCurrent() && error?.name !== 'AbortError') {
+        warn('workspaces','Saved workspaces are unavailable.');
+        return error;
+      }
+    });
+    const sidebarReady = Promise.all([hostReady, placesReady, workspacesReady]);
+    if (deferSidebar) {
+      sidebarDeferred = true;
+      void sidebarReady.catch(() => {
+        if (sidebarCurrent()) warn('sidebar','Some navigation data is unavailable.');
+      }).finally(releaseNavigation);
+    } else {
+      await sidebarReady;
+      if (!sidebarCurrent()) return null;
     }
     return {
       version: rootsResponse?.version,
-      generation: rootsResponse?.policy_generation,
+      generation: navigationGeneration,
       opaque: true,
-      roots,
+      roots: state.navigationRoots,
+      hostReady,
+      placesReady,
+      workspacesReady,
     };
   } finally {
-    if (state.navigationController === controller) state.navigationController = null;
+    if (!sidebarDeferred) releaseNavigation();
   }
 }
 
@@ -1082,17 +1427,6 @@ async function archiveWorkspace(item, current = () => true) {
   }
 }
 
-function showTreeActions(choices) {
-  const anchor = document.activeElement;
-  const rect = anchor?.getBoundingClientRect?.();
-  closeManagedActionMenu();
-  const owner = state.owner; const lifecycle = state.lifecycleGeneration;
-  const menu = el('div',{class:'files-tree-actions-menu',role:'menu'});ownFilesActionMenu(menu,anchor);
-  menu.style.left = Math.min(rect?.left || 0,window.innerWidth - 210) + 'px'; menu.style.top = (rect?.bottom || 0) + 'px';
-  for (const choice of choices) menu.append(el('button',{type:'button',role:'menuitem',text:choice.label,disabled:choice.disabled ? 'true' : null,onclick:() => { closeManagedActionMenu(); if (owner !== state.owner || lifecycle !== state.lifecycleGeneration) return; void choice.run(); }}));
-  menu.addEventListener('keydown',event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeManagedActionMenu(); anchor?.focus(); } });
-  document.body.append(menu); menu.querySelector('button:not(:disabled)')?.focus();
-}
 function renderWorkspaces() {
   const container = state.sidebar?.querySelector('[data-files-workspaces]');
   if (!container) return;
@@ -1105,12 +1439,12 @@ function renderWorkspaces() {
   container.replaceChildren();
   state.workspaceTree = mountExplorerTree(roots,container,{ persistenceKey:'workspaces', emptyLabel:'No Workspaces yet',
     actions:node => node.workspaceRootId ? [{id:'workspace-actions',label:'Workspace actions',icon:glyphIcon('more',12)}] : [],
-    onAction:(action,node) => {
-      const item = state.workspaces.find(item => item.workspace.id === node.workspaceRootId); if (!item) return;
-      state.treeSelection = node;
-      const captured = captureCommands();
-      showTreeActions(commandDescriptors(captured).filter(item => item.id.startsWith('files.workspace-') || item.id === 'files.code-graph')
-        .map(item => ({...item,disabled:Boolean(item.disabledReason),run:() => isCommandCaptureCurrent(captured) && item.run()})));
+    onAction:(_action,node,context) => {
+      const row = [...container.querySelectorAll('[data-explorer-id]')].find(item => item.dataset.explorerId === context.id);
+      if (!row) return;
+      const anchor = row.querySelector('[data-explorer-row] [data-explorer-action="workspace-actions"]') || row;
+      const captured = captureTreeCommands(state.workspaceTree, context.id, node);
+      showCapturedFilesMenu(anchor, captured);
     },
   });
 }
@@ -1153,7 +1487,7 @@ function updateTreeHighlight() {
   const column = activeColumn();
   const activeResource = String(column?.resourceId || '');
   const activePath = state.provider === 'host' && !activeResource ? state.hostPath : '';
-  for (const tree of [state.explorerTree, state.workspaceTree, state.favoriteTree, state.collectionTree]) {
+  for (const tree of [state.explorerTree, state.workspaceTree, state.favoriteTree, state.collectionTree, state.editorRootTree]) {
     const node = tree?.snapshot().nodes.find(node => activeResource
       ? node.data.resource_id === activeResource : activePath && node.data.path === activePath);
     tree?.setActive(node?.id || null);
@@ -1179,20 +1513,21 @@ function updateFavoriteButton() {
   button.disabled = state.provider !== 'host' || pinned || (!activeRef && !state.hostPath);
 }
 
-async function toggleCurrentFavorite() {
-  if (state.provider !== 'host') return;
-  const column = activeColumn();
-  const activeResource = String(column?.resourceId || '');
-  const activeRef = String(column?.resourceRef || '');
+async function toggleCurrentFavorite(column = activeColumn(), current = () => true) {
+  if ((column?.provider || state.provider) !== 'host' || !current()) return;
+  const activeResource = String(column?.resourceId || column?.resource_id || '');
+  const activeRef = destinationResourceRef(column);
   if (activeResource && activeRef) {
     const existing = state.favorites.find(item => item.resource_id === activeResource);
     if (existing?.pinned) return;
     try {
       if (existing?.placeId) {
         await filesFacadeClient.removePlace(existing.placeId);
+        if (!current()) return;
         state.favorites = state.favorites.filter(item => item !== existing);
       } else {
         const response = await filesFacadeClient.savePlace(activeRef);
+        if (!current()) return;
         const place = { ...explorerEntry(response?.resource || {}), placeId: String(response?.resource?.place_id || ''), pinned: false };
         state.favorites = [...state.favorites.filter(item => item.resource_id !== place.resource_id), place];
       }
@@ -1313,7 +1648,7 @@ function applyModelSelection(model, { render = true } = {}) {
   if (render) renderEntries();
   const entries = model.selectedEntries();
   const bytes = entries.reduce((total,entry) => total + (Number(entry.size) || 0),0);
-  setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items · ${entries.length} selected${bytes ? ' · ' + formatBytes(bytes) : ''}`);
+  setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items · ${entries.length} selected${bytes ? ' · ' + formatBytes(bytes) : ''}`, false, { keepUndo: true });
 }
 
 function syncVisibleSelection(model, body = state.shell?.querySelector('[data-files-body]')) {
@@ -1472,8 +1807,9 @@ function creationCaptureForNode(node) {
   return creationDestinationForNode(node);
 }
 
-async function createFilesResource(kind, captured) {
+async function createFilesResource(kind, captured, isCurrent = () => true) {
   if (options.pickerMode) { setStatus("This dialog selects resources; creating items is unavailable.", true); return false; }
+  if (!isCurrent()) return false;
   if (state.contentController) { setStatus('Wait for folder navigation to finish before choosing New.', true); return false; }
   if (!captured?.creationDestinationRef) captured = await pickCreationDestination();
   if (!captured?.creationDestinationRef) {
@@ -1481,7 +1817,7 @@ async function createFilesResource(kind, captured) {
     return false;
   }
   if (kind === 'folder' && captured.creationSupportsFolders === false) {
-    setStatus('This Copal collection supports new notes; folders appear when notes use folder names.', true);
+    setStatus('Create a page in this collection. Include a folder in its name to group pages.', true);
     return false;
   }
   const generation = Number(captured.creationGeneration);
@@ -1503,6 +1839,7 @@ async function createFilesResource(kind, captured) {
       { title: kind === 'file' ? 'New File' : 'New Folder', defaultValue: proposed, confirmText: 'Create', maxLength: 240 },
     );
     if (value == null) return false;
+    if (!isCurrent()) return false;
     try { proposed = creationName(value, kind); } catch (error) { setStatus(error.message, true); continue; }
     if (captured.creationNavigating || state.contentController || state.contentGeneration !== content
       || state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle
@@ -1514,9 +1851,10 @@ async function createFilesResource(kind, captured) {
     try {
       if (kind === 'file' && captured.creationCopalCorpus) {
         const copal = await import('./copal.js');
+        if (!isCurrent()) return false;
         const result = await copal.createFilesNote({ name: proposed, workspace: captured.creationWorkspace,
           corpus: captured.creationCopalCorpus, actionId: operation });
-        if (!result?.doc?.id) throw new Error('Copal creation outcome was not confirmed; do not submit it again.');
+        if (!result?.doc?.id) throw new Error('Page creation is unconfirmed. Check the folder before retrying.');
         if (state.owner !== owner || state.lifecycleGeneration !== lifecycle
             || String(state.currentWorkspaceId || copalWorkspace()) !== captured.creationWorkspace) {
           setStatus('Files access changed after creation; reopen the collection to confirm the new note.', true);
@@ -1546,6 +1884,7 @@ async function createFilesResource(kind, captured) {
             resource_ref: captured.creationDestinationRef,
             provider: captured.creationProvider,
           }, Number(captured.creationDestinationIndex));
+          if (!isCurrent()) return false;
           if (!renewed.resource.capabilities.includes('write')) throw new Error('This folder is no longer writable.');
           state.columns = renewed.columns;
           captured = { ...captured, creationDestinationRef: renewed.resource.resource_ref };
@@ -1629,6 +1968,169 @@ async function pickCreationDestination() {
   }
   setStatus('No authorized writable folder is available.', true);
   return null;
+}
+
+function chooseBrowserReportDestination(candidates, signal, noun = 'backup') {
+  if (!candidates.length || signal?.aborted) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const previousFocus = document.activeElement;
+    const overlay = document.createElement('div');
+    overlay.className = 'modal';
+    overlay.dataset.browserReportDestinationPicker = '';
+    overlay.style.zIndex = '10000';
+    overlay.innerHTML = '<div class="modal-content styled-confirm-box" role="dialog" aria-modal="true" aria-labelledby="browser-report-destination-title"><div class="modal-header"><h4 id="browser-report-destination-title">Choose Files destination</h4></div><div class="modal-body"><p>Choose an authorized writable folder for this backup.</p><div data-browser-report-destination-list role="listbox" aria-label="Writable Files folders"></div></div><div class="modal-footer"><button type="button" class="confirm-btn confirm-btn-secondary" data-browser-report-cancel>Cancel</button></div></div>';
+    overlay.querySelector('.modal-content').style.zIndex = '10001';
+    overlay.querySelector('.modal-body p').textContent = `Choose an authorized writable folder for this ${noun}.`;
+    const list = overlay.querySelector('[data-browser-report-destination-list]');
+    list.style.display = 'grid';
+    list.style.gap = '0.5rem';
+    for (const row of candidates) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'files-toolbar-button';
+      button.style.width = '100%';
+      button.style.textAlign = 'left';
+      button.setAttribute('role', 'option');
+      button.textContent = row.label;
+      button.addEventListener('click', () => finish(row.candidate));
+      list.append(button);
+    }
+    const cancel = overlay.querySelector('[data-browser-report-cancel]');
+    cancel.addEventListener('click', () => finish(null));
+    function onBackdrop(event) { if (event.target === overlay) finish(null); }
+    function onKey(event) { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(null); } }
+    function finish(value) {
+      if (!overlay.isConnected) return;
+      overlay.remove();
+      overlay.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey);
+      signal?.removeEventListener('abort', onAbort);
+      try { previousFocus?.focus?.(); } catch {}
+      resolve(value);
+    }
+    function onAbort() { finish(null); }
+    overlay.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey);
+    signal?.addEventListener('abort', onAbort, { once:true });
+    document.body.append(overlay);
+    overlay.classList.remove('hidden');
+    overlay.style.display = '';
+    overlay.querySelector('[role="option"]')?.focus();
+  });
+}
+
+async function pickBrowserReportImportTarget({ signal = null, isCurrent = () => true, noun = 'backup' } = {}) {
+  const current = () => !signal?.aborted && isCurrent();
+  if (!current()) return null;
+  const scope = { owner:state.owner, workspace:String(state.currentWorkspaceId || copalWorkspace()),
+    generation:filesPolicyGeneration(), lifecycle:state.lifecycleGeneration };
+  const abortNavigation = () => state.navigationController?.abort();
+  signal?.addEventListener('abort', abortNavigation, { once:true });
+  try { await loadNavigationRoots({ force: true }); } catch (error) {
+    if (signal?.aborted || !isCurrent()) return null;
+    setStatus(error?.message || 'Authorized import folders are unavailable.', true);
+    return null;
+  } finally {
+    signal?.removeEventListener('abort', abortNavigation);
+  }
+  if (!current()) return null;
+  const scopeIsCurrent = () => state.owner === scope.owner
+    && String(state.currentWorkspaceId || copalWorkspace()) === scope.workspace
+    && filesPolicyGeneration() === scope.generation && state.lifecycleGeneration === scope.lifecycle
+    && !listeners.signal.aborted;
+  if (!scopeIsCurrent()) { setStatus('Files access changed while loading import folders.', true); return null; }
+  const entries = [...state.columns, ...state.managedRoots, ...state.navigationRoots];
+  const candidates = entries.map((entry, index) => ({ entry, candidate: creationDestinationForEntry(entry, index) }))
+    .filter(row => row.candidate && row.entry.capabilities?.includes('children') && row.entry.capabilities?.includes('write'))
+    .filter((row, index, all) => all.findIndex(other => other.candidate.creationDestinationRef === row.candidate.creationDestinationRef) === index);
+  const selected = await chooseBrowserReportDestination(candidates.map(({ entry, candidate }) => ({
+    candidate, label:String(candidate.creationDestinationName || entry.provenance?.logical_path || entry.name || 'Files folder'),
+  })), signal, noun);
+  if (!scopeIsCurrent() || !current()) { setStatus('Browser or Files access changed while choosing an import folder.', true); return null; }
+  if (selected) return selected;
+  setStatus(`Choose an authorized writable Files folder before importing the ${noun === 'PDF' ? 'PDF' : 'report'}.`, true);
+  return null;
+}
+
+async function importBrowserReportFile(file, { signal = null, isCurrent = () => true, purpose = 'report', beforeDispatch = null, videoFrameSource = null } = {}) {
+  const noun = purpose === 'pdf' ? 'PDF' : purpose === 'video-frame' ? 'PNG frame copy' : purpose === 'widget-state' ? 'widget state copy' : 'backup';
+  if (!file || typeof file.name !== 'string' || !file.size) throw new TypeError(`A non-empty ${purpose === 'pdf' ? 'PDF' : purpose === 'video-frame' ? 'PNG frame copy' : purpose === 'widget-state' ? 'widget state copy' : 'report backup'} file is required.`);
+  const current = () => !signal?.aborted && isCurrent() && !listeners.signal.aborted;
+  if (!current()) return { committed:0, cancelled:true };
+  if (options.pickerMode || listeners.signal.aborted) throw new Error('Files import is unavailable in this pane.');
+  if (!state.nativeWindow?.visible) { await api.open(); api.activate(); }
+  if (!current()) return { committed:0, cancelled:true };
+  const captured = await pickBrowserReportImportTarget({ signal, isCurrent:current, noun });
+  if (!captured) return { committed: 0, cancelled: true };
+  const owner = captured.creationOwner;
+  const workspace = captured.creationWorkspace;
+  const generation = captured.creationGeneration;
+  const lifecycle = captured.creationLifecycle;
+  const content = captured.creationContent;
+  const destinationRef = captured.creationDestinationRef;
+  const filesScopeCurrent = () => current() && state.nativeWindow?.visible
+    && state.owner === owner && String(state.currentWorkspaceId || copalWorkspace()) === workspace
+    && filesPolicyGeneration() === generation && state.lifecycleGeneration === lifecycle
+    && state.contentGeneration === content;
+  if (!filesScopeCurrent()) {
+    setStatus('Files access or destination changed; start the import again.', true);
+    return { committed: 0, stale: true };
+  }
+  const destinationEntry = [...state.columns, ...state.managedRoots, ...state.navigationRoots]
+    .find(entry => destinationResourceRef(entry) === destinationRef);
+  if (!destinationEntry || !destinationEntry.capabilities?.includes('children') || !destinationEntry.capabilities?.includes('write')) {
+    setStatus('The selected Files destination is no longer writable.', true);
+    return { committed: 0, stale: true };
+  }
+  const collisionChoice = await uiModule.styledConfirm(
+    `If a file with this name already exists, import the ${noun === 'PDF' ? 'PDF' : purpose === 'video-frame' ? 'PNG frame copy' : purpose === 'widget-state' ? 'widget state copy' : 'report backup'} with a unique name?`,
+    { title: 'Choose collision policy', confirmText: 'Rename conflict', cancelText: 'Fail on conflict', alternateText:'Cancel import' },
+  );
+  if (collisionChoice === 'alternate') return { committed: 0, cancelled: true };
+  if (!filesScopeCurrent()) {
+    setStatus('Files access or destination changed; start the import again.', true);
+    return { committed: 0, stale: true };
+  }
+  if (beforeDispatch) {
+    if (typeof beforeDispatch !== 'function') throw new TypeError('Files import source check is unavailable.');
+    let allowed = false;
+    try { allowed = await beforeDispatch() === true; } catch (_) {}
+    if (!allowed || !filesScopeCurrent()) {
+      setStatus('The source or Files destination changed; start the import again.', true);
+      return { committed:0, stale:true };
+    }
+  }
+  const destinationIndex = state.columns.findIndex(entry => destinationResourceRef(entry) === destinationRef);
+  const result = await importDroppedFiles([file], { ...destinationEntry, resource_ref: destinationRef, kind: 'folder' },
+    destinationIndex, { collision: collisionChoice === true ? 'rename' : 'fail', refreshDestination: destinationIndex >= 0,
+      signal, isCurrent:filesScopeCurrent, ...(purpose==='video-frame' && videoFrameSource ? {videoFrameSource} : {}) });
+  return { ...(result || {}), submitted:result?.submitted === true };
+}
+
+async function reconcileBrowserReportImport(receiptHandles, { signal = null, isCurrent = () => true } = {}) {
+  if (!Array.isArray(receiptHandles) || !receiptHandles.length) return { unknown:true, receiptHandles:[] };
+  const results = [];
+  for (const handle of receiptHandles) {
+    if (signal?.aborted || !isCurrent()) return { unknown:true, receiptHandles };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once:true });
+    try {
+      const receipt = await filesFacadeClient.operationReceipt(handle.operationId, { signal:controller.signal, generation:handle.generation });
+      const parsed = importReceiptItem(receipt, handle.itemId, { operationId:handle.operationId, generation:handle.generation });
+      results.push({ ...handle, ...parsed });
+    } catch (error) {
+      results.push({ ...handle, outcome:'unknown', terminal:false, committed:false, error:error?.name || 'receipt_unavailable' });
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
+    }
+  }
+  const pending = results.filter(row => !row.terminal);
+  const committed = results.filter(row => row.committed).length;
+  const rejected = results.filter(row => row.terminal && !row.committed).length;
+  return { committed, rejected, pending:pending.length, receiptHandles:pending, terminal:pending.length === 0, recoveryUnavailable:results.some(row=>row.committed && row.recoveryUnavailable) };
 }
 
 function captureFilesPasteDestination(node) {
@@ -1723,37 +2225,66 @@ function setFilesClipboard(model, kind, current, capturedEntries = null, verifie
   return true;
 }
 
-async function pasteFilesClipboard(destination, destinationIndex, current) {
-  const clipboard = filesClipboard;
+async function pasteFilesClipboard(destination, destinationIndex, current, clipboard = filesClipboard) {
   if (!current()) throw new Error('The destination folder changed; choose Paste again.');
-  if (!clipboard?.current()) throw new Error('The copied source changed. Copy the files again.');
+  if (clipboard !== filesClipboard || !clipboard?.current()) throw new Error('The copied source changed. Copy the files again.');
   if (!destination?.capabilities?.includes('children') || !destination.capabilities.includes('write')
     || clipboard.payload.provider !== destination.provider) throw new Error('Paste requires a writable folder in the same provider.');
-  const response = await executeFilesTransfer(clipboard.payload, destination, 'fail', destinationIndex, { model: clipboard.model });
+  const response = await executeFilesTransfer(clipboard.payload, destination, 'fail', destinationIndex, {
+    model:clipboard.model, isCurrent:() => current() && clipboard === filesClipboard && clipboard.current(),
+  });
   clipboard.source.updateTransferSelection(clipboard.model);
   if ((response?.items || []).length && response.items.every(item => ['committed','unchanged'].includes(item.outcome))) await clipboard.source.refresh();
   if (filesClipboard === clipboard && response) filesClipboard = null;
   return true;
 }
 
+function captureTreeCommands(tree, id, entry = tree.getNode(id)?.data) {
+  if (!entry) return null;
+  cancelReveal();
+  state.treeSelection = entry;
+  tree.setActive(id);
+  options.onSelection?.(entry);
+  updateManagedActionControl();
+  return captureCommands({ context:'selection', treeEntry:entry, treeHit:{ tree, id } });
+}
+
 function sharedFilesMenuAdapter() {
   return {
-    ownsObjectCommands:true,groupCommands:true,
-    capture:target=>{
-      const row=target.closest?.('[data-copal-context-object="file"]')||target;
-      const tree=target.closest?.('.files-tree-item'),entry=contextEntryForNode(row);
-      if(!target.closest?.('.files-tree-item')){
-        if(entry)hooks.__openClankFilesContextCapture(row);
-        else { state.treeSelection=null; activateColumn(columnIndexForNode(target)); }
-      }
-      return captureCommands({directoryOnly:!tree&&!entry});
+    ownsObjectCommands:true,groupCommands:true,editingCommands:false,
+    hitTest:target => {
+      if (target.closest?.('[data-explorer-toggle]')) return 'native';
+      if (target.closest?.('[data-files-selection-key], [data-files-row-actions], .files-tree-item[data-explorer-id], [data-files-explorer-heading]')) return true;
+      return !target.closest?.('input, textarea, select, button, a, [contenteditable]') &&
+        Boolean(target.closest?.('[data-files-body]') || target.matches?.('[data-files-collections]'));
     },
+    capture:target=>{
+      const treeItem = target.closest?.('.files-tree-item[data-explorer-id]');
+      if (treeItem) {
+        const trees = [state.explorerTree, state.workspaceTree, state.favoriteTree, state.collectionTree, state.editorRootTree];
+        const tree = trees.find(candidate => candidate?.container.contains(treeItem));
+        if (tree) return captureTreeCommands(tree, treeItem.dataset.explorerId);
+      }
+      if (target.closest?.('[data-files-explorer-heading]') || target.matches?.('[data-files-collections]')) {
+        return captureCommands({ context:'navigation' });
+      }
+      const row = target.closest?.('[data-files-selection-key]') ||
+        target.closest?.('.files-entry-frame')?.querySelector('[data-files-selection-key]');
+      if (!target.closest?.('[data-files-body]')) return null;
+      if (row) {
+        const captured = hooks.__openClankFilesContextCapture(row);
+        return captured ? captureCommands({ context:'selection', columnIndex:captured.filesColumnIndex, treeEntry:null }) : null;
+      }
+      state.treeSelection = null;
+      return captureCommands({ context:'folder', columnIndex:columnIndexForNode(target), treeEntry:null });
+    },
+    focusOrigin:request => request.rawTarget?.closest?.('[data-files-row-actions], [data-files-selection-key], .files-tree-item, [tabindex]'),
     isCurrent:request=>isCommandCaptureCurrent(request?.adapterContext),
-    commands:request=>request?.adapterContext?commandDescriptors(request.adapterContext).map(item=>({...item,disabled:Boolean(item.disabledReason)})):[],
+    commands:request=>request?.adapterContext?contextCommandDescriptors(request.adapterContext):[],
     execute:async(command,request)=>{
       const captured=request?.adapterContext;
       if(!isCommandCaptureCurrent(captured))throw new Error('The captured Files target changed. Reopen its menu.');
-      const descriptor=commandDescriptors(captured).find(item=>item.id===command);
+      const descriptor=contextCommandDescriptors(captured).find(item=>item.id===command);
       if(!descriptor)return false;
       if(descriptor.disabledReason)throw new Error(descriptor.disabledReason);
       await descriptor.run();return true;
@@ -1765,13 +2296,17 @@ function sharedFilesMenuAdapter() {
 async function openEntryInCanvas(entry, model, commandId = operationId('files-canvas')) {
   const handoff = canvasPayloadForEntry(entry, model, commandId);
   if (!handoff) { setStatus('Select one authorized image to open in Canvas.', true); return false; }
-  // Imps owns the canvas host after the Gallery retirement — no Gallery
-  // modal is opened. The editor self-mounts its container.
-  const editor = window.impsModule || await import('./imps.js');
-  await editor.openEditor?.(null, null, { w: 1024, h: 1024 }, `Canvas · ${entry.name || 'Files image'}`);
-  window.dispatchEvent(new CustomEvent('openclank-files-image-to-canvas', {
-    detail: Object.freeze({ payload: handoff.payload, context: handoff.context }),
-  }));
+  const readContext = () => {
+    if (state.selectionModels.get(handoff.context.scopeKey)!==model || model.epoch!==handoff.context.selectionEpoch) return null;
+    const selected=model.selectedEntries();
+    if (selected.length!==1 || entrySelectionKey(selected[0])!==entrySelectionKey(entry)) return null;
+    return filesCanvasGestureContext(selected[0],model,commandId);
+  };
+  const editor=window.copalModule || await import('./copal.js');
+  if (typeof editor?.openFilesImageInBlank!=='function') throw new Error('Canvas image import is unavailable.');
+  const result=await editor.openFilesImageInBlank({payload:handoff.payload,context:handoff.context,getContext:readContext,name:`Canvas · ${entry.name || 'Files image'}`});
+  if (result?.status==='retained') setStatus('The image is retained in its original canvas for review.');
+  else if (result?.status!=='imported' && result?.status!=='duplicate') throw new Error('Canvas image import did not complete.');
   return true;
 }
 
@@ -2339,6 +2874,10 @@ function transferFailureStatus(receipt) {
     provider_unavailable: 'The provider could not complete the transfer.',
     unsupported_operation: 'This provider does not support the operation.',
     policy_generation_changed: 'File access changed during the transfer.',
+    managed_media_move_unsupported: 'This kind of move is not supported for a document with managed media; nothing was changed.',
+    managed_cross_filesystem_unsupported: 'This move crosses disks. Moving a document with its media between disks is not supported yet; nothing was changed.',
+    ...Object.fromEntries(['unmanaged_local_reference', 'unresolvable_reference', 'reference_outside_move', 'media_location_not_preservable', 'invalid_destination_frame']
+      .map(code => [code, `This document's media links could not be moved safely, so nothing was changed. (${code})`])),
   };
   const reasons = [...new Set(receipt.failed.map(item => labels[item.code] || item.message || item.reason || item.code || item.outcome))];
   return `${receipt.committed.size} completed · ${receipt.failed.length} need attention${reasons.length ? ' · ' + reasons.join(' ') : ''}`;
@@ -2375,7 +2914,7 @@ function payloadScopeKey(payload) {
   });
 }
 
-async function executeFilesTransfer(payload, destination, collision = 'fail', destinationIndex = state.columns.length - 1, { model: suppliedModel = null, selectionKeys = null, batchId = '', operationIdOverride = '', refresh = true } = {}) {
+async function executeFilesTransfer(payload, destination, collision = 'fail', destinationIndex = state.columns.length - 1, { model: suppliedModel = null, selectionKeys = null, batchId = '', operationIdOverride = '', refresh = true, rootRequirement = null, isCurrent = () => true } = {}) {
   if (options.pickerMode) { setStatus("This dialog selects resources; transfers are unavailable.", true); return null; }
   const destinationRef = destinationResourceRef(destination);
   if (!payload?.provider || !destination?.provider || !destinationRef || payload.provider !== destination.provider) {
@@ -2420,9 +2959,51 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
   if (!validation.ok) { setStatus(validation.reason, true); return null; }
   const sources = payload.sources.map((source) => ({ itemId: source.item_id, resourceRef: source.resource_ref, expectedRevision: source.revision || undefined }));
   const operation = operationIdOverride || operationId(batchId ? `files-transfer-${batchId}` : 'files-transfer');
+  let didDispatch = false;
   try {
+    let managedRoot = null;
+    let destinationRoot = null;
+    if (payload.kind === 'move' && payload.provider === 'host') {
+      const capturedCurrent = () => isCurrent() && sourceIsCurrent() && transferLifecycle === state.lifecycleGeneration && transferContent === state.contentGeneration
+        && state.owner === payload.owner && filesPolicyGeneration() === Number(payload.policy_generation)
+        && capturedModel?.epoch === Number(payload.selection_epoch) && capturedModel.snapshot().scopeKey === payloadScopeKey(payload);
+      for (const source of sources) {
+        if (!source.expectedRevision) {
+          const current = await filesFacadeClient.stat(source.resourceRef);
+          if (!capturedCurrent()) throw new Error('The Files selection or access changed.');
+          const revision = current?.resource?.revision;
+          if (!revision) throw new Error('Refresh this item before moving it.');
+          source.expectedRevision = {kind:revision.kind, value:revision.value};
+        }
+      }
+      const preflight = rootRequirement == null ? await filesFacadeClient.transferRootRequirement({generation:Number(payload.generation), sources, destinationRef}) : rootRequirement;
+      if (!capturedCurrent()) { setStatus('The Files selection or access changed.', true); return null; }
+      const pickRoot = async (rootLabel) => {
+        const { createResourcePicker } = await import('./copal/resourcePicker.js');
+        if (!capturedCurrent()) return null;
+        return new Promise(resolve => {
+          let selected = null;
+          state.managedRootPicker?.destroy();
+          const picker = createResourcePicker({client:filesFacadeClient, purpose:'folder', accountScope:state.owner,
+            workspaceScope:copalWorkspace(), generation:Number(payload.generation), originWindow:state.nativeWindow,
+            getGeneration:()=>filesPolicyGeneration(), getAccountScope:()=>state.owner, getWorkspaceScope:()=>copalWorkspace(),
+            isOriginCurrent:capturedCurrent, rootLabel,
+            isCompatible:resource=>resource.provider === 'host' && resource.capabilities.write ? '' : 'Choose a writable Host root.',
+            onSelect:resource=>{ selected=resource; return true; },
+            onClose:cancelled=>{ if (state.managedRootPicker === picker) state.managedRootPicker=null; resolve(cancelled ? null : selected); }});
+          state.managedRootPicker=picker; void picker.open();
+        });
+      };
+      for (const which of transferRootsToAsk(preflight)) {
+        const root = await pickRoot(which === 'managed' ? 'Choose an authorized root for this move' : "Choose the folder that will own the moved document's media");
+        if (!root || !capturedCurrent()) return null;
+        if (which === 'managed') managedRoot = root; else destinationRoot = root;
+      }
+    }
+    if (!isCurrent()) return null;
     setStatus(`${sources.length} item${sources.length === 1 ? '' : 's'} · ${payload.kind}…`);
-    const response = await filesFacadeClient.transferResources({ operationId: operation, generation: Number(payload.generation), kind: payload.kind, sources, destinationRef, collision });
+    didDispatch = true;
+    const response = await filesFacadeClient.transferResources({ operationId: operation, generation: Number(payload.generation), kind: payload.kind, sources, destinationRef, collision, managedRoot, destinationRoot });
     if (!sourceIsCurrent() || transferLifecycle !== state.lifecycleGeneration || transferContent !== state.contentGeneration || (capturedModel && (capturedModel.epoch !== Number(payload.selection_epoch)
       || state.owner !== payload.owner || filesPolicyGeneration() !== Number(payload.policy_generation)
       || capturedModel.snapshot().scopeKey !== payloadScopeKey(payload)))) {
@@ -2449,9 +3030,13 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
         setStatus('File access changed while refreshing the transfer result.', true);
       }
     }
+    if (payload.kind === 'move' && reconciled.committed.size) {
+      void offerFinishCleanup(operation, Number(payload.generation), payload.owner, transferLifecycle);
+    }
     return response;
   } catch (error) {
     if (error?.name !== 'AbortError') {
+      if (!didDispatch) { setStatus(error?.message || 'Files transfer could not be checked.', true); return null; }
       // A lost response is reconciled by receipt; the browser never resends a
       // request whose commit status is unknown.
       if (transferLifecycle !== state.lifecycleGeneration) {
@@ -2481,6 +3066,9 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
         }
         setStatus(reconciled.pending ? 'Transfer status is still pending reconciliation.' : reconciled.failed.length ? transferFailureStatus(reconciled) : `${reconciled.committed.size} transfer item${reconciled.committed.size === 1 ? '' : 's'} reconciled.`, reconciled.pending || reconciled.failed.length > 0);
         if (reconciled.failed.length) offerKeepBothRetry(payload, destination, receipt);
+        if (payload.kind === 'move' && reconciled.committed.size) {
+          void offerFinishCleanup(operation, Number(payload.generation), payload.owner, transferLifecycle);
+        }
         return receipt;
       } catch (_) { setStatus(error.message || 'Files transfer failed', true); }
     }
@@ -2523,7 +3111,9 @@ function importReceiptItem(receipt, expectedItemId, { operationId = '', generati
   if (stateValue === 'pending' && outcome !== 'pending') return { outcome: 'malformed', terminal: false, committed: false };
   if (stateValue === 'complete' && !['committed', 'unchanged', 'created', 'imported'].includes(outcome)) return { outcome: 'malformed', terminal: false, committed: false };
   const terminal = ['committed', 'unchanged', 'created', 'imported', 'conflict', 'denied', 'stale', 'failed'].includes(outcome);
-  return { outcome, terminal, committed: ['committed', 'unchanged', 'created', 'imported'].includes(outcome) };
+  const history=matches[0]?.history?.history;
+  const recoveryUnavailable = outcome === 'committed' && (!history || !['complete','incomplete','unavailable'].includes(history.state) || history.state !== 'complete');
+  return { outcome, terminal, committed: ['committed', 'unchanged', 'created', 'imported'].includes(outcome), recoveryUnavailable };
 }
 
 function importedDirectoryParts(item) {
@@ -2653,7 +3243,7 @@ async function prepareImportedDirectories(files, destination, batchId, generatio
   return { refs, failures };
 }
 
-async function importDroppedFiles(files, destination, destinationIndex = state.columns.length - 1, { skipped = [], directories = [] } = {}) {
+async function importDroppedFiles(files, destination, destinationIndex = state.columns.length - 1, { skipped = [], directories = [], collision = 'fail', refreshDestination = true, signal = null, isCurrent = () => true, videoFrameSource = null } = {}) {
   if (options.pickerMode) return;
   const destinationRef = destinationResourceRef(destination);
   if (!destinationRef || !(destination.capabilities || []).includes('children') || !(destination.capabilities || []).includes('write')) { setStatus('This folder does not accept imported files.', true); return; }
@@ -2664,6 +3254,7 @@ async function importDroppedFiles(files, destination, destinationIndex = state.c
       relativePath: String(item?.relativePath || item?.name || item?.file?.name || '').replace(/\\/g, '/'),
     }))
     .filter((item) => item.file && item.name);
+  if (videoFrameSource && (allFiles.length!==1 || directories.length || skipped.length)) throw new TypeError('A frame copy must be one file.');
   const provider = String(destination.provider || state.provider || '');
   const limits = state.importCapabilities?.[provider];
   const maxTotal = Number(limits?.max_total_bytes);
@@ -2683,23 +3274,29 @@ async function importDroppedFiles(files, destination, destinationIndex = state.c
   const owner = state.owner;
   const generation = filesPolicyGeneration();
   const lifecycle = state.lifecycleGeneration;
+  const requestCurrent = () => !signal?.aborted && isCurrent() && state.owner === owner
+    && filesPolicyGeneration() === generation && state.lifecycleGeneration === lifecycle;
+  if (!requestCurrent()) return { committed:0, rejected:0, pending:0, cancelled:true, receiptHandles:[] };
   const importedDirectories = await prepareImportedDirectories(bounded, destination, batchId, generation, lifecycle, owner, directories);
-  if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) {
+  if (!requestCurrent()) {
     setStatus('Imports stopped because file access changed.', true);
-    return;
+    return { committed:0, rejected:0, pending:0, cancelled:true, receiptHandles:[] };
   }
   state.pendingImport = allFiles.slice(FILES_MAX_DRAG_ITEMS);
   if (state.pendingImport.length) setStatus(`${bounded.length} of ${allFiles.length} files queued · ${state.pendingImport.length} remaining`, false);
   const results = new Array(bounded.length);
+  let submittedCount = 0;
   let cursor = 0;
   const worker = async () => {
     while (cursor < bounded.length) {
-      if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) return;
+      if (!requestCurrent()) return;
       const index = cursor++;
       const file = bounded[index];
       const id = operationId('files-import');
       const itemId = `${batchId}-${index}-${operationId('item').slice(-12)}`.slice(0, 128);
       const controller = new AbortController();
+      const abortForCaller = () => controller.abort();
+      signal?.addEventListener('abort', abortForCaller, { once:true });
       state.importControllers.add(controller);
       setStatus(`Importing ${index + 1} of ${bounded.length}…`);
       try {
@@ -2710,48 +3307,60 @@ async function importDroppedFiles(files, destination, destinationIndex = state.c
           results[index] = { outcome: 'failed', terminal: true, committed: false, code: 'directory_create_failed' };
           continue;
         }
+        if (!requestCurrent()) {
+          results[index] = { outcome:'cancelled', terminal:true, committed:false, operationId:id, itemId, generation };
+          continue;
+        }
         let receipt;
         try {
+          submittedCount += 1;
           receipt = await filesFacadeClient.importFile(file.file, {
             operationId: id, itemId, generation, destinationRef: directory.ref,
             name: file.name, relativePath: file.name,
-            collision: 'fail', signal: controller.signal,
+            collision: collision === 'rename' ? 'rename' : 'fail', signal: controller.signal, ...(videoFrameSource ? {videoFrameSource} : {}),
           });
         } catch (error) {
-          if (error?.name === 'AbortError') throw error;
-          if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) throw error;
-          // A transport failure is unknown until the idempotent receipt says
-          // otherwise. Never submit the file again.
-          receipt = await filesFacadeClient.operationReceipt(id, { signal: controller.signal, generation });
+          if (error?.name !== 'AbortError' && requestCurrent()) {
+            // A lost response is unknown until this exact operation receipt
+            // says otherwise. Never submit the file again.
+          }
+          const receiptController = new AbortController();
+          const receiptDeadline = setTimeout(() => receiptController.abort(), 5_000);
+          try { receipt = await filesFacadeClient.operationReceipt(id, { signal:receiptController.signal, generation }); }
+          catch { receipt = null; }
+          finally { clearTimeout(receiptDeadline); }
         }
-        if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) return;
         let parsed = importReceiptItem(receipt, itemId, { operationId: id, generation });
         if (!parsed.terminal && receipt?.state !== 'pending') parsed = { outcome: 'malformed', terminal: false, committed: false };
-        results[index] = parsed;
+        results[index] = { ...parsed, operationId:id, itemId, generation };
       } catch (error) {
-        results[index] = { outcome: error?.name === 'AbortError' ? 'cancelled' : 'unknown', terminal: false, committed: false };
-      } finally { state.importControllers.delete(controller); }
+        results[index] = { outcome: error?.name === 'AbortError' ? 'cancelled' : 'unknown', terminal: false, committed: false, operationId:id, itemId, generation };
+      } finally { signal?.removeEventListener('abort', abortForCaller); state.importControllers.delete(controller); }
     }
   };
   await Promise.all([worker(), worker()]);
-  if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) {
+  const receiptHandles = results.filter(result => result && !result.terminal)
+    .map(result => ({ operationId:result.operationId, itemId:result.itemId, generation:result.generation }));
+  const stillCurrent = requestCurrent();
+  if (!stillCurrent) {
     setStatus('Imports stopped because file access changed.', true);
-    return;
   }
   const committed = results.filter((result) => result?.committed).length;
   const pending = results.filter((result) => !result?.terminal).length;
   const rejected = results.filter((result) => result?.terminal && !result.committed).length;
-  if (committed && state.owner === owner && filesPolicyGeneration() === generation && state.lifecycleGeneration === lifecycle) {
+  if (stillCurrent && refreshDestination && committed && destinationIndex >= 0) {
     await reloadManagedColumn(destinationIndex);
     if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) {
       setStatus('File access or window changed while refreshing imported files.', true);
       return;
     }
   }
+  const recoveryUnavailable = results.some(row=>row?.committed && row.recoveryUnavailable);
   const remaining = state.pendingImport.length;
   const skippedFailures = [...(Array.isArray(skipped) ? skipped : []), ...importedDirectories.failures];
   const skippedCount = skippedFailures.length;
-  setStatus(`${committed} imported${rejected ? ` · ${rejected} rejected` : ''}${skippedCount ? ` · ${skippedCount} skipped (${skippedFailures[0]?.code || 'partial_failure'})` : ''}${pending ? ` · ${pending} pending reconciliation` : ''}${remaining ? ` · ${remaining} remaining (drop them separately)` : ''}`, Boolean(rejected || skippedCount || pending));
+  if (stillCurrent) setStatus(`${committed} imported${rejected ? ` · ${rejected} rejected` : ''}${skippedCount ? ` · ${skippedCount} skipped (${skippedFailures[0]?.code || 'partial_failure'})` : ''}${pending ? ` · ${pending} pending reconciliation` : ''}${recoveryUnavailable ? ' · recovery copy unavailable' : ''}${remaining ? ` · ${remaining} remaining (drop them separately)` : ''}`, Boolean(rejected || skippedCount || pending || recoveryUnavailable));
+  return { committed, rejected, pending, receiptHandles, recoveryUnavailable, stale:!stillCurrent, submitted:submittedCount > 0 };
 }
 
 // Identifier-only context consumed by contextualHelp.js. Keep host paths out
@@ -2815,18 +3424,10 @@ function ensureThumbnailLoader() {
 function observeNativeThumbnail(img, item) {
   const loader = ensureThumbnailLoader();
   const entry = item.entry || {};
-  const identity = String(
-    entry.resource_id || entry.resource_ref || entry.resourceRef || entry.name || item.url,
-  );
-  const key = [
-    state.owner || 'anonymous',
-    entry.provider || 'host',
-    identity,
-    entry.modified_unix_ms ?? entry.modified ?? '',
-    entry.size ?? '',
-    item.icon ? 'native-icon:64x64' : 'content-thumbnail:192x192',
-    Math.min(3, Math.max(1, Number(window.devicePixelRatio) || 1)),
-  ].join(':');
+  const key = thumbnailCacheKey({
+    owner: state.owner, entry, icon: item.icon,
+    scale: Math.min(3, Math.max(1, Number(window.devicePixelRatio) || 1)),
+  });
   loader.attach(img, {
     key,
     url: item.url,
@@ -2960,6 +3561,25 @@ function syncPagingControl() {
   button.textContent = state.pagingController ? 'Loading more…' : 'Load more';
 }
 
+function withFileRowActions(row, entry, details = false) {
+  if (options.pickerMode) return row;
+  const button = iconButton({ glyph:'more', className:'files-row-actions', title:`Actions for ${entry.name}`,
+    onClick:event => {
+      event.stopPropagation();
+      const hit = hooks.__openClankFilesContextCapture(row);
+      if (!hit) return;
+      showCapturedFilesMenu(event.currentTarget, captureCommands({ context:'selection', columnIndex:hit.filesColumnIndex, treeEntry:null }));
+    },
+  });
+  button.dataset.filesRowActions = '';
+  button.setAttribute('aria-haspopup', 'menu');
+  button.addEventListener('dblclick', event => event.stopPropagation());
+  if (!details) return el('div', { class:'files-entry-frame', role:'presentation' }, row, button);
+  row.classList.add('files-entry-frame');
+  row.append(el('span', { class:'files-row-action-cell', role:'gridcell' }, button));
+  return row;
+}
+
 function renderEntries() {
   syncPagingControl();
   if (options.navigationOnly) {
@@ -3091,6 +3711,7 @@ function renderEntries() {
       // restarts expired thumbnails, whose policy refresh can cancel the open.
       applyModelSelection(model, { render: false });
       syncVisibleSelection(model, entriesHost);
+      updateManagedActionControl();
       const capabilities = model.selectedEntries().map(transferCapabilities);
       for (const node of entriesHost.querySelectorAll('[data-files-selection-key]')) {
         node.dataset.fileTransferMove = capabilities.length > 0 && capabilities.every(capability => capability.move) ? 'true' : 'false';
@@ -3098,12 +3719,8 @@ function renderEntries() {
       }
       row.focus({ preventScroll: true });
     });
-    row.addEventListener('contextmenu', (event) => {
-      // The shared app menu owns this target when enabled.  With that
-      // preference disabled, leave the event untouched so the browser menu
-      // appears; explicit toolbar/action buttons still open our menu.
-    });
     row.addEventListener('keydown', (event) => {
+      if (event.target !== row) return;
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End' || event.key === 'PageDown' || event.key === 'PageUp') {
         event.preventDefault();
         const model = ensureSelectionModel(activeColumn());
@@ -3150,7 +3767,7 @@ function renderEntries() {
       else if (entry.download_url) downloadEntry(entry);
       else if (state.provider === 'host') setStatus('Refresh the authorized Files roots before downloading this file.', true);
     });
-    entriesHost.append(row);
+    entriesHost.append(withFileRowActions(row, entry, details));
   }
   if (virtualized && end < allEntries.length) {
     const remainingRows = gridMode ? Math.ceil((allEntries.length - end) / gridColumns) : allEntries.length - end;
@@ -3248,14 +3865,10 @@ function renderColumns() {
         }
         else if (!options.pickerMode && !directory && isPreviewable(entry, path)) void previewEntry(entry, path);
       });
-      item.addEventListener('contextmenu', (event) => {
-        // See the list view handler above: browser context menus remain the
-        // immediate fallback when the shared menu preference is off.
-      });
       item.addEventListener('keydown', (event) => {
         void handleColumnEntryKeydown(event, { columnIndex: index, entryIndex: actualEntryIndex, entry, path, directory });
       });
-      list.append(item);
+      list.append(withFileRowActions(item, entry));
     }
     if (columnVirtualized && columnEnd < sortedEntries.length) list.append(el('div', { class: 'files-virtual-spacer', 'aria-hidden': 'true', style: `height:${(sortedEntries.length - columnEnd) * columnRowHeight}px` }));
     if (columnVirtualized) {
@@ -3364,16 +3977,27 @@ async function handleColumnEntryKeydown(event, { columnIndex, entryIndex, entry,
 }
 
 async function applyColumnSort(index, spec) {
-  if (!state.columns[index]) {
-    return;
+  const column = state.columns[index];
+  if (!column) return false;
+  if (column.globalSearch) {
+    activateColumn(index);
+    return applyPrimarySort(spec);
   }
-  if (!state.columns[index].resourceRef) {
+  if (!column.resourceRef && column.nextCursor) {
     setStatus('Refresh the authorized Files roots before sorting this folder.', true);
     return false;
   }
-  const normalized = constrainSortSpec(spec, state.columns[index].sortKeys || SORT_KEYS);
-  state.columns[index].sort = normalized;
-  await reloadManagedColumn(index);
+  column.sort = constrainSortSpec(spec, column.sortKeys || SORT_KEYS);
+  if (column.resourceRef) return reloadManagedColumn(index, { preserveColumns:true });
+  column.entries = sortEntries(column.entries || [], column.sort);
+  if (activeColumn() === column) {
+    state.sort = column.sort;
+    state.entries = column.entries;
+    rememberViewPreferences();
+    syncPrimarySortControls();
+  }
+  renderEntries();
+  return true;
 }
 
 async function reloadColumn(index) {
@@ -3402,7 +4026,7 @@ async function reloadColumn(index) {
       state.nextCursor = column.nextCursor;
     }
     renderEntries();
-    setStatus(`${column.entries.length}${column.nextCursor ? '+' : ''} items`);
+    setStatus(`${column.entries.length}${column.nextCursor ? '+' : ''} items`, false, { keepUndo: true });
     return true;
   } catch (error) {
     if (error?.name !== 'AbortError') setStatus(error.message || 'Column could not be sorted', true);
@@ -3504,7 +4128,8 @@ function closePreview() {
   preview.replaceChildren();
 }
 
-async function previewEntry(entry, path) {
+async function previewEntry(entry, path, isCurrent = () => true) {
+  if (!isCurrent()) return;
   if(!state.graphicalMedia&&state.shell)state.graphicalMedia=mountImageRegion({root:state.shell,selector:'.files-thumbnail, .files-preview-image',isCurrent:()=>!!state.shell?.isConnected});
   const preview = state.shell?.querySelector('[data-files-preview]');
   if (!preview) return;
@@ -3515,15 +4140,90 @@ async function previewEntry(entry, path) {
   closePreview();
   const controller = new AbortController(); state.previewController = controller;
   preview.hidden = false; preview.replaceChildren(el('div', { class: 'files-preview-loading', text: 'Loading preview…' }));
-  const kind = previewKind(entry, path);
+  let kind = previewKind(entry, path);
   const provider = state.provider;
+  const owner = state.owner, lifecycle = state.lifecycleGeneration, policy = filesPolicyGeneration(), workspace = copalWorkspace();
   let handle = null;
   let url = entry.preview_url || entry.download_url;
   try {
+    if (entry.format?.formatId === 'iwi' && !entry.format?.providerRevision) {
+      const result = await filesFacadeClient.stat(entry.resource_ref, { signal:controller.signal });
+      if (controller.signal.aborted || state.previewController !== controller || state.owner !== owner
+          || state.lifecycleGeneration !== lifecycle || filesPolicyGeneration() !== policy || copalWorkspace() !== workspace
+          || state.provider !== provider) return;
+      const fresh = result;
+      if (!fresh || fresh.id !== entry.resource_id || fresh.provider !== entry.provider || !fresh.revision
+          || fresh.format?.formatId !== 'iwi') throw new Error('The preview source changed. Refresh the item.');
+      entry = facadeEntry(fresh); kind = previewKind(entry, path); url = entry.preview_url;
+      if (!url) throw new Error('This preview is unavailable.');
+    }
+    if (kind === 'video') {
+      const fresh=await filesFacadeClient.stat(entry.resource_ref,{signal:controller.signal});
+      if(controller.signal.aborted || state.previewController!==controller || state.owner!==owner || state.lifecycleGeneration!==lifecycle || filesPolicyGeneration()!==policy || copalWorkspace()!==workspace || state.provider!==provider) return;
+      if(!fresh || fresh.id!==entry.resource_id || fresh.provider!=='host' || fresh.format?.formatId!=='video' || !fresh.revision) throw Error('The recording source changed. Refresh the item.');
+      entry=facadeEntry(fresh);url=filesFacadeClient.contentUrl(entry.resource_ref,{purpose:'preview',expectedRevision:fresh.revision});
+    }
+    let iwiEvidence = null;
+    if (entry.format?.formatId === 'iwi') {
+      const response = await fetch(url, { credentials:'same-origin', signal:controller.signal });
+      const derived = await readIwiPreview(response, { descriptor:entry.format, revision:entry.format.providerRevision, signal:controller.signal });
+      const digest = await crypto.subtle.digest('SHA-256', await derived.blob.arrayBuffer());
+      if (controller.signal.aborted || state.previewController !== controller || state.owner !== owner || state.lifecycleGeneration !== lifecycle || filesPolicyGeneration() !== policy || copalWorkspace() !== workspace) return;
+      iwiEvidence = { ...derived.evidence, pngSHA256:Array.from(new Uint8Array(digest), b=>b.toString(16).padStart(2,'0')).join('') };
+      url = URL.createObjectURL(derived.blob);
+      controller.signal.addEventListener('abort', () => URL.revokeObjectURL(url), { once:true });
+    }
     const close = iconButton({ glyph: 'close', title: 'Close preview', onClick: closePreview });
     const head = el('div', { class: 'files-preview-head' }, el('strong', { text: entry.name || displayName(path) }), close);
+    if (iwiEvidence) {
+      const save = el('button', { type:'button', text:'Save PNG copy…' });
+      save.addEventListener('click', async () => {
+        const current = () => !controller.signal.aborted && state.previewController === controller && state.owner === owner
+          && state.lifecycleGeneration === lifecycle && filesPolicyGeneration() === policy && copalWorkspace() === workspace;
+        try {
+          const { createResourcePicker } = await import('./copal/resourcePicker.js');
+          if (!current()) return;
+          let selected = null;
+          const picker = createResourcePicker({ client:filesFacadeClient, purpose:'folder', accountScope:owner, workspaceScope:workspace,
+            generation:policy, originWindow:state.nativeWindow, getGeneration:()=>filesPolicyGeneration(), getAccountScope:()=>state.owner,
+            getWorkspaceScope:()=>copalWorkspace(), isOriginCurrent:current,
+            isCompatible:resource=>resource.capabilities?.write ? '' : 'Choose a writable folder.',
+            onSelect:resource=>{ selected=resource; return true; },
+            onClose:async cancelled=>{
+              if (cancelled || !selected || !current()) return;
+              try {
+                const name = await uiModule.styledPrompt('Name the new PNG copy.', { title:'Save PNG copy', defaultValue:`${entry.name}.png` });
+                if (!name || !current()) return;
+                const operation = `iwi-${crypto.randomUUID()}`;
+                const request = { operation_id:operation, item_id:operation, generation:policy, source_ref:entry.resource_ref,
+                  revision:iwiEvidence.revision, source_sha256:iwiEvidence.sourceSHA256, decoder:iwiEvidence.decoder,
+                  png_sha256:iwiEvidence.pngSHA256, destination_ref:selected.ref, name:String(name).trim() };
+                let result;
+                try { result = await filesFacadeClient.saveIwiPngCopy(request); }
+                catch (error) {
+                  if (!current()) return;
+                  if (error.status >= 400 && error.status < 500 && error.code !== 'mutation_outcome_unknown') throw error;
+                  try { result = await filesFacadeClient.operationReceipt(operation, { generation:policy, signal:controller.signal }); }
+                  catch (_) { throw new Error(`Save outcome is unknown. Check operation ${operation} before retrying.`); }
+                }
+                if (current()) setStatus(result.items?.[0]?.outcome === 'committed' ? 'PNG copy saved; original retained.' : `PNG copy status: ${result.items?.[0]?.code || result.state}. Operation ${operation}`);
+              } catch (error) { if (current()) setStatus(error.message || 'PNG copy unavailable.', true); }
+            } });
+          void picker.open();
+        } catch (error) { if (current()) setStatus(error.message || 'PNG copy unavailable.', true); }
+      });
+      head.append(save);
+    }
     const content = el('div', { class: 'files-preview-content' });
-    if (kind === 'image' || kind === 'audio') {
+    if (kind === 'video') {
+      const video=el('video',{controls:true,preload:'metadata',src:url,'aria-label':`Recording preview for ${entry.name}`});video.style.maxWidth='100%';
+      video.addEventListener('error',()=>setStatus('Video playback unavailable or codec unsupported; original download remains available.',true),{once:true});
+      controller.signal.addEventListener('abort',()=>{video.pause();video.removeAttribute('src');video.load();},{once:true});
+      const open=el('button',{type:'button',text:'Review in Editor…'});open.addEventListener('click',async()=>{
+        const valid=()=>!controller.signal.aborted && state.previewController===controller && state.owner===owner && state.lifecycleGeneration===lifecycle && filesPolicyGeneration()===policy && copalWorkspace()===workspace;
+        try{const copal=window.copalModule || await import('./copal.js');if(valid())await copal.openResource(entry.resource_ref,{expectedRevision:entry.revision,isCurrent:valid});}catch(error){if(valid())setStatus(error.message || 'Editor recording review unavailable.',true);}
+      });content.append(video,open);
+    } else if (kind === 'image' || kind === 'audio') {
       // Let the browser media engine consume the opaque authorized Rust
       // stream. This avoids assembling a second full-size Blob in the Files
       // UI and keeps audio seeking/range requests useful for recordings.
@@ -3629,8 +4329,16 @@ async function previewEntry(entry, path) {
       }
       content.append(el('pre', { class: 'files-preview-text', text: bounded.text + suffix }));
     }
+    if (!isCurrent()) {
+      if (state.previewController === controller) closePreview();
+      return;
+    }
     preview.replaceChildren(head, content);
   } catch (error) {
+    if (!isCurrent()) {
+      if (state.previewController === controller) closePreview();
+      return;
+    }
     if (error?.name !== 'AbortError') {
       if (entry.download_url) {
         const fallbackClose = iconButton({ glyph: 'close', title: 'Close preview', onClick: closePreview });
@@ -3692,7 +4400,7 @@ async function openDirectory(requestedPath) {
     renderEntries();
     updateTreeHighlight();
     updateFavoriteButton();
-    setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`);
+    setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`, false, { keepUndo: true });
     commitFilesHistory();
     return true;
   } catch (error) {
@@ -3811,7 +4519,7 @@ async function loadMoreEntries() {
     state.entries = sortEntries([...combined.values()]);
     state.nextCursor = data.next_cursor || null;
     renderEntries();
-    setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`);
+    setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`, false, { keepUndo: true });
   } catch (error) {
     if (error?.code === 'stale_cursor' && generation === state.contentGeneration && path === state.hostPath) {
       return openDirectory(path);
@@ -3844,6 +4552,7 @@ function managedColumn(resource, response, spec = state.sort, query = '') {
     capabilities: Array.isArray(resource?.capabilities) ? [...resource.capabilities] : [],
     provenance: resource?.provenance && typeof resource.provenance === 'object' ? { ...resource.provenance } : {},
     revision: resource?.revision && typeof resource.revision === 'object' ? { ...resource.revision } : null,
+    binderContext: resource?.binderContext || null,
     name: String(resource?.name || 'Files'),
     // The sealed cursor is bound to the provider's ordering. Never reorder an
     // individual page in the browser or page N can jump ahead of page N-1.
@@ -3859,6 +4568,7 @@ function managedColumn(resource, response, spec = state.sort, query = '') {
 }
 
 function stopActiveFolderWatch() {
+  clearFilesReadRecovery('watch');
   state.watchEpoch += 1;
   state.watchController?.abort();
   state.watchController = null;
@@ -3875,7 +4585,11 @@ function syncActiveFolderWatch() {
     && !column?.query
     && Array.isArray(column?.capabilities)
     && column.capabilities.includes('watch')
-    && state.nativeWindow?.visible;
+    && !options.navigationOnly && !document.hidden && state.nativeWindow?.visible;
+  if (state.watchRetryRef !== resourceRef) {
+    state.watchRetryRef = resourceRef;
+    state.watchFailures = 0;
+  }
   if (!watchable) {
     stopActiveFolderWatch();
     return;
@@ -3890,6 +4604,7 @@ function syncActiveFolderWatch() {
     try {
       for await (const event of filesFacadeClient.watch(resourceRef, { signal: controller.signal })) {
         if (controller.signal.aborted || epoch !== state.watchEpoch || activeColumn()?.resourceRef !== resourceRef) return;
+        state.watchFailures = 0;
         // A successful watch observation is a dirty hint, never source authority.
         window.dispatchEvent(new CustomEvent('openclank-files-watch-dirty',{detail:{provider:'host',resourceRef,rescanRequired:event?.rescan_required===true}}));
         if (state.watchRefreshTimer != null) clearTimeout(state.watchRefreshTimer);
@@ -3907,11 +4622,20 @@ function syncActiveFolderWatch() {
         }, 180);
       }
       if (!controller.signal.aborted && epoch === state.watchEpoch) {
-        throw new Error('Files watch ended');
+        throw Object.assign(new Error('Files watch ended'), {code:'transport_unavailable'});
       }
     } catch (error) {
-      if (error?.name !== 'AbortError' && epoch === state.watchEpoch) {
-        setStatus('Live folder updates paused · use Refresh to reconcile', true);
+      if (error?.name !== 'AbortError' && epoch === state.watchEpoch && activeColumn()?.resourceRef === resourceRef) {
+        state.watchFailures += 1;
+        const snapshot = captureFilesProjection();
+        showFilesReadRetry('watch','live folder updates',error,() => {
+          if (error?.code === 'resource_ref_stale' || error?.code === 'policy_generation_changed') {
+            return handleFilesPolicyChanged(snapshot);
+          }
+          // Reconcile the one directory that may have missed events. Committing
+          // its listing opens the replacement watch without rebuilding all roots.
+          return reloadManagedColumn(state.columns.indexOf(activeColumn()));
+        });
       }
     } finally {
       if (state.watchController === controller) {
@@ -3948,7 +4672,7 @@ function commitManagedColumn(column, { provider = state.provider, columns = [col
   if (partialSearch) {
     setStatus('Partial search', true);
   } else {
-    setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`);
+    setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`, false, { keepUndo: true });
   }
   if (!options.navigationOnly) syncActiveFolderWatch();
   commitFilesHistory();
@@ -3964,6 +4688,8 @@ function cancelReveal() {
 }
 
 async function openManagedDirectory(entry, parentIndex = state.columns.length - 1, navigation = {}) {
+  clearFilesReadRecovery('folder');
+  clearFilesReadRecovery('library');
   if (!editorResourceAllowed(entry)) throw new Error('Chats belong in Chats or Library, outside Editor.');
   if (navigation.reveal != null) { if (navigation.reveal !== state.revealGeneration) return false; }
   else cancelReveal();
@@ -3977,6 +4703,17 @@ async function openManagedDirectory(entry, parentIndex = state.columns.length - 
   const generation = ++state.contentGeneration;
   const sortKeys = sortKeysFor(entry?.sort_keys || SORT_KEYS);
   const requestedSort = constrainSortSpec(state.sort, sortKeys);
+  const intent = captureFilesProjection();
+  const selected = {resourceId:String(entry.resource_id || entry.id || ''),provider:entry.provider || state.provider,
+    name:entry.name,sort:requestedSort,sortKeys,query:''};
+  intent.provider = selected.provider;
+  intent.hostPath = '';
+  const nestedTarget = Number.isInteger(parentIndex) && parentIndex >= 0;
+  const ancestors = (entry.tree_ancestors || []).map(parent => ({
+    resourceId:String(parent.resource_id || parent.id || ''),provider:parent.provider || selected.provider,
+    name:parent.name,sort:parent.tree_sort || requestedSort,sortKeys:sortKeysFor(parent.sort_keys || SORT_KEYS),query:'',
+  }));
+  intent.columns = [...(nestedTarget ? intent.columns.slice(0,parentIndex+1) : ancestors),selected];
   setStatus(`Loading ${entry.name || 'folder'}…`);
   try {
     const nested = Number.isInteger(parentIndex) && parentIndex >= 0;
@@ -3995,7 +4732,7 @@ async function openManagedDirectory(entry, parentIndex = state.columns.length - 
     }
     if (generation !== state.contentGeneration || controller.signal.aborted || !state.nativeWindow?.visible) return false;
     if (nested && parents[parentIndex]) parents[parentIndex].activeName = resource.name;
-    const column = managedColumn(resource, response, requestedSort, '');
+    const column = managedColumn({ ...resource, binderContext:resource.binderContext || (nested ? parents[parentIndex]?.binderContext : null) }, response, requestedSort, '');
     const ancestors = !nested && Array.isArray(entry.tree_ancestors) ? entry.tree_ancestors.map(parent => managedColumn(parent,{entries:parent.tree_entries || [],next_cursor:parent.tree_cursor || null},parent.tree_sort || requestedSort)) : [];
     commitManagedColumn(column, {
       provider: resource?.provider || state.provider,
@@ -4004,7 +4741,8 @@ async function openManagedDirectory(entry, parentIndex = state.columns.length - 
     return true;
   } catch (error) {
     if (error?.name !== 'AbortError' && generation === state.contentGeneration) {
-      setStatus(error.message || 'Folder unavailable', true);
+      clearFilesAuthorityContent('',{catalogs:false});
+      showFilesReadRetry('folder','the selected folder',error,()=>handleFilesPolicyChanged(intent));
     }
     return false;
   } finally {
@@ -4082,7 +4820,8 @@ async function renewManagedDirectoryAuthority(target, index, signal = null) {
   return { resource, columns: refreshed };
 }
 
-async function reloadManagedColumn(index) {
+async function reloadManagedColumn(index, { preserveColumns = false } = {}) {
+  clearFilesReadRecovery('folder');
   const column = state.columns[index];
   if (!column) return false;
   if (!column.resourceRef) return openProvider('all');
@@ -4092,6 +4831,8 @@ async function reloadManagedColumn(index) {
   const generation = ++state.contentGeneration;
   const requestedSort = constrainSortSpec(column.sort || state.sort, column.sortKeys || SORT_KEYS);
   column.sort = requestedSort;
+  const intent = captureFilesProjection();
+  intent.columns = intent.columns.slice(0,index+1);
   try {
     let resource = column;
     let columns = state.columns.slice(0, index);
@@ -4116,10 +4857,29 @@ async function reloadManagedColumn(index) {
       provenance: resource.provenance,
       revision: resource.revision,
     }, response, requestedSort, column.query || '');
-    commitManagedColumn(refreshed, { columns: [...columns, refreshed] });
+    if (preserveColumns && resource === column && state.mode === 'columns') {
+      refreshed.activeName = column.activeName;
+      refreshed.selection = column.selection;
+      refreshed.scrollTop = column.scrollTop;
+      state.columns[index] = refreshed;
+      if (state.activeColumnIndex === index) {
+        state.entries = refreshed.entries;
+        state.nextCursor = refreshed.nextCursor;
+        state.sort = refreshed.sort;
+        syncPrimarySortControls();
+        rememberViewPreferences();
+      }
+      renderEntries();
+      commitFilesHistory();
+    } else {
+      commitManagedColumn(refreshed, { columns: [...columns, refreshed] });
+    }
     return true;
   } catch (error) {
-    if (error?.name !== 'AbortError') setStatus(error.message || 'Folder could not be sorted', true);
+    if (error?.name !== 'AbortError' && generation === state.contentGeneration && state.nativeWindow?.visible) {
+      clearFilesAuthorityContent('',{catalogs:false});
+      showFilesReadRetry('folder','the selected folder',error,()=>handleFilesPolicyChanged(intent));
+    }
     return false;
   } finally {
     if (state.contentController === controller) state.contentController = null;
@@ -4137,7 +4897,11 @@ async function loadManagedColumnMore(index) {
   syncPagingControl();
   setStatus('Loading more items…');
   const generation = state.contentGeneration;
+  const lifecycle = state.lifecycleGeneration;
   const cursor = column.nextCursor;
+  const current = () => state.contentController === controller && state.pagingController === controller
+    && !controller.signal.aborted && generation === state.contentGeneration && lifecycle === state.lifecycleGeneration
+    && state.columns[index] === column && cursor === column.nextCursor;
   try {
     const response = await filesFacadeClient.children(column.resourceRef, {
       cursor,
@@ -4145,7 +4909,7 @@ async function loadManagedColumnMore(index) {
       query: column.query || '',
       signal: controller.signal,
     });
-    if (generation !== state.contentGeneration || controller.signal.aborted || cursor !== column.nextCursor) return false;
+    if (!current()) return false;
     const combined = new Map(column.entries.map((item) => [item.resource_id, item]));
     for (const item of (response?.entries || []).map(facadeEntry).filter(editorResourceAllowed)) combined.set(item.resource_id, item);
     column.entries = [...combined.values()];
@@ -4155,10 +4919,11 @@ async function loadManagedColumnMore(index) {
       state.nextCursor = column.nextCursor;
     }
     renderEntries();
-    setStatus(`${column.entries.length}${column.nextCursor ? '+' : ''} items`);
+    setStatus(`${column.entries.length}${column.nextCursor ? '+' : ''} items`, false, { keepUndo: true });
     return true;
   } catch (error) {
-    if (error?.code === 'stale_cursor' && generation === state.contentGeneration) return reloadManagedColumn(index);
+    if (!current()) return false;
+    if (error?.code === 'stale_cursor') return reloadManagedColumn(index);
     if (error?.name !== 'AbortError') setStatus(error.message || 'More items could not be loaded', true);
     return false;
   } finally {
@@ -4251,7 +5016,8 @@ async function refreshBrowser({ hierarchyProvider = null } = {}) {
   const selectedId = state.treeSelection?.resource_id;
   const directoryId = activeColumn()?.resourceId;
   const branches = [];
-  for (const tree of [state.workspaceTree, state.favoriteTree, state.explorerTree, state.collectionTree]) {
+  const trees = state.editorRootBound ? [state.editorRootTree] : [state.workspaceTree, state.favoriteTree, state.explorerTree, state.collectionTree];
+  for (const tree of trees) {
     if (!tree) continue;
     const nodes = tree.snapshot().nodes;
     if (hierarchyProvider) {
@@ -4343,8 +5109,13 @@ async function openClankerHome(controller, generation) {
     const response = await filesFacadeClient.children(library.resource_ref, {
       sort: managedSortRequest(constrainSortSpec(state.sort, library.sort_keys || SORT_KEYS)),
       signal: controller.signal,
+    }).catch(error => {
+      if (error?.name === 'AbortError') throw error;
+      return {error};
     });
     if (generation !== state.contentGeneration || !state.nativeWindow?.visible) return false;
+    if (response.error) showFilesReadRetry('library','Library collections',response.error,()=>openProvider(CLANKER_HOME_PROVIDER));
+    else clearFilesReadRecovery('library');
     collections = (response?.entries || []).map(facadeEntry).filter(editorResourceAllowed)
       .filter((entry) => Object.values(LIBRARY_COLLECTION_VIEWS).includes(libraryCollectionView(entry)))
       .map(clankerHomeEntry);
@@ -4366,7 +5137,9 @@ async function openClankerHome(controller, generation) {
   return true;
 }
 
-async function openProvider(provider) {
+async function openProvider(provider, { rootsConfirmed = false } = {}) {
+  clearFilesReadRecovery('folder');
+  clearFilesReadRecovery('library');
   cancelReveal();
   state.treeSelection = null; options.onSelection?.(null); options.onDirectory?.(null);
   stopActiveFolderWatch();
@@ -4391,12 +5164,14 @@ async function openProvider(provider) {
   updateTreeHighlight();
   updateFavoriteButton();
   try {
-    const data = await filesFacadeClient.roots({
-      copalWorkspace: copalWorkspace(),
-      signal: controller.signal,
-    });
-    if (generation !== state.contentGeneration || !state.nativeWindow?.visible) return false;
-    state.managedRoots = (data?.entries || []).map(facadeEntry).filter(editorResourceAllowed);
+    if (!rootsConfirmed) {
+      const roots = await filesFacadeClient.roots({
+        copalWorkspace: copalWorkspace(),
+        signal: controller.signal,
+      });
+      if (generation !== state.contentGeneration || !state.nativeWindow?.visible) return false;
+      state.managedRoots = roots.entries.map(facadeEntry).filter(editorResourceAllowed);
+    }
     if (provider === CLANKER_HOME_PROVIDER) return await openClankerHome(controller, generation);
     if (provider === 'all') {
       // Once Host is present in the opaque facade, it is the single unified
@@ -4450,9 +5225,8 @@ async function openProvider(provider) {
   } catch (error) {
     if (error?.name === 'AbortError') return false;
     if (generation !== state.contentGeneration) return false;
-    state.entries = [];
-    if (body) body.replaceChildren(el('div', { class: 'files-error', text: error.message || `${provider} unavailable` }));
-    setStatus(error.message || `${provider} unavailable`, true);
+    clearFilesAuthorityContent('', {catalogs:false});
+    showFilesReadRetry('folder','this source',error,()=>openProvider(provider));
     return false;
   } finally {
     if (state.contentController === controller) state.contentController = null;
@@ -4489,25 +5263,18 @@ async function download(path) {
 }
 
 async function downloadSelected() {
-  const selected = [...state.selected];
-  const entries = state.entries.filter((entry) => {
-    return selected.includes(entrySelectionKey(entry)) && !isDirectory(entry);
-  });
-  if (!entries.length) { setStatus('Select one or more files first.', true); return; }
-  for (const entry of entries) {
-    if (entry.download_url) await downloadEntry(entry);
-    else if (state.provider === 'host') await download(entryPath(entry));
+  const captured = captureCommands({ context:'selection' });
+  const command = commandDescriptors(captured).find(item => item.id === 'files.download');
+  if (!command || command.disabledReason || !isCommandCaptureCurrent(captured)) {
+    setStatus(command?.disabledReason || 'Select one or more files first.', true);
+    return false;
   }
+  return command.run();
 }
 
 function selectedActionEntry() {
   const selected = state.entries.filter((entry) => state.selected.has(entrySelectionKey(entry)));
   return selected.length === 1 ? selected[0] : null;
-}
-
-function selectedActionEntries() {
-  const model = ensureSelectionModel(activeColumn(), state.activeColumnIndex);
-  return model?.selectedEntries?.() || state.entries.filter((entry) => state.selected.has(entrySelectionKey(entry)));
 }
 
 function isHostInteropEntry(entry) {
@@ -4521,15 +5288,16 @@ function isNativeHostOpenEntry(entry) {
   if (!isFacadeEntry(entry)) return false;
   const provider = String(entry?.provider || '').toLowerCase();
   const capabilities = new Set(entry?.capabilities || []);
-  return (provider === 'host' || capabilities.has('open'))
+  return (provider === 'host' || provider === 'files' && entry.kind === 'image' ||
+      provider === 'copal' && entry.provenance?.document_kind === 'asset' ||
+      provider === 'library' && entry.provenance?.domain === 'published')
     && capabilities.has('stat')
     && capabilities.has('open')
     && !isDirectory(entry)
     && !['symlink', 'special', 'other'].includes(String(entry?.kind || '').toLowerCase());
 }
 
-function isLibraryDocumentsView() {
-  const column = activeColumn();
+function isLibraryDocumentsView(column = activeColumn()) {
   return String(column?.provider || '') === 'library'
     && libraryCollectionView(column) === LIBRARY_COLLECTION_VIEWS.documents;
 }
@@ -4541,14 +5309,64 @@ function selectedLibraryDocumentEntries() {
   ));
 }
 
+async function createSelectedLibraryDocument(snapshot) {
+  if (options.pickerMode || !isLibraryDocumentsView(snapshot.column)) return false;
+  const current = () => isCommandCaptureCurrent(snapshot) && snapshot.sessionId === (window.sessionModule?.getCurrentSessionId?.() || '');
+  try {
+    const actions = await import('./filesLibraryActions.js');
+    if (!current()) return false;
+    const created = await actions.createLibraryDocument({ sessionId:snapshot.sessionId || null });
+    if (!current()) return false;
+    if (created?.id) await window.documentModule?.loadDocument?.(created.id);
+    if (!current()) return false;
+    await reloadManagedColumn(snapshot.columnIndex);
+    setStatus('Created Library document');
+    return true;
+  } catch (error) {
+    if (current()) setStatus(error?.message || 'Library document could not be created', true);
+    return false;
+  }
+}
+
+function chooseLibraryDocuments(snapshot) {
+  if (options.pickerMode || !isLibraryDocumentsView(snapshot.column) || !isCommandCaptureCurrent(snapshot)) return false;
+  const input = state.shell?.querySelector('[data-files-library-input]');
+  if (!input) return false;
+  state.libraryImportCapture = snapshot;
+  input.click();
+  return true;
+}
+
 function entryActionChoices(entry) {
+  if (entry?.unavailable || !entry?.resource_ref) return [];
   const capabilities = new Set(entry?.capabilities || []);
   const choices = [];
+  if (!options.pickerMode && entry?.provider === 'host' && !isDirectory(entry)
+      && !['symlink','special','other'].includes(String(entry?.kind || '').toLowerCase())
+      && capabilities.has('download') && entry.resource_ref && entry.resource_id) {
+    choices.push({action:'analysis.note', label:'Human analysis note…', glyph:'edit', local:true});
+    choices.push({action:'analysis.result', label:'Save verified analysis result…', glyph:'edit', local:true});
+    choices.push({action:'history.preview', label:'Preview selected history…', glyph:'file', local:true});
+    if (/\.json$/i.test(String(entry?.name||''))) choices.push({action:'backup.preference', label:'Review backup preference…', glyph:'file', local:true});
+  }
+  if (!options.pickerMode && !isDirectory(entry) && entry?.resource_ref && entry?.resource_id && capabilities.has('download') && /\.png$/i.test(String(entry?.name||''))) choices.push({action:'media.spriteCrops',label:'Select sprite frames…',glyph:'image',local:true});
+  if (!options.pickerMode && !isDirectory(entry) && /\.json$/i.test(String(entry?.name || '')) && capabilities.has('download')) {
+    choices.push({action:'media.workflow', label:'Review media workflow…', glyph:'image', local:true});
+  }
+  if (!options.pickerMode && !isDirectory(entry) && /\.glb$/i.test(String(entry?.name || '')) && capabilities.has('download')) {
+    choices.push({action:'media.materialBake', label:'Bake material maps…', glyph:'image', local:true});
+    choices.push({action:'media.blender', label:'Review Blender render…', glyph:'image', local:true});
+    choices.push({action:'media.blenderFour', label:'Review four-heading sheet…', glyph:'image', local:true});
+    choices.push({action:'media.blenderRig', label:'Review joint pose clip…', glyph:'image', local:true});
+  }
   if (isHostInteropEntry(entry) && isDirectory(entry) && capabilities.has('children') && !['symlink', 'special', 'other'].includes(String(entry?.kind || '').toLowerCase())) {
     choices.push({ action: 'workspace.use', label: 'Use as workspace', glyph: 'workspace', local: true });
   }
   if (isHostInteropEntry(entry) && !isDirectory(entry) && isTextualEntry(entry) && !['symlink', 'special', 'other'].includes(String(entry?.kind || '').toLowerCase())) {
     choices.push({ action: 'code.open', label: 'Open in Editor', glyph: 'code', local: true });
+  }
+  if (entry?.provider === 'host' && !isDirectory(entry) && entry.resource_ref && entry.resource_id && capabilities.has('download')) {
+    choices.push({ action: 'history.checkpoint', label: 'Checkpoint selected files…', glyph: 'restore', local: true });
   }
   if (entry?.provider === 'host' && !isDirectory(entry) && String(entry.resource_id || '').trim()) {
     choices.push({ action: 'history.open', label: 'History', glyph: 'restore', local: true });
@@ -4562,31 +5380,19 @@ function entryActionChoices(entry) {
     choices.push({ action: 'favorite.set', value: !favored, label: favored ? 'Remove favorite' : 'Add favorite', glyph: favored ? 'star-filled' : 'star' });
   }
   if (capabilities.has('archive')) choices.push({ action: 'archive.set', value: true, label: 'Archive', glyph: 'archive' });
-  if (capabilities.has('restore') && entry?.provenance?.domain !== 'copal') choices.push({ action: 'archive.set', value: false, label: 'Restore', glyph: 'restore' });
-  if (entry?.provenance?.domain === 'copal' && capabilities.has('rename')) choices.push({ action: 'rename', label: 'Rename', glyph: 'edit' });
+  if (capabilities.has('restore') && !['copal', 'host'].includes(entry.provider)) choices.push({ action: 'archive.set', value: false, label: 'Restore', glyph: 'restore' });
+  if (['copal', 'host', 'files'].includes(entry.provider) && capabilities.has('rename')) choices.push({ action: 'rename', label: 'Rename', glyph: 'edit' });
   const transfer = transferCapabilities(entry);
+  if (entry?.provider === 'host' && !isDirectory(entry) && transfer.copy) choices.push({ action:'transfer.duplicate', label:'Duplicate file', glyph:'copy' });
   if (entry?.provenance?.domain === 'copal' && transfer.move) choices.push({ action: 'transfer.move', label: 'Move', glyph: 'folder' });
   if (entry?.provenance?.domain === 'copal' && transfer.copy) choices.push({ action: 'transfer.copy', label: 'Copy', glyph: 'copy' });
-  if (entry?.provenance?.domain === 'copal' && capabilities.has('trash')) choices.push({ action: 'trash', label: 'Move to trash', glyph: 'trash' });
-  if (entry?.provenance?.domain === 'copal' && capabilities.has('restore')) choices.push({ action: 'restore', label: 'Restore', glyph: 'restore' });
-  if (isLibraryDocumentsView() && !isDirectory(entry)) {
+  if ((entry?.provenance?.domain === 'copal' || entry?.provider === 'host') && capabilities.has('trash')) choices.push({ action: 'trash', label: 'Move to trash', glyph: 'trash' });
+  if (entry.provenance?.domain === 'copal' && capabilities.has('restore')) choices.push({ action: 'restore', label: 'Restore', glyph: 'restore' });
+  if (entry.provider === 'library' && entry.kind === 'document' && entry.provenance?.domain === 'documents' && capabilities.has('open')) {
     choices.push({ action: 'library.clone', label: 'Clone to current session', glyph: 'copy', local: true });
     choices.push({ action: 'library.delete', label: 'Delete', glyph: 'trash', local: true, danger: true });
   }
   return choices;
-}
-
-function closeManagedActionMenu() {
-  state.actionMenuRelease?.();state.actionMenuRelease=null;
-  state.actionMenu?.remove?.();
-  state.actionMenu = null;
-}
-function ownFilesActionMenu(menu,anchor=null){
-  state.actionMenu=menu;
-  const owner=state.nativeWindow?.root,z=owner?Number.parseInt(getComputedStyle(owner).zIndex,10):NaN;
-  if(Number.isSafeInteger(z)&&z>=0&&z<2147483646)menu.style.zIndex=String(z+1);
-  const dismiss=()=>{const focused=menu.contains(document.activeElement);closeManagedActionMenu();if(focused&&anchor?.isConnected&&state.nativeWindow?.visible)anchor.focus();};
-  menu._dismiss=dismiss;state.actionMenuRelease=registerMenuDismiss(dismiss);
 }
 
 function chooseHostApplication(applications) {
@@ -4618,26 +5424,15 @@ function updateManagedActionControl() {
   updateLibraryCommandControls();
   const button = state.shell?.querySelector('[data-files-actions]');
   if (!button) return;
-  const selectedEntries = selectedActionEntries();
-  const entry = selectedEntries.length === 1 ? selectedEntries[0] : null;
-  const libraryEntries = selectedLibraryDocumentEntries();
-  if (libraryEntries.length > 1 && libraryEntries.length === selectedEntries.length) {
-    button.disabled = false;
-    setActionButtonLabel(button, libraryEntries.length);
-    button.title = `Actions for ${libraryEntries.length} selected Library documents`;
-    return;
-  }
-  if (selectedEntries.length > 1) {
-    const common = commonActionChoices(selectedEntries);
-    button.disabled = common.length === 0;
-    setActionButtonLabel(button, selectedEntries.length);
-    button.title = common.length ? `Actions available for all ${selectedEntries.length} selected items` : 'No action is available for every selected item';
-    return;
-  }
-  const count = entry ? entryActionChoices(entry).length : 0;
-  button.disabled = count === 0;
-  setActionButtonLabel(button, 0);
-  button.title = count ? `Actions for ${entry.name}` : 'Select one actionable item';
+  const captured = captureCommands({ context:'selection' });
+  const count = captured.entries.length;
+  const available = !options.pickerMode && count > 0 && contextCommandDescriptors(captured).length > 0;
+  button.disabled = !available;
+  setActionButtonLabel(button, count > 1 ? count : 0);
+  button.title = available
+    ? count === 1 ? `Actions for ${captured.entries[0].name}` : `Actions available for all ${count} selected items`
+    : 'No action is available for the selection';
+  button.setAttribute('aria-label', button.title);
 }
 
 function setActionButtonLabel(button, count) {
@@ -4648,10 +5443,15 @@ function setActionButtonLabel(button, count) {
 
 function commonActionChoices(entries) {
   if (!entries.length) return [];
-  const batchable = new Set(['archive.set', 'favorite.set', 'transfer.move', 'transfer.copy']);
-  const choices = entryActionChoices(entries[0]);
-  return choices.filter((choice) => batchable.has(choice.action) && entries.slice(1).every((entry) =>
-    entryActionChoices(entry).some((candidate) => candidate.action === choice.action && (candidate.value ?? null) === (choice.value ?? null))));
+  const batchable = new Set(['archive.set', 'favorite.set', 'transfer.move', 'transfer.copy', 'transfer.duplicate',
+    'history.checkpoint', 'library.clone', 'library.delete']);
+  let common = entryActionChoices(entries[0]).filter(choice => batchable.has(choice.action));
+  for (const entry of entries.slice(1)) {
+    if (!common.length) break;
+    const choices = entryActionChoices(entry);
+    common = common.filter(choice => choices.some(candidate => candidate.action === choice.action && candidate.value === choice.value));
+  }
+  return common;
 }
 
 function captureFilesSelectionGuard(model, destinationIndex = state.activeColumnIndex) {
@@ -4706,11 +5506,168 @@ function updateLibraryCommandControls() {
 async function performManagedAction(entry, choice, snapshot = null) {
   if (options.pickerMode) { setStatus('This dialog selects resources; file changes are unavailable.', true); return false; }
   const menuTrigger = document.activeElement;
-  closeManagedActionMenu();
-  if (!entry || !choice) return false;
+  if (!choice) return false;
   let ownedController=null;
   const current=()=>!snapshot||isCommandCaptureCurrent(snapshot,snapshot.policy,ownedController);
   if(!current())return false;
+  if (choice.action === 'backup.preference') {
+    const owner=state.owner,generation=filesPolicyGeneration(),chatID=String(window.sessionModule?.getCurrentSessionId?.()||'');
+    const stillCurrent=()=>current() && state.owner===owner && filesPolicyGeneration()===generation && String(window.sessionModule?.getCurrentSessionId?.()||'')===chatID;
+    try {const {runBackupPreferenceTransfer}=await import('./backupPreferenceTransfer.js');await runBackupPreferenceTransfer({client:filesFacadeClient,sourceRef:entry.resource_ref,sourceResourceID:entry.resource_id,current:stillCurrent,scopeRoot:state.nativeWindow?.root,status:(message,error=false)=>setStatus(message,error)});return true;}
+    catch(error){if(stillCurrent())setStatus(String(error?.message||'Backup preference unavailable.'),true);return false;}
+  }
+  if (choice.action === 'history.preview') {
+    const owner=state.owner,generation=filesPolicyGeneration(),chatID=String(window.sessionModule?.getCurrentSessionId?.()||'');
+    const stillCurrent=()=>current() && state.owner===owner && filesPolicyGeneration()===generation && String(window.sessionModule?.getCurrentSessionId?.()||'')===chatID;
+    try {const {runSessionTransferPreview}=await import('./sessionTransfer.js');await runSessionTransferPreview({client:filesFacadeClient,sourceRef:entry.resource_ref,sourceResourceID:entry.resource_id,current:stillCurrent,scopeRoot:state.nativeWindow?.root,status:(message,error=false)=>setStatus(message,error)});return true;}
+    catch(error){if(stillCurrent())setStatus(String(error?.message||'Selected history unavailable.'),true);return false;}
+  }
+  if (choice.action === 'analysis.result') {
+    const owner=state.owner,generation=filesPolicyGeneration(),chatID=String(window.sessionModule?.getCurrentSessionId?.()||'');
+    if(!chatID){setStatus('Open the original chat before selecting an analysis result.',true);return false;}
+    const stillCurrent=()=>current() && state.owner===owner && filesPolicyGeneration()===generation && String(window.sessionModule?.getCurrentSessionId?.()||'')===chatID;
+    try {const {runAnalysisResultFlow}=await import('./analysisNoteFlow.js');await runAnalysisResultFlow({client:filesFacadeClient,sourceRef:entry.resource_ref,sourceResourceID:entry.resource_id,chatID,current:stillCurrent,scopeRoot:state.nativeWindow?.root,status:(message,error=false)=>setStatus(message,error),openResult:async ref=>{const result=await filesFacadeClient.open(ref);if(stillCurrent())await dispatchFilesDestination(result,{resourceRef:ref,surface:options.surface||'files',isCurrent:stillCurrent});}});return true;}
+    catch(error){if(stillCurrent())setStatus(String(error?.message||'Analysis result unavailable.'),true);return false;}
+  }
+  if (choice.action === 'analysis.note') {
+    const owner=state.owner, generation=filesPolicyGeneration();
+    const stillCurrent=()=>current() && state.owner===owner && filesPolicyGeneration()===generation;
+    try {
+      const {runAnalysisNoteFlow}=await import('./analysisNoteFlow.js');
+      await runAnalysisNoteFlow({client:filesFacadeClient,sourceRef:entry.resource_ref,sourceResourceID:entry.resource_id,
+        current:stillCurrent,scopeRoot:state.nativeWindow?.root,status:(message,error=false)=>setStatus(message,error),
+        openResult:async ref=>{const result=await filesFacadeClient.open(ref);if(stillCurrent())await dispatchFilesDestination(result,{resourceRef:ref,surface:options.surface||'files',isCurrent:stillCurrent});}});
+      return true;
+    } catch(error) {if(stillCurrent())setStatus(String(error?.message||'Analysis note unavailable.'),true);return false;}
+  }
+  if (choice.action === 'media.jobs') {
+    const owner = state.owner, generation = filesPolicyGeneration();
+    const stillCurrent = () => current() && state.owner === owner && filesPolicyGeneration() === generation;
+    try {
+      const {showMediaJobs} = await import('./mediaJobFlow.js');
+      const workspace = copalWorkspace();
+      const chooseDestination = async () => {
+        const {createResourcePicker} = await import('./copal/resourcePicker.js');
+        if (!stillCurrent()) return null;
+        return await new Promise(resolve => {
+          let selected = null;
+          const picker = createResourcePicker({client:filesFacadeClient,purpose:'folder',accountScope:owner,workspaceScope:workspace,
+            generation,originWindow:state.nativeWindow,getGeneration:()=>filesPolicyGeneration(),getAccountScope:()=>state.owner,
+            getWorkspaceScope:()=>copalWorkspace(),isOriginCurrent:stillCurrent,rootLabel:'Choose a destination for the retained output',
+            isCompatible:resource=>resource.capabilities?.write ? '' : 'Choose a writable folder.',
+            onSelect:resource=>{selected=resource.ref; return true;},onClose:cancelled=>resolve(cancelled ? null : selected)});
+          void picker.open();
+        });
+      };
+      const openResult = async (ref, {recordingJobHint = null, savedImageDigest = null} = {}) => {
+        if (savedImageDigest) {
+          const stat=await filesFacadeClient.stat(ref), resource=stat?.resource || stat;
+          const revision=resource?.revision;
+          const fingerprint=revision?.kind === 'hostFingerprint' && /^sha256:([a-f0-9]{64}):[1-9][0-9]*$/.exec(revision.value || '');
+          if (!stillCurrent() || resource?.provider !== 'host' || resource.kind !== 'file' ||
+              !resource.ref || !fingerprint || fingerprint[1] !== savedImageDigest) throw new Error('The original saved image revision changed.');
+          const editor=window.copalModule || await import('./copal.js');
+          if (!stillCurrent() || typeof editor.openRetainedHostImage !== 'function' ||
+              !await editor.openRetainedHostImage(resource.ref,{expectedRevision:revision,isCurrent:stillCurrent})) {
+            throw new Error('The exact saved image could not be opened.');
+          }
+          return;
+        }
+        let originalRevision = null, recordingEvidence = null;
+        if (recordingJobHint) {
+          const original = await filesFacadeClient.openRecordedMedia(recordingJobHint);
+          if (!stillCurrent() || typeof original?.resourceRef !== 'string' || !original.revision) throw new Error('Original recording is unavailable. Choose the file in Files.');
+          ref = original.resourceRef; originalRevision = original.revision;
+          if (original.recordingCoverage) recordingEvidence={resourceRef:ref,revision:originalRevision,coverage:original.recordingCoverage};
+        }
+        const response = await filesFacadeClient.open(ref);
+        if (originalRevision && (response?.resource?.revision?.kind !== originalRevision.kind || response?.resource?.revision?.value !== originalRevision.value)) throw new Error('Original recording changed. Choose the file in Files.');
+        if (stillCurrent()) await dispatchFilesDestination(response, {resourceRef:ref,surface:options.surface || 'files',isCurrent:stillCurrent,recordingJobHint,recordingEvidence});
+      };
+      await showMediaJobs({client:filesFacadeClient,ui:uiModule,current:stillCurrent,chooseDestination,openResult,status:(message,error=false)=>setStatus(message,error)});
+      return true;
+    } catch (error) { if (stillCurrent()) setStatus(String(error?.message || 'Media jobs unavailable.'), true); return false; }
+  }
+  if (choice.action === 'media.record' || choice.action === 'media.workflow' || choice.action === 'media.materialBake' || choice.action === 'media.blender' || choice.action === 'media.blenderFour' || choice.action === 'media.blenderRig' || choice.action === 'media.generate' || choice.action === 'media.materialPack' || choice.action === 'media.spriteSheet' || choice.action === 'media.spriteCrops') {
+    const sessionID = String(window.sessionModule?.getCurrentSessionId?.() || '');
+    if (!sessionID) { setStatus('Open a chat before reviewing a media workflow.', true); return false; }
+    const owner = state.owner, workspace = copalWorkspace(), generation = filesPolicyGeneration();
+    const stillCurrent = () => current() && state.owner === owner && copalWorkspace() === workspace
+      && filesPolicyGeneration() === generation && String(window.sessionModule?.getCurrentSessionId?.() || '') === sessionID;
+    try {
+      const {runMediaJobFlow, runNeutralMediaFlow, runMaterialPackFlow, runBlenderJobFlow, runSpriteSheetFlow, runSpriteCropsFlow, runRecordingFlow} = await import('./mediaJobFlow.js');
+      const filesWorkspace = state.currentWorkspaceId;
+      const captureCurrent = () => stillCurrent() && (choice.action !== 'media.record' || state.currentWorkspaceId === filesWorkspace);
+      const chooseDestination = async () => {
+        const {createResourcePicker} = await import('./copal/resourcePicker.js');
+        if (!captureCurrent()) return null;
+        let initialDirectory = null;
+        if (choice.action === 'media.record' && filesWorkspace) {
+          const suggested = await filesFacadeClient.workspaceCaptureDirectory(filesWorkspace, 'movs');
+          if (!captureCurrent()) return null;
+          initialDirectory = suggested?.resource || null;
+        }
+        return await new Promise(resolve => {
+          let selected = null;
+          const picker = createResourcePicker({client:filesFacadeClient,purpose:'folder',accountScope:owner,workspaceScope:workspace,
+            generation,originWindow:state.nativeWindow,getGeneration:()=>filesPolicyGeneration(),getAccountScope:()=>state.owner,
+            getWorkspaceScope:()=>copalWorkspace(),isOriginCurrent:captureCurrent,initialDirectory,rootLabel:'Choose a destination for the output',
+            isCompatible:resource=>resource.capabilities?.write ? '' : 'Choose a writable folder.',
+            onSelect:resource=>{selected=resource.ref; return true;},onClose:cancelled=>resolve(cancelled ? null : selected)});
+          void picker.open();
+        });
+      };
+      const args={client:filesFacadeClient,ui:uiModule,sessionID,current:choice.action === 'media.record' ? captureCurrent : stillCurrent,chooseDestination,
+        status:(message,error=false)=>setStatus(message,error)};
+      if (choice.action === 'media.record') await runRecordingFlow(args);
+      else if (choice.action === 'media.spriteSheet') {
+        const chooseFrame=async index=>{
+          const {createResourcePicker}=await import('./copal/resourcePicker.js');
+          return await new Promise(resolve=>{let selected=null; const picker=createResourcePicker({client:filesFacadeClient,purpose:'image',accountScope:owner,workspaceScope:workspace,
+            generation,originWindow:state.nativeWindow,getGeneration:()=>filesPolicyGeneration(),getAccountScope:()=>state.owner,getWorkspaceScope:()=>copalWorkspace(),isOriginCurrent:stillCurrent,
+            rootLabel:`Choose PNG frame ${index}`,isCompatible:resource=>resource.capabilities?.download && /\.png$/i.test(String(resource.name||''))?'':'Choose a readable PNG.',
+            onSelect:resource=>{selected={ref:resource.ref,name:resource.name};return true;},onClose:cancelled=>resolve(cancelled?null:selected)}); void picker.open();});
+        };
+        await runSpriteSheetFlow({...args,chooseFrame});
+      }
+      else if (choice.action === 'media.spriteCrops') await runSpriteCropsFlow({...args,sourceRef:entry.resource_ref,sourceID:entry.resource_id,sourceName:entry.name});
+      else if (choice.action === 'media.materialBake') await runBlenderJobFlow({...args,sourceRef:entry.resource_ref,materialBake:true});
+      else if (choice.action === 'media.blender') await runBlenderJobFlow({...args,sourceRef:entry.resource_ref});
+      else if (choice.action === 'media.blenderFour') await runBlenderJobFlow({...args,sourceRef:entry.resource_ref,fourHeadings:true});
+      else if (choice.action === 'media.blenderRig') await runBlenderJobFlow({...args,sourceRef:entry.resource_ref,rigClip:true});
+      else if (choice.action === 'media.materialPack') {
+        const chooseMap=async role=>{
+          const {createResourcePicker}=await import('./copal/resourcePicker.js');
+          if(!stillCurrent())return null;
+          return await new Promise(resolve=>{let selected=null;const picker=createResourcePicker({client:filesFacadeClient,purpose:'image',accountScope:owner,workspaceScope:workspace,
+            generation,originWindow:state.nativeWindow,getGeneration:()=>filesPolicyGeneration(),getAccountScope:()=>state.owner,getWorkspaceScope:()=>copalWorkspace(),isOriginCurrent:stillCurrent,
+            rootLabel:`Choose the ${role} PNG`,isCompatible:resource=>resource.capabilities?.download && resource.resourceId && resource.revision?'':'Choose a readable image with a current revision.',
+            onSelect:resource=>{selected={ref:resource.ref,resourceID:resource.resourceId,revision:resource.revision};return true;},onClose:cancelled=>resolve(cancelled?null:selected)});void picker.open();});
+        };
+        await runMaterialPackFlow({...args,chooseMap});
+      }
+      else if (choice.action === 'media.generate') {
+        const chooseRecipe=async()=>{
+          const {createResourcePicker}=await import('./copal/resourcePicker.js');
+          return await new Promise(resolve=>{let selected=null;const picker=createResourcePicker({client:filesFacadeClient,purpose:'file',accountScope:owner,workspaceScope:workspace,
+            generation,originWindow:state.nativeWindow,getGeneration:()=>filesPolicyGeneration(),getAccountScope:()=>state.owner,getWorkspaceScope:()=>copalWorkspace(),isOriginCurrent:stillCurrent,
+            rootLabel:'Choose the workflow input for this profile',isCompatible:resource=>resource.capabilities?.download && /\.json$/i.test(String(resource.name||''))?'':'Choose a readable JSON workflow.',
+            onSelect:resource=>{selected=resource.ref;return true;},onClose:cancelled=>resolve(cancelled?null:selected)});void picker.open();});
+        };
+        const chooseImage=async()=>{
+          const {createResourcePicker}=await import('./copal/resourcePicker.js');
+          return await new Promise(resolve=>{let selected=null;const picker=createResourcePicker({client:filesFacadeClient,purpose:'image',accountScope:owner,workspaceScope:workspace,
+            generation,originWindow:state.nativeWindow,getGeneration:()=>filesPolicyGeneration(),getAccountScope:()=>state.owner,getWorkspaceScope:()=>copalWorkspace(),isOriginCurrent:stillCurrent,
+            rootLabel:'Choose a source image',isCompatible:resource=>resource.capabilities?.download && resource.resourceId && resource.revision?'':'Choose a readable image with a current revision.',
+            onSelect:resource=>{selected={ref:resource.ref,resourceID:resource.resourceId,revision:resource.revision};return true;},onClose:cancelled=>resolve(cancelled?null:selected)});void picker.open();});
+        };
+        await runNeutralMediaFlow({...args,chooseRecipe,chooseImage});
+      }
+      else await runMediaJobFlow({...args,recipeRef:entry.resource_ref});
+      return true;
+    } catch (error) { if (stillCurrent()) setStatus(String(error?.message || 'Media workflow unavailable.'), true); return false; }
+  }
+  if (choice.action === 'history.checkpoint') return await openSelectedCheckpoint([entry], current, snapshot?.selection);
   if (choice.action === 'history.open') {
     const target = createFilesHistoryTarget(entry);
     if (!target) {
@@ -4725,30 +5682,11 @@ async function performManagedAction(entry, choice, snapshot = null) {
     return opened;
   }
   if (choice.action === 'library.clone' || choice.action === 'library.delete') {
-    if (choice.action === 'library.delete' && !await uiModule.styledConfirm(
-      'Delete this document?', { title: 'Delete document', confirmText: 'Delete', danger: true },
-    )) return false;
-    if(!current())return false;
-    try {
-      const actions = await import('./filesLibraryActions.js');
-      if(!current())return false;
-      if (choice.action === 'library.clone') {
-        const clone = await actions.cloneLibraryDocument(entry.resource_ref, {
-          sessionId: window.sessionModule?.getCurrentSessionId?.() || null,
-        });
-        if (clone?.id && typeof window.documentModule?.loadDocument === 'function') {
-          await window.documentModule.loadDocument(clone.id);
-        }
-      } else {
-        await actions.deleteLibraryDocument(entry.resource_ref);
-      }
-      await reloadManagedColumn(state.columns.length - 1);
-      setStatus(choice.label + ': ' + entry.name);
-      return true;
-    } catch (error) {
-      setStatus(error?.message || choice.label + ' failed', true);
-      return false;
-    }
+    return performLibrarySelectionAction([entry], choice, snapshot);
+  }
+  if (choice.action === 'transfer.duplicate') {
+    if (!snapshot?.selection) { setStatus('Select the file in its containing folder to duplicate it.', true); return false; }
+    return performSelectedBulkAction([entry], choice, snapshot);
   }
   if (choice.action === 'transfer.move' || choice.action === 'transfer.copy') {
     const model = ensureSelectionModel(activeColumn(), state.activeColumnIndex);
@@ -4760,12 +5698,17 @@ async function performManagedAction(entry, choice, snapshot = null) {
   state.contentController?.abort();
   state.contentController = controller;
   const generation = state.contentGeneration;
+  const actionOwner = state.owner, actionPolicy = filesPolicyGeneration(), actionRef = String(entry.resource_ref || ''), actionLifecycle = state.lifecycleGeneration;
+  let actionRevision = entry.revision ? {kind:entry.revision.kind, value:entry.revision.value} : null;
+  const actionCurrent = () => current() && !controller.signal.aborted && generation === state.contentGeneration
+    && actionOwner === state.owner && actionPolicy === filesPolicyGeneration() && actionRef === String(entry.resource_ref || '');
   setStatus(`${choice.label}…`);
   try {
     if (choice.action === 'code.open') {
       const code = window.codeEditorModule || await import('./codeEditor.js');
+      if (!actionCurrent()) return false;
       const opened = isFacadeEntry(entry)
-        ? await code.openResource(entry.resource_ref)
+        ? await code.openResource(entry.resource_ref, { isCurrent:actionCurrent })
         : await code.openPath(entryPath(entry), { directory: isDirectory(entry) });
       if (!opened) throw new Error('Editor did not open this resource');
       setStatus(`Opened ${entry.name} in Editor`);
@@ -4775,6 +5718,7 @@ async function performManagedAction(entry, choice, snapshot = null) {
       const capabilities = new Set(entry.capabilities || []);
       if (!isDirectory(entry) || !capabilities.has('children') || !capabilities.has('stat')) throw new Error('Only an authorized folder can be used as a workspace');
       const workspace = await import('./workspace.js');
+      if (!actionCurrent()) return false;
       let bound;
       if (isFacadeEntry(entry)) {
         const response = await filesFacadeClient.workspace(
@@ -4796,6 +5740,7 @@ async function performManagedAction(entry, choice, snapshot = null) {
     }
     if (choice.action === 'host.default' || choice.action === 'host.open') {
       const discovered = await filesFacadeClient.hostApps(entry.resource_ref, { signal: controller.signal });
+      if (!actionCurrent()) return false;
       const applications = Array.isArray(discovered?.applications) ? discovered.applications : [];
       if (!applications.length) throw new Error('No installed app can open this file.');
       const application = choice.action === 'host.default'
@@ -4810,20 +5755,52 @@ async function performManagedAction(entry, choice, snapshot = null) {
     if (!entry.resource_ref) return false;
     let actionArgs = {};
     if (choice.action === 'rename' || choice.action === 'move') {
-      const name = await uiModule.styledPrompt(choice.action === 'rename' ? 'Choose a new file name.' : 'Choose the destination name for this document.', {
-        title: choice.action === 'rename' ? 'Rename document' : 'Move document', defaultValue: entry.provenance?.logical_path || entry.name,
+      const itemKind = isDirectory(entry) ? 'folder' : 'file';
+      const name = await uiModule.styledPrompt(choice.action === 'rename' ? `Choose a new ${itemKind} name.` : 'Choose the destination name for this document.', {
+        title: choice.action === 'rename' ? `Rename ${itemKind}` : 'Move document', defaultValue: entry.provenance?.logical_path || entry.name,
       });
       if (name == null) return false;
       if (!String(name).trim()) throw new Error('A name is required.');
       actionArgs = { name: String(name).trim() };
     } else if (choice.action === 'trash' && !await uiModule.styledConfirm(`Move ${entry.name} to trash?`, { title: 'Move to trash', confirmText: 'Move to trash', danger: true })) return false;
-    if(!current())return false;
+    if(!actionCurrent())return false;
+    let managedRoot = null;
+    if (entry.provider === 'host' && choice.action === 'rename') {
+      if (!actionRevision) {
+        const current = await filesFacadeClient.stat(actionRef, {signal:controller.signal});
+        if (!actionCurrent()) return false;
+        const revision = current?.resource?.revision;
+        if (!revision) throw new Error('Refresh this item before renaming it.');
+        actionRevision = {kind:revision.kind, value:revision.value};
+      }
+      const requirement = await filesFacadeClient.actionRootRequirement({generation:actionPolicy, resourceRef:actionRef,
+        name:actionArgs.name, expectedRevision:actionRevision}, {signal:controller.signal});
+      if (!actionCurrent()) return false;
+      if (requirement.root_required) {
+        if (!actionRevision) throw new Error('Refresh this file before renaming it.');
+        const {createResourcePicker} = await import('./copal/resourcePicker.js');
+        if (!actionCurrent()) return false;
+        managedRoot = await new Promise(resolve => {
+          let selected = null;
+          state.managedRootPicker?.destroy();
+          const picker = createResourcePicker({client:filesFacadeClient, purpose:'folder', accountScope:actionOwner,
+            workspaceScope:copalWorkspace(), generation:actionPolicy, originWindow:state.nativeWindow,
+            getGeneration:()=>filesPolicyGeneration(), getAccountScope:()=>state.owner, getWorkspaceScope:()=>copalWorkspace(),
+            isOriginCurrent:actionCurrent, rootLabel:'Choose an authorized root for this rename',
+            isCompatible:resource=>resource.provider === 'host' && resource.capabilities.write ? '' : 'Choose a writable Host root.',
+            onSelect:resource=>{selected=resource; return true;},
+            onClose:cancelled=>{if(state.managedRootPicker === picker) state.managedRootPicker=null; resolve(cancelled ? null : selected);}});
+          state.managedRootPicker=picker; void picker.open();
+        });
+        if (!managedRoot || !actionCurrent()) return false;
+      }
+    }
     const actionId = `files-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
     const response = await filesFacadeClient.action(
       entry.resource_ref,
       choice.action,
       choice.action === 'favorite.set' || choice.action === 'archive.set' ? { value: choice.value } : actionArgs,
-      { signal: controller.signal, actionId },
+      { signal: controller.signal, actionId, ...(entry.provider === 'host' && choice.action === 'rename' ? {expectedRevision:actionRevision, managedRoot} : {}) },
     );
     if (controller.signal.aborted || generation !== state.contentGeneration) return false;
     clearFilesSelection();
@@ -4838,7 +5815,32 @@ async function performManagedAction(entry, choice, snapshot = null) {
     }
     window.dispatchEvent(new CustomEvent('openclank-files-resource-mutated', { detail: { resourceRef: entry.resource_ref, action: choice.action, resource: response?.resource || null, history: response?.history || null } }));
     const recoveryUnavailable = response?.history && response.history.status !== "complete" && response.history.status !== "unconfigured";
-    setStatus(recoveryUnavailable ? `Saved; recovery copy unavailable: ${entry.name}` : `${choice.label}: ${entry.name}`);
+    const hostTrashEntry = entry.provider === 'host' && choice.action === 'trash' ? response?.history?.receipt?.trash_entry : null;
+    setStatus(hostTrashEntry ? 'Moved to trash.' : recoveryUnavailable ? `Saved; recovery copy unavailable: ${entry.name}` : `${choice.label}: ${entry.name}`);
+    if (hostTrashEntry) {
+      // One-shot Undo for this trash only: the entry lives in this closure, never in storage, and goes with the status line.
+      const undoOwner = state.owner;
+      const undo = el('button', { type: 'button', text: 'Undo', title: 'Put the file back where it was' });
+      undo.addEventListener('click', async () => {
+        if (listeners.signal.aborted || state.owner !== undoOwner) return;
+        undo.disabled = true;
+        state.pendingUndo = null;
+        try {
+          await filesFacadeClient.action(response.resource?.ref || entry.resource_ref, 'restore', { entry: hostTrashEntry },
+            { signal: listeners.signal, actionId: operationId('files-untrash') });
+          if (listeners.signal.aborted || state.owner !== undoOwner) return;
+          if (usesFacadeListing()) await refreshBrowser({ hierarchyProvider: null });
+          setStatus('Restored.');
+        } catch (error) {
+          if (error?.name !== 'AbortError' && state.owner === undoOwner) setStatus(error?.code === 'mutation_outcome_unknown' ? 'The outcome is not known. Refresh to check; do not repeat.' : (error.message || 'Undo failed'), true);
+        }
+      }, { signal: listeners.signal });
+      state.pendingUndo = { button: undo, path: state.path };
+      state.shell?.querySelector('.files-pane-status')?.append(' ', undo);
+    }
+    if (entry.provider === 'host' && choice.action === 'rename' && actionOwner === state.owner && actionPolicy === filesPolicyGeneration()) {
+      void offerFinishCleanup(actionId, actionPolicy, actionOwner, actionLifecycle);
+    }
     if (recoveryUnavailable && response.history.action_id) {
       const repairActionId = String(response.history.action_id);
       const repairOwner = state.owner;
@@ -4862,7 +5864,7 @@ async function performManagedAction(entry, choice, snapshot = null) {
     }
     return true;
   } catch (error) {
-    if (error?.name !== 'AbortError') setStatus(error.message || `${choice.label} failed`, true);
+    if (error?.name !== 'AbortError') setStatus(error?.code === 'mutation_outcome_unknown' ? 'The outcome is not known. Refresh to check; do not repeat.' : error.message || `${choice.label} failed`, true);
     return false;
   } finally {
     if (state.contentController === controller) state.contentController = null;
@@ -4871,6 +5873,38 @@ async function performManagedAction(entry, choice, snapshot = null) {
 
 function sameFileHistoryKeys(left, right) {
   return left.length === right.length && left.every((key, index) => key === right[index]);
+}
+
+async function openSelectedCheckpoint(entries, selectionCurrent, capturedGuard = null) {
+  if (!Array.isArray(entries) || entries.length<1 || entries.length>16 || !entries.every(entry=>entry?.provider==='host' && !isDirectory(entry) && entry.resource_ref && entry.resource_id)) {
+    setStatus('Choose one to sixteen Host files.',true);return false;
+  }
+  const model = capturedGuard ? validateFilesSelectionGuard(capturedGuard) : ensureSelectionModel(activeColumn());
+  const guard = model && (capturedGuard || captureFilesSelectionGuard(model));
+  if (!guard || model.selectedEntries().length!==entries.length || model.selectedEntries().some((entry,index)=>entrySelectionKey(entry)!==entrySelectionKey(entries[index]))) {
+    setStatus('Select the files in the current folder first.',true);return false;
+  }
+  const owner=state.owner,policy=filesPolicyGeneration(),lifecycle=state.lifecycleGeneration,content=state.contentGeneration;
+  const current=()=>Boolean(selectionCurrent() && validateFilesSelectionGuard(guard) && state.nativeWindow?.visible && state.owner===owner && filesPolicyGeneration()===policy
+    && state.lifecycleGeneration===lifecycle && state.contentGeneration===content);
+  try {
+    const {runCheckpointFlow}=await import('./checkpointFlow.js');if(!current())return false;
+    const chooseRoot=async()=>{
+      const {createResourcePicker}=await import('./copal/resourcePicker.js');if(!current())return null;
+      return await new Promise(resolve=>{let selected=null;
+        const picker=createResourcePicker({client:filesFacadeClient,purpose:'folder',accountScope:owner,workspaceScope:state.currentWorkspaceId||copalWorkspace(),
+          generation:policy,originWindow:state.nativeWindow,getGeneration:()=>filesPolicyGeneration(),getAccountScope:()=>state.owner,
+          getWorkspaceScope:()=>state.currentWorkspaceId||copalWorkspace(),isOriginCurrent:current,rootLabel:'Choose the authorized History root',
+          isCompatible:resource=>resource.provider==='host' && resource.capabilities?.children===true?'':'Choose an authorized Host folder.',
+          onSelect:resource=>{selected=resource;return true;},onClose:cancelled=>{if(state.managedRootPicker===picker)state.managedRootPicker=null;resolve(cancelled?null:selected);}});
+        state.managedRootPicker?.destroy();state.managedRootPicker=picker;void picker.open();});
+    };
+    await runCheckpointFlow({client:filesFacadeClient,entries,chooseRoot,current,scopeRoot:state.nativeWindow?.root,
+      status:(message,error=false)=>setStatus(message,error),openHistory:async entry=>{const target=createFilesHistoryTarget(entry);if(target)openResourceHistory(target);},
+      openCompare:async (entry,load,requestId)=>{if(!current())return;const target=createFilesHistoryTarget(entry);if(!target)return;const {openCheckpointComparison}=await import('./historyView.js');if(current())openCheckpointComparison({...target,exactOnly:true},{requestId,load});},
+      openRestore:async (entry,checkpointID,resourceID)=>{if(!current())return;const target=createFilesHistoryTarget(entry);if(!target||target.resourceId!==resourceID)return;const {openCheckpointRestore}=await import('./historyView.js');if(!current())return;const isStatusCurrent=()=>Boolean(state.owner===owner&&state.lifecycleGeneration===lifecycle&&state.nativeWindow?.visible);openCheckpointRestore({...target,exactOnly:true,isStatusCurrent},{checkpointID,client:filesFacadeClient});}});
+    return true;
+  } catch(error) {if(current())setStatus(String(error?.message||'Checkpoint unavailable.'),true);return false;}
 }
 
 function createFilesHistoryTarget(entry) {
@@ -4899,6 +5933,9 @@ function createFilesHistoryTarget(entry) {
     selectionKeys: model.selectedKeys(),
     targetKey,
   };
+  const originWindow = state.nativeWindow;
+  const statusContextIsCurrent = () => Boolean(originWindow && originWindow.visible && state.nativeWindow === originWindow
+    && String(state.owner || '') === captured.owner && Number(state.lifecycleGeneration || 0) === captured.lifecycleGeneration);
   const parentContextIsCurrent = () => {
     const liveColumn = state.columns[captured.columnIndex] || null;
     return String(state.owner || '') === captured.owner
@@ -4929,6 +5966,7 @@ function createFilesHistoryTarget(entry) {
     name: String(entry.name || 'Selected file'),
     provider: 'host',
     isContextCurrent: contextIsCurrent,
+    isStatusCurrent: statusContextIsCurrent,
     onRestored: async () => {
       if (!contextIsCurrent()) return { status: 'context_changed' };
       const expectedRefreshGeneration = captured.contentGeneration + 1;
@@ -4955,102 +5993,92 @@ function createFilesHistoryTarget(entry) {
   };
 }
 
-function showEntryActionMenu(entry, { x = null, y = null, anchor = null } = {}) {
-  closeManagedActionMenu();
-  if(anchor)hooks.__openClankFilesContextCapture(anchor);
-  const captured=captureCommands();
-  const choices = commandDescriptors(captured).filter(item=>['File','Edit','Go'].includes(item.menu));
-  if (!choices.length) return false;
-  const menu = el('div', {
-    class: 'files-action-menu',
-    role: 'menu',
-    'aria-label': `Actions for ${entry.name}`,
-  });
-  for (const choice of choices) {
-    const item = el('button', { type: 'button', class: 'files-action-menu-item', role: 'menuitem' });
-    item.append(el('span', { text: choice.label }));
-    item.disabled=Boolean(choice.disabledReason);item.title=choice.disabledReason||'';
-    item.addEventListener('click', () => { closeManagedActionMenu(); if(isCommandCaptureCurrent(captured))void choice.run(); });
-    menu.append(item);
-  }
-  document.body.append(menu);
-  const box = anchor?.getBoundingClientRect?.();
-  const left = Number.isFinite(Number(x)) ? Number(x) : Number(box?.left || 8);
-  const top = Number.isFinite(Number(y)) ? Number(y) : Number(box?.bottom || 8) + 4;
-  menu.style.left = `${Math.max(6, Math.min(left, window.innerWidth - menu.offsetWidth - 6))}px`;
-  menu.style.top = `${Math.max(6, Math.min(top, window.innerHeight - menu.offsetHeight - 6))}px`;
-  ownFilesActionMenu(menu,anchor);
-  menu.querySelector('button')?.focus();
-  return true;
+function openCapturedFolderHistory(snapshot, trigger = document.activeElement) {
+  const folder = snapshot.directory;
+  if (!fileResourceCanBrowseHostFolder(folder) || !isCommandCaptureCurrent(snapshot)) return false;
+  const folderRef = folder.resourceRef;
+  const workspace = String(state.currentWorkspaceId || copalWorkspace());
+  const openFolder = destinationResourceRef(snapshot.column) === folderRef;
+  const wasActive = snapshot.column === activeColumn();
+  const current = openFolder ? () => !listeners.signal.aborted && state.nativeWindow?.visible
+    && state.lifecycleGeneration === snapshot.lifecycle && state.owner === snapshot.owner
+    && state.accountId === snapshot.accountId && document.body?.dataset?.accountId === snapshot.accountId
+    && String(state.currentWorkspaceId || copalWorkspace()) === workspace && filesPolicyGeneration() === snapshot.policy
+    && destinationResourceRef(state.columns[snapshot.columnIndex]) === folderRef
+    && (!wasActive || destinationResourceRef(activeColumn()) === folderRef)
+    : () => isCommandCaptureCurrent(snapshot);
+  return openFolderHistory({
+    folderRef, name: folder.name || folder.title, isContextCurrent: current,
+    onRestored: openFolder ? async () => {
+      if (!current()) return { status: 'context_changed' };
+      return await reloadManagedColumn(snapshot.columnIndex, { preserveColumns: true })
+        ? { status: 'refreshed' } : { status: 'refresh_failed' };
+    } : null,
+  }, trigger);
 }
 
-async function performLibraryBulkAction(entries, action) {
-  if (action === 'delete' && !await uiModule.styledConfirm(
-    'Delete ' + entries.length + ' documents?', { title: 'Delete documents', confirmText: 'Delete', danger: true },
-  )) return false;
+function openCapturedGitWorkbench(snapshot) {
+  const folder = snapshot.directory;
+  if (!fileResourceCanBrowseHostFolder(folder) || !isCommandCaptureCurrent(snapshot)) return false;
+  const navigation = window.sessionModule?.getSessionNavigationToken?.();
+  const sameChat = () => snapshot.sessionId === (window.sessionModule?.getCurrentSessionId?.() || '')
+    && navigation === window.sessionModule?.getSessionNavigationToken?.();
+  const isStatusCurrent = () => !listeners.signal.aborted && state.nativeWindow?.visible
+    && snapshot.owner === state.owner && snapshot.accountId === state.accountId
+    && snapshot.accountId === document.body?.dataset?.accountId && sameChat();
+  return openGitWorkbenchWindow({
+    rootRef: folder.resourceRef, name: folder.name || folder.title, chatID: snapshot.sessionId,
+    account: snapshot.owner, generation: snapshot.policy, getGeneration: filesPolicyGeneration,
+    isCurrent: () => isStatusCurrent() && isCommandCaptureCurrent(snapshot), isStatusCurrent,
+    setStatus, signal: listeners.signal, trigger: document.activeElement,
+  });
+}
+
+async function performLibrarySelectionAction(entries, choice, snapshot) {
+  const clone = choice.action === 'library.clone';
+  const current = () => isCommandCaptureCurrent(snapshot) && (!clone ||
+    snapshot.sessionId === (window.sessionModule?.getCurrentSessionId?.() || ''));
+  if (!current()) return false;
+  if (!clone && !await uiModule.styledConfirm(entries.length === 1 ? 'Delete this document?' : `Delete ${entries.length} documents?`, {
+    title:entries.length === 1 ? 'Delete document' : 'Delete documents', confirmText:'Delete', danger:true,
+  })) return false;
+  if (!current()) return false;
   const actions = await import('./filesLibraryActions.js');
   let completed = 0;
   let failed = 0;
+  let createdId = null;
   for (const entry of entries) {
+    if (!current()) break;
     try {
-      if (action === 'clone') {
-        await actions.cloneLibraryDocument(entry.resource_ref, {
-          sessionId: window.sessionModule?.getCurrentSessionId?.() || null,
-        });
-      } else if (action === 'delete') {
-        await actions.deleteLibraryDocument(entry.resource_ref);
+      if (clone) {
+        const result = await actions.cloneLibraryDocument(entry.resource_ref, { sessionId:snapshot.sessionId, isCurrent:current });
+        createdId = result?.id || null;
       } else {
-        await filesFacadeClient.action(entry.resource_ref, 'archive.set', { value: action === 'archive' }, {
-          actionId: operationId('files-library-' + action),
-        });
+        await actions.deleteLibraryDocument(entry.resource_ref, { isCurrent:current });
       }
       completed += 1;
-    } catch {
+    } catch (error) {
+      if (error?.name === 'AbortError') break;
       failed += 1;
     }
   }
-  clearFilesSelection();
-  await reloadManagedColumn(state.columns.length - 1);
-  setStatus((action === 'archive' ? 'Archived' : action === 'restore' ? 'Restored' : action === 'clone' ? 'Cloned' : 'Deleted')
-    + ' ' + completed + (failed ? ' · ' + failed + ' failed' : ''));
-  return failed === 0;
-}
-
-function showLibraryBulkActionMenu(entries, anchor) {
-  closeManagedActionMenu();
-  const menu = el('div', { class: 'files-action-menu', role: 'menu', 'aria-label': 'Bulk Library document actions' });
-  const choices = [
-    ...(entries.every((entry) => entry.capabilities?.includes('archive')) ? [['archive', 'Archive', 'archive']] : []),
-    ...(entries.every((entry) => entry.capabilities?.includes('restore')) ? [['restore', 'Restore', 'restore']] : []),
-    ['clone', 'Clone to current session', 'copy'], ['delete', 'Delete', 'trash'],
-  ];
-  for (const [action, label, glyph] of choices) {
-    const item = el('button', { type: 'button', class: 'files-action-menu-item', role: 'menuitem' });
-    item.append(namedGlyph(glyph, { size: 14 }), el('span', { text: label }));
-    item.addEventListener('click', () => {
-      closeManagedActionMenu();
-      void performLibraryBulkAction(entries, action);
-    });
-    menu.append(item);
+  if (current()) {
+    if (clone && entries.length === 1 && createdId) await window.documentModule?.loadDocument?.(createdId);
+    if (current() && snapshot.column?.globalSearch) await searchAllSources(state.searchQuery);
+    else if (current() && snapshot.column?.resourceRef) await reloadManagedColumn(snapshot.columnIndex);
   }
-  document.body.append(menu);
-  const box = anchor?.getBoundingClientRect?.();
-  menu.style.left = Math.max(6, Math.min(Number(box?.left || 8), window.innerWidth - menu.offsetWidth - 6)) + 'px';
-  menu.style.top = Number(box?.bottom || 8) + 4 + 'px';
-  ownFilesActionMenu(menu,anchor);
-  menu.querySelector('button')?.focus();
+  if (snapshot.owner === state.owner && snapshot.lifecycle === state.lifecycleGeneration) {
+    const summary = clone ? 'Cloned' : 'Deleted';
+    setStatus(`${summary} ${completed} of ${entries.length}${failed ? ` · ${failed} failed` : ''}`, completed !== entries.length);
+  }
+  return completed === entries.length;
 }
 
-function showSelectedBulkActionMenu(entries, choices, anchor, guard) {
-  // The selection model/descriptor authority owns both the multi-item
-  // ellipsis and right-click. Never independently choose the first row.
-  return showEntryActionMenu(null,{anchor});
-}
-
-
-async function performSelectedBulkAction(entries, choice, guard) {
+async function performSelectedBulkAction(entries, choice, snapshot) {
+  const guard = snapshot.selection;
+  const current = () => isCommandCaptureCurrent(snapshot);
   const model = validateFilesSelectionGuard(guard);
-  if (!model) {
+  if (!model || !current()) {
     setStatus('The Files selection or access changed; choose the action again.', true);
     return false;
   }
@@ -5061,7 +6089,9 @@ async function performSelectedBulkAction(entries, choice, guard) {
     setStatus('The Files selection changed; choose the action again.', true);
     return false;
   }
-  if (choice.action === 'transfer.move' || choice.action === 'transfer.copy') {
+  if (choice.action === 'history.checkpoint') return await openSelectedCheckpoint(entries, current, guard);
+  if (choice.action === 'library.clone' || choice.action === 'library.delete') return performLibrarySelectionAction(entries, choice, snapshot);
+  if (choice.action === 'transfer.move' || choice.action === 'transfer.copy' || choice.action === 'transfer.duplicate') {
     const destinationIndex = Number(guard.filesDestinationIndex);
     const capturedColumn = Number.isInteger(destinationIndex) && destinationIndex >= 0
       ? state.columns[destinationIndex] || null : null;
@@ -5070,22 +6100,24 @@ async function performSelectedBulkAction(entries, choice, guard) {
       setStatus('The destination folder changed; choose the transfer again.', true);
       return false;
     }
-    const destination = destinationRef
-      ? { ...(capturedColumn || {}), resource_ref:destinationRef, kind:'folder', capabilities:[...new Set([...(capturedColumn?.capabilities || []), 'children'])] }
-      : null;
-    if (!destination || !isDirectory(destination)) {
+    const destination = { ...capturedColumn, resource_ref:destinationRef, kind:'folder' };
+    if (!destination.capabilities?.includes('children') || !destination.capabilities.includes('write')) {
       setStatus('Choose an authorized destination folder before transferring the selection.', true);
       return false;
     }
-    return executeSelectedFilesTransfer(choice.action === 'transfer.copy' ? 'copy' : 'move', {
-      model, destination, destinationIndex,
+    if (choice.action === 'transfer.duplicate' && destinationRef !== String(model.scope?.parentRef || '')) {
+      setStatus('Open the selected files’ containing folder to duplicate them.', true);
+      return false;
+    }
+    return executeSelectedFilesTransfer(choice.action === 'transfer.move' ? 'move' : 'copy', {
+      model, destination, destinationIndex, collision:choice.action === 'transfer.duplicate' ? 'rename' : 'fail',
     });
   }
   if (choice.action !== 'archive.set' && choice.action !== 'favorite.set') return false;
   let completed = 0;
   let failed = 0;
   for (const entry of entries) {
-    if (!validateFilesSelectionGuard(guard)) {
+    if (!current()) {
       setStatus(`${completed} of ${entries.length} completed; the Files selection or access changed, so remaining actions were stopped.`, true);
       return false;
     }
@@ -5096,41 +6128,25 @@ async function performSelectedBulkAction(entries, choice, guard) {
       completed += 1;
     } catch (_) { failed += 1; }
   }
-  if (!validateFilesSelectionGuard(guard)) {
+  if (!current()) {
     setStatus(`${completed} of ${entries.length} completed; the Files selection or access changed before refresh.`, true);
     return false;
   }
-  clearFilesSelection();
-  if (activeColumn()?.globalSearch) await searchAllSources(state.searchQuery);
-  else if (usesFacadeListing()) await reloadManagedColumn(state.columns.length - 1);
+  clearFilesSelection(snapshot.column, snapshot.columnIndex);
+  if (snapshot.column?.globalSearch) await searchAllSources(state.searchQuery);
+  else if (snapshot.column?.resourceRef) await reloadManagedColumn(snapshot.columnIndex);
   setStatus(`${choice.label}: ${completed} of ${entries.length}${failed ? ` · ${failed} failed` : ''}`);
   return failed === 0;
 }
 
-function showFilesNewMenu({ anchor = null } = {}) {
-  const snapshot=captureCommands();
-  showTreeActions(commandDescriptors(snapshot).filter(item=>['files.new-file','files.new-folder'].includes(item.id))
-    .map(item=>({...item,disabled:Boolean(item.disabledReason),run:()=>isCommandCaptureCurrent(snapshot)&&item.run()})));
-  return true;
+function showFilesNewMenu({ anchor } = {}) {
+  const snapshot = captureCommands({ context:'folder' });
+  return showCapturedFilesMenu(anchor, snapshot, ['files.new-file', 'files.new-folder']);
 }
 
-
 function openSelectedActions() {
-  const selectedEntries = selectedActionEntries();
-  const entry = selectedEntries.length === 1 ? selectedEntries[0] : null;
-  const button = state.shell?.querySelector('[data-files-actions]');
-  const libraryEntries = selectedLibraryDocumentEntries();
-  if (libraryEntries.length > 1 && libraryEntries.length === selectedEntries.length) {
-    showLibraryBulkActionMenu(libraryEntries, button);
-    return;
-  }
-  if (selectedEntries.length > 1) {
-    const choices = commonActionChoices(selectedEntries);
-    const model = ensureSelectionModel(activeColumn(), state.activeColumnIndex);
-    showSelectedBulkActionMenu(selectedEntries, choices, button, captureFilesSelectionGuard(model));
-    return;
-  }
-  if (entry) showEntryActionMenu(entry, { anchor: button });
+  const anchor = state.shell?.querySelector('[data-files-actions]');
+  return showCapturedFilesMenu(anchor, captureCommands({ context:'selection' }));
 }
 
 async function launchManagedSourceApp(app, { resourceRef = '', exact = false } = {}) {
@@ -5162,18 +6178,16 @@ async function launchManagedSourceApp(app, { resourceRef = '', exact = false } =
   if (target === 'imps') {
     // Imps (Image Processing Suite) owns image open. Open the editor
     // directly; legacy /gallery links resolve to Files before reaching here.
-    const editor = window.impsModule || await import('./imps.js');
     if (exact && resourceRef) {
-      if (typeof editor?.openResource === 'function') {
-        await editor.openResource(resourceRef);
-        return;
-      }
-    }
-    if (typeof editor?.openEditor === 'function') {
-      await editor.openEditor(null, null, null, 'Imps');
+      const editor = window.copalModule || await import('./copal.js');
+      if (typeof editor?.openImageResource !== 'function') throw new Error('Image Editor exact-open is unavailable');
+      await editor.openImageResource(resourceRef);
       return;
     }
-    throw new Error('Imps is unavailable');
+    const editor = window.copalModule || await import('./copal.js');
+    if (typeof editor?.openBlankImage !== 'function') throw new Error('Blank image Editor is unavailable');
+    await editor.openBlankImage({name:'Untitled image'});
+    return;
   }
   if (target === 'document_editor' || target === 'library') {
     if (exact && target === 'document_editor' && resourceRef) {
@@ -5218,7 +6232,8 @@ async function launchManagedSourceApp(app, { resourceRef = '', exact = false } =
   throw new Error('This source app is unavailable');
 }
 
-async function openManagedEntry(entry) {
+async function openManagedEntry(entry, capturedCurrent = () => true) {
+  if (!capturedCurrent()) return false;
   if (options.pickerMode) return confirmPickerEntry(entry);
   if (isPublishedLibraryEntry(entry)) {
     if (entry.capabilities?.includes('preview')) await previewEntry(entry, entryPath(entry));
@@ -5227,10 +6242,18 @@ async function openManagedEntry(entry) {
     return;
   }
   try {
-    const response = await filesFacadeClient.open(entry.resource_ref);
-    const app = response?.target?.app;
+    const owner = state.owner, lifecycle = state.lifecycleGeneration, policy = filesPolicyGeneration(), workspace = copalWorkspace();
+    const isCurrent = () => capturedCurrent() && state.owner === owner && state.lifecycleGeneration === lifecycle
+      && filesPolicyGeneration() === policy && copalWorkspace() === workspace;
+    const purpose = isMetadataInspection(entry?.format) ? 'inspect' : null;
+    const response = await filesFacadeClient.open(entry.resource_ref, {purpose});
+    if (!isCurrent()) return false;
+    if ((response?.resource?.format?.formatId === 'iwi' || metadataFormatId(response?.resource?.format?.formatId)) && (!isCurrent() || response.resource.id !== entry.resource_id)) {
+      throw new Error('The preview source or Files scope changed. Reopen the item.');
+    }
     const refreshedRef = String(response?.resource?.ref || entry.resource_ref || '');
-    await dispatchFilesDestination(response, { resourceRef:refreshedRef, surface:options.surface || 'files' });
+    await dispatchFilesDestination(response, { resourceRef:refreshedRef, surface:options.surface || 'files', isCurrent });
+    if (!isCurrent()) return false;
     if (response?.resource) {
       const refreshed = facadeEntry(response.resource);
       const index = state.entries.findIndex((candidate) => entrySelectionKey(candidate) === entrySelectionKey(entry));
@@ -5238,7 +6261,7 @@ async function openManagedEntry(entry) {
     }
     setStatus(`Opened ${entry.name} in its source app`);
   } catch (error) {
-    setStatus(error.message || 'Source app could not be opened', true);
+    if (capturedCurrent()) setStatus(error.message || 'Source app could not be opened', true);
   }
 }
 
@@ -5256,7 +6279,7 @@ function contextEntryForNode(node) {
   )) || (resourceRef ? { resource_ref:resourceRef, name:String(node?.dataset?.fileName || resourceRef) } : null);
 }
 
-async function executeSelectedFilesTransfer(kind, { model = null, destination = null, destinationIndex = null } = {}) {
+async function executeSelectedFilesTransfer(kind, { model = null, destination = null, destinationIndex = null, collision = 'fail' } = {}) {
   const selectedModel = model || ensureSelectionModel(activeColumn(), state.activeColumnIndex);
   const target = destination || activeColumn();
   const initialKeys = selectedModel?.selectedKeys?.() || [];
@@ -5271,6 +6294,35 @@ async function executeSelectedFilesTransfer(kind, { model = null, destination = 
   const batchScopeKey = String(selectedModel.snapshot?.().scopeKey || selectedModel.scopeKey || '');
   const batchLifecycle = state.lifecycleGeneration;
   const chunkCount = Math.ceil(initialKeys.length / FILES_MAX_DRAG_ITEMS);
+  if (kind === 'move' && selectedModel.scope?.provider === 'host' && initialKeys.length > 1) {
+    try {
+      const destinationRef = destinationResourceRef(target);
+      let rootPayload = null, rootResult = null;
+      for (let index = 0; index < chunkCount; index += 1) {
+        const keys = initialKeys.slice(index * FILES_MAX_DRAG_ITEMS, (index + 1) * FILES_MAX_DRAG_ITEMS);
+        const keySet = new Set(keys);
+        const entries = selectedModel.selectedEntries().filter(entry => keySet.has(entrySelectionKey(entry))).map((entry, n) => ({...entry, item_id:`preflight-${index}-${n}`}));
+        const payload = buildInternalDragPayload({scope:selectedModel.scope, generation:batchGeneration, policyGeneration:batchGeneration,
+          owner:state.owner, pane:state.nativeWindow?.id || 'files-window', selectionEpoch:selectedModel.epoch, kind, entries, selectedKeys:keys});
+        if (!payload || !destinationRef) throw new Error('The Files selection could not be checked.');
+        const sources = payload.sources.map(source => ({itemId:source.item_id, resourceRef:source.resource_ref, expectedRevision:source.revision || undefined}));
+        const result = await filesFacadeClient.transferRootRequirement({generation:batchGeneration, sources, destinationRef});
+        const currentKeys = selectedModel.selectedKeys();
+        if (state.owner !== batchOwner || filesPolicyGeneration() !== batchGeneration || state.lifecycleGeneration !== batchLifecycle
+          || String(selectedModel.snapshot?.().scopeKey || selectedModel.scopeKey || '') !== batchScopeKey
+          || currentKeys.length !== initialKeys.length || currentKeys.some((key, n) => key !== initialKeys[n])) throw new Error('The Files selection or access changed.');
+        if (result.root_required || result.destination_root_required) {
+          if (chunkCount !== 1) throw new Error('This selection is too large for one managed move.');
+          rootPayload = payload; rootResult = result;
+        }
+      }
+      if (rootPayload) {
+        const response = await executeFilesTransfer(rootPayload, target, 'fail', destinationColumnIndex(target, destinationIndex),
+          {model:selectedModel, selectionKeys:initialKeys, batchId, rootRequirement:rootResult});
+        return Boolean(response && (response.items || []).every(item => ['committed', 'unchanged'].includes(item.outcome)));
+      }
+    } catch (error) { setStatus(error?.message || 'The Files selection could not be checked.', true); return false; }
+  }
   for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
     const expectedCurrent = initialKeys.filter((key) => !committedKeys.has(key));
     const currentKeys = selectedModel.selectedKeys();
@@ -5303,7 +6355,7 @@ async function executeSelectedFilesTransfer(kind, { model = null, destination = 
     const response = await executeFilesTransfer(
       payload,
       target,
-      'fail',
+      collision,
       destinationColumnIndex(target, destinationIndex == null ? state.activeColumnIndex : destinationIndex),
       { model: selectedModel, selectionKeys: expectedCurrent, batchId, operationIdOverride: childOperation, refresh: false },
     );
@@ -5350,11 +6402,13 @@ async function executeSelectedFilesTransfer(kind, { model = null, destination = 
 }
 
 hooks.__openClankFilesContextCapture = (node) => {
-  supersedeFilesRefreshForContext();
-  const entry = contextEntryForNode(node);
+  const index = columnIndexForNode(node);
+  const column = state.columns[index];
+  const key = String(node?.dataset?.filesSelectionKey || '');
+  const entry = (column?.entries || state.entries).find(item => entrySelectionKey(item) === key);
   if (!entry) return null;
-  const key = entrySelectionKey(entry);
-  const selectedColumn = activateColumn(columnIndexForNode(node));
+  supersedeFilesRefreshForContext();
+  const selectedColumn = activateColumn(index);
   const destinationIndex = selectedColumn.index;
   const destination = selectedColumn.column;
   const model = selectedColumn.model;
@@ -5364,7 +6418,10 @@ hooks.__openClankFilesContextCapture = (node) => {
   if (!model.orderedKeys().includes(key)) model.setItems(selectedColumn.column?.entries || state.entries);
   // Desktop Files keeps a right-clicked selected row in the existing set;
   // right-clicking elsewhere changes the context target to that one row.
-  if (!model.has(key)) { model.select(key); state.selected = new Set(model.selectedKeys()); renderEntries(); }
+  if (!model.has(key)) model.select(key);
+  applyModelSelection(model, { render:false });
+  syncVisibleSelection(model, node.closest('.files-column-list') || state.shell?.querySelector('[data-files-body]'));
+  updateManagedActionControl();
   return Object.freeze({
     filesScope: model.snapshot().scopeKey,
     filesColumnIndex: selectedColumn.index,
@@ -5550,30 +6607,18 @@ hooks.__openClankFilesContextCommand = async (command, node, request = null) => 
 };
 
 async function openSelected() {
-  const entries = state.entries.filter((entry) => state.selected.has(entrySelectionKey(entry)));
-  if (entries.length !== 1) {
-    setStatus('Select one managed file to open.', true);
-    return;
+  const captured = captureCommands({ context:'selection' });
+  const [entry] = captured.entries;
+  const items = commandDescriptors(captured);
+  if (captured.entries.length === 1 && isCommandCaptureCurrent(captured)) {
+    const supportedIds = isPublishedLibraryEntry(entry) ? ['files.preview', 'files.download'] : ['files.open', 'files.preview'];
+    for (const id of supportedIds) {
+      const command = items.find(item => item.id === id && !item.disabledReason);
+      if (command) return command.run();
+    }
   }
-  const entry = entries[0];
-  if (options.pickerMode) { if (isDirectory(entry)) await openManagedDirectory(entry); else confirmPickerEntry(entry); return; }
-  if (isDirectory(entry) || !entry.resource_ref) {
-    setStatus('Select a file to open.', true);
-    return;
-  }
-  // Published Library resources remain an exact, read-only Files experience:
-  // preview or download them instead of reopening the retired Library modal.
-  if (isPublishedLibraryEntry(entry)) {
-    if (entry.capabilities?.includes('preview')) await previewEntry(entry, entryPath(entry));
-    else if (entry.capabilities?.includes('download')) await downloadEntry(entry);
-    else setStatus('This published resource can no longer be previewed or downloaded.', true);
-    return;
-  }
-  if (!entry.capabilities?.includes('open')) {
-    setStatus('This item does not expose a source-app action.', true);
-    return;
-  }
-  await openManagedEntry(entry);
+  setStatus('Select one item that Files can open.', true);
+  return false;
 }
 
 async function addHostLocation() {
@@ -5581,14 +6626,17 @@ async function addHostLocation() {
     const controller = await import('./fileLocationController.js');
     const added = await controller.openFileLocationWizard({
       suggestedPath: state.hostPath || state.defaultPath || '',
+      onAdded: ({appAccess}) => setStatus(appAccess ? 'Folder is available in Files and Editor.' : 'Location registered.'),
     });
-    setStatus(added ? 'Host Location added.' : 'Add Location closed.');
+    if (!added) setStatus('Add folder closed.');
   } catch (error) {
     setStatus(error.message || 'Location could not be added', true);
   }
 }
 
 function handleWindowClosed() {
+  clearFilesReadRecovery();
+  resetFilesReadRetry();
   categoryObserver?.disconnect();
   cancelReveal();
   const splitPair = splits.get(id);
@@ -5607,12 +6655,13 @@ function handleWindowClosed() {
   state.favoritesController = null;
   state.workspaceController?.abort();
   state.workspaceController = null;
+  state.managedRootPicker?.destroy(); state.managedRootPicker = null;
   stopActiveFolderWatch();
   clearNativeThumbnailCache();
   state.contextAdapterDispose?.();
   state.contextAdapterDispose = null;
-  closeManagedActionMenu();
   closePreview();
+  setEditorRoot(null,false);
   destroyExplorerTree();
   if (id !== 'files-window' && !options.container) {
     listeners.abort(); localMenu?.dispose(); browserResize?.disconnect(); state.navigation?.dispose(); state.pane?.destroy();
@@ -5661,7 +6710,6 @@ function abortFilesAuthorityRequests() {
   state.workspaceController = null;
   stopActiveFolderWatch();
   clearNativeThumbnailCache();
-  closeManagedActionMenu();
   // Preview URLs and handles are generation-bound capabilities. Close them at
   // the event boundary even when the current folder later revalidates.
   closePreview();
@@ -5673,11 +6721,16 @@ function abortFilesAuthorityRequests() {
 // refresh before it mutates the selection model. The refresh keeps its
 // original lifecycle token and cannot later clear the captured row.
 function supersedeFilesRefreshForContext() {
-  if (!state.contentController && !state.navigationController) return;
+  if (!state.contentController) return;
   abortFilesAuthorityRequests();
 }
 
-function clearFilesAuthorityContent(message = 'File access changed') {
+function clearFilesAuthorityContent(message = 'File access changed', {catalogs = true} = {}) {
+  if (state.editorRootBound) setEditorRoot(null,true);
+  if (catalogs) {
+    state.managedRootPicker?.destroy(); state.managedRootPicker=null;
+    renderFavorites();
+  }
   cancelReveal();
   cancelFilesGesture('policy-change');
   clearKeepBothRetry();
@@ -5686,7 +6739,6 @@ function clearFilesAuthorityContent(message = 'File access changed') {
   state.contentController = null;
   stopActiveFolderWatch();
   clearNativeThumbnailCache();
-  closeManagedActionMenu();
   closePreview();
   state.path = '';
   state.hostPath = '';
@@ -5752,7 +6804,7 @@ async function refreshRawFilesProjection(snapshot, lifecycle) {
     renderEntries();
     updateTreeHighlight();
     updateFavoriteButton();
-    setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`);
+    setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`, false, { keepUndo: true });
     return { status: 'resolved' };
   } catch (error) {
     if (error?.name === 'AbortError') return { status: 'stale' };
@@ -5859,6 +6911,17 @@ async function refreshManagedFilesProjection(snapshot, lifecycle) {
       if (index > 0) {
         const parent = columns.at(-1);
         current = parent?.entries.find(entry => entry.resource_id === prior.resourceId) || null;
+        let cursor = parent?.nextCursor;
+        const seen = new Set();
+        while (!current && cursor && !seen.has(cursor) && seen.size < 100) {
+          seen.add(cursor);
+          const page = await filesFacadeClient.children(parent.resourceRef, {
+            cursor, sort:managedSortRequest(parent.sort), query:parent.query, signal:controller.signal,
+          });
+          if (controller.signal.aborted || lifecycle !== state.lifecycleGeneration || contentGeneration !== state.contentGeneration) return { status:'stale' };
+          current = page.entries.map(facadeEntry).filter(editorResourceAllowed).find(entry => entry.resource_id === prior.resourceId);
+          cursor = page.next_cursor;
+        }
         if (!current) return { status: 'invalid' };
         parent.activeName = current.name;
       }
@@ -5888,64 +6951,78 @@ async function refreshManagedFilesProjection(snapshot, lifecycle) {
   }
 }
 
-async function handleFilesPolicyChanged() {
-  if (!state.nativeWindow?.visible) return false;
-  const snapshot = captureFilesProjection();
+async function handleFilesPolicyChanged(snapshot = captureFilesProjection()) {
+  clearFilesReadRecovery();
+  if (!state.nativeWindow?.visible) {
+    abortFilesAuthorityRequests();
+    clearFilesAuthorityContent('');
+    suspendFilesNavigation();
+    return false;
+  }
   const lifecycle = abortFilesAuthorityRequests();
+  clearFilesAuthorityContent('');
+  suspendFilesNavigation();
   const startingContent = state.contentGeneration;
+  const current = () => lifecycle === state.lifecycleGeneration && state.contentGeneration === startingContent && state.nativeWindow?.visible;
   setStatus('Revalidating file access…');
   try {
-    await loadNavigationRoots({ force: true });
+    const roots = await loadNavigationRoots({force:true,deferSidebar:true});
+    if (!roots || !current()) return false;
+    const first = snapshot.columns.find(column => column.resourceId);
+    if (first && first.provider === 'host' && !freshManagedResource(first.resourceId, 'host')) {
+      await roots.hostReady;
+      if (!current()) return false;
+      // Most Host anchors are in the location projection. A saved place or
+      // workspace can also be the first anchor for a folder opened directly.
+      if (!freshManagedResource(first.resourceId, 'host')) {
+        const optionalErrors = await Promise.all([roots.placesReady, roots.workspacesReady]);
+        if (!current()) return false;
+        const error = readRecoveries.get('navigation')?.error || optionalErrors.find(Boolean);
+        if (error && !freshManagedResource(first.resourceId, 'host')) {
+          showFilesReadRetry('folder','the selected folder',error,()=>handleFilesPolicyChanged(snapshot));
+          return false;
+        }
+      }
+    }
   } catch (error) {
-    if (error?.name !== 'AbortError' && lifecycle === state.lifecycleGeneration) {
-      setStatus('File access could not be revalidated; the current view was retained', true);
+    if (error?.name !== 'AbortError' && current()) {
+      showFilesReadRetry('roots','available Files sources',error,()=>handleFilesPolicyChanged(snapshot));
+      setStatus(filesReadErrorMessage(error,'available Files sources'),true);
     }
     return false;
   }
-  if (lifecycle !== state.lifecycleGeneration || state.contentGeneration !== startingContent || !state.nativeWindow?.visible) return false;
-
-  if (snapshot.owner && state.owner !== snapshot.owner) {
-    clearFilesAuthorityContent('Account file access changed');
-    await openProvider(snapshot.provider || 'host');
-    return false;
+  if (snapshot.owner && state.owner !== snapshot.owner) return openProvider(CLANKER_HOME_PROVIDER, {rootsConfirmed:true});
+  if (!snapshot.columns.length && !snapshot.hostPath && snapshot.provider !== CLANKER_HOME_PROVIDER) {
+    return openProvider(snapshot.provider || CLANKER_HOME_PROVIDER, {rootsConfirmed:true});
   }
 
-  if (snapshot.provider === 'host' && snapshot.hostPath) {
-    const result = await refreshRawFilesProjection(snapshot, lifecycle);
-    if (lifecycle !== state.lifecycleGeneration || result.status === 'stale') return false;
-    if (result.status === 'resolved') return true;
-    if (result.status === 'unavailable') {
-      setStatus('Current file access could not be refreshed; the prior view was retained', true);
-      return false;
-    }
-    clearFilesAuthorityContent('The saved folder has expired; choose an authorized Files folder again');
-    await openProvider('host');
-    return false;
-  }
-
-  const result = await refreshManagedFilesProjection(snapshot, lifecycle);
+  const result = snapshot.provider === 'host' && snapshot.hostPath
+    ? await refreshRawFilesProjection(snapshot,lifecycle) : await refreshManagedFilesProjection(snapshot,lifecycle);
   if (lifecycle !== state.lifecycleGeneration || result.status === 'stale') return false;
   if (result.status === 'resolved') return true;
-  if (result.status === 'unavailable') {
-    setStatus('Current file access could not be refreshed; the prior view was retained', true);
+  if (result.error) {
+    clearFilesAuthorityContent('',{catalogs:false});
+    showFilesReadRetry('folder','the selected folder',result.error,()=>handleFilesPolicyChanged(snapshot));
     return false;
   }
 
-  // The current-policy root/parent listing succeeded but the selected resource
-  // disappeared, or the server authoritatively rejected it. Remove every old
-  // path/ref before opening the nearest current-policy provider landing page.
-  clearFilesAuthorityContent('The previous folder is no longer available');
-  await openProvider(snapshot.provider || 'host');
+  // An authoritative fresh read did not find the previous resource.
+  clearFilesAuthorityContent('The previous folder is no longer available',{catalogs:false});
+  const reopened = await openProvider(snapshot.provider || CLANKER_HOME_PROVIDER, {rootsConfirmed:true});
+  if (reopened) setStatus('The previous folder is no longer available. Choose a folder from the current sources.',true);
   return false;
 }
 
 async function handleAuthUserReady(event) {
   const announcedOwner = String(event?.detail?.username || '').trim();
-  if (!state.owner || announcedOwner === state.owner) return;
+  const announcedAccount = String(event?.detail?.accountId || '');
+  if (!state.owner || (announcedOwner === state.owner && (!announcedAccount || announcedAccount === state.accountId))) return;
 
   // Treat the event only as a revocation signal. The subsequent authenticated
   // server responses, not browser-supplied event detail, establish the new
   // owner and visible roots.
+  clearFilesReadRecovery();
+  resetFilesReadRetry();
   const lifecycle = ++state.lifecycleGeneration;
   cancelFilesGesture('account-change');
   abortFilesImports();
@@ -5962,10 +7039,11 @@ async function handleAuthUserReady(event) {
   state.workspaceController = null;
   stopActiveFolderWatch();
   clearNativeThumbnailCache();
-  closeManagedActionMenu();
   closePreview();
+  setEditorRoot(null,state.editorRootBound === true);
   destroyExplorerTree();
   state.owner = '';
+  state.accountId = '';
   state.navigation?.reset({ account: '', workspace: copalWorkspace() });
   state.path = '';
   state.hostPath = '';
@@ -5974,6 +7052,7 @@ async function handleAuthUserReady(event) {
   state.defaultPath = '';
   state.navigationGeneration = null;
   state.navigationRoots = [];
+  state.managedRoots = [];
   state.favorites = [];
   state.workspaces = [];
   state.currentWorkspaceId = '';
@@ -6000,13 +7079,13 @@ async function handleAuthUserReady(event) {
 
   if (!state.nativeWindow?.visible) return;
   try {
-    await loadNavigationRoots({ force: true });
+    await loadNavigationRoots({force:true,deferSidebar:true});
     if (lifecycle !== state.lifecycleGeneration || !state.nativeWindow?.visible) return;
-    const opaqueOpened = await openProvider('host');
-    if (!opaqueOpened) setStatus('No authorized Host folder is available', true);
+    await openProvider(CLANKER_HOME_PROVIDER, {rootsConfirmed:true});
   } catch (error) {
     if (error?.name !== 'AbortError' && lifecycle === state.lifecycleGeneration) {
-      setStatus(error.message || 'Available files could not be reloaded', true);
+      showFilesReadRetry('roots','available Files sources',error,()=>handleFilesPolicyChanged());
+      setStatus(filesReadErrorMessage(error,'available Files sources'),true);
     }
   }
 }
@@ -6045,7 +7124,7 @@ function mount() {
   } : createOpenClankWindow({
     id,
     label: 'Files',
-    subtitle: 'Copal · Host and library',
+    subtitle: 'Host and library',
     className: 'files-window',
     minWidth: 620,
     minHeight: 440,
@@ -6080,19 +7159,28 @@ function mount() {
       'data-files-tree': '',
     }),
   );
-  const collectionsSection = el('section', { class: 'files-sidebar-section' }, el('h2', { class: 'files-sidebar-heading', text: 'Open Clank' }), el('div', { 'data-files-collections': '', class: 'files-tree', role: 'tree', 'aria-label': 'Open Clank collections' }));
-  sidebar.append(favoritesSection, workspacesSection, worktreeSection, collectionsSection);
-  for (const [index,section] of [...sidebar.children].entries()) {
-    const ids = ['favorites','workspaces','locations','applications'];
+  const collectionsSection = el('section', { class:'files-sidebar-section', 'data-files-category':'applications' },
+    el('h2', {class:'files-sidebar-heading',text:'Library'}),
+    el('div', {},
+      el('div', {'data-files-collections':'',class:'files-tree',role:'tree','aria-label':'Library collections'})));
+  favoritesSection.dataset.filesCategory='favorites';
+  workspacesSection.dataset.filesCategory='workspaces';
+  worktreeSection.dataset.filesCategory='locations';
+  sidebar.append(favoritesSection, workspacesSection, worktreeSection);
+  sidebar.append(collectionsSection);
+  for (const section of sidebar.children) {
     const heading=section.querySelector('h2'), content=heading.nextElementSibling;
-    const label=heading.textContent, categoryId=ids[index]; section.dataset.filesCategory=categoryId;
+    const label=heading.textContent, categoryId=section.dataset.filesCategory;
     const toggle=el('button',{type:'button',class:'files-category-toggle','aria-expanded':'true',text:'▾ '+label}); heading.replaceChildren(toggle);
     explorerLayout.register({id:categoryId,label,group:'places',element:()=>section,content:()=>content,
       sync:record=>{toggle.setAttribute('aria-expanded',String(!record.collapsed));const text=(record.collapsed?'▸ ':'▾ ')+label;if(toggle.textContent!==text)toggle.textContent=text;},
     });
     toggle.addEventListener('click',()=>{const record=explorerLayout.records().find(item=>item.id===categoryId);explorerLayout.update(categoryId,{collapsed:!record.collapsed});});
-    heading.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation();customizeExplorer();});
+    heading.dataset.filesExplorerHeading = '';
   }
+  if (options.editorRootProjection) sidebar.prepend(el('div',{
+    class:'files-tree','data-files-editor-root':'',hidden:true,
+  }));
   categoryObserver?.disconnect();
   categoryObserver = new MutationObserver(()=>{syncCollectionLayout();explorerLayout.apply();});
   categoryObserver.observe(sidebar,{childList:true,subtree:true});
@@ -6126,36 +7214,34 @@ function mount() {
   newButton.dataset.filesNew = '';
   const libraryCreate = iconButton({
     glyph: 'plus', text: 'Create', title: 'Create a Library document',
-    onClick: () => { if (options.pickerMode) return; void (async () => {
-      try {
-        const actions = await import('./filesLibraryActions.js');
-        const created = await actions.createLibraryDocument({ sessionId: window.sessionModule?.getCurrentSessionId?.() || null });
-        if (created?.id && typeof window.documentModule?.loadDocument === 'function') await window.documentModule.loadDocument(created.id);
-        await reloadManagedColumn(state.columns.length - 1);
-        setStatus('Created Library document');
-      } catch (error) { setStatus(error?.message || 'Library document could not be created', true); }
-    })(); },
+    onClick: () => createSelectedLibraryDocument(captureCommands({ context:'folder' })),
   });
   libraryCreate.dataset.filesLibraryCreate = '';
   libraryCreate.hidden = true;
   const libraryImport = iconButton({
     glyph: 'folder-plus', text: 'Import', title: 'Import Library documents',
-    onClick: () => { if (!options.pickerMode) state.shell?.querySelector('[data-files-library-input]')?.click(); },
+    onClick: () => chooseLibraryDocuments(captureCommands({ context:'folder' })),
   });
   libraryImport.dataset.filesLibraryImport = '';
   libraryImport.hidden = true;
   const libraryInput = el('input', { type: 'file', multiple: 'true', hidden: 'true', 'data-files-library-input': '' });
+  libraryInput.addEventListener('cancel', () => { state.libraryImportCapture = null; });
   libraryInput.addEventListener('change', () => { void (async () => {
+    const snapshot = state.libraryImportCapture;
+    state.libraryImportCapture = null;
+    const current = () => isCommandCaptureCurrent(snapshot);
     const files = Array.from(libraryInput.files || []);
     libraryInput.value = '';
-    if (options.pickerMode || !files.length) return;
+    if (options.pickerMode || !files.length || !current()) return;
     try {
       const actions = await import('./filesLibraryActions.js');
+      if (!current()) return;
       const results = await actions.importLibraryDocuments(files);
-      await reloadManagedColumn(state.columns.length - 1);
+      if (!current()) return;
+      await reloadManagedColumn(snapshot.columnIndex);
       setStatus('Imported ' + Number(results?.imported || 0)
         + (results?.failed ? ' · ' + results.failed + ' failed' : ''));
-    } catch (error) { setStatus(error?.message || 'Library import failed', true); }
+    } catch (error) { if (current()) setStatus(error?.message || 'Library import failed', true); }
   })(); });
   const librarySelect = iconButton({
     glyph: 'check', text: 'Select', title: 'Select all Library documents',
@@ -6168,19 +7254,30 @@ function mount() {
   });
   librarySelect.dataset.filesLibrarySelect = '';
   librarySelect.hidden = true;
-  const add = iconButton({ glyph: 'folder-plus', text: 'Add location', title: 'Add host location', onClick: addHostLocation });
+  const add = iconButton({glyph:'folder-plus',text:'Add folder',title:'Add host folder',onClick:addHostLocation});
+  add.dataset.filesAddHost = '';
+  add.hidden = true;
+  add.disabled = true;
   const openButton = iconButton({ glyph: 'folder-open', text: 'Open', title: 'Open selected in source app', onClick: openSelected });
   const downloadButton = iconButton({ glyph: 'download', text: 'Download', title: 'Download selected', onClick: downloadSelected });
   const actionsButton = iconButton({ glyph: 'archive', text: 'Actions', title: 'Select one actionable managed item', onClick: openSelectedActions });
   actionsButton.dataset.filesActions = '';
   actionsButton.querySelector('span:not(.files-button-glyph)')?.classList.add('files-actions-label');
   actionsButton.disabled = true;
-  const favoriteButton = iconButton({ glyph: 'star', title: 'Add current folder to Favorites', onClick: toggleCurrentFavorite });
+  const historyButton = iconButton({ glyph: 'restore', text: 'History', title: 'History for this folder', onClick: event => {
+    const snapshot = captureCommands({ context: 'folder' });
+    if (!fileResourceCanBrowseHostFolder(snapshot.directory)) {
+      setStatus('Open a Host folder to see its History.', true);
+      return;
+    }
+    openCapturedFolderHistory(snapshot, event.currentTarget);
+  } });
+  const favoriteButton = iconButton({ glyph: 'star', title: 'Add current folder to Favorites', onClick: () => toggleCurrentFavorite() });
   favoriteButton.classList.add('files-favorite-toggle');
   favoriteButton.dataset.filesFavoriteToggle = '';
   favoriteButton.setAttribute('aria-pressed', 'false');
   const provider = el('select', { class: 'files-provider-select', 'aria-label': 'Files source' });
-  for (const [value, label] of [[CLANKER_HOME_PROVIDER, 'Clanker home'], ['host', 'Host locations'], ['all', 'All sources'], ['copal', 'Copal'], ['files', 'Images'], ['library', 'Library']]) provider.append(el('option', { value, text: label }));
+  for (const [value, label] of [[CLANKER_HOME_PROVIDER, 'Clanker home'], ['host', 'Host locations'], ['all', 'All sources'], ['copal', 'Workspace collections'], ['files', 'Images'], ['library', 'Library']]) provider.append(el('option', { value, text: label }));
   provider.addEventListener('change', () => openProvider(provider.value));
   const searchInput = el('input', {
     type: 'search',
@@ -6233,7 +7330,7 @@ function mount() {
   foldersFirst.dataset.filesFoldersFirst = '';
   updateFoldersFirstControl(foldersFirst, state.sort);
   const previewButton = iconButton({ glyph: 'image', text: 'Preview', title: 'Preview selected', onClick: () => { const entry = state.entries.find(item => state.selected.has(entrySelectionKey(item))); if (entry) previewEntry(entry, entryPath(entry)); } });
-  const operationShelf = el('div', { class: 'files-operation-shelf', hidden: 'true' }, newButton, libraryCreate, libraryImport, librarySelect, libraryInput, add, openButton, downloadButton, previewButton, actionsButton, foldersFirst);
+  const operationShelf = el('div', { class: 'files-operation-shelf', hidden: 'true' }, newButton, libraryCreate, libraryImport, librarySelect, libraryInput, add, historyButton, openButton, downloadButton, previewButton, actionsButton, foldersFirst);
   toolbar.append(up, provider, favoriteButton, searchGroup, el('span', { class: 'files-toolbar-spacer' }), modes);
   const size = el('select', { 'aria-label': 'Icon size', class: 'files-size-select' });
   const updateSizes = () => { const large = ['grid', 'gallery'].includes(state.mode); size.replaceChildren(); for (const value of large ? [32,64,96,128] : [16,20,24,32]) size.append(el('option', { value, text: value + ' px' })); size.value = String(large ? state.largeIconSize : state.smallIconSize); };
@@ -6260,14 +7357,43 @@ function mount() {
   main.append(more, status);
   if (options.navigationOnly) { state.shell.classList.add('files-navigation-only'); main.hidden = true; separator.hidden = true; }
   state.shell.append(sidebar, separator, main);
-  if(!options.pickerMode)state.contextAdapterDispose = registerAdapter(state.shell, sharedFilesMenuAdapter());
+  registerFilesContextAdapters();
   state.nativeWindow.body.append(state.shell);
-  state.pane = createResizablePane({ container: state.shell, sidebar, main, separator, cssVar: '--files-sidebar-width', storageKey: 'odysseus-files-pane-width', defaultWidth: 220, minWidth: 170, maxWidth: 420, mainMin: 360, getOwner: () => state.owner });
+  state.pane = createResizablePane({ container: state.shell, sidebar, main, separator, cssVar: '--files-sidebar-width', storageKey: 'openclank-files-pane-width', defaultWidth: 220, minWidth: 170, maxWidth: 420, mainMin: 360, getOwner: () => state.owner });
   listen(window, 'modal-dismissed', (event) => {
     if (event.detail?.id === state.nativeWindow.id) state.nativeWindow.requestClose();
   });
+  const retryVisibleReads = () => {
+    if (!document.hidden && state.nativeWindow?.visible) {
+      const kind = nextFilesReadRecovery({automatic:true});
+      if (kind === 'watch') scheduleFilesReadRetry();
+      else if (kind) void retryFilesRead(kind);
+    }
+  };
+  listen(state.shell,'focusin',event=>{ if (!event.target.closest?.('.files-error')) retryVisibleReads(); });
+  listen(window,'focus',retryVisibleReads);
+  listen(window,'online',retryVisibleReads);
+  let pausedWatchRef = '';
+  listen(document,'visibilitychange',() => {
+    if (document.hidden) {
+      pausedWatchRef = state.watchResourceRef;
+      if (pausedWatchRef) stopActiveFolderWatch();
+      return;
+    }
+    const resume = pausedWatchRef && activeColumn()?.resourceRef === pausedWatchRef;
+    pausedWatchRef = '';
+    if (resume && state.nativeWindow?.visible) void reloadManagedColumn(state.columns.indexOf(activeColumn()));
+    else if (nextFilesReadRecovery({automatic:true})) retryVisibleReads();
+    else if (!nextFilesReadRecovery()) syncActiveFolderWatch();
+  });
+  listen(window,'odysseus:modal-restored',event=>{
+    if (event.detail?.id === (options.parentWindow?.id || state.nativeWindow.id)) {
+      if (nextFilesReadRecovery({automatic:true})) retryVisibleReads();
+      else if (!nextFilesReadRecovery()) syncActiveFolderWatch();
+    }
+  });
   listen(window, 'odysseus:modal-minimized', (event) => {
-    if (event.detail?.id === (options.parentWindow?.id || state.nativeWindow.id)) { cancelFilesGesture('window-hidden'); stopActiveFolderWatch(); resetNativeThumbnails(); closeManagedActionMenu(); }
+    if (event.detail?.id === (options.parentWindow?.id || state.nativeWindow.id)) { cancelFilesGesture('window-hidden'); stopActiveFolderWatch(); resetNativeThumbnails(); }
   });
   listen(window, 'odysseus:modal-opened', (event) => {
     if (event.detail?.id === (options.parentWindow?.id || state.nativeWindow.id)) syncActiveFolderWatch();
@@ -6277,6 +7403,7 @@ function mount() {
     void handleAuthUserReady(event);
   });
   listen(document, 'openclank:file-policy-changed', () => {
+    resetFilesReadRetry();
     void handleFilesPolicyChanged();
   });
   listen(window, 'openclank:files-places-changed', event => {
@@ -6298,9 +7425,6 @@ function mount() {
     renderWorkspaces();
     if (workspaceChanged) void handleFilesPolicyChanged();
   });
-  listen(document, 'pointerdown', (event) => {
-    if (state.actionMenu && !state.actionMenu.contains(event.target)) closeManagedActionMenu();
-  });
   state.shell.addEventListener('keydown', (event) => {
     const preview = state.shell?.querySelector('[data-files-preview]');
     if (event.key === 'Escape' && state.gesture) {
@@ -6312,18 +7436,12 @@ function mount() {
     const inputTarget = event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]');
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !inputTarget) {
       if (options.pickerMode) return;
-      const model = ensureSelectionModel(activeColumn());
+      const { model } = activateColumn(columnIndexForNode(event.target));
       model.selectAll();
       applyModelSelection(model);
       event.preventDefault();
       event.stopPropagation();
       setStatus(`${model.selectedKeys().length}${state.nextCursor ? '+' : ''} items selected`);
-      return;
-    }
-    if (event.key === 'Escape' && state.actionMenu) {
-      event.preventDefault();
-      event.stopPropagation();
-      closeManagedActionMenu();
       return;
     }
     if (event.key === 'Escape' && preview && !preview.hidden) {
@@ -6363,37 +7481,11 @@ async function open() {
   const windowApi = mount();
   windowApi.show();
   activate();
-  if (!options.pickerMode) acknowledgeVisible(state.shell, 'surface.visited', { surface:'files', visited:true });
-  if (!options.pickerMode&&!state.contextAdapterDispose) state.contextAdapterDispose = registerAdapter(state.shell, sharedFilesMenuAdapter());
-  const lifecycle = ++state.lifecycleGeneration;
-  const priorProjection = captureFilesProjection();
-  const startingContent = state.contentGeneration;
-  setStatus('Loading available files…');
-  try {
-    await loadNavigationRoots();
-    if (lifecycle !== state.lifecycleGeneration || state.contentGeneration !== startingContent || !windowApi.visible) return windowApi;
-    // A new Files window starts at Clanker home. Reopening first resolves the
-    // retained projection against current owner-bound refs, rather than
-    // displaying expired rows from a previous window lifetime.
-    if (state.columns.length && priorProjection.owner === state.owner) {
-      const refreshed = await refreshManagedFilesProjection(priorProjection, lifecycle);
-      if (refreshed.status === 'resolved') return windowApi;
-      if (refreshed.status === 'stale') return windowApi;
-      clearFilesAuthorityContent('The previous Files folder is no longer available');
-    }
-    const opaqueOpened = await openProvider(CLANKER_HOME_PROVIDER);
-    if (opaqueOpened) return windowApi;
-    state.entries = [];
-    state.nextCursor = null;
-    renderEntries();
-    setStatus('No authorized Host folder is available', true);
-  } catch (error) {
-    if (lifecycle === state.lifecycleGeneration) {
-      setStatus(error.message || 'Available files could not be loaded', true);
-      const body = state.shell?.querySelector('[data-files-body]');
-      if (body) body.replaceChildren(el('div', { class: 'files-error', text: error.message || 'Available files could not be loaded' }));
-    }
-  }
+  if (!options.pickerMode) acknowledgeVisible(state.shell, 'surface.visited', {surface:'files',visited:true});
+  registerFilesContextAdapters();
+  const recovery = activeReadRetry || retryFilesRead(nextFilesReadRecovery());
+  if (recovery) await recovery;
+  else await handleFilesPolicyChanged();
   return windowApi;
 }
 
@@ -6407,8 +7499,9 @@ async function openLibraryCollection(view = 'documents') {
   const expectedView = LIBRARY_COLLECTION_VIEWS[requested] || LIBRARY_COLLECTION_VIEWS.documents;
   const windowApi = mount();
   windowApi.show();
-  await loadNavigationRoots();
-  const opened = await openProvider(CLANKER_HOME_PROVIDER);
+  const roots = await loadNavigationRoots({deferSidebar:true});
+  if (!roots || !windowApi.visible) return false;
+  const opened = await openProvider(CLANKER_HOME_PROVIDER, {rootsConfirmed:true});
   if (!opened) return false;
   const collection = state.entries.find((entry) => libraryCollectionView(entry) === expectedView);
   if (!collection) {
@@ -6469,7 +7562,7 @@ async function expandRevealTrees(ancestors, target, reveal) {
   const chain = [...ancestors];
   if (chain.at(-1)?.resource_id !== target.resource_id) chain.push(target);
   let chosen = null;
-  const trees = [state.workspaceTree, state.favoriteTree, state.explorerTree, state.collectionTree];
+  const trees = state.editorRootBound ? [state.editorRootTree] : [state.workspaceTree, state.favoriteTree, state.explorerTree, state.collectionTree];
   // Prefer the deepest registered presentation root. Workspace/Favorites win
   // equal-depth ties; a physical ancestor is never expanded alongside it.
   for (const tree of trees) {
@@ -6490,6 +7583,7 @@ async function expandRevealTrees(ancestors, target, reveal) {
       }
     }
   }
+  if (state.editorRootBound && !chosen) return [];
   const start = chosen?.index || 0;
   if (chosen) {
     const { tree } = chosen;
@@ -6517,7 +7611,9 @@ async function expandRevealTrees(ancestors, target, reveal) {
 }
 
 /** Reveal an already-authorized provider resource in its canonical parent. */
-async function revealResource(resourceRef) {
+async function revealResource(resourceRef, {expectedRevision = null, workspaceMatch = false, isCurrent = () => true} = {}) {
+  if (!isCurrent() || (workspaceMatch && expectedRevision?.kind !== 'hostFingerprint')) return false;
+  const matchesRevision = item => !expectedRevision || (item?.revision?.kind === expectedRevision.kind && item?.revision?.value === expectedRevision.value);
   const windowApi = mount();
   windowApi.show();
   Modals.restore(state.nativeWindow.id);
@@ -6526,19 +7622,23 @@ async function revealResource(resourceRef) {
   const revealController = state.revealController = new AbortController();
   setStatus('Locating resource…');
   try {
+    const revealOptions = {
+      signal: revealController.signal,
+      expectedRevision: workspaceMatch ? expectedRevision : null,
+    };
     let response;
     try {
-      response = await filesFacadeClient.reveal(resourceRef, {signal:revealController.signal});
+      response = await filesFacadeClient.reveal(resourceRef, revealOptions);
     } catch (error) {
-      if (error?.code !== 'resource_ref_stale') throw error;
+      if (expectedRevision || error?.code !== 'resource_ref_stale') throw error;
       const renewed = await filesFacadeClient.reissue(resourceRef, {signal:revealController.signal});
       const renewedRef = String(renewed?.resource?.ref || '');
       if (!renewedRef) throw new Error('Resource could not be renewed');
       response = await filesFacadeClient.reveal(renewedRef, {signal:revealController.signal});
     }
-    if (reveal !== state.revealGeneration) return false;
+    if (reveal !== state.revealGeneration || !isCurrent()) return false;
     await loadNavigationRoots();
-    if (reveal !== state.revealGeneration) return false;
+    if (reveal !== state.revealGeneration || !isCurrent()) return false;
     windowApi.show();
     const ancestors = (
       Array.isArray(response?.ancestors) && response.ancestors.length
@@ -6547,6 +7647,7 @@ async function revealResource(resourceRef) {
     ).filter(Boolean).map(facadeEntry).filter(editorResourceAllowed);
     let parent = ancestors.at(-1);
     const target = facadeEntry(response?.resource);
+    if (!matchesRevision(target)) throw new Error('The saved result changed.');
     if (
       !parent?.resource_ref
       || !target.resource_id
@@ -6555,15 +7656,30 @@ async function revealResource(resourceRef) {
       throw new Error('Resource is unavailable');
     }
     const navigation = await expandRevealTrees(ancestors,target,reveal);
-    if (reveal !== state.revealGeneration || !navigation.length) return false;
+    if (reveal !== state.revealGeneration || !isCurrent() || !navigation.length) return false;
     parent = navigation.at(-1);
     for (let index = 0; index < navigation.length; index += 1) {
       const opened = await openManagedDirectory(navigation[index], index === 0 ? null : index - 1, {reveal});
-      if (!opened || reveal !== state.revealGeneration || !windowApi.visible) return false;
+      if (!opened || reveal !== state.revealGeneration || !isCurrent() || !windowApi.visible) return false;
     }
     if (target.resource_id !== parent.resource_id) {
-      const listed = state.entries.find((entry) => entry.resource_id === target.resource_id);
-      if (!listed) throw new Error('Resource is no longer in this folder');
+      const findTarget = () => state.entries.find((entry) => entry.resource_id === target.resource_id);
+      let listed = findTarget();
+      if (workspaceMatch) {
+        const selectedFolder = activeColumn();
+        for (let page = 0; !listed && state.nextCursor && page < 8; page += 1) {
+          if (!await loadManagedMore() || reveal !== state.revealGeneration || !isCurrent() || activeColumn() !== selectedFolder) return false;
+          listed = findTarget();
+        }
+        if (listed) {
+          // Host listings omit byte fingerprints. Recheck the original sealed
+          // match through Workspace policy before selecting the listing row.
+          const verified = await filesFacadeClient.reveal(resourceRef, revealOptions);
+          if (reveal !== state.revealGeneration || !isCurrent() || !windowApi.visible || activeColumn() !== selectedFolder) return false;
+          listed = verified?.resource?.id === target.resource_id && matchesRevision(verified.resource) ? findTarget() : null;
+        }
+      }
+      if (!listed || (!workspaceMatch && !matchesRevision(listed))) throw new Error('The saved result changed or is no longer in this folder.');
       const column = activeColumn();
       const model = clearFilesSelection(column, state.activeColumnIndex);
       model.select(entrySelectionKey(listed));
@@ -6584,8 +7700,17 @@ async function revealResource(resourceRef) {
   } finally { if (state.revealController === revealController) state.revealController = null; }
 }
 
-function captureCommands({directoryOnly=false}={}) {
-  const treeEntry = state.treeSelection || null;
+function registerFilesContextAdapters() {
+  if (state.contextAdapterDispose || options.surface === 'editor') return;
+  const adapter = sharedFilesMenuAdapter();
+  const disposers = [registerAdapter(state.shell, adapter), registerAdapter(state.sidebar, adapter)];
+  state.contextAdapterDispose = () => disposers.forEach(dispose => dispose());
+}
+
+function captureCommands({ context = '', columnIndex = state.mode === 'columns' ? state.activeColumnIndex : state.columns.length - 1,
+  treeEntry = context === 'folder' || context === 'navigation' ? null : state.treeSelection || null, treeHit = null } = {}) {
+  if (!state.columns[columnIndex]) columnIndex = state.columns.length - 1;
+  const column = state.columns[columnIndex] || null;
   const treeParent = treeEntry?.tree_ancestors?.at(-1) || null;
   let model;
   if (treeEntry) {
@@ -6596,28 +7721,36 @@ function captureCommands({directoryOnly=false}={}) {
     if (!model) { model = createFilesSelectionModel({scope}); state.selectionModels.set(identity, model); }
     model.setItems([treeEntry]);
     model.replaceSelection([resourceKey(treeEntry,scope.provider,scope)]);
-  } else model = ensureSelectionModel(activeColumn());
-  const selection = captureFilesSelectionGuard(model);
-  const destination = treeEntry ? (isDirectory(treeEntry) ? treeEntry : treeParent) : activeColumn();
+  } else model = ensureSelectionModel(column, columnIndex);
+  const selection = captureFilesSelectionGuard(model, columnIndex);
+  const entries = context === 'folder' || context === 'navigation' ? [] : model.selectedEntries();
+  const destination = commandDirectory(treeEntry, context, entries, column);
   const directory = destination ? { ...destination,kind:'folder',resourceRef:destinationResourceRef(destination), resourceId:destination.resource_id || destination.resourceId } : null;
   return Object.freeze({ browser: api, lifecycle: state.lifecycleGeneration, content: state.contentGeneration, navigating: Boolean(state.contentController),
-    owner: state.owner, policy: filesPolicyGeneration(), selection, treeEntry,
-    entries: Object.freeze(directoryOnly?[]:[...model.selectedEntries()]), directory,
-    creation: directory ? creationDestinationForEntry({ ...directory, kind:'folder' }, state.activeColumnIndex) : null });
+    owner: state.owner, accountId: state.accountId, policy: filesPolicyGeneration(), selection, treeEntry, treeHit, context, mode:state.mode,
+    column, columnIndex, entries: Object.freeze([...entries]), directory,
+    clipboard: filesClipboard, sessionId: window.sessionModule?.getCurrentSessionId?.() || '',
+    creation: destination ? creationDestinationForEntry(destination, columnIndex) : null });
 }
+function commandDirectory(treeEntry, context, entries, column) {
+  if (context === 'selection' && entries.length === 1 && isDirectory(entries[0])) return entries[0];
+  if (treeEntry) return isDirectory(treeEntry) ? treeEntry : treeEntry.tree_ancestors?.at(-1);
+  return column;
+}
+
 function isCommandCaptureCurrent(snapshot, policy = snapshot?.policy, ownedController = null) {
   if(!snapshot)return false;
-  const treeEntry = state.treeSelection || null;
-  const destination = treeEntry ? (isDirectory(treeEntry) ? treeEntry : treeEntry.tree_ancestors?.at(-1)) : activeColumn();
-  const destinationId = String(destination?.resource_id || destination?.resourceId || '');
-  const capturedId = String(snapshot?.directory?.resource_id || snapshot?.directory?.resourceId || '');
-  return !snapshot?.navigating && (!state.contentController || state.contentController===ownedController)
-    && destinationResourceRef(destination) === String(snapshot?.directory?.resourceRef || '')
-    && destinationId === capturedId && snapshot?.browser === api && !listeners.signal.aborted && state.nativeWindow?.visible
+  const stillSelected = snapshot.context === 'folder' || snapshot.context === 'navigation' || snapshot.treeEntry === (state.treeSelection || null);
+  const column = state.columns[snapshot.columnIndex] || null;
+  const model = validateFilesSelectionGuard({ ...snapshot.selection, filesGeneration:policy });
+  return !snapshot.navigating && (!state.contentController || state.contentController === ownedController)
+    && column === snapshot.column && state.mode === snapshot.mode && snapshot.browser === api && !listeners.signal.aborted && state.nativeWindow?.visible
     && snapshot.lifecycle === state.lifecycleGeneration && snapshot.content === state.contentGeneration
-    && snapshot.owner === state.owner && policy === filesPolicyGeneration()
-    && snapshot.treeEntry === (state.treeSelection || null)
-    && Boolean(validateFilesSelectionGuard({ ...snapshot.selection, filesGeneration:policy }));
+    && snapshot.owner === state.owner && snapshot.accountId === state.accountId && policy === filesPolicyGeneration()
+    && (!document.body?.dataset?.accountId || document.body.dataset.accountId === snapshot.accountId)
+    && stillSelected && (snapshot.context !== 'selection' || snapshot.treeEntry || activeColumn() === snapshot.column)
+    && (!snapshot.treeHit || snapshot.treeHit.tree.getNode(snapshot.treeHit.id)?.data === snapshot.treeEntry)
+    && Boolean(model) && snapshot.entries.every((entry, index) => model.item(snapshot.selection.selectedKeys[index]) === entry);
 }
 async function openCapturedCodeGraph(snapshot) {
   let accepted = snapshot.policy;
@@ -6641,14 +7774,100 @@ async function openCapturedCodeGraph(snapshot) {
   if(result.ok)document.dispatchEvent(new CustomEvent('openclank:file-policy-changed'));
   return result;
 }
+function contextCommandDescriptors(snapshot) {
+  const descriptors = new Map(commandDescriptors(snapshot).filter(item => !item.disabledReason).map(item => [item.id, item]));
+  const items = [];
+  const include = (names, menu = '', useChoiceLabel = false) => {
+    for (const name of names) {
+      const item = descriptors.get('files.' + name);
+      if (item) items.push({ ...item, menu, label: useChoiceLabel ? item.choiceLabel || item.label : item.label });
+    }
+  };
+
+  if (snapshot.context === 'navigation') {
+    if (!options.pickerMode) include(['customize-explorer']);
+    return items;
+  }
+  if (snapshot.context === 'folder') {
+    include(['new-file', 'new-folder', 'library-create', 'library-import'], 'New');
+    include(['paste', 'select-all', 'refresh', 'favorite', 'code-graph', 'folder-history', 'git-workbench']);
+    include([...FILE_SORT_OPTIONS.map(([value]) => 'sort-' + value), 'folders-first'], 'Sort by', true);
+    include(['view-list', 'view-grid', 'view-details', 'view-columns', 'view-gallery'], 'View mode');
+    include(['size-16', 'size-20', 'size-24', 'size-32', 'size-64', 'size-96', 'size-128'], 'Icon size', true);
+    return items;
+  }
+
+  if (snapshot.entries.length > 1) {
+    include(['copy', 'cut', 'download', 'action-transfer.duplicate', 'selected-output-export']);
+    include(['action-transfer.copy', 'action-transfer.move'], 'Transfer');
+    include(['action-history.checkpoint'], 'History');
+    include(['action-archive.set', 'action-favorite.set', 'action-library.clone', 'action-library.delete']);
+    return items;
+  }
+
+  const [entry] = snapshot.entries;
+  if (!entry) return items;
+  if (options.pickerMode) {
+    include(['open']);
+    return items;
+  }
+  include(['open', 'preview']);
+  include(['open-editor', 'open-editor-right', 'open-editor-below', 'open-browser', 'open-in-canvas',
+    'action-host.default', 'action-host.open', 'code-graph'], 'Open with');
+  if (isDirectory(entry)) {
+    include(['new-file', 'new-folder', 'library-create', 'library-import'], 'New');
+    include(['paste', 'favorite', 'folder-history', 'git-workbench']);
+    include(['workspace-use', 'workspace-rename', 'workspace-archive', 'workspace-hexes',
+      ...(!descriptors.has('files.workspace-use') ? ['action-workspace.use'] : [])], 'Workspace');
+  }
+  include(['copy', 'cut', 'copy-path', 'action-rename', 'action-transfer.duplicate', 'download']);
+  include(['action-transfer.copy', 'action-transfer.move'], 'Transfer');
+  include(['manage-file-access', 'share-download'], 'Share');
+  include(['action-history.open', 'action-history.checkpoint'], 'History');
+  include(['action-analysis.note', 'action-analysis.result', 'selected-output-export'], 'Analysis');
+  include(['action-media.spriteCrops', 'action-media.materialBake', 'action-media.blender',
+    'action-media.blenderFour', 'action-media.blenderRig'], 'Media');
+  include(['inspect-binary', 'inspect-model-header'], 'Inspect');
+  include(['action-favorite.set', 'action-archive.set', 'action-restore', 'action-trash',
+    'action-library.clone', 'action-library.delete', 'information']);
+  return items;
+}
+
+function showCapturedFilesMenu(anchor, snapshot, names = null) {
+  if (!snapshot) return false;
+  const items = names
+    ? commandDescriptors(snapshot).filter(item => names.includes(item.id) && !item.disabledReason).map(item => ({ ...item, menu:'' }))
+    : contextCommandDescriptors(snapshot);
+  return openContextActionMenu({ anchor, items, isCurrent:() => isCommandCaptureCurrent(snapshot) });
+}
+
 function commandDescriptors(snapshot) {
   const descriptors = [];
-  const add = (name, label, menu, run, reason = '', checked = undefined) => descriptors.push({ id: 'files.' + name, label, menu, run, disabledReason: snapshot.navigating ? 'Wait for folder navigation to finish; reopen this menu.' : reason, checked });
+  const add = (name, label, menu, run, reason = '', checked = undefined, presentation = {}) => descriptors.push({
+    id:'files.' + name, label, menu, run,
+    disabledReason:snapshot.navigating ? 'Wait for folder navigation to finish; reopen this menu.' : reason,
+    checked, ...presentation,
+  });
   const entries = snapshot.entries;
   const single = entries.length === 1 ? entries[0] : null;
   const requiredSingle = single ? '' : 'Select one item.';
+  const current = () => isCommandCaptureCurrent(snapshot);
+  const sameChat = () => snapshot.sessionId === (window.sessionModule?.getCurrentSessionId?.() || '');
+  const source = snapshot.column;
+  const directory = snapshot.directory;
+  add('shared-with-me', 'Shared with me…', 'File', async () => {
+    const owner=state.owner, lifecycle=state.lifecycleGeneration, account=document.body.dataset.accountId;
+    const current=()=>!!account && document.body.dataset.accountId===account && state.owner===owner && state.lifecycleGeneration===lifecycle;
+    if(!current())return;
+    try {
+      const [{openSharedResources},copal]=await Promise.all([import('./sharedResources.js'),import('./copal.js')]);
+      if(current())openSharedResources({isCurrent:current,openSharedText:copal.openSharedText});
+    } catch(error) {if(current())setStatus(error?.message || 'Shared files unavailable.',true);}
+  });
   const graphEntries = entries.length ? entries : snapshot.directory ? [snapshot.directory] : [];
-  add('code-graph',CODE_GRAPH_LABEL,'Go',()=>openCapturedCodeGraph(snapshot),single?.unavailable?'This saved Workspace or resource is unavailable.':graphDisabledReason(graphEntries));
+  add('code-graph', CODE_GRAPH_LABEL, 'Go', () => openCapturedCodeGraph(snapshot),
+    graphEntries.length === 1 && fileResourceCanOpenCodeGraph(graphEntries[0]) ? '' :
+      graphDisabledReason(graphEntries) || 'Select an available Host source file or folder.');
   const workspaceItem=single?.workspaceRootId && state.workspaces.find(item=>item.workspace.id===single.workspaceRootId);
   if(workspaceItem){
     const still=()=>isCommandCaptureCurrent(snapshot)&&state.workspaces.includes(workspaceItem);
@@ -6664,46 +7883,265 @@ function commandDescriptors(snapshot) {
       const opener=window.__openClankOpenResourceHandle;
       if(typeof opener!=='function')return false;
       return opener({resourceRef:single.resource_ref,name:single.name,resourceKey:entrySelectionKey(single),...(intent?{intent}:{}),isCurrent:()=>isCommandCaptureCurrent(snapshot)});
-    },requiredSingle||(!single?.capabilities?.includes('open')||isDirectory(single)||!isTextualEntry(single)?'Select an authorized source or text file.':''));
+    }, requiredSingle || (!fileResourceCanOpenInEditor(single) ? 'Select an authorized source or text file.' : ''));
   }
-  add('reveal','Reveal in Files','Go',()=>revealResource(single.resource_ref),requiredSingle||(!single?.capabilities?.includes('stat')?'This resource cannot be revealed.':''));
-  add('copy-path','Copy file path','Edit',()=>navigator.clipboard.writeText(single.path),requiredSingle||(!single?.path||!navigator.clipboard?.writeText?'No authorized path or clipboard is available.':''));
-  add('new-file', 'New file…', 'File', () => createFilesResource('file', snapshot.creation), snapshot.creation ? '' : 'This folder does not support creating files.');
-  add('new-folder', 'New folder…', 'File', () => createFilesResource('folder', snapshot.creation), snapshot.creation && snapshot.creation.creationSupportsFolders !== false ? '' : 'This folder does not support creating folders.');
-  add('open', 'Open', 'File', () => isDirectory(single) ? openManagedDirectory(single) : options.pickerMode ? confirmPickerEntry(single) : openManagedEntry(single), requiredSingle || (!single?.capabilities?.includes('open') && !isDirectory(single) ? 'This provider cannot open this item.' : ''));
-  add('download', 'Download', 'File', async () => { for (const entry of entries) await downloadEntry(entry); }, entries.length && entries.every(entry => entry.capabilities?.includes('download')) ? '' : 'Select downloadable files.');
-  add('information', 'Resource information', 'File', () => uiModule.styledConfirm([single.name, 'Type: ' + (single.kind || single.media_type || 'File'), 'Provider: ' + (single.provider || state.provider), ...(single.size != null ? ['Size: ' + formatBytes(single.size)] : []), ...(single.modified_unix_ms ? ['Modified: ' + formatModified(single.modified_unix_ms)] : [])].join('\n'), { title:'Resource information',confirmText:'Done',cancelText:'Close' }), requiredSingle);
+  add('reveal','Reveal in Files','Go',() => revealResource(single.resource_ref), requiredSingle || (!fileResourceCanReveal(single) ? 'This resource cannot be revealed.' : ''));
+  add('copy-path','Copy file path','Edit',() => fileResourceCopyPath(single), requiredSingle || (!fileResourceCanCopyPath(single) ? 'No authorized path or clipboard is available.' : ''));
+  add('new-file', 'New file…', 'File', () => createFilesResource('file', snapshot.creation, current), snapshot.creation ? '' : 'This folder does not support creating files.');
+  add('new-folder', 'New folder…', 'File', () => createFilesResource('folder', snapshot.creation, current), snapshot.creation && snapshot.creation.creationSupportsFolders !== false ? '' : 'This folder does not support creating folders.');
+  if (!options.pickerMode && isLibraryDocumentsView(directory) && directory.resourceRef === destinationResourceRef(source)) {
+    add('library-create', 'Create Library document', 'File', () => createSelectedLibraryDocument(snapshot));
+    add('library-import', 'Import Library documents…', 'File', () => chooseLibraryDocuments(snapshot));
+  }
+  if (!options.pickerMode) add('recover-history-import', 'Recover previous history import…', 'File', async () => {
+    const owner=state.owner,lifecycle=state.lifecycleGeneration,policy=filesPolicyGeneration(),chatID=String(window.sessionModule?.getCurrentSessionId?.()||'');
+    const current=()=>state.owner===owner&&state.lifecycleGeneration===lifecycle&&filesPolicyGeneration()===policy&&String(window.sessionModule?.getCurrentSessionId?.()||'')===chatID;
+    try {const {recoverSessionTransfer}=await import('./sessionTransfer.js');if(current())await recoverSessionTransfer({client:filesFacadeClient,current,scopeRoot:state.nativeWindow?.root,status:(message,error=false)=>setStatus(message,error)});}
+    catch(error){if(current())setStatus(String(error?.message||'Recovery unavailable.'),true);}
+  });
+  add('open', options.pickerMode && single && !isDirectory(single) ? 'Choose' : 'Open', 'File', () => isDirectory(single)
+    ? openManagedDirectory(single, snapshot.treeEntry ? null : snapshot.columnIndex)
+    : options.pickerMode ? confirmPickerEntry(single) : openManagedEntry(single, current),
+  requiredSingle || (!fileResourceCanOpen(single) ? 'This provider cannot open this item.' : ''));
+  add('download', entries.length > 1 ? 'Download selected files' : 'Download', 'File', async () => {
+    for (const entry of entries) {
+      if (!current()) return false;
+      await downloadEntry(entry);
+    }
+    return true;
+  }, entries.length && entries.every(entry => !entry.unavailable && entry.resource_ref && entry.capabilities?.includes('download')) ? '' : 'Select downloadable files.');
+  if (!options.pickerMode) add('selected-output-export','Review selected outputs…','File',async()=>{
+    const current=()=>isCommandCaptureCurrent(snapshot); const {reviewSelectedOutputs}=await import('./selectedOutputExport.js');
+    if(current()) await reviewSelectedOutputs({entries,client:filesFacadeClient,current,scopeRoot:state.nativeWindow?.root});
+  }, entries.length>=1 && entries.length<=16 && entries.every(entry=>entry.provider==='host' && !isDirectory(entry) && entry.resource_ref && entry.resource_id && entry.revision && entry.capabilities?.includes('stat') && entry.capabilities?.includes('download')) ? '' : 'Select one to sixteen current downloadable Host files.');
+  add('manage-file-access', 'Invite / manage access…', 'File', async () => {
+    const current=()=>isCommandCaptureCurrent(snapshot);
+    const owner=state.owner,lifecycle=state.lifecycleGeneration,account=document.body.dataset.accountId;
+    const sameHuman=()=>!!account && document.body.dataset.accountId===account && state.owner===owner && state.lifecycleGeneration===lifecycle;
+    const {openFilesAccess}=await import('./filesShare.js');
+    if(!current() || !sameHuman())return false;
+    return openFilesAccess({entry:single,client:filesFacadeClient,current,sameHuman,status:setStatus,onChanged:()=>document.dispatchEvent(new CustomEvent('openclank:file-policy-changed'))});
+  }, requiredSingle || (!fileResourceCanShare(single) ? 'Select one current downloadable Host file.' : ''));
+  add('share-download', 'Share download…', 'File', async () => {
+    const current = () => isCommandCaptureCurrent(snapshot);
+    const { openFilesShare } = await import('./filesShare.js');
+    if (!current()) return false;
+    return openFilesShare({entry:single,client:filesFacadeClient,current,ui:uiModule,status:setStatus});
+  }, requiredSingle || (!fileResourceCanShare(single) ? 'Select one current downloadable Host file.' : ''));
+  add('manage-shared-downloads', 'Manage shared downloads…', 'File', async () => {
+    const current = () => isCommandCaptureCurrent(snapshot);
+    const { openFilesShareManager } = await import('./filesShare.js');
+    if (!current()) return false;
+    return openFilesShareManager({current,ui:uiModule,status:setStatus});
+  });
+  add('information', 'Resource information', 'File', () => uiModule.styledConfirm([single.name, 'Type: ' + (single.kind || single.media_type || 'File'), 'Provider: ' + (single.provider || state.provider), ...(single.size != null ? ['Size: ' + formatBytes(single.size)] : []), ...(single.modified_unix_ms ? ['Modified: ' + formatModified(single.modified_unix_ms)] : [])].join('\n'), { title:'Resource information',confirmText:'Done',cancelText:'Close' }), requiredSingle || (single?.unavailable ? 'This item is unavailable.' : ''));
+  const binaryFormats = ['elf', 'pe', 'macho', 'sqlite'];
+  const recognizedBinary = binaryFormats.includes(single?.format?.formatId) ||
+    /\.(?:exe|dll|so(?:\.\d+)*|dylib|elf|sqlite3?|db)$/i.test(single?.name || '');
+  if (recognizedBinary && !single?.unavailable && single?.resource_ref && single?.provider === 'host' && single?.kind === 'file' && single?.capabilities?.includes('preview')) add('inspect-binary', 'Inspect binary headers…', 'File', async () => {
+    const owner=state.owner, lifecycle=state.lifecycleGeneration, policy=filesPolicyGeneration(), workspace=copalWorkspace();
+    const current=()=>isCommandCaptureCurrent(snapshot) && state.owner===owner && state.lifecycleGeneration===lifecycle && filesPolicyGeneration()===policy && copalWorkspace()===workspace;
+    try {
+      const selected=await uiModule.styledPrompt('Choose ELF, PE, Mach-O or SQLite.', {title:'Inspect metadata',defaultValue:single?.format?.formatId === 'pe' ? 'PE' : single?.format?.formatId === 'macho' ? 'Mach-O' : single?.format?.formatId === 'sqlite' ? 'SQLite' : 'ELF'});
+      if (!selected || !current()) return;
+      const format=selected.trim().toLowerCase().replace('-', '');
+      if (!['elf','pe','macho','sqlite'].includes(format)) throw new Error('Choose ELF, PE, Mach-O or SQLite.');
+      const fresh=await filesFacadeClient.stat(single.resource_ref, {purpose:`inspect_${format}`});
+      if (!current() || fresh?.id!==single.resource_id || !fresh.revision) throw new Error('The inspection source changed.');
+      const result=await filesFacadeClient.inspectModelHeader(fresh.ref, fresh.revision, {format});
+      if (current()) await uiModule.styledConfirm(metadataDetails(result, fresh.ref, fresh.revision, policy, format), {title:'Read-only inspection',confirmText:'Done',cancelText:'Close'});
+    } catch (error) { if (current()) setStatus(error.message || 'ELF inspection unavailable.', true); }
+  }, requiredSingle);
+  if (!single?.unavailable && single?.resource_ref && isMetadataInspection(single?.format) && !binaryFormats.includes(single.format.formatId)) add('inspect-model-header', `Inspect ${metadataLabel(single.format.formatId)}`, 'File', async () => {
+    const owner=state.owner, lifecycle=state.lifecycleGeneration, policy=filesPolicyGeneration(), workspace=copalWorkspace();
+    const current=()=>isCommandCaptureCurrent(snapshot) && state.owner===owner && state.lifecycleGeneration===lifecycle && filesPolicyGeneration()===policy && copalWorkspace()===workspace;
+    try {
+      const fresh=await filesFacadeClient.stat(single.resource_ref, {purpose:'inspect'});
+      if (!current() || fresh?.id!==single.resource_id || fresh?.format?.formatId!==single.format.formatId || !fresh.revision) throw new Error('The inspection source changed.');
+      const result=await filesFacadeClient.inspectModelHeader(fresh.ref, fresh.revision, {format:fresh.format.formatId});
+      if (!current()) return;
+      await uiModule.styledConfirm(metadataDetails(result, fresh.ref, fresh.revision, policy, fresh.format.formatId), {title:'Read-only inspection',confirmText:'Done',cancelText:'Close'});
+    } catch (error) { if (current()) setStatus(error.message || 'Inspection unavailable.', true); }
+  }, requiredSingle);
   add('customize-explorer', 'Customize Explorer…', 'View', customizeExplorer);
-  add('preview', 'Preview', 'View', () => previewEntry(single, entryPath(single)), requiredSingle || (isPreviewable(single, entryPath(single)) ? '' : 'No preview is available.'));
+  add('preview', 'Preview', 'View', () => previewEntry(single, entryPath(single), current),
+    requiredSingle || (!single?.unavailable && !isDirectory(single) && single?.capabilities?.includes('preview') && isPreviewable(single, entryPath(single))
+      ? '' : 'No preview is available.'));
+  const browserMime = previewMime(single);
+  const browserMimeAllowed = browserMime === 'text/html' || browserMime === 'application/xhtml+xml';
+  const browserCapabilitiesAllowed = !single?.unavailable && single?.resource_ref && single.capabilities?.includes('preview') && single.capabilities?.includes('stat') && window.browserApplet?.openPreview;
+  add('open-browser', 'Open in Browser', 'File', async () => {
+    const isCurrent = () => isCommandCaptureCurrent(snapshot);
+    if (!isCurrent()) return false;
+    const dependencies = [];
+    const dependencyWarnings = [];
+    const root = snapshot.directory;
+    const rootRef = String(root?.resourceRef || '');
+    const treeParentRef = String(snapshot.treeEntry?.tree_ancestors?.at(-1)?.resource_ref || '');
+    const directChild = isDirectPreviewChild({ folderRef:rootRef, entryParentRef:treeParentRef,
+      treeEntry:Boolean(snapshot.treeEntry), directory:isDirectory(single) || Boolean(root?.globalSearch) });
+    if (rootRef && root.capabilities?.includes('children') && directChild) {
+      const guard = createDependencyAcquisitionGuard({ isCurrent });
+      try {
+        const readText = async resourceRef => {
+          if (!isCurrent()) throw new DOMException('Files selection changed.', 'AbortError');
+          const response = await fetch(filesFacadeClient.contentUrl(resourceRef, { purpose:'preview' }), {
+            credentials:'same-origin', cache:'no-store', signal:guard.signal,
+          });
+          if (!response.ok) throw new Error(`Files content read failed (${response.status}).`);
+          const bounded = await readBoundedTextResponse(response, { limit:512 * 1024, signal:guard.signal });
+          if (bounded.truncated) throw new Error('A linked stylesheet is larger than the bounded dependency scan.');
+          if (!isCurrent()) throw new DOMException('Files selection changed.', 'AbortError');
+          return bounded.text;
+        };
+        const response = await fetch(filesFacadeClient.contentUrl(single.resource_ref, { purpose:'preview' }), {
+          credentials:'same-origin', cache:'no-store', signal:guard.signal,
+        });
+        if (!response.ok) throw new Error(`HTML source read failed (${response.status}).`);
+        const bounded = await readBoundedTextResponse(response, { limit:512 * 1024, signal:guard.signal });
+        if (!isCurrent()) throw new DOMException('Files selection changed.', 'AbortError');
+        if (bounded.truncated) {
+          dependencyWarnings.push('Linked resources were not acquired because the HTML exceeds the bounded dependency scan.');
+        } else {
+          const acquired = await acquirePreviewDependencies({ html:bounded.text, rootRef:root.resourceRef,
+            client:filesFacadeClient, readText, signal:guard.signal, isCurrent });
+          dependencies.push(...acquired.dependencies);
+          dependencyWarnings.push(...acquired.warnings);
+        }
+      } catch (error) {
+        if (!isCurrent()) return false;
+        if (guard.timedOut) dependencyWarnings.push('Dependency acquisition timed out; only self-contained content may work.');
+        else if (error?.name === 'AbortError') return false;
+        else dependencyWarnings.push('Linked resources could not be acquired through Files; only self-contained content may work.');
+      } finally {
+        guard.dispose();
+      }
+    } else {
+      dependencyWarnings.push(rootRef
+        ? 'Linked resources were not acquired because the selected HTML is not a direct child of the captured Files folder.'
+        : 'Linked resources were not acquired because the selected Files folder cannot be traversed.');
+    }
+    if (!isCurrent()) return false;
+    return window.browserApplet?.openPreview({
+      resourceRef: single.resource_ref, revision: single.revision || single.stat_revision || null,
+      dependencies, dependencyWarnings,
+      title: single.name || 'HTML preview', accountScope: snapshot.owner,
+      workspaceScope: single.workspace_id || single.workspaceId || state.currentWorkspaceId || copalWorkspace(),
+      isCurrent,
+    }) || false;
+  }, requiredSingle || (isDirectory(single) || !browserMimeAllowed || !browserCapabilitiesAllowed
+    ? 'Select an HTML file with authorized preview and stat access.' : ''));
   const caps = entries.map(transferCapabilities);
-  for (const [kind,label] of [['copy','Copy'],['move','Cut']]) add(kind === 'move' ? 'cut' : kind, label, 'Edit', () => {
+  const selectionParentRef = validateFilesSelectionGuard(snapshot.selection)?.scope.parentRef;
+  const transferable = entries.length && entries.length <= FILES_MAX_DRAG_ITEMS
+    && entries.every(entry => !entry.unavailable && entry.resource_ref && entry.provider === entries[0].provider);
+  for (const [kind,label,bulkLabel] of [['copy','Copy','Copy selected items'],['move','Cut','Cut selected items']]) add(kind === 'move' ? 'cut' : kind,
+    entries.length > 1 ? bulkLabel : label, 'Edit', () => {
     const model = validateFilesSelectionGuard(snapshot.selection);
-    return setFilesClipboard(model, kind, () => isCommandCaptureCurrent(snapshot));
-  }, snapshot.treeEntry && !validateFilesSelectionGuard(snapshot.selection)?.scope.parentRef ? 'This tree resource has no authorized parent; open its containing folder first.' : entries.length && entries.length <= FILES_MAX_DRAG_ITEMS && caps.every(cap => cap[kind]) ? '' : `Select up to ${FILES_MAX_DRAG_ITEMS} transferable items.`);
-  add('paste', 'Paste', 'Edit', async () => {
-    const destination = { ...snapshot.directory, resource_ref:snapshot.directory.resourceRef, kind:'folder' };
-    return pasteFilesClipboard(destination, destinationColumnIndex(destination), () => isCommandCaptureCurrent(snapshot));
-  }, filesClipboard && snapshot.directory?.capabilities?.includes('write') && filesClipboard.payload.provider === snapshot.directory?.provider ? '' : 'Copy or cut files from the same provider into a writable folder.');
-  add('select-all', 'Select all', 'Edit', () => { const model = ensureSelectionModel(activeColumn()); model.selectAll(); applyModelSelection(model); });
+    return setFilesClipboard(model, kind, current);
+  }, !selectionParentRef ? 'This resource has no authorized parent; open its containing folder first.'
+    : transferable && caps.every(cap => cap[kind]) ? '' : `Select up to ${FILES_MAX_DRAG_ITEMS} transferable items.`);
+  const destination = directory ? { ...directory, resource_ref:directory.resourceRef } : null;
+  const writable = Boolean(destination?.resource_ref && !destination.unavailable && destination.capabilities?.includes('children') && destination.capabilities.includes('write'));
+  const clipboard = snapshot.clipboard;
+  const paste = writable && clipboard === filesClipboard && clipboard?.current() && validateDropTarget(clipboard.payload, {
+    resource_ref:destination.resource_ref, resource_key:entrySelectionKey(destination),
+  }, {
+    policyGeneration:snapshot.policy, owner:snapshot.owner, workspace:snapshot.selection?.filesWorkspace,
+    provider:destination.provider, allowCopy:writable, allowMove:writable,
+  }).ok;
+  add('paste', 'Paste into this folder', 'Edit', () => pasteFilesClipboard(destination,
+    destinationColumnIndex(destination, snapshot.columnIndex), current, clipboard),
+  paste ? '' : 'Copy or cut files from the same provider into a writable folder.');
+  add('select-all', 'Select all', 'Edit', () => {
+    const { model } = activateColumn(snapshot.columnIndex);
+    model.selectAll();
+    applyModelSelection(model);
+  }, source?.entries?.length || (!source && state.entries.length) ? '' : 'This folder has no loaded items.');
   const choices = single ? entryActionChoices(single) : commonActionChoices(entries);
+  const groupLabels = {
+    'archive.set':value => value ? 'Archive selected items' : 'Restore selected items',
+    'favorite.set':value => value ? 'Add selected items to favorites' : 'Remove selected items from favorites',
+    'transfer.duplicate':() => 'Duplicate selected files',
+    'library.clone':() => 'Clone selected documents',
+    'library.delete':() => 'Delete selected documents…',
+  };
   for (const choice of choices) {
-    const transfer=choice.action.startsWith('transfer.');
-    add('action-' + choice.action, transfer?`${choice.label} into this folder…`:choice.label, ['rename','trash','restore','archive.set'].includes(choice.action)||transfer ? 'Edit' : 'File', () => entries.length > 1||transfer ? performSelectedBulkAction(entries, choice, snapshot.selection) : performManagedAction(single, choice, snapshot));
+    const action = choice.action;
+    if (action === 'code.open') continue;
+    if (action === 'workspace.use' && workspaceItem) continue;
+    const transfer = action.startsWith('transfer.');
+    const checkpoint = action === 'history.checkpoint';
+    const chatAction = action === 'analysis.result' || action.startsWith('media.') || action === 'library.clone';
+    const label = transfer && action !== 'transfer.duplicate' ? `${choice.label} into this folder…`
+      : entries.length > 1 && groupLabels[action] ? groupLabels[action](choice.value) : choice.label;
+    const needsDestination = transfer && (!source?.resourceRef || !source.capabilities?.includes('write') || !source.capabilities.includes('children')
+      || entries.some(entry => entry.provider !== source.provider) || snapshot.treeEntry);
+    const sameParent = source?.resourceRef && selectionParentRef === source.resourceRef;
+    const reason = chatAction && (!snapshot.sessionId || !sameChat()) ? 'Open a chat before using this action.'
+      : needsDestination ? 'Open a writable folder in this provider first.'
+      : transfer && action !== 'transfer.duplicate' && sameParent ? 'Choose another writable destination folder.'
+      : action === 'transfer.duplicate' && !sameParent ? 'Open the selected files’ containing folder to duplicate them.'
+      : checkpoint && entries.length > 16 ? 'Select up to sixteen Host files.'
+      : (checkpoint || action === 'history.open') && snapshot.treeEntry ? 'Select the file in its containing folder to use History.'
+      : '';
+    add('action-' + action, label, ['rename','trash','restore','archive.set','library.delete'].includes(action) || transfer ? 'Edit' : 'File', () => {
+      if (chatAction && !sameChat()) return false;
+      return entries.length > 1 || transfer ? performSelectedBulkAction(entries, choice, snapshot) : performManagedAction(single, choice, snapshot);
+    }, reason, undefined, { icon:choice.glyph, destructive:choice.danger || action === 'trash' });
   }
-  if(single&&isCanvasImageEntry(single))add('open-in-canvas','Open in Canvas','File',()=>{
+  if (!options.pickerMode) {
+    const mediaCommands = [
+      ['media.jobs', 'Media jobs…'], ['media.generate', 'Create media…'],
+      ['media.materialPack', 'Package material maps…'], ['media.spriteSheet', 'Create sprite sheet…'],
+      ...(state.importCapabilities?.screen_record ? [['media.record', 'Record screen…']] : []),
+    ];
+    for (const [action, label] of mediaCommands) add('action-' + action, label, 'File',
+      () => sameChat() && performManagedAction(null, { action, label }, snapshot),
+      action === 'media.jobs' || snapshot.sessionId ? '' : 'Open a chat before using this action.');
+  }
+  if(single&&!single.unavailable&&isCanvasImageEntry(single))add('open-in-canvas','Open in Canvas','File',()=>{
     const model=validateFilesSelectionGuard(snapshot.selection);return model&&openEntryInCanvas(single,model);
   });
   for (const mode of ['list','grid','details','columns','gallery']) add('view-' + mode, mode[0].toUpperCase() + mode.slice(1), 'View', () => { const control = state.shell.querySelector('.files-mode-select'); control.value = mode; control.dispatchEvent(new Event('change')); }, '', state.mode === mode);
-  for (const [value,label] of FILE_SORT_OPTIONS) add('sort-' + value, 'Sort: ' + label, 'View', () => { const [key,direction] = value.split(':'); return applyPrimarySort({ ...state.sort,key,direction }); });
-  add('folders-first', 'Folders first', 'View', () => applyPrimarySort({ ...state.sort, directoriesFirst: !state.sort.directoriesFirst }), '', state.sort.directoriesFirst);
-  for (const value of ['grid','gallery'].includes(state.mode) ? [32,64,96,128] : [16,20,24,32]) add('size-' + value, 'Icon size: ' + value + ' px', 'View', () => { const size = state.shell.querySelector('.files-size-select'); size.value = value; size.dispatchEvent(new Event('change')); });
+  const sort = normalizeSortSpec(source?.sort || state.sort);
+  const sortKeys = sortKeysFor(source?.sortKeys);
+  const applySort = spec => state.mode === 'columns' && source
+    ? applyColumnSort(snapshot.columnIndex, spec) : applyPrimarySort(spec);
+  const sortUnavailable = source?.nextCursor && !source.resourceRef && !source.globalSearch;
+  for (const [value,label] of FILE_SORT_OPTIONS) {
+    const [key,direction] = value.split(':');
+    add('sort-' + value, 'Sort: ' + label, 'View', () => applySort({ ...sort, key, direction }),
+      !sortUnavailable && sortKeys.includes(key) ? '' : 'This folder does not expose that metadata for sorting',
+      sort.key === key && sort.direction === direction, { choiceLabel:label, radio:true });
+  }
+  add('folders-first', 'Folders first', 'View', () => applySort({ ...sort, directoriesFirst:!sort.directoriesFirst }),
+    sortUnavailable ? 'Refresh the authorized Files roots before sorting this folder.' : '', sort.directoriesFirst);
+  const largeIcons = ['grid','gallery'].includes(state.mode);
+  if (state.mode !== 'columns') for (const value of largeIcons ? [32,64,96,128] : [16,20,24,32]) {
+    add('size-' + value, 'Icon size: ' + value + ' px', 'View', () => {
+      const size = state.shell.querySelector('.files-size-select');
+      size.value = value;
+      size.dispatchEvent(new Event('change'));
+    }, '', value === (largeIcons ? state.largeIconSize : state.smallIconSize), { choiceLabel:value + ' px', radio:true });
+  }
   add('navigation', 'Navigation sidebar', 'View', toggleNavigation, '', state.shell.classList.contains('files-navigation-open'));
-  add('refresh', 'Refresh folder', 'View', () => api.refresh());
+  add('refresh', 'Refresh folder', 'View', () => source !== activeColumn() && source?.resourceRef
+    ? reloadManagedColumn(snapshot.columnIndex, { preserveColumns:true }) : api.refresh());
   add('back', 'Back in folder history', 'Go', () => state.navigation.back(), state.navigation.canGoBack() ? '' : 'No previous folder.');
   add('forward', 'Forward in folder history', 'Go', () => state.navigation.forward(), state.navigation.canGoForward() ? '' : 'No next folder.');
   add('up', 'Parent folder', 'Go', managedUp);
   add('home', 'Home', 'Go', () => openProvider(CLANKER_HOME_PROVIDER));
-  add('favorite', 'Favorite current folder', 'Go', toggleCurrentFavorite, state.provider === 'host' && snapshot.directory?.resourceRef ? '' : 'Open a Host folder to save a Favorite.');
+  if (!options.pickerMode) {
+    const hostFolderReason = fileResourceCanBrowseHostFolder(directory) ? '' : 'Choose an authorized Host folder.';
+    add('folder-history', 'Folder History…', 'Go', () => openCapturedFolderHistory(snapshot), hostFolderReason);
+    add('git-workbench', 'Git workbench…', 'Go', () => openCapturedGitWorkbench(snapshot),
+      hostFolderReason || (snapshot.sessionId ? '' : 'Open a managed chat for this repository.'));
+  }
+  const favorite = state.favorites.find(item => item.resource_id && item.resource_id === directory?.resourceId);
+  add('favorite', favorite ? 'Remove folder from Favorites' : 'Add folder to Favorites', 'Go',
+    () => toggleCurrentFavorite(directory, current),
+    !favorite?.pinned && fileResourceCanBrowseHostFolder(directory) ? '' : 'Choose an unpinned Host folder.');
   add('new-window-file', 'New Files Window', 'File', newWindow);
   add('new-window', 'New Files Window', 'Window', newWindow);
   add('split-right', 'Split right', 'Window', () => split('right', options.parentWindow?.id || id));
@@ -6744,13 +8182,15 @@ const api = {
     if (!model || model.epoch !== Number(payload.selection_epoch) || !payload.sources.every(source => model.has(String(source.resource_key)))) return null;
     return model;
   },
-  explorerLayout, customizeExplorer,
+  explorerLayout, customizeExplorer, setEditorRoot,
   id, hooks, parentWindow: options.parentWindow, captureCommands, isCommandCaptureCurrent, commandDescriptors, open, openLibraryCollection, revealResource, revealWorkspaceResource,
   get element() { return state.shell; }, get sidebar() { return state.sidebar; }, get sidebarSeparator() { return state.sidebarSeparator; }, get window() { return state.nativeWindow; },
   getCurrentDirectory: () => { const column = activeColumn(); return column?.resourceRef ? { ...column, resource_ref:column.resourceRef, resource_id:column.resourceId, kind:'folder' } : null; },
   getSelection: () => state.treeSelection ? [state.treeSelection] : ensureSelectionModel(activeColumn()).selectedEntries(),
   getContext: () => hooks.__odysseusGetActiveFilesContext(),
   openDirectory: entry => openManagedDirectory(facadeEntry(entry), null),
+  importBrowserReportFile,
+  reconcileBrowserReportImport,
   newFile: () => createFilesResource('file', creationDestinationForNode(null)),
   refresh: refreshBrowser, cancelReveal, filterTree, clearFilter: () => filterTree(''), search: searchActive,
   activate,
@@ -6827,5 +8267,15 @@ export function closeSplit() {
   splits.delete(pair.primary.window.id); restoreSplit(pair); pair.primary.activate(); return true;
 }
 export function getActiveBrowser() { return activeBrowser || defaultBrowser(); }
+export async function importBrowserReportFile(file, options = {}) {
+  const browser = activeBrowser || defaultBrowser();
+  if (!browser || typeof browser.importBrowserReportFile !== 'function') throw new Error('Files import is unavailable.');
+  return browser.importBrowserReportFile(file, options);
+}
+export async function reconcileBrowserReportImport(receiptHandles, options = {}) {
+  const browser = activeBrowser || defaultBrowser();
+  if (!browser || typeof browser.reconcileBrowserReportImport !== 'function') throw new Error('Files receipt reconciliation is unavailable.');
+  return browser.reconcileBrowserReportImport(receiptHandles, options);
+}
 export function focusOtherPane() { const pair = [...splits.values()].find(pair => pair.primary === activeBrowser || pair.browser === activeBrowser); if (!pair) return false; const target = activeBrowser === pair.primary ? pair.browser : pair.primary; target.activate(); target.element.querySelector('[data-files-body]')?.focus(); return true; }
 export default { open: () => defaultBrowser().open(), newFile, newWindow, split, closeSplit, focusOtherPane, getActiveBrowser, createFilesBrowser, openLibraryCollection, revealResource, revealWorkspaceResource, close: () => activeBrowser?.window?.requestClose() };

@@ -73,6 +73,11 @@ function stamp() {
 
 export async function init(options: Options) {
   await enqueue(async () => {
+    if (Flag.OPEN_CLANK_PRIVATE_RUNTIME) {
+      printing = false
+      logpath = ""
+      return
+    }
     await closeCurrent()
     if (options.level) level = options.level
     rotation = options.rotate ?? !Flag.MIMOCODE_DISABLE_LOG_ROTATION
@@ -100,6 +105,7 @@ export async function init(options: Options) {
 function swallow() {}
 
 function write(msg: string) {
+  if (Flag.OPEN_CLANK_PRIVATE_RUNTIME) return
   void enqueue(() => append(msg))
 }
 
@@ -109,6 +115,7 @@ function enqueue(operation: () => void | Promise<void>) {
 }
 
 async function append(msg: string) {
+  if (Flag.OPEN_CLANK_PRIVATE_RUNTIME) return
   const size = Buffer.byteLength(msg)
   if (rotation && written > 0 && written + size > MAX_FILE_SIZE) await rotate()
   const target = stream

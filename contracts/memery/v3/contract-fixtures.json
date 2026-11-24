@@ -1,0 +1,170 @@
+{
+  "fixture_version": "frankenmemory.v3.proposal.1",
+  "status": "inactive_source_adapter_not_advertised_or_runtime_supported",
+  "capability_note": "native_memory_ops_v1 is separate and is not implied by this wire version or a database schema version",
+  "typed_value": [
+    {
+      "name": "knowledge reference to current visible block",
+      "valid": true,
+      "value": {
+        "type": "knowledge_ref",
+        "value": {
+          "block_id": "block-1"
+        }
+      }
+    },
+    {
+      "name": "knowledge reference to exact positive revision",
+      "valid": true,
+      "value": {
+        "type": "knowledge_ref",
+        "value": {
+          "block_id": "block-1",
+          "revision": 2
+        }
+      }
+    },
+    {
+      "name": "knowledge reference rejects empty identity",
+      "valid": false,
+      "value": {
+        "type": "knowledge_ref",
+        "value": {
+          "block_id": ""
+        }
+      }
+    },
+    {
+      "name": "knowledge reference rejects whitespace-only identity",
+      "valid": false,
+      "value": {
+        "type": "knowledge_ref",
+        "value": {
+          "block_id": "  "
+        }
+      }
+    },
+    {
+      "name": "knowledge reference rejects nonpositive revision",
+      "valid": false,
+      "value": {
+        "type": "knowledge_ref",
+        "value": {
+          "block_id": "block-1",
+          "revision": 0
+        }
+      }
+    },
+    {
+      "name": "knowledge reference rejects owner in value",
+      "valid": false,
+      "value": {
+        "type": "knowledge_ref",
+        "value": {
+          "block_id": "block-1",
+          "owner_id": "owner-b"
+        }
+      }
+    },
+    {
+      "name": "entity reference remains unchanged",
+      "valid": true,
+      "value": {
+        "type": "entity_ref",
+        "value": {
+          "entity_id": "entity-1"
+        }
+      }
+    },
+    {
+      "name": "entity reference cannot masquerade as knowledge reference",
+      "valid": false,
+      "value": {
+        "type": "entity_ref",
+        "value": {
+          "block_id": "block-1"
+        }
+      }
+    }
+  ],
+  "revision_metadata": [
+    {
+      "name": "name aliases domain type and producer role",
+      "valid": true,
+      "value": {
+        "name": "Beacon",
+        "aliases": [
+          "Beacon One"
+        ],
+        "domain_refs": [
+          {
+            "block_id": "domain-a",
+            "revision": 1
+          }
+        ],
+        "types": [
+          "project"
+        ],
+        "processing_role": "extractor"
+      }
+    },
+    {
+      "name": "absence represents unknown",
+      "valid": true,
+      "value": {}
+    },
+    {
+      "name": "manual authority is not S01 metadata",
+      "valid": false,
+      "value": {
+        "authority": "manual"
+      }
+    },
+    {
+      "name": "duplicate aliases rejected",
+      "valid": false,
+      "value": {
+        "aliases": [
+          "one",
+          "one"
+        ]
+      }
+    },
+    {
+      "name": "blank domain rejected",
+      "valid": false,
+      "value": {
+        "domain_refs": [
+          "  "
+        ]
+      }
+    },
+    {
+      "name": "explicit null does not mean absent",
+      "valid": false,
+      "value": {
+        "name": null
+      }
+    },
+    {
+      "name": "domain needs exact revision",
+      "valid": false,
+      "value": {
+        "domain_refs": [
+          {
+            "block_id": "domain-a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "domain rejects bare names",
+      "valid": false,
+      "value": {
+        "domain_refs": [
+          "domain-a"
+        ]
+      }
+    }
+  ]
+}

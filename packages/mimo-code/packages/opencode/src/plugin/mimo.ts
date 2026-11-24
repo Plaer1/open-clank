@@ -87,6 +87,9 @@ export async function MimoAuthPlugin(_input: PluginInput): Promise<Hooks> {
         {
           label: "Browser login (paste code)",
           type: "oauth" as const,
+          acquisitionMethod: "browser" as const,
+          credentialKinds: ["api"],
+          billingLanes: ["metered_api", "subscription"],
           authorize: async () => {
             const { publicKey, privateKeyDer } = generateKeyPair()
             const manualUrl = buildAuthorizeUrl(publicKey, `${PLATFORM_URL}/authorize/code/callback`)

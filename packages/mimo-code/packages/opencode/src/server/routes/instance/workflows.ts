@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { Effect } from "effect"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { lazy } from "@/util/lazy"
@@ -15,6 +16,11 @@ import type { SessionID } from "@/session/schema"
 // read routes only do an in-memory runtime map lookup, so the wider (still
 // traversal-proof — no `.`/`/`) charset is safe here.
 const READ_RUN_ID = /^wf_(?:[0-9A-Za-z-]{26}|[0-9a-f]{64})$/
+
+export function workflowAvailability(runtime: typeof workflowRef.current, sessionID: SessionID) {
+  if (!runtime) return Effect.succeed({ available: false as const, runs: null })
+  return runtime.list({ sessionID }).pipe(Effect.map((runs) => ({ available: true as const, runs })))
+}
 
 export const WorkflowRoutes = lazy(() =>
   new Hono()
@@ -39,6 +45,31 @@ export const WorkflowRoutes = lazy(() =>
           if (!runtime) return []
           const query = c.req.valid("query")
           return yield* runtime.list({ sessionID: query.sessionID as SessionID })
+        }),
+    )
+    .get(
+      "/availability",
+      describeRoute({
+        summary: "Inspect workflow runtime availability and session runs",
+        description: "Report whether the in-memory workflow runtime is live and list runs for exactly one session when available.",
+        operationId: "workflow.availability",
+        responses: {
+          200: {
+            description: "Workflow runtime availability and session-scoped runs",
+            content: {
+              "application/json": {
+                schema: resolver(z.object({ available: z.boolean(), runs: z.array(z.any()).nullable() })),
+              },
+            },
+          },
+        },
+      }),
+      validator("query", z.object({ sessionID: Identifier.schema("session") })),
+      async (c) =>
+        jsonRequest("WorkflowRoutes.availability", c, function* () {
+          const runtime = workflowRef.current
+          const query = c.req.valid("query")
+          return yield* workflowAvailability(runtime, query.sessionID as SessionID)
         }),
     )
     .post(

@@ -1,4 +1,4 @@
-import { uiIcon, setUiIconText } from './uiIcons.js';
+import { uiIcon, setUiIconText, mountUiIcons } from './uiIcons.js';
 // static/js/settings.js — Settings panel module (ES6)
 // User-facing preferences: AI models, search, appearance
 
@@ -21,6 +21,10 @@ import { mountNativeSettingsReference, nativeReferenceCatalogEntries, nativeRefe
 import { refreshReadyNativeCommands } from './nativeCatalogRefresh.js';
 import { mountCodeIndexSettings } from './codeIndexSettings.js';
 import { mountRenderingSettings } from './graphics/renderingSettings.js';
+import { mountBuddyAppearance } from './interactiveBuddy.js';
+import { mountAnnotatorSettings } from './annotator.js';
+import { clearBuddyDiagnostics, mountBuddyDiagnostics } from './buddyDiagnostics.js';
+import { reasoningEffortOption, serializeReasoningEffortSelection } from './modelRequestOptions.js';
 
 function refreshReadyNativeCatalog() {
   return refreshReadyNativeCommands({reloadSkills:false,changedEvent:'odysseus:mcp-changed',fetcher:checkedFetch});
@@ -29,6 +33,7 @@ function refreshReadyNativeCatalog() {
 let initialized = false;
 let modalEl = null;
 let _authPolicy = { password_min_length: 8 };
+let _fullAccessEligible = null;
 let _copalModule = null;
 let _copalAppearanceRefresh = null;
 let _closeTimer = null;
@@ -72,19 +77,19 @@ function safeRasterDataUrl(raw) {
 
 /* ── Tab switching ── */
 const SETTINGS_OWNERSHIP = Object.freeze({
-  services: { scope: 'per-user', api: '/api/v1/providers', consumer: 'adding API and local models' },
-  'added-models': { scope: 'per-user', api: '/api/v1/providers', consumer: 'your connected models and advanced provider settings' },
+  services: { scope: 'per-user', api: '/api/v1/providers', consumer: 'provider connections, model routing and web search' },
   // The Persona card inside this panel is per-user too, served by
   // /api/presets/default-persona (chat default, assistant, reminder voice,
   // background work — one synced record, ruling R13).
   ai: { scope: 'per-user', api: '/api/auth/settings', consumer: 'new sessions and auxiliary model dispatch' },
-  search: { scope: 'global-admin', api: '/api/auth/settings', consumer: 'Open Clank search and research policy' },
-  integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Open Clank services and approved agent integrations' },
-  email: { scope: 'per-user', api: '/api/email', consumer: 'mail tools and composition' },
-  reminders: { scope: 'per-user', api: '/api/auth/settings', consumer: 'reminder delivery' },
+  tokenomics: { scope: 'per-user', api: '/api/auth/settings', consumer: 'structured tool result representation' },
   logging: { scope: 'per-user', api: '/api/logging/v1/policy', consumer: 'Open Clank capture, storage and display preferences' },
+  integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Open Clank services and approved agent integrations' },
+  reminders: { scope: 'per-user', api: '/api/auth/settings', consumer: 'reminder delivery' },
   hexes: { scope: 'per-user', api: '/api/hexes', consumer: 'saved General defaults and the current Workspace contract' },
+  memery: { scope: 'per-user', api: '/api/prefs/memery-settings', consumer: 'Memery recall and learning preferences' },
   history: { scope: 'shared-policy', api: '/api/history/settings', consumer: 'Lore history usage and retention budgets' },
+  buddy: { scope: 'browser-local', api: 'localStorage', consumer: 'this account’s buddy visibility and look in this browser' },
   appearance: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
   shortcuts: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
   help: { scope: 'shared-content', api: '/api/copal/official/docs', consumer: 'Open Clank handbook and documentation' },
@@ -95,7 +100,6 @@ const SETTINGS_OWNERSHIP = Object.freeze({
   users: { scope: 'global-admin', api: '/api/auth/users', consumer: 'account and capability policy' },
   system: { scope: 'global-admin', api: '/api/admin', consumer: 'server lifecycle and diagnostics' },
 });
-const MODEL_MANAGEMENT_TABS = new Set(['services', 'added-models']);
 const ADMIN_MODULE_TABS = new Set(['integrations', 'tools', 'users', 'system']);
 const ADMIN_ONLY_TABS = new Set(
   Object.entries(SETTINGS_OWNERSHIP)
@@ -114,11 +118,18 @@ const PANEL_ALIASES = Object.freeze({
   fileaccess: 'file-access',
   filesystem: 'file-access',
   locations: 'file-access',
+  'added-models':'services', search:'services', email:'integrations',
+  'deep research':'ai', 'web search':'services',
   logs: 'logging',
   'advanced logging': 'logging',
   hex: 'hexes',
   'general hexes': 'hexes',
   lore: 'history',
+  'lore history': 'history',
+  backup: 'history',
+  memory: 'memery',
+  learning: 'memery',
+  recall: 'memery',
   retention: 'history',
   'history usage': 'history',
   docs: 'help',
@@ -128,13 +139,15 @@ const PANEL_ALIASES = Object.freeze({
   themes: 'appearance',
   models: 'services',
   providers: 'services',
-  'added models': 'added-models',
+  'added models': 'services',
+  'model management': 'services',
+  'add provider': 'services',
   persona: 'ai',
   agent: 'ai',
   agents: 'ai',
   'native settings': 'ai',
   'ai defaults': 'ai',
-  mail: 'email',
+  mail: 'integrations',
   accounts: 'account',
   users: 'users',
   admin: 'system',
@@ -151,17 +164,130 @@ export function normalizeSettingsPanel(name) {
 // Lazy activation runs once per panel per page load so finder, deep-link and
 // nav clicks cannot double-init a panel's data hooks.
 const _activatedPanels = new Set();
+let memerySettingsRequest;
+async function loadMemerySettings() {
+  const form = modalEl.querySelector('[data-memery-preferences]');
+  if (!form) return;
+  window.memoryModule?.mountLearningSettings?.(modalEl.querySelector('[data-memery-learning-host]'));
+  memerySettingsRequest?.abort();
+  const controller = new AbortController();
+  memerySettingsRequest = controller;
+  const fieldset = form.querySelector('fieldset');
+  const status = form.querySelector('[role="status"]');
+  const { enabled, mode, memery_prompt_recall_enabled: automaticRecall,
+    memery_prompt_recall_limit: recordLimit, memery_prompt_recall_chars: charLimit,
+    memery_agent_search_enabled: agentSearch } = form.elements;
+  fieldset.disabled = true;
+  status.textContent = 'Loading preferences…';
+  function describe() {
+    mode.disabled = !enabled.checked;
+    const inactive = !enabled.checked || mode.value === 'off';
+    agentSearch.disabled = automaticRecall.disabled = inactive;
+    recordLimit.disabled = charLimit.disabled = inactive || !automaticRecall.checked;
+    const descriptions = {
+      off: 'Automatic recall, capture and agent access to Memery are off.',
+      manual: 'Review candidates before adding them to saved knowledge.',
+      automatic: 'The agent can save knowledge when its tools and your permissions allow it.',
+    };
+    form.querySelector('[data-memery-help]').textContent = enabled.checked
+      ? descriptions[mode.value]
+      : 'Memery is disabled. Your saved records and learning mode are preserved.';
+  }
+  const endpoint = '/api/prefs/memery-settings';
+  try {
+    const response = await fetch(endpoint, { signal: controller.signal });
+    if (!response.ok) throw Error();
+    const prefs = await response.json();
+    if (controller.signal.aborted) return;
+    enabled.checked = prefs.enabled;
+    mode.value = prefs.mode;
+    automaticRecall.checked = prefs.memery_prompt_recall_enabled;
+    agentSearch.checked = prefs.memery_agent_search_enabled;
+    recordLimit.value = prefs.memery_prompt_recall_limit;
+    charLimit.value = prefs.memery_prompt_recall_chars;
+    describe();
+    form.onchange = describe;
+    form.onsubmit = async event => {
+      event.preventDefault();
+      fieldset.disabled = true;
+      try {
+        const { account_id, ...expected } = prefs;
+        const result = await fetch(endpoint, { method: 'PUT', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expected_account_id: account_id, expected, enabled: enabled.checked, mode: mode.value,
+            memery_prompt_recall_enabled: automaticRecall.checked, memery_agent_search_enabled: agentSearch.checked,
+            memery_prompt_recall_limit: recordLimit.valueAsNumber || expected.memery_prompt_recall_limit,
+            memery_prompt_recall_chars: charLimit.valueAsNumber || expected.memery_prompt_recall_chars }) });
+        if (result.status === 409) {
+          status.textContent = 'Preferences changed. Reopen Memery settings to load them.';
+          return;
+        }
+        if (!result.ok) throw Error();
+        const saved = await result.json();
+        if (controller.signal.aborted) return;
+        Object.assign(prefs, saved);
+        document.dispatchEvent(new CustomEvent('openclank:memery-preferences-saved', { detail: prefs }));
+        status.textContent = 'Memery preferences saved.';
+      } catch {
+        if (!controller.signal.aborted) status.textContent = 'Could not save Memery preferences.';
+      } finally {
+        if (!controller.signal.aborted) fieldset.disabled = false;
+      }
+    };
+    fieldset.disabled = false;
+    status.textContent = '';
+  } catch {
+    if (!controller.signal.aborted) status.textContent = 'Memery preferences are unavailable.';
+  }
+}
+
+document.addEventListener('openclank:auth-context-changed', () => {
+  memerySettingsRequest?.abort();
+  const panel = modalEl?.querySelector('[data-settings-panel="memery"]');
+  if (panel && !panel.classList.contains('hidden')) void loadMemerySettings();
+});
+function scrollToProviderSection(view) {
+  modalEl.querySelector(`[data-provider-section="${view}"]`)?.scrollIntoView({block:'start'});
+}
 function activatePanel(tab) {
   if (!tab) return;
+  if (tab === 'memery') {
+    void loadMemerySettings();
+    modalEl.querySelector('[data-open-memery-models]').onclick = () => {
+      activatePanel('ai');
+      const model = modalEl.querySelector('#set-memoryEpSelect');
+      model?.scrollIntoView({ block: 'center' });
+      model?.focus({ preventScroll: true });
+    };
+    modalEl.querySelector('[data-open-memery-backup]').onclick = () => {
+      activatePanel('history');
+      const control = modalEl.querySelector('[data-capture="memery_records"]');
+      control?.scrollIntoView({ block: 'center' });
+      if (control) window.OpenClankHistorySettings?.refreshAll().then(() => control.focus());
+    };
+  } else memerySettingsRequest?.abort();
+  if (tab === 'history') modalEl.querySelector('[data-open-memery]').onclick = () => activatePanel('memery');
+  if (tab !== 'logging') modalEl?.querySelector('[data-logging-settings]')?._storageHide?.();
   modalEl?.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
   modalEl?.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
   document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
   syncAppearanceOpacity(tab === 'appearance');
-  if (tab === 'appearance') mountRenderingSettings(modalEl?.querySelector('[data-graphical-rendering-settings]'));
-  if (tab === 'system') mountCodeIndexSettings(modalEl?.querySelector('[data-code-index-settings]'));
+  if (tab === 'appearance') {
+    mountRenderingSettings(modalEl?.querySelector('[data-graphical-rendering-settings]'));
+
+    document.dispatchEvent(new CustomEvent('openclank:theme-status-refresh'));
+  }
+  const buddyPanel = modalEl?.querySelector('[data-settings-panel="buddy"]');
+  if (tab === 'buddy') {
+    mountBuddyAppearance(buddyPanel);
+    if (window._isAdmin) mountBuddyDiagnostics(buddyPanel);
+  } else clearBuddyDiagnostics(buddyPanel);
+  if (tab === 'system') {
+    mountCodeIndexSettings(modalEl?.querySelector('[data-code-index-settings]'));
+  }
   if (tab === 'logging') {
     const root = modalEl?.querySelector('[data-logging-settings]');
-    if (root?.dataset.loggingMounted) root.dispatchEvent(new Event('logging-settings-refresh'));
+    if (root?.dataset.loggingMounted) { root._storageShow?.(); root.dispatchEvent(new Event('logging-settings-refresh')); }
     else mountLoggingSettings(root);
   }
   if (tab === 'hexes') {
@@ -170,7 +296,9 @@ function activatePanel(tab) {
     else mountGeneralHexLibrary(root);
   }
   if (tab === 'file-access') void loadFileAccessSettings();
+  else cancelFileAccessRead();
   if (tab === 'advanced') {
+    mountAnnotatorSettings(el('settings-annotator'));
     const achievementSettings = modalEl?.querySelector('[data-achievement-notification-settings]');
     mountAchievementNotificationSettings(achievementSettings);
     if (achievementSettings && !achievementSettings.parentElement.querySelector('[data-achievement-collection-link]')) {
@@ -194,13 +322,13 @@ function activatePanel(tab) {
       };
     }
   }
+  if (tab === 'services') void providerControl.load({view:'added-models'});
+  if (tab === 'integrations') import('./channelSettings.js').then(m => m.mountChannelSettings(el('channel-settings-root'))).catch(() => {});
   if (_activatedPanels.has(tab)) return;
   _activatedPanels.add(tab);
   if (tab === 'appearance') syncCopalNotesSettings();
   if (tab === 'ai') activateAiSettings();
-  if (MODEL_MANAGEMENT_TABS.has(tab)) {
-    providerControl.load({ view: tab });
-  }
+
 }
 
 function applyControlOwnership(root) {
@@ -239,23 +367,60 @@ function applyOwnershipManifest() {
 }
 
 function initHelpLinks() {
+  const panel = modalEl.querySelector('[data-settings-panel="help"]');
+  const release = document.createElement('section');
+  release.className = 'admin-card';
+  const heading = document.createElement('h2');
+  heading.textContent = 'About this installation';
+  const facts = document.createElement('div');
+  facts.id = 'settings-installation-details';
+  facts.tabIndex = -1;
+  facts.setAttribute('role', 'status');
+  facts.textContent = 'Reading installation details…';
+  release.append(heading, facts);
+  panel?.append(release);
+  if (panel) {
+    fetch('/api/version', { credentials: 'same-origin', cache: 'no-store' })
+      .then(response => response.ok ? response.json() : Promise.reject(new Error('Version unavailable')))
+      .then(data => {
+        const engine = data.engine || {};
+        const discovery = data.releaseDiscovery || {};
+        const rows = [
+          ['Open Clank', typeof data.version === 'string' ? data.version : 'Unavailable'],
+          ['Managed engine', engine.state === 'verified' ? 'Verified' : 'Unavailable'],
+          ['Engine version', typeof engine.version === 'string' ? engine.version : ''],
+          ['Engine target', typeof engine.target === 'string' ? engine.target : ''],
+          ['Engine source SHA-256', /^[a-f0-9]{64}$/i.test(engine.sourceSha256 || '') ? engine.sourceSha256 : ''],
+          ['Release discovery', discovery.state === 'unavailable' && discovery.reason === 'publisher_feed_unconfigured'
+            ? 'Publisher feed unavailable' : 'Unavailable'],
+        ];
+        facts.replaceChildren(...rows.filter(([, value]) => value).map(([label, value]) => {
+          const row = document.createElement('p');
+          row.textContent = `${label} · ${value}`;
+          if (label.endsWith('SHA-256')) row.style.overflowWrap = 'anywhere';
+          return row;
+        }));
+      }).catch(() => { facts.textContent = 'Installation details are unavailable.'; });
+  }
+
   for (const [id, presentation] of [['settings-help-wiki', 'wiki'], ['settings-help-copal', 'copal']]) {
     el(id)?.addEventListener('click', async () => {
       const status = el('settings-help-status');
-      if (status) status.textContent = 'Opening handbook…';
+      if (status) status.textContent = 'Opening documentation…';
       try {
         const opened = await window.openClankHandbook?.({ presentation });
-        if (!opened) throw new Error('The handbook is not available yet. Retry opening Wiki documentation or the Copal handbook.');
+        if (!opened) throw new Error('The documentation is unavailable. Try again.');
         if (status) status.textContent = '';
         close();
       } catch (error) {
-        if (status) status.textContent = error.message || 'Could not open the handbook.';
+        if (status) status.textContent = error.message || 'Could not open the documentation.';
       }
     });
   }
 }
 
 function initTabs() {
+  for (const button of modalEl.querySelectorAll('[data-provider-view]')) button.onclick = () => scrollToProviderSection(button.dataset.providerView);
   modalEl.querySelectorAll('[data-settings-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
       const tab = btn.dataset.settingsTab;
@@ -272,6 +437,32 @@ function initTabs() {
 }
 
 /* ── Settings finder ── */
+function namedSettingsControls() {
+  return [
+    {panel:'advanced', field:'advanced-export-theme', label:'Export current theme settings', aliases:['background','effects','theme JSON'],
+      help:'Download the active theme and background controls', availability:'available'},
+    ...(window._isAdmin ? [
+      {panel:'services',field:'search-provider-btn',label:'Web search provider',aliases:['search provider','web search','search engine'],help:'Configure the search provider and fallbacks',availability:'available'},
+      {panel:'ai',field:'set-researchSearch',label:'Deep Research',aliases:['research search','research limits'],help:'Configure Deep Research limits and search',availability:'available'},
+    ] : []),
+    {panel:'integrations',field:'set-email-open-library-settings',label:'Email settings',aliases:['mail settings'],help:'Open Email settings',availability:'available'},
+    {panel:'buddy', field:'settings-show-buddy', label:'Show buddy', aliases:['pet','interactive buddy','mascot'],
+      help:'Show or hide your interactive buddy in Open Clank', availability:'available'},
+    ...(el('settings-annotator')?.closest('[data-annotator-settings]')?.hidden === false
+      ? [{panel:'advanced',field:'settings-annotator',label:'annotator',aliases:['feedback','annotation'],
+          help:'Show the floating feedback button',availability:'available'}] : []),
+    {panel:'account', field:'settings-full-access', label:'Full access', aliases:['owner access','permissions'],
+      help: _fullAccessEligible === true ? 'Set the first-run owner’s optional account access' :
+        _fullAccessEligible === false ? 'Available only to the recorded first-run owner' : 'Owner eligibility is loading',
+      availability: _fullAccessEligible === false ? 'unavailable' : 'available'},
+    {panel:'help', field:'settings-installation-details', label:'Installed build details', aliases:['about','version','engine'],
+      help:'Read the local app version, managed engine verification and release availability', availability:'available'},
+    {panel:'hexes', field:'workspace-hex-review', label:'Workspace Hex review', aliases:['hook','hooks','executable trust'],
+      help:'Inspect the current workspace contract and executable trust',
+      availability: getWorkspaceId() ? 'available' : 'unavailable'},
+  ];
+}
+
 function initSettingsFinder() {
   const input = el('settings-finder');
   if (!input) return;
@@ -286,7 +477,9 @@ function initSettingsFinder() {
       const keys = panel ? [...panel.querySelectorAll('[data-native-setting], [data-ui-key]')].map(node => node.dataset.nativeSetting || node.dataset.uiKey).join(' ') : '';
       const aliases = Object.entries(PANEL_ALIASES).filter(([, target]) => target === tab).map(([alias]) => alias).join(' ');
       const reference = tab === 'ai' ? nativeReferenceSearchTerms() : '';
-      const hay = `${tab} ${label} ${owner.consumer || ''} ${owner.scope || ''} ${aliases} ${panel?.textContent || ''} ${keys} ${reference}`.toLowerCase();
+      const controls = namedSettingsControls().filter(control => control.panel === tab)
+        .map(control => [control.label, ...control.aliases].join(' ')).join(' ');
+      const hay = `${tab} ${label} ${owner.consumer || ''} ${owner.scope || ''} ${aliases} ${panel?.textContent || ''} ${keys} ${reference} ${controls}`.toLowerCase();
       const match = !q || hay.includes(q);
       btn.classList.toggle('settings-finder-hidden', !match);
     });
@@ -299,8 +492,20 @@ function initSettingsFinder() {
   input.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
-    // Enter activates the first visible match (finder -> activation, once).
-    const first = modalEl.querySelector('[data-settings-tab]:not(.settings-finder-hidden)');
+    const query = input.value.trim().toLowerCase();
+    const matched = namedSettingsControls().find(control => query &&
+        [control.label, ...control.aliases].some(term => term.toLowerCase().includes(query)));
+    if (matched) {
+      if (matched.availability !== 'available') {
+        uiModule.showToast(matched.panel === 'hexes' ? 'Select an authorized workspace first.' : matched.help);
+        return;
+      }
+      open(matched.panel, { field: matched.field });
+      return;
+    }
+    // Enter activates the first visible, authorized panel match.
+    const first = [...modalEl.querySelectorAll('[data-settings-tab]:not(.settings-finder-hidden)')]
+      .find(button => !ADMIN_ONLY_TABS.has(button.dataset.settingsTab) || window._isAdmin);
     if (first) {
       first.click();
       const q = input.value.trim().toLowerCase();
@@ -660,6 +865,12 @@ function _registerAiEndpointRefresh(fn) {
   _aiEndpointRefreshers.add(fn);
 }
 
+// The same connection + model chooser the AI Defaults pickers use, for other panels (chat channels).
+export const modelChooser = Object.freeze({
+  fetchEndpoints: _fetchModelEndpoints, fillEndpoints: _fillEndpointSelect, fillModels: _fillModelSelect,
+  catalog: _endpointCatalog, onRefresh: _registerAiEndpointRefresh,
+});
+
 export async function refreshAiModelEndpoints() {
   if (_aiEndpointRefreshInFlight) return _aiEndpointRefreshInFlight;
   _aiEndpointRefreshInFlight = (async function() {
@@ -999,6 +1210,178 @@ async function initUtilityModel() {
   });
 }
 
+/* ── Memory work-kind choices: configuration only, no job activation. ── */
+async function initMemoryWorkKinds() {
+  const rows = el('set-memoryWorkKindsRows');
+  const status = el('set-memoryWorkKindsStatus');
+  if (!rows || !status || rows.dataset.bound) return;
+  rows.dataset.bound = '1';
+  const kinds = [['interpretation','Interpretation'], ['synthesis','Synthesis'], ['skill_processing','Skill processing']];
+  let generation = 0, authEpoch = 0, revision = 0, owner = null, catalogue = [], busy = false, loading = false, activeController = null;
+  const controls = new Map();
+  const scope = () => ({ generation, authEpoch, account: document.body?.dataset?.accountId || window.currentAccountId || '',
+    session: window.sessionModule?.getCurrentSessionId?.() || '' });
+  const current = (value) => rows.isConnected && value.generation === generation && value.authEpoch === authEpoch &&
+    value.account === (document.body?.dataset?.accountId || window.currentAccountId || '') &&
+    value.session === (window.sessionModule?.getCurrentSessionId?.() || '');
+  const addOption = (select, value, label) => { const item = document.createElement('option'); item.value = value; item.textContent = label; select.append(item); };
+  const routeKey = (item) => JSON.stringify([item.endpointID, item.modelID, item.optionRouteID]);
+  for (const [kind, label] of kinds) {
+    const row = document.createElement('div'); row.className = 'settings-row';
+    const title = document.createElement('label'); title.className = 'settings-label'; title.textContent = label;
+    const route = document.createElement('select'); route.className = 'settings-select'; route.setAttribute('aria-label', `${label} model`);
+    const effort = document.createElement('select'); effort.className = 'settings-select'; effort.setAttribute('aria-label', `${label} thinking`);
+    const save = document.createElement('button'); save.type = 'button'; save.textContent = 'Save';
+    row.append(title, route, effort, save); rows.append(row);
+    controls.set(kind, { route, effort, save, stored: null, dirty: false, draft: null });
+    route.addEventListener('change', () => { const control = controls.get(kind); control.dirty = true; control.draft = null; renderEffort(kind); });
+    effort.addEventListener('change', () => { const control = controls.get(kind); control.dirty = true; control.draft = null; });
+    save.addEventListener('click', () => saveKind(kind));
+  }
+  function renderEffort(kind, value = 'default') {
+    const control = controls.get(kind); const model = catalogue.find((item) => routeKey(item) === control.route.value);
+    control.effort.replaceChildren(); addOption(control.effort, 'default', 'Default');
+    const descriptor = model ? reasoningEffortOption(model) : null;
+    if (descriptor) for (const item of descriptor.values) addOption(control.effort, item, item);
+    if (value !== 'default' && ![...control.effort.options].some((item) => item.value === value)) addOption(control.effort, value, `${value} — unavailable`);
+    control.effort.disabled = !descriptor || busy;
+    control.effort.value = value;
+  }
+  function render(snapshot) {
+    for (const control of controls.values()) {
+      if (control.dirty && !control.draft) control.draft = { route: control.route.value, effort: control.effort.value };
+    }
+    revision = snapshot.revision; owner = snapshot.owner;
+    const assignments = snapshot.document?.workKindAssignments || {};
+    for (const [kind] of kinds) {
+      const control = controls.get(kind); const stored = assignments[kind]?.selection ?? null; control.stored = stored;
+      control.route.replaceChildren(); addOption(control.route, '', 'Unset — inherit initiating execution');
+      for (const item of catalogue) addOption(control.route, routeKey(item), `${item.endpointLabel} — ${item.modelLabel}`);
+      if (stored?.state === 'unavailable') { addOption(control.route, '__unavailable', 'Saved selection unavailable — refresh required'); control.route.value = '__unavailable'; }
+      else if (stored?.state === 'available') {
+        const match = catalogue.find((item) => item.endpointID === stored.endpointID && item.modelID === stored.modelID && item.optionRouteID === stored.optionRouteID && item.catalogRevision === stored.catalogRevision);
+        if (match) control.route.value = routeKey(match);
+        else { addOption(control.route, '__unavailable', 'Saved selection unavailable — refresh required'); control.route.value = '__unavailable'; }
+      }
+      if (control.dirty && control.draft) {
+        if (![...control.route.options].some((item) => item.value === control.draft.route)) addOption(control.route, control.draft.route, 'Unsaved model unavailable — review choice');
+        control.route.value = control.draft.route;
+        renderEffort(kind, control.draft.effort);
+      } else renderEffort(kind, stored?.options?.reasoning_effort ?? 'default');
+      control.route.disabled = busy; control.save.disabled = busy;
+    }
+  }
+  async function load(force = false, notice = '') {
+    const retiredSave = activeController;
+    if (retiredSave) { activeController = null; retiredSave.abort(); busy = false; }
+    ++generation; const captured = scope(); loading = true;
+    for (const item of controls.values()) { item.save.disabled = true; item.route.disabled = true; item.effort.disabled = true; }
+    const refreshNotice = notice || (retiredSave ? 'Previous save may have completed. Refresh and review your choices.' : '');
+    status.textContent = refreshNotice || 'Loading model choices…';
+    try {
+      const [modelData, response] = await Promise.all([_fetchOwnerModelCatalog({ force }), fetch('/api/prefs/memory-policy/preview', { credentials:'same-origin', cache:'no-store' })]);
+      if (!response.ok) throw new Error('preview unavailable');
+      const snapshot = await response.json(); if (!current(captured)) return;
+      catalogue = (modelData.items || []).flatMap((item) => (item.catalog || []).filter((model) => model.hidden !== true && model.entitled !== false && model.compatible !== false && (model.operations || []).includes('chat.complete') && model.option_route_id && Number.isSafeInteger(model.catalog_revision)).map((model) => ({
+        endpointID:item.endpoint_id, endpointLabel:item.endpoint_name || item.endpoint_id, modelID:model.provider_model_id || model.model_id,
+        modelLabel:model.display_name || model.model_id, optionRouteID:model.option_route_id, optionRouteId:model.option_route_id,
+        catalogRevision:model.catalog_revision, capabilities:model.capabilities || {},
+      })));
+      loading = false;
+      render(snapshot); status.textContent = refreshNotice || ([...controls.values()].some((item) => item.dirty)
+        ? 'Unsaved choices preserved. Review them before saving.' : 'Automatic processing is inactive; choices can be saved.');
+    } catch { if (current(captured)) { loading = false; for (const item of controls.values()) { item.save.disabled = false; item.route.disabled = false; } for (const [name] of kinds) renderEffort(name, controls.get(name).effort.value); status.textContent = 'Model choices unavailable. Refresh and try again.'; } }
+  }
+  async function saveKind(kind) {
+    if (busy || loading) return;
+    const control = controls.get(kind); const model = catalogue.find((item) => routeKey(item) === control.route.value);
+    if (control.route.value === '__unavailable' || (control.route.value && !model)) { status.textContent = 'Saved model unavailable. Choose a current model or unset it.'; return; }
+    let selection = null;
+    if (model) {
+      const descriptor = reasoningEffortOption(model);
+      let options = {};
+      if (!descriptor && control.effort.value !== 'default') { status.textContent = 'Thinking choice unavailable. Refresh and review it.'; return; }
+      try { if (descriptor) options = serializeReasoningEffortSelection(model, control.effort.value).options; }
+      catch { status.textContent = 'Thinking choice changed. Refresh and try again.'; return; }
+      selection = { version:1, endpointID:model.endpointID, modelID:model.modelID, optionRouteID:model.optionRouteID, catalogRevision:model.catalogRevision, options };
+    }
+    busy = true; const captured = scope(); const controller = new AbortController(); activeController = controller;
+    for (const item of controls.values()) { item.save.disabled = true; item.route.disabled = true; item.effort.disabled = true; }
+    try {
+      const check = await fetch('/api/prefs/memory-policy/preview', { credentials:'same-origin', cache:'no-store', signal:controller.signal });
+      if (!check.ok) throw new Error('preview unavailable');
+      const fresh = await check.json();
+      if (!current(captured)) return;
+      if (fresh.owner !== owner || fresh.revision !== revision) { status.textContent = 'Settings changed. Refresh and review your choice.'; return; }
+      const response = await fetch(`/api/prefs/memory-policy/work-kind/${encodeURIComponent(kind)}`, { method:'PUT', credentials:'same-origin', signal:controller.signal, headers:{'Content-Type':'application/json'}, body:JSON.stringify({expected_revision:revision, expected_owner:owner, selection}) });
+      if (!current(captured)) return;
+      if (response.status === 409) { status.textContent = 'Settings changed. Refresh and review your choice.'; return; }
+      if (!response.ok) { status.textContent = 'Model choice unavailable or stale. Refresh and review it.'; return; }
+      const result = await response.json(); if (!current(captured) || result.owner !== owner) return;
+      control.dirty = false; control.draft = null;
+      render(result); status.textContent = [...controls.values()].some((item) => item.dirty)
+        ? 'Saved. Other unsaved choices are preserved.' : 'Saved. Automatic processing remains inactive.';
+    } catch { if (current(captured)) status.textContent = 'Could not save the model choice.'; }
+    finally { if (activeController === controller) { activeController = null; busy = false; if (current(captured) && !loading) { for (const item of controls.values()) { item.save.disabled = false; item.route.disabled = false; } for (const [name] of kinds) renderEffort(name, controls.get(name).effort.value); } } }
+  }
+  const onAccountChange = () => {
+    activeController?.abort(); activeController = null;
+    authEpoch++; generation++; owner = null; catalogue = []; busy = false;
+    for (const control of controls.values()) { control.dirty = false; control.draft = null; control.route.replaceChildren(); addOption(control.route, '', 'Unset — inherit initiating execution'); control.effort.replaceChildren(); addOption(control.effort, 'default', 'Default'); control.route.disabled = true; control.effort.disabled = true; control.save.disabled = true; }
+    status.textContent = 'Account changed; unsaved choices were cleared.';
+    if (rows.isConnected) void load(true, 'Account changed; unsaved choices were cleared.');
+  };
+  document.addEventListener('openclank:auth-context-changed', onAccountChange);
+  window.addEventListener('openclank:auth-context-changed', onAccountChange);
+  document.addEventListener('odysseus:session-selected', () => { if (rows.isConnected) void load(true); else { activeController?.abort(); activeController = null; busy = false; } });
+  el('set-memoryWorkKindsRefresh')?.addEventListener('click', () => { void load(true); });
+  _registerAiEndpointRefresh(() => { void load(true); });
+  await load();
+}
+
+async function initMemoryRatings() {
+  const root=el('set-memoryRatings'), visible=el('set-memoryRatingsVisible'), collect=el('set-memoryRatingsCollect');
+  const save=el('set-memoryRatingsSave'), status=el('set-memoryRatingsStatus');
+  if (!root || !visible || !collect || !save || !status || root.dataset.bound) return;
+  root.dataset.bound='1'; let revision=null, owner=null, authEpoch=0, generation=0, busy=false;
+  const account=()=>document.body?.dataset?.accountId || window.currentAccountId || '';
+  const scope=()=>({account:account(),authEpoch,generation});
+  const current=x=>root.isConnected && x.account && x.account===account() && x.authEpoch===authEpoch && x.generation===generation;
+  const enable=value=>{visible.disabled=!value;collect.disabled=!value;save.disabled=!value;};
+  async function load() {
+    const ticket=scope(); enable(false); status.textContent='Checking rating availability…';
+    try {
+      const response=await fetch('/api/prefs/memory-policy/preview',{credentials:'same-origin',cache:'no-store'});
+      if (!response.ok) throw new Error(); const snapshot=await response.json(); if (!current(ticket)) return;
+      const doc=snapshot.document, accepted=['openclank.memory-policy.v2','openclank.memory-policy.v3'].includes(doc?.schema) ? doc.accepted_policy : doc;
+      const ratings=snapshot.ratings || accepted?.policy?.ratings || snapshot.proposed_defaults?.ratings;
+      if (!ratings || typeof ratings.visible!=='boolean' || typeof ratings.collection_enabled!=='boolean' || ratings.explicit_submission_only!==true) throw new Error();
+      revision=snapshot.revision; owner=snapshot.owner; visible.checked=ratings.visible; collect.checked=ratings.collection_enabled;
+      const ready=snapshot.capabilities?.consumers?.ratings===true; enable(ready);
+      status.textContent=ready ? 'Manual ratings are available; collection and visibility are separate.' : 'Rating storage is unavailable for this profile.';
+    } catch {if (current(ticket)) {revision=null;owner=null;enable(false);status.textContent='Rating settings are unavailable.';}}
+  }
+  save.addEventListener('click',async()=>{
+    if (busy || revision===null || !owner) return;
+    const ticket=scope(), priorRevision=revision, priorOwner=owner;
+    const ratings={visible:visible.checked,collection_enabled:collect.checked,explicit_submission_only:true};
+    busy=true;enable(false);status.textContent='Saving…';
+    try {
+      const response=await fetch('/api/prefs/memory-policy/ratings',{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_owner:priorOwner,expected_revision:priorRevision,ratings})});
+      if (!current(ticket)) return;
+      if (response.status===409) {status.textContent='Settings changed. Refresh and review your choices.';return;}
+      if (!response.ok) throw new Error(); const result=await response.json(); if (!current(ticket) || result.owner!==priorOwner) return;
+      revision=result.revision;status.textContent='Rating settings saved.';
+      document.dispatchEvent(new CustomEvent('openclank:memory-policy-changed'));
+    } catch {if (current(ticket)) status.textContent='Could not save rating settings.';}
+    finally {busy=false;if (current(ticket)) enable(true);}
+  });
+  el('set-memoryRatingsRefresh')?.addEventListener('click',()=>{generation++;void load();});
+  document.addEventListener('openclank:auth-context-changed',()=>{authEpoch++;generation++;revision=null;owner=null;enable(false);void load();});
+  document.addEventListener('odysseus:session-selected',()=>{generation++;void load();});
+  await load();
+}
+
 /* ── Memory Model ── */
 async function initMemoryModel() {
   var epSel = el('set-memoryEpSelect');
@@ -1006,6 +1389,8 @@ async function initMemoryModel() {
   var msg = el('set-memoryChatMsg');
   var _endpoints = [];
   if (!epSel || !modelSel) return;
+  void initMemoryWorkKinds();
+  void initMemoryRatings();
   if (epSel.options[0]) epSel.options[0].textContent = 'Same as Utility';
   if (modelSel.options[0]) modelSel.options[0].textContent = 'Same as Utility';
 
@@ -1218,6 +1603,175 @@ async function initImageSettings() {
   modelSel.addEventListener('change', saveSettings);
   qualSel.addEventListener('change', saveSettings);
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncImgDisabled(); saveSettings(); });
+}
+
+/* ── Desktop capture / control ── */
+// Control, capture and accessibility reading are independent opt-ins: none of them disables another.
+export function desktopControlDisabled() { return false; }
+
+async function initDesktopSettings() {
+  const capture = el('set-desktopCaptureToggle');
+  const control = el('set-desktopControlToggle');
+  const hint = el('set-desktopControlHint');
+  const msg = el('set-desktopSettingsMsg');
+  if (!capture || !control) return;
+  const desktopCard = control.closest('.admin-card');
+  if (desktopCard && !desktopCard.querySelector('[data-android-sdk-readback]')) {
+    const section = document.createElement('section');
+    section.dataset.androidSdkReadback = '';
+    const heading = document.createElement('h3');
+    heading.textContent = 'Android development tools';
+    const check = document.createElement('button');
+    check.type = 'button';
+    check.className = 'admin-btn-sm';
+    check.textContent = 'Check SDK on this host';
+    const status = document.createElement('p');
+    status.setAttribute('role', 'status');
+    const help = document.createElement('p');
+    help.className = 'admin-toggle-sub';
+    help.textContent = 'Use Android Studio’s SDK Manager on the host to install Android SDK Platform-Tools and Android Emulator. The app can read the host’s ANDROID_HOME or standard SDK location. Device and emulator status are unavailable here.';
+    section.append(heading, check, status, help);
+    desktopCard.append(section);
+    document.addEventListener('openclank:auth-context-changed', () => {
+      status.textContent = '';
+      check.disabled = false;
+    });
+    check.addEventListener('click', async () => {
+      const account = document.body.dataset.accountId;
+      if (!account) { status.textContent = 'Sign in to read host SDK status.'; return; }
+      check.disabled = true;
+      status.textContent = 'Reading Android SDK files…';
+      try {
+        const response = await checkedFetch('/api/desktop-control/android-sdk', { credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) throw new Error();
+        const value = await response.json();
+        if (!section.isConnected || document.body.dataset.accountId !== account) return;
+        const label = token => ({ located: 'Found', missing: 'Missing', unavailable: 'Unavailable' })[token] || 'Unavailable';
+        const sdk = label(value?.sdk?.state);
+        const message = value?.sdk?.reason === 'configured_roots_disagree' ? ' The configured SDK locations differ.' : '';
+        status.textContent = `Android SDK: ${sdk}. Platform-Tools: ${label(value?.platformTools)}. Emulator: ${label(value?.emulator)}.${message}`;
+      } catch (_) {
+        if (section.isConnected && document.body.dataset.accountId === account) status.textContent = 'Android SDK status is unavailable.';
+      } finally {
+        if (section.isConnected && document.body.dataset.accountId === account) check.disabled = false;
+      }
+    });
+  }
+  // Control no longer needs capture; correct the static sentence, and add the accessibility opt-in row beside it.
+  const row = control.closest('label') && control.closest('label').parentElement;
+  const sub = row && row.querySelector('.admin-toggle-sub');
+  if (sub) sub.textContent = 'Off by default. The system asks you to share the screen each time, and you approve every single click, key press and typed text. Linux Wayland only.';
+  let access = el('set-desktopAccessibilityToggle');
+  if (!access && row) {
+    const copy = row.cloneNode(true);
+    copy.querySelectorAll('[id]').forEach(function(n) { n.removeAttribute('id'); });
+    const input = copy.querySelector('input');
+    input.id = 'set-desktopAccessibilityToggle'; input.checked = false;
+    const label = copy.querySelector('.settings-label');
+    label.setAttribute('for', 'set-desktopAccessibilityToggle'); label.textContent = 'Allow the assistant to read application windows (experimental)';
+    const text = copy.querySelectorAll('.admin-toggle-sub');
+    text[0].textContent = 'Off by default. An application window\'s element tree can reveal names, text you typed and other content visible in that window, such as messages, document text or account details. Secret-looking values are hidden, but that filter is not a guarantee. You approve every read.';
+    for (let i = 1; i < text.length; i++) text[i].remove();
+    row.parentElement.insertBefore(copy, row.nextSibling);
+    access = input;
+  }
+  // Actions-only log: one plain line per action, Off by default; the person can read and clear it here.
+  let logToggle = el('set-desktopActionLogToggle');
+  const accessRow = access && access.closest('label') && access.closest('label').parentElement;
+  if (!logToggle && accessRow) {
+    const copy = accessRow.cloneNode(true);
+    copy.querySelectorAll('[id]').forEach(function(n) { n.removeAttribute('id'); });
+    const input = copy.querySelector('input');
+    input.id = 'set-desktopActionLogToggle'; input.checked = false;
+    const label = copy.querySelector('.settings-label');
+    label.setAttribute('for', 'set-desktopActionLogToggle'); label.textContent = 'Keep a text log of what the assistant did on the desktop';
+    const text = copy.querySelectorAll('.admin-toggle-sub');
+    text[0].textContent = 'Off by default. Writes one plain line per action: time, action, application, element type and result. It never contains typed text, screenshots or clipboard content. Nothing is written while this is off.';
+    for (let i = 1; i < text.length; i++) text[i].remove();
+    const link = document.createElement('a');
+    link.href = '#'; link.textContent = 'Show action log'; link.style.cssText = 'font-size:12px;display:inline-block;margin-top:4px;';
+    const clear = document.createElement('a');
+    clear.href = '#'; clear.textContent = 'Clear'; clear.style.cssText = 'font-size:12px;display:none;margin:4px 0 0 12px;';
+    const out = document.createElement('pre');
+    out.style.cssText = 'display:none;font-size:11px;max-height:200px;overflow:auto;white-space:pre-wrap;margin:6px 0 0;';
+    text[0].parentElement.append(link, clear, out);
+    async function showLog() {
+      try {
+        const r = await checkedFetch('/api/desktop-control/actions', { credentials: 'same-origin' });
+        const body = await r.json();
+        out.textContent = body.lines.length ? body.lines.join('\n') : 'The log is empty.';
+      } catch (e) { out.textContent = 'Could not read the log.'; }
+      out.style.display = ''; clear.style.display = '';
+    }
+    link.addEventListener('click', function(ev) { ev.preventDefault(); showLog(); });
+    clear.addEventListener('click', async function(ev) {
+      ev.preventDefault();
+      try { await checkedFetch('/api/desktop-control/actions', { method: 'DELETE', credentials: 'same-origin' }); } catch (e) { /* shown below */ }
+      showLog();
+    });
+    accessRow.parentElement.insertBefore(copy, accessRow.nextSibling);
+    logToggle = input;
+  }
+  // Offering control-session recording is independent of capture, input and action logging.
+  let recordingToggle = el('set-desktopControlRecordingToggle');
+  const recordingAnchor = logToggle && logToggle.closest('label') && logToggle.closest('label').parentElement;
+  if (!recordingToggle && recordingAnchor) {
+    const copy = recordingAnchor.cloneNode(true);
+    copy.querySelectorAll('[id]').forEach(function(n) { n.removeAttribute('id'); });
+    copy.querySelectorAll('a, pre').forEach(function(n) { n.remove(); });
+    const input = copy.querySelector('input');
+    input.id = 'set-desktopControlRecordingToggle'; input.checked = false;
+    const label = copy.querySelector('.settings-label');
+    label.setAttribute('for', input.id); label.textContent = 'Allow offering a recording of a desktop-control session';
+    const text = copy.querySelectorAll('.admin-toggle-sub');
+    text[0].textContent = 'Off by default. On supported Linux desktops, a new control session can offer its already shared screen for recording. Each recording requires confirmation and a Files destination; no recording starts automatically.';
+    for (let i = 1; i < text.length; i++) text[i].remove();
+    recordingAnchor.parentElement.insertBefore(copy, recordingAnchor.nextSibling);
+    recordingToggle = input;
+  }
+  // Several agents on the same app: Off by default; while Off a second agent is refused for an app another agent holds.
+  let multiToggle = el('set-desktopMultiAgentToggle');
+  const logRow = logToggle && logToggle.closest('label') && logToggle.closest('label').parentElement;
+  if (!multiToggle && logRow) {
+    const copy = logRow.cloneNode(true);
+    copy.querySelectorAll('[id]').forEach(function(n) { n.removeAttribute('id'); });
+    copy.querySelectorAll('a, pre').forEach(function(n) { n.remove(); });
+    const input = copy.querySelector('input');
+    input.id = 'set-desktopMultiAgentToggle'; input.checked = false;
+    const label = copy.querySelector('.settings-label');
+    label.setAttribute('for', 'set-desktopMultiAgentToggle'); label.textContent = 'Let several agents use the same application at once (experimental)';
+    const text = copy.querySelectorAll('.admin-toggle-sub');
+    text[0].textContent = 'Off by default. While off, a second agent is refused for an application or screen another agent is already using. Turning it on allows interleaved actions on the same window.';
+    for (let i = 1; i < text.length; i++) text[i].remove();
+    logRow.parentElement.insertBefore(copy, logRow.nextSibling);
+    multiToggle = input;
+  }
+  if (hint) hint.style.display = 'none';
+  function syncControl() { control.disabled = desktopControlDisabled(); }
+  try {
+    const settingsRes = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
+    const settings = await settingsRes.json();
+    capture.checked = settings.desktop_capture_enabled === true;
+    control.checked = settings.desktop_control_enabled === true;
+    if (access) access.checked = settings.desktop_accessibility_enabled === true;
+    if (logToggle) logToggle.checked = settings.desktop_action_log_enabled === true;
+    if (recordingToggle) recordingToggle.checked = settings.desktop_control_recording_enabled === true;
+    if (multiToggle) multiToggle.checked = settings.desktop_multi_agent_same_app_enabled === true;
+  } catch (e) { console.warn('Failed to load desktop settings', e); }
+  syncControl();
+  async function save(key, box) {
+    try {
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: box.checked }) });
+      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
+    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+  }
+  capture.addEventListener('change', function() { syncControl(); save('desktop_capture_enabled', capture); });
+  control.addEventListener('change', function() { save('desktop_control_enabled', control); });
+  if (access) access.addEventListener('change', function() { save('desktop_accessibility_enabled', access); });
+  if (logToggle) logToggle.addEventListener('change', function() { save('desktop_action_log_enabled', logToggle); });
+  if (recordingToggle) recordingToggle.addEventListener('change', function() { save('desktop_control_recording_enabled', recordingToggle); });
+  if (multiToggle) multiToggle.addEventListener('change', function() { save('desktop_multi_agent_same_app_enabled', multiToggle); });
 }
 
 /* ── Vision ── */
@@ -2137,9 +2691,9 @@ function initAppearance() {
   syncCopalNotesSettings();
   const contextMenuToggle = modalEl.querySelector('#set-custom-context-menu');
   if (contextMenuToggle) {
-    contextMenuToggle.checked = localStorage.getItem('odysseus-custom-context-menu') !== 'off';
+    contextMenuToggle.checked = localStorage.getItem('openclank-custom-context-menu') !== 'off';
     contextMenuToggle.addEventListener('change', () => {
-      localStorage.setItem('odysseus-custom-context-menu', contextMenuToggle.checked ? 'on' : 'off');
+      localStorage.setItem('openclank-custom-context-menu', contextMenuToggle.checked ? 'on' : 'off');
       window.dispatchEvent(new CustomEvent('odysseus-context-menu-changed'));
     });
   }
@@ -2188,7 +2742,7 @@ function initAppearance() {
   modalEl.querySelectorAll('[data-privacy-key]').forEach(function(chk) {
     chk.addEventListener('change', function() {
       if (chk.dataset.privacyKey !== 'sensitive-blur') return;
-      localStorage.setItem('odysseus-sensitive-blur', chk.checked ? 'on' : 'off');
+      localStorage.setItem('openclank-sensitive-blur', chk.checked ? 'on' : 'off');
       window.dispatchEvent(new CustomEvent('odysseus-sensitive-blur-change', {
         detail: { enabled: chk.checked }
       }));
@@ -2241,19 +2795,20 @@ function syncCopalNotesSettings() {
 }
 
 function initCopalAppearanceControls() {
+  if (_copalAppearanceRefresh) { _copalAppearanceRefresh(); return; }
   const entries = modalEl?.querySelector('#set-copal-navigation-entries');
   const panels = modalEl?.querySelector('#set-copal-notes-panels');
   const render = () => {
-    if (!entries || !_copalModule?.getAppearanceEntries || !_copalModule?.getEntryVisibility) return;
+    if (!entries) return;
     let visibility;
-    try { visibility = _copalModule.getEntryVisibility(); } catch (_) { visibility = null; }
+    try { visibility = _copalModule?.getEntryVisibility?.(); } catch (_) { visibility = null; }
     entries.replaceChildren();
     if (!visibility) {
-      const message = document.createElement('p'); message.textContent = 'Copal is still loading; retry Appearance.'; entries.append(message);
+      const message = document.createElement('p'); message.textContent = 'Copal navigation is unavailable. Reopen Appearance to retry.'; entries.append(message);
       // Copal initializes its scoped appearance preference asynchronously.
       // Keep the normal Appearance tab live when it is opened during that
       // short window instead of requiring the user to close and reopen it.
-      if (_copalModule.whenReady && entries.dataset.copalReadyPending !== '1') {
+      if (_copalModule?.whenReady && entries.dataset.copalReadyPending !== '1') {
         entries.dataset.copalReadyPending = '1';
         _copalModule.whenReady().then(() => {
           delete entries.dataset.copalReadyPending;
@@ -2269,7 +2824,23 @@ function initCopalAppearanceControls() {
       entries.append(row);
     }
   };
+  el('set-copal-manage-journals')?.addEventListener('click', async () => {
+    const status = el('set-copal-journal-status');
+    status.textContent = '';
+    status.hidden = true;
+    try {
+      if (!_copalModule?.manageJournals) throw new Error('Journal settings are unavailable. Select Manage journals to retry.');
+      await _copalModule.manageJournals();
+    } catch (error) {
+      status.textContent = error.message || 'Could not open Manage journals.';
+      status.hidden = false;
+    }
+  });
   modalEl?.querySelectorAll('[data-copal-entry-action]').forEach((button) => button.addEventListener('click', async () => {
+    if (!_copalModule?.getEntryVisibility?.()) {
+      window.uiModule?.showToast?.('Copal navigation is unavailable. Reopen Appearance to retry.');
+      return;
+    }
     try {
       if (button.dataset.copalEntryAction === 'show') await _copalModule.setAllEntryVisibility(true);
       else if (button.dataset.copalEntryAction === 'hide') await _copalModule.setAllEntryVisibility(false);
@@ -2278,24 +2849,27 @@ function initCopalAppearanceControls() {
     } catch (error) { window.uiModule?.showToast?.(error.message); }
   }));
   const renderPanels = () => {
-    if (!panels || !_copalModule?.getNotesPanels) return;
+    if (!panels) return;
     panels.replaceChildren();
-    const customize = document.createElement('button'); customize.type = 'button'; customize.className = 'copal-btn'; customize.textContent = 'Customize Explorer…';
-    customize.addEventListener('click', () => { try { _copalModule.customizeExplorer(); } catch (error) { window.uiModule?.showToast?.(error.message); } });
-    panels.append(customize);
     let panelItems;
-    try { panelItems = _copalModule.getNotesPanels(); } catch (_) {
+    try { panelItems = _copalModule?.getNotesPanels?.(); } catch (_) { panelItems = null; }
+    if (!panelItems) {
       const message = document.createElement('p');
       message.className = 'admin-toggle-sub';
-      message.textContent = 'Copal is still loading; retry Appearance.';
+      message.textContent = 'Editor panel settings are unavailable. Reopen Appearance to retry.';
       panels.append(message);
       return;
     }
+    const customize = document.createElement('button'); customize.type = 'button'; customize.className = 'copal-btn'; customize.textContent = 'Customize Explorer…';
+    customize.addEventListener('click', () => { try { _copalModule.customizeExplorer(); } catch (error) { window.uiModule?.showToast?.(error.message); } });
+    panels.append(customize);
     for (const item of panelItems) {
       if (['files', 'search'].includes(item.id)) continue;
       const row = document.createElement('div'); row.className = 'settings-row copal-panel-setting';
       const label = document.createElement('span'); label.className = 'settings-label'; label.textContent = item.label;
-      const side = document.createElement('select'); side.className = 'settings-select'; side.innerHTML = '<option value="left">Left</option><option value="right">Right</option>'; side.value = item.side;
+      const side = document.createElement('select'); side.className = 'settings-select'; side.setAttribute('aria-label', `${item.label} side`);
+      for (const allowed of item.allowedSides) side.add(new Option(allowed === 'left' ? 'Left' : 'Right', allowed));
+      side.value = item.side; side.disabled = item.allowedSides.length < 2;
       side.addEventListener('change', async () => { await _copalModule.updateNotesPanel(item.id, { side: side.value }); renderPanels(); });
       const visible = document.createElement('input'); visible.type = 'checkbox'; visible.checked = !item.hidden; visible.addEventListener('change', async () => { await _copalModule.updateNotesPanel(item.id, { hidden: !visible.checked }); renderPanels(); });
       const up = document.createElement('button'); up.type = 'button'; up.className = 'copal-btn'; up.innerHTML = uiIcon('chevron-up', 14); up.setAttribute('aria-label', 'Move panel up'); up.disabled = item.hidden; up.addEventListener('click', async () => { await _copalModule.updateNotesPanel(item.id, { move: 'up' }); renderPanels(); });
@@ -2303,10 +2877,6 @@ function initCopalAppearanceControls() {
       row.append(label, side, visible, up, down); panels.append(row);
     }
   };
-  if (_copalAppearanceRefresh) {
-    _copalAppearanceRefresh();
-    return;
-  }
   _copalAppearanceRefresh = () => { render(); renderPanels(); };
   _copalAppearanceRefresh();
 }
@@ -2322,7 +2892,7 @@ function syncAppearanceCheckboxes() {
 
 function syncPrivacyCheckboxes() {
   modalEl.querySelectorAll('[data-privacy-key="sensitive-blur"]').forEach(function(chk) {
-    chk.checked = localStorage.getItem('odysseus-sensitive-blur') === 'on';
+    chk.checked = localStorage.getItem('openclank-sensitive-blur') === 'on';
   });
 }
 
@@ -2636,7 +3206,123 @@ async function initShortcuts() {
 /* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
+function initFullAccessSetting() {
+  const profile = el('settings-account-role')?.closest('.admin-card');
+  if (!profile) return null;
+  const row = document.createElement('div');
+  row.hidden = true;
+  const label = document.createElement('label');
+  label.className = 'settings-row';
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.id = 'settings-full-access';
+  checkbox.disabled = true;
+  label.append('Full access', checkbox);
+  const scope = document.createElement('p');
+  scope.className = 'admin-toggle-sub';
+  scope.textContent = 'Enable models and optional tools for this account. Files, approvals and provider credentials use their existing grants.';
+  const status = document.createElement('p');
+  status.setAttribute('role', 'status');
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.textContent = 'Retry access change';
+  retry.hidden = true;
+  row.append(label, scope, status, retry);
+  profile.append(row);
+
+  let accountId = '', epoch = 0, active = false, attempted;
+  const currentAccount = () => document.body?.dataset?.accountId || window.currentAccountId || '';
+  function show(data, publish) {
+    accountId = data.account_id || '';
+    const eligible = Boolean(accountId && data.full_access?.eligible === true);
+    _fullAccessEligible = eligible;
+    row.hidden = !eligible;
+    checkbox.checked = eligible && data.full_access.enabled === true;
+    checkbox.disabled = !eligible;
+    if (eligible && publish && data.privileges) {
+      const detail = { accountId, privileges: data.privileges };
+      document.dispatchEvent(new CustomEvent('openclank:account-privileges-changed', { detail }));
+      document.dispatchEvent(new Event('openclank:file-policy-changed'));
+      document.dispatchEvent(new Event('openclank:memory-policy-changed'));
+    }
+  }
+
+  async function change(enabled) {
+    if (!accountId || active || !profile.isConnected) return;
+    const expected = accountId;
+    const revision = epoch;
+    const current = () => revision === epoch && profile.isConnected &&
+      (!currentAccount() || currentAccount() === expected);
+    active = true;
+    attempted = enabled;
+    checkbox.disabled = true;
+    retry.hidden = true;
+    status.textContent = 'Changing access…';
+    try {
+      const result = await fetch('/api/auth/full-access', {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-Openclank-Account': expected },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!result.ok) throw new Error('Access change unconfirmed');
+      const data = await result.json();
+      if (!current() || data.account_id !== expected) return;
+      show(data, true);
+      status.textContent = checkbox.checked ? 'Full access is on.' : 'Full access is off.';
+    } catch {
+      try {
+        const result = await fetch('/api/auth/status', { credentials: 'same-origin', cache: 'no-store' });
+        if (!result.ok) throw new Error('Account unavailable');
+        const data = await result.json();
+        if (!current() || data.account_id !== expected) return;
+        show(data, true);
+        status.textContent = checkbox.checked
+          ? 'Full access is on. The transition could not be confirmed.'
+          : 'Full access is off. The transition could not be confirmed.';
+      } catch {
+        if (!current()) return;
+        checkbox.indeterminate = true;
+        status.textContent = 'Could not confirm the current access mode.';
+      }
+      retry.hidden = false;
+    } finally {
+      if (revision === epoch) active = false;
+    }
+  }
+
+  checkbox.addEventListener('change', () => {
+    checkbox.indeterminate = false;
+    void change(checkbox.checked);
+  });
+  retry.addEventListener('click', () => {
+    checkbox.indeterminate = false;
+    void change(attempted);
+  });
+  document.addEventListener('openclank:auth-context-changed', () => {
+    epoch++;
+    accountId = '';
+    _fullAccessEligible = null;
+    active = false;
+    row.hidden = true;
+    checkbox.disabled = true;
+    checkbox.indeterminate = false;
+    retry.hidden = true;
+    status.textContent = '';
+    const revision = epoch;
+    void fetch('/api/auth/status', { credentials: 'same-origin', cache: 'no-store' })
+      .then(result => result.ok ? result.json() : null)
+      .then(data => {
+        if (data && revision === epoch && (!currentAccount() || currentAccount() === data.account_id)) show(data, false);
+      }).catch(() => {});
+  });
+  return data => {
+    if (epoch === 0 && (!currentAccount() || currentAccount() === data.account_id)) show(data, false);
+  };
+}
+
 function initAccount() {
+  const showFullAccess = initFullAccessSetting();
   const emptyPasswordRow = el('settings-pw-empty-row');
   const emptyPasswordToggle = el('settings-pw-empty');
   const passwordNew = el('settings-pw-new');
@@ -2659,6 +3345,7 @@ function initAccount() {
   fetch('/api/auth/status', { credentials: 'same-origin' })
     .then(r => r.json())
     .then(d => {
+      showFullAccess?.(d);
       const nameEl = el('settings-account-username');
       const roleEl = el('settings-account-role');
       const avatarEl = el('settings-account-avatar');
@@ -2830,12 +3517,12 @@ function initAccount() {
       // doesn't inherit the previous account's session id, last-used model,
       // draft chat input, or cached lists. Owner-namespaced browser preferences
       // remain available when their account signs in again.
-      // Keep "odysseus-last-user" so the login form remembers the username
+      // Keep "openclank-last-user" so the login form remembers the username
       // (if "Remember me" was on). Without this the chat composer pre-loaded
       // the previous user's last model into a fresh session, which read as
       // cross-account leakage.
       try {
-        const _keepKeys = new Set(['odysseus-last-user']);
+        const _keepKeys = new Set(['openclank-last-user']);
         const _toRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
           const k = localStorage.key(i);
@@ -2852,6 +3539,15 @@ function initAccount() {
 
 function initAll() {
   modalEl = el('settings-modal');
+  // These panels have no controls owned by the shell. Parse their static
+  // markup on first Settings open, before binding controls or indexing labels.
+  for (const source of modalEl.querySelectorAll('script[data-settings-markup]')) {
+    const content = document.createElement('template');
+    content.innerHTML = source.textContent;
+    mountUiIcons(content.content);
+    source.replaceWith(content.content);
+  }
+  mountAnnotatorSettings(el('settings-annotator'));
   applyOwnershipManifest();
   new MutationObserver((records) => {
     for (const record of records) {
@@ -2865,12 +3561,11 @@ function initAll() {
   initSettingsFinder();
   providerControl.init({
     onCatalogChanged: async () => {
-      if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
+      const picker = Promise.resolve(window.modelsModule?.refreshModels?.(true)).then(() => window.sessionModule?.updateModelPicker?.());
       // The AI model cards are lazy. Until somebody opens that tab there are
       // no controls to refresh, and fetching their endpoint projection here
       // would duplicate providerControl's own connection/model reload.
-      if (_aiSettingsInitialized) await refreshAiModelEndpoints();
-      window.sessionModule?.updateModelPicker?.();
+      await Promise.all([picker, _aiSettingsInitialized && refreshAiModelEndpoints()]);
     },
   });
   initDrag();
@@ -2907,6 +3602,7 @@ function initAiSettingsOnce() {
   initMemoryModel();
   initImageSettings();
   initVisionSettings();
+  initDesktopSettings();
   initTtsSettings();
   initSttSettings();
   if (window._isAdmin) initResearchSettings();
@@ -3585,7 +4281,7 @@ async function initReminderSettings() {
             new Notification('Test Reminder', {
               body: data.synthesis || 'This is a test reminder.',
               tag: 'reminder-test',
-              icon: '/static/favicon.ico',
+              icon: '/static/icons/icon-192.png',
             });
           } catch {}
         }
@@ -3601,7 +4297,7 @@ async function initReminderSettings() {
 
 async function initEmailAccountsSettings() {
   const root = el('settings-modal');
-  if (!root || !root.querySelector('[data-settings-panel="email"]')) return;
+  if (!root || !root.querySelector('#set-email-open-library-settings')) return;
 
   el('set-email-open-library-settings')?.addEventListener('click', async () => {
     try {
@@ -3616,7 +4312,7 @@ async function initEmailAccountsSettings() {
   const manageBtn = el('set-email-open-integrations');
   if (manageBtn && manageBtn.dataset.bound !== '1') {
     manageBtn.dataset.bound = '1';
-    manageBtn.addEventListener('click', () => open('integrations'));
+    manageBtn.addEventListener('click', () => { el('unified-intg-add-btn')?.scrollIntoView({block:'center'}); el('unified-intg-add-btn')?.focus({preventScroll:true}); });
   }
   const tasksBtn = el('set-email-open-tasks');
   if (tasksBtn && tasksBtn.dataset.bound !== '1') {
@@ -3901,11 +4597,11 @@ async function initEmailAccountsSettings() {
 
 async function initEmailSettings() {
   const root = el('settings-modal');
-  if (!root || !root.querySelector('[data-settings-panel="email"]')) return;
+  if (!root || !root.querySelector('#set-email-open-library-settings')) return;
 
   const styleKey = () => {
     const account = String(window.__odysseusActiveEmailAccount || '').trim();
-    return account ? `odysseus-email-writing-style:${account}` : 'odysseus-email-writing-style';
+    return account ? `openclank-email-writing-style:${account}` : 'openclank-email-writing-style';
   };
   const styleEl = el('set-email-style');
   const emailAccountSuffix = () => {
@@ -4314,11 +5010,11 @@ const AGENT_CONFIGS = {
     defaultName: 'Codex Agent',
     pluginPath: '/api/codex/plugin.zip',
     setupDescription: 'Downloads a plugin bundle and registers it.',
-    buildSetup: (origin, token) => `export ODYSSEUS_URL=${origin}
-export ODYSSEUS_API_TOKEN='${token}'
+    buildSetup: (origin, token) => `export OPENCLANK_URL=${origin}
+export OPENCLANK_API_TOKEN='${token}'
 mkdir -p ~/plugins
-curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/codex/plugin.zip" -o /tmp/odysseus-codex-plugin.zip
-python3 -m zipfile -e /tmp/odysseus-codex-plugin.zip ~/plugins
+curl -fsSL -H "Authorization: Bearer $OPENCLANK_API_TOKEN" "$OPENCLANK_URL/api/codex/plugin.zip" -o /tmp/openclank-codex-plugin.zip
+python3 -m zipfile -e /tmp/openclank-codex-plugin.zip ~/plugins
 python3 - <<'PY'
 import json
 from pathlib import Path
@@ -4334,16 +5030,16 @@ data.setdefault("name", "personal")
 data.setdefault("interface", {}).setdefault("displayName", "Personal")
 plugins = data.setdefault("plugins", [])
 entry = {
-    "name": "odysseus",
-    "source": {"source": "local", "path": "./plugins/odysseus"},
+    "name": "openclank",
+    "source": {"source": "local", "path": "./plugins/openclank"},
     "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
     "category": "Productivity",
 }
-data["plugins"] = [item for item in plugins if item.get("name") != "odysseus"] + [entry]
+data["plugins"] = [item for item in plugins if item.get("name") not in ("openclank", "odysseus")] + [entry]
 p.write_text(json.dumps(data, indent=2) + "\\n")
 PY
-codex plugin add odysseus@personal
-python3 ~/plugins/odysseus/scripts/odysseus_api.py capabilities`,
+codex plugin add openclank@personal
+python3 ~/plugins/openclank/scripts/openclank_api.py capabilities`,
   },
   claude: {
     label: 'Claude Agent',
@@ -4352,12 +5048,12 @@ python3 ~/plugins/odysseus/scripts/odysseus_api.py capabilities`,
     defaultName: 'Claude Agent',
     pluginPath: '/api/claude/plugin.zip',
     setupDescription: 'Downloads a plugin bundle and registers it.',
-    buildSetup: (origin, token) => `export ODYSSEUS_URL=${origin}
-export ODYSSEUS_API_TOKEN='${token}'
+    buildSetup: (origin, token) => `export OPENCLANK_URL=${origin}
+export OPENCLANK_API_TOKEN='${token}'
 mkdir -p ~/.claude
-curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/claude/plugin.zip" -o /tmp/odysseus-claude-skill.zip
-python3 -m zipfile -e /tmp/odysseus-claude-skill.zip ~/.claude/
-python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py capabilities`,
+curl -fsSL -H "Authorization: Bearer $OPENCLANK_API_TOKEN" "$OPENCLANK_URL/api/claude/plugin.zip" -o /tmp/openclank-claude-skill.zip
+python3 -m zipfile -e /tmp/openclank-claude-skill.zip ~/.claude/
+python3 ~/.claude/skills/openclank/scripts/openclank_api.py capabilities`,
   },
 };
 
@@ -4976,7 +5672,7 @@ async function initUnifiedIntegrations() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = format === 'csv' ? 'odysseus-contacts.csv' : 'odysseus-contacts.vcf';
+        a.download = format === 'csv' ? 'openclank-contacts.csv' : 'openclank-contacts.vcf';
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -5872,9 +6568,16 @@ async function initUnifiedIntegrations() {
         const srv = servers.find(s => (s.id || s.name) === editId);
         if (!srv) { formEl.innerHTML = '<div class="admin-card" style="margin-top:8px">Server not found</div>'; return; }
         const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
-        const statusColor = srv.needs_oauth ? '#e5a33a' : srv.status === 'connected' ? 'var(--green,#50fa7b)' : srv.status === 'error' ? 'var(--red)' : 'var(--fg)';
-        const toolInfo = srv.status === 'connected' ? `${srv.enabled_tool_count}/${srv.tool_count} tools` : '';
-        const statusText = srv.needs_oauth ? 'Needs authorization' : srv.status === 'connected' ? `Connected (${toolInfo})` : srv.status === 'error' ? `Error: ${esc(srv.error || 'unknown')}` : 'Disconnected';
+        const requiresAuth = srv.needs_oauth || srv.status === 'needs_auth';
+        const statusColor = srv.is_enabled === false ? 'var(--fg)' : requiresAuth ? '#e5a33a' : srv.status === 'connected' ? 'var(--green,#50fa7b)' : srv.status === 'error' ? 'var(--red)' : 'var(--fg)';
+        const toolInfo = srv.tool_counts_known ? `${srv.enabled_tool_count}/${srv.tool_count} configured tools` : 'tool count unavailable';
+        const observed = srv.observation && typeof srv.observation === 'object' ? srv.observation : null;
+        const obsTime = Number.isFinite(observed?.observed_at) ? new Date(observed.observed_at * 1000).toLocaleString() : 'not observed';
+        const ms = value => Number.isFinite(value) && value >= 0 ? `${Math.round(value)} ms` : 'unavailable';
+        const callTime = Number.isFinite(observed?.last_call_at) ? new Date(observed.last_call_at * 1000).toLocaleString() : 'not observed';
+        const category = ['transport','tool_error'].includes(observed?.last_error_category) ? observed.last_error_category.replace('_',' ') : 'none observed';
+        const health = observed ? `Python manager · generation ${Number.isSafeInteger(observed.generation) ? observed.generation : 'unknown'} · ${esc(observed.status)} · ${esc(obsTime)} · discovery ${ms(observed.discover_ms)} · last call ${ms(observed.last_call_ms)} at ${esc(callTime)} (generation ${Number.isSafeInteger(observed.last_call_generation) ? observed.last_call_generation : 'unknown'}) · ${category}` : 'Python manager: no observation yet';
+        const statusText = srv.is_enabled === false ? 'Disabled' : requiresAuth ? 'Needs authorization' : srv.status === 'connected' ? `Connected (${toolInfo})` : srv.status === 'connecting' ? 'Connecting' : srv.status === 'error' ? 'Connection error' : 'Disconnected';
         formEl.innerHTML = `
           <div class="admin-card" style="margin-top:8px">
             <h2 style="font-size:13px">${esc(srv.name)}</h2>
@@ -5882,6 +6585,11 @@ async function initUnifiedIntegrations() {
               <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${statusColor}"></span>
               <span style="font-size:11px;opacity:0.7">${statusText}</span>
             </div>
+            <p style="font-size:11px;opacity:0.75">${health}. Managed-agent connection health and turn-specific effective permissions are not shown here.</p>
+            <details><summary>Access and destination</summary>
+              <p>Origin: ${srv.configuration_origin === 'built_in' ? 'built-in' : 'configured'} · Transport: ${esc(srv.transport || 'unknown')} · Destination: ${srv.transport_origin ? esc(srv.transport_origin) : srv.transport === 'stdio' ? 'local process; network behavior unknown' : 'unknown'}.</p>
+              <p>Requested filesystem and network access are not declared here. Configured tool switches do not establish current-turn permission. Authentication configuration: ${srv.has_oauth ? 'present' : 'not reported'}. Server configuration has no represented expiry; operation grants are managed separately.</p>
+            </details>
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;justify-content:flex-end;">
               <span id="uf-mcp-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
               ${srv.needs_oauth ? `<a href="/api/mcp/oauth/authorize/${srv.id}" target="_blank" class="admin-btn-add" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));text-decoration:none;font-weight:600;">Authorize</a>` : ''}
@@ -6016,6 +6724,8 @@ async function initUnifiedIntegrations() {
     } catch (_) {}
 
     const toolScopes = [
+      { key: 'sessions:read', label: 'Sessions read', detail: 'Read your sessions and bounded progress' },
+      { key: 'sessions:write', label: 'Sessions write', detail: 'Create sessions and submit actor input' },
       { key: 'todos:read', label: 'Todos', detail: 'Read notes and checklists' },
       { key: 'todos:write', label: 'Todos write', detail: 'Create, update, delete, and toggle todo items' },
       { key: 'documents:read', label: 'Documents', detail: 'Read documents when a document API is enabled' },
@@ -6520,13 +7230,151 @@ function syncAdminVisibility() {
 }
 
 let _fileAccessInitialized = false;
-let _fileAccessLoadId = 0;
+let _fileAccessRead = null;
+let _fileAccessNamesController = null;
+let _fileAccessNeedsRetry = false;
+let _fileAccessEpoch = 0;
+let _fileAccessState = null;
+const _fileAccessSaves = new Map();
+const fileAccessOwner = () => document.body?.dataset?.accountId || '';
+const fileAccessPanel = () => modalEl?.querySelector('[data-settings-panel="file-access"]');
+const fileAccessVisible = () => !!modalEl && !modalEl.classList.contains('hidden')
+  && !modalEl.classList.contains('modal-minimized') && !!fileAccessPanel() && !fileAccessPanel().classList.contains('hidden');
+const fileAccessReadLists = ['odysseus-file-visible-to-me-list','odysseus-file-roots','odysseus-file-visibility-assignments',
+  'file-policy-workspaces','file-policy-agent-access','odysseus-agent-grants'];
 
-async function loadCanonicalPolicyState() {
-  const response = await checkedFetch('/api/file-policy/state?include_inactive=true', {
-    credentials: 'same-origin', cache: 'no-store',
+function cancelFileAccessRead() {
+  _fileAccessNamesController?.abort();
+  _fileAccessNamesController = null;
+  _fileAccessRead?.controller.abort();
+  _fileAccessRead = null;
+}
+
+function clearFileAccessAuthority() {
+  _fileAccessState = null;
+  const panel = fileAccessPanel();
+  for (const id of fileAccessReadLists) el(id)?.replaceChildren();
+  for (const card of panel?.querySelectorAll('.admin-card') || []) {
+    card.inert = !['odysseus-file-visible-to-me','full-filesystem-access'].includes(card.id);
+  }
+  const controls = panel?.querySelector('[data-full-filesystem-controls]');
+  if (controls) { controls.inert = true; controls.hidden = true; }
+  const status = el('full-filesystem-status');
+  if (status) status.textContent = 'Saved settings are unavailable.';
+}
+
+function setFileAccessReadError(message) {
+  const status = el('file-policy-status');
+  if (!status) return;
+  status.textContent = message;
+  status.append(' ', filePolicyButton('Retry', () => loadFileAccessSettings({force:true}), 'file-policy-status'));
+}
+
+async function loadCanonicalPolicyState(signal) {
+  const response = await fetch('/api/file-policy/state?include_inactive=true', {
+    credentials:'same-origin', cache:'no-store', signal,
   });
+  if (!response.ok) {
+    const message = response.status === 401 ? 'Your sign-in expired. Sign in again to see file access.'
+      : response.status === 403 ? 'This account cannot read file permissions.'
+      : response.status >= 500 ? 'The host file permission service is unavailable.'
+      : `File permissions could not be loaded (HTTP ${response.status}).`;
+    throw Object.assign(new Error(message), {status:response.status});
+  }
   return response.json();
+}
+
+function fullFilesystemSection() {
+  const panel = fileAccessPanel();
+  if (!panel) return null;
+  let section = el('full-filesystem-access');
+  if (section) return section;
+  section = document.createElement('section');
+  section.id = 'full-filesystem-access';
+  section.className = 'admin-card';
+  const heading = document.createElement('h2');
+  heading.textContent = 'Full filesystem access';
+  const controls = document.createElement('div');
+  controls.dataset.fullFilesystemControls = '';
+  controls.inert = true;
+  controls.hidden = true;
+  for (const [scope, labelText] of [['human','Files and Editor'],['agent','Agents for this account']]) {
+    const label = document.createElement('label');
+    label.className = 'settings-row';
+    const control = document.createElement('input');
+    control.type = 'checkbox';
+    control.setAttribute('role','switch');
+    control.dataset.fullFilesystemScope = scope;
+    control.addEventListener('change', () => { void saveFullFilesystemAccess(scope, control.checked); });
+    label.append(control, ` ${labelText}`);
+    controls.append(label);
+  }
+  const status = document.createElement('div');
+  status.id = 'full-filesystem-status';
+  status.className = 'admin-toggle-sub';
+  status.setAttribute('role','status');
+  status.textContent = 'Loading saved settings…';
+  section.append(heading,controls,status);
+  panel.prepend(section);
+  return section;
+}
+
+function renderFullFilesystemAccess(state) {
+  const section = fullFilesystemSection();
+  if (!section) return;
+  const controls = section.querySelector('[data-full-filesystem-controls]');
+  const status = el('full-filesystem-status');
+  const choice = state.full_filesystem_access;
+  const valid = typeof choice?.eligible === 'boolean' && typeof choice?.human === 'boolean' && typeof choice?.agent === 'boolean';
+  controls.inert = !valid;
+  controls.hidden = !valid;
+  for (const control of controls.querySelectorAll('input')) {
+    const scope = control.dataset.fullFilesystemScope;
+    control.checked = valid && choice[scope];
+    control.disabled = !valid || !choice.eligible || _fileAccessSaves.has(scope);
+  }
+  status.textContent = !valid ? 'Full filesystem settings are unavailable.'
+    : choice.eligible ? 'Off uses your existing folder grants. On grants access within the host OS account’s permissions.'
+    : 'The first-run owner and administrators can change these settings for their own accounts.';
+}
+
+async function saveFullFilesystemAccess(scope, enabled) {
+  const previous = _fileAccessState;
+  const epoch = _fileAccessEpoch, owner = fileAccessOwner();
+  if (!previous?.full_filesystem_access?.eligible || previous.subject_id !== owner || _fileAccessSaves.has(scope)) return;
+  const token = Symbol(scope);
+  _fileAccessSaves.set(scope, token);
+  renderFullFilesystemAccess(previous);
+  el('full-filesystem-status').textContent = 'Saving…';
+  const sameOwner = () => owner === fileAccessOwner() && epoch === _fileAccessEpoch;
+  let saved = false;
+  let refusal = false;
+  try {
+    const response = await fetch('/api/file-policy/full-filesystem-access', {
+      method:'PUT', credentials:'same-origin', cache:'no-store', signal:AbortSignal.timeout(10_000),
+      headers:{'Content-Type':'application/json','X-Openclank-Account':owner}, body:JSON.stringify({scope,enabled}),
+    });
+    refusal = response.status >= 400 && response.status < 500;
+    if (response.ok) {
+      const result = await response.json();
+      saved = result?.version === 1 && result.full_filesystem_access?.[scope] === enabled;
+      if (saved && sameOwner()) announceFilePolicyChanged({mutation:'full-filesystem-access',generation:result.generation});
+    }
+  } catch {}
+  finally { if (_fileAccessSaves.get(scope) === token) _fileAccessSaves.delete(scope); }
+  if (!sameOwner()) return;
+  const current = await loadFileAccessSettings({force:true});
+  if (!sameOwner() || !fileAccessVisible()) return;
+  if (!saved && Number.isSafeInteger(current?.generation) && current.generation !== previous.generation) {
+    announceFilePolicyChanged({mutation:'full-filesystem-readback',generation:current.generation});
+  }
+  const status = el('full-filesystem-status');
+  if (!current) {
+    status.textContent = 'Save outcome is unverified. Use Retry to read the saved settings.';
+  } else if (current.full_filesystem_access?.[scope] !== enabled) {
+    status.textContent = refusal ? 'The host refused this change. The saved setting is shown.'
+      : 'The requested change could not be confirmed. The saved setting is shown.';
+  }
 }
 
 function announceFilePolicyChanged(detail = {}) {
@@ -6668,7 +7516,10 @@ function renderCurrentAppFilesystemAccess(state) {
     return filePolicyRow(location?.display_path || location?.canonical_path || scope.location_id,
       `${locationKindLabel(location)} · ${fileCapabilitySummary(scope.app_capabilities)}`);
   }));
-  if (!effective.length) list.textContent = 'No files or folders are currently shared with your account.';
+  if (!effective.length) {
+    list.textContent = state.is_admin ? 'No files or folders are shared with your account yet. Use Add folder below to choose one.'
+      : 'No files or folders are currently shared with your account. Ask a manager to share a folder.';
+  }
 }
 
 function populateVisibilitySelectors(users, locations) {
@@ -6973,11 +7824,30 @@ async function resetFileAgentPermissions(scope, payload, label) {
 function initFileAccessControls() {
   if (_fileAccessInitialized) return;
   _fileAccessInitialized = true;
-  el('odysseus-file-root-add')?.addEventListener('click', () => { void openFileLocationWizard(); });
+  fullFilesystemSection();
+  const addFolder = el('odysseus-file-root-add');
+  if (addFolder) {
+    setUiIconText(addFolder,'folder-plus','Add folder…');
+    addFolder.addEventListener('click', () => { void openFileLocationWizard(); });
+  }
+  const retryVisibleFileAccess = () => {
+    if (_fileAccessNeedsRetry && fileAccessVisible() && !document.hidden) void loadFileAccessSettings();
+  };
+  window.addEventListener('focus', retryVisibleFileAccess);
+  window.addEventListener('online', retryVisibleFileAccess);
+  document.addEventListener('visibilitychange', retryVisibleFileAccess);
+  document.addEventListener('openclank:auth-context-changed', () => {
+    _fileAccessEpoch++;
+    _fileAccessSaves.clear();
+    cancelFileAccessRead();
+    clearFileAccessAuthority();
+    if (fileAccessVisible()) void loadFileAccessSettings();
+  });
   document.addEventListener('openclank:file-policy-changed', event => {
-    if (event.detail?.source === 'settings' || modalEl?.classList.contains('hidden')) return;
-    const panel = modalEl?.querySelector('[data-settings-panel="file-access"]');
-    if (panel && !panel.classList.contains('hidden')) void loadFileAccessSettings();
+    if (event.detail?.source === 'settings') return;
+    cancelFileAccessRead();
+    clearFileAccessAuthority();
+    if (fileAccessVisible()) void loadFileAccessSettings();
   });
   el('odysseus-file-visibility-add')?.addEventListener('click', async () => {
     const button = el('odysseus-file-visibility-add');
@@ -7022,42 +7892,76 @@ function initFileAccessControls() {
   bindReset('odysseus-permissions-reset-all', 'all_agent', () => ({}), 'All agent permissions');
 }
 
-async function loadFileAccessSettings() {
+function loadFileAccessSettings({force = false} = {}) {
   initFileAccessControls();
-  const loadId = ++_fileAccessLoadId;
+  if (!fileAccessVisible()) return Promise.resolve(null);
+  const owner = fileAccessOwner(), epoch = _fileAccessEpoch;
+  if (!force && _fileAccessRead?.owner === owner) return _fileAccessRead.promise;
+  cancelFileAccessRead();
+  const controller = new AbortController();
+  const attempt = {controller,owner,promise:null};
+  _fileAccessRead = attempt;
   const status = el('file-policy-status');
+  const current = () => _fileAccessRead === attempt && !controller.signal.aborted && fileAccessVisible()
+    && owner === fileAccessOwner() && epoch === _fileAccessEpoch;
   if (status) status.textContent = 'Loading file access…';
-  try {
-    const state = await loadCanonicalPolicyState();
-    let users = [];
-    let accountWarning = '';
-    if (state.is_admin) {
-      try {
-        const response = await checkedFetch('/api/auth/users', { credentials: 'same-origin', cache: 'no-store' });
-        users = (await response.json()).users || [];
-      } catch (_) { accountWarning = 'Account names are unavailable; account IDs are shown.'; }
+  attempt.promise = (async () => {
+    const timeout = setTimeout(() => controller.abort('timeout'), 12_000);
+    try {
+      const state = await loadCanonicalPolicyState(controller.signal);
+      if (!current()) return null;
+      if (!owner || state.subject_id !== owner) throw new Error('The current account could not be verified.');
+      _fileAccessState = state;
+      _fileAccessNeedsRetry = false;
+      const panel = fileAccessPanel();
+      for (const card of panel.querySelectorAll('.admin-card')) card.inert = false;
+      panel.querySelectorAll('.admin-only').forEach(control => { control.style.display = state.is_admin ? '' : 'none'; });
+      renderFullFilesystemAccess(state);
+      renderCurrentAppFilesystemAccess(state);
+      renderFileLocations(state);
+      renderPeopleAccess(state, []);
+      renderFileWorkspaces(state, new Map());
+      renderAgentAccess(state, new Map());
+      renderOperationApprovals(state, new Map());
+      if (status) status.textContent = '';
+      if (state.is_admin) {
+        const names = new AbortController();
+        _fileAccessNamesController = names;
+        void checkedFetch('/api/auth/users',{credentials:'same-origin',cache:'no-store',
+          signal:AbortSignal.any([names.signal,AbortSignal.timeout(5000)])}).then(response=>response.json()).then(result=>{
+            if (_fileAccessState !== state || names.signal.aborted || !fileAccessVisible() || owner !== fileAccessOwner()) return;
+            const users = Array.isArray(result.users) ? result.users : [];
+            const usersById = new Map(users.filter(user=>user?.account_id).map(user=>[String(user.account_id),user]));
+            renderPeopleAccess(state, users);
+            renderFileWorkspaces(state, usersById);
+            renderAgentAccess(state, usersById);
+            renderOperationApprovals(state, usersById);
+          }).catch(()=>{
+            if (_fileAccessState === state && !names.signal.aborted && fileAccessVisible() && owner === fileAccessOwner() && status)
+              status.textContent = 'Account names are unavailable. Account IDs are shown.';
+          }).finally(()=>{ if (_fileAccessNamesController === names) _fileAccessNamesController = null; });
+      }
+      return state;
+    } catch (error) {
+      if (_fileAccessRead !== attempt || !fileAccessVisible() || owner !== fileAccessOwner() || epoch !== _fileAccessEpoch) return null;
+      _fileAccessNeedsRetry = true;
+      clearFileAccessAuthority();
+      setFileAccessReadError(error.status ? error.message : 'Could not connect to the host to read file access.');
+      return null;
+    } finally {
+      clearTimeout(timeout);
+      if (_fileAccessRead === attempt) _fileAccessRead = null;
     }
-    if (loadId !== _fileAccessLoadId) return;
-    const usersById = new Map(users.filter(user => user?.account_id).map(user => [String(user.account_id), user]));
-    modalEl?.querySelectorAll('[data-settings-panel="file-access"] .admin-only').forEach(control => { control.style.display = state.is_admin ? '' : 'none'; });
-    renderCurrentAppFilesystemAccess(state);
-    renderFileLocations(state);
-    renderPeopleAccess(state, users);
-    renderFileWorkspaces(state, usersById);
-    renderAgentAccess(state, usersById);
-    renderOperationApprovals(state, usersById);
-    if (status) status.textContent = accountWarning;
-  } catch (error) {
-    if (loadId !== _fileAccessLoadId) return;
-    for (const id of ['odysseus-file-visible-to-me-list', 'odysseus-file-roots', 'odysseus-file-visibility-assignments', 'file-policy-workspaces', 'file-policy-agent-access', 'odysseus-agent-grants']) el(id)?.replaceChildren();
-    if (status) status.textContent = error.message || 'Could not load file access.';
-  }
+  })();
+  return attempt.promise;
 }
 
 /* ═══════════════════════════════════════════
    PUBLIC API
    ═══════════════════════════════════════════ */
 export function open(tab, options = {}) {
+  const requested = String(tab || '').trim().toLowerCase();
+  const legacyTarget = {'added-models':'settings-connected-models','added models':'settings-connected-models','model management':'settings-connected-models',search:'settings-web-search','web search':'settings-web-search',email:'set-email-open-library-settings',mail:'set-email-open-library-settings',logging:'settings-logging-section',logs:'settings-logging-section','advanced logging':'settings-logging-section','deep research':'settings-deep-research'}[requested];
   if (tab) {
     const normalized = normalizeSettingsPanel(tab);
     if (!normalized) { uiModule.showToast('Unknown settings panel: ' + tab); tab = 'ai'; }
@@ -7084,14 +7988,22 @@ export function open(tab, options = {}) {
   }
   // One activation path shared with nav clicks / finder / deep-link.
   activatePanel(activeTab);
+  if (legacyTarget && el(legacyTarget)?.getClientRects().length) el(legacyTarget).scrollIntoView({block:'start'});
   if (options.field) {
     Promise.resolve(window.__agentSettingsReady).then(() => {
       if (options.field.startsWith('reference:')) {
         if (!focusNativeSettingsReference(options.field.slice(10))) uiModule.showToast('Unknown native settings reference');
         return;
       }
-      const field = [...modalEl.querySelectorAll('input,select,textarea')].find(node=>node.dataset.nativeSetting === options.field || node.dataset.uiKey === options.field || node.id === options.field);
-      if (field) focusSettingsControl(field);
+      if (options.field === 'workspace-hex-review') {
+        const workspaceId = getWorkspaceId();
+        if (workspaceId) window.dispatchEvent(new CustomEvent('hex-open', { detail: { workspaceId } }));
+        else uiModule.showToast('Select an authorized workspace first.');
+        return;
+      }
+      const field = el(options.field) || [...modalEl.querySelectorAll('input,select,textarea')]
+        .find(node => node.dataset.nativeSetting === options.field || node.dataset.uiKey === options.field);
+      if (field && !field.closest('[hidden]')) focusSettingsControl(field);
       else uiModule.showToast('This setting is not available: ' + options.field);
     });
   }
@@ -7103,6 +8015,7 @@ export function open(tab, options = {}) {
 export function setCopalModule(copalModule) {
   _copalModule = copalModule;
   syncCopalNotesSettings();
+  _copalAppearanceRefresh?.();
 }
 
 // Files supplies an explicit, owned Workspace ID. Open the surface before
@@ -7121,16 +8034,18 @@ export async function openFileLocationWizard({ suggestedPath = '', showSettings 
   const controller = await import('./fileLocationController.js');
   return controller.openFileLocationWizard({
     suggestedPath,
-    onAdded: async ({ path, agentAccess }) => {
+    onAdded: async ({ path, agentAccess, appAccess }) => {
       if (initialized) await loadFileAccessSettings();
       const status = el('odysseus-file-root-status');
-      if (status) status.textContent = `Added ${path}. Agent access is ${agentAccess ? 'enabled within this Location' : 'off'}.`;
+      if (status) status.textContent = `Added ${path}. ${appAccess ? 'Available in Files and Editor.' : 'Location registered.'} Agent access is ${agentAccess ? 'enabled within this Location' : 'off'}.`;
     },
   });
 }
 
 export function close() {
   if (!modalEl) return;
+  cancelFileAccessRead();
+  modalEl.querySelector('[data-logging-settings]')?._storageHide?.();
   const closeEpoch = cancelPendingSettingsClose();
   // Always clear the appearance-tab body class so the rest of the app
   // doesn't keep its dimmed state if the modal got closed mid-tab.
@@ -7209,7 +8124,7 @@ export function close() {
   window.history.replaceState(null, '', clean);
   function _tryOpen() {
     if (window.settingsModule && typeof window.settingsModule.open === 'function') {
-      window.settingsModule.open(panel);
+      window.settingsModule.open(raw);
     } else {
       setTimeout(_tryOpen, 100);
     }
@@ -7232,7 +8147,13 @@ export function getCommandCatalogEntries() {
     category:'Settings', origin:'host', executor:'settings', scope:'browser-local',
     destination:{panel:'appearance',field:control.dataset.uiKey}, availability:'available',
   }));
-  return panels.concat(presentation, agentSettingsCatalogEntries(), nativeReferenceCatalogEntries());
+  const named = namedSettingsControls().map(control => ({
+    identity: 'setting:' + control.field, token: 'settings ' + control.label.toLowerCase(),
+    aliases: control.aliases, help: control.help, category: 'Settings', origin: 'host', executor: 'settings',
+    scope: SETTINGS_OWNERSHIP[control.panel].scope, destination: {panel: control.panel, field: control.field},
+    availability: control.availability, reason: control.availability === 'unavailable' ? control.help : '',
+  }));
+  return panels.concat(presentation, named, agentSettingsCatalogEntries(), nativeReferenceCatalogEntries());
 }
 
 export function openSettings(name, options = {}) {

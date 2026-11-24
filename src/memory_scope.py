@@ -1,4 +1,4 @@
-"""Canonical frankenmemory scope convention.
+"""Canonical Memery scope convention.
 
 Conversational memory lives in ONE workspace — the engine's own default,
 "global" — no matter which host, session, or filesystem path the turn came

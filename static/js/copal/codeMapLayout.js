@@ -1,11 +1,13 @@
 import {forceSimulation,forceManyBody,forceLink,forceCollide,forceX,forceY} from '../vendor/d3-force-3.0.0.js';
-import { resolveGraphSettings } from './graphSettings.js';
+import { CODE_GRAPH_DISPLAY, resolveGraphSettings } from './graphSettings.js';
 // Deterministic bounded CPU layout, not a GPU simulation or evidence producer.
-const MAX_NODES=2000,MAX_EDGES=5000,MAX_BYTES=4*1024*1024;
+const {nodes:MAX_NODES,edges:MAX_EDGES,sceneBytes:MAX_BYTES}=CODE_GRAPH_DISPLAY;
+const MAX_SYNCHRONOUS_NODES=2000;
 const bytes=v=>new TextEncoder().encode(JSON.stringify(v)).length;
 function need(ok){if(!ok)throw Error('Invalid compact map layout');}
 export function validateLayoutInput(input){
-  need(input&&Object.keys(input).every(k=>['serial','namespace','nodes','edges','previous','anchor','viewport','presentation','settings'].includes(k))&&[7,8,9].includes(Object.keys(input).length)&&(!Object.hasOwn(input,'presentation')||['map','web','gravity'].includes(input.presentation))&&['serial','namespace','nodes','edges','previous','anchor','viewport'].every(k=>Object.hasOwn(input,k)));
+  need(input&&Object.keys(input).every(k=>['serial','namespace','nodes','edges','previous','anchor','viewport','presentation','settings','relayout','pinned'].includes(k))&&[7,8,9,10,11].includes(Object.keys(input).length)&&(!Object.hasOwn(input,'presentation')||['map','web','gravity'].includes(input.presentation))&&['serial','namespace','nodes','edges','previous','anchor','viewport'].every(k=>Object.hasOwn(input,k)));
+  need(!Object.hasOwn(input,'relayout') || (input.presentation === 'gravity' && typeof input.relayout === 'boolean'));
   need(input&&Number.isSafeInteger(input.serial)&&input.serial>0&&typeof input.namespace==='string'&&input.namespace.length<=16384&&bytes(input)<=MAX_BYTES);
   need(Array.isArray(input.nodes)&&input.nodes.length<=MAX_NODES&&Array.isArray(input.edges)&&input.edges.length<=MAX_EDGES&&Array.isArray(input.previous)&&input.previous.length<=MAX_NODES);
   const exact=(v,fields)=>v&&Object.keys(v).length===fields.length&&fields.every(k=>Object.hasOwn(v,k));
@@ -13,10 +15,13 @@ export function validateLayoutInput(input){
   const ids=new Set();for(const n of input.nodes){need(exact(n,['id','parent','kind'])&&typeof n.id==='string'&&n.id.length>0&&n.id.length<=256&&!ids.has(n.id)&&['repository','folder','file','symbol'].includes(n.kind)&&(n.parent===null||typeof n.parent==='string'&&n.parent.length<=256));ids.add(n.id);}
   for(const e of input.edges)need((exact(e,['from','to'])||exact(e,['from','to','relation']))&&ids.has(e.from)&&ids.has(e.to));
   const prior=new Set();for(const p of input.previous){need(exact(p,['id','x','y'])&&ids.has(p.id)&&!prior.has(p.id)&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&Math.abs(p.x)<=1e7&&Math.abs(p.y)<=1e7);prior.add(p.id);}
+  const pins=input.pinned||[];
+  need(Array.isArray(pins)&&pins.length<=64&&new Set(pins).size===pins.length&&pins.every(id=>prior.has(id)));
   need(input.anchor===null||ids.has(input.anchor));return input;
 }
 export function layoutCodeMap(input){
   validateLayoutInput(input);
+  if(input.presentation==='gravity' && input.previous.length && !input.relayout) return settleGravityArrivals(input);
   if(input.presentation&&input.presentation!=='map')return networkLayout(input);
   const nodes=new Map(input.nodes.map(n=>[n.id,n])),children=new Map(),neighbors=new Map(),ranks=new Map();
   for(const id of nodes.keys())neighbors.set(id,[]);
@@ -84,15 +89,175 @@ export function layoutCodeMap(input){
   return {serial:input.serial,namespace:input.namespace,presentation:input.presentation||'map',positions:result,bounds:result.length?{minX:Math.min(...result.map(p=>p.x)),minY:Math.min(...result.map(p=>p.y)),maxX:Math.max(...result.map(p=>p.x)),maxY:Math.max(...result.map(p=>p.y))}:{minX:0,minY:0,maxX:0,maxY:0}};
 }
 
-// Finite presentation geometry only. Springs never create evidence edges.
+// Membership comes from linked containment in the current projection.
+export function codeMapTerritory(id, nodes, {grouping,groupDepth}) {
+  if (grouping === 'free') return null;
+  const folders = [], seen = new Set();
+  let current = nodes.get(id);
+  while (current && !seen.has(current.id) && seen.size < 64) {
+    seen.add(current.id);
+    if (current.kind === 'repository') return grouping === 'workspaces'
+      ? current.id : folders.reverse().slice(0,groupDepth).at(-1) || null;
+    if (current.kind === 'folder') folders.push(current.id);
+    current = nodes.get(current.parent);
+  }
+  return null;
+}
+
+function networkResult(input, points) {
+  const positions = points.map(({id,x,y}) => {
+    need(Number.isFinite(x) && Number.isFinite(y) && Math.abs(x) <= 1e7 && Math.abs(y) <= 1e7);
+    return {id,x,y};
+  });
+  return {serial:input.serial,namespace:input.namespace,presentation:input.presentation,positions,
+    bounds:positions.length?{minX:Math.min(...positions.map(p=>p.x)),minY:Math.min(...positions.map(p=>p.y)),maxX:Math.max(...positions.map(p=>p.x)),maxY:Math.max(...positions.map(p=>p.y))}:{minX:0,minY:0,maxX:0,maxY:0}};
+}
+
+function networkNodeRadius(kind, degree, settings) {
+  const factor = settings.nodeSizeBasis === 'connections'
+    ? 1 + Math.min(2,Math.log2(1 + degree) * .3)
+    : kind === 'repository' ? 1.5 : kind === 'folder' ? 1.3 : 1;
+  return settings.nodeRadius * factor;
+}
+
+function phaseFor(id) {
+  let hash = 2166136261;
+  for (let i = 0; i < id.length; i++) hash = Math.imul(hash ^ id.charCodeAt(i), 16777619);
+  return (hash >>> 0) / 4294967296 * 2 * Math.PI;
+}
+
+// Expand a settled neighborhood in place. Each position reserves room for
+// glyphs and its arrival motion before the next newcomer chooses a slot.
+function settleGravityArrivals(input) {
+  const settings = resolveGraphSettings({common:input.settings || {}}, 'gravity');
+  const nodes = new Map(input.nodes.map(node => [node.id,node]));
+  const ids = [...nodes.keys()].sort();
+  const positioned = new Map(input.previous.map(point => [point.id,point]));
+  if (positioned.size === ids.length) return {...networkResult(input, ids.map(id => positioned.get(id))),arrivals:[]};
+
+  const neighbors = new Map(ids.map(id => [id, new Set()]));
+  const children = new Map(ids.map(id => [id, []]));
+  const degrees = new Map(ids.map(id => [id, 0]));
+  for (const edge of input.edges) {
+    degrees.set(edge.from, degrees.get(edge.from) + 1);
+    degrees.set(edge.to, degrees.get(edge.to) + 1);
+    if (edge.from === edge.to) continue;
+    neighbors.get(edge.from).add(edge.to);
+    neighbors.get(edge.to).add(edge.from);
+  }
+  for (const id of ids) children.get(nodes.get(id).parent)?.push(id);
+  const clearance = settings.collisionPadding + Math.min(45,settings.labelSize * 2);
+  const footprint = new Map(ids.map(id => [id,networkNodeRadius(nodes.get(id).kind,degrees.get(id),settings) + clearance]));
+  const gridStep = Math.max(...footprint.values()) * 2;
+  const cell = (x,y) => `${Math.floor(x / gridStep)},${Math.floor(y / gridStep)}`;
+  const occupied = new Map();
+  function occupy(id, point) {
+    const key = cell(point.x,point.y);
+    if (!occupied.has(key)) occupied.set(key,[]);
+    occupied.get(key).push({...point, radius:footprint.get(id)});
+  }
+  function available(point, radius) {
+    if (Math.abs(point.x) > 1e7 || Math.abs(point.y) > 1e7) return false;
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+      for (const old of occupied.get(cell(point.x + dx * gridStep, point.y + dy * gridStep)) || []) {
+        const distance = radius + old.radius;
+        if ((point.x - old.x) ** 2 + (point.y - old.y) ** 2 < distance ** 2) return false;
+      }
+    }
+    return true;
+  }
+  const membership = new Map(ids.map(id => [id, codeMapTerritory(id,nodes,settings)]));
+  const groupCenters = new Map();
+  const settleCenter = (id, point) => {
+    const group = membership.get(id);
+    const center = groupCenters.get(group) || {x:0,y:0,count:0};
+    center.x += point.x; center.y += point.y; center.count++;
+    groupCenters.set(group,center);
+  };
+  const queue = [...positioned.keys()].sort();
+  const queued = new Set(queue), arrivals = [], orbitCursor = new Map();
+  for (const id of queue) {
+    const point = positioned.get(id);
+    occupy(id,point);
+    settleCenter(id,point);
+  }
+  const roots = ids.filter(id => !nodes.has(nodes.get(id).parent));
+  const fallbackNodes = [...roots, ...ids];
+  const orbitStep = Math.max(gridStep * .8,Math.sqrt(settings.repulsion));
+  let disconnected = 0, fallbackSlot = 0;
+  const origin = positioned.get(roots[0]) || {x:0,y:0};
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  for (let index = 0; index < ids.length; index++) {
+    if (index === queue.length) {
+      while (queued.has(fallbackNodes[disconnected])) disconnected++;
+      const next = fallbackNodes[disconnected++];
+      queue.push(next);
+      queued.add(next);
+    }
+    const id = queue[index], parent = nodes.get(id).parent;
+    const related = [...neighbors.get(id)].sort();
+    if (!positioned.has(id)) {
+      const anchor = positioned.has(parent) ? parent : related.find(candidate => positioned.has(candidate));
+      const group = membership.get(id);
+      const totals = groupCenters.get(group);
+      const center = positioned.get(anchor) || (totals ? {x:totals.x / totals.count,y:totals.y / totals.count} : {x:0,y:0});
+      const radius = footprint.get(id);
+      const orbitKey = anchor || group || null;
+      const start = orbitCursor.get(orbitKey) || 0;
+      const phase = phaseFor(orbitKey || id);
+      const baseDistance = Math.max(gridStep, anchor ? settings.linkDistance * (anchor === parent ? .8 : 1) : settings.clusterSpacing);
+      let point;
+      for (let slot = start; slot < start + 64; slot++) {
+        const distance = Math.hypot(baseDistance,orbitStep * Math.sqrt(slot));
+        const angle = phase + slot * goldenAngle;
+        const candidate = {id,x:center.x + Math.cos(angle) * distance,y:center.y + Math.sin(angle) * distance};
+        if (!available(candidate,radius)) continue;
+        orbitCursor.set(orbitKey,slot + 1);
+        point = candidate;
+        break;
+      }
+      if (!point) orbitCursor.set(orbitKey,start + 64);
+      // Overflow grows around the repository in every direction. One
+      // shared cursor bounds placement work across crowded neighborhoods.
+      while (!point) {
+        need(fallbackSlot <= MAX_NODES * 4 + 1);
+        const slot = ++fallbackSlot;
+        const distance = gridStep * Math.sqrt(slot);
+        const angle = slot * goldenAngle;
+        const candidate = {id,x:origin.x+distance*Math.cos(angle),y:origin.y+distance*Math.sin(angle)};
+        if (available(candidate,radius)) point = candidate;
+      }
+      const distance = Math.hypot(center.x - point.x,center.y - point.y);
+      const motion = distance > 0 ? Math.min(.28,clearance * .65 / distance) : 0;
+      arrivals.push({id,x:point.x + (center.x - point.x) * motion,y:point.y + (center.y - point.y) * motion});
+      positioned.set(id,point);
+      occupy(id,point);
+      settleCenter(id,point);
+    }
+    for (const next of [...children.get(id), parent, ...related]) {
+      if (!nodes.has(next) || queued.has(next)) continue;
+      queued.add(next);
+      queue.push(next);
+    }
+  }
+  const result = {...networkResult(input,ids.map(id => positioned.get(id))),arrivals};
+  // Large projections can settle immediately when optional origins exceed
+  // the same byte budget as the rest of the scene message.
+  return bytes(result)>MAX_BYTES ? {...result,arrivals:[]} : result;
+}
+
+// Finite presentation geometry. Springs never create evidence edges.
 function networkLayout(input){
   const settings=resolveGraphSettings({common:input.settings||{}},input.presentation);
   const ids=input.nodes.map(n=>n.id).sort(),byId=new Map(input.nodes.map(n=>[n.id,n])),prior=new Map(input.previous.map(p=>[p.id,p]));
   const degree=new Map(ids.map(id=>[id,0]));for(const e of input.edges){degree.set(e.from,degree.get(e.from)+1);degree.set(e.to,degree.get(e.to)+1);}
-  const radius=id=>settings.nodeRadius*(settings.nodeSizeBasis==='connections'?1+Math.min(2,Math.log2(1+degree.get(id))*.3):byId.get(id).kind==='repository'?1.5:byId.get(id).kind==='folder'?1.3:1);
-  const groupFor=id=>{if(settings.grouping==='free')return 'all';let n=byId.get(id),chain=[],seen=new Set();while(n&&!seen.has(n.id)){seen.add(n.id);if(n.kind==='folder')chain.unshift(n.id);n=byId.get(n.parent);}return chain.slice(0,settings.groupDepth).at(-1)||'root';};
-  const groupIds=[...new Set(ids.map(groupFor))].sort(),groups=new Map(groupIds.map((id,i)=>[id,{x:(i%Math.ceil(Math.sqrt(groupIds.length)))*settings.clusterSpacing,y:Math.floor(i/Math.ceil(Math.sqrt(groupIds.length)))*settings.clusterSpacing}]));
-  const points=ids.map((id,i)=>{const previous=prior.get(id),g=groups.get(groupFor(id)),angle=i*2.399963229728653,r=20*Math.sqrt(i+1);return {id,x:previous?.x??g.x+Math.cos(angle)*r,y:previous?.y??g.y+Math.sin(angle)*r};});
+  const radius=id=>networkNodeRadius(byId.get(id).kind,degree.get(id),settings);
+  const membership=new Map(ids.map(id=>[id,codeMapTerritory(id,byId,settings)]));
+  const groupIds=[...new Set(membership.values())].filter(Boolean).sort();
+  const columns=Math.max(1,Math.ceil(Math.sqrt(groupIds.length)));
+  const groups=new Map(groupIds.map((id,i)=>[id,{x:(i%columns)*settings.clusterSpacing,y:Math.floor(i/columns)*settings.clusterSpacing}]));
+  const origin={x:0,y:0},center=id=>groups.get(membership.get(id))||origin;
+  const points=ids.map((id,i)=>{const previous=prior.get(id),g=center(id),angle=i*2.399963229728653,r=20*Math.sqrt(i+1);return {id,x:previous?.x??g.x+Math.cos(angle)*r,y:previous?.y??g.y+Math.sin(angle)*r};});
   const links=input.edges.filter(e=>e.from!==e.to).map(e=>({source:e.from,target:e.to,relation:e.relation||'containment'}));
   // Stop the maintained timer immediately. Only this finite worker job ticks;
   // D3 mutates this fresh local geometry, never native nodes or evidence.
@@ -101,14 +266,14 @@ function networkLayout(input){
     .force('charge',forceManyBody().strength(-settings.repulsion).theta(.9))
     .force('links',forceLink(links).id(p=>p.id).distance(e=>settings.linkDistance*(e.relation==='containment'?.8:1)).strength(e=>settings.linkStrength*(e.relation==='containment'?settings.containmentStrength:1)))
     .force('collision',forceCollide(p=>radius(p.id)+settings.collisionPadding+Math.min(45,settings.labelSize*2)).iterations(2))
-    .force('x',forceX(p=>input.presentation==='web'?groups.get(groupFor(p.id)).x:0).strength(input.presentation==='web'?settings.gravity*2:settings.gravity))
-    .force('y',forceY(p=>input.presentation==='web'?groups.get(groupFor(p.id)).y:0).strength(input.presentation==='web'?settings.gravity*2:settings.gravity));
-  if(input.anchor&&prior.has(input.anchor)){const p=points.find(p=>p.id===input.anchor);p.fx=p.x;p.fy=p.y;}
+    .force('x',forceX(p=>center(p.id).x).strength(input.presentation==='web'?settings.gravity*2:settings.gravity))
+    .force('y',forceY(p=>center(p.id).y).strength(input.presentation==='web'?settings.gravity*2:settings.gravity));
+  const pinned=new Set(input.pinned||[]);
+  if(input.anchor&&prior.has(input.anchor))pinned.add(input.anchor);
+  for(const p of points)if(pinned.has(p.id)){p.fx=p.x;p.fy=p.y;}
   for(let step=0;step<settings.iterations;step++){simulation.tick();if(simulation.alpha()<simulation.alphaMin())break;}
   simulation.stop();
-  const positions=points.map(({id,x,y})=>{need(Number.isFinite(x)&&Number.isFinite(y)&&Math.abs(x)<=1e7&&Math.abs(y)<=1e7);return {id,x,y};});
-  return {serial:input.serial,namespace:input.namespace,presentation:input.presentation,positions,
-    bounds:positions.length?{minX:Math.min(...positions.map(p=>p.x)),minY:Math.min(...positions.map(p=>p.y)),maxX:Math.max(...positions.map(p=>p.x)),maxY:Math.max(...positions.map(p=>p.y))}:{minX:0,minY:0,maxX:0,maxY:0}};
+  return networkResult(input,points);
 }
 
 export function createCodeMapLayoutOwner({workerFactory,changed=()=>{}}={}){
@@ -116,7 +281,7 @@ export function createCodeMapLayoutOwner({workerFactory,changed=()=>{}}={}){
   try{worker=workerFactory?.()||null;}catch{worker=null;}
   function dispatch(job){
     if(disposed)return;
-    if(!worker){try{const result=layoutCodeMap(job);if(job.serial===latest&&job.namespace===namespace)changed(result,'main-thread-fallback');}catch{changed(null,'layout-error');}return;}
+    if(!worker){try{if(job.nodes.length>MAX_SYNCHRONOUS_NODES){changed(null,'worker-required');return;}const result=layoutCodeMap(job);if(job.serial===latest&&job.namespace===namespace)changed(result,'main-thread-fallback');}catch{changed(null,'layout-error');}return;}
     inflight=job;try{worker.postMessage(job);}catch{fallback();}
   }
   function fallback(){worker?.terminate();worker=null;const job=pending||inflight;pending=null;inflight=null;if(job&&job.serial===latest)dispatch(job);}

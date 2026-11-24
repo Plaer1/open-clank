@@ -1,0 +1,8 @@
+{
+  "version": "s03.mirror-projection-fixtures.v1",
+  "status": "synthetic_inactive",
+  "records": [
+    {"id":"fact", "text":"Snow is white", "category":"fact", "kind":"fact", "metadata":{}, "source_type":"human"},
+    {"id":"question", "text":"Preferred name?", "category":"unknown", "kind":"unknown", "source_type":"human", "metadata":{"question_context":{"mode":"missing_slot", "target":{"kind":"entity", "id":"handler"}, "predicate":"preferred_name", "claim_slot":"identity.preferred_name"}}}
+  ]
+}

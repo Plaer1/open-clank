@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {createCodeMapModel,validateMapResult,mapRequest,codeMapKey} from '../../static/js/copal/codeMapModel.js';
-const folder=new URL('../../mcp_servers/frankenmemory/crates/fm-core/tests/fixtures/',import.meta.url);
+const folder=new URL('../../native/memery/crates/memery-core/tests/fixtures/',import.meta.url);
 const load=name=>JSON.parse(fs.readFileSync(new URL(name,folder),'utf8'));
 const preview=()=>measure(load('code_map_preview.json'));
 const published=()=>measure(load('code_map_published.json'));

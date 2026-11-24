@@ -35,6 +35,8 @@ class SessionCreateRequest(BaseModel):
 
 
 class MemoryAddRequest(BaseModel):
+    request_key: Optional[str] = Field(default=None, max_length=512)
+    action: str = Field(default="submit", pattern="^(submit|status)$")
     text: str = Field(..., min_length=1, max_length=5000, description="Memory text")
     category: str = Field(default="fact", description="Memory category")
     source: str = Field(default="user", description="Memory source")
@@ -139,6 +141,8 @@ class SessionResponse(BaseModel):
     endpoint_id: Optional[str] = Field(default=None, description="Canonical model endpoint ID")
     rag: bool = Field(default=False, description="RAG enabled")
     archived: bool = Field(default=False, description="Whether session is archived")
+    response_style: str = Field(default="normal")
+    response_style_revision: int = Field(default=0)
     workspace_id: Optional[str] = Field(
         default=None,
         description="Stable Workspace bound to this chat",

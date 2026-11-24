@@ -215,7 +215,7 @@ async function loadUsers() {
           const username = adminToggleBtn.dataset.admToggleAdmin;
           const makeAdmin = adminToggleBtn.dataset.makeAdmin === '1';
           const confirmMsg = makeAdmin
-            ? `Grant admin rights to "${username}"? They'll get full access to all settings and users — including the power to demote or remove other admins (you included).`
+            ? `Grant admin rights to "${username}"? They can manage account settings and other users, including changing administrator roles. Their optional permissions stay the same.`
             : `Revoke admin rights from "${username}"? They'll lose access to the admin panel.`;
           if (!await uiModule.styledConfirm(confirmMsg, { confirmText: makeAdmin ? 'Make admin' : 'Revoke admin', danger: !makeAdmin })) return;
           adminToggleBtn.disabled = true;
@@ -1070,8 +1070,14 @@ async function loadRag() {
           btn.disabled = true; btn.textContent = '...';
           try {
             const res = await checkedFetch('/api/personal/file?filepath=' + encodeURIComponent(btn.dataset.admRagFile), { method: 'DELETE' });
-            if (res.ok) { ragMsg('File removed'); loadRag(); }
-            else { const e = await res.json(); ragMsg(e.detail || 'Failed', true); }
+            const data = await res.json();
+            if (res.ok && data.success !== false) { ragMsg('File removed'); loadRag(); }
+            else {
+              const status = el('adm-ragStatus');
+              status._documentOriginals = [...(status._documentOriginals || []), ...(data.original ? [data.original] : [])].slice(-20);
+              const detail = data.state === 'outcome_unknown' ? 'Removal outcome is unknown.' : (data.detail || 'Removal could not be confirmed.');
+              ragMsg(btn.dataset.admRagFile + ': ' + detail, true, true);
+            }
           } catch (e) { ragMsg('Error: ' + e.message, true); }
         });
       });
@@ -1098,9 +1104,17 @@ async function ragUpload(files) {
   try {
     const res = await checkedFetch('/api/personal/upload', { method: 'POST', body: fd });
     const data = await res.json();
-    if (data.success) { ragMsg(`Uploaded ${data.uploaded.length} file(s), ${data.indexed_count} chunks indexed`); loadRag(); }
-    else ragMsg(data.detail || 'Upload failed', true);
-  } catch (e) { ragMsg('Upload error: ' + e.message, true); }
+    if (res.ok && data.success) { ragMsg(`Uploaded ${data.uploaded.length} file(s), ${data.indexed_count} chunks indexed`); loadRag(); }
+    else {
+      const outcomes = Array.isArray(data.outcomes) ? data.outcomes.filter(item => item && item.state !== 'indexed') : [];
+      const status = el('adm-ragStatus');
+      status._documentOriginals = [...(status._documentOriginals || []), ...outcomes.filter(item => item.original).map(item => item.original)].slice(-20);
+      const details = outcomes.map(item => (item.name || 'File') + ': ' +
+        (item.state === 'outcome_unknown' ? 'indexing outcome unknown' : item.state === 'saved_unindexed' ? 'saved but not indexed' : 'not saved'));
+      ragMsg(details.length ? details.join(' | ') : (data.detail || 'Some files were not indexed.'), true, true);
+      loadRag();
+    }
+  } catch (e) { ragMsg('Upload response unavailable; the outcome may be unknown. ' + e.message, true, true); }
 }
 
 function initRag() {
@@ -1143,6 +1157,8 @@ function initRag() {
 // Catalog mirrors the one in settings.js integration form. Keep keys in
 // sync with the backend scope allowlist.
 const _TOKEN_SCOPES = [
+  { key: 'sessions:read',     label: 'Sessions read',     detail: 'Read your sessions and bounded progress' },
+  { key: 'sessions:write',    label: 'Sessions write',    detail: 'Create sessions and submit actor input' },
   { key: 'todos:read',        label: 'Todos read',        detail: 'Read notes and checklists' },
   { key: 'todos:write',       label: 'Todos write',       detail: 'Create, update, delete, and toggle todo items' },
   { key: 'documents:read',    label: 'Documents read',    detail: 'Read documents when a document API is enabled' },
@@ -1471,7 +1487,7 @@ function initBackup() {
       const blob = await res.blob();
       const disposition = res.headers.get('Content-Disposition') || '';
       const match = disposition.match(/filename=(.+)/);
-      const filename = match ? match[1] : 'odysseus_backup.json';
+      const filename = match ? match[1] : 'openclank_backup.json';
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = filename;

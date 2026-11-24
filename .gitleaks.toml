@@ -37,7 +37,7 @@ targetRules = ["private-key"]
 description = "Deliberately incomplete PEM header used by the no-store test"
 condition = "AND"
 regexTarget = "line"
-paths = ['(^|/)mcp_servers/frankenmemory/crates/fm-core/src/privacy\.rs$']
+paths = ['(^|/)native/memery/crates/memery-core/src/privacy\.rs$']
 regexes = ['(?m)^\s*"-----BEGIN PRIVATE KEY-----\\nabc",\s*$']
 
 [[allowlists]]
@@ -45,7 +45,7 @@ targetRules = ["generic-api-key"]
 description = "Exact fake credentials in redaction behavior tests"
 condition = "AND"
 regexTarget = "secret"
-paths = ['(^|/)packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline\.test\.ts$']
+paths = ['(^|/)packages/mimo-code/packages/cli/test/tool/bash_token_efficient_pipeline\.test\.ts$']
 regexes = ['^(eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjMifQ\.dBjftJeZ4CVPmB92Sg|0123456789abcdef)$']
 
 # Exact upstream test publishable client identifier; public by design.
@@ -353,3 +353,92 @@ condition = "AND"
 regexTarget = "line"
 paths = ["(^|/)static/icons/treehouse-achievements/kit/composition\\.json$"]
 regexes = ["(?m)^\\s*\"key\":\\s*\"k1ec9ef342b87\",\\s*$"]
+
+# Reviewed release findings: match the whole fixture value or exact catalog line.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Exact existing redaction fixture in the upstream package layout"
+regexTarget = "secret"
+paths = ["^packages/mimo\\-code/packages/opencode/test/tool/bash_token_efficient_pipeline\\.test\\.ts$"]
+regexes = ["^0123456789abcdef$", "^eyJhbGciOiJIUzI1NiJ9\\.eyJzdWIiOiIxMjMifQ\\.dBjftJeZ4CVPmB92Sg$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Prefix for derived scheduler deduplication identifiers"
+regexTarget = "secret"
+paths = ["^src/task_scheduler\\.py$"]
+regexes = ["^s04pairrebind_$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Private Cookbook record namespace (dictionary key)"
+regexTarget = "secret"
+paths = ["^src/openclank/cookbook_state\\.py$"]
+regexes = ["^_pinned_acquisitions_v1$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Recorded SHA-256 checksum of the vendored source"
+regexTarget = "secret"
+paths = ["^packages/openclank\\-history/vendor\\-provenance\\.json$"]
+regexes = ["^c2d7f81b2d9d3c698f1854e8b32fba06c2b168b493bdae553f1c669a777baa4c$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Synthetic Markdown export omission fixture"
+regexTarget = "secret"
+paths = ["^tests/test_markdown_export_route\\.py$"]
+regexes = ["^abcdef123456789$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Synthetic computer-control redaction fixture"
+regexTarget = "secret"
+paths = ["^tests/test_computer_control_tool\\.py$"]
+regexes = ["^hunter2\\-SECRET\\-phrase$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Synthetic occupancy idempotency identifier"
+regexTarget = "secret"
+paths = ["^tests/test_s05_shadow_occupancy\\.py$"]
+regexes = ["^idempotency\\-key\\-123$", "^idempotency\\-key\\-456$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Synthetic search idempotency identifier"
+regexTarget = "secret"
+paths = ["^packages/mimo\\-code/packages/cli/test/acp/managed\\-search\\-contract\\.test\\.ts$", "^packages/mimo\\-code/packages/opencode/test/acp/managed\\-search\\-contract\\.test\\.ts$", "^tests/test_managed_search_contract\\.py$"]
+regexes = ["^idempotency\\-key\\-1$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Test-only revision replay identifier"
+regexTarget = "secret"
+paths = ["^native/memery/crates/memery\\-core/src/store/sqlite/knowledge_update_batch\\.rs$"]
+regexes = ["^f1_stale_test_abcdefghijklmnop$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Exact built-in UI labels for plan keys and token counts"
+regexTarget = "line"
+paths = ["^static/i18n/ar\\.json$", "^static/i18n/bg\\.json$", "^static/i18n/bn\\.json$", "^static/i18n/bs\\.json$", "^static/i18n/cs\\.json$", "^static/i18n/da\\.json$", "^static/i18n/de\\.json$", "^static/i18n/el\\.json$", "^static/i18n/en\\.json$", "^static/i18n/es\\-419\\.json$", "^static/i18n/es\\.json$", "^static/i18n/fa\\.json$", "^static/i18n/fi\\.json$", "^static/i18n/fr\\.json$", "^static/i18n/hi\\.json$", "^static/i18n/hr\\.json$", "^static/i18n/hu\\.json$", "^static/i18n/id\\.json$", "^static/i18n/it\\.json$", "^static/i18n/ko\\.json$", "^static/i18n/ms\\.json$", "^static/i18n/nl\\.json$", "^static/i18n/no\\.json$", "^static/i18n/pa\\-Guru\\.json$", "^static/i18n/pl\\.json$", "^static/i18n/pt\\-BR\\.json$", "^static/i18n/pt\\.json$", "^static/i18n/ro\\.json$", "^static/i18n/ru\\.json$", "^static/i18n/sv\\.json$", "^static/i18n/sw\\.json$", "^static/i18n/th\\.json$", "^static/i18n/tr\\.json$", "^static/i18n/uk\\.json$", "^static/i18n/ur\\.json$", "^static/i18n/vi\\.json$", "^static/i18n/zh\\-Hans\\.json$", "^static/i18n/zh\\-Hant\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.choose\\.768\\.to\\.24\\.000\\.tokens\":\\ \"Choose\\ 768\\ to\\ 24,000\\ tokens\\.\",?$", "(?m)^\\s*\"ui\\.kimi\\.code\\.plan\\.key\":\\ \"Kimi\\ Code\\ plan\\ key\",?$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+description = "Exact Spanish UI token-range label"
+regexTarget = "line"
+paths = ["^static/i18n/es(?:-419)?\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.choose\\.768\\.to\\.24\\.000\\.tokens\":\\ \"Elige\\ entre\\ 768\\ y\\ 24\\ 000\\ tokens\\.\",?$"]

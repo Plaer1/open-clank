@@ -95,16 +95,12 @@
   function highlight(el) {
     if (!el) return;
     if (engine) paint(el);
-    else if (!failed) queue.add(el);
+    else if (!failed && langOf(el)) { queue.add(el); ensureEngine(); }
   }
 
   function highlightAll(root) {
     if (!root) return;
-    if (!engine) {
-      if (!failed) root.querySelectorAll('pre code:not([data-hl-done])').forEach(el => queue.add(el));
-      return;
-    }
-    root.querySelectorAll('pre code:not([data-hl-done])').forEach(paint);
+    root.querySelectorAll('pre code:not([data-hl-done])').forEach(highlight);
   }
 
   // Debounced painter for the streaming open-fence path: hands back a stable
@@ -137,7 +133,8 @@
       paint(codeEl, source) {
         pendingArgs = [codeEl, source];
         if (!engine) {
-          if (!failed) painterQueue.add(run);
+          if (!failed && langOf(codeEl)) { painterQueue.add(run); ensureEngine(); }
+          else run();
           return;
         }
         if (timer === null) timer = setTimeout(run, interval);
@@ -205,30 +202,25 @@
     painters.forEach(run => run());
   }
 
-  const ready = new Promise((resolve) => {
-    const deadline = setTimeout(() => { failed = true; releasePlain(); resolve(false); }, 4000);
-    const settle = value => { clearTimeout(deadline); resolve(value); };
-    const api = window.__odysseusShiki;
-    if (!api || !api.ready) {
-      failed = true;
-      releasePlain();
-      console.warn('highlighter: shiki bundle missing; code renders plain');
-      settle(false);
-      return;
+  let loading;
+  function ensureEngine() {
+    if (!loading) {
+      loading = import('./loadClassicScript.js')
+        .then(({loadClassicScript}) => loadClassicScript('/static/lib/shiki.bundle.js?v=20260815shiki1'))
+        .then(() => window.__odysseusShiki.ready)
+        .then(highlighter => {
+          engine = highlighter;
+          flush();
+          return true;
+        }).catch(error => {
+          failed = true;
+          releasePlain();
+          console.warn('Syntax highlighting unavailable:', error);
+          return false;
+        });
     }
-    api.ready
-      .then((h) => {
-        engine = h;
-        flush();
-        failed = false; settle(true);
-      })
-      .catch((err) => {
-        failed = true;
-        releasePlain();
-        console.warn('highlighter: shiki failed to initialize', err);
-        settle(false);
-      });
-  });
+    return loading;
+  }
 
   const visibleTasks = new WeakMap();
   const blockObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
@@ -262,7 +254,7 @@
       // Includes queued/never-mounted work: no retained observer can conceal
       // or hold a discarded block forever. This is a failure bound, not a delay.
       const deadline = setTimeout(() => settle(false), 4000);
-      (engine ? Promise.resolve(true) : ready).then(available => {
+      (engine ? Promise.resolve(true) : ensureEngine()).then(available => {
         if (finished) return;
         if (!available || failed) { settle(false); return; }
         const run = () => { if (finished) return; if (el.isConnected) paint(el); settle(el.dataset.hlDone === '1'); };
@@ -278,6 +270,6 @@
     createStreamingPainter,
     detect,
     codeHtml: (code, lang) => codeHtml(code, lang),
-    ready,
+    get ready() { return ensureEngine(); },
   };
 })();

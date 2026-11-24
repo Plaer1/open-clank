@@ -1,3 +1,4 @@
+import { bindCardActionMenu } from './cardActionMenu.js';
 import { uiIcon } from './uiIcons.js';
 /**
  * emailLibrary.js — Email library popup modal.
@@ -1763,9 +1764,9 @@ function _rememberedEmailAccountId() {
 // results and __scheduled__ are deliberately not cached.
 const _libListCache = new Map();
 const _LIB_CACHE_MAX = 24;
-const _LIB_SESSION_CACHE_PREFIX = 'odysseus.email.list.';
+const _LIB_SESSION_CACHE_PREFIX = 'openclank.email.list.';
 const _LIB_SESSION_CACHE_TTL_MS = 10 * 60 * 1000;
-const _LIB_LAST_ACCOUNT_KEY = 'odysseus.email.lastAccountId';
+const _LIB_LAST_ACCOUNT_KEY = 'openclank.email.lastAccountId';
 let _libPrewarmTimer = null;
 let _libPrewarmPromise = null;
 let _libLastPrewarmAt = 0;
@@ -2159,10 +2160,6 @@ export async function prewarmUnreadEmails({ limit = 8, maxUid = 0 } = {}) {
   } catch (_) {}
 }
 
-function _sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 async function _prewarmEmailViews() {
   if (state._libOpen) return;
   _libLastPrewarmAt = Date.now();
@@ -2193,45 +2190,37 @@ async function _prewarmEmailViews() {
     state._libAccountId = preferred;
     _publishActiveAccount();
   }
-  const orderedAccountIds = [
-    preferred,
-    ...accounts.map(a => a.id).filter(id => id && id !== preferred),
-  ].filter((id, idx, arr) => arr.indexOf(id) === idx);
-  if (!orderedAccountIds.length) orderedAccountIds.push('');
-
   try {
-    for (const accountId of orderedAccountIds.slice(0, 4)) {
-      if (state._libOpen) return;
-      const ck = _libCacheKeyFor(accountId, folder, filter, false);
-      if (_libCacheGet(ck)) continue;
-      await fetch(emailApiUrl('/api/email/folders', { account_id: accountId || undefined }), { credentials: 'same-origin' }).catch(() => null);
-      await fetch(emailApiUrl('/api/email/unread-state', { folder, account_id: accountId || undefined }), { credentials: 'same-origin' }).catch(() => null);
-      const res = await fetch(emailApiUrl('/api/email/list', {
-        folder,
-        limit: 100,
-        offset: 0,
-        filter,
-        account_id: accountId || undefined,
-      }), {
-        credentials: 'same-origin',
-      });
-      if (res.ok) {
-        const data = await res.json().catch(() => null);
-        if (data && !data.error) {
-          const sync = data.sync || {};
-          _libCachePut(ck, {
-            emails: data.emails || [],
-            total: data.total || 0,
-            sync,
-          });
-          _setEmailSyncStatus({
-            updatedAt: sync.updated_at || new Date().toISOString(),
-            source: sync.source || '',
-            warming: true,
-          });
-        }
+    if (state._libOpen) return;
+    const accountId = preferred;
+    const ck = _libCacheKeyFor(accountId, folder, filter, false);
+    if (_libCacheGet(ck)) return;
+    await fetch(emailApiUrl('/api/email/folders', { account_id: accountId || undefined }), { credentials: 'same-origin' }).catch(() => null);
+    await fetch(emailApiUrl('/api/email/unread-state', { folder, account_id: accountId || undefined }), { credentials: 'same-origin' }).catch(() => null);
+    const res = await fetch(emailApiUrl('/api/email/list', {
+      folder,
+      limit: 100,
+      offset: 0,
+      filter,
+      account_id: accountId || undefined,
+    }), {
+      credentials: 'same-origin',
+    });
+    if (res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data && !data.error) {
+        const sync = data.sync || {};
+        _libCachePut(ck, {
+          emails: data.emails || [],
+          total: data.total || 0,
+          sync,
+        });
+        _setEmailSyncStatus({
+          updatedAt: sync.updated_at || new Date().toISOString(),
+          source: sync.source || '',
+          warming: true,
+        });
       }
-      await _sleep(900);
     }
   } finally {
     _setEmailSyncStatus({ warming: false });
@@ -2601,7 +2590,7 @@ export function openEmailLibrary(opts = {}) {
     tagsToggle.setAttribute('aria-pressed', String(!!state._libShowTags));
     tagsToggle.addEventListener('click', () => {
       state._libShowTags = !state._libShowTags;
-      localStorage.setItem('odysseus.email.showTags', state._libShowTags ? '1' : '0');
+      localStorage.setItem('openclank.email.showTags', state._libShowTags ? '1' : '0');
       tagsToggle.classList.toggle('active', !!state._libShowTags);
       tagsToggle.setAttribute('aria-pressed', String(!!state._libShowTags));
       _renderGrid();
@@ -5044,41 +5033,22 @@ function _createCard(em) {
     menuBtn.style.position = 'relative';
     menuBtn.style.top = '-1px';
     menuBtn.innerHTML = uiIcon("more", 14);
-    menuBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      _showCardMenu(em, menuBtn);
+    const folder = state._libFolder;
+    const account = state._libAccountId;
+    bindCardActionMenu(card, {
+      button: menuBtn,
+      current: () => !state._selectMode && state._libFolder === folder && state._libAccountId === account,
+      allowGesture: () => !card.classList.contains('email-card-expanded') && !card.classList.contains('doclib-card-expanded'),
+      exclude: '.email-card-done, .recipient-chip, .memory-select-cb, .email-card-nav-btn',
+      items: valid => _cardEmailActions(em, card, folder, valid),
     });
     actionsWrap.appendChild(menuBtn);
     card.appendChild(actionsWrap);
 
-    // Long-press anywhere on the row opens the same actions menu — matches
-    // the chats / archive / research / documents tabs' long-press UX.
-    let _hold = null, _holdStart = null;
-    const _cancelHold = () => { if (_hold) { clearTimeout(_hold); _hold = null; } _holdStart = null; };
-    card.addEventListener('pointerdown', (e) => {
-      if (card.classList.contains('email-card-expanded') || card.classList.contains('doclib-card-expanded')) return;
-      if (e.target.closest('button, .email-card-done, .recipient-chip, .memory-select-cb, .email-card-nav-btn')) return;
-      _holdStart = { x: e.clientX, y: e.clientY };
-      _hold = setTimeout(() => {
-        _hold = null;
-        if (card.classList.contains('email-card-expanded') || card.classList.contains('doclib-card-expanded')) return;
-        card._suppressNextClick = true;
-        setTimeout(() => { card._suppressNextClick = false; }, 400);
-        if (navigator.vibrate) try { navigator.vibrate(15); } catch {}
-        _showCardMenu(em, menuBtn);
-      }, 500);
-    });
-    card.addEventListener('pointermove', (e) => {
-      if (!_holdStart) return;
-      if (Math.hypot(e.clientX - _holdStart.x, e.clientY - _holdStart.y) > 10) _cancelHold();
-    });
-    card.addEventListener('pointerup', _cancelHold);
-    card.addEventListener('pointercancel', _cancelHold);
   }
 
   // Click handler — toggle preview expansion
   card.addEventListener('click', async (e) => {
-    if (card._suppressNextClick) { card._suppressNextClick = false; return; }
     if (state._selectMode) {
       if (state._selectedUids.has(em.uid)) state._selectedUids.delete(em.uid);
       else state._selectedUids.add(em.uid);
@@ -5461,7 +5431,7 @@ async function _toggleCardPreview(card, em) {
 // occasionally splits a single reply into two bogus "turns" by treating a
 // signature/disclaimer as its own message), the user can flip this off to
 // fall back to plain rendering. Survives reloads.
-const _BUBBLES_DISABLED_KEY = 'odysseus.email.bubblesDisabled';
+const _BUBBLES_DISABLED_KEY = 'openclank.email.bubblesDisabled';
 // Threaded chat-bubble email view is DISABLED for now — too buggy to
 // ship. Force plain-text rendering everywhere by always returning true.
 // Re-enable by restoring the localStorage-backed body + the toggle
@@ -6243,7 +6213,7 @@ function _foldQuotedReplies(html) {
 // Global preference: AI summary panels stay collapsed across every email
 // once the user folds one, and stay expanded once they unfold. Stored in
 // localStorage so the choice survives reloads.
-const _SUMMARY_COLLAPSED_KEY = 'odysseus.email.summaryCollapsed';
+const _SUMMARY_COLLAPSED_KEY = 'openclank.email.summaryCollapsed';
 function _summaryCollapsedPref() {
   try { return localStorage.getItem(_SUMMARY_COLLAPSED_KEY) === '1'; } catch { return false; }
 }
@@ -6676,6 +6646,11 @@ function _allocReaderSlot(modalId) {
 }
 function _freeReaderSlot(modalId) {
   _emailReaderSlots.delete(modalId);
+  if (!_emailReaderSlots.size) {
+    _emailDockObserver?.disconnect();
+    _emailShellObserver?.disconnect();
+    _emailDockObserver = _emailShellObserver = null;
+  }
 }
 
 // JS-driven gate: sets [data-email-tabs="N"] on <body> so CSS can show
@@ -6701,41 +6676,27 @@ function _syncEmailTabBadge() {
     if (slot) chip.dataset.tabNum = String(slot);
   });
 }
-let _emailTabObserverWired = false;
-let _badgeSyncScheduled = false;
+let _emailDockObserver = null;
+let _emailShellObserver = null;
 function _ensureEmailTabObserver() {
-  if (_emailTabObserverWired) return;
-  _emailTabObserverWired = true;
-  // Debounce so a burst of mutations (e.g. _renderDock rebuilding the
-  // whole dock in one pass) collapses to a single sync per animation
-  // frame. Without this the chip badge could flicker as the observer
-  // fires repeatedly during dock rerenders.
-  const handler = () => {
-    if (_badgeSyncScheduled) return;
-    _badgeSyncScheduled = true;
-    requestAnimationFrame(() => {
-      _badgeSyncScheduled = false;
-      _syncEmailTabBadge();
-    });
+  if (_emailShellObserver) return;
+  // Reader chips can be direct body children or live inside the dock.
+  // Their numbering depends only on chip membership, never inbox grid state.
+  let dock = null;
+  const connectDock = () => {
+    const current = document.getElementById('minimized-dock');
+    if (current === dock) return;
+    _emailDockObserver.disconnect();
+    dock = current;
+    if (dock) _emailDockObserver.observe(dock, {childList:true});
   };
-  const tryWire = () => {
-    const dock = document.getElementById('minimized-dock');
-    if (!dock) { setTimeout(tryWire, 200); return; }
-    // Only watch what we care about: chip add/remove in the dock.
-    const obs = new MutationObserver(handler);
-    obs.observe(dock, { childList: true });
-    // Watch the library grid so toggling a card expanded/collapsed
-    // updates the lib chip's "has-expanded" badge in real time.
-    const wireGridObs = () => {
-      const grid = document.getElementById('email-lib-grid');
-      if (!grid) { setTimeout(wireGridObs, 500); return; }
-      const gridObs = new MutationObserver(handler);
-      gridObs.observe(grid, { subtree: true, attributes: true, attributeFilter: ['class'] });
-    };
-    wireGridObs();
-    handler();
-  };
-  tryWire();
+  _emailDockObserver = new MutationObserver(_syncEmailTabBadge);
+  _emailShellObserver = new MutationObserver(() => {
+    connectDock();
+    _syncEmailTabBadge();
+  });
+  _emailShellObserver.observe(document.body, {childList:true});
+  connectDock();
 }
 // Hybrid model:
 //   - email-lib-modal (the inbox library) is unique. Its chip just
@@ -7660,56 +7621,36 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
   }, (ev) => !dropdown.contains(ev.target) && ev.target !== anchor);
 }
 
-function _showCardMenu(em, anchor) {
-  document.querySelectorAll('.email-card-dropdown').forEach(dismissOrRemove);
-
-  const dropdown = document.createElement('div');
-  dropdown.className = 'email-card-dropdown';
-  const rect = anchor.getBoundingClientRect();
-  dropdown.style.cssText = `position:fixed;z-index:${topPortalZ()};min-width:140px;background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3);padding:4px;font-size:12px;top:${rect.bottom + 4}px;right:${window.innerWidth - rect.right}px;`;
-
-  const _icon = (svg) => `<span class="dropdown-icon">${svg}</span>`;
-  const _replyIcon = uiIcon("reply", 14);
-  const _archIcon = uiIcon("archive", 14);
-  const _delIcon = uiIcon("trash", 14);
-  const _unreadIcon = uiIcon("select", 14);
-  const _checkIcon = uiIcon("check", 14, {"role":"success"});
-  const _cardBellIcon = uiIcon("bell", 14);
-
-  const isSentFolder = /sent/i.test(state._libFolder);
-
-  const _newTabIcon = uiIcon("external", 14);
+function _cardEmailActions(em, card, folder, valid) {
+  const params = `?folder=${encodeURIComponent(folder)}${_acct()}`;
   const actions = [
-    { label: 'Open', icon: _replyIcon, action: async () => {
+    { id: 'open', label: 'Open', icon: 'external', run: async () => {
       // Just expand inline (same as tapping the row).
-      const card = anchor.closest('.doclib-card');
       if (card && !card.classList.contains('doclib-card-expanded')) {
         await _toggleCardPreview(card, em);
       }
     }},
-    { label: 'Open in new tab', icon: _newTabIcon, action: async () => {
+    { id: 'new-tab', label: 'Open in new tab', icon: 'external', run: async () => {
       // Open this email as its own in-app modal that registers a dock
       // chip — multiple emails can be opened simultaneously, each gets
       // its own chip in the minimized dock.
-      const folder = state._libFolder || 'INBOX';
-      await _openEmailAsTab(em, folder);
+      await _openEmailAsTab(em, folder || 'INBOX');
     }},
-    { label: 'Remind to reply', icon: _cardBellIcon, submenu: 'remind' },
+    ..._emailReminderActions(em, valid),
   ];
 
-  if (!isSentFolder) {
+  if (!/sent/i.test(folder)) {
     // Source of truth = the visible "active" class on the card's done
     // check, so the menu label and the actual toggle behaviour can't
     // disagree with what the user sees.
-    const _cardForLabel = anchor.closest('.doclib-card');
-    const _checkForLabel = _cardForLabel ? _cardForLabel.querySelector('.email-card-done') : null;
+    const _checkForLabel = card.querySelector('.email-card-done');
     const _currentlyDone = _checkForLabel ? _checkForLabel.classList.contains('active') : !!em.is_answered;
     actions.push({
+      id: 'done',
       label: _currentlyDone ? 'Not Done' : 'Done',
-      icon: _checkIcon,
-      action: async () => {
-        const card = anchor.closest('.doclib-card');
-        const check = card ? card.querySelector('.email-card-done') : null;
+      icon: 'check',
+      run: async () => {
+        const check = card.querySelector('.email-card-done');
         const wasActive = check ? check.classList.contains('active') : !!em.is_answered;
         const newState = !wasActive;
         em.is_answered = newState;
@@ -7719,13 +7660,14 @@ function _showCardMenu(em, anchor) {
         }
         try {
           if (newState) {
-            await fetch(`${API_BASE}/api/email/mark-answered/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-            await fetch(`${API_BASE}/api/email/mark-read/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+            await fetch(`${API_BASE}/api/email/mark-answered/${em.uid}${params}`, { method: 'POST' });
+            if (!valid()) return;
+            await fetch(`${API_BASE}/api/email/mark-read/${em.uid}${params}`, { method: 'POST' });
           } else {
-            await fetch(`${API_BASE}/api/email/clear-answered/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+            await fetch(`${API_BASE}/api/email/clear-answered/${em.uid}${params}`, { method: 'POST' });
           }
         } catch (e) { console.error('Failed to toggle done:', e); }
-        if (card) {
+        if (valid()) {
           if (check) check.classList.toggle('active', newState);
           if (newState) {
             _syncEmailReadState(em.uid, true);
@@ -7734,137 +7676,62 @@ function _showCardMenu(em, anchor) {
         }
       },
     });
-    actions.push({
-      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
-      icon: uiIcon(em.is_flagged ? 'bookmark-filled' : 'bookmark', 14),
-      action: async () => {
-        const next = !em.is_flagged;
-        em.is_flagged = next;
-        _renderGrid();
-        try {
-          await fetch(`${API_BASE}/api/email/flag/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
-        } catch (e) {
-          em.is_flagged = !next;
-          _renderGrid();
-          console.error('Failed to toggle favorite:', e);
-        }
-      },
-    });
-    actions.push({
-      label: 'Archive',
-      icon: _archIcon,
-      action: async () => {
-        await fetch(`${API_BASE}/api/email/archive/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-        await _animateEmailCardRemoval([em.uid]);
-        state._libEmails = state._libEmails.filter(e => String(e.uid) !== String(em.uid));
-        _renderGrid();
-        _libCacheWriteBack();
-      },
-    });
-  } else {
-    actions.push({
-      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
-      icon: uiIcon(em.is_flagged ? 'bookmark-filled' : 'bookmark', 14),
-      action: async () => {
-        const next = !em.is_flagged;
-        em.is_flagged = next;
-        _renderGrid();
-        try {
-          await fetch(`${API_BASE}/api/email/flag/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
-        } catch (e) {
-          em.is_flagged = !next;
-          _renderGrid();
-          console.error('Failed to toggle favorite:', e);
-        }
-      },
-    });
-    actions.push({
-      label: 'Archive',
-      icon: _archIcon,
-      action: async () => {
-        await fetch(`${API_BASE}/api/email/archive/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-        await _animateEmailCardRemoval([em.uid]);
-        state._libEmails = state._libEmails.filter(e => String(e.uid) !== String(em.uid));
-        _renderGrid();
-        _libCacheWriteBack();
-      },
-    });
   }
 
-  // "Select" — switch to multi-select mode with THIS email pre-selected so
-  // the user can quickly fan-out to neighbours with the bulk bar.
-  // Match the chat-sidebar Select icon — a thick bullet character reads
-  // much heavier than a small SVG circle. Nudged up 2px so its visual
-  // center lines up with the SVG icons above (which sit a bit higher).
-  const _selectIcon = '<span style="font-size:16px;line-height:1;position:relative;top:-2px;">●</span>';
-  actions.push({
-    label: 'Select',
-    icon: _selectIcon,
-    action: () => {
+  actions.push(
+    { id: 'favorite', label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
+      icon: em.is_flagged ? 'bookmark-filled' : 'bookmark', run: async () => {
+        const next = !em.is_flagged;
+        em.is_flagged = next;
+        _renderGrid();
+        try {
+          await fetch(`${API_BASE}/api/email/flag/${em.uid}${params}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
+        } catch (error) {
+          em.is_flagged = !next;
+          if (state._libFolder === folder && state._libEmails.includes(em)) _renderGrid();
+          console.error('Failed to toggle favorite:', error);
+        }
+      } },
+    { id: 'archive', label: 'Archive', icon: 'archive', run: async () => {
+      await fetch(`${API_BASE}/api/email/archive/${em.uid}${params}`, { method: 'POST' });
+      if (!valid()) return;
+      await _animateEmailCardRemoval([em.uid]);
+      if (!valid()) return;
+      state._libEmails = state._libEmails.filter(e => String(e.uid) !== String(em.uid));
+      _renderGrid();
+      _libCacheWriteBack();
+    } },
+    { id: 'select', label: 'Select', icon: 'select', run: () => {
       state._selectMode = true;
       state._selectedUids.add(em.uid);
       _updateBulkBar();
       _renderGrid();
-    },
-  });
-
-  actions.push(
-    { label: 'Delete', icon: _delIcon, danger: true, action: async () => {
+    } },
+    { separator: true },
+    { id: 'delete', label: 'Delete', icon: 'trash', destructive: true, dialog: true, run: async () => {
       const subject = em.subject || '(no subject)';
       const ok = await styledConfirm(`Delete "${subject}"?`, { confirmText: 'Delete', cancelText: 'Cancel', danger: true });
-      if (!ok) return;
-      const card = document.querySelector(`#email-lib-grid .doclib-card[data-uid="${CSS.escape(String(em.uid))}"]`);
+      if (!ok || !valid()) return;
       const busy = _showEmailDeleteOverlay(card);
       await busy?.ready;
       try {
-        await fetch(`${API_BASE}/api/email/delete/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
-      } catch (e) {
-        busy?.remove?.();
+        if (!valid()) return;
+        await fetch(`${API_BASE}/api/email/delete/${em.uid}${params}`, { method: 'DELETE' });
+      } catch (error) {
         showToast('Failed to delete email');
-        throw e;
+        throw error;
+      } finally {
+        busy?.remove?.();
       }
-      busy?.remove?.();
+      if (!valid()) return;
       await _animateEmailCardRemoval([em.uid]);
+      if (!valid()) return;
       state._libEmails = state._libEmails.filter(e => String(e.uid) !== String(em.uid));
       _renderGrid();
       _libCacheWriteBack();
-    }},
+    } },
   );
-
-  for (const a of actions) {
-    const item = document.createElement('div');
-    item.className = 'dropdown-item-compact' + (a.danger ? ' dropdown-item-danger' : '');
-    const arrow = a.submenu ? '<span style="margin-left:auto;opacity:0.5;">›</span>' : '';
-    item.innerHTML = _icon(a.icon) + `<span>${a.label}</span>${arrow}`;
-    item.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (a.submenu === 'remind') {
-        _showLibRemindSubmenu(em, dropdown);
-        return;
-      }
-      close();
-      a.action();
-    });
-    dropdown.appendChild(item);
-  }
-  // Mobile-only Cancel item — explicit close for touch users. CSS hides it
-  // on desktop where outside-click already dismisses cleanly.
-  const _cancelIco = uiIcon("close", 14);
-  const cancelItem = document.createElement('div');
-  cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
-  cancelItem.innerHTML = _icon(_cancelIco) + '<span>Cancel</span>';
-  cancelItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    close();
-  });
-  dropdown.appendChild(cancelItem);
-
-  document.body.appendChild(dropdown);
-  _fitEmailDropdown(dropdown, rect);
-  const close = bindMenuDismiss(dropdown, () => {
-    dropdown.remove();
-    anchor.classList.remove('reader-more-active');
-  }, (ev) => !dropdown.contains(ev.target) && ev.target !== anchor);
+  return actions;
 }
 
 // Bulk "Actions" dropdown for select mode — Delete is a separate visible button.
@@ -8324,15 +8191,8 @@ function _showEmailTranslateSubmenu(reader, parentDropdown) {
   }
 }
 
-// ---- Reminder submenu (used by both email menus) ----
-function _showLibRemindSubmenu(em, parentDropdown) {
-  parentDropdown.innerHTML = '';
-  const header = document.createElement('div');
-  header.className = 'dropdown-item-compact';
-  header.style.cssText = 'opacity:0.5;font-size:10px;pointer-events:none;text-transform:uppercase;letter-spacing:0.5px;padding-top:6px;';
-  header.innerHTML = '<span>Remind me</span>';
-  parentDropdown.appendChild(header);
-
+// ---- Reply reminders ----
+function _emailReminderActions(em, valid = () => true) {
   const now = new Date();
   const laterToday = new Date(now);
   const sixPm = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 18, 0);
@@ -8343,57 +8203,62 @@ function _showLibRemindSubmenu(em, parentDropdown) {
   const nextWeek = new Date(now); nextWeek.setDate(now.getDate()+daysUntilMon); nextWeek.setHours(8,0,0,0);
 
   const presets = [
-    { label: 'Later today', sub: laterToday.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }), date: laterToday },
-    { label: 'Tomorrow', sub: tomorrow.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }), date: tomorrow },
-    { label: 'Next week', sub: nextWeek.toLocaleDateString([], { weekday:'short' }) + ' ' + nextWeek.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }), date: nextWeek },
+    { id: 'later-today', label: 'Later today', sub: laterToday.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }), date: laterToday },
+    { id: 'tomorrow', label: 'Tomorrow', sub: tomorrow.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }), date: tomorrow },
+    { id: 'next-week', label: 'Next week', sub: nextWeek.toLocaleDateString([], { weekday:'short' }) + ' ' + nextWeek.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }), date: nextWeek },
   ];
-  for (const p of presets) {
+  const menu = 'Remind to reply';
+  return [
+    ...presets.map(p => ({ id: p.id, label: p.label, shortcut: p.sub, menu, run: () => _createEmailReplyReminder(em, p.date) })),
+    { id: 'custom-date', label: 'Pick date and time', menu, dialog: true, run: () => _pickEmailReminderDate(em, tomorrow, valid) },
+    { id: 'note', label: 'Note', menu, dialog: true, run: () => _promptEmailNote(em, valid) },
+  ];
+}
+
+function _pickEmailReminderDate(em, tomorrow, valid) {
+  const tmp = document.createElement('input');
+  tmp.type = 'datetime-local';
+  const def = tomorrow;
+  const pad = n => String(n).padStart(2,'0');
+  tmp.value = `${def.getFullYear()}-${pad(def.getMonth()+1)}-${pad(def.getDate())}T${pad(def.getHours())}:${pad(def.getMinutes())}`;
+  tmp.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:99999;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:13px;';
+  document.body.appendChild(tmp);
+  tmp.focus();
+  if (typeof tmp.showPicker === 'function') { try { tmp.showPicker(); } catch {} }
+  tmp.addEventListener('change', async () => {
+    if (tmp.value && valid()) await _createEmailReplyReminder(em, new Date(tmp.value));
+    tmp.remove();
+  });
+  tmp.addEventListener('blur', () => setTimeout(() => tmp.remove(), 200));
+}
+
+function _showLibRemindSubmenu(em, parentDropdown) {
+  parentDropdown.replaceChildren();
+  const header = document.createElement('div');
+  header.className = 'dropdown-item-compact';
+  header.style.cssText = 'opacity:0.5;font-size:10px;pointer-events:none;text-transform:uppercase;letter-spacing:0.5px;padding-top:6px;';
+  header.textContent = 'Remind me';
+  parentDropdown.appendChild(header);
+  for (const action of _emailReminderActions(em)) {
     const item = document.createElement('div');
     item.className = 'dropdown-item-compact';
-    item.innerHTML = `<span>${p.label}</span><span style="margin-left:auto;opacity:0.5;font-size:10px;">${p.sub}</span>`;
-    item.addEventListener('click', async (e) => {
+    item.textContent = action.dialog ? action.label + '…' : action.label;
+    if (action.shortcut) {
+      const time = document.createElement('span');
+      time.style.cssText = 'margin-left:auto;opacity:0.5;font-size:10px;';
+      time.textContent = action.shortcut;
+      item.appendChild(time);
+    }
+    item.addEventListener('click', e => {
       e.stopPropagation();
       parentDropdown.remove();
-      await _createEmailReplyReminder(em, p.date);
+      action.run();
     });
     parentDropdown.appendChild(item);
   }
-  const customItem = document.createElement('div');
-  customItem.className = 'dropdown-item-compact';
-  customItem.innerHTML = '<span>Pick date and time…</span>';
-  customItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    parentDropdown.remove();
-    const tmp = document.createElement('input');
-    tmp.type = 'datetime-local';
-    const def = new Date(tomorrow);
-    const pad = n => String(n).padStart(2,'0');
-    tmp.value = `${def.getFullYear()}-${pad(def.getMonth()+1)}-${pad(def.getDate())}T${pad(def.getHours())}:${pad(def.getMinutes())}`;
-    tmp.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:99999;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:13px;';
-    document.body.appendChild(tmp);
-    tmp.focus();
-    if (typeof tmp.showPicker === 'function') { try { tmp.showPicker(); } catch {} }
-    tmp.addEventListener('change', async () => {
-      if (tmp.value) await _createEmailReplyReminder(em, new Date(tmp.value));
-      tmp.remove();
-    });
-    tmp.addEventListener('blur', () => setTimeout(() => tmp.remove(), 200));
-  });
-  parentDropdown.appendChild(customItem);
-  // "Note" — prompts for free-text and saves it as a note without a
-  // due_date, so no timer/reminder fires.
-  const noteItem = document.createElement('div');
-  noteItem.className = 'dropdown-item-compact';
-  noteItem.innerHTML = '<span>Note</span>';
-  noteItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    parentDropdown.remove();
-    _promptEmailNote(em);
-  });
-  parentDropdown.appendChild(noteItem);
 }
 
-function _promptEmailNote(em) {
+function _promptEmailNote(em, valid) {
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:16px;';
   const card = document.createElement('div');
@@ -8418,7 +8283,7 @@ function _promptEmailNote(em) {
     const text = (ta.value || '').trim();
     if (!text) { ta.focus(); return; }
     close();
-    await _createEmailReplyReminder(em, null, text);
+    if (valid()) await _createEmailReplyReminder(em, null, text);
   });
   ta.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') close();

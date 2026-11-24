@@ -26,10 +26,12 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import * as BashInteractive from "./bash-interactive"
 import * as BashTokenEfficient from "./bash_token_efficient_pipeline"
+import { markBashView } from "../session/tool-view-bash-proof"
 import * as BashTokenEfficientHeuristic from "./bash_token_efficient_heuristic"
 import { filterShellEnvironment, minimalShellEnvironment, resolveShellInvocation } from "./shell-containment"
 import { StreamingSecurityRedactor } from "@/util/security-redact"
 import { assertProjectShellPolicy } from "./project-policy"
+import { gitDiffRewriteEligible } from "./bash-git-diff-rewrite"
 
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.MIMOCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
@@ -593,7 +595,7 @@ const parse = Effect.fn("BashTool.parse")(function* (command: string, ps: boolea
   return tree.rootNode
 })
 
-const ask = Effect.fn("BashTool.ask")(function* (ctx: Tool.Context, scan: Scan) {
+const ask = Effect.fn("BashTool.ask")(function* (ctx: Tool.Context, scan: Scan, command: string, workdir: string) {
   if (scan.dirs.size > 0) {
     const globs = Array.from(scan.dirs).map((dir) => {
       if (process.platform === "win32") return AppFileSystem.normalizePathPattern(path.join(dir, "*"))
@@ -603,7 +605,7 @@ const ask = Effect.fn("BashTool.ask")(function* (ctx: Tool.Context, scan: Scan) 
       permission: "external_directory",
       patterns: globs,
       always: globs,
-      metadata: {},
+      metadata: { command, workdir },
     })
   }
 
@@ -612,7 +614,7 @@ const ask = Effect.fn("BashTool.ask")(function* (ctx: Tool.Context, scan: Scan) 
     permission: "bash",
     patterns: Array.from(scan.patterns),
     always: Array.from(scan.always),
-    metadata: {},
+    metadata: { command, workdir },
   })
 })
 
@@ -816,6 +818,7 @@ export const BashTool = Tool.define(
         shell: string
         name: string
         command: string
+        rewriteCandidate?: boolean
         cwd: string
         env: NodeJS.ProcessEnv
         writableRoots: string[]
@@ -916,9 +919,16 @@ export const BashTool = Tool.define(
         })
       }
 
+      let rewritten = false
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
-          const handle = yield* spawner.spawn(invocation.process)
+          if (input.rewriteCandidate) {
+            const proof = yield* Effect.promise(() => ManagedProvider.shellRewriteCurrent(ctx))
+            if (ctx.abort.aborted) return yield* Effect.fail(new Error("Shell operation aborted"))
+            rewritten = proof === true
+          }
+          const selected = rewritten ? shellProcess(input.shell, "git diff --no-color", input.cwd, input.env, input.writableRoots, input.network) : invocation
+          const handle = yield* spawner.spawn(selected.process)
 
           yield* Effect.forkScoped(
             Stream.runForEach(Stream.decodeText(handle.all), (chunk) => retain(redactor.push(chunk))),
@@ -971,7 +981,7 @@ export const BashTool = Tool.define(
       // secret redact / long-line elide. Spill files already contain mandatory
       // sink-redacted output, so optional cleaning only affects inline output.
       const cleaned =
-        !file && Flag.MIMOCODE_EXPERIMENTAL_TOKEN_EFFICIENCY
+        !rewritten && !file && Flag.MIMOCODE_EXPERIMENTAL_TOKEN_EFFICIENCY
           ? BashTokenEfficient.clean(end.text, { command: input.command })
           : null
       if (cleaned && cleaned.bytesOut < cleaned.bytesIn) {
@@ -986,7 +996,7 @@ export const BashTool = Tool.define(
       // only when both flags are on. Same never-worse contract — a shape that
       // doesn't shrink the bytes is discarded.
       const heuristic =
-        !file &&
+        !rewritten && !file &&
         Flag.MIMOCODE_EXPERIMENTAL_TOKEN_EFFICIENCY &&
         Flag.MIMOCODE_EXPERIMENTAL_TOKEN_EFFICIENCY_HEURISTIC
           ? BashTokenEfficientHeuristic.cleanHeuristic(cleaned?.text ?? end.text, { command: input.command })
@@ -1039,7 +1049,8 @@ export const BashTool = Tool.define(
         )
       }
 
-      return {
+      if (rewritten) output = "Requested: git diff\nExecuted: git diff --no-color\n\n" + output
+      const result = {
         title: input.description,
         metadata: {
           output: last || preview(output),
@@ -1049,9 +1060,11 @@ export const BashTool = Tool.define(
           containment,
           network,
           ...(cut && file ? { outputPath: file } : {}),
+          ...(rewritten ? { shellRewrite: { profile: "git-diff-no-color-v1", requested: "git diff", executed: "git diff --no-color" } } : {}),
         },
         output,
       }
+      return !rewritten && !expired && !aborted && !file ? markBashView(result,ctx) : result
     })
 
     return () =>
@@ -1087,7 +1100,7 @@ export const BashTool = Tool.define(
               if (scan.destructive.size > 0 && !Flag.MIMOCODE_AUTO_APPROVE_DESTRUCTIVE) {
                 yield* askDestructive(ctx, scan, params.command, cwd)
               } else {
-                yield* ask(ctx, scan)
+                yield* ask(ctx, scan, params.command, cwd)
               }
 
               // Interactive mode: hand terminal to user for direct interaction
@@ -1140,13 +1153,27 @@ export const BashTool = Tool.define(
                 }
               }
 
+              const env = yield* shellEnv(ctx, cwd)
+              let rewriteCandidate = false
+              if (ManagedProvider.shellRewriteCandidate(ctx) &&
+                  (yield* Effect.promise(() => gitDiffRewriteEligible(params.command, name, params.interactive, env)))) {
+                const actualRoot = yield* parse("git diff --no-color", ps)
+                const actualScan = yield* collect(actualRoot, cwd, ps, shell)
+                if (!Instance.containsPath(cwd)) actualScan.dirs.add(cwd)
+                if (actualScan.destructive.size > 0 && !Flag.MIMOCODE_AUTO_APPROVE_DESTRUCTIVE)
+                  yield* askDestructive(ctx, actualScan, "git diff --no-color", cwd)
+                else yield* ask(ctx, actualScan, "git diff --no-color", cwd)
+                for (const dir of actualScan.dirs) scan.dirs.add(dir)
+                rewriteCandidate = true
+              }
               return yield* run(
                 {
                   shell,
                   name,
                   command: params.command,
+                  rewriteCandidate,
                   cwd,
-                  env: yield* shellEnv(ctx, cwd),
+                  env,
                   writableRoots: [Instance.directory, ...scan.dirs],
                   network: params.network,
                   timeout,

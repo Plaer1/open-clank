@@ -1,0 +1,67 @@
+.chat-turn-rail {
+  position: absolute;
+  inset-inline-start: 2px;
+  z-index: 3;
+  width: 26px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  pointer-events: none;
+}
+.chat-turn-rail[hidden], .chat-turn-card[hidden],
+:is(.welcome-active,.compare-active) > :is(.chat-turn-rail,.chat-turn-card) { display: none; }
+.chat-turn-list {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  pointer-events: auto;
+}
+.chat-turn-list button {
+  display: flex;
+  align-items: center;
+  inline-size: 100%;
+  block-size: 13px;
+  padding: 0 3px;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+.chat-turn-list button::before {
+  content: '';
+  inline-size: 9px;
+  block-size: 2px;
+  border-radius: 2px;
+  background: var(--tick);
+  opacity: .6;
+}
+.chat-turn-list button:is(:hover,:focus-visible,[aria-current=true])::before {
+  inline-size: 19px;
+  opacity: 1;
+}
+.chat-turn-card {
+  position: absolute;
+  inset-inline-start: 31px;
+  width: min(320px, calc(100% - 40px));
+  box-sizing: border-box;
+  padding: 9px 12px;
+  z-index: 4;
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--tick);
+  border-radius: 7px;
+  background: var(--panel, #25272c);
+  color: var(--fg);
+  pointer-events: auto;
+  cursor: pointer;
+  box-shadow: 0 4px 12px #0004;
+  font-size: .85rem;
+}
+.chat-turn-card strong,.chat-turn-card small { display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.chat-turn-card p { margin: 4px 0 0; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
+.chat-turn-card small { color: var(--tick); margin-block-start: 4px; }
+.chat-turn-card :empty { display: none; }
+#chat-container:has(> .chat-turn-rail:not([hidden])) #chat-history { margin-inline-start: 13px; }
+@media (pointer:coarse) { .chat-turn-list button {block-size:24px;} }
+@media print { .chat-turn-rail,.chat-turn-card {display:none!important;} }

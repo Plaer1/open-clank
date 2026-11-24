@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openclank.analysis-ingest.v1",
+  "title": "Open Clank neutral analysis ingest (JSON Lines)",
+  "description": "One header line, then body lines. Each line is a separate JSON object (<= 512 bytes). File <= 1 MiB, <= 4096 body lines. Closed key sets; integers are 0..2^53-1; duplicate keys are refused. Validated by src/openclank/analysis_ingest.py; this file documents the same contract.",
+  "$defs": {
+    "int": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "token": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$" },
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "provider", "source", "generation", "producedAt"],
+      "properties": {
+        "schema": { "const": "openclank.analysis-ingest.v1" },
+        "kind": { "enum": ["static_db", "trace"] },
+        "provider": {
+          "type": "object", "additionalProperties": false, "required": ["id", "version"],
+          "properties": { "id": { "$ref": "#/$defs/token" }, "version": { "type": "string", "minLength": 1, "maxLength": 64 } }
+        },
+        "source": {
+          "type": "object", "additionalProperties": false, "required": ["sha256", "size", "addressSpace"],
+          "properties": {
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "size": { "$ref": "#/$defs/int" },
+            "arch": { "$ref": "#/$defs/token" },
+            "addressSpace": { "const": "provider_virtual" }
+          }
+        },
+        "generation": { "$ref": "#/$defs/int" },
+        "producedAt": { "$ref": "#/$defs/int" }
+      }
+    },
+    "function": {
+      "type": "object", "additionalProperties": false, "required": ["type", "name", "address", "size"],
+      "properties": { "type": { "const": "function" }, "name": { "type": "string", "minLength": 1 }, "address": { "$ref": "#/$defs/int" }, "size": { "$ref": "#/$defs/int" } }
+    },
+    "xref": {
+      "type": "object", "additionalProperties": false, "required": ["type", "from", "to", "kind"],
+      "properties": { "type": { "const": "xref" }, "from": { "$ref": "#/$defs/int" }, "to": { "oneOf": [{ "$ref": "#/$defs/int" }, { "type": "null" }] }, "kind": { "$ref": "#/$defs/token" } }
+    },
+    "call": {
+      "type": "object", "additionalProperties": false, "required": ["type", "seq", "from", "to"],
+      "properties": { "type": { "const": "call" }, "seq": { "$ref": "#/$defs/int" }, "from": { "$ref": "#/$defs/int" }, "to": { "oneOf": [{ "$ref": "#/$defs/int" }, { "type": "null" }] }, "count": { "$ref": "#/$defs/int" } }
+    },
+    "hit": {
+      "type": "object", "additionalProperties": false, "required": ["type", "address", "count"],
+      "properties": { "type": { "const": "hit" }, "address": { "$ref": "#/$defs/int" }, "count": { "$ref": "#/$defs/int" } }
+    }
+  },
+  "x-lines": {
+    "header": { "$ref": "#/$defs/header" },
+    "static_db": [{ "$ref": "#/$defs/function" }, { "$ref": "#/$defs/xref" }],
+    "trace": [{ "$ref": "#/$defs/call" }, { "$ref": "#/$defs/hit" }]
+  }
+}

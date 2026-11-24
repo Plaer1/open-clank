@@ -665,6 +665,30 @@ class TaskScheduler:
         # claim, though. Keep a per-task fence across the full execution.
         self._task_run_locks: dict[str, asyncio.Lock] = {}
         self._owner_aux_handles: dict[str, set[asyncio.Task]] = {}
+        self._s05_controller = None
+        self._s05_handle = None
+        self._s05_cursor = ('', '')
+        self._s05_stage_owner = ''
+        self._s05_skill_owner = ''
+        self._s05_stage_cursors = {}
+        self._s05_pair_stage_owner = ''
+        self._s05_pair_stage_cursors = {}
+        self._s05_pair_cursor = ('', '')
+        self._s05_pair_turn = False
+        self._s05_maintenance_owner = ''
+        self._s05_maintenance_cursors = {}
+        self._s08_scan_owner = ''
+        self._s08_status_owner = ''
+        self._journal_staged = {}      # account -> {chat_id: JournalSelection} staged/selected, awaiting the journal run step (H9)
+        self._journal_settle = {}      # account -> set(chat_id) whose journal run finished, to be settled (status -> proof -> ACK)
+        self._journal_run_owner = ''
+        self._s08_scan_cursors = {}
+        self._s08_evidence_window = {}
+        self._s08_next_connection = {}
+        self._s05_registry_state = None
+        self._s05_registry_dirty = False
+        self._s05_registry_generation = 0
+        self._s05_registry_status = {'state':'disabled','reason':'profile_not_configured'}
         self._runtime_instance_id = uuid.uuid4().hex
 
     def _owner_lifecycle_fenced(self, owner: object) -> bool:
@@ -683,6 +707,9 @@ class TaskScheduler:
             return bool(checker(normalized))
         except Exception:
             return True
+
+    def _skip_owner_maintenance(self, owner: object) -> bool:
+        return str(owner or "").strip().lower().startswith("deleted:") or self._owner_lifecycle_fenced(owner)
 
     def _task_owner_lifecycle_fenced(self, task_id: str) -> bool:
         from core.database import SessionLocal, ScheduledTask
@@ -1153,6 +1180,8 @@ class TaskScheduler:
             for handle in group
         }
         handles.update(self._task_handles.values())
+        if getattr(self, '_s05_handle', None) is not None:
+            handles.add(self._s05_handle)
         return {handle for handle in handles if not handle.done()}
 
     async def _mint_session_id(self) -> str:
@@ -1305,6 +1334,56 @@ class TaskScheduler:
     # S12 durable wait requests (question / permission)                   #
     # ------------------------------------------------------------------ #
 
+    def _task_live_pending(self, *, owner, session_id, account_id, kind, request_id, root_operation_id):
+        """Read one existing worker-held pending request; caller data grants nothing."""
+        sup = getattr(self, '_mimo_supervisor', None)
+        pool = getattr(sup, '_pool', None)
+        workers = getattr(pool, '_workers', None)
+        auth = getattr(self, '_auth_manager', None)
+        if (not isinstance(workers, dict) or auth is None or not account_id
+                or auth.account_id(owner) != account_id or auth.username_for_account_id(account_id) != owner):
+            return None
+        matches = []
+        for worker in {id(w):w for w in workers.values()}.values():
+            if getattr(worker, '_owner', None) != owner or not worker.is_alive():
+                continue
+            bridge = getattr(worker, '_bridge', None)
+            holder = getattr(bridge, '_managed_provider_generation', None)
+            handler = getattr(worker, 'question_handler' if kind == 'question' else 'permission_handler', None)
+            pending = getattr(handler, 'pending_requests', {}).get(request_id) if handler else None
+            if pending is None or pending._future.done() or not holder:
+                continue
+            if kind == 'question' and pending.blocking is not True:
+                continue
+            native = getattr(pending, 'mimo_session_id', None) if kind == 'question' else getattr(pending, 'session_id', None)
+            if (pending.owner != owner or pending.odysseus_session_id != session_id or not native
+                    or getattr(bridge, '_session_map', {}).get(session_id) != native):
+                continue
+            # A task chat can be reused by a later occurrence.  The pending
+            # object's actual projection and current bridge turn must both be
+            # the original root; the caller's label is never evidence alone.
+            turn = getattr(bridge, '_turns', {}).get(native)
+            context = getattr(bridge, '_session_context', {}).get(native) or {}
+            actual_root = getattr(turn, 'root_operation_id', None)
+            if (not actual_root or actual_root != root_operation_id
+                    or context.get('root_operation_id') != actual_root
+                    or pending.turn_id != actual_root):
+                continue
+            snapshot = {'version':1,'kind':kind,'request_id':request_id,'owner':owner,'account_id':account_id,
+                        'session_id':session_id,'native_session_id':native,'holder':holder,
+                        'generation':getattr(worker, 'installed_generation', None),
+                        'turn_id':pending.turn_id,'revision':pending.revision,
+                        'root_operation_id':actual_root}
+            if kind == 'question':
+                snapshot.update(native_request_id=pending.mimo_request_id, question_revision=pending.question_revision,
+                                plan_revision=pending.plan_revision, actor_id=pending.actor_id,
+                                actor_session_id=pending.actor_session_id, origin_turn_id=pending.origin_turn_id)
+            if (type(snapshot['generation']) is not int or type(snapshot['revision']) is not int
+                    or not isinstance(snapshot['turn_id'], str) or not snapshot['turn_id']):
+                continue
+            matches.append((snapshot, handler, pending))
+        return matches[0] if len(matches) == 1 else None
+
     def _persist_wait_request(
         self,
         *,
@@ -1317,6 +1396,7 @@ class TaskScheduler:
         workspace_id: str | None = None,
         continuation_revision: int = 0,
         actor_generation: str | None = None,
+        native_binding: dict | None = None,
     ) -> str | None:
         """Persist a waiting interaction and flip the run to ``waiting``.
 
@@ -1327,15 +1407,42 @@ class TaskScheduler:
         import json as _json
         import uuid as _uuid
         try:
-            from core.database import SessionLocal, TaskRun, TaskWaitRequest
+            from core.database import SessionLocal, ScheduledTask, TaskRun, TaskWaitRequest
             wait_id = f"wait_{_uuid.uuid4().hex}"
             db = SessionLocal()
             try:
-                run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
-                if run and run.status in ("queued", "running"):
-                    run.status = "waiting"
+                if db.get_bind().dialect.name == 'sqlite':
+                    db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+                run = db.query(TaskRun).filter_by(id=run_id, task_id=task_id).first()
+                task = db.query(ScheduledTask).filter_by(id=task_id, owner=owner).first()
+                if not run or not task:
+                    return None
+                if native_binding is not None and (run.status not in ('running', 'outcome_unknown', 'issued_waiting')
+                        or task.host_account_id != native_binding.get('account_id')
+                        or native_binding.get('root_operation_id') != f'turn-task-run:{run_id}'):
+                    return None
+                if run and run.status in ("queued", "running", "outcome_unknown"):
+                    run.status = "issued_waiting" if native_binding is not None or run.status == "outcome_unknown" else "waiting"
                     run.result = "Waiting for user answer…"
-                    db.commit()
+                payload = dict(payload)
+                payload.pop('_openclank_native_wait', None)
+                if native_binding is not None:
+                    existing = db.query(TaskWaitRequest).filter_by(task_id=task_id, run_id=run_id,
+                        owner=owner, session_id=session_id, kind=kind, state='waiting').order_by(TaskWaitRequest.id).limit(65).all()
+                    if len(existing) > 64:
+                        raise ValueError('task wait inventory unavailable')
+                    for prior in existing:
+                        try:
+                            prior_payload = _json.loads(prior.payload or '{}')
+                        except (ValueError, TypeError):
+                            raise ValueError('task wait inventory unavailable')
+                        if isinstance(prior_payload, dict) and prior_payload.get('_openclank_native_wait') == native_binding:
+                            db.commit()
+                            return prior.id
+                    payload = dict(payload)
+                    payload['_openclank_native_wait'] = native_binding
+                if len(_json.dumps(payload, ensure_ascii=False, default=str).encode('utf-8')) > 65536:
+                    raise ValueError('task wait payload too large')
                 row = TaskWaitRequest(
                     id=wait_id,
                     task_id=task_id,
@@ -1364,6 +1471,9 @@ class TaskScheduler:
         *,
         owner: str,
         session_id: str | None = None,
+        expected_payload: str | None = None,
+        task_id: str | None = None,
+        run_id: str | None = None,
     ) -> bool:
         """CAS-consume a waiting request exactly once.
 
@@ -1383,12 +1493,18 @@ class TaskScheduler:
                     return False
                 if session_id is not None and row.session_id != session_id:
                     return False
-                # CAS: only transition waiting -> consumed.
-                updated = (
-                    db.query(TaskWaitRequest)
-                    .filter(TaskWaitRequest.id == wait_id, TaskWaitRequest.state == "waiting")
-                    .update({"state": "consumed", "consumed_at": _utcnow()}, synchronize_session=False)
-                )
+                # Preserve the exact reviewed payload and scope through CAS.
+                query = db.query(TaskWaitRequest).filter(TaskWaitRequest.id == wait_id, TaskWaitRequest.state == "waiting",
+                    TaskWaitRequest.owner == owner)
+                if session_id is not None:
+                    query = query.filter(TaskWaitRequest.session_id == session_id)
+                if expected_payload is not None:
+                    query = query.filter(TaskWaitRequest.payload == expected_payload)
+                if task_id is not None:
+                    query = query.filter(TaskWaitRequest.task_id == task_id)
+                if run_id is not None:
+                    query = query.filter(TaskWaitRequest.run_id == run_id)
+                updated = query.update({"state": "consumed", "consumed_at": _utcnow()}, synchronize_session=False)
                 db.commit()
                 return bool(updated)
             finally:
@@ -1423,7 +1539,7 @@ class TaskScheduler:
             try:
                 rows = (
                     db.query(TaskRun.id)
-                    .filter(TaskRun.task_id == task_id, TaskRun.status == "waiting")
+                    .filter(TaskRun.task_id == task_id, TaskRun.status.in_(("waiting", "issued_waiting", "issued_resuming")))
                     .all()
                 )
                 return [r[0] for r in rows]
@@ -1441,9 +1557,9 @@ class TaskScheduler:
             db = SessionLocal()
             try:
                 run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
-                if not run or run.status != "waiting":
+                if not run or run.status not in ("waiting", "issued_waiting"):
                     return False
-                run.status = "resuming"
+                run.status = "issued_resuming" if run.status == "issued_waiting" else "resuming"
                 run.result = "Resuming…"
                 db.commit()
                 return True
@@ -1488,7 +1604,7 @@ class TaskScheduler:
             self._pending_notifications = self._pending_notifications[-50:]
         return True
 
-    def pop_notifications(self, owner: str = None) -> list:
+    def pop_notifications(self, owner: str = None, predicate=None) -> list:
         """Return and clear pending notifications.
 
         When `owner` is set, only matching notifications are returned (and
@@ -1515,7 +1631,7 @@ class TaskScheduler:
             return []
         keep, take = [], []
         for n in self._pending_notifications:
-            if str(n.get("owner") or "").strip().lower() == normalized_owner:
+            if str(n.get("owner") or "").strip().lower() == normalized_owner and (predicate is None or predicate(n)):
                 take.append(n)
             else:
                 keep.append(n)
@@ -1539,6 +1655,8 @@ class TaskScheduler:
                 if stale:
                     now = _utcnow()
                     for r in stale:
+                        if r.task and self._skip_owner_maintenance(r.task.owner):
+                            continue
                         old_status = r.status or "running"
                         r.status = "aborted"
                         r.error = "Server restarted while task was " + old_status
@@ -1561,10 +1679,12 @@ class TaskScheduler:
                     db.query(_TWR, _TR, _ST)
                     .join(_TR, _TWR.run_id == _TR.id)
                     .join(_ST, _TWR.task_id == _ST.id)
-                    .filter(_TWR.state == "waiting", _TR.status == "waiting")
+                    .filter(_TWR.state == "waiting", _TR.status.in_(("waiting", "issued_waiting")))
                     .all()
                 )
                 for wait, run, task in pending:
+                    if self._skip_owner_maintenance(wait.owner):
+                        continue
                     import json as _json
                     try:
                         payload = _json.loads(wait.payload or "{}")
@@ -1602,6 +1722,8 @@ class TaskScheduler:
                 ).all()
                 if overdue:
                     for t in overdue:
+                        if self._skip_owner_maintenance(t.owner):
+                            continue
                         t.next_run = now + timedelta(seconds=60)
                     db.commit()
                     logger.info(
@@ -1627,6 +1749,8 @@ class TaskScheduler:
                     CrewMember.is_default_assistant == True,  # noqa: E712
                 ).group_by(CrewMember.owner).having(func.count(CrewMember.id) > 1).all()
                 for owner, n in groups:
+                    if self._skip_owner_maintenance(owner):
+                        continue
                     rows = db.query(CrewMember).filter(
                         CrewMember.owner == owner,
                         CrewMember.is_default_assistant == True,  # noqa: E712
@@ -1816,6 +1940,7 @@ class TaskScheduler:
         while self._running:
             try:
                 await self._check_due_tasks()
+                self._wake_completed_turn()
             except Exception:
                 logger.exception("Error in task scheduler loop")
             # Sleep until the next scheduled run, capped at 60s. A `* * * * *`
@@ -1838,6 +1963,832 @@ class TaskScheduler:
             except Exception:
                 pass
             await asyncio.sleep(sleep_for)
+
+    def install_completed_turn_controller(self, *, profile, owners):
+        """Install app-issued owner authorities; queued refs remain the only work queue."""
+        from src.openclank.chat_source_bridge import CompletedTurnLifecycleOwner
+        from src.openclank.memory_job_admission import SingleHostProfile, AssignmentAuthority
+        from src.openclank.operation_router import ManagedOperationRouter
+        if (type(profile) is not SingleHostProfile or type(owners) not in (tuple,list)
+            or (self._s05_controller is not None and self._s05_controller[0] is not profile)):
+            raise ValueError('completed-turn controller unavailable')
+        registry = {}
+        for item in owners:
+            if type(item) is not tuple or len(item) != 3:
+                raise ValueError('completed-turn owner unavailable')
+            lifecycle,assignment,router = item
+            if (type(lifecycle) is not CompletedTurnLifecycleOwner or type(assignment) is not AssignmentAuthority
+                or type(router) is not ManagedOperationRouter or lifecycle.profile is not profile
+                or lifecycle.owner != assignment.owner or lifecycle.source_authority is not assignment.source_authority
+                or lifecycle.account_id in registry):
+                raise ValueError('completed-turn owner unavailable')
+            registry[lifecycle.account_id] = (lifecycle,assignment,router)
+        profile.assert_current()
+        # Replace atomically; a running task retains its own immutable snapshot
+        # and must still pass the live per-source lifecycle checks.
+        self._s05_controller = (profile,registry)
+
+    def configure_completed_turn_registry(self, *, state, profile):
+        """Attach only the app's existing qualified profile; no authority is minted."""
+        from src.openclank.memory_job_admission import SingleHostProfile
+        if type(profile) is not SingleHostProfile or getattr(state,'s05_profile',None) is not profile:
+            raise ValueError('completed-turn registry unavailable')
+        profile.assert_current()
+        self._s05_registry_state = state
+        self._s05_registry_generation += 1
+        self._s05_registry_dirty = True
+        self._s05_registry_status = {'state':'pending','reason':'registry_not_refreshed'}
+
+    def completed_turn_status(self):
+        return dict(self._s05_registry_status)
+
+    async def _refresh_and_select_completed_turn(self):
+        if self._s05_registry_dirty and self._s05_registry_state is not None:
+            from src.openclank.memory_job_admission import refresh_completed_turn_registry
+            generation = self._s05_registry_generation
+            work = asyncio.create_task(asyncio.to_thread(refresh_completed_turn_registry,
+                state=self._s05_registry_state,scheduler=self))
+            try:
+                result = await asyncio.shield(work)
+                if generation != self._s05_registry_generation:
+                    self._s05_registry_dirty = True
+                    return
+                profile = getattr(self._s05_registry_state,'s05_profile',None)
+                if result.get('owners') or self._s05_controller is not None:
+                    self.install_completed_turn_controller(profile=profile,owners=result['owners'])
+                self._s05_registry_dirty = result.get('state') != 'ready'
+                installer=getattr(self._s05_registry_state,'install_policy_publication_callbacks',None)
+                if callable(installer) and result.get('state') == 'ready':
+                    if not await installer(self._s05_registry_state,profile,result):
+                        self._s05_registry_dirty = True
+                elif result.get('state') != 'ready':
+                    self._s05_registry_state.s08_rules_callback = None
+                    self._s05_registry_state.maintenance_reconcile_callback = None
+                status = {'state':result.get('state','unavailable'), 'owner_count':result.get('owner_count',0),
+                          'unavailable_count':result.get('unavailable_count',0)}
+                if status != self._s05_registry_status and status['state'] != 'ready':
+                    logger.warning('Completed-turn registry is unavailable or partial')
+                self._s05_registry_status = status
+            except asyncio.CancelledError:
+                while not work.done():
+                    try:
+                        await asyncio.shield(work)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if work.done() and not work.cancelled():
+                    work.exception()
+                raise
+            except Exception:
+                self._s05_registry_dirty = True
+                self._s05_controller = None
+                self._s05_registry_state.s08_rules_callback = None
+                self._s05_registry_state.maintenance_reconcile_callback = None
+                if self._s05_registry_status.get('reason') != 'registry_refresh_unavailable':
+                    logger.warning('Completed-turn registry unavailable')
+                self._s05_registry_status = {'state':'unavailable','reason':'registry_refresh_unavailable'}
+                return
+        if self._s05_controller is not None:
+            await self._select_completed_turn()
+
+    async def _select_completed_turn(self):
+        from dataclasses import asdict
+        from src.memery_external_sources import SourceRef
+        from src.openclank.memory_job_admission import _conn, _run_completed_turn_once, _retire_completed_turn, _completed_turn_thread
+        profile,registry = self._s05_controller
+        _, cancelled = await _completed_turn_thread(profile.assert_current)
+        if cancelled:
+            raise asyncio.CancelledError
+        await self._stage_one_completed_turn_chat(profile,registry)
+        paired_ticket = await self._reconcile_paired_publication_ticket(profile,registry)
+        source_ticket = await self._reconcile_source_publication_ticket(profile,registry)
+        await self._stage_one_assistant_component_chat(profile,registry)
+        await self._reconcile_one_s08_original(registry)
+        self._s05_pair_turn = not self._s05_pair_turn
+        if self._s05_pair_turn and not paired_ticket and not source_ticket:
+            await self._select_one_assistant_interpretation(profile,registry)
+            return
+        await self._reconcile_one_maintenance_source(profile,registry)
+        await self._discover_one_s08_page(profile,registry)
+        await self._run_one_journal_selection(profile,registry)   # H9: sibling step, always after the existing S08 step
+        if paired_ticket or source_ticket:
+            return  # Existing original remains the only publication authority.
+        await self._run_one_automatic_skill(profile, registry)
+        cursor = self._s05_cursor
+        def select_rows():
+            with _conn(profile.path) as db:
+                return db.execute("SELECT j.owner_id,j.job_id,r.source_account_id,r.source_ref_json FROM fm_v2_jobs j JOIN fm_v2_s05_job_refs r USING(owner_id,job_id) WHERE j.kind='completed_turn_review' AND j.state IN ('queued','retry_wait') AND (j.owner_id>? OR (j.owner_id=? AND j.job_id>?)) ORDER BY j.owner_id,j.job_id LIMIT 32", (cursor[0],cursor[0],cursor[1])).fetchall()
+        rows, cancelled = await _completed_turn_thread(select_rows)
+        if cancelled:
+            raise asyncio.CancelledError
+        if not rows:
+            self._s05_cursor = ('','')
+            return
+
+        for row in rows:
+            self._s05_cursor = (row['owner_id'],row['job_id'])
+            entry = registry.get(row['source_account_id'])
+            if entry is None:
+                continue
+            lifecycle,assignment,router = entry
+            if row['owner_id'] != lifecycle.binding.memory_owner or self._owner_lifecycle_fenced(lifecycle.owner):
+                continue
+            try:
+                source = SourceRef(**json.loads(row['source_ref_json']))
+                if (source.account_id != lifecycle.account_id or json.dumps(asdict(source),sort_keys=True,separators=(',',':')) != row['source_ref_json']):
+                    continue
+                async with lifecycle.mapping.async_chat_admission_lock(source.chat_id) as guard:
+                    try:
+                        child, cancelled = await _completed_turn_thread(lambda: lifecycle.for_source(source=source,guard=guard))
+                        if cancelled:
+                            raise asyncio.CancelledError
+                    except Exception:
+                        # Only an exact durable withdrawal can retire work.
+                        # Missing or transient authority remains queued.
+                        _, cancelled = await _completed_turn_thread(lambda: _retire_completed_turn(lifecycle_owner=lifecycle,source=source,guard=guard,job_id=row['job_id']))
+                        if cancelled:
+                            raise asyncio.CancelledError
+                        continue
+            except (ValueError,TypeError,KeyError):
+                continue
+            except Exception:
+                # A transient authority failure does not retire this source.
+                continue
+            async def action(*, owner):
+                if owner != lifecycle.owner:
+                    raise ValueError('completed-turn owner changed')
+                return await _run_completed_turn_once(lifecycle=child,profile=profile,
+                    target_authority=lifecycle.target_authority,assignment_authority=assignment,router=router,
+                    lifecycle_state=getattr(self._session_manager,'lifecycle_context',None))
+            try:
+                barrier=getattr(getattr(getattr(self,'_session_manager',None),'lifecycle_context',None),'account_request_barrier',None)
+                if barrier is None: raise ValueError('completed-turn account barrier unavailable')
+                async with barrier.admitted(lifecycle.owner):
+                    await self._run_owner_aux_action(lifecycle.owner,action)
+            except ValueError:
+                # Deferred or stale work stays in the existing queue; continue
+                # on the next wake rather than trying a second job now.
+                return
+            return
+
+
+    async def _reconcile_one_s08_original(self, registry):
+        """Offer one retained original a bounded factual status pass."""
+        state=self._s05_registry_state
+        callback=getattr(state,'s08_original_status_callback',None) if state is not None else None
+        accounts=sorted(registry)
+        if not callable(callback) or not accounts: return
+        account=next((item for item in accounts if item>self._s08_status_owner),accounts[0])
+        self._s08_status_owner=account
+        lifecycle,_assignment,_router=registry[account]
+        async def action(*,owner):
+            if owner!=lifecycle.owner: raise ValueError('S08 owner changed')
+            return await callback(state,lifecycle)
+        try:
+            await self._run_owner_aux_action(lifecycle.owner,action)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Unknown original remains with its provider; other work proceeds.
+            pass
+
+    async def _discover_one_s08_page(self, profile, registry):
+        """Collect one bounded, individually authorized admitted-evidence page."""
+        from datetime import datetime, timezone
+        from src.memery_consolidation import select_codelivered_group, select_admitted_evidence
+        from src.memery_provider import _HostObservationProjection
+        from src.openclank.memory_job_admission import _completed_turn_thread
+        state=self._s05_registry_state
+        callback=getattr(state,'s08_rules_callback',None) if state is not None else None
+        accounts=sorted(registry)
+        if not callable(callback) or not accounts:
+            return
+        account=next((item for item in accounts if item>self._s08_scan_owner),accounts[0])
+        self._s08_scan_owner=account
+        lifecycle,_assignment,router=registry[account];provider=lifecycle.provider
+        cursor=self._s08_scan_cursors.setdefault(account,{'after':'o:','origin':None,'event_after':None,'next_origin':None})
+        try:
+            profile.assert_current()
+            if lifecycle.target_authority.resolve(account)!=lifecycle.binding or lifecycle.account_lifecycle.owner_has_active_operation(lifecycle.owner):
+                raise ValueError('S08 owner unavailable')
+            if cursor['origin'] is None:
+                (rows,following),cancelled=await _completed_turn_thread(lambda: provider._host_account_source_refs(
+                    account_id=account,target_authority=lifecycle.target_authority,after_job_id=cursor['after'],limit=1))
+                if cancelled: raise asyncio.CancelledError
+                if not rows:
+                    cursor.update(after='o:',origin=None,event_after=None,next_origin=None)
+                    return
+                if len(rows)!=1 or type(rows[0]) is not _HostObservationProjection or rows[0].source.account_id!=account:
+                    raise ValueError('S08 source inventory unavailable')
+                cursor.update(origin=rows[0],event_after=None,next_origin=following)
+            origin=cursor['origin'];source=origin.source
+            async with lifecycle.mapping.async_chat_admission_lock(source.chat_id) as guard:
+                _,cancelled=await _completed_turn_thread(lambda: lifecycle.for_source(source=source,guard=guard))
+                if cancelled: raise asyncio.CancelledError
+                rows,following=await provider._host_consolidation_admissions_page(origin,after=cursor['event_after'],limit=64)
+                _,cancelled=await _completed_turn_thread(lambda: lifecycle.for_source(source=source,guard=guard))
+                if cancelled: raise asyncio.CancelledError
+                lifecycle.mapping.validate_chat_guard(source.chat_id,guard)
+                if lifecycle.target_authority.resolve(account)!=lifecycle.binding:
+                    raise ValueError('S08 owner changed')
+            for item in rows:
+                for old_key,(old_item,_) in tuple(self._s08_evidence_window.items()):
+                    if old_key[0]==account and old_item.memory.block_id==item.memory.block_id and old_item.memory!=item.memory:
+                        self._s08_evidence_window.pop(old_key,None)
+                key=(account,item.event_id);previous=self._s08_evidence_window.get(key)
+                if previous is not None and previous[0]!=item:
+                    self._s08_evidence_window.pop(key,None)
+                    continue
+                self._s08_evidence_window.pop(key,None)
+                self._s08_evidence_window[key]=(item,origin)
+                while len(self._s08_evidence_window)>512:
+                    self._s08_evidence_window.pop(next(iter(self._s08_evidence_window)))
+            if following is None:
+                cursor.update(after=cursor['next_origin'] or 'o:',origin=None,event_after=None,next_origin=None)
+            else:
+                cursor['event_after']=following
+            entries=[value for (owner,_),value in self._s08_evidence_window.items() if owner==account]
+            origins={item.event_id:origin for item,origin in entries}
+            # Preferences only select the next use of this existing wake; the
+            # retained provider rechecks source, policy, assignment and budget.
+            from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
+            def enabled_axes():
+                with PREFERENCE_LOCK:
+                    prefs=_load_for_user(lifecycle.owner)
+                    return (type(prefs) is dict and prefs.get('memory_policy_connections_enabled') is True,
+                            type(prefs) is dict and prefs.get('memory_policy_importance_enabled') is True)
+            (connections,importance),cancelled=await _completed_turn_thread(enabled_axes)
+            if cancelled: raise asyncio.CancelledError
+            choices=['summary']+(['connection'] if connections else [])+(['importance_target'] if importance else [])
+            cursor_index=self._s08_next_connection.get(account,0)
+            if type(cursor_index) not in (int,bool): cursor_index=0
+            index=int(cursor_index)%len(choices);output_kind=choices[index]
+            self._s08_next_connection[account]=(index+1)%len(choices)
+            now=datetime.now(timezone.utc); admitted=tuple(item for item,_ in entries)
+            if output_kind=='importance_target':
+                selection=None
+                # Only target revisions actually encountered on this page;
+                # the existing cursor supplies fairness without a new queue.
+                for ref in sorted({item.memory for item in rows},key=lambda value:value.block_id):
+                    candidate=select_admitted_evidence(owner=lifecycle.binding.memory_owner,workspace_id=lifecycle.binding.memory_workspace,
+                        project_id=None,source_account_id=account,candidates=(ref,),evidence=admitted,now=now,minimum_blocks=1)
+                    if len(candidate.memories)==1:
+                        selection=candidate;break
+                if selection is None:return
+            else:
+                selection=select_codelivered_group(owner=lifecycle.binding.memory_owner,workspace_id=lifecycle.binding.memory_workspace,
+                    source_account_id=account,evidence=admitted,now=now)
+                if len(selection.memories)<2:return
+            async def action(*,owner):
+                if owner!=lifecycle.owner: raise ValueError('S08 owner changed')
+                return await callback(state,lifecycle,selection,tuple(origins[item.event_id] for item in selection.evidence),router,output_kind=output_kind)
+            await self._run_owner_aux_action(lifecycle.owner,action)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Advance only the ephemeral hint; unknown sources remain durable
+            # and are revisited on the next account scan.
+            origin=cursor.get('origin')
+            if origin is not None:
+                for key,(_,stored) in tuple(self._s08_evidence_window.items()):
+                    if key[0]==account and stored.source==origin.source:
+                        self._s08_evidence_window.pop(key,None)
+                cursor.update(after=cursor['next_origin'] or 'o:',origin=None,event_after=None,next_origin=None)
+            return
+
+    async def _run_one_automatic_skill(self, profile, registry):
+        """Use the existing S05 wake for at most one explicitly enabled owner."""
+        from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
+        from src.openclank.memory_job_admission import _completed_turn_thread
+        from src.openclank.skill_draft_run import run_one_skill_draft
+        accounts = sorted(registry)
+        if not accounts:
+            return
+        account = next((item for item in accounts if item > self._s05_skill_owner), accounts[0])
+        self._s05_skill_owner = account
+        lifecycle, assignment, router = registry[account]
+        def enabled():
+            with PREFERENCE_LOCK:
+                prefs = _load_for_user(lifecycle.owner)
+                agent = prefs.get('agent_settings') if type(prefs) is dict else None
+                distill = agent.get('distill') if type(agent) is dict else None
+                return (type(prefs.get('_skill_draft_policy_version')) is int
+                    and prefs['_skill_draft_policy_version'] == 1 and type(distill) is dict
+                    and distill.get('auto') is True)
+        try:
+            active, cancelled = await _completed_turn_thread(enabled)
+            if cancelled:
+                raise asyncio.CancelledError
+            if not active or self._owner_lifecycle_fenced(lifecycle.owner):
+                return
+            async def action(*, owner):
+                if owner != lifecycle.owner:
+                    raise ValueError('skill draft owner changed')
+                return await run_one_skill_draft(scheduler=self, state=self._s05_registry_state,
+                    profile=profile, lifecycle=lifecycle, assignment=assignment, router=router)
+            await self._run_owner_aux_action(lifecycle.owner, action)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    async def _run_one_journal_selection(self, profile, registry):
+        """H9: run at most one staged journal selection, mirroring `_discover_one_s08_page` (same owner rotation, same aux action, same
+        callback family). The authoritative gate is `_reserve` inside the callback; `s05_gates_open` is only the cheap pre-check that
+        keeps a closed gate from preparing/cancelling (burning) an original. Settling is left to the staging pass."""
+        from src.openclank.memory_job_admission import _completed_turn_limits, _completed_turn_thread
+        from src.openclank.fm_journal_delta import PREF_KEY, s05_gates_open
+        state=self._s05_registry_state
+        callback=getattr(state,'s08_rules_callback',None) if state is not None else None
+        accounts=sorted(account for account in registry if self._journal_staged.get(account))
+        if not callable(callback) or not accounts:
+            return
+        account=next((item for item in accounts if item>self._journal_run_owner),accounts[0])
+        self._journal_run_owner=account
+        lifecycle,assignment,router=registry[account]
+        staged=self._journal_staged[account]
+        chat_id=next(iter(staged));journal=staged[chat_id]
+        try:
+            from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
+            def enabled_now():
+                with PREFERENCE_LOCK:
+                    prefs=_load_for_user(lifecycle.owner)
+                    return type(prefs) is dict and prefs.get(PREF_KEY) is True
+            enabled,cancelled=await _completed_turn_thread(enabled_now)
+            if cancelled: raise asyncio.CancelledError
+            if not enabled: return                      # preference default Off: nothing is read or run
+            def gates():
+                profile.assert_current()
+                _base,limits=_completed_turn_limits(lifecycle.target_authority,assignment)
+                _operation,bound=journal.model_input(lifecycle.source_authority.hydrate,limits.job_output_tokens)
+                return s05_gates_open(profile,owner=lifecycle.binding.memory_owner,limits=limits,input_bound=bound)
+            open_,cancelled=await _completed_turn_thread(gates)
+            if cancelled: raise asyncio.CancelledError
+            if open_ is not True: return                # deferred: nothing prepared, the selection stays staged for a later wake
+            async def action(*,owner):
+                if owner!=lifecycle.owner: raise ValueError('S08 owner changed')
+                if journal.cadence_policy is not None:
+                    from src.openclank.memory_policy_projection import policy_coordinator
+                    coordinator=policy_coordinator()
+                    if coordinator is None:
+                        return False
+                    if coordinator.checked_refs(lifecycle.owner,account,lifecycle.binding.memory_workspace)!=journal.expected_policy_refs:
+                        # Restage the still-unacknowledged page under the newly checked policy on a later existing wake.
+                        staged.pop(chat_id,None)
+                        self._journal_settle.setdefault(account,set()).add(chat_id)
+                        return False
+                    return await callback(state,lifecycle,None,(),router,output_kind='journal_synthesis',journal=journal,expected_policy_refs=journal.expected_policy_refs)
+                return await callback(state,lifecycle,None,(),router,output_kind='journal_synthesis',journal=journal)
+            ran=await self._run_owner_aux_action(lifecycle.owner,action)
+            if ran is True:
+                staged.pop(chat_id,None)
+                self._journal_settle.setdefault(account,set()).add(chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The selection stays staged (or is re-found by the next staging pass); the page stays unacknowledged.
+            return
+
+    async def _reconcile_one_maintenance_source(self, profile, registry):
+        """One bounded pending hint on the existing S05 owner worker."""
+        from sqlalchemy import text
+        state=self._s05_registry_state
+        callback=getattr(state,'maintenance_reconcile_callback',None) if state is not None else None
+        accounts=sorted(registry)
+        if not callable(callback) or not accounts:
+            return
+        account=next((item for item in accounts if item>self._s05_maintenance_owner),accounts[0])
+        self._s05_maintenance_owner=account
+        lifecycle,_assignment,_router=registry[account]
+        after=self._s05_maintenance_cursors.get(account)
+        def discover():
+            profile.assert_current()
+            source=lifecycle.source_authority
+            if (source._auth.account_id(lifecycle.owner)!=account
+                or source._auth.username_for_account_id(account)!=lifecycle.owner
+                or lifecycle.account_lifecycle.owner_has_active_operation(lifecycle.owner)
+                or lifecycle.target_authority.resolve(account)!=lifecycle.binding):
+                raise ValueError('maintenance owner unavailable')
+            def authorize(candidate,chat):
+                if candidate!=account: return False
+                db=source._session_factory()
+                try:
+                    row=db.execute(text('SELECT owner FROM sessions WHERE id=:chat'),{'chat':chat}).first()
+                    return bool(row and source._auth.account_id(row[0])==account)
+                finally: db.close()
+            return source._archive.discover_trusted_maintenance_pending(owner=account,after=after,limit=1,authorize=authorize)
+        try:
+            page=await asyncio.to_thread(discover)
+            if not page['items']:
+                self._s05_maintenance_cursors[account]=None
+                return
+            hint=page['items'][0]
+            self._s05_maintenance_cursors[account]=(hint['chat_id'],hint['message_id'],hint['seq'])
+            async def action(*,owner):
+                if owner!=lifecycle.owner: raise ValueError('maintenance owner changed')
+                return await callback(state,lifecycle,hint)
+            await self._run_owner_aux_action(lifecycle.owner,action)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Only the disposable hint advances; the exact pending row remains.
+            return
+
+    async def _select_one_assistant_interpretation(self, profile, registry):
+        """Select one never-attempted paired job on the existing owner lane."""
+        from dataclasses import asdict
+        from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
+        from src.memery_external_sources import SourceRef, AssistantInterpretationRef, _assistant_ref_error
+        from src.openclank.memory_job_admission import _conn, _completed_turn_thread, _completed_turn_limits, reserve_assistant_interpretation, execute_assistant_interpretation, _revoke_completed_turn_reservation, _assistant_interpretation_evidence, _job_input_hash, _lookup_staged_assistant_interpretation_db, prepare_pending_assistant_rebind, pending_assistant_rebind_original
+        cursor=self._s05_pair_cursor
+        def rows():
+            with _conn(profile.path) as db:
+                return db.execute("SELECT j.owner_id,j.job_id,r.source_account_id,r.source_ref_json,r.coverage_json FROM fm_v2_jobs j JOIN fm_v2_s05_job_refs r USING(owner_id,job_id) WHERE j.kind='assistant_interpretation_review' AND j.state='queued' AND j.attempt_count=0 AND (j.owner_id>? OR (j.owner_id=? AND j.job_id>?)) ORDER BY j.owner_id,j.job_id LIMIT 32",(cursor[0],cursor[0],cursor[1])).fetchall()
+        page,cancelled=await _completed_turn_thread(rows)
+        if cancelled: raise asyncio.CancelledError
+        if not page: self._s05_pair_cursor=('',''); return
+        for row in page:
+            self._s05_pair_cursor=(row['owner_id'],row['job_id'])
+            entry=registry.get(row['source_account_id'])
+            if entry is None: continue
+            lifecycle,assignment,router=entry
+            if row['owner_id']!=lifecycle.binding.memory_owner or self._owner_lifecycle_fenced(lifecycle.owner): continue
+            try:
+                root=SourceRef(**json.loads(row['source_ref_json'])); coverage=json.loads(row['coverage_json']); part=coverage['assistant']
+                if set(coverage)!={'version','kind','assistant','pair_sha256'} or coverage['version']!=1 or coverage['kind']!='assistant_interpretation_review' or set(part)!={'message_id','part_id','revision','content_hash'}: continue
+                pair=AssistantInterpretationRef(1,root,part['message_id'],part['part_id'],part['revision'],part['content_hash'],coverage['pair_sha256'])
+                if _assistant_ref_error(pair) or root.account_id!=lifecycle.account_id or json.dumps(asdict(root),sort_keys=True,separators=(',',':'))!=row['source_ref_json']: continue
+            except (ValueError,TypeError,KeyError): continue
+            def enabled():
+                with PREFERENCE_LOCK: return _load_for_user(lifecycle.owner).get('memory_assistant_interpretation') is True
+            async def action(*,owner):
+                if owner!=lifecycle.owner: raise ValueError('paired owner changed')
+                on,cancelled=await _completed_turn_thread(enabled)
+                if cancelled: raise asyncio.CancelledError
+                if not on: return
+                lease=None
+                try:
+                    async with lifecycle.mapping.async_chat_admission_lock(root.chat_id) as guard:
+                        (_,limits),cancelled=await _completed_turn_thread(lambda: _completed_turn_limits(lifecycle.target_authority,assignment))
+                        if cancelled: raise asyncio.CancelledError
+                        def rebind_inputs():
+                            from src.openclank.owner_custody_facts import verified_owner_custody_head
+                            from src.openclank.memory_policy_projection import policy_coordinator
+                            evidence,target,coverage,source_identity,_=_assistant_interpretation_evidence(source=pair,lifecycle_owner=lifecycle,guard=guard,target_authority=lifecycle.target_authority,assignment_authority=assignment)
+                            _,captured_binding=_lookup_staged_assistant_interpretation_db(profile.path,source=pair,target=target,coverage=coverage,key=source_identity,expected_job_id=row['job_id'],_return_binding=True)
+                            with _conn(profile.path) as db:
+                                db.execute('BEGIN')
+                                stored=db.execute("SELECT j.input_hash,r.binding_fingerprint FROM fm_v2_jobs j JOIN fm_v2_s05_job_refs r USING(owner_id,job_id) WHERE j.owner_id=? AND j.job_id=? AND j.kind='assistant_interpretation_review' AND j.state='queued' AND j.attempt_count=0",(target.memory_owner,row['job_id'])).fetchone()
+                                if not stored: raise ValueError('paired original unavailable')
+                                head=verified_owner_custody_head(db,database_id=profile.provider._guarded_preparation.database_id,account_id=root.account_id,current_owner=target.memory_owner)
+                                db.rollback()
+                            if stored['input_hash']==_job_input_hash('assistant_interpretation_review',coverage,evidence,target): return None
+                            coordinator=policy_coordinator()
+                            if coordinator is None: raise ValueError('paired policy unavailable')
+                            refs=coordinator.checked_refs(lifecycle.owner,root.account_id,target.memory_workspace)
+                            movement=None
+                            if captured_binding.memory_owner!=target.memory_owner:
+                                if head is None: raise ValueError('paired movement proof unavailable')
+                                rename=head['request']; fields=('database_id','account_id','operation_id','step','generation','action','owner','new_owner')
+                                phase={k:rename[k] for k in fields}
+                                fence='cs_s04pairpending_'+hashlib.sha256(json.dumps(['s04.paired-pending-fence.v1',phase,row['job_id']],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+                                movement={'request':rename,'receipt_id':head['receipt_id'],'receipt_hash':head['receipt_hash'],'fence_id':fence}
+                            key='s04pairrebind_'+hashlib.sha256(json.dumps([row['job_id'],stored['input_hash'],target.fingerprint,evidence.authority_fingerprint,evidence.policy_fingerprint],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+                            return refs,movement,key
+                        pending=lifecycle.provider._paired_review_ticket
+                        if type(pending) is dict and 'pending_pair_identity' in pending:
+                            result=await pending_assistant_rebind_original(profile.path,source=pair,lifecycle_owner=lifecycle,guard=guard,target_authority=lifecycle.target_authority,assignment_authority=assignment,job_id=row['job_id'])
+                            if result.get('state')!='rebound': return
+                        rebind,cancelled=await _completed_turn_thread(rebind_inputs)
+                        if cancelled: raise asyncio.CancelledError
+                        if rebind is not None:
+                            refs,movement,key=rebind
+                            await prepare_pending_assistant_rebind(profile.path,source=pair,lifecycle_owner=lifecycle,guard=guard,target_authority=lifecycle.target_authority,assignment_authority=assignment,job_id=row['job_id'],request_key=key,policy_projection=refs,movement=movement)
+                        # Qualify the actual local witness before consuming an attempt.
+                        from src.openclank.chat_source_bridge import mint_review_currentness
+                        (preflight,_),cancelled=await _completed_turn_thread(lambda: mint_review_currentness(
+                            lifecycle_owner=lifecycle,sources=((root,guard),),assignment=assignment,
+                            validate=lambda: _assistant_interpretation_evidence(source=pair,lifecycle_owner=lifecycle,guard=guard,
+                                target_authority=lifecycle.target_authority,assignment_authority=assignment)))
+                        preflight.close()
+                        if cancelled: raise asyncio.CancelledError
+                        lease=await reserve_assistant_interpretation(profile.path,source=pair,lifecycle_owner=lifecycle,guard=guard,
+                            target_authority=lifecycle.target_authority,assignment_authority=assignment,job_id=row['job_id'],
+                            worker_id='s05worker_'+uuid.uuid4().hex,limits=limits,
+                            lifecycle_state=getattr(self._session_manager,'lifecycle_context',None))
+                    if lease.get('state')=='deferred': return
+                    await execute_assistant_interpretation(profile.path,source=pair,lifecycle_owner=lifecycle,target_authority=lifecycle.target_authority,
+                        assignment_authority=assignment,job_id=row['job_id'],attempt_id=lease['attempt_id'],lease_epoch=lease['lease_epoch'],router=router,
+                        reservation_deadline_tick=lease['reservation_deadline_tick'],worker_id=lease['worker_id'])
+                except BaseException:
+                    if lease and 'attempt_id' in lease and 'lease_epoch' in lease:
+                        try:
+                            await _completed_turn_thread(lambda: _revoke_completed_turn_reservation(profile.path,owner=lifecycle.binding.memory_owner,job_id=row['job_id'],attempt_id=lease['attempt_id'],lease_epoch=lease['lease_epoch'],profile=profile))
+                        except Exception: pass  # Dispatched or unresolved work is never revoked.
+                    raise
+            try:
+                barrier=getattr(getattr(getattr(self,'_session_manager',None),'lifecycle_context',None),'account_request_barrier',None)
+                if barrier is None: raise ValueError('paired account barrier unavailable')
+                async with barrier.admitted(lifecycle.owner): await self._run_owner_aux_action(lifecycle.owner,action)
+            except ValueError: return
+            return
+
+
+    async def _reconcile_source_publication_ticket(self, profile, registry):
+        """Read/settle only the exact retained user-source original."""
+        from src.memery_external_sources import SourceRef
+        from src.openclank.memory_job_admission import source_publication_original
+        ticket=profile.provider._paired_review_ticket
+        identity=ticket.get('source_publication_identity') if type(ticket) is dict else None
+        if identity is None: return False
+        try:
+            identity=json.loads(json.dumps(identity,ensure_ascii=False,separators=(',',':'),allow_nan=False))
+            source=SourceRef(**identity['source'])
+            lifecycle,assignment,_=registry[source.account_id]
+            if lifecycle.provider is not profile.provider or self._owner_lifecycle_fenced(lifecycle.owner):
+                raise ValueError('source original unavailable')
+            async def action(*,owner):
+                if owner!=lifecycle.owner or profile.provider._paired_review_ticket is not ticket:
+                    raise ValueError('source original changed')
+                async with lifecycle.mapping.async_chat_admission_lock(source.chat_id) as guard:
+                    return await source_publication_original(source=source,lifecycle_owner=lifecycle,guard=guard,
+                        target_authority=lifecycle.target_authority,assignment_authority=assignment)
+            barrier=getattr(getattr(getattr(self,'_session_manager',None),'lifecycle_context',None),'account_request_barrier',None)
+            if barrier is None: raise ValueError('source account barrier unavailable')
+            async with barrier.admitted(lifecycle.owner): await self._run_owner_aux_action(lifecycle.owner,action)
+        except (ValueError,TypeError,KeyError):
+            pass  # An unreadable original remains fenced, never resubmitted.
+        return True
+
+    async def _reconcile_paired_publication_ticket(self, profile, registry):
+        """Only the retained exact publication may be read; no write or model retry."""
+        from src.memery_external_sources import SourceRef, AssistantInterpretationRef, _assistant_ref_error
+        from src.openclank.memory_job_admission import paired_publication_original
+        ticket=profile.provider._paired_review_ticket
+        identity=ticket.get('paired_publication_identity') if type(ticket) is dict else None
+        if identity is None: return False
+        try:
+            identity=json.loads(json.dumps(identity,ensure_ascii=False,separators=(',',':'),allow_nan=False))
+            root=SourceRef(**identity['source']); coverage=identity['coverage']; part=coverage['assistant']
+            pair=AssistantInterpretationRef(1,root,part['message_id'],part['part_id'],part['revision'],part['content_hash'],coverage['pair_sha256'])
+            if _assistant_ref_error(pair): raise ValueError('paired original unavailable')
+            lifecycle,assignment,_=registry[root.account_id]
+            if lifecycle.provider is not profile.provider or self._owner_lifecycle_fenced(lifecycle.owner): raise ValueError('paired original unavailable')
+            async def action(*,owner):
+                if owner!=lifecycle.owner or profile.provider._paired_review_ticket is not ticket: raise ValueError('paired original changed')
+                async with lifecycle.mapping.async_chat_admission_lock(root.chat_id) as guard:
+                    return await paired_publication_original(source=pair,lifecycle_owner=lifecycle,guard=guard,
+                        target_authority=lifecycle.target_authority,assignment_authority=assignment,job_id=identity['job_id'],
+                        attempt_id=identity['attempt_id'],lease_epoch=identity['lease_epoch'])
+            barrier=getattr(getattr(getattr(self,'_session_manager',None),'lifecycle_context',None),'account_request_barrier',None)
+            if barrier is None: raise ValueError('paired account barrier unavailable')
+            async with barrier.admitted(lifecycle.owner): await self._run_owner_aux_action(lifecycle.owner,action)
+        except (ValueError,TypeError,KeyError):
+            pass  # Exact original remains fenced; a failed read is not permission to send.
+        return True
+
+
+    async def _stage_one_assistant_component_chat(self, profile, registry):
+        """Stage one bounded exact archive prefix under the existing owner admission."""
+        from sqlalchemy import text
+        from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
+        from src.memery_external_sources import SourceRef, assistant_interpretation_ref
+        from src.openclank.memory_job_admission import _completed_turn_limits, _completed_turn_thread, stage_assistant_interpretation, _terminal_pair_context, _full_pair_terminal_db, lookup_full_pair_terminal, lookup_terminal_assistant_interpretation, _conn, _exact_json
+        try: trace=logger.isEnabledFor(logging.DEBUG)
+        except Exception: trace=False
+        started=time.monotonic() if trace else 0.0
+        phase='lifecycle'; phase_started=started; timings={}; outcome='unavailable'
+        def mark(name):
+            nonlocal phase,phase_started
+            if trace:
+                now=time.monotonic();timings[phase]=round((now-phase_started)*1000,3);phase_started=now
+            phase=name
+        def emit(category):
+            if not trace: return
+            try:
+                now=time.monotonic();timings[phase]=round((now-phase_started)*1000,3)
+                logger.debug('S14_PAIRED_STAGE outcome=%s phase=%s exception=%s elapsed_ms=%s phases_ms=%s',outcome,phase,category,round((now-started)*1000,3),timings)
+            except Exception: pass
+        accounts=sorted(registry)
+        if not accounts:
+            outcome='no_owner';emit('none');return
+        account=next((item for item in accounts if item>self._s05_pair_stage_owner),accounts[0])
+        self._s05_pair_stage_owner=account
+        lifecycle,assignment,_router=registry[account]
+        after=self._s05_pair_stage_cursors.get(account,0)
+        source=lifecycle.source_authority
+        def enabled():
+            with PREFERENCE_LOCK:
+                prefs=_load_for_user(lifecycle.owner)
+                return type(prefs) is dict and prefs.get('memory_assistant_interpretation') is True
+        def authorize(candidate,chat):
+            if candidate!=account: return False
+            db=source._session_factory()
+            try:
+                row=db.execute(text('SELECT owner FROM sessions WHERE id=:chat'),{'chat':chat}).first()
+                return bool(row and source._auth.account_id(row[0])==account)
+            finally: db.close()
+        async def action(*,owner):
+            nonlocal outcome
+            mark('action_entry')
+            if owner!=lifecycle.owner: raise ValueError('paired owner changed')
+            mark('preference')
+            on,cancelled=await _completed_turn_thread(enabled)
+            if cancelled: raise asyncio.CancelledError
+            mark('discovery')
+            page,cancelled=await _completed_turn_thread(lambda: source._archive.pending_assistant_component_page(owner=account,authorize=authorize,after_seq=after,limit=32))
+            if cancelled: raise asyncio.CancelledError
+            if not page['hints']:
+                outcome='no_hint';return page['next_seq']
+            hint=page['hints'][0];chat=hint['chat_id']
+            mark('guarded_page')
+            async with lifecycle.mapping.async_chat_admission_lock(chat) as guard:
+                page,cancelled=await _completed_turn_thread(lambda: source._archive.read_assistant_component_page(owner=account,chat_id=chat,authorize=authorize,limit=32))
+                if cancelled: raise asyncio.CancelledError
+                if not page['events']:
+                    outcome='no_event';return hint['seq']
+                mark('pair_ref')
+                event=page['events'][0];component=event['component'];root=component['root']
+                ref=SourceRef(2 if component['workspace_id'] is None else 1,'host_user_body',account,chat,'main',root[0],root[1],root[2],root[3],component['workspace_id'],None)
+                pair=assistant_interpretation_ref(ref,component)
+                mark('terminal_context')
+                target,coverage,_=await _paired_scheduler_owned(lambda: _terminal_pair_context(pair,lifecycle,guard,lifecycle.target_authority))
+                mark('original_lookup')
+                terminal=await _paired_scheduler_owned(lambda: _full_pair_terminal_db(profile.path,source=pair,target=target,coverage=coverage,expected_job_id=None))
+                if terminal is not None:
+                    await lookup_full_pair_terminal(profile.path,source=pair,lifecycle_owner=lifecycle,guard=guard,target_authority=lifecycle.target_authority)
+                    entry={'event':event,'source':pair,'disposition':'full_pair_terminal'}
+                else:
+                    from dataclasses import asdict
+                    source_key=hashlib.sha256(_exact_json(['assistant_interpretation_review',asdict(ref),coverage]).encode()).hexdigest()
+                    def retained():
+                        with _conn(profile.path) as db:
+                            return db.execute("SELECT j.job_id,length(CAST(j.result_json AS BLOB)) AS result_size,CASE WHEN length(CAST(j.result_json AS BLOB))<=262144 THEN j.result_json END AS result_json FROM fm_v2_jobs j JOIN fm_v2_s05_job_refs r USING(owner_id,job_id) WHERE j.owner_id=? AND r.source_key=? AND j.kind='assistant_interpretation_review' LIMIT 2",(target.memory_owner,source_key)).fetchall()
+                    matches=await _paired_scheduler_owned(retained)
+                    if len(matches)>1: raise ValueError('paired source identity ambiguous')
+                    marker=None
+                    if matches and matches[0]['result_size'] is not None and matches[0]['result_json'] is None:
+                        raise ValueError('paired terminal evidence exceeds bound')
+                    if matches and matches[0]['result_json'] is not None:
+                        try: marker=json.loads(matches[0]['result_json'])
+                        except (ValueError,TypeError,RecursionError): raise ValueError('paired terminal evidence unavailable') from None
+                    if type(marker) is dict and marker.get('version')=='s04.ingest-erased.v1':
+                        job_id=matches[0]['job_id']
+                        await lookup_terminal_assistant_interpretation(profile.path,source=pair,lifecycle_owner=lifecycle,guard=guard,target_authority=lifecycle.target_authority,assignment_authority=assignment,expected_job_id=job_id)
+                        entry={'event':event,'source':pair,'job_id':job_id,'disposition':'terminal_erased'}
+                    else:
+                        if not on:
+                            outcome='preference_off';return None
+                        mark('limits')
+                        _,limits=await _paired_scheduler_owned(lambda: _completed_turn_limits(lifecycle.target_authority,assignment))
+                        mark('stage')
+                        fact=await stage_assistant_interpretation(profile.path,source=pair,lifecycle_owner=lifecycle,guard=guard,
+                            target_authority=lifecycle.target_authority,assignment_authority=assignment,limits=limits,now_ms=time.time_ns()//1_000_000)
+                        entry={'event':event,'source':pair,'job_id':fact['job_id'],'disposition':'staged'}
+                on,cancelled=await _completed_turn_thread(enabled)
+                if cancelled: raise asyncio.CancelledError
+                if entry['disposition']=='staged' and not on: raise ValueError('paired source choice changed')
+                mark('ack')
+                await source._archive.ack_staged_assistant_components(owner=account,chat_id=chat,lifecycle_owner=lifecycle,guard=guard,
+                    target_authority=lifecycle.target_authority,assignment_authority=assignment,expected_cursor=page['cursor'],
+                    entries=[entry])
+            outcome='acknowledged'
+            return hint['seq']
+        async def _paired_scheduler_owned(fn):
+            value,cancelled=await _completed_turn_thread(fn)
+            if cancelled: raise asyncio.CancelledError
+            return value
+        category='none'
+        try:
+            mark('lifecycle')
+            barrier=getattr(getattr(getattr(self,'_session_manager',None),'lifecycle_context',None),'account_request_barrier',None)
+            if barrier is None: raise ValueError('paired account barrier unavailable')
+            async with barrier.admitted(lifecycle.owner):
+                next_seq=await self._run_owner_aux_action(lifecycle.owner,action)
+            mark('cursor_commit')
+            if next_seq is not None: self._s05_pair_stage_cursors[account]=next_seq
+            elif outcome=='unavailable': outcome='owner_unavailable'
+        except asyncio.CancelledError:
+            outcome='cancelled';category='cancelled';raise
+        except Exception as exc:
+            outcome='exception'
+            category=type(exc).__name__ if type(exc) in (ValueError,TypeError,KeyError,TimeoutError) else 'other'
+            return
+        finally:
+            emit(category)
+
+
+    async def _stage_one_completed_turn_chat(self, profile, registry):
+        """Consume at most one authorized archive prefix without blocking the loop."""
+        from sqlalchemy import text
+        from src.openclank.memory_job_admission import _completed_turn_limits, stage_completed_turn_page
+        accounts = sorted(registry)
+        if not accounts:
+            return
+        account = next((value for value in accounts if value > self._s05_stage_owner), accounts[0])
+        self._s05_stage_owner = account
+        lifecycle,assignment,_router = registry[account]
+        after = self._s05_stage_cursors.get(account,0)
+        journal_chat = {}
+        def stage():
+            profile.assert_current()
+            source = lifecycle.source_authority
+            if (source._auth.account_id(lifecycle.owner) != account
+                or source._auth.username_for_account_id(account) != lifecycle.owner
+                or lifecycle.account_lifecycle.owner_has_active_operation(lifecycle.owner)
+                or lifecycle.target_authority.resolve(account) != lifecycle.binding):
+                raise ValueError('completed-turn owner unavailable')
+            def authorize(candidate,chat):
+                if candidate != account:
+                    return False
+                db = source._session_factory()
+                try:
+                    row = db.execute(text('SELECT owner FROM sessions WHERE id=:chat'),{'chat':chat}).first()
+                    return bool(row and source._auth.account_id(row[0]) == account)
+                finally:
+                    db.close()
+            page = source._archive.pending_completed_turn_chats(owner=account,authorize=authorize,after_seq=after,limit=32)
+            if not page['hints']:
+                pending = self._journal_settle.get(account)
+                if pending:
+                    journal_chat['id'] = pending.pop()   # settle a finished journal run (status -> proof -> ACK) on a wake without hints
+                return page['next_seq']
+            hint = page['hints'][0]
+            journal_chat['id'] = hint['chat_id']
+            try:
+                with lifecycle.mapping.chat_admission_lock(hint['chat_id']) as guard:
+                    try:
+                        _base, limits = _completed_turn_limits(lifecycle.target_authority,assignment)
+                    except (ValueError, KeyError, TypeError):
+                        limits = None  # Only a proven retirement may advance without policy.
+                    stage_completed_turn_page(profile.path,owner=lifecycle.owner,chat_id=hint['chat_id'],
+                        target_authority=lifecycle.target_authority,assignment_authority=assignment,limits=limits,
+                        now_ms=time.time_ns() // 1_000_000,lifecycle_owner=lifecycle,guard=guard)
+            except Exception:
+                # Only the in-memory discovery hint advances; durable cursor
+                # acknowledgment remains exclusively in the staging adapter.
+                return hint['seq']
+            return hint['seq']
+        async def action(*, owner):
+            if owner != lifecycle.owner:
+                raise ValueError('completed-turn owner changed')
+            work = asyncio.create_task(asyncio.to_thread(stage))
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                # Lifecycle shutdown must join the in-flight staging thread.
+                while not work.done():
+                    try:
+                        await asyncio.shield(work)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if work.done() and not work.cancelled():
+                    work.exception()
+                raise
+        try:
+            barrier = getattr(getattr(getattr(self, '_session_manager', None), 'lifecycle_context', None), 'account_request_barrier', None)
+            if barrier is None:
+                raise ValueError('completed-turn account barrier unavailable')
+            async with barrier.admitted(lifecycle.owner):
+                next_seq = await self._run_owner_aux_action(lifecycle.owner,action)
+                if journal_chat:
+                    # BQ-8: journal delta pass (default Off; read -> select -> status/ACK; never dispatches inference, never a timer).
+                    try:
+                        from src.openclank.fm_journal_delta import run_chat_pass
+                        # H8: this wake only selects/stages and settles (status -> proof -> ACK); it never runs the model.
+                        staged = []
+                        await run_chat_pass(profile=profile,lifecycle=lifecycle,assignment=assignment,account_id=account,chat_id=journal_chat['id'],staged=staged,automatic=True)
+                        if staged: self._journal_staged.setdefault(account,{})[journal_chat['id']] = staged[0]
+                    except Exception as exc:
+                        logger.warning('journal delta pass skipped: %s', type(exc).__name__)
+            if next_seq is not None:
+                self._s05_stage_cursors[account] = next_seq
+        except Exception:
+            # The outbox remains authoritative; no cursor is acknowledged here.
+            return
+
+    def _wake_completed_turn(self):
+        """Start at most one owned one-shot without blocking the scheduler loop."""
+        if not self._running or (self._s05_controller is None and self._s05_registry_state is None) or (self._s05_handle and not self._s05_handle.done()):
+            return
+        handle = asyncio.create_task(self._refresh_and_select_completed_turn())
+        self._s05_handle = handle
+        def finished(task):
+            if self._s05_handle is task:
+                self._s05_handle = None
+            if not task.cancelled() and task.exception() is not None:
+                logger.warning('Completed-turn background review unavailable')
+        handle.add_done_callback(finished)
+
+    def request_completed_turn_wake(self):
+        """A nonblocking hint; the durable archive remains the delivery source."""
+        if self._s05_registry_state is not None:
+            self._s05_registry_generation += 1
+            self._s05_registry_dirty = True
+        self._wake_completed_turn()
 
     async def _check_due_tasks(self):
         from core.database import SessionLocal, ScheduledTask
@@ -1865,7 +2816,7 @@ class TaskScheduler:
                         continue
                     if self._owner_lifecycle_fenced(task.owner):
                         continue
-                    if foreground_active:
+                    if foreground_active and not self._is_theme_emoji_task(task):
                         task.next_run = now + timedelta(minutes=15)
                         continue
                     self._executing.add(task.id)
@@ -1877,13 +2828,46 @@ class TaskScheduler:
         finally:
             db.close()
 
-    async def _execute_task(self, task_id: str, *, bypass_model_slot: bool = False, release_executing: bool = True):
+    def _manual_task_current(self, task_id, expected):
+        if expected is None:
+            return True
+        from core.database import SessionLocal, ScheduledTask
+        from src.openclank.task_execution_context import manual_task_sha256
+        try:
+            auth = getattr(self, '_auth_manager', None)
+            if (not auth or auth.account_id(expected['owner']) != expected['account']
+                    or auth.username_for_account_id(expected['account']) != expected['owner']):
+                return False
+            with SessionLocal() as db:
+                task = db.query(ScheduledTask).filter_by(id=task_id, owner=expected['owner']).first()
+                if not task or task.host_account_id != expected['bound_account'] or task.status != expected['status']:
+                    return False
+                return manual_task_sha256(task) == expected['spec']
+        except Exception:
+            return False
+
+    def _skip_selected_manual_run(self, task_id, run_id):
+        """Mark only a proven queued selected occurrence as skipped."""
+        if not run_id: return
+        from core.database import SessionLocal, TaskRun
+        try:
+            with SessionLocal() as db:
+                run = db.query(TaskRun).filter_by(id=run_id, task_id=task_id, status='queued').first()
+                if run:
+                    run.status = 'skipped'; run.finished_at = _utcnow()
+                    run.error = 'Task account, configuration or admission changed before execution'
+                    db.commit()
+        except Exception:
+            logger.warning('Selected manual run outcome remains unknown')
+
+    async def _execute_task(self, task_id: str, *, bypass_model_slot: bool = False, release_executing: bool = True, manual_expected=None, selected_run_id=None):
         # Create the run record with status="queued" BEFORE waiting on the
         # semaphore so the UI can show that a manually-triggered task is in
         # line behind another. Once we acquire the slot, flip to "running"
         # and hand off to _execute_task_locked.
         from core.database import SessionLocal, TaskRun
-        if self._task_owner_lifecycle_fenced(task_id):
+        if self._task_owner_lifecycle_fenced(task_id) or not self._manual_task_current(task_id, manual_expected):
+            self._skip_selected_manual_run(task_id, selected_run_id)
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
@@ -1900,6 +2884,7 @@ class TaskScheduler:
         # If a previous run is waiting for a user answer, queue this trigger
         # behind it rather than starting a competing run.
         if self._has_waiting_run(task_id):
+            self._skip_selected_manual_run(task_id, selected_run_id)
             logger.info("Task %s has a waiting run; skipping overlapping trigger", task_id)
             if current:
                 self._unregister_task_handle(task_id, current)
@@ -1907,22 +2892,33 @@ class TaskScheduler:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
             return
-        run_id = str(uuid.uuid4())
-        _q_db = SessionLocal()
-        try:
-            run = TaskRun(
-                id=run_id,
-                task_id=task_id,
-                started_at=_utcnow(),
-                status="queued",
-                result="Queued — waiting for a free slot…",
-            )
-            _q_db.add(run)
-            _q_db.commit()
-        except Exception:
-            logger.exception(f"Failed to create queued run row for task {task_id}")
-        finally:
-            _q_db.close()
+        if selected_run_id is not None:
+            # A selected occurrence is already durable; never create or adopt it.
+            run_id = selected_run_id
+            with SessionLocal() as db:
+                run = db.query(TaskRun).filter_by(id=run_id, task_id=task_id, status='queued').first()
+                if not run:
+                    if current: self._unregister_task_handle(task_id, current)
+                    if release_executing:
+                        async with self._executing_lock: self._executing.discard(task_id)
+                    return
+        else:
+            run_id = str(uuid.uuid4())
+            _q_db = SessionLocal()
+            try:
+                run = TaskRun(
+                    id=run_id,
+                    task_id=task_id,
+                    started_at=_utcnow(),
+                    status="queued",
+                    result="Queued — waiting for a free slot…",
+                )
+                _q_db.add(run)
+                _q_db.commit()
+            except Exception:
+                logger.exception(f"Failed to create queued run row for task {task_id}")
+            finally:
+                _q_db.close()
 
         try:
             # Lazy fallback keeps restart/test harnesses that construct the
@@ -1941,6 +2937,7 @@ class TaskScheduler:
                         run_id,
                         release_executing=release_executing,
                         gate_foreground=not bypass_model_slot,
+                        manual_expected=manual_expected, selected_run=selected_run_id is not None,
                     )
                     return
 
@@ -1950,6 +2947,7 @@ class TaskScheduler:
                         run_id,
                         release_executing=release_executing,
                         gate_foreground=True,
+                        manual_expected=manual_expected, selected_run=selected_run_id is not None,
                     )
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
@@ -1993,12 +2991,16 @@ class TaskScheduler:
         *,
         release_executing: bool = True,
         gate_foreground: bool = True,
+        manual_expected=None,
+        selected_run=False,
     ):
         from core.database import SessionLocal, ScheduledTask, TaskRun
 
         db = SessionLocal()
         try:
             task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if selected_run and not db.query(TaskRun.id).filter_by(id=run_id, task_id=task_id, status='queued').first():
+                return
             if not task or task.status != "active":
                 # Task was paused/deleted while queued — record that outcome
                 # so the run row doesn't sit as "queued" forever.
@@ -2042,6 +3044,7 @@ class TaskScheduler:
                 db.commit()
                 return
 
+            gate_foreground = gate_foreground and not self._is_theme_emoji_task(task)
             if gate_foreground:
                 waiting = db.query(TaskRun).filter(TaskRun.id == run_id).first()
                 if waiting and waiting.status == "queued":
@@ -2050,16 +3053,45 @@ class TaskScheduler:
                 from src.interactive_gate import wait_for_interactive_quiet
                 await wait_for_interactive_quiet(f"scheduled task {task.name}")
 
+            if not self._manual_task_current(task_id, manual_expected):
+                db.expire_all()
+                stale = db.query(TaskRun).filter_by(id=run_id, task_id=task_id).first()
+                if stale and stale.status == 'queued':
+                    stale.status = 'skipped'
+                    stale.error = 'Task account or configuration changed before execution'
+                    stale.finished_at = _utcnow()
+                    db.commit()
+                return
+            db.expire_all()
+            task = db.query(ScheduledTask).filter_by(id=task_id).first()
+            if not task:
+                return
+
             # Flip the run from queued → running. Reset started_at to the
             # actual execution start so queue wait time is visible from
             # created_at vs started_at if we ever surface that.
             run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
-            if run:
+            if selected_run and (not run or run.task_id != task_id or run.status != 'queued'):
+                return
+            task._execution_context_original_run = bool(run and run.task_id == task.id and run.status == 'queued')
+            if selected_run:
+                changed = db.query(TaskRun).filter_by(id=run_id, task_id=task_id, status='queued').update(
+                    {'status':'running', 'started_at':_utcnow(), 'result':'Starting…'}, synchronize_session=False)
+                if changed != 1:
+                    db.rollback()
+                    return
+                db.commit()
+                db.expire_all()
+                run = db.query(TaskRun).filter_by(id=run_id, task_id=task_id).first()
+                if not run: return
+            elif run:
                 run.status = "running"
                 run.started_at = _utcnow()
                 run.result = "Starting…"
                 db.commit()
             else:
+                if selected_run:
+                    return
                 # Defensive: row may have been wiped; recreate so the rest of
                 # the code can look it up by run_id without crashing.
                 run = TaskRun(
@@ -2109,7 +3141,53 @@ class TaskScheduler:
                 foreground_monitor = asyncio.create_task(_cancel_if_foreground_active())
             try:
                 if task_type == "action":
-                    result, success = await self._execute_action(task, run_id=run_id)
+                    # A bound account remains admitted while the actual action
+                    # drains, including its existing to_thread subprocess path.
+                    # Actions do not consume the task's workspace binding, so
+                    # this does not mint an execution-workspace witness.
+                    account = getattr(task, 'host_account_id', None)
+                    admission = None
+                    barrier = getattr(getattr(getattr(self, '_session_manager', None), 'lifecycle_context', None), 'account_request_barrier', None)
+                    if account:
+                        if (not barrier or not self._auth_manager
+                                or self._auth_manager.account_id(task.owner) != account
+                                or self._auth_manager.username_for_account_id(account) != task.owner):
+                            raise RuntimeError('TASK_ACCOUNT_PROVENANCE_UNAVAILABLE: account changed')
+                        admission = await barrier.acquire(task.owner)
+                    try:
+                        if admission and (not await barrier.is_live(task.owner, admission)
+                                or self._auth_manager.account_id(task.owner) != account
+                                or self._auth_manager.username_for_account_id(account) != task.owner):
+                            raise RuntimeError('TASK_ACCOUNT_PROVENANCE_UNAVAILABLE: account changed')
+                        if admission:
+                            from src.openclank.task_execution_context import TASKSPEC_FIELDS, taskspec_sha256
+                            def spec(row):
+                                return {key: int(value) if type(value) is bool else value
+                                        for key in TASKSPEC_FIELDS for value in [getattr(row, key)]}
+                            with SessionLocal() as check_db:
+                                current = check_db.query(ScheduledTask).filter_by(id=task.id).first()
+                                if (not current or current.owner != task.owner or current.host_account_id != account
+                                        or current.status != 'active' or taskspec_sha256(spec(current)) != taskspec_sha256(spec(task))):
+                                    raise RuntimeError('TASK_ACCOUNT_PROVENANCE_UNAVAILABLE: task changed')
+                        action = asyncio.create_task(self._execute_action(task, run_id=run_id))
+                        try:
+                            result, success = await asyncio.shield(action)
+                        except asyncio.CancelledError:
+                            if self._is_theme_emoji_task(task):
+                                action.cancel()
+                            while not action.done():
+                                try:
+                                    await asyncio.shield(action)
+                                except asyncio.CancelledError:
+                                    continue
+                                except Exception:
+                                    break
+                            if not action.cancelled():
+                                action.exception()
+                            raise
+                    finally:
+                        if admission:
+                            await barrier.release(admission)
                     run.status = "success" if success else "error"
                     run.result = result
                     if not success:
@@ -2120,7 +3198,9 @@ class TaskScheduler:
                         db,
                         root_operation_id=f"turn-task-run:{run_id}",
                     )
+                    db.refresh(run)
                     run.status = "success"
+                    run.error = None
                     run.result = result
                 else:
                     # LLM task — use agent loop for tool access
@@ -2129,7 +3209,9 @@ class TaskScheduler:
                         db,
                         root_operation_id=f"turn-task-run:{run_id}",
                     )
+                    db.refresh(run)
                     run.status = "success"
+                    run.error = None
                     run.result = result
                 # Record which model actually ran (resolved inside the executor).
                 if getattr(self, "_last_run_model", None):
@@ -2137,6 +3219,22 @@ class TaskScheduler:
                 if run.status == "success":
                     await self._deliver_task_result(task, result, db, model=getattr(self, "_last_run_model", None))
             except TaskDeferred as defer:
+                db.expire_all()
+                deferred_run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if deferred_run is not None and deferred_run.status in ('outcome_unknown', 'issued_waiting', 'issued_resuming'):
+                    deferred_run.error = 'Agent outcome unknown after interruption'
+                    deferred_run.finished_at = _utcnow()
+                    db.commit()
+                    return
+                if getattr(defer, 'pause', False) and task.action == 'theme_emoji_refresh':
+                    run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                    if run_obj:
+                        run_obj.status = 'error'
+                        run_obj.error = 'Source retry delay exceeds the automatic horizon; updates paused.'
+                        run_obj.finished_at = _utcnow()
+                    task.status, task.next_run = 'paused', None
+                    db.commit()
+                    return
                 count = self._task_defer_counts.get(task_id, 0) + 1
                 self._task_defer_counts[task_id] = count
                 delay_seconds = int(getattr(defer, "delay_seconds", 20 * 60) or (20 * 60))
@@ -2149,7 +3247,12 @@ class TaskScheduler:
                 )
                 run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
                 if run_obj:
-                    db.delete(run_obj)
+                    if self._is_theme_emoji_task(task):
+                        run_obj.status = 'skipped'
+                        run_obj.result = self._THEME_EMOJI_RETRY_DEFERRED
+                        run_obj.finished_at = _utcnow()
+                    else:
+                        db.delete(run_obj)
                 task.next_run = when
                 db.commit()
                 return
@@ -2164,6 +3267,15 @@ class TaskScheduler:
                 )
                 return
             except asyncio.CancelledError:
+                # The separately committed occurrence marker wins over a
+                # stale ORM identity-map copy after an issued Agent turn.
+                db.expire_all()
+                current_run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if current_run is not None and current_run.status in ('outcome_unknown', 'issued_waiting', 'issued_resuming'):
+                    current_run.error = 'Agent outcome unknown after interruption'
+                    current_run.finished_at = _utcnow()
+                    db.commit()
+                    return
                 msg = (
                     "Paused because Open Clank became active"
                     if foreground_cancel.get("hit")
@@ -2244,7 +3356,8 @@ class TaskScheduler:
                 task.next_run = None
 
             db.commit()
-            if run.status == "success" and task.owner and (task.trigger_type or "schedule") == "schedule":
+            if (run.status == "success" and task.owner and (task.trigger_type or "schedule") == "schedule"
+                    and not self._is_theme_emoji_task(task)):
                 from src.openclank.achievement_producers import record_worker_activity
                 record_worker_activity(self._auth_manager, task.owner, "scheduled.task.run.completed", str(run_id), {
                     "createdByOwner": True, "scheduled": True, "runStatus": "success", "taskId": str(task_id),
@@ -2324,15 +3437,19 @@ class TaskScheduler:
             try:
                 # Persist the actual exception message so the UI can show it
                 err_text = f"{type(exec_exc).__name__}: {exec_exc}"
+                db.expire_all()
                 run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
-                if run_obj and run_obj.status in ("running", "success"):
+                if run_obj and run_obj.status in ("outcome_unknown", "issued_waiting", "issued_resuming"):
+                    run_obj.error = "Agent outcome unknown after interruption"
+                    run_obj.finished_at = _utcnow()
+                elif run_obj and run_obj.status in ("running", "success"):
                     run_obj.status = "error"
                     run_obj.error = err_text[:2000]
                     run_obj.finished_at = _utcnow()
                 # Advance next_run even on failure so a broken task doesn't
                 # busy-loop the scheduler every tick with a stale past date.
                 task_obj = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-                if task_obj and (task_obj.trigger_type or "schedule") == "schedule":
+                if task_obj and (not run_obj or run_obj.status not in ('outcome_unknown', 'issued_waiting', 'issued_resuming')) and (task_obj.trigger_type or "schedule") == "schedule":
                     task_obj.last_run = _utcnow()
                     try:
                         task_obj.next_run = compute_next_run(
@@ -2392,6 +3509,7 @@ class TaskScheduler:
     # content) — don't pollute the assistant chat session with their summaries.
     # Activity log + reminder email already carry everything the user needs.
     _SILENT_ACTIONS = frozenset({
+        "theme_emoji_refresh",
         "check_email_urgency",
         "learn_sender_signatures",
         "summarize_emails",
@@ -2459,7 +3577,7 @@ class TaskScheduler:
         if not action_fn:
             return f"Unknown action: {task.action}", False
 
-        from src.builtin_actions import TaskNoop
+        from src.builtin_actions import TaskNoop, TaskDeferred, ThemeEmojiRetryPaused
         try:
             # Pass task prompt as script/command for ssh_command/run_script actions.
             def _progress(message: str):
@@ -2489,6 +3607,114 @@ class TaskScheduler:
                 self._last_run_model = managed_route.provider_model_id
                 kwargs["model_route_id"] = managed_route.model_route_id
                 kwargs["grant_id"] = managed_route.grant_id
+            if task.action == 'theme_emoji_refresh':
+                async def _theme_run(owner):
+                    from pathlib import Path
+                    from src.openclank.theme_emoji_local import ThemeEmojiLocalState
+                    from src.openclank.theme_emoji_discovery import SourceHTTPError
+                    from src.openclank.theme_emoji_inventory import EmojiInventory
+                    from src.openclank.theme_emoji_acquisition import (
+                        THEME_EMOJI_ACQUISITION_READY, ThemeEmojiAcquisition,
+                        InstallationLease, acquisition_http_client,
+                    )
+                    if not THEME_EMOJI_ACQUISITION_READY or not run_id:
+                        raise TaskNoop('Theme artwork acquisition is unavailable')
+                    expected = json.loads(task.prompt or '{}')
+                    account = expected.get('account_id')
+                    consent = {k: expected.get(k) for k in ('installation_id', 'consent', 'consent_revision')}
+                    task_hash = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                    local = ThemeEmojiLocalState()
+                    manager_state = getattr(self._session_manager, 'lifecycle_context', None)
+                    barrier = getattr(manager_state, 'account_request_barrier', None)
+                    if (task.id != 'theme-emoji-' + task_hash[:32] or barrier is None
+                            or not self._auth_manager or self._auth_manager.account_id(owner) != account
+                            or self._auth_manager.username_for_account_id(account) != owner
+                            or local.obligation(account) != consent or consent.get('consent') != 'accepted'):
+                        raise TaskNoop('Theme consent changed')
+                    def run_authorized():
+                        from core.database import SessionLocal, ScheduledTask
+                        with SessionLocal() as db:
+                            current = db.query(ScheduledTask).filter_by(id=task.id, owner=owner, action='theme_emoji_refresh', status='active').first()
+                            return bool(current and json.loads(current.prompt or '{}') == expected)
+                    service = ThemeEmojiAcquisition(
+                        inventory=EmojiInventory(local.root / 'inventory.sqlite3'), local_state=local,
+                        auth_manager=self._auth_manager, account_barrier=barrier, run_authorized=run_authorized)
+                    async with InstallationLease(local) as lease:
+                        await service.prepare_inventory(owner=owner, account_id=account, expected=consent, lease=lease)
+                        scanned = await asyncio.to_thread(service.inventory.epoch_prune_page)
+                        def terminal_epochs():
+                            from core.database import SessionLocal, TaskRun, ScheduledTask
+                            if not scanned:
+                                return []
+                            with SessionLocal() as db:
+                                rows = db.query(TaskRun.id, ScheduledTask.prompt).join(
+                                    ScheduledTask, TaskRun.task_id == ScheduledTask.id).filter(
+                                    TaskRun.id.in_(scanned), ScheduledTask.owner == owner,
+                                    ScheduledTask.action == 'theme_emoji_refresh', TaskRun.id != run_id,
+                                    TaskRun.finished_at.isnot(None),
+                                    TaskRun.status.in_(('success', 'error', 'skipped', 'aborted')),
+                                ).all()
+                                result = []
+                                for old_id, old_prompt in rows:
+                                    try:
+                                        old = json.loads(old_prompt or '{}')
+                                        if old.get('account_id') == account and old.get('installation_id') == consent['installation_id']:
+                                            result.append(old_id)
+                                    except (ValueError, TypeError, AttributeError):
+                                        continue
+                                return result
+                        terminal = await asyncio.to_thread(terminal_epochs)
+                        await service.prune_terminal_epochs(owner=owner, account_id=account,
+                            expected=consent, lease=lease, epoch_ids=terminal, scanned=scanned)
+                        deadline = time.monotonic() + 180
+                        async with asyncio.timeout(180), acquisition_http_client() as client:
+                            remaining_bytes = 64 * 1024 * 1024
+                            progress = {'ready':0, 'failed':0, 'bytes':0, 'pending':True, 'reason':'time_budget'}
+
+                            async def acquire_batch(limit, seconds):
+                                nonlocal remaining_bytes
+                                batch = await service.run_epoch(owner=owner, account_id=account, expected=consent,
+                                    lease=lease, client=client, epoch_id=str(run_id), limit=limit,
+                                    budget_bytes=remaining_bytes, deadline_seconds=seconds)
+                                for field in ('ready', 'failed', 'bytes'):
+                                    progress[field] += batch[field]
+                                progress['pending'], progress['reason'] = batch['pending'], batch['reason']
+                                remaining_bytes -= batch['bytes']
+                                if batch['reason'] == 'rate_limited':
+                                    if batch['retryAfter'] is None:
+                                        raise ThemeEmojiRetryPaused('Emoji source retry delay exceeds the automatic horizon')
+                                    raise TaskDeferred('Emoji source asked to retry later', batch['retryAfter'])
+
+                            manifest_path = Path(__file__).resolve().parents[1] / 'static/vendor/google-emoji/kitchen-catalog.tsv'
+                            def read_manifest():
+                                with manifest_path.open('rb') as stream:
+                                    return stream.read(16 * 1024 * 1024 + 1)
+                            manifest = await asyncio.to_thread(read_manifest)
+                            if await asyncio.to_thread(service.inventory.catalogue_generation) == 0:
+                                await service.discover_kitchen_baseline(owner=owner, account_id=account,
+                                    expected=consent, lease=lease, manifest=manifest, starter=True)
+                            await acquire_batch(32, 15)
+                            await service.discover_kitchen_baseline(owner=owner, account_id=account, expected=consent, lease=lease, manifest=manifest)
+                            warnings = []
+                            for name, discover in (('kitchen', service.discover_kitchen_latest), ('noto', service.discover_noto)):
+                                try:
+                                    await discover(owner=owner, account_id=account, expected=consent, lease=lease, client=client)
+                                except PermissionError:
+                                    raise
+                                except SourceHTTPError as exc:
+                                    if exc.status in (429, 502, 503, 504):
+                                        raise
+                                    warnings.append(name)
+                                except (ValueError, OSError):
+                                    warnings.append(name)
+                            progress.update(pending=True, reason='time_budget')
+                            while time.monotonic() < deadline and remaining_bytes > 0:
+                                await acquire_batch(1000, max(1, int(deadline - time.monotonic())))
+                                if not progress['pending'] or progress['reason'] != 'batch_limit':
+                                    break
+                    progress['refreshWarnings'] = warnings
+                    return json.dumps(progress, separators=(',', ':')), True
+                kwargs['theme_emoji_run'] = _theme_run
             if task.prompt:
                 kwargs["prompt"] = task.prompt
             if task.action in ("run_script", "run_local", "ssh_command") and task.prompt:
@@ -3185,6 +4411,13 @@ class TaskScheduler:
         from src.model_dispatch import stream_agent_target
         from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 
+        # Freeze the persisted identity before the first await; never infer a
+        # legacy account from a later username lookup.
+        frozen_task_id = str(task.id or '')
+        frozen_owner = str(task.owner or '')
+        frozen_account = getattr(task, 'host_account_id', None)
+        run_id = (root_operation_id or '').removeprefix('turn-task-run:') if (root_operation_id or '').startswith('turn-task-run:') else ''
+
         # Resolve once for setup-time tool projection. This is deliberately
         # repeated after the final async quiet gate below; only that second
         # result is allowed into the worker cwd/envelope.
@@ -3290,7 +4523,7 @@ class TaskScheduler:
             # ``workspace`` is a server-derived physical cwd retained for the
             # current worker contract. ``authority_workspace_id`` is the
             # collision-free stable file-policy identity used by approval
-            # scopes; it is not the Copal or Frankenmemory workspace axis.
+            # scopes; it is not the Copal or Memery workspace axis.
             "workspace": workspace_path or "",
             "authority_workspace_id": str(
                 getattr(task, "workspace_id", None) or ""
@@ -3299,20 +4532,89 @@ class TaskScheduler:
         }
         if managed_route.grant_id:
             turn_envelope["provider_grant_id"] = managed_route.grant_id
-        async for event_str in stream_agent_target(
-            target,
-            messages=messages,
-            supervisor=self._mimo_supervisor,
-            max_rounds=_task_max_rounds,
-            max_tool_calls=int(getattr(task, "max_tool_calls", None) or 20),
-            session_id=session_id,
-            owner=task.owner,
-            cwd=workspace_path,
-            disabled_tools=disabled_tools,
-            relevant_tools=allowed_tools,
-            turn_envelope=turn_envelope,
-            workload="background",
-        ):
+        async def admitted_stream():
+            from core.models import get_session_manager_instance
+            from core.database import SessionLocal, ScheduledTask, TaskRun
+            manager = get_session_manager_instance()
+            state = getattr(manager, 'lifecycle_context', None) if manager else None
+            auth = getattr(state, 'auth_manager', None)
+            barrier = getattr(state, 'account_request_barrier', None)
+            runtime = getattr(self._mimo_supervisor, '_s05_foreground_runtime', None)
+            admission = None
+            context = None
+            if runtime is not None or frozen_account:
+                if (not frozen_account or not run_id or auth is None or barrier is None
+                        or auth.account_id(frozen_owner) != frozen_account
+                        or auth.username_for_account_id(frozen_account) != frozen_owner):
+                    raise RuntimeError('TASK_ACCOUNT_PROVENANCE_UNAVAILABLE: task requires a newly authenticated account binding')
+                admission = await barrier.acquire(frozen_owner)
+                try:
+                    if (auth.account_id(frozen_owner) != frozen_account
+                            or auth.username_for_account_id(frozen_account) != frozen_owner
+                            or not await barrier.is_live(frozen_owner, admission)):
+                        raise RuntimeError('TASK_ACCOUNT_PROVENANCE_UNAVAILABLE: account changed')
+                    # The quiet gate and account admission both await. Recheck
+                    # the workspace actually passed to this invocation after them.
+                    if self._resolve_task_workspace(task) != workspace_path:
+                        raise RuntimeError('TASK_WORKSPACE_UNAVAILABLE: workspace changed')
+                    with SessionLocal() as claim_db:
+                        if claim_db.get_bind().dialect.name == 'sqlite':
+                            claim_db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+                        current = claim_db.query(ScheduledTask).filter_by(id=frozen_task_id).first()
+                        occurrence = claim_db.query(TaskRun).filter_by(id=run_id, task_id=frozen_task_id).first()
+                        if (not current or current.owner != frozen_owner or current.host_account_id != frozen_account
+                                or not occurrence or occurrence.status != 'running'):
+                            raise RuntimeError('TASK_ACCOUNT_PROVENANCE_UNAVAILABLE: task occurrence changed')
+                        from src.openclank.task_execution_context import (
+                            TASKSPEC_FIELDS, profile_available, taskspec_sha256, write_context,
+                        )
+                        spec = {key: getattr(task, key) for key in TASKSPEC_FIELDS}
+                        spec = {key: int(value) if type(value) is bool else value for key, value in spec.items()}
+                        expected_spec = taskspec_sha256(spec)
+                        current_spec = {key: getattr(current, key) for key in TASKSPEC_FIELDS}
+                        current_spec = {key: int(value) if type(value) is bool else value for key, value in current_spec.items()}
+                        if taskspec_sha256(current_spec) != expected_spec:
+                            raise RuntimeError('TASK_ACCOUNT_PROVENANCE_UNAVAILABLE: task configuration changed')
+                        workspace_id = str(getattr(task, 'workspace_id', None) or '')
+                        if (claim_db.get_bind().dialect.name == 'sqlite'
+                                and getattr(task, '_execution_context_original_run', False) and workspace_id):
+                            raw_db = claim_db.connection().connection.driver_connection
+                            if profile_available(raw_db):
+                                write_context(raw_db, account_id=frozen_account, owner=frozen_owner,
+                                    task_id=frozen_task_id, run_id=run_id, workspace_id=workspace_id,
+                                    expected_taskspec_sha256=expected_spec)
+                        # The send can become uncertain after this commit.  Advance
+                        # the due occurrence now, not on a later timeout/restart.
+                        if runtime is not None:
+                            occurrence.status = 'outcome_unknown'
+                            occurrence.error = 'Agent outcome not yet settled'
+                            if (current.trigger_type or 'schedule') == 'schedule':
+                                current.next_run = compute_next_run(current.schedule, current.scheduled_time,
+                                    current.scheduled_day, current.scheduled_date, after=_utcnow(),
+                                    cron_expression=current.cron_expression, tz_name=_resolve_task_timezone(claim_db, current))
+                            else:
+                                current.next_run = None
+                        claim_db.commit()
+                    context = (frozen_account, auth, barrier, admission)
+                except BaseException:
+                    await barrier.release(admission)
+                    raise
+            try:
+                async for value in stream_agent_target(
+                    target, messages=messages, supervisor=self._mimo_supervisor,
+                    max_rounds=_task_max_rounds,
+                    max_tool_calls=int(getattr(task, 'max_tool_calls', None) or 20),
+                    session_id=session_id, owner=frozen_owner, cwd=workspace_path,
+                    disabled_tools=disabled_tools, relevant_tools=allowed_tools,
+                    turn_envelope=turn_envelope, workload='background',
+                    _foreground_account_context=context,
+                ):
+                    yield value
+            finally:
+                if admission is not None:
+                    await barrier.release(admission)
+
+        async for event_str in admitted_stream():
             event_name = "message"
             for line in event_str.splitlines():
                 if line.startswith("event:"):
@@ -3333,7 +4635,7 @@ class TaskScheduler:
                 if event_name == "error" or data.get("error"):
                     stream_error = data
                     continue
-                if data.get("type") in {"permission_request", "question", "interaction_required"}:
+                if data.get("type") in {"permission_request", "ask_user", "question", "interaction_required"}:
                     # S12: persist the wait and surface it to the task chat.
                     # The bridge's QuestionHandler blocks the worker until the
                     # answer arrives, so this async pause IS the resume point.
@@ -3341,6 +4643,15 @@ class TaskScheduler:
                     # committed in the transcript.
                     _kind = "permission" if data.get("type") == "permission_request" else "question"
                     _payload = data.get("data") or data.get("request") or data
+                    _native_binding = None
+                    if frozen_account and isinstance(_payload, dict):
+                        _live = self._task_live_pending(owner=frozen_owner, session_id=session_id,
+                            account_id=frozen_account, kind=_kind, request_id=_payload.get('request_id'),
+                            root_operation_id=root_operation_id)
+                        if (_live and _payload.get('session_id') == session_id
+                                and _payload.get('turn_id') == _live[0]['turn_id']
+                                and _payload.get('revision') == _live[0]['revision']):
+                            _native_binding = _live[0]
                     self._persist_wait_request(
                         task_id=task.id,
                         run_id=run_id,
@@ -3351,6 +4662,7 @@ class TaskScheduler:
                         workspace_id=getattr(task, "workspace_id", None),
                         continuation_revision=int(data.get("revision") or 0),
                         actor_generation=data.get("turn_id") or None,
+                        native_binding=_native_binding,
                     )
                     self.add_notification(
                         task_name=task.name,
@@ -3376,8 +4688,8 @@ class TaskScheduler:
                         _db = SessionLocal()
                         try:
                             _run = _db.query(_TR).filter(_TR.id == run_id).first()
-                            if _run and _run.status == "waiting":
-                                _run.status = "running"
+                            if _run and _run.status in ("waiting", "resuming", "issued_waiting", "issued_resuming"):
+                                _run.status = "outcome_unknown" if _run.status.startswith("issued_") else "running"
                                 _db.commit()
                         finally:
                             _db.close()
@@ -3691,6 +5003,55 @@ class TaskScheduler:
         so the blocked worker continues. Otherwise (restart), re-execute the
         task with the same run_id and session so the durable chat continues.
         """
+        # A qualified issued turn may continue only via its exact live question
+        # handler.  A persisted wait is not proof that a lost worker can resume.
+        from core.database import SessionLocal, TaskRun, TaskWaitRequest
+        with SessionLocal() as check_db:
+            wait = check_db.query(TaskWaitRequest).filter_by(id=wait_id, task_id=task_id, run_id=run_id, owner=owner, session_id=session_id, state='waiting').first()
+            run = check_db.query(TaskRun).filter_by(id=run_id, task_id=task_id).first()
+            if not wait or not run:
+                return False
+            issued = run.status in ('issued_waiting', 'issued_resuming', 'outcome_unknown')
+        if issued:
+            accepted = False
+            try:
+                from core.database import ScheduledTask
+                with SessionLocal() as verify_db:
+                    row = verify_db.query(TaskWaitRequest).filter_by(id=wait_id, task_id=task_id, run_id=run_id, owner=owner, session_id=session_id, state='waiting').first()
+                    task = verify_db.query(ScheduledTask).filter_by(id=task_id, owner=owner).first()
+                    if not row or not task or not task.host_account_id:
+                        return False
+                    sealed_payload = row.payload
+                    payload = json.loads(sealed_payload or '{}')
+                    binding = payload.get('_openclank_native_wait') if isinstance(payload, dict) else None
+                    if not isinstance(binding, dict) or binding.get('account_id') != task.host_account_id or binding.get('kind') != row.kind:
+                        return False
+                    live = self._task_live_pending(owner=owner, session_id=session_id, account_id=task.host_account_id,
+                        kind=row.kind, request_id=binding.get('request_id'), root_operation_id=f'turn-task-run:{run_id}')
+                    if not live or live[0] != binding:
+                        return False
+                    handler, pending = live[1], live[2]
+                    if row.kind == 'question':
+                        accepted = handler.resolve_result(binding['request_id'], owner=owner, session_id=session_id,
+                            answers=(answer_payload or {}).get('answers'), rejected=bool((answer_payload or {}).get('rejected'))) == 'accepted'
+                    elif row.kind == 'permission':
+                        option = (answer_payload or {}).get('option_id')
+                        if option not in ('once','chat','workspace','always','reject') or pending._future.done():
+                            return False
+                        accepted = handler.resolve_for(binding['request_id'], option, owner=owner, session_id=session_id)
+                    else:
+                        return False
+                if not accepted:
+                    return False
+                if not self._consume_wait_request(wait_id, owner=owner, session_id=session_id,
+                        expected_payload=sealed_payload, task_id=task_id, run_id=run_id):
+                    return 'resolved_unrecorded'
+                if not self._mark_run_resuming(run_id):
+                    return 'resolved_unrecorded'
+                return True
+            except Exception:
+                logger.debug('Live issued task continuation unavailable', exc_info=True)
+                return 'resolved_unrecorded' if accepted else False
         if not self._consume_wait_request(wait_id, owner=owner, session_id=session_id):
             return False
         self._mark_run_resuming(run_id)
@@ -3745,22 +5106,50 @@ class TaskScheduler:
             logger.exception("Failed to resume task %s from wait %s", task_id, wait_id)
             return False
 
-    async def run_task_now(self, task_id: str, *, force: bool = False):
+    async def _execute_owned_manual_task(self, task_id, expected, *, force=False, selected_run_id=None):
+        barrier = getattr(getattr(getattr(self, '_session_manager', None), 'lifecycle_context', None), 'account_request_barrier', None)
+        admission = None
+        handed_off = False
+        try:
+            if barrier is None:
+                return
+            admission = await barrier.acquire(expected['owner'])
+            if not await barrier.is_live(expected['owner'], admission) or not self._manual_task_current(task_id, expected):
+                return
+            handed_off = True
+            await self._execute_task(task_id, bypass_model_slot=force, release_executing=not force, manual_expected=expected, selected_run_id=selected_run_id)
+        except Exception:
+            logger.warning('Manual task admission or execution became unavailable')
+        finally:
+            if admission is not None:
+                await barrier.release(admission)
+            if selected_run_id is not None:
+                handle = asyncio.current_task()
+                if handle: self._unregister_task_handle(task_id, handle)
+            if not handed_off and not force:
+                self._skip_selected_manual_run(task_id, selected_run_id)
+                async with self._executing_lock:
+                    self._executing.discard(task_id)
+
+    async def run_task_now(self, task_id: str, *, force: bool = False, manual_expected=None):
         """Manually trigger a task execution."""
-        if self._task_owner_lifecycle_fenced(task_id):
+        if self._task_owner_lifecycle_fenced(task_id) or not self._manual_task_current(task_id, manual_expected):
             return False
         if force:
-            asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
+            asyncio.create_task(self._execute_owned_manual_task(task_id, manual_expected, force=True) if manual_expected else
+                                self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
             return True
         async with self._executing_lock:
             if task_id in self._executing:
                 return False
             self._executing.add(task_id)
-        asyncio.create_task(self._execute_task(task_id))
+        asyncio.create_task(self._execute_owned_manual_task(task_id, manual_expected) if manual_expected else self._execute_task(task_id))
         return True
 
-    async def stop_task(self, task_id: str) -> bool:
+    async def stop_task(self, task_id: str, *, manual_expected=None) -> bool:
         """Cancel and join a task before reporting its durable aborted state."""
+        if not self._manual_task_current(task_id, manual_expected):
+            return False
         handles = self._execution_handles_for_task(task_id)
         stopped = False
         current = asyncio.current_task()
@@ -3777,6 +5166,8 @@ class TaskScheduler:
                 self._executing.discard(task_id)
                 stopped = True
 
+        if not self._manual_task_current(task_id, manual_expected):
+            return False
         stopped = self._mark_run_aborted(task_id) or stopped
         return stopped
 
@@ -3978,7 +5369,8 @@ class TaskScheduler:
         deferred by their cancellation path instead of stealing the app.
         """
         async with self._executing_lock:
-            task_ids = list(self._executing)
+            # The server-owned theme task supplies artwork to the open UI.
+            task_ids = [task_id for task_id in self._executing if not task_id.startswith('theme-emoji-')]
         stopped = 0
         handles = []
         for task_id in task_ids:
@@ -3995,9 +5387,171 @@ class TaskScheduler:
             logger.info("Stopped %d background scheduler task(s): %s", stopped, reason)
         return stopped
 
-    async def ensure_defaults(self, owner: str):
+    _THEME_EMOJI_RETRY_DEFERRED = 'Emoji source asked to retry later.'
+
+    @staticmethod
+    def _is_theme_emoji_task(task):
+        return (task.id.startswith('theme-emoji-') and task.task_type == 'action'
+                and task.action == 'theme_emoji_refresh')
+
+    def theme_emoji_link(self, *, username: str, account_id: str, local_state):
+        """Resolve only the existing task for this exact accepted consent."""
+        from core.database import SessionLocal, ScheduledTask
+        if (not self._auth_manager or self._auth_manager.account_id(username) != account_id
+                or self._auth_manager.username_for_account_id(account_id) != username):
+            raise ValueError('Account changed')
+        state = local_state.obligation(account_id)
+        if state['consent'] != 'accepted':
+            raise ValueError('Emoji consent unavailable')
+        frozen = {'account_id':account_id, **state}
+        key = hashlib.sha256(json.dumps(frozen, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        task_id = 'theme-emoji-' + key[:32]
+        with SessionLocal() as db:
+            row = db.query(ScheduledTask).filter_by(id=task_id, owner=username, action='theme_emoji_refresh', status='active').first()
+            if row is None or json.loads(row.prompt or '{}') != frozen:
+                raise ValueError('Emoji update task unavailable')
+        return task_id
+
+    def theme_emoji_obligation_status(self, *, username: str, account_id: str, local_state):
+        """Read the linked task; never create or schedule work from status."""
+        from core.database import SessionLocal, ScheduledTask, TaskRun
+        if (not self._auth_manager or self._auth_manager.account_id(username) != account_id
+                or self._auth_manager.username_for_account_id(account_id) != username):
+            raise ValueError('Account changed')
+        state = local_state.obligation(account_id)
+        frozen = {'account_id':account_id, **state}
+        key = hashlib.sha256(json.dumps(frozen, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        db = SessionLocal()
+        try:
+            row = db.query(ScheduledTask).filter_by(id='theme-emoji-' + key[:32], owner=username, action='theme_emoji_refresh').first()
+            run = db.query(TaskRun).filter(TaskRun.task_id == row.id, TaskRun.status.in_(('queued','running','waiting','resuming'))).order_by(TaskRun.started_at.desc()).first() if row else None
+            last = db.query(TaskRun).filter(TaskRun.task_id == row.id, TaskRun.finished_at.isnot(None)).order_by(TaskRun.started_at.desc()).first() if row else None
+            warning = False
+            if last and last.status == 'success' and last.result:
+                try:
+                    warning = bool(set(json.loads(last.result).get('refreshWarnings', [])) & {'noto', 'kitchen'})
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            return {'next_due': row.next_run.isoformat() if row and row.status == 'active' and row.next_run else None,
+                    'updates_enabled': bool(row and row.status == 'active' and state['consent'] == 'accepted'),
+                    'last_check': row.last_run.isoformat() if row and row.last_run else None,
+                    'last_error': bool(last and last.status == 'error'), 'last_warning':warning,
+                    'runID':run.id if run else None, 'cancellable':bool(run and row.id in self._executing),
+                    'acquisition_active':bool(row and row.id in self._executing)}
+        finally:
+            db.close()
+
+    async def set_theme_emoji_updates(self, *, username: str, account_id: str, local_state, expected_revision: int, enabled: bool):
+        """Explicitly pause/resume the same consent-linked scheduler task."""
+        from core.atomic_io import _path_locks
+        from core.database import SessionLocal, ScheduledTask, TaskRun
+        def commit():
+            with _path_locks([str(local_state._owner_path(account_id))]):
+                if (not self._auth_manager or self._auth_manager.account_id(username) != account_id
+                        or self._auth_manager.username_for_account_id(account_id) != username):
+                    raise ValueError('Account changed')
+                state = local_state.obligation(account_id)
+                if state['consent'] != 'accepted' or state['consent_revision'] != expected_revision:
+                    raise ValueError('Emoji consent changed')
+                frozen = {'account_id':account_id, **state}
+                key = hashlib.sha256(json.dumps(frozen, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                task_id = 'theme-emoji-' + key[:32]
+                with SessionLocal() as db:
+                    row = db.query(ScheduledTask).filter_by(id=task_id, owner=username, action='theme_emoji_refresh').first()
+                    if row is None or json.loads(row.prompt or '{}') != frozen:
+                        raise ValueError('Emoji update task unavailable')
+                    last = db.query(TaskRun).filter(TaskRun.task_id == row.id, TaskRun.finished_at.isnot(None)).order_by(TaskRun.started_at.desc()).first()
+                    if enabled and last and last.error == 'Source retry delay exceeds the automatic horizon; updates paused.':
+                        raise ValueError('Source retry delay remains in effect')
+                    row.status = 'active' if enabled else 'paused'
+                    row.next_run = compute_next_run('weekly', row.scheduled_time, row.scheduled_day, None, after=_utcnow()) if enabled else None
+                    db.commit()
+                return task_id
+        task = asyncio.create_task(asyncio.to_thread(commit))
+        try:
+            task_id = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try: await asyncio.shield(task)
+                except asyncio.CancelledError: continue
+                except Exception: break
+            if not task.cancelled(): task.exception()
+            raise
+        if not enabled:
+            await self.stop_task(task_id)
+        return await asyncio.to_thread(self.theme_emoji_obligation_status, username=username, account_id=account_id, local_state=local_state)
+
+    async def reconcile_theme_emoji_obligation(self, *, username: str, account_id: str, local_state,
+                                              start_revision: int | None = None):
+        """Commit desired task under the same lock as consent CAS."""
+        from core.atomic_io import _path_locks
+        from core.database import SessionLocal, ScheduledTask, TaskRun
+        from src.openclank.theme_emoji_acquisition import THEME_EMOJI_ACQUISITION_READY
+        def commit():
+            with _path_locks([str(local_state._owner_path(account_id))]):
+                if (not self._auth_manager or self._auth_manager.account_id(username) != account_id
+                        or self._auth_manager.username_for_account_id(account_id) != username):
+                    raise ValueError('Account changed')
+                state = local_state.obligation(account_id)
+                frozen = {'account_id':account_id, **state}
+                key = hashlib.sha256(json.dumps(frozen, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                task_id = 'theme-emoji-' + key[:32]
+                enabled = state['consent'] == 'accepted' and THEME_EMOJI_ACQUISITION_READY
+                cancel = []
+                with SessionLocal() as db:
+                    rows = db.query(ScheduledTask).filter(ScheduledTask.owner == username, ScheduledTask.action == 'theme_emoji_refresh').all()
+                    for row in rows:
+                        if str(row.id or '').startswith('theme-emoji-') and (row.id != task_id or not enabled):
+                            row.status, row.next_run = 'paused', None
+                            cancel.append(row.id)
+                    row = next((item for item in rows if item.id == task_id), None)
+                    if enabled and row is None:
+                        now = datetime.now(timezone.utc).replace(tzinfo=None)
+                        row = ScheduledTask(id=task_id, owner=username, host_account_id=account_id, name='Refresh emoji artwork',
+                            task_type='action', action='theme_emoji_refresh', prompt=json.dumps(frozen, sort_keys=True),
+                            trigger_type='schedule', schedule='weekly', scheduled_time=now.strftime('%H:%M'),
+                            scheduled_day=now.weekday(), next_run=now + timedelta(seconds=5), status='active',
+                            output_target='none', notifications_enabled=False)
+                        db.add(row)
+                    db.commit()
+                    kick = (enabled and row is not None and row.status == 'active'
+                            and start_revision == state['consent_revision'])
+                    if kick:
+                        last = db.query(TaskRun).filter(TaskRun.task_id == task_id, TaskRun.finished_at.isnot(None)).order_by(TaskRun.started_at.desc()).first()
+                        if last and last.result == self._THEME_EMOJI_RETRY_DEFERRED:
+                            kick = row.next_run is not None and row.next_run <= _utcnow()
+                        elif last and last.status == 'success':
+                            try:
+                                kick = json.loads(last.result or '{}').get('pending', True) is not False
+                            except (ValueError, AttributeError):
+                                pass
+                return cancel, task_id if kick else None
+        task = asyncio.create_task(asyncio.to_thread(commit))
+        try:
+            cancel, start_id = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try: await asyncio.shield(task)
+                except asyncio.CancelledError: continue
+                except Exception: break
+            if not task.cancelled(): task.exception()
+            raise
+        for old_id in cancel:
+            await self.stop_task(old_id)
+        if start_id:
+            await self.run_task_now(start_id)
+        return {'acquisition_available':THEME_EMOJI_ACQUISITION_READY, **(
+            await asyncio.to_thread(self.theme_emoji_obligation_status,
+                username=username, account_id=account_id, local_state=local_state))}
+
+    async def ensure_defaults(self, owner: str, *, account_id: str | None = None):
         """Create default housekeeping tasks for this owner (idempotent per action)."""
         from core.database import SessionLocal, ScheduledTask
+        if self._skip_owner_maintenance(owner):
+            return
+        if account_id and (not self._auth_manager or self._auth_manager.account_id(owner) != account_id
+                or self._auth_manager.username_for_account_id(account_id) != owner):
+            raise ValueError('Account changed')
         try:
             from routes.prefs_routes import _load_for_user
             _prefs = _load_for_user(owner) or {}
@@ -4008,10 +5562,15 @@ class TaskScheduler:
 
         db = SessionLocal()
         try:
+            if account_id and (not self._auth_manager or self._auth_manager.account_id(owner) != account_id
+                    or self._auth_manager.username_for_account_id(account_id) != owner):
+                raise ValueError('Account changed')
+            from sqlalchemy import or_
             existing_actions = {
                 row[0] for row in db.query(ScheduledTask.action).filter(
                     ScheduledTask.owner == owner,
                     ScheduledTask.task_type == "action",
+                    or_(ScheduledTask.host_account_id == account_id, ScheduledTask.host_account_id.is_(None)),
                 ).all() if row[0]
             }
             seeded = []
@@ -4029,6 +5588,7 @@ class TaskScheduler:
                 task = ScheduledTask(
                     id=str(uuid.uuid4())[:8],
                     owner=owner,
+                    host_account_id=account_id,
                     name=defs["name"],
                     task_type="action",
                     action=action,
@@ -4049,7 +5609,13 @@ class TaskScheduler:
                 )
                 db.add(task)
                 seeded.append(action)
+            if account_id and (self._auth_manager.account_id(owner) != account_id
+                    or self._auth_manager.username_for_account_id(account_id) != owner):
+                raise ValueError('Account changed')
             db.commit()
+        except ValueError:
+            db.rollback()
+            raise
         except Exception as e:
             logger.warning(f"Failed to create default tasks: {e}")
         finally:
@@ -4069,7 +5635,7 @@ class TaskScheduler:
         # check-ins seeded, which then double-fire alongside the human user's
         # check-ins. This was the root cause of the duplicate 'Morning check-in'
         # rows we had to manually clean up.
-        if not owner or owner in RESERVED_USERNAMES:
+        if not owner or owner in RESERVED_USERNAMES or self._skip_owner_maintenance(owner):
             logger.info(f"ensure_assistant_defaults: skip synthetic owner {owner!r}")
             return
         from core.database import SessionLocal, CrewMember, ScheduledTask

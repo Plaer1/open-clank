@@ -5,7 +5,9 @@ describe("BuiltinWorkflow registry", () => {
   test("registers every script in the built-in directory", () => {
     // The directory is the registry, so losing a script is otherwise silent.
     expect(BuiltinWorkflow.list().map((w) => w.name)).toEqual([
+      "advisor",
       "compose",
+      "council",
       "deep-research",
       "fact-check",
       "research-experiment",

@@ -31,10 +31,10 @@ let _fetchInflight = null;
 let _fetchSeq = 0;
 let _authListenerBound = false;
 const _FETCH_CACHE_TTL = 30000; // 30s client-side cache for /api/models
-const COLLAPSE_KEY = 'odysseus-models-collapsed';
-const FAVORITES_KEY = 'odysseus-model-favorites';
-const USAGE_KEY = 'odysseus-model-usage';
-const SORT_KEY = 'odysseus-model-sort';
+const COLLAPSE_KEY = 'openclank-models-collapsed';
+const FAVORITES_KEY = 'openclank-model-favorites';
+const USAGE_KEY = 'openclank-model-usage';
+const SORT_KEY = 'openclank-model-sort';
 
 export function init(apiBase) {
   API_BASE = apiBase;
@@ -224,14 +224,10 @@ export async function refreshModels(force = false, opts = {}) {
     try {
       if (force) request = null;
       if (!request) {
-        // Pass ?refresh=true on forced refreshes so the BACKEND's 30s
-        // per-user cache also gets bypassed. Without this, `force=true`
-        // only clears the frontend cache and the same stale list comes
-        // back — newly-served endpoints don't appear until the cache
-        // ages out. (Bug repro: serve a model, picker is empty for ~30s
-        // even though the endpoint is in the DB and online.)
+        // UI invalidation reloads persisted routes. Only explicit discovery
+        // should start a provider worker or contact connected accounts.
         const _seq = ++_fetchSeq;
-        const _url = `${API_BASE}/api/models` + (force ? '?refresh=true' : '?background=false');
+        const _url = `${API_BASE}/api/models` + (opts.discover ? '?refresh=true' : '');
         request = {
           seq: _seq,
           promise: fetch(_url, { credentials: 'same-origin' }).then(async (res) => {
@@ -656,7 +652,7 @@ export async function refreshModels(force = false, opts = {}) {
       if (welcomeTip) {
         const tips = window.innerWidth <= 768
           ? [
-              'Tip: Long-press a session for rename, delete, and memory options.',
+              'Tip: Long-press a session to see its actions.',
               'Tip: Tap the eye icon for Nobody mode - no history saved.',
               'Tip: Switch to Agent mode when you want tools.',
               'Tip: Attach images or files using the + button next to the input.',
@@ -666,7 +662,7 @@ export async function refreshModels(force = false, opts = {}) {
               'Tip: Press Ctrl+B to quickly toggle the sidebar.',
               'Tip: Shift-click the sidebar toggle to swap it to the other side.',
               'Tip: Drag and drop files onto the chat to attach them.',
-              'Tip: Right-click a session for rename, delete, and memory options.',
+              'Tip: Right-click a session to see its actions.',
             ];
         welcomeTip.textContent = tips[Math.floor(Math.random() * tips.length)];
       }

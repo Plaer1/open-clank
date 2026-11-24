@@ -12,9 +12,9 @@ import stat
 
 
 @contextmanager
-def copal_commit_lock(data_dir: Path):
+def copal_commit_lock(data_dir: Path, *, existing_only: bool = False, nonblocking: bool = False):
     path = Path(data_dir) / ".copal-commit.lock"
-    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    descriptor = os.open(path, (0 if existing_only else os.O_CREAT) | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     acquired = False
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -22,12 +22,14 @@ def copal_commit_lock(data_dir: Path):
         if os.name == "nt":
             import msvcrt
             if os.fstat(descriptor).st_size == 0:
+                if existing_only:
+                    raise OSError("Copal commit lock is uninitialized")
                 os.write(descriptor, b"\0")
             os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK if nonblocking else msvcrt.LK_LOCK, 1)
         else:
             import fcntl
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0))
         acquired = True
         yield
     finally:

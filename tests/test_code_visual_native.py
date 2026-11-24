@@ -11,7 +11,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-binary = os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN")
+binary = os.environ.get("OPEN_CLANK_TEST_MEMERY_WORKER_BIN")
 expected = os.environ.get("OPENCLANK_S02_NATIVE_SHA256")
 if not binary or not expected:
     pytest.skip("Explicit matching s03-fixtures binary+SHA required; no installed fallback", allow_module_level=True)

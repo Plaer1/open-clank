@@ -29,6 +29,16 @@ import { InstanceState } from "@/effect"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 
+// Only the original built-in owner may mark its actual post-configuration object.
+const bundledChatPrompts = new WeakMap<object, {prompt:string; mode:string; native:boolean | undefined}>()
+/** Process-private provenance, not an agent name or prompt-byte lookup. */
+export function ownsBundledChatPrompt(value:Info):boolean {
+  const mark=bundledChatPrompts.get(value)
+  if (!mark) return false
+  const prompt=Object.getOwnPropertyDescriptor(value,"prompt")
+  return !!prompt && "value" in prompt && prompt.value===mark.prompt && value.mode===mark.mode && value.native===mark.native
+}
+
 export const Info = z
   .object({
     name: z.string(),
@@ -481,6 +491,8 @@ export const layer = Layer.effect(
           },
         }
 
+        const originalBundledChat = agents.chat
+        const chatPromptWasConfigured = Object.prototype.hasOwnProperty.call(cfg.agent?.chat ?? {}, "prompt")
         for (const [key, value] of Object.entries(cfg.agent ?? {})) {
           if (value.disable) {
             delete agents[key]
@@ -512,6 +524,16 @@ export const layer = Layer.effect(
           item.toolAllowlist = value.tool_allowlist ?? item.toolAllowlist
           item.options = mergeDeep(item.options, value.options ?? {})
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
+        }
+
+        // Only the same built-in object without any configured prompt replacement
+        // receives this private marker; equality of names or bytes is insufficient.
+        if (originalBundledChat && agents.chat === originalBundledChat && !chatPromptWasConfigured &&
+            originalBundledChat.prompt === PROMPT_CHAT) {
+          bundledChatPrompts.set(originalBundledChat,{prompt:PROMPT_CHAT,mode:originalBundledChat.mode,native:originalBundledChat.native})
+          // The marker dies with the actual InstanceState owner; a retained old
+          // agent object cannot survive cache invalidation as current evidence.
+          yield* Effect.addFinalizer(() => Effect.sync(() => bundledChatPrompts.delete(originalBundledChat)))
         }
 
         // Ensure Truncate.GLOB and skill directories are allowed unless explicitly configured

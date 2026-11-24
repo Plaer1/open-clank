@@ -145,3 +145,27 @@ def test_real_plan_save_preserves_newer_managed_binding(tmp_path, monkeypatch):
     saved = plan_approval.save_plan_draft("chat-plan", "alice", "new draft")
     assert saved["status"] == "draft"
     assert projection.get_managed_binding("chat-plan", owner="alice")["engineSessionID"] == "engine-newer"
+
+
+def test_bound_plan_slice_update_invalidates_approval_without_replacing_root():
+    import asyncio
+    from types import SimpleNamespace
+    from src.openclank.acp_bridge import ACPBridge
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._session_state = {'s': {'plan_state': {'artifact_relpath': '.clanker/futures/topic.md', 'artifact_path_revision': 2}}}
+    bridge._persist_session_state = lambda *_: None
+    root = bridge._persist_plan_diff('s', '.clanker/futures/topic.md', 'root text')
+    first = bridge._persist_plan_diff('s', '.clanker/futures/topic/a.md', 'slice one')
+    assert first['plan'] == 'root text' and first['path'] == '.clanker/futures/topic.md'
+    first['approved_revision'] = first['revision']; first['approved_digest'] = first['digest']; first['status'] = 'approved'
+    replay = bridge._persist_plan_diff('s', '.clanker/futures/topic/a.md', 'slice one')
+    assert replay['revision'] == first['revision'] and replay['approved_digest'] == first['digest']
+    assert bridge._persist_plan_diff('s', '.clanker/futures/other/x.md', 'unrelated') is None
+    changed = bridge._persist_plan_diff('s', '.clanker/futures/topic/a.md', 'slice two')
+    assert changed['revision'] > replay['revision'] and changed['approved_digest'] is None
+    request = SimpleNamespace(mimo_session_id='s', request_id='q', questions=[{'key':'plan_exit','options':[{'label':'yes'}]}], plan_revision=replay['revision'], result=lambda: {'answers': [['yes']]})
+    bridge._session_state['s']['pending_question'] = {'request_id':'q'}
+    asyncio.run(bridge._clear_question(request))
+    assert bridge._session_state['s']['plan_state']['approved_digest'] is None
+    reverted = bridge._persist_plan_diff('s', '.clanker/futures/topic/a.md', 'slice one')
+    assert reverted['approved_digest'] is None

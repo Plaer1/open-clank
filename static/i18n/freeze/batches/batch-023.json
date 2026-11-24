@@ -2,21 +2,21 @@
   "id": "batch-023",
   "group": "docs.openclank-docs-chat-workspaces",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 1727,
+  "entry_count": 3,
+  "character_count": 5914,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-chat-workspaces.body",
-      "source": "# Chat and Workspaces\n\nChat is the conversational surface. Copal is the document surface. They share\none account and one set of resources, but they have different rules.\n\n## Chat\n\nEach conversation is its own transcript with its own history, attachments and\ntask list. You can keep many conversations open and switch between them from\nthe sidebar.\n\nChats can reference Copal documents by name. When the assistant quotes or\nlinks a document, opening that link goes to the document in Editor — it does\nnot fork the chat or lose your draft.\n\n## Workspaces and drafts\n\nEditor keeps drafts. If you type into a document and navigate away, the draft\nis kept and restored when you come back. Saving is guarded: if the stored\nversion moved underneath you, the save is refused rather than silently\noverwriting newer work.\n\nWindows in Copal (Editor, Graph, Timeline and the rest) keep their own\nposition and selection. Closing a window does not delete anything.\n\n## Identity in links\n\nDocument links carry the document identity, not just a title. Renaming a\ndocument keeps its links working. Sharing a link to someone on another account\nof the same installation resolves inside their own scope — they see their\ncopy of the target, not yours.\n\n## Preserving your work\n\n- Drafts survive navigation and window management.\n- Answering a task toast resumes in the original task chat, not whichever\n  chat happens to be in front.\n- Nothing in chat rewrites a Copal document without going through the normal\n  guarded save.\n\nContinue with [[Editor]] or [[Tasks and Continuations]].",
+      "source": "# Chat and Workspaces\n\nOpen [Chat](clank://chat), choose a saved chat or start a new one, and select a model. Attach files in the composer. For work in a Host folder, select the workspace and check its name before enabling **Shell Access**. Workspace rules, file permissions and individual approvals still apply. See [[Workspace Hexes]] and [[App Windows and Navigation]].\n\n## Send or steer a follow-up\n\nEnter sends and Shift+Enter starts a new line. During a reply, Enter normally steers the turn and Ctrl+Enter queues a new message. Change this in **Settings → AI Defaults → Chat input → Queue follow-ups by default**. Pending messages above the composer offer **Send now** and **Cancel** where available. Choose **Stop** to stop the active turn.\n\n## See what the chat is using\n\nIn a saved workspace chat, open **Workspace**. **Changes** lists observed workspace edits. **Sources** shows attached files and sources from loaded messages. Use **+** to attach a workspace file or select a source card to open it.\n\nOpen **Sources → Model context** or the context meter. The meter can show an estimate for current context and a reported size for the last request. **Inspect provider frames** shows retained sources and model details by attempt, with gaps labeled. If offered, **Preview** a context selection before choosing **Apply selection**. See [[Agent Settings and Compaction]] and [[Usage and Stats]].\n\n## Inspect a worker or a saved plan\n\nOpen **Workspace → Subagents** and select a worker to see its session, observations and available transcript. Use **Send follow-up** to address that worker when enabled. **Chat work** lists recorded commitments, executions and routines. Open a pending question or approval in the originating chat or worker.\n\nIn a chat with a saved plan, open the plan panel’s **Feedback**. Check the revision, save your comment, then choose **Send** or **Verify and send** to deliver it. See [[Tasks and Continuations]] for scheduled follow-through.\n\n## Resume, fork or recover\n\nUse **Chats** or `/sessions` to find a conversation and `/resume name` to open it. For a supported native chat, use `/timeline` to find a mapped user message. `/fork <host-message-id>` opens a separate continuation before it. `/recover` lists supported interrupted replies and gives the command to recover one. Reconcile a pending fork receipt before retrying. Type `/commands` for the browser command list.\n\n## Preview or move work\n\nSelect **Preview saved HTML** on an eligible tool result. The preview lists dependency gaps and offers **Open in Editor**, **Export source bundle (partial static)** and **Widget state…** where available. Use **More → Copy Chat** for chat text or [[Search and Media#Keep or export an output|Review selected outputs]] for saved files.\n\nIn Files, select an eligible standalone Codex thread-history SQLite snapshot and choose **Preview selected history…**. Choose an **Owned workspace**, then **Preview threads → Open thread**. Select supported items starting with a user message. Enter a **New chat name**, then **Review import → Import selected**. **Open imported chat** opens the new chat for model selection. If the result is unclear, use **Reconcile import** or save the recovery selector for **File → Recover previous history import…** under the same account.\n\n## Continue from a terminal\n\nWith the Open Clank CLI installed, open a saved browser chat and copy its ID from `/chats info`. Substitute your server URL and chat ID below.\n\n```bash\nopenclank profile add work https://clank.example --use\nopenclank login --profile work\nopenclank run --profile work --session CHAT_ID --prompt \"Summarize the decisions so far.\"\nopenclank tui --profile work\nopenclank logout --profile work\n```\n\nApprove the terminal in the browser. Use `--no-browser` to open the displayed URL yourself. The profile selects the server and `--session` selects its chat. In TUI, type `open` and a number from **Sessions**. Use `help` for commands and `quit` before `logout` revokes the credential. Without an OS credential vault, open TUI directly and authorize it for that process.\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:203"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
@@ -26,10 +26,20 @@
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:203"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
       "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-chat-workspaces.body.compat-5fe5af10dc02",
+      "source": "# Chat and Workspaces\n\nChat is the conversational surface. Copal is the document surface. They share\none account and one set of resources, but they have different rules.\n\n## Chat\n\nEach conversation is its own transcript with its own history, attachments and\ntask list. You can keep many conversations open and switch between them from\nthe sidebar.\n\nChats can reference Copal documents by name. When the assistant quotes or\nlinks a document, opening that link goes to the document in Editor — it does\nnot fork the chat or lose your draft.\n\n## Workspaces and drafts\n\nEditor keeps drafts. If you type into a document and navigate away, the draft\nis kept and restored when you come back. Saving is guarded: if the stored\nversion moved underneath you, the save is refused rather than silently\noverwriting newer work.\n\nWindows in Copal (Editor, Graph, Timeline and the rest) keep their own\nposition and selection. Closing a window does not delete anything.\n\n## Identity in links\n\nDocument links carry the document identity, not just a title. Renaming a\ndocument keeps its links working. Sharing a link to someone on another account\nof the same installation resolves inside their own scope — they see their\ncopy of the target, not yours.\n\n## Preserving your work\n\n- Drafts survive navigation and window management.\n- Answering a task toast resumes in the original task chat, not whichever\n  chat happens to be in front.\n- Nothing in chat rewrites a Copal document without going through the normal\n  guarded save.\n\nContinue with [[Editor]] or [[Tasks and Continuations]].",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
     }
   ]
 }

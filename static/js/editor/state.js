@@ -1,6 +1,6 @@
 /**
- * Editor state store — a single mutable object that Imps
- * and its tool modules read and write directly.
+ * Editor state store — independent instances for injected core contexts,
+ * plus the legacy mutable compatibility instance still used by Imps tools.
  *
  * Migration: imps.js used to own ~110 module-scope `let`
  * declarations and capture them via closure. Tool modules can't import
@@ -14,7 +14,10 @@
  * module-scope initializers verbatim — every `state.foo = …` reset
  * site in imps.js still works unchanged.
  */
-export const state = {
+export function createEditorState() {
+  return {
+  sceneRevision: 0,
+  editEpoch: 0,
   // ── Transform tool ──
   // Drag-resize / rotate session state. While `transformActive` is
   // false every field below should be considered stale.
@@ -229,6 +232,7 @@ export const state = {
   // session. Tracked so closeEditor can detach them all cleanly.
   // Mutated in place (push / length = 0); the reference never changes.
   editorDocClickHandlers: [],
+  suppressLayerTapUntil: 0,
 
   // ── Undo / redo ──
   undoStack: [],
@@ -264,4 +268,113 @@ export const state = {
   // True when an edit happened during an in-flight save — triggers a
   // follow-up persist after the current one finishes.
   persistDirty: false,
-};
+  };
+}
+
+// Saved scene and persistence fields are shared; every other existing field
+// remains owned by the one current view until its tool family is migrated.
+const IMAGE_SCENE_FIELDS = Object.freeze(['sceneRevision','editEpoch','layers','activeLayerId','imgWidth','imgHeight','wandMask','wandLayerId','wandLastSeed','lastInpaintLayerId','imageId','imageRef','managedProvider','managedResourceId','projectId','projectRevision','expectedImageRevision','originalExt','undoStack','redoStack','layerOffsets','nextLayerId','draftId','draftName','persistTimer','persistInFlight','persistDirty','_editableExtras']);
+
+export function createImageStateParts({scene = null} = {}) {
+  const defaults = createEditorState(), shared = scene || {}, view = {}, state = {};
+  const fields = new Set(IMAGE_SCENE_FIELDS);
+  for (const key of new Set([...Object.keys(defaults), ...IMAGE_SCENE_FIELDS])) {
+    const target = fields.has(key) ? shared : view;
+    if (!Object.prototype.hasOwnProperty.call(target,key)) target[key] = defaults[key];
+    Object.defineProperty(state,key,{enumerable:true,configurable:false,get:() => target[key],set:value => { target[key] = value; }});
+  }
+  return Object.freeze({scene:shared,view,state});
+}
+
+/** Legacy singleton stays the active ingress until every dependent family is injected. */
+export const state = createEditorState();
+
+/** Owned listeners and callbacks are retired exactly once with their view. */
+export function createEditorLifetime() {
+  let disposed = false;
+  const cleanups = new Set();
+  const add = (cleanup) => {
+    if (typeof cleanup !== 'function') throw new TypeError('cleanup must be a function');
+    if (disposed) { cleanup(); return () => {}; }
+    cleanups.add(cleanup);
+    return () => { if (cleanups.delete(cleanup)) cleanup(); };
+  };
+  return Object.freeze({
+    get disposed() { return disposed; },
+    add,
+    listen(target, type, handler, options) {
+      if (disposed) return () => {};
+      target.addEventListener(type, handler, options);
+      return add(() => target.removeEventListener(type, handler, options));
+    },
+    dispose() {
+      if (disposed) return false;
+      disposed = true;
+      for (const cleanup of [...cleanups].reverse()) { cleanups.delete(cleanup); try { cleanup(); } catch (_) {} }
+      return true;
+    },
+  });
+}
+
+/** History is session-owned; capture/restore remain the runtime's pixel authority. */
+export function createEditorHistory({ state, capture, restore, limit = 20, onChanged = () => {}, now = Date.now, lifetime = null }) {
+  if (!state || typeof capture !== 'function' || typeof restore !== 'function') throw new TypeError('history dependencies are required');
+  const live = () => !lifetime?.disposed;
+  const current = () => { const snapshot = capture(); snapshot._label = 'Current'; snapshot._ts = now(); return snapshot; };
+  return Object.freeze({
+    save(label) {
+      if (!live()) return false;
+      const snapshot = capture(); snapshot._label = label || 'Edit'; snapshot._ts = now();
+      state.undoStack.push(snapshot);
+      if (state.undoStack.length > limit) state.undoStack.shift();
+      state.redoStack = [];
+      return true;
+    },
+    undo() {
+      if (!live() || !state.undoStack.length) return false;
+      state.redoStack.push(current()); restore(state.undoStack.pop()); onChanged(); return true;
+    },
+    redo() {
+      if (!live() || !state.redoStack.length) return false;
+      state.undoStack.push(current()); restore(state.redoStack.pop()); onChanged(); return true;
+    },
+  });
+}
+
+/** Signal a committed saved-scene mutation without serializing the canvas. */
+export function createSceneMutationSignal({ state, onChange = () => {} }) {
+  if (!state || typeof onChange !== 'function') throw new TypeError('scene mutation dependencies required');
+  return () => { state.sceneRevision += 1; onChange(state.sceneRevision); return state.sceneRevision; };
+}
+
+const sceneOwners = new WeakMap();
+
+/** One scene/history writer with independent view invalidation subscribers. */
+export function createImageSceneAuthority({state, sceneKey = state, onChange = () => {}, onDispose = () => {}, canDispose = () => true, isDirty = () => false}) {
+  if (!state || !sceneKey || typeof onChange !== 'function' || typeof onDispose !== 'function' || typeof canDispose !== 'function' || typeof isDirty !== 'function' || sceneOwners.has(sceneKey)) throw new TypeError('image scene must have one owner');
+  const views = new Set(), gestureEndListeners = new Set(); let history = null, disposed = false, gesture = null;
+  const signal = createSceneMutationSignal({state,onChange:revision => {
+    onChange(revision);
+    for (const view of [...views]) { try { view(revision); } catch (error) { console.error('[imps] view invalidation failed', error); } }
+  }});
+  const scene = Object.freeze({
+    get state() { return state; },
+    get revision() { return state.sceneRevision; },
+    get dirty() { return !disposed && isDirty(); },
+    get history() { return history; },
+    beginGesture(view, operation) { if (disposed || gesture || !view || !operation) return null; gesture = Object.freeze({view,operation}); return gesture; },
+    ownsGesture(token) { return !disposed && !!token && gesture === token; },
+    endGesture(token) { if (!token || gesture !== token) return false; gesture = null; for (const listener of [...gestureEndListeners]) { try { listener(state.sceneRevision); } catch (error) { console.error('[imps] gesture listener failed', error); } } return true; },
+    subscribeGestureEnd(listener) { if (disposed || typeof listener !== 'function') throw new TypeError('live gesture listener required'); gestureEndListeners.add(listener); return () => gestureEndListeners.delete(listener); },
+    canApplyAt(revision) { return !disposed && !gesture && state.sceneRevision === revision; },
+    canDispose() { return disposed || (!gesture && canDispose()); },
+    markChanged() { if (disposed) return false; return signal(); },
+    undo() { if (disposed || gesture || !history?.undo()) return false; signal(); return true; },
+    redo() { if (disposed || gesture || !history?.redo()) return false; signal(); return true; },
+    project(event) { if (disposed) return false; for (const view of [...views]) { try { view(state.sceneRevision,event); } catch (error) { console.error('[imps] view projection failed', error); } } return true; },
+    installHistory(options) { if (disposed || history) throw new Error('image history already installed or scene retired'); const lifetime = {get disposed() { return disposed || options.lifetime?.disposed === true; }}; history = createEditorHistory({...options,state,lifetime}); return history; },
+    subscribeView(invalidate) { if (disposed || typeof invalidate !== 'function') throw new TypeError('live view callback required'); views.add(invalidate); return () => views.delete(invalidate); },
+    dispose() { if (disposed || gesture || !canDispose()) return false; disposed = true; views.clear(); gestureEndListeners.clear(); try { onDispose(); } finally { if (sceneOwners.get(sceneKey) === scene) sceneOwners.delete(sceneKey); } return true; },
+  });
+  sceneOwners.set(sceneKey,scene); return scene;
+}

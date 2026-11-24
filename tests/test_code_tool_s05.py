@@ -23,19 +23,18 @@ def broker(monkeypatch, request):
     # DATA_DIR. The actual dispatcher must keep rejecting control-data roots.
     assert root.name == "data" and root.parent.name.startswith("openclank-s03-s06-projection.")
     assert root.parent.is_relative_to(Path("/tmp").resolve())
-    assert Path(os.environ["ODYSSEUS_DATA_DIR"]).resolve() == root
     assert Path(str(request.config.option.basetemp)).resolve() == root.parent / "tests"
-    for key in ("ODYSSEUS_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "OPENCLANK_CONVERSATION_ARCHIVE_DB"):
+    for key in ("OPEN_CLANK_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "OPENCLANK_CONVERSATION_ARCHIVE_DB"):
         assert Path(os.environ[key]).resolve().is_relative_to(root), key
     assert os.environ["DATABASE_URL"] == "sqlite:///:memory:"
-    assert os.environ["ODYSSEUS_INPROCESS_POLLERS"] == "0"
+    assert os.environ["OPEN_CLANK_INPROCESS_POLLERS"] == "0"
     assert os.environ["PYTHONDONTWRITEBYTECODE"] == "1"
     assert "OPEN_CLANK_AGENT_HOME" not in os.environ and "THESIUS_AGENT_HOME" not in os.environ
-    binary = Path(os.environ["FM_MCP_COMMAND"]).resolve()
-    assert binary.is_file() and binary == Path(os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"]).resolve()
+    binary = Path(os.environ["OPEN_CLANK_MEMERY_WORKER"]).resolve()
+    assert binary.is_file() and binary == Path(os.environ["OPEN_CLANK_TEST_MEMERY_WORKER_BIN"]).resolve()
     monkeypatch.setenv("DEBUG", "false")
-    from src import app_initializer, frankenmemory_database, secret_storage
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src import app_initializer, memery_database, secret_storage
+    from src.memery_provider import MemeryProvider
 
     def prepare(path=None):
         if path is not None:
@@ -45,9 +44,9 @@ def broker(monkeypatch, request):
     async def no_native_start(_self):
         raise AssertionError("Mock broker test must never initialize a native provider")
 
-    monkeypatch.setattr(app_initializer, "prepare_frankenmemory_database", prepare)
-    monkeypatch.setattr(frankenmemory_database, "prepare_frankenmemory_database", prepare)
-    monkeypatch.setattr(FrankenmemoryProvider, "initialize", no_native_start)
+    monkeypatch.setattr(app_initializer, "prepare_memery_database", prepare)
+    monkeypatch.setattr(memery_database, "prepare_memery_database", prepare)
+    monkeypatch.setattr(MemeryProvider, "initialize", no_native_start)
     monkeypatch.setattr(secret_storage, "_KEY_PATH", root / "synthetic-secret.key")
     monkeypatch.setattr(secret_storage, "_fernet", None)
     auth_path = Path(os.environ["OPEN_CLANK_AUTHORITY_AUTH_PATH"])
@@ -96,16 +95,16 @@ def broker(monkeypatch, request):
 
 def request(state, *, code_token=None, global_token=None, sid="chat-a", workspace="workspace-a", revision=7, queue=None):
     from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_OWNER_HEADER, INTERNAL_TOOL_WORKSPACE_HEADER
-    from src.openclank.acp_bridge import frankenmemory_broker_token
+    from src.openclank.acp_bridge import memery_broker_token
     from src.openclank.code_query import code_binding_token
-    global_token = global_token if global_token is not None else frankenmemory_broker_token(state.app.INTERNAL_TOOL_TOKEN, "alice", "global")
+    global_token = global_token if global_token is not None else memery_broker_token(state.app.INTERNAL_TOOL_TOKEN, "alice", "global")
     code_token = code_token if code_token is not None else code_binding_token(state.app.INTERNAL_TOOL_TOKEN, owner="alice", session_id=sid, workspace_id=workspace, binding_revision=revision)
     headers = {INTERNAL_TOOL_HEADER: global_token, INTERNAL_TOOL_OWNER_HEADER: "alice", INTERNAL_TOOL_WORKSPACE_HEADER: "global", "X-OpenClank-Code-Binding": code_token}
     async def receive():
         if queue is None:
             await asyncio.Event().wait()
         return await queue.get()
-    return Request({"type": "http", "http_version": "1.1", "method": "POST", "scheme": "http", "path": "/api/internal/frankenmemory/tool", "raw_path": b"/api/internal/frankenmemory/tool", "query_string": b"", "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()], "client": ("127.0.0.1", 1234), "server": ("127.0.0.1", 7000), "app": state.app.app}, receive)
+    return Request({"type": "http", "http_version": "1.1", "method": "POST", "scheme": "http", "path": "/api/internal/memery/tool", "raw_path": b"/api/internal/memery/tool", "query_string": b"", "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()], "client": ("127.0.0.1", 1234), "server": ("127.0.0.1", 7000), "app": state.app.app}, receive)
 
 
 def body(*, sid="chat-a", revision=7, query=None):
@@ -120,7 +119,7 @@ def assert_bounded(result, maximum=8192):
 
 
 async def test_actual_broker_uses_owned_live_chat_and_separate_purpose_token(broker):
-    result = await broker.app.internal_frankenmemory_tool(request(broker), body())
+    result = await broker.app.internal_memery_tool(request(broker), body())
     assert result["error"] is None
     assert_bounded(result)
     assert len(broker.calls) == 1
@@ -131,13 +130,13 @@ async def test_actual_broker_uses_owned_live_chat_and_separate_purpose_token(bro
 
 @pytest.mark.parametrize("change", ["missing", "global_as_code", "code_as_global", "wrong_chat", "wrong_workspace", "wrong_revision"])
 async def test_actual_broker_rejects_missing_swapped_or_stale_code_credentials(broker, change):
-    from src.openclank.acp_bridge import frankenmemory_broker_token
+    from src.openclank.acp_bridge import memery_broker_token
     from src.openclank.code_query import code_binding_token
-    global_token = frankenmemory_broker_token(broker.app.INTERNAL_TOOL_TOKEN, "alice", "global")
+    global_token = memery_broker_token(broker.app.INTERNAL_TOOL_TOKEN, "alice", "global")
     code = code_binding_token(broker.app.INTERNAL_TOOL_TOKEN, owner="alice", session_id="chat-a", workspace_id="workspace-a", binding_revision=7)
     kwargs = {"missing": {"code_token": ""}, "global_as_code": {"code_token": global_token}, "code_as_global": {"global_token": code}, "wrong_chat": {"sid": "chat-b"}, "wrong_workspace": {"workspace": "workspace-b"}, "wrong_revision": {"revision": 6}}[change]
     with pytest.raises(HTTPException) as caught:
-        await broker.app.internal_frankenmemory_tool(request(broker, **kwargs), body())
+        await broker.app.internal_memery_tool(request(broker, **kwargs), body())
     assert caught.value.status_code == 403
     assert broker.calls == []
 
@@ -150,7 +149,7 @@ async def test_actual_broker_rechecks_binding_after_held_query_and_measures_deni
         await release.wait()
         return {"schema": "open-clank.code-query/v1", "error": None, "hits": [{"id": "decl:bad"}]}
     broker.handler = held
-    task = asyncio.create_task(broker.app.internal_frankenmemory_tool(request(broker), body(query={"operation": "catalog", "budgets": {"bytes": 512, "tokens": 512}})))
+    task = asyncio.create_task(broker.app.internal_memery_tool(request(broker), body(query={"operation": "catalog", "budgets": {"bytes": 512, "tokens": 512}})))
     await asyncio.wait_for(started.wait(), 2)
     if change == "owner": broker.binding["owner"] = "bob"
     if change == "workspace": broker.binding["authorityWorkspaceID"] = "workspace-b"
@@ -170,7 +169,7 @@ async def test_actual_broker_rechecks_binding_after_held_query_and_measures_deni
 @pytest.mark.parametrize("failure", ["fenced", "runtime"])
 async def test_actual_broker_barrier_entry_failure_is_bounded_not_500(broker, failure):
     broker.barrier_error = failure
-    result = await broker.app.internal_frankenmemory_tool(request(broker), body(query={"operation": "catalog", "budgets": {"bytes": 512, "tokens": 512}}))
+    result = await broker.app.internal_memery_tool(request(broker), body(query={"operation": "catalog", "budgets": {"bytes": 512, "tokens": 512}}))
     assert result["error"]["code"] in {"denied", "unavailable"}
     assert_bounded(result, 512)
 
@@ -185,7 +184,7 @@ async def test_actual_broker_asgi_disconnect_cancels_owned_query_task(broker):
             cancelled.set()
     broker.handler = held
     queue = asyncio.Queue()
-    task = asyncio.create_task(broker.app.internal_frankenmemory_tool(request(broker, queue=queue), body()))
+    task = asyncio.create_task(broker.app.internal_memery_tool(request(broker, queue=queue), body()))
     await asyncio.wait_for(started.wait(), 2)
     # Actual Request receive disconnect, not task.cancel()/fake-function cancel.
     await queue.put({"type": "http.disconnect"})
@@ -260,7 +259,7 @@ async def test_actual_plan_mode_dispatch_executes_registered_code_reader(broker,
 def test_actual_acp_descriptor_code_token_binds_chat_workspace_revision(broker, monkeypatch):
     from src.openclank import acp_bridge
     from src.openclank.code_query import code_binding_token
-    monkeypatch.setattr(acp_bridge, "_MEMORY_BROKER_URL", "http://127.0.0.1:7000/api/internal/frankenmemory/tool")
+    monkeypatch.setattr(acp_bridge, "_MEMORY_BROKER_URL", "http://127.0.0.1:7000/api/internal/memery/tool")
     monkeypatch.setattr(acp_bridge, "_MEMORY_BROKER_TOKEN", "synthetic-master")
     def descriptor(**extra):
         arguments = dict(owner="alice", session_id="chat-a", workspace=str(Path(os.environ["OPEN_CLANK_DATA_DIR"]).resolve()), authority_workspace_id="workspace-a", binding_revision=7)

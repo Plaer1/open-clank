@@ -15,11 +15,14 @@
  *   showToast:   (msg: string) => void,
  * }} deps
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 import { canvasCoords } from '../canvas-coords.js';
 
-export function createCloneTool({ activeLayer, saveState, strokeTo, showToast }) {
-  return {
+export function createCloneTool({ state = legacyState, root = null, lifetime = null, activeLayer, saveState, strokeTo, showToast, gesture = {begin:() => true, end:() => {}} }) {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated tool requires root and lifetime');
+  let disposed = false;
+  lifetime?.add(() => { disposed = true; state.drawing = false; });
+  const tool = {
     begin(e) {
       const layer = activeLayer();
       const coords = canvasCoords(e, state.mainCanvas);
@@ -60,12 +63,14 @@ export function createCloneTool({ activeLayer, saveState, strokeTo, showToast })
         return;
       }
       if (!layer || layer.locked) return;
+      if (!gesture.begin()) return;
+      try {
       saveState('Clone stroke');
       // Snapshot the source layer's pixels at stroke-start so the
       // brush samples clean source pixels even after it has painted
       // over them. Otherwise we'd cascade-clone the same ring.
       const srcLayer = state.layers.find(l => l.id === state.cloneSourceLayerId) || layer;
-      const snap = document.createElement('canvas');
+      const snap = (state.container?.ownerDocument || document).createElement('canvas');
       snap.width = srcLayer.canvas.width;
       snap.height = srcLayer.canvas.height;
       snap.getContext('2d').drawImage(srcLayer.canvas, 0, 0);
@@ -76,6 +81,12 @@ export function createCloneTool({ activeLayer, saveState, strokeTo, showToast })
       state.lastX = coords.x;
       state.lastY = coords.y;
       strokeTo(coords.x, coords.y);
+      } catch (error) { state.drawing = false; gesture.end(); throw error; }
     },
   };
+  for (const key of Object.keys(tool)) {
+    const invoke = tool[key];
+    tool[key] = (...args) => disposed ? false : invoke(...args);
+  }
+  return tool;
 }

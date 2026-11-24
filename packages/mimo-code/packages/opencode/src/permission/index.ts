@@ -128,6 +128,9 @@ export const AskInput = Schema.Struct({
   ...Request.fields,
   id: Schema.optional(PermissionID),
   ruleset: Ruleset,
+  // Independent current authorities whose normal precedence must each be
+  // evaluated before intersecting their decisions (used by immutable forks).
+  rulesets: Schema.optional(Schema.Array(Ruleset)),
   // When false, an ask that would otherwise block on human reply instead fails
   // immediately with DeniedError. Set by callers spawning non-interactive agents
   // (SYSTEM_SPAWNED_AGENT_TYPES) which have no attached human to reply. Default
@@ -198,6 +201,17 @@ export function evaluate(permission: string, pattern: string, ...rulesets: Rules
   return evalRule(permission, pattern, ...rulesets)
 }
 
+/** Evaluate each authority with its own rule precedence, then combine outcomes. */
+export function evaluateIntersection(permission: string, pattern: string, rulesets: Ruleset[]) {
+  const rules = rulesets.map((ruleset) => evaluate(permission, pattern, ruleset))
+  return {
+    rules,
+    denied: rules.some((rule) => rule.action === "deny"),
+    allowed: rules.every((rule) => rule.action === "allow"),
+    needsAsk: rules.some((rule) => rule.action === "ask"),
+  }
+}
+
 // Permissions whose "allow" outcome must ALWAYS come from an explicit human ask.
 // A wildcard rule like `permissions.allow: ["*"]` (or a stored `{permission:"*",
 // pattern:"*", action:"allow"}` approval) MUST NOT be able to pre-authorize
@@ -207,6 +221,10 @@ export function evaluate(permission: string, pattern: string, ...rulesets: Rules
 // (e.g. MIMOCODE_AUTO_APPROVE_DESTRUCTIVE for bash_destructive) is the only bypass.
 // bash_delete remains forced-ask for older clients and stored requests.
 const FORCED_ASK = new Set(["bash_destructive", "bash_delete"])
+
+// Real-desktop input tool (MCP key lifetools_<scope>_control_desktop): every call needs a human
+// answer; neither rules, stored approvals nor skip-all may pre-authorize it. The Host verifies it again.
+const CONTROL_DESKTOP_ASK = /^lifetools_.+_control_desktop$/
 
 // Delete-class subset of FORCED_ASK that `autoApproveDelete` may auto-approve.
 // Intentionally narrower than FORCED_ASK: bash_destructive stays human-only
@@ -254,27 +272,32 @@ export const layer = Layer.effect(
     const ask = Effect.fn("Permission.ask")(function* (input: AskInput, abortSignal?: AbortSignal) {
       const s = yield* InstanceState.get(state)
       const { approved, pending } = s
-      const { ruleset, ...request } = input
+      const { ruleset, rulesets, ...request } = input
+      const authorities: Ruleset[] = [...(rulesets?.length ? rulesets : [ruleset])]
       let needsAsk = false
 
-      // Publish this session's effective grant snapshot so background children
-      // in another Instance can inherit it. Kept as two ordered phases (ruleset,
-      // then session-accumulated approvals) — NOT flattened — so the child can
-      // mirror the two-phase evaluation below: a ruleset deny wins outright, and
-      // only a non-denying ruleset lets an approved allow upgrade an ask.
-      forwardRef.setParentGrants(request.sessionID, { ruleset, approved })
+      // Publish all independent current rulesets so nested full-context actors
+      // inherit the same intersection. Approvals remain a separate phase: they
+      // may upgrade asks, never a deny from any source/destination ruleset.
+      forwardRef.setParentGrants(request.sessionID, { rulesets: authorities, approved })
 
-      const forced = FORCED_ASK.has(request.permission)
+      const forced = FORCED_ASK.has(request.permission) || CONTROL_DESKTOP_ASK.test(request.permission)
 
       for (const pattern of request.patterns) {
         // Evaluate the ruleset ALONE first. An explicit deny here must win
         // outright — a persisted approval (e.g. an edit approved "always" in
         // build mode) must NOT be able to out-rank it. Only once the ruleset
         // itself does not deny do we let approvals upgrade an "ask" to "allow".
-        const ruleAction = evaluate(request.permission, pattern, ruleset).action
-        if (ruleAction === "deny") {
+        const decision = evaluateIntersection(request.permission, pattern, authorities)
+        if (decision.denied) {
+          const matchingRules: Rule[] = []
+          for (const authority of authorities) {
+            for (const rule of authority) {
+              if (Wildcard.match(request.permission, rule.permission)) matchingRules.push(rule)
+            }
+          }
           return yield* new DeniedError({
-            ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
+            ruleset: matchingRules,
           })
         }
         // Forced-ask permissions skip both allow short-circuits: neither the
@@ -284,7 +307,7 @@ export const layer = Layer.effect(
           needsAsk = true
           continue
         }
-        if (ruleAction === "allow") continue
+        if (decision.allowed) continue
         if (evaluate(request.permission, pattern, approved).action === "allow") continue
         needsAsk = true
       }
@@ -322,18 +345,14 @@ export const layer = Layer.effect(
       if (needsAsk && input.inherit && !forced) {
         const parentSnapshot = forwardRef.getParentGrants(input.inherit.parentSessionID)
         if (parentSnapshot) {
-          // Mirror the parent's own two-phase evaluation (see the deny loop
-          // above). A parent ruleset deny must win outright — an approved allow
-          // must NOT be able to out-rank it — so evaluate the ruleset ALONE for
-          // deny first, and only for a non-denying ruleset let approvals upgrade
-          // to allow. Never flatten ruleset+approved into one findLast pass:
-          // that would let a trailing approved allow beat a ruleset deny and let
-          // the child escape a permission the parent itself would refuse.
+          // Mirror the parent's intersection across every current ruleset.
+          // An approved allow may upgrade an ask in each ruleset, but any
+          // ruleset deny remains decisive for the child.
           const allAllowed = request.patterns.every((pattern) => {
-            if (evaluate(request.permission, pattern, parentSnapshot.ruleset).action === "deny") return false
-            return (
-              evaluate(request.permission, pattern, parentSnapshot.ruleset, parentSnapshot.approved).action === "allow"
-            )
+            return parentSnapshot.rulesets.every((parentRuleset) => {
+              if (evaluate(request.permission, pattern, parentRuleset).action === "deny") return false
+              return evaluate(request.permission, pattern, parentRuleset, parentSnapshot.approved).action === "allow"
+            })
           })
           if (allAllowed) {
             log.info("inheriting parent grant, auto-allowing", {
@@ -556,7 +575,7 @@ export const layer = Layer.effect(
       // just-pushed patterns). Keeping the phases separate preserves deny
       // precedence for the child (a ruleset deny still can't be out-ranked).
       forwardRef.setParentGrants(existing.info.sessionID, {
-        ruleset: forwardRef.getParentGrants(existing.info.sessionID)?.ruleset ?? [],
+        rulesets: forwardRef.getParentGrants(existing.info.sessionID)?.rulesets ?? [],
         approved,
       })
 
@@ -675,6 +694,13 @@ export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
     if (!rule) continue
     if (rule.pattern === "*" && rule.action === "deny") result.add(tool)
   }
+  return result
+}
+
+/** Union tools disabled by any independently evaluated authority. */
+export function disabledIntersection(tools: string[], rulesets: Ruleset[]): Set<string> {
+  const result = new Set<string>()
+  for (const ruleset of rulesets) for (const name of disabled(tools, ruleset)) result.add(name)
   return result
 }
 

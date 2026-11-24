@@ -1,3 +1,6 @@
+import { bindCardActionMenu } from './cardActionMenu.js';
+import { mountTaskWorkload } from './taskWorkload.js';
+import { openContinuityPanel } from './chatContinuityPanel.js';
 import { uiIcon } from './uiIcons.js';
 /**
  * Tasks Module — scheduled recurring LLM prompts.
@@ -7,10 +10,8 @@ import uiModule from './ui.js';
 import markdownModule from './markdown.js';
 import * as spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
-import { topPortalZ } from './toolWindowZOrder.js';
 import { sortModelIds } from './modelSort.js';
 import { ordinalSuffix } from './util/ordinal.js';
-import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
 const API_BASE = window.location.origin;
 let _open = false;
@@ -52,22 +53,12 @@ async function _fetchTasks() {
   _tasksFetched = true;
 }
 
-async function _runFirstOpenOnboarding() {
-  try {
-    const res = await fetch(`${API_BASE}/api/tasks/onboarding`, { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const state = await res.json();
-    if (state.opened) return;
-
-    await fetch(`${API_BASE}/api/tasks/onboarding`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: false }),
-    });
-  } catch (e) {
-    console.warn('Tasks onboarding failed:', e);
-  }
+async function _setupDefaultTasks() {
+  const res = await fetch(`${API_BASE}/api/tasks/onboarding`, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }),
+  });
+  if (!res.ok) throw new Error('Could not set up default routines');
 }
 
 async function _createTask(data) {
@@ -850,7 +841,8 @@ function _renderList() {
     const builtinBadge = task.is_builtin
       ? `<span class="task-builtin-badge${task.is_modified ? ' modified' : ''}" title="${task.is_modified ? 'Built-in task — edited from its default' : 'Built-in task'}">built-in${task.is_modified ? ' · edited' : ''}</span>`
       : '';
-    titleRow.innerHTML = `${_taskIcon(task)}<span class="memory-item-title">${_esc(task.name)}</span>${_taskAiMark(task)}${builtinBadge}<span style="flex:1;"></span>${statusBadge}`;
+    const legacyBadge = task.account_provenance === 'legacy_unverified' ? '<span class="task-status-badge" title="Created before account provenance was recorded">Legacy · account unverified</span>' : '';
+    titleRow.innerHTML = `${_taskIcon(task)}<span class="memory-item-title">${_esc(task.name)}</span>${_taskAiMark(task)}${builtinBadge}${legacyBadge}<span style="flex:1;"></span>${statusBadge}`;
 
     // ... menu button (hover to show)
     const actionsWrap = document.createElement('div');
@@ -861,25 +853,23 @@ function _renderList() {
     menuBtn.style.position = 'relative';
     menuBtn.style.top = '4px';
     menuBtn.innerHTML = uiIcon("more", 14);
-    menuBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
+    bindCardActionMenu(card, { button: menuBtn, exclude: '.memory-select-cb', items: valid => {
       const items = [];
-      // Run now stays in the kebab too for users coming from muscle-memory /
-      // mobile long-press. The expanded card also shows it next to Edit.
-      if (task.status !== 'completed') items.push({ label: 'Run now', icon: 'play', action: () => _doRunNow(task.id) });
-      items.push({ label: 'Edit', icon: 'edit', action: () => _showForm(task) });
-      if (task.status === 'active') items.push({ label: 'Pause', icon: 'pause', action: () => _doPause(task.id) });
-      else if (task.status === 'paused') items.push({ label: 'Resume', icon: 'play', action: () => _doResume(task.id) });
-      items.push({ label: 'History', icon: 'clock', action: () => _showRunHistory(task.id, task.name) });
+      if (task.status !== 'completed') items.push({ id: 'run', label: 'Run now', icon: 'play', run: () => _doRunNow(task.id) });
+      items.push({ id: 'edit', label: 'Edit', icon: 'edit', run: () => _showForm(task) });
+      if (task.status === 'active') items.push({ id: 'pause', label: 'Pause', icon: 'pause', run: () => _doPause(task.id) });
+      else if (task.status === 'paused') items.push({ id: 'resume', label: 'Resume', icon: 'play', run: () => _doResume(task.id) });
+      items.push({ id: 'history', label: 'History', icon: 'clock', run: () => _showRunHistory(task.id, task.name) });
       if (task.is_builtin && task.is_modified) {
-        items.push({ label: 'Revert to default', icon: 'restore', action: () => _doRevert(task.id) });
+        items.push({ id: 'revert', label: 'Revert to default', dialog: true, icon: 'restore', run: () => _doRevert(task.id, valid) });
       }
-      if (_taskClearCacheLabel(task)) {
-        items.push({ label: 'Clear cache', icon: 'trash', action: () => _doClearTaskCache(task.id, _taskClearCacheLabel(task)) });
+      const cacheLabel = _taskClearCacheLabel(task);
+      if (cacheLabel) {
+        items.push({ id: 'clear-cache', label: 'Clear cache', dialog: true, icon: 'trash', run: () => _doClearTaskCache(task.id, cacheLabel, valid) });
       }
-      items.push({ label: 'Delete', icon: 'trash', action: () => _doDelete(task.id), danger: true });
-      _showTaskDropdown(menuBtn, items);
-    });
+      items.push({ id: 'delete', label: 'Delete', icon: 'trash', dialog: true, destructive: true, run: () => _doDelete(task.id, valid) });
+      return items;
+    } });
     actionsWrap.appendChild(menuBtn);
     titleRow.appendChild(actionsWrap);
 
@@ -992,7 +982,6 @@ function _renderList() {
 
     // Title-row click: in select mode toggle the checkbox; otherwise expand.
     titleRow.addEventListener('click', (e) => {
-      if (card._suppressNextClick) return;  // long-press just opened the menu
       if (e.target.closest('.memory-item-actions')) return;
       if (_taskSelectMode) {
         if (e.target.classList.contains('memory-select-cb')) return;
@@ -1006,7 +995,6 @@ function _renderList() {
     });
 
     // Long-press (mobile) opens the ⋮ actions menu.
-    _attachTaskLongPress(card, menuBtn);
 
     card.appendChild(content);
     list.appendChild(card);
@@ -1043,81 +1031,6 @@ function _esc(s) {
 
 // Long-press a task card (mobile) to open its ⋮ actions menu. Hold 500ms;
 // moving the finger >10px or releasing early cancels. Mirrors the library.
-function _attachTaskLongPress(card, menuBtn) {
-  let hold = null, start = null;
-  const cancel = () => { if (hold) { clearTimeout(hold); hold = null; } start = null; };
-  card.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('.memory-item-actions, .memory-select-cb, button, a, input')) return;
-    start = { x: e.clientX, y: e.clientY };
-    hold = setTimeout(() => {
-      hold = null;
-      card._suppressNextClick = true;
-      setTimeout(() => { card._suppressNextClick = false; }, 400);
-      if (navigator.vibrate) { try { navigator.vibrate(15); } catch (_) {} }
-      menuBtn.click();
-    }, 500);
-  });
-  card.addEventListener('pointermove', (e) => {
-    if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) cancel();
-  });
-  card.addEventListener('pointerup', cancel);
-  card.addEventListener('pointercancel', cancel);
-}
-
-function _showTaskDropdown(anchor, items) {
-  const existing = document.querySelector('.task-dropdown');
-  if (existing && existing._anchor === anchor) {
-    if (typeof existing._dismiss === 'function') existing._dismiss();
-    else existing.remove();
-    return;
-  }
-  document.querySelectorAll('.task-dropdown').forEach(d => {
-    if (typeof d._dismiss === 'function') d._dismiss();
-    else dismissOrRemove(d);
-  });
-  const dd = document.createElement('div');
-  dd.className = 'task-dropdown';
-  dd._anchor = anchor;
-  dd.style.cssText = `position:fixed;z-index:${topPortalZ()};background:var(--panel);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.3);padding:4px;min-width:120px;`;
-  items.forEach(item => {
-    const btn = document.createElement('button');
-    btn.style.cssText = 'display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:6px 10px;border:none;background:none;color:var(--fg);font-size:11px;font-family:inherit;cursor:pointer;border-radius:4px;transition:background 0.1s;';
-    if (item.danger) btn.style.color = 'var(--color-error)';
-    if (item.icon) {
-      btn.innerHTML = `${uiIcon(item.icon, 13, { style: "opacity:0.6;flex-shrink:0;" })}<span>${item.label}</span>`;
-    } else {
-      btn.textContent = item.label;
-    }
-    btn.addEventListener('mouseenter', () => { btn.style.background = 'color-mix(in srgb, var(--fg) 8%, transparent)'; });
-    btn.addEventListener('mouseleave', () => { btn.style.background = 'none'; });
-    btn.addEventListener('click', (e) => { e.stopPropagation(); close(); item.action(); });
-    dd.appendChild(btn);
-  });
-  document.body.appendChild(dd);
-  // Sit above the currently-raised tool modal at any stack depth (#4720): the
-  // modal bring-to-front counter climbs unbounded, so a hardcoded z eventually
-  // loses. topPortalZ() derives the value from the live tool-window stack.
-  dd.style.zIndex = String(topPortalZ());
-  const rect = anchor.getBoundingClientRect();
-  let top = rect.bottom + 4;
-  let left = rect.right - dd.offsetWidth;
-  if (left < 8) left = 8;
-  if (top + dd.offsetHeight > window.innerHeight - 8) top = rect.top - dd.offsetHeight - 4;
-  dd.style.top = top + 'px';
-  dd.style.left = left + 'px';
-  const openedAt = performance.now();
-  const close = bindMenuDismiss(dd, () => { dd.remove(); }, (ev) => {
-    // Ignore any clicks that occur within 250ms of the open (covers touch
-    // "ghost click" duplicates that were firing right after pointerup and
-    // removing the dropdown before the user could see it) — treat as inside.
-    if (performance.now() - openedAt < 250) return false;
-    return !dd.contains(ev.target);
-  });
-  dd._dismiss = () => {
-    close();
-  };
-}
-
 // ---- Presets ----
 
 const _TASK_PRESETS = [
@@ -1154,6 +1067,7 @@ function _showPresetPicker() {
     + '<input type="text" id="task-ai-input" class="memory-search-input" style="flex:1 1 220px;min-width:0;" placeholder="Describe a task — e.g. &quot;every weekday 7am summarize my unread email&quot;" />'
     + "<button class=\"memory-toolbar-btn active\" id=\"task-ai-btn\" title=\"Draft a task with AI\" style=\"white-space:nowrap;height:28px;flex:0 0 auto;\">" + uiIcon("sparkles", 12, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Draft with AI</button>"
     + '</div>';
+  html += '<div><button type="button" id="tasks-setup-defaults">Set up default routines</button> <span id="tasks-setup-status" role="status"></span></div>';
   html += '<div class="memory-list" style="max-height:none;flex:1;gap:0px;margin-top:2px;padding-right:8px;">';
   _TASK_PRESETS.forEach((p, i) => {
     html += `<button class="memory-item task-card" data-idx="${i}" style="cursor:pointer;text-align:left;width:100%;font-family:inherit;">
@@ -1166,6 +1080,14 @@ function _showPresetPicker() {
   html += '</div>';
   html += '</div>';
   body.innerHTML = html;
+
+  body.querySelector('#tasks-setup-defaults')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget, status = body.querySelector('#tasks-setup-status');
+    button.disabled = true;
+    try { await _setupDefaultTasks(); status.textContent = 'Default routines set up.'; }
+    catch (_) { status.textContent = 'Could not set up default routines.'; }
+    finally { button.disabled = false; }
+  });
 
   body.querySelectorAll('.memory-item[data-idx]').forEach(card => {
     card.addEventListener('click', () => {
@@ -1865,7 +1787,7 @@ async function _doRunNow(id, force = false) {
     let fired = false;
     try {
       if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-        new Notification('Task', { body: msg, tag: 'task-runnow-' + id, icon: '/static/favicon.ico' });
+        new Notification('Task', { body: msg, tag: 'task-runnow-' + id, icon: '/static/icons/icon-192.png' });
         fired = true;
       }
     } catch (_) {}
@@ -1873,11 +1795,11 @@ async function _doRunNow(id, force = false) {
   }
 }
 
-async function _doDelete(id) {
+async function _doDelete(id, valid = () => true) {
   const ok = uiModule?.styledConfirm
     ? await uiModule.styledConfirm('Delete this task and all its run history?', { confirmText: 'Delete', danger: true })
     : confirm('Delete this task and all its run history?');
-  if (!ok) return;
+  if (!ok || !valid()) return;
   try {
     await _deleteTask(id);
     await _animateTaskRemoval([id]);
@@ -1887,11 +1809,11 @@ async function _doDelete(id) {
   } catch (e) { if (uiModule) uiModule.showError(e.message); }
 }
 
-async function _doRevert(id) {
+async function _doRevert(id, valid = () => true) {
   const ok = uiModule?.styledConfirm
     ? await uiModule.styledConfirm('Revert this built-in task to its default schedule and settings?', { confirmText: 'Revert' })
     : confirm('Revert this built-in task to its default?');
-  if (!ok) return;
+  if (!ok || !valid()) return;
   try {
     const res = await fetch(`${API_BASE}/api/tasks/${id}/revert`, { method: 'POST', credentials: 'same-origin' });
     if (!res.ok) throw new Error('Failed to revert task');
@@ -1901,11 +1823,11 @@ async function _doRevert(id) {
   } catch (e) { if (uiModule) uiModule.showError(e.message); }
 }
 
-async function _doClearTaskCache(id, label = 'cache') {
+async function _doClearTaskCache(id, label = 'cache', valid = () => true) {
   const ok = uiModule?.styledConfirm
     ? await uiModule.styledConfirm(`Clear cached ${label} for this task?`, { confirmText: 'Clear' })
     : confirm(`Clear cached ${label} for this task?`);
-  if (!ok) return;
+  if (!ok || !valid()) return;
   try {
     const res = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}/clear-cache`, {
       method: 'POST',
@@ -1984,8 +1906,10 @@ function _syncPauseAllButton() {
 // ---- Tab routing ----
 
 let _activeTab = 'tasks';
+let _workload = null;
 
 function _switchTab(tab) {
+  if (_workload) { _workload.dispose(); _workload = null; }
   _activeTab = tab;
   const modal = document.getElementById('tasks-modal');
   if (!modal) return;
@@ -1994,7 +1918,20 @@ function _switchTab(tab) {
     b.setAttribute('aria-selected', on ? 'true' : 'false');
     b.classList.toggle('active', on);
   });
-  if (tab === 'tasks') _renderMainView();
+  if (tab === 'workload') {
+    const body = modal.querySelector('.modal-body');
+    body.replaceChildren();
+    const beside = document.createElement('button'); beside.type = 'button'; beside.textContent = 'Open beside chat';
+    beside.addEventListener('click', () => { closeTasks(); openContinuityPanel(); }); body.append(beside);
+    _workload = mountTaskWorkload(body);
+  } else if (tab === 'tasks') {
+    _renderMainView();
+    _fetchTasks().then(() => {
+      if (_activeTab !== 'tasks' || !_open) return;
+      _renderList(); _syncPauseAllButton();
+      if (_pendingFocusTaskId) { _focusTask(_pendingFocusTaskId); _pendingFocusTaskId = null; }
+    });
+  }
   else if (tab === 'completed') _renderCompletedView();
   else if (tab === 'activity') _renderActivityView();
   else if (tab === 'new') _showPresetPicker();
@@ -2002,6 +1939,12 @@ function _switchTab(tab) {
 
 function _runToActivityEntry(r) {
   let resultText = r.result || r.error || '';
+  const stateText = {
+    outcome_unknown: 'Outcome unknown — this run was not restarted.',
+    issued_waiting: 'Waiting for an answer to the live task request.',
+    issued_resuming: 'Answer accepted; waiting for the live task to continue.',
+  };
+  if (stateText[r.status]) resultText = stateText[r.status];
   if (!resultText) {
     if (r.status === 'queued')  resultText = '_Queued — waiting for a free slot…_';
     if (r.status === 'running') resultText = '_Running…_';
@@ -2010,6 +1953,8 @@ function _runToActivityEntry(r) {
     kind: r.task_type || 'llm',
     taskName: r.task_name || (r.task_type === 'action' ? (r.action || 'Action') : 'Task'),
     taskId: r.task_id,
+    runId: r.id,
+    cacheClearCapability: r.cache_clear_capability || null,
     action: r.action || '',
     result: resultText,
     prompt: '',
@@ -2024,7 +1969,7 @@ function _runToActivityEntry(r) {
 }
 
 function _isFinishedRun(entry) {
-  return !['queued', 'running', 'skipped'].includes(entry.status || '');
+  return !['queued', 'running', 'skipped', 'waiting', 'resuming', 'outcome_unknown', 'issued_waiting', 'issued_resuming'].includes(entry.status || '');
 }
 
 function _isChatResultRun(entry) {
@@ -2267,6 +2212,7 @@ function _stackActivityEntries(entries) {
   for (const entry of entries) {
     const key = [
       entry.taskId || '',
+      ['llm','research'].includes(entry.kind) ? entry.runId || '' : '',
       entry.taskName || '',
       entry.kind || '',
       entry.status || '',
@@ -2279,6 +2225,7 @@ function _stackActivityEntries(entries) {
       existing
       && entry.status !== 'running'
       && entry.status !== 'queued'
+      && !['outcome_unknown', 'issued_waiting', 'issued_resuming'].includes(entry.status)
       && (existing.repeatCount || 1) < maxStack
     ) {
       existing.repeatCount = (existing.repeatCount || 1) + 1;
@@ -2328,6 +2275,92 @@ function _tickActivityTimers(root) {
   return true;
 }
 
+document.addEventListener('openclank:auth-context-changed', () => {
+  for (const panel of document.querySelectorAll('.task-run-usage')) {
+    panel.hidden=true;
+    panel.replaceChildren();
+    panel.parentElement?.querySelector('.task-log-run-usage')?.setAttribute('aria-expanded','false');
+  }
+});
+
+const RUN_USAGE_REASONS = Object.freeze({
+  execution_witness_unavailable: 'The recorded task, chat and workspace could not be joined for this run.',
+  no_admitted_usage: 'No Stats measurements were recorded for this run.',
+  usage_bound_reached: 'This run exceeds the bounded usage view.',
+  usage_overlap_ambiguous: 'The recorded measurements overlap without a proven accounting boundary.',
+  admitted_facts_only: 'Partial coverage of admitted Stats measurements.',
+});
+
+function _runCostLabel(cost, kind) {
+  const totals = cost?.[kind];
+  if (!totals || typeof totals !== 'object') return 'Unavailable';
+  const display = [];
+  for (const [currency, raw] of Object.entries(totals)) {
+    if (!/^[A-Z]{3}$/.test(currency) || typeof raw !== 'string' || !/^\d+(?:\/[1-9]\d*)?$/.test(raw)) continue;
+    const [numerator,denominator='1']=raw.split('/');
+    const amount=Number(numerator)/Number(denominator);
+    if (!Number.isFinite(amount)) continue;
+    const formatted=amount>0 && amount<.000001 ? '<0.000001' : amount.toLocaleString(undefined,{maximumFractionDigits:6});
+    display.push(`${currency} ${formatted}`);
+  }
+  return display.join(' · ') || 'Unavailable';
+}
+
+function _runUsagePanel(panel, reading) {
+  const row = (label, value) => {
+    const term=document.createElement('dt'), text=document.createElement('dd');
+    term.textContent=label; text.textContent=value;
+    return [term,text];
+  };
+  const token = value => Number.isSafeInteger(value) && value>=0 ? value.toLocaleString() : 'Unavailable';
+  const duration = Number.isSafeInteger(reading.wall_elapsed_ms) && reading.wall_elapsed_ms>=0
+    ? _fmtElapsed(reading.wall_elapsed_ms) : 'Unavailable';
+  const summary=document.createElement('p'), metrics=document.createElement('dl');
+  summary.textContent=RUN_USAGE_REASONS[reading.reason] || 'Usage coverage unavailable.';
+  metrics.append(
+    ...row('Wall elapsed',duration), ...row('Active effort','Unavailable'),
+    ...row('Reported input tokens',token(reading.input_tokens)), ...row('Reported output tokens',token(reading.output_tokens)),
+    ...row('Billed cost',_runCostLabel(reading.cost,'billed')),
+    ...row('Schedule estimate',_runCostLabel(reading.cost,'estimated')),
+  );
+  if (reading.cost && reading.cost.coverage!=='complete') metrics.append(...row('Cost coverage','Partial'));
+  panel.replaceChildren(summary,metrics);
+}
+
+function _wireRunUsage(row) {
+  const button=row.querySelector('.task-log-run-usage'), panel=row.querySelector('.task-run-usage');
+  if (!button || !panel) return;
+  let view=0;
+  panel.addEventListener('click',event=>event.stopPropagation());
+  button.addEventListener('click',async event=>{
+    event.stopPropagation();
+    const token=++view;
+    panel.hidden=!panel.hidden;
+    button.setAttribute('aria-expanded',String(!panel.hidden));
+    if (panel.hidden) return;
+    const entry = _activityEntries[Number(row.dataset.entryIdx)];
+    if (!entry || entry.runId!==button.dataset.runId) { panel.textContent='This run is no longer selected.'; return; }
+    const account=document.body.dataset.accountId;
+    const auth=window.chatModule?.ratingAccountScope?.();
+    const current=()=>token===view && !panel.hidden && row.isConnected && _open && _activeTab==='activity'
+      && !!account && typeof auth?.authEpoch==='number' && account===document.body.dataset.accountId
+      && auth.authEpoch===window.chatModule?.ratingAccountScope?.()?.authEpoch;
+    if (!current()) { panel.textContent='Usage requires a current signed-in account.'; return; }
+    panel.textContent='Loading run usage…';
+    const url=`${API_BASE}/api/tasks/${encodeURIComponent(entry.taskId)}/runs/${encodeURIComponent(entry.runId)}/usage`;
+    try {
+      const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});
+      if (!response.ok) throw new Error();
+      const reading=await response.json();
+      if (!current()) return;
+      if (reading.run_id!==entry.runId) throw new Error();
+      _runUsagePanel(panel,reading);
+    } catch (_) {
+      if (current()) panel.textContent='Run usage is unavailable.';
+    }
+  });
+}
+
 // Wire row interactions: expand toggle + "Open in chat".
 function _wireActivityRows(list) {
   // Replace the [data-spin-here] placeholders in running/queued rows with the
@@ -2349,6 +2382,7 @@ function _wireActivityRows(list) {
   // counter). No-op when there's nothing to tick.
   _startActivityTimers(list);
   list.querySelectorAll('.task-log-row').forEach(row => {
+    _wireRunUsage(row);
     // Click anywhere on the row to toggle expand.
     // Buttons inside still get their own handlers via stopPropagation.
     if (!row.classList.contains('is-skipped')) {
@@ -2357,6 +2391,11 @@ function _wireActivityRows(list) {
     row.querySelector('.task-log-row-toggle')?.addEventListener('click', (e) => {
       e.stopPropagation();
       row.classList.toggle('expanded');
+    });
+    row.querySelector('.task-log-answer-wait')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const entry = _activityEntries[parseInt(row.dataset.entryIdx, 10)];
+      if (entry) void _openTaskWait(entry.sessionId, entry.taskId);
     });
     row.querySelector('.task-log-open-chat')?.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -2639,7 +2678,11 @@ function _renderActivityEntry(entry, opts = {}) {
   // over heuristic text classification. Fall back to text-scan for older
   // rows where entry.status is missing.
   let status;
-  if (entry.status === 'queued' || entry.status === 'running' || entry.status === 'skipped' || entry.status === 'aborted') {
+  if (entry.status === 'outcome_unknown') {
+    status = 'unknown';
+  } else if (entry.status === 'issued_waiting' || entry.status === 'issued_resuming') {
+    status = 'waiting';
+  } else if (entry.status === 'queued' || entry.status === 'running' || entry.status === 'skipped' || entry.status === 'aborted') {
     status = entry.status;
   } else if (entry.status === 'error' || entry.status === 'failed') {
     status = 'error';
@@ -2648,7 +2691,8 @@ function _renderActivityEntry(entry, opts = {}) {
   } else {
     status = _classifyResult(entry.result);
   }
-  const statusDot = `<span class="task-log-status task-log-status-${status}" title="${status}"></span>`;
+  const statusLabel = status === 'unknown' ? 'Outcome unknown' : status === 'waiting' ? 'Waiting for live task' : status;
+  const statusDot = `<span class="task-log-status task-log-status-${status}" title="${statusLabel}"></span>`;
   const failedTag = status === 'error'
     ? '<span class="task-log-failed-tag">(failed)</span>'
     : '';
@@ -2695,7 +2739,7 @@ function _renderActivityEntry(entry, opts = {}) {
   // CSS vars feed the colored title + accent stripe.
   const styleVars = `--cat-hue:${hue};`;
   const _runningPlaceholder = /^(Starting…|Starting\.\.\.|_Running…_|_Running\.\.\._|_Queued\b)/i.test((entry.result || '').trim());
-  const hasResult = !!(entry.result && entry.result.trim() && entry.status !== 'running' && entry.status !== 'queued');
+  const hasResult = !!(entry.result && entry.result.trim() && _isFinishedRun(entry));
   const hasRunningProgress = !!(entry.result && entry.result.trim() && !_runningPlaceholder && (entry.status === 'running' || entry.status === 'queued'));
   // "Open in chat" only makes sense for runs whose result is a real assistant
   // message (Prompt / Research tasks). Action/event runs are just log lines
@@ -2721,18 +2765,28 @@ function _renderActivityEntry(entry, opts = {}) {
          Copy log
        </button>`;
   }
+  if (entry.status === 'issued_waiting' && entry.sessionId && entry.taskId) {
+    actionBtn = '<button class="task-log-answer-wait" type="button">Answer request</button>';
+  }
   const clearLabel = _taskClearCacheLabel(entry);
-  if (hasResult && clearLabel && entry.taskId) {
+  if (hasResult && clearLabel && entry.taskId && entry.cacheClearCapability?.available === true) {
     actionBtn += `<button class="task-log-clear-cache" type="button" title="Clear cached ${_escHtml(clearLabel)} for this task">
          ${uiIcon("trash", 11)}
          Clear cache
        </button>`;
+  } else if (hasResult && clearLabel && entry.taskId) {
+    const reason = entry.cacheClearCapability?.reason || 'Cache clearing is unavailable';
+    actionBtn += `<button type="button" disabled title="${_escHtml(reason)}">Clear cache unavailable</button>`;
   }
   if (hasResult && entry.taskId) {
     actionBtn += `<button class="task-log-run-again" type="button" title="Run this task again">
          ${uiIcon("refresh", 11)}
          Run again
        </button>`;
+  }
+  const showRunUsage=!!entry.taskId && !!entry.runId && !_isSkipped;
+  if (showRunUsage) {
+    actionBtn += `<button class="task-log-run-usage" type="button" aria-expanded="false" data-run-id="${_escHtml(entry.runId)}">Run usage</button>`;
   }
   // Running rows replace the relative-time on the right with "Running NN" + a
   // live whirlpool spinner. Queued shows "Queued" the same way (no timer —
@@ -2787,6 +2841,7 @@ function _renderActivityEntry(entry, opts = {}) {
         ${long ? '<button class="task-log-row-toggle" type="button">Show more</button>' : '<span></span>'}
         ${actionBtn}
       </div>
+      ${showRunUsage ? '<section class="task-run-usage" aria-label="Recorded run usage" aria-live="polite" hidden></section>' : ''}
     </div>
   `;
 }
@@ -2924,10 +2979,11 @@ export function openTasks(focusId, opts) {
   _setTaskCompletionPending(false);
   if (_open) {
     // Already open — just focus the requested task / apply filter.
-    if (openActivityForFailure) _switchTab('activity');
+    if (focusId) _pendingFocusTaskId = focusId;
+    if (focusId || o.filter !== undefined) _switchTab('tasks');
+    else if (openActivityForFailure) _switchTab('activity');
     else if (openCompletedForNotification) _switchTab('completed');
     if (o.filter !== undefined) { _taskFilter = o.filter; _renderList(); }
-    if (focusId) _focusTask(focusId);
     return;
   }
   if (o.filter !== undefined) _taskFilter = o.filter;
@@ -2950,6 +3006,7 @@ export function openTasks(focusId, opts) {
         <button class="close-btn" id="tasks-close">✖</button>
       </div>
       <div class="memory-tabs tasks-tabs" role="tablist">
+        <button class="memory-tab tasks-tab" data-tab="workload" role="tab" aria-selected="false">Workload</button>
         <button class="memory-tab tasks-tab active" data-tab="tasks" role="tab" aria-selected="true">
           ${uiIcon("tasks", 12, {"style":"vertical-align:-2px;margin-right:5px"})}
           Clanker Tasks <span id="tasks-tab-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span>
@@ -3036,17 +3093,8 @@ export function openTasks(focusId, opts) {
   // of an empty modal-body that fills in after the fetch resolves — that delay
   // was visible as a "flicker" right after opening.
   _activeTab = 'tasks';
-  _switchTab(openActivityForFailure ? 'activity' : openCompletedForNotification ? 'completed' : 'tasks');
-  _fetchTasks().then(() => {
-    // Re-render so the list swaps the Loading row for real cards.
-    _renderList();
-    _syncPauseAllButton();
-    if (_pendingFocusTaskId) {
-      _focusTask(_pendingFocusTaskId);
-      _pendingFocusTaskId = null;
-    }
-    _runFirstOpenOnboarding();
-  });
+  _switchTab(openActivityForFailure ? 'activity' : openCompletedForNotification ? 'completed' : (focusId || o.filter !== undefined) ? 'tasks' : 'workload');
+
 }
 
 let _pendingFocusTaskId = null;
@@ -3070,6 +3118,7 @@ function _focusTask(taskId) {
 export function closeTasks() {
   if (!_open) return;
   _open = false;
+  if (_workload) { _workload.dispose(); _workload = null; }
   _viewingRuns = null;
   const modal = document.getElementById('tasks-modal');
   if (modal) {
@@ -3102,8 +3151,31 @@ export function isTasksOpen() { return _open; }
 
 // ---- Task run notifications polling ----
 
-let _notifInterval = null;
+let _notifTimer = null;
+let _notifGeneration = 0;
+let _notifRunning = false;
 let _questionPending = false;
+let _notifChannel = null;
+let _lastSharedPoll = null;
+
+function shareWaitBadge({account, at, pending}) {
+  if (!account || account !== document.body.dataset.accountId || typeof pending !== 'boolean') return;
+  if (!Number.isFinite(at) || Math.abs(Date.now() - at) > 30000) return;
+  _lastSharedPoll = {account, at};
+  _setQuestionPending(pending);
+}
+
+async function _pollSharedNotifications() {
+  const account = document.body.dataset.accountId || '';
+  if (!account) return;
+  const request = () => _pollTaskNotifications(account);
+  if (!_notifChannel || !navigator.locks) return request();
+  await navigator.locks.request('openclank-task-notifications:' + account, {ifAvailable:true}, lock => {
+    if (!lock || account !== document.body.dataset.accountId) return;
+    if (_lastSharedPoll?.account === account && Date.now() - _lastSharedPoll.at < 29000) return;
+    return request();
+  });
+}
 
 function _setQuestionPending(flag) {
   _questionPending = !!flag;
@@ -3122,20 +3194,55 @@ function _openTaskChat(sessionId) {
   }
 }
 
-async function _pollTaskNotifications() {
+async function _openTaskWait(sessionId, taskId) {
+  const scope = window.chatModule?.ratingAccountScope?.();
+  const owner = document.body.dataset.accountId || '';
+  if (!owner || typeof scope?.authEpoch !== 'number' || !sessionId || !taskId) return;
+  const sameAccount = () => {
+    const now = window.chatModule?.ratingAccountScope?.();
+    return now?.authEpoch === scope.authEpoch && document.body.dataset.accountId === owner;
+  };
+  const sameSession = () => sameAccount() && window.sessionModule?.getCurrentSessionId?.() === sessionId
+    && window.chatModule?.ratingAccountScope?.()?.owner === owner;
   try {
-    // S12: check durable wait requests for the persistent badge.
-    try {
-      const waitsRes = await fetch(`${API_BASE}/api/tasks/waits`, { credentials: 'same-origin' });
-      if (waitsRes.ok) {
-        const waitsData = await waitsRes.json();
-        _setQuestionPending((waitsData.waits || []).length > 0);
-      }
-    } catch (_) {}
+    const response = await fetch(`${API_BASE}/api/tasks/waits`, {credentials:'same-origin', cache:'no-store'});
+    if (!response.ok || !sameAccount()) throw new Error('Task request unavailable');
+    const data = await response.json();
+    if (!sameAccount()) return;
+    const matches = (data.waits || []).filter(w => w.task_id === taskId && w.session_id === sessionId && w.available);
+    if (matches.length !== 1) throw new Error('The live task request is unavailable or ambiguous.');
+    const wait = matches[0];
+    closeTasks();
+    await window.sessionModule?.selectSession?.(sessionId);
+    if (!sameSession()) return;
+    const renderer = await import('./chatRenderer.js');
+    if (!sameSession()) return;
+    const submitTaskWait = async payload => {
+      if (!sameSession()) throw new Error('Account or chat changed.');
+      return fetch(`${API_BASE}/api/tasks/waits/${encodeURIComponent(wait.id)}/answer`, {
+        method:'POST', credentials:'same-origin', cache:'no-store',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({session_id:sessionId,...payload}),
+      });
+    };
+    if (wait.kind === 'question') renderer.renderAskUserCard(wait.display, {submitTaskWait});
+    else if (wait.kind === 'permission') renderer.renderPermissionCard(wait.display, sessionId, {submitTaskWait});
+    else throw new Error('Task request unavailable');
+  } catch (error) {
+    uiModule?.showToast?.(error?.message || 'The task request is unavailable.');
+  }
+}
 
-    const res = await fetch(`${API_BASE}/api/tasks/notifications`, { credentials: 'same-origin' });
+async function _pollTaskNotifications(account) {
+  try {
+    const res = await fetch(`${API_BASE}/api/tasks/notifications?include_wait_badge=true`, { credentials: 'same-origin' });
     if (!res.ok) return;
     const data = await res.json();
+    if (account !== document.body.dataset.accountId) return;
+    if (typeof data.wait_pending === 'boolean') {
+      const badge = {account, at:Date.now(), pending:data.wait_pending};
+      shareWaitBadge(badge);
+      _notifChannel?.postMessage(badge);
+    }
     const notes = data.notifications || [];
     for (const n of notes) {
       if (n.kind === 'model_share') {
@@ -3156,7 +3263,7 @@ async function _pollTaskNotifications() {
             duration: 12000,
             action: {
               label: 'Open',
-              onClick: () => _openTaskChat(n.session_id),
+              onClick: () => void _openTaskWait(n.session_id, n.task_id),
             },
           });
         }
@@ -3167,9 +3274,9 @@ async function _pollTaskNotifications() {
             const ntf = new Notification(qTitle, {
               body: qBody,
               tag: 'task-question-' + (n.task_id || qTitle),
-              icon: '/static/favicon.ico',
+              icon: '/static/icons/icon-192.png',
             });
-            ntf.onclick = () => { window.focus(); _openTaskChat(n.session_id); };
+            ntf.onclick = () => { window.focus(); void _openTaskWait(n.session_id, n.task_id); };
           }
         } catch (_) {}
         continue;
@@ -3192,7 +3299,7 @@ async function _pollTaskNotifications() {
         let fired = false;
         try {
           if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-            new Notification(title, { body: n.body, tag: 'task-' + (n.task_id || title), icon: '/static/favicon.ico' });
+            new Notification(title, { body: n.body, tag: 'task-' + (n.task_id || title), icon: '/static/icons/icon-192.png' });
             fired = true;
           }
         } catch (_) {}
@@ -3216,16 +3323,31 @@ async function _pollTaskNotifications() {
 }
 
 function startNotificationPolling() {
-  if (_notifInterval) return;
-  setTimeout(_pollTaskNotifications, 1500);
-  _notifInterval = setInterval(_pollTaskNotifications, 30000);
+  if (_notifRunning) return;
+  _notifRunning = true;
+  const generation = ++_notifGeneration;
+  if (typeof BroadcastChannel === 'function' && navigator.locks) {
+    _notifChannel = new BroadcastChannel('openclank-task-wait-badge');
+    _notifChannel.onmessage = event => shareWaitBadge(event.data || {});
+  }
+  const poll = async () => {
+    try { await _pollSharedNotifications(); } catch {
+      // A closing tab may lose its lock request.
+    } finally {
+      if (_notifGeneration === generation) _notifTimer = setTimeout(poll, 30000);
+    }
+  };
+  _notifTimer = setTimeout(poll, 1500);
 }
 
 function stopNotificationPolling() {
-  if (_notifInterval) {
-    clearInterval(_notifInterval);
-    _notifInterval = null;
-  }
+  _notifRunning = false;
+  _notifGeneration += 1;
+  clearTimeout(_notifTimer);
+  _notifTimer = null;
+  _notifChannel?.close();
+  _notifChannel = null;
+  _lastSharedPoll = null;
 }
 
 const tasksModule = { openTasks, closeTasks, isTasksOpen, startNotificationPolling, stopNotificationPolling };

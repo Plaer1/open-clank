@@ -29,6 +29,7 @@ class FilesystemRegistryError(ValueError):
 
 class FilesystemRootRegistry:
     VERSION = 1
+    FULL_AGENT_ROOT_PREFIX = "agent-host-"
     KINDS = {"exact_file", "recursive_directory"}
     CAPABILITIES = {"read", "write", "execute"}
     _snapshot_lock = threading.RLock()
@@ -36,7 +37,7 @@ class FilesystemRootRegistry:
     def __init__(self, path: str | os.PathLike[str] | None = None, *, repository: FilePolicyRepository | None = None) -> None:
         # path is a transport/source hint only; it never selects another policy
         # database. Explicit authority overrides support isolated installations.
-        self.path = Path(path) if path else Path(DATA_DIR) / "odysseus-file-roots.json"
+        self.path = Path(path) if path else Path(DATA_DIR) / "open-clank-file-roots.json"
         self.repository = repository or FilePolicyRepository(os.environ.get("OPEN_CLANK_AUTHORITY_DB_PATH") or APP_DB)
         self._lock = threading.RLock()
         self._preimage = None
@@ -469,14 +470,47 @@ class FilesystemRootRegistry:
             "active_folder": None,
         }
 
-    def rust_snapshot_path(self, *, expected_generation: int | None = None) -> str:
+    def full_filesystem_choices(self, owner: str, subject: str) -> dict[str, bool]:
+        from src.openclank.operation_approvals import ReadOnlyAuthSnapshot, _authority_paths
+
+        try:
+            auth = ReadOnlyAuthSnapshot(_authority_paths()[1])
+            if auth.filesystem_access_eligible(owner, subject):
+                return self.repository.full_filesystem_access(subject)
+        except (OSError, ValueError):
+            pass
+        return {"human": False, "agent": False}
+
+    def full_agent_roots(self, owner: str, subject: str) -> dict[str, dict[str, Any]]:
+        """Project read/write OS anchors for one explicitly enabled Agent lane."""
+        from routes.odysseus_files_routes import project_navigation_roots
+
+        if not self.full_filesystem_choices(owner, subject)["agent"]:
+            return {}
+        roots = {}
+        for anchor in project_navigation_roots(self, owner, {"host": True})["roots"]:
+            try:
+                record = self._record(owner, anchor["path"], "recursive_directory", ["read", "write"])
+            except (FilesystemRegistryError, OSError):
+                continue
+            identity = hashlib.sha256((subject + "\0" + record["canonical_path"]).encode()).hexdigest()
+            record["id"] = self.FULL_AGENT_ROOT_PREFIX + identity
+            roots[record["id"]] = record
+        return roots
+
+    def rust_snapshot_path(self, *, expected_generation: int | None = None,
+                           full_agent_roots: dict[str, dict[str, Any]] | None = None) -> str:
         # Generation-addressed, immutable transport artifact. No request-time
         # publication; a process startup prepares only its current generation.
         with self._snapshot_lock:
             snapshot = self.snapshot()
             if expected_generation is not None and snapshot["generation"] != expected_generation:
                 raise FilesystemRegistryError("File access changed; retry with a fresh scope", code="policy_generation_changed")
-            destination = Path(self.repository.db_path).parent / f"file-policy-derived-roots-{snapshot['generation']}.json"
+            suffix = ""
+            if full_agent_roots:
+                suffix = "-" + hashlib.sha256("\0".join(sorted(full_agent_roots)).encode()).hexdigest()
+                snapshot["roots"].update(full_agent_roots)
+            destination = Path(self.repository.db_path).parent / f"file-policy-derived-roots-{snapshot['generation']}{suffix}.json"
             if destination.is_file():
                 return str(destination)
             for root in snapshot["roots"].values():
@@ -522,7 +556,8 @@ class FilesystemRootRegistry:
 
     def agent_scope(self, owner: str, active_workspace: str | None = None,
                     app_visibility: list[dict[str, Any]] | None = None, *,
-                    workspace_id: str | None = None, chat_id: str | None = None) -> dict[str, Any]:
+                    workspace_id: str | None = None, chat_id: str | None = None,
+                    registered_only: bool = False) -> dict[str, Any]:
         """Mint one canonical AgentScope; paths only narrow existing bindings."""
         empty = {"approved_root_ids": [], "root_capabilities": {}, "active_folder": None}
         from src.openclank.operation_approvals import _authority_context
@@ -552,9 +587,24 @@ class FilesystemRootRegistry:
             if not self._contains(bound_path, candidate):
                 return finish(empty)
             active_workspace = candidate
+        broad_roots = {} if registered_only else self.full_agent_roots(owner, subject)
+        if broad_roots:
+            path = str(Path(active_workspace).expanduser().resolve(strict=False)) if active_workspace else None
+            eligible = {key: root for key, root in broad_roots.items()
+                        if path is None or self._contains(root["canonical_path"], path)}
+            folder = None
+            if path is not None:
+                if not eligible or not Path(path).is_dir():
+                    return finish(empty)
+                identifier = max(eligible, key=lambda key: len(eligible[key]["canonical_path"]))
+                eligible = {identifier: eligible[identifier]}
+                folder = {"id": "folder-" + uuid.uuid5(uuid.NAMESPACE_URL, (stable_id or path) + ":" + identifier).hex,
+                          "root_id": identifier, "canonical_path": path, "capabilities": ["read", "write"]}
+            return finish({"approved_root_ids": sorted(eligible),
+                           "root_capabilities": {key: ["read", "write"] for key in eligible},
+                           "active_folder": folder, "full_agent_roots": eligible})
         roots = []
         root_caps = {}
-        is_admin = self.repository.subject_is_admin(subject)
         for root in self.list(owner):
             if not root.get("enabled") or root.get("availability") != "available":
                 continue
@@ -569,8 +619,9 @@ class FilesystemRootRegistry:
             target_location = workspace.location_id if workspace else root["location_id"]
             caps = self.repository.people_capabilities(subject, target_location, workspace_id=stable_id or None,
                 chat_id=chat_id, binding_class="agent") & set(root.get("physical_capabilities", root.get("capabilities")) or [])
-            if not is_admin:
-                caps &= self.repository.people_capabilities(subject, target_location, workspace_id=stable_id or None, chat_id=chat_id)
+            caps &= self.repository.people_capabilities(
+                subject, target_location, workspace_id=stable_id or None, chat_id=chat_id,
+            )
             if caps:
                 roots.append(root)
                 root_caps[root["id"]] = caps

@@ -56,7 +56,7 @@ function present(note, owner, epoch) {
   // Respect the system permission already granted by the user.
   try {
     if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      const notification = new Notification(message, { tag: note.outboxId, icon: '/static/favicon.ico' });
+      const notification = new Notification(message, { tag: note.outboxId, icon: '/static/icons/icon-192.png' });
       notification.onclick = openOriginal;
     }
   } catch (_) {}
@@ -113,7 +113,7 @@ export function mountAchievementNotificationSettings(root) {
     try {
       const notification = new Notification('Open Clank achievement notifications', {
         body: 'Test notification. Earned achievements also appear in the app.',
-        tag: 'openclank-achievement-notification-test', icon: '/static/favicon.ico',
+        tag: 'openclank-achievement-notification-test', icon: '/static/icons/icon-192.png',
       });
       notification.onclick = () => window.focus();
       status.textContent = 'Test sent to the browser. If no popup appears, check your browser and OS notification settings. Achievement notices still appear in the app.';

@@ -127,7 +127,7 @@ export function showExplorerCustomization(controllers, { title = 'Customize Expl
   dialog.append(heading,intro,content,status,actions); draw(); document.body.append(dialog); dialog.showModal(); done.focus(); return dialog;
 }
 
-export function createExplorerDivider({ getContainer, getShare, setShare, getDirection = () => 1, label = 'Files places and Copal documents heights' }) {
+export function createExplorerDivider({ getContainer, getShare, setShare, getDirection = () => 1, label = 'File tree and document list heights' }) {
   const divider=element('div'); divider.className='copal-explorer-section-divider'; divider.tabIndex=0;
   divider.setAttribute('role','separator'); divider.setAttribute('aria-orientation','horizontal'); divider.setAttribute('aria-label',label);
   divider.setAttribute('aria-valuemin','15'); divider.setAttribute('aria-valuemax','85');

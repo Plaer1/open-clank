@@ -1,5 +1,6 @@
 import type { McpServer } from "@agentclientprotocol/sdk"
 import path from "node:path"
+import { Flag } from "@/flag/flag"
 import {
   bindMemorySessionClient,
   unbindMemorySessionClient,
@@ -19,7 +20,7 @@ export type MemorySessionScope = {
   includeGlobal: boolean
 }
 
-export type ManagedSessionBinding = {
+type ManagedSessionBindingCommon = {
   owner: string
   stableChatID: string
   engineSessionID: string
@@ -28,13 +29,14 @@ export type ManagedSessionBinding = {
   authorityWorkspaceID: string
   copalWorkspace: string
   physicalCwd: string
-  bindingRevision: number
-  mapRevision: number
-  mappingRevision: number
   memoryEnabled: boolean
-  registrationMarker: { engineSessionID: string; owner: string; stableChatID: string; mapRevision: number; mappingRevision: number; workspaceRevision: number; readonly token: symbol }
+  registrationMarker: { engineSessionID: string; owner: string; stableChatID: string; mapRevision?: number; mappingRevision?: number; workspaceRevision?: number; authority?: { kind: "private"; generation: string }; readonly token: symbol }
   transition: { requestedCwd: string; previousRevision: number; transitionID: string; phase: "in_flight" | "reconciling" } | null
 }
+export type ManagedSessionBinding = ManagedSessionBindingCommon & (
+  { authority: { kind: "private"; generation: string }; bindingRevision?: number; mapRevision?: never; mappingRevision?: never } |
+  { authority?: never; bindingRevision: number; mapRevision: number; mappingRevision: number }
+)
 
 const scopes = new Map<string, MemorySessionScope>()
 const bindings = new Map<string, ManagedSessionBinding>()
@@ -47,7 +49,7 @@ export function registerManagedSessionAdmissionReset(reset: (sessionID: string) 
   resetAdmission = reset
 }
 
-type ManagedSessionBindingInput = Omit<ManagedSessionBinding, "registrationMarker">
+type ManagedSessionBindingInput = ManagedSessionBinding extends infer T ? T extends ManagedSessionBinding ? Omit<T, "registrationMarker"> : never : never
 
 function tokenFor(sessionID: string): symbol {
   let token = markerTokens.get(sessionID)
@@ -81,9 +83,8 @@ function markerFor(sessionID: string, binding: ManagedSessionBindingInput) {
     engineSessionID: binding.engineSessionID,
     owner: binding.owner,
     stableChatID: binding.stableChatID,
-    mapRevision: binding.mapRevision,
-    mappingRevision: binding.mappingRevision,
-    workspaceRevision: binding.bindingRevision,
+    ...(binding.authority ? { authority: { ...binding.authority }, ...(binding.bindingRevision !== undefined ? { workspaceRevision: binding.bindingRevision } : {}) } :
+      { mapRevision: binding.mapRevision, mappingRevision: binding.mappingRevision, workspaceRevision: binding.bindingRevision }),
     token: tokenFor(sessionID),
   } as const
 }
@@ -97,6 +98,12 @@ export function registerMemorySessionScope(sessionID: string, servers: McpServer
   const env = Object.fromEntries(server.env.map((item) => [item.name, item.value]))
   const owner = env.FM_OWNER?.trim()
   const workspaceId = env.FM_WORKSPACE_ID?.trim()
+  if (Flag.OPEN_CLANK_PRIVATE_RUNTIME) {
+    unregisterMemorySessionScope(sessionID)
+    if (!owner || !workspaceId || env.FM_MEMORY_ENABLED !== "0") throw new Error("private lifetools descriptor is invalid")
+    bindMemorySessionClient(sessionID, server.name, owner, workspaceId)
+    return
+  }
   const stableChatID = env.SESSION_ID?.trim()
   const authorityWorkspaceID = env.OPEN_CLANK_AUTHORITY_WORKSPACE_ID?.trim()
   const descriptorCwd = env.WORKSPACE?.trim()
@@ -163,17 +170,20 @@ export function memorySessionScope(sessionID: string) {
 
 export function managedSessionBinding(sessionID: string): ManagedSessionBinding | undefined {
   const binding = bindings.get(sessionID)
-  return binding ? { ...binding, engineAliases: [...binding.engineAliases], registrationMarker: { ...binding.registrationMarker }, transition: binding.transition && { ...binding.transition } } : undefined
+  if (!binding) return undefined
+  const registrationMarker = { ...binding.registrationMarker, ...(binding.registrationMarker.authority ? { authority: { ...binding.registrationMarker.authority } } : {}) }
+  if (binding.authority) return { ...binding, authority: { ...binding.authority }, engineAliases: [...binding.engineAliases], registrationMarker, transition: null }
+  return { ...binding, engineAliases: [...binding.engineAliases], registrationMarker, transition: binding.transition && { ...binding.transition } }
 }
 
 export function markerMatches(sessionID: string, binding: ManagedSessionBinding): boolean {
   const marker = binding.registrationMarker
-  return marker.token === markerTokens.get(sessionID) && marker.engineSessionID === binding.engineSessionID && marker.owner === binding.owner && marker.stableChatID === binding.stableChatID && marker.mapRevision === binding.mapRevision && marker.mappingRevision === binding.mappingRevision && marker.workspaceRevision === binding.bindingRevision
+  return marker.token === markerTokens.get(sessionID) && marker.engineSessionID === binding.engineSessionID && marker.owner === binding.owner && marker.stableChatID === binding.stableChatID && marker.mapRevision === binding.mapRevision && marker.mappingRevision === binding.mappingRevision && marker.workspaceRevision === binding.bindingRevision && marker.authority?.generation === binding.authority?.generation
 }
 
 function validateBinding(sessionID: string, binding: ManagedSessionBinding) {
   const marker = binding.registrationMarker
-  if (!binding.owner || binding.owner !== binding.owner.trim() || !binding.stableChatID || binding.stableChatID !== binding.stableChatID.trim() || !binding.engineSessionID || binding.engineSessionID !== binding.engineSessionID.trim() || !binding.memoryWorkspaceID || binding.memoryWorkspaceID !== binding.memoryWorkspaceID.trim() || typeof binding.authorityWorkspaceID !== "string" || binding.authorityWorkspaceID !== binding.authorityWorkspaceID.trim() || !binding.copalWorkspace || binding.copalWorkspace !== binding.copalWorkspace.trim() || !path.isAbsolute(binding.physicalCwd) || path.normalize(binding.physicalCwd) !== binding.physicalCwd || !Number.isSafeInteger(binding.bindingRevision) || binding.bindingRevision < 0 || !Number.isSafeInteger(binding.mapRevision) || binding.mapRevision < 0 || !Number.isSafeInteger(binding.mappingRevision) || binding.mappingRevision < 0 || binding.engineAliases.length > 16 || new Set(binding.engineAliases).size !== binding.engineAliases.length || binding.engineAliases.some((value) => !value || value !== value.trim() || value === binding.engineSessionID) || typeof binding.memoryEnabled !== "boolean" || !marker || !markerMatches(sessionID, binding)) {
+  if (!binding.owner || binding.owner !== binding.owner.trim() || !binding.stableChatID || binding.stableChatID !== binding.stableChatID.trim() || !binding.engineSessionID || binding.engineSessionID !== binding.engineSessionID.trim() || !binding.memoryWorkspaceID || binding.memoryWorkspaceID !== binding.memoryWorkspaceID.trim() || typeof binding.authorityWorkspaceID !== "string" || binding.authorityWorkspaceID !== binding.authorityWorkspaceID.trim() || !binding.copalWorkspace || binding.copalWorkspace !== binding.copalWorkspace.trim() || !path.isAbsolute(binding.physicalCwd) || path.normalize(binding.physicalCwd) !== binding.physicalCwd || (binding.authority ? (!binding.authority.generation || binding.memoryEnabled || binding.engineAliases.length !== 0 || binding.transition !== null || binding.mapRevision !== undefined || binding.mappingRevision !== undefined) : (!Number.isSafeInteger(binding.bindingRevision) || binding.bindingRevision < 0 || !Number.isSafeInteger(binding.mapRevision) || binding.mapRevision < 0 || !Number.isSafeInteger(binding.mappingRevision) || binding.mappingRevision < 0)) || binding.engineAliases.length > 16 || new Set(binding.engineAliases).size !== binding.engineAliases.length || binding.engineAliases.some((value) => !value || value !== value.trim() || value === binding.engineSessionID) || typeof binding.memoryEnabled !== "boolean" || !marker || !markerMatches(sessionID, binding)) {
     throw new Error("managed session binding is invalid")
   }
 }
@@ -198,7 +208,7 @@ export function installManagedSessionBinding(sessionID: string, replacement: Man
 
 export function beginManagedSessionTransition(sessionID: string, requestedCwd: string, transitionID: string, expectedWorkspaceRevision: number) {
   const current = bindings.get(sessionID)
-  if (!current || current.transition || current.bindingRevision !== expectedWorkspaceRevision || !path.isAbsolute(requestedCwd) || path.normalize(requestedCwd) !== requestedCwd) throw new Error("managed session binding is unavailable or already transitioning")
+  if (!current || current.authority || current.transition || current.bindingRevision !== expectedWorkspaceRevision || !path.isAbsolute(requestedCwd) || path.normalize(requestedCwd) !== requestedCwd) throw new Error("managed session binding is unavailable or already transitioning")
   bindings.set(sessionID, {
     ...current,
     transition: { requestedCwd, previousRevision: current.bindingRevision, transitionID, phase: "in_flight" },
@@ -207,13 +217,13 @@ export function beginManagedSessionTransition(sessionID: string, requestedCwd: s
 
 export function clearManagedSessionTransition(sessionID: string, transitionID: string, expectedWorkspaceRevision: number) {
   const current = bindings.get(sessionID)
-  if (!current || current.bindingRevision !== expectedWorkspaceRevision || current.transition?.transitionID !== transitionID) throw new Error("managed session transition changed")
+  if (!current || current.authority || current.bindingRevision !== expectedWorkspaceRevision || current.transition?.transitionID !== transitionID) throw new Error("managed session transition changed")
   bindings.set(sessionID, { ...current, transition: null })
 }
 
 export function markManagedSessionReconciling(sessionID: string, transitionID: string, expectedWorkspaceRevision: number) {
   const current = bindings.get(sessionID)
-  if (!current || current.bindingRevision !== expectedWorkspaceRevision || current.transition?.transitionID !== transitionID) throw new Error("managed session transition changed")
+  if (!current || current.authority || current.bindingRevision !== expectedWorkspaceRevision || current.transition?.transitionID !== transitionID) throw new Error("managed session transition changed")
   bindings.set(sessionID, { ...current, transition: { ...current.transition!, phase: "reconciling" } })
 }
 

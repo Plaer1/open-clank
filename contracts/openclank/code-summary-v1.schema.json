@@ -1,0 +1,26 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://openclank.dev/contracts/code-summary/v1",
+  "$defs":{
+    "request":{
+      "type":"object","additionalProperties":false,
+      "required":["workspace_id","resource_id","receipt","scope","depth","detail","input_budget","output_budget","model_route_id"],
+      "properties":{
+        "workspace_id":{"type":"string","minLength":1,"maxLength":256},
+        "resource_id":{"type":"string","pattern":"^(file|decl|occ):[0-9a-f]{64}$"},
+        "receipt":{"type":"object","additionalProperties":false,
+          "required":["workspace_id","registration_id","source_snapshot_id","checkout_id","head_generation","admission_epoch","policy_generation","config_fingerprint"],
+          "properties":{
+            "workspace_id":{"type":"string","minLength":1,"maxLength":256},"registration_id":{"type":"string","minLength":1,"maxLength":256},
+            "source_snapshot_id":{"type":"string","minLength":1,"maxLength":256},"checkout_id":{"type":"string","minLength":1,"maxLength":256},
+            "head_generation":{"type":"string","minLength":1,"maxLength":256},"config_fingerprint":{"type":"string","minLength":1,"maxLength":256},
+            "admission_epoch":{"type":"integer","minimum":0},"policy_generation":{"type":"integer","minimum":0}
+          }},
+        "scope":{"enum":["declaration","file","neighborhood"]},"depth":{"type":"integer","minimum":1,"maximum":3},
+        "detail":{"enum":["brief","standard","detailed"]},"input_budget":{"enum":[2048,4096,8192]},"output_budget":{"enum":[256,512,1024]},
+        "model_route_id":{"type":"string","minLength":1,"maxLength":256},"grant_id":{"type":["string","null"],"minLength":1,"maxLength":256},
+        "preview_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},"request_id":{"type":"string","pattern":"^[0-9a-f-]{36}$"}
+      }
+    }
+  },"$ref":"#/$defs/request"
+}

@@ -80,7 +80,7 @@ export function createMemoryExportDialog({
 
   const hint = doc.createElement('p');
   hint.className = 'memory-desc doclib-desc';
-  hint.textContent = 'Defaults export everything as the canonical v3 bundle — narrow it only if you need to.';
+  hint.textContent = 'The default v3 bundle excludes saved snapshot attachments. Select the snapshot bundle to include them.';
 
   // Format: bundle (default, zip) or plain JSON (absent format param).
   const formatRow = doc.createElement('div');
@@ -95,13 +95,19 @@ export function createMemoryExportDialog({
   formatBundle.checked = true;
   const formatBundleLabel = doc.createElement('label');
   formatBundleLabel.append(formatBundle, doc.createTextNode(' bundle (zip)'));
+  const formatSnapshot = doc.createElement('input');
+  formatSnapshot.type = 'radio';
+  formatSnapshot.name = 'memory-export-format';
+  formatSnapshot.value = 'snapshot-v4';
+  const formatSnapshotLabel = doc.createElement('label');
+  formatSnapshotLabel.append(formatSnapshot, doc.createTextNode(' bundle with snapshot attachments (zip)'));
   const formatJson = doc.createElement('input');
   formatJson.type = 'radio';
   formatJson.name = 'memory-export-format';
   formatJson.value = 'json';
   const formatJsonLabel = doc.createElement('label');
   formatJsonLabel.append(formatJson, doc.createTextNode(' JSON'));
-  formatRow.append(formatLabel, formatBundleLabel, formatJsonLabel);
+  formatRow.append(formatLabel, formatBundleLabel, formatSnapshotLabel, formatJsonLabel);
 
   // Sections: all checked = full export (param omitted).
   const sectionsField = doc.createElement('div');
@@ -200,11 +206,12 @@ export function createMemoryExportDialog({
   assetsRow.append(assetsText, assetsSelect, imagesOnlyBtn);
 
   const syncAssetControls = () => {
-    const bundle = formatBundle.checked;
+    const bundle = formatBundle.checked || formatSnapshot.checked;
     assetsSelect.disabled = !bundle;
     imagesOnlyBtn.disabled = !bundle;
   };
   formatBundle.addEventListener('change', syncAssetControls);
+  formatSnapshot.addEventListener('change', syncAssetControls);
   formatJson.addEventListener('change', syncAssetControls);
 
   const errorLine = doc.createElement('small');
@@ -247,7 +254,7 @@ export function createMemoryExportDialog({
     const from = String(dateFrom.value || '').trim();
     const to = String(dateTo.value || '').trim();
     return {
-      format: formatBundle.checked ? 'bundle' : 'json',
+      format: formatSnapshot.checked ? 'snapshot-v4' : (formatBundle.checked ? 'bundle' : 'json'),
       sections,
       kinds: kinds.length ? kinds : null,
       since: from || null,
@@ -279,15 +286,13 @@ export function createMemoryExportDialog({
     submitBtn.disabled = true;
     try {
       const bundle = options.format !== 'json';
-      await _downloadResponse(
-        { document: doc, fetchImpl, urlApi, showToast, showError },
-        `/api/memory/export${query}`,
-        memoryExportFilename(options),
-        {
-          okToast: bundle ? 'Exported the canonical Memory bundle' : 'Exported Memory as JSON',
-          failMessage: 'Memory export failed',
-        },
-      );
+      // Browser-managed download streams to its destination and owns cancellation.
+      // A completed file may explicitly mark inaccessible history as partial.
+      const anchor = doc.createElement('a');
+      anchor.href = `/api/memory/export${query}`;
+      anchor.download = memoryExportFilename(options);
+      anchor.click();
+      showToast(bundle ? 'Memory bundle download requested; check the file for unavailable sections.' : 'Memory JSON download requested; check the file for unavailable sections.');
     } finally {
       submitBtn.disabled = false;
     }
@@ -299,6 +304,7 @@ export function createMemoryExportDialog({
     // Shortcut: restorable bundle with only the image asset bytes.
     formatBundle.checked = true;
     formatJson.checked = false;
+    formatSnapshot.checked = false;
     assetsSelect.value = 'images';
     syncAssetControls();
     _submit({ ..._readOptions(), format: 'bundle', assets: 'images', assetsOnly: true });
@@ -321,7 +327,7 @@ export function createMemoryExportDialog({
     element: overlay,
     // Exposed for wiring tests; not part of the user-facing surface.
     controls: {
-      formatBundle, formatJson, sectionBoxes, kindSelect, dateFrom, dateTo,
+      formatBundle, formatSnapshot, formatJson, sectionBoxes, kindSelect, dateFrom, dateTo,
       qInput, archivedToggle, assetsSelect, imagesOnlyBtn, submitBtn,
       cancelBtn, closeBtn, errorLine,
     },

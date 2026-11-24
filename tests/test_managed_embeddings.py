@@ -258,10 +258,10 @@ def test_embedding_network_ledger_has_no_python_or_frankenmemory_bypass():
     routes_source = (root / "routes/embedding_routes.py").read_text(encoding="utf-8")
     bridge_source = (root / "src/openclank/acp_bridge.py").read_text(encoding="utf-8")
     rust_main = (
-        root / "mcp_servers/frankenmemory/crates/fm-mcp/src/main.rs"
+        root / "native/memery/crates/memery-worker/src/main.rs"
     ).read_text(encoding="utf-8")
     rust_embed = (
-        root / "mcp_servers/frankenmemory/crates/fm-core/src/embed.rs"
+        root / "native/memery/crates/memery-core/src/embed.rs"
     ).read_text(encoding="utf-8")
 
     assert "import httpx" not in embeddings_source

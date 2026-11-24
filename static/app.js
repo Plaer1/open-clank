@@ -3,6 +3,7 @@ import { uiIcon, mountUiIcons } from './js/uiIcons.js';
 // Odysseus UI — Main Application Orchestrator
 // ES6 module — entry point, no exports (wires all modules together)
 // ============================================
+import { mountComposerHeight } from './js/composerHeight.js';
 import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
@@ -12,7 +13,17 @@ import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
 import chatModule from './js/chat.js?v=20260804doneframe1';
-import compareModule from './js/compare/index.js?v=20260723compareicon2';
+let compareModule;
+async function openCompare() {
+  try {
+    const module = await import('./js/compare/index.js');
+    if (!compareModule) {
+      compareModule = module.default;
+      compareModule.init(API_BASE);
+    }
+    return compareModule.toggleMode();
+  } catch (error) { uiModule.showError(error.message); }
+}
 import documentModule from './js/document.js?v=20260722emailfastindex1';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
@@ -29,20 +40,25 @@ import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
 import copalModule from './js/copal.js';
-import codeEditorModule from './js/codeEditor.js';
-import filesModule from './js/files.js';
+// File actions converge here from sidebar, keyboard, restored route and chat.
+async function loadFiles() {
+  const {default: files} = await import('./js/files.js');
+  window.filesModule = files;
+  return files;
+}
+const filesModule = {
+  open: async (...args) => (await loadFiles()).open(...args),
+  openLibraryCollection: async (...args) => (await loadFiles()).openLibraryCollection(...args),
+  revealResource: async (...args) => (await loadFiles()).revealResource(...args),
+};
+import browserAppletModule from './js/browserApplet.js';
 import { appletPath, resolveAppletLocation } from './js/appletRoutes.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import modalManagerDock from './js/modalManager.js';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
 import './js/tileManager.js';
 import themeModule from './js/theme.js';
-// IMPORTANT: import cookbook.js with NO ?v= query — the same plain specifier
-// every other importer (cookbook-hwfit.js / cookbook-diagnosis.js) uses. A query
-// mismatch makes the browser load cookbook.js twice as separate modules (two
-// _envState objects), which broke server selection. Keep all cookbook imports
-// unversioned so this can't recur.
-import cookbookModule from './js/cookbook.js';
+import cookbookModule, {restoreCookbookJobs} from './js/cookbookEntry.js';
 import groupModule from './js/group.js';
 import * as researchPanelModule from './js/research/panel.js';
 import ttsModule from './js/tts-ai.js';
@@ -54,7 +70,8 @@ import initPermissionModeControl from './js/permission-mode.js';
 import initInteractionModeControl from './js/interaction-mode.js';
 import { initCustomContextMenu } from './js/custom-context-menu.js';
 import { initWorkbenchMenu } from './js/workbenchMenu.js';
-import { openHelp } from './js/contextualHelp.js';
+import { getPendingAssistantContext, openHelp } from './js/contextualHelp.js';
+import { bindBuddyLauncher } from './js/interactiveBuddy.js';
 import chatWorkspaceModule from './js/chatWorkspace.js';
 
 const API_BASE = window.location.origin;
@@ -66,6 +83,7 @@ window.cookbookModule = cookbookModule;
 window.copalModule = copalModule;
 window.chatWorkspaceModule = chatWorkspaceModule;
 window.filesModule = filesModule;
+window.browserApplet = browserAppletModule;
 settingsModule.setCopalModule(copalModule);
 window.settingsModule = settingsModule;
 
@@ -87,6 +105,17 @@ function _isForegroundChatBusy() {
     || Date.now() < (window.__odysseusChatBusyUntil || 0)
     || !!document.querySelector('.send-btn[data-mode="streaming"], .send-btn.send-pending')
     || (sendBtn && (sendBtn.title || '').toLowerCase().includes('stop'));
+}
+
+function _submitComposerFollowUp(forceAfterTurn, input) {
+  if (!_isForegroundChatBusy() || !(input.value.trim() || fileHandlerModule?.getPendingCount?.())) return false;
+  if (chatModule?.queueStreamingComposerRequest?.({forceAfterTurn})) return true;
+  if (forceAfterTurn) {
+    uiModule.showToast('Wait for the current turn to start, then press Ctrl+Enter again.');
+    return true;
+  }
+  window.__odysseusQueueStreamingSubmit = Date.now();
+  return false;
 }
 
 function _shouldQueueFromMobileEnter(e, input) {
@@ -179,6 +208,7 @@ function initRailHoverLabels() {
     'rail-delete-session': 'Delete',
     'rail-chats': 'Chat',
     'rail-documents': 'Docs',
+    'rail-buddy': 'Buddy',
     'rail-calendar': 'Calendar',
     'rail-compare': 'Compare',
     'rail-cookbook': 'Cookbook',
@@ -239,7 +269,7 @@ const el = uiModule.el;
 // went stale when the user changed their default model).
 let _defaultChat = null;
 try {
-  const cachedDefaultChat = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+  const cachedDefaultChat = JSON.parse(localStorage.getItem('openclank-default-chat-cache') || 'null');
   if (cachedDefaultChat && cachedDefaultChat.endpoint_url && cachedDefaultChat.model) {
     _defaultChat = cachedDefaultChat;
     window.__odysseusDefaultChat = cachedDefaultChat;
@@ -252,7 +282,7 @@ async function _refreshDefaultChat() {
       _defaultChat = d;
       try {
         window.__odysseusDefaultChat = d;
-        localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(d));
+        localStorage.setItem('openclank-default-chat-cache', JSON.stringify(d));
       } catch (_) {}
       return d;
     }
@@ -316,28 +346,21 @@ function initializeEventListeners() {
   // File attachments (inside overflow menu)
   const _overflowAttach = el('overflow-attach-btn');
   if (_overflowAttach) _overflowAttach.addEventListener('click', fileHandlerModule.openPicker);
-  el('file-input').addEventListener('change', async (e)=>{
-    await fileHandlerModule.addFiles(Array.from(e.target.files || []));
-    e.target.value = '';
-    // Refocus textarea after file picker closes (mobile keyboard)
-    const ta = el('message');
-    if (ta) setTimeout(() => ta.focus(), 100);
+  el('file-input').addEventListener('change', async event => {
+    const input = event.target;
+    const files = Array.from(input.files || []);
+    const addition = fileHandlerModule.takePickerAddition();
+    input.value = '';
+    if (!addition?.current()) return;
+    await fileHandlerModule.addFiles(files, {addition});
+    setTimeout(() => { if (addition.current()) el('message')?.focus(); }, 100);
   });
 
-  // Paste handler
-  window.addEventListener('paste', async (e)=>{
-    if (!e.clipboardData) return;
-    let changed = false;
-    for (const item of e.clipboardData.items){
-      if (item.kind === 'file'){
-        const f = item.getAsFile();
-        if (f) {
-          await fileHandlerModule.addFiles([f]);
-          changed = true;
-        }
-      }
-    }
-    if (changed) fileHandlerModule.renderAttachStrip();
+  window.addEventListener('paste', async event => {
+    if (!event.clipboardData || fileHandlerModule.isOtherApplet(event.target)) return;
+    const files = Array.from(event.clipboardData.items)
+      .filter(item => item.kind === 'file').map(item => item.getAsFile()).filter(Boolean);
+    if (files.length) await fileHandlerModule.addFiles(files);
   });
 
   // Message count in the header — recount on any DOM change in
@@ -999,20 +1022,12 @@ function initializeEventListeners() {
   const toolCompareBtn = el('tool-compare-btn');
   if (toolCompareBtn) {
     toolCompareBtn.addEventListener('click', () => {
-      if (compareModule) {
-        if (compareModule.isActive()) {
-          // Already active — toggle off
-          compareModule.toggleMode();
-          return;
-        }
-        // Close other exclusive tools before opening compare
+      if (!compareModule?.isActive()) {
         const resChk = el('research-toggle');
-        if (resChk && resChk.checked) {
-          _syncResearchIndicator(false);
-        }
+        if (resChk?.checked) _syncResearchIndicator(false);
         _startFreshChat();
-        compareModule.toggleMode();
       }
+      void openCompare();
     });
   }
 
@@ -1104,32 +1119,6 @@ function initializeEventListeners() {
     history.pushState({}, '', appletPath('files'));
     filesModule.open();
   });
-  let imageEditorOpening = false;
-  document.querySelectorAll('[data-image-editor-launcher]').forEach((launcher) => {
-    launcher.addEventListener('click', async (event) => {
-      event.preventDefault();
-      if (imageEditorOpening) return;
-      imageEditorOpening = true;
-      try {
-        const editor = window.impsModule || await import('./js/imps.js');
-        if (editor.isEditorOpen?.()) {
-          const host = document.getElementById('imps-editor-container');
-          if (host) {
-            host.style.display = 'flex';
-            host.querySelector('button, input, [tabindex="0"]')?.focus();
-          }
-          const Modals = await import('./js/modalManager.js');
-          Modals.restore('imps-editor-container');
-        } else {
-          await editor.openEditor(null, null, { w: 1024, h: 1024 }, 'Image Editor');
-        }
-      } catch (error) {
-        uiModule.showError(error.message || 'Image Editor could not be opened');
-      } finally {
-        imageEditorOpening = false;
-      }
-    });
-  });
   // Refresh notes due-reminder badge on load and every 5 minutes
   if (notesModule && notesModule.refreshDueBadge) {
     notesModule.refreshDueBadge();
@@ -1203,14 +1192,9 @@ function initializeEventListeners() {
   // (Files, Editor, Graph, TreeHouse, timeline/todo, calendar, settings) are
   // canonical; /copal/* and Notes/Code/Bases, Mind/Galaxy stay as aliases.
   const _targetOpen = {
-    editor: (resolved) => {
-      const view = resolved.openBases ? 'bases'
-        : resolved.mode === 'mind' ? 'mind'
-        : resolved.mode === 'galaxy' ? 'galaxy'
-        : (resolved.view || 'notes');
-      copalModule.open(view, false);
-    },
+    editor: (resolved) => copalModule.openResolvedRoute(resolved),
     files: () => filesModule.open(),
+    browser: () => browserAppletModule.open(),
     calendar: () => calendarModule && calendarModule.openCalendar(),
     settings: (resolved) => {
       settingsModule.open(resolved.panel || undefined);
@@ -1225,11 +1209,8 @@ function initializeEventListeners() {
       // default-chat / fallback-model resolution logic baked in, so just
       // delegate to it.
       try { document.getElementById('rail-new-session')?.click(); } catch (_) {}
-      // The email library is opened by clicking the email section's HEADER
-      // row (.section-header-flex), not the title span. Trigger that, then
-      // snap the modal to fullscreen on the next frame.
-      const hdr = document.querySelector('#email-section .section-header-flex');
-      if (hdr) hdr.click();
+      // Use the same inbox action as the Copal row before snapping the window.
+      document.getElementById('email-section-title')?.click();
       // The modal is built synchronously inside openEmailLibrary, so a
       // single frame later it's in the DOM and ready to be flagged.
       // Fullscreen leaves the icon-rail visible on the left so navigation
@@ -1272,13 +1253,10 @@ function initializeEventListeners() {
   // opener so it runs from sessionModule.loadSessions().finally() below.
   if (_opener) window._odysseusRouteOpener = _opener;
 
-  // Back/Forward across direct applet addresses. Copal-family views also
-  // listen for popstate (draft/window state); both run and the registry
-  // normalizes the address so the two stay consistent.
+  // Copal owns Back/Forward within its Editor-family routes and draft state.
   window.addEventListener('popstate', () => {
     const resolved = resolveAppletLocation(window.location.pathname, window.location.search);
-    if (!resolved) return;
-    _openResolvedTarget(resolved);
+    if (resolved && resolved.target !== 'editor') _openResolvedTarget(resolved);
   });
 
   // Manage Chats — opens Full Library modal (decoupled from Chats accordion toggle)
@@ -1331,6 +1309,54 @@ function initializeEventListeners() {
     userBarAdmin.addEventListener('click', () => adminModule.open());
   }
 
+  const privilegeHidden = new WeakMap();
+  const privilegeDisabled = new WeakMap();
+  let privilegesChanged = false;
+  function applyAccountPrivileges(privileges) {
+    window._userPrivileges = privileges;
+    const agentBlocked = privileges.can_use_agent !== true;
+    document.querySelectorAll('.send-btn, #message').forEach(control => {
+      if (agentBlocked) {
+        if (!privilegeDisabled.has(control)) {
+          privilegeDisabled.set(control, { disabled: control.disabled, title: control.title });
+        }
+        control.disabled = true;
+        control.title = 'Agent access is disabled for this account';
+      } else if (privilegeDisabled.has(control)) {
+        const saved = privilegeDisabled.get(control);
+        control.disabled = saved.disabled;
+        control.title = saved.title;
+        privilegeDisabled.delete(control);
+      }
+    });
+    function showIfAllowed(control, allowed) {
+      if (!control) return;
+      if (!allowed) {
+        if (!privilegeHidden.has(control)) privilegeHidden.set(control, control.style.display);
+        control.style.display = 'none';
+      } else if (privilegeHidden.has(control)) {
+        control.style.display = privilegeHidden.get(control);
+        privilegeHidden.delete(control);
+      }
+    }
+    for (const [privilege, controls] of [
+      ['can_use_bash', [el('bash-toggle')?.closest('.chat-input-toggle'), el('bash-toggle-btn')]],
+      ['can_use_documents', [el('overflow-doc-btn'), el('doc-indicator-btn')]],
+      ['can_use_research', [el('research-toggle-btn'), el('overflow-research-btn')]],
+    ]) {
+      for (const control of controls) showIfAllowed(control, privileges[privilege] === true);
+    }
+  }
+  document.addEventListener('openclank:account-privileges-changed', event => {
+    const { accountId, privileges } = event.detail || {};
+    const current = document.body?.dataset?.accountId || window.currentAccountId;
+    if (!accountId || (current && current !== accountId) || !privileges) return;
+    privilegesChanged = true;
+    applyAccountPrivileges(privileges);
+    window.sessionModule?.updateModelPicker?.();
+    document.dispatchEvent(new CustomEvent('open-clank:providers-updated', { detail: { source: 'account-access' } }));
+  });
+
   // Fetch auth status — populate user bar and show admin button if admin
   fetch(`${API_BASE}/api/auth/status`, { credentials: 'same-origin' })
     .then(r => r.json())
@@ -1350,41 +1376,7 @@ function initializeEventListeners() {
         userBarName.textContent = displayName;
         if (userBarAvatar) userBarAvatar.textContent = d.username.charAt(0).toUpperCase();
       }
-      // Apply per-user privilege restrictions
-      if (d.privileges) {
-        window._userPrivileges = d.privileges;
-        const p = d.privileges;
-        // Agent is the only composer lane; disable submit controls when the
-        // account lacks authority.
-        if (!p.can_use_agent) {
-          document.querySelectorAll('.send-btn, #message').forEach(control => {
-            control.disabled = true;
-            control.title = 'Agent access is disabled for this account';
-          });
-        }
-        // Hide bash toggle
-        if (!p.can_use_bash) {
-          const bashToggle = document.getElementById('bash-toggle');
-          if (bashToggle) bashToggle.closest('.chat-input-toggle')?.style.setProperty('display', 'none');
-          const bashBtn = document.getElementById('bash-toggle-btn');
-          if (bashBtn) bashBtn.style.display = 'none';
-        }
-        // Hide document button
-        if (!p.can_use_documents) {
-          const docBtn = document.getElementById('overflow-doc-btn');
-          if (docBtn) docBtn.style.display = 'none';
-          const docInd = document.getElementById('doc-indicator-btn');
-          if (docInd) docInd.style.display = 'none';
-        }
-        // Hide research toggle
-        if (!p.can_use_research) {
-          const resBtn = document.getElementById('research-toggle-btn');
-          if (resBtn) resBtn.style.display = 'none';
-          const resOverflow = document.getElementById('overflow-research-btn');
-          if (resOverflow) resOverflow.style.display = 'none';
-        }
-
-      }
+      if (d.privileges && !privilegesChanged) applyAccountPrivileges(d.privileges);
     })
     .catch(() => {});
 
@@ -1506,7 +1498,7 @@ function initializeEventListeners() {
     modelSortDropdown.querySelectorAll('.sort-option').forEach(opt => {
       opt.addEventListener('click', () => {
         const mode = opt.dataset.sort;
-        Storage.set('odysseus-model-sort', mode);
+        Storage.set('openclank-model-sort', mode);
         if (modelsModule) modelsModule.refreshModels();
         modelSortDropdown.style.display = 'none';
         uiModule.showToast('Models sorted: ' + opt.textContent.trim().toLowerCase());
@@ -1860,7 +1852,7 @@ function initializeEventListeners() {
   try { workspaceModule.applyMode('agent'); } catch (_) {}
 
   // ── Tool splash explainer messages (shown first 2 times per tool) ──
-  const SPLASH_COUNT_KEY = 'odysseus-tool-splash-counts';
+  const SPLASH_COUNT_KEY = 'openclank-tool-splash-counts';
   const SPLASH_MAX = 2;
   const _toolSplashes = {
     web: { role: 'Web Search', text: 'Searches the web for relevant information to include in the response. Results are fetched and summarized before the AI answers.' },
@@ -1939,7 +1931,7 @@ function initializeEventListeners() {
       const presentation = captured.modal?.classList.contains('copal-wiki-window') ? 'wiki' : 'copal';
       try {
         const opened = await window.openClankHandbook?.({ presentation });
-        if (!opened) throw new Error('The handbook is not available yet. Retry opening Wiki documentation or the Copal handbook.');
+        if (!opened) throw new Error('The documentation is unavailable. Try again.');
       } catch (error) {
         uiModule.showError(error.message || 'Could not open the handbook.');
       }
@@ -2620,7 +2612,7 @@ function initializeEventListeners() {
   }
 
   // ── UI Visibility (Customize UI modal) ──
-  const UI_VIS_KEY = 'odysseus-ui-visibility';
+  const UI_VIS_KEY = 'openclank-ui-visibility';
 
   // Selector map: key → CSS selector(s) for targets
   const UI_VIS_MAP = {
@@ -2903,7 +2895,7 @@ function initializeEventListeners() {
 
   // Migrate old toolbar visibility key if present
   (function migrateOldToolbarVis() {
-    const OLD_KEY = 'odysseus-toolbar-visibility';
+    const OLD_KEY = 'openclank-toolbar-visibility';
     try {
       const old = Storage.getJSON(OLD_KEY, null);
       if (old && typeof old === 'object') {
@@ -3173,6 +3165,24 @@ function initializeEventListeners() {
       }
   }
 
+  bindBuddyLauncher([el('buddy-launcher'), el('rail-buddy')], async (element, owner) => {
+    const input = el('message');
+    const sameAccount = () => (document.body?.dataset.accountId || window.currentAccountId) === owner;
+    if (!sameAccount() || !input) return;
+    if (compareModule?.isActive() || groupModule?.isActive() || el('incognito-toggle')?.checked) {
+      uiModule.showToast('Return to a regular chat to ask Buddy.');
+      return;
+    }
+    if (input.value.trim() || fileHandlerModule.getPendingCount() || getPendingAssistantContext()) {
+      uiModule.showToast('Finish your current draft, then ask Buddy again.');
+      return;
+    }
+    const navigation = sessionModule.getSessionNavigationToken();
+    await _handleNewChatAction({preferModel:false,focus:false});
+    if (!sameAccount() || sessionModule.getSessionNavigationToken() !== navigation+1 || sessionModule.getCurrentSessionId()) return;
+    await chatModule.sendBuddyExplanation(element);
+  });
+
   // New session button on icon rail
   const railNewSession = el('rail-new-session');
   if (railNewSession) {
@@ -3254,6 +3264,7 @@ function initializeEventListeners() {
   // Textarea auto-resize
   const textarea = el('message');
   if (textarea) {
+    mountComposerHeight(textarea, uiModule.autoResize);
     _syncMobileEnterKeyHint(textarea);
     window.addEventListener('odysseus:chat-busy-change', () => _syncMobileEnterKeyHint(textarea));
     uiModule.autoResize(textarea);
@@ -3286,8 +3297,9 @@ function initializeEventListeners() {
       const isMobile = _isMobileChatInput();
 
       if (_shouldQueueFromMobileEnter(e, textarea) || (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isMobile)) {
-        // If ghost autocomplete is active, accept the suggestion instead of submitting
-        if (window._ghostAutocomplete && window._ghostAutocomplete.isActive()) {
+        const forceAfterTurn = e.ctrlKey && !e.altKey && !e.metaKey;
+        // The explicit queue shortcut sends the draft as typed.
+        if (!forceAfterTurn && window._ghostAutocomplete && window._ghostAutocomplete.isActive()) {
           e.preventDefault();
           e.stopPropagation();
           window._ghostAutocomplete.accept();
@@ -3298,12 +3310,7 @@ function initializeEventListeners() {
         // Check if already submitting before triggering form submission
         const form = el('chat-form');
         if (form) {
-          if (_isForegroundChatBusy() && textarea.value && textarea.value.trim()) {
-            if (chatModule && chatModule.queueStreamingComposerRequest && chatModule.queueStreamingComposerRequest()) {
-              return;
-            }
-            window.__odysseusQueueStreamingSubmit = Date.now();
-          }
+          if (_submitComposerFollowUp(forceAfterTurn, textarea)) return;
           _submitChatFormDirect(form);
         }
       }
@@ -3561,17 +3568,14 @@ function startOdysseusApp() {
   chatModule.initListeners();
   groupModule.init(API_BASE);
   copalModule.init(API_BASE);
-  // Initialize compare module
-  if (compareModule) {
-    compareModule.init(API_BASE);
-  }
+  void restoreCookbookJobs().catch(error => console.warn('Cookbook restore unavailable:', error));
   researchPanelModule.init(API_BASE, markdownModule, sessionModule);
   // Initialize document editor module
   if (documentModule) {
     documentModule.init(API_BASE);
     // Restore document panel if it was open before refresh
     const _curSession = sessionModule && sessionModule.getCurrentSessionId();
-    if (_curSession && localStorage.getItem('odysseus-doc-open-' + _curSession) === '1') {
+    if (_curSession && localStorage.getItem('openclank-doc-open-' + _curSession) === '1') {
       documentModule.loadSessionDocs(_curSession);
     }
   }  
@@ -3665,8 +3669,11 @@ function startOdysseusApp() {
     _show('rail-chats', !!hasChatNotif);
   }
   window._syncRailDynamic = _syncRailDynamic;
-  // Sync periodically and on key events
-  setInterval(_syncRailDynamic, 1000);
+  _syncRailDynamic();
+  const railIndicators = new MutationObserver(_syncRailDynamic);
+  for (const indicator of [el('doc-indicator-btn'), el('rail-chats')]) {
+    if (indicator) railIndicators.observe(indicator, { attributes: true, attributeFilter: ['class'] });
+  }
   document.addEventListener('overflow-state-change', _syncRailDynamic);
 
   const sidebarSearchBtn = el('sidebar-search-btn');
@@ -3841,7 +3848,7 @@ function startOdysseusApp() {
     sendBtn.classList.remove('mic-mode', 'newchat-mode', 'newchat-expanded', 'anim-spin', 'anim-launch', 'anim-land');
     if (hasText) {
       sendBtn.innerHTML = _sendIcon;
-      sendBtn.title = 'Queue message';
+      sendBtn.title = 'Send follow-up (Ctrl+Enter to queue)';
     } else {
       sendBtn.innerHTML = _stopIcon;
       sendBtn.title = 'Stop generation';
@@ -3981,8 +3988,9 @@ function startOdysseusApp() {
         sendBtn.title = 'Stop recording';
         sendBtn.dataset.mode = 'recording';
         sendBtn.classList.add('recording');
+        const addition = fileHandlerModule.captureFileAddition();
         voiceRecorderModule.startRecording(
-          (audioFile) => fileHandlerModule.addFiles([audioFile]),
+          (audioFile) => fileHandlerModule.addFiles([audioFile], {addition}),
           uiModule.showToast,
           uiModule.showError
         );
@@ -4011,12 +4019,7 @@ function startOdysseusApp() {
           if (railNew) railNew.click();
           return;
         }
-        if (_isForegroundChatBusy() && messageInput.value && messageInput.value.trim()) {
-          if (chatModule && chatModule.queueStreamingComposerRequest && chatModule.queueStreamingComposerRequest()) {
-            return;
-          }
-          window.__odysseusQueueStreamingSubmit = Date.now();
-        }
+        if (_submitComposerFollowUp(e.ctrlKey && !e.altKey && !e.metaKey, messageInput)) return;
         _submitChatFormDirect(document.getElementById('chat-form'));
       }
     });
@@ -4106,8 +4109,8 @@ function startOdysseusApp() {
     _hideDropHighlight();
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
-    await fileHandlerModule.addFiles(files);
-    uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to chat`);
+    const added = await fileHandlerModule.addFiles(files);
+    if (added) uiModule.showToast(`Added ${added} file${added > 1 ? 's' : ''} to chat`);
   });
 
   chatContainer.addEventListener('dragleave', (e) => {
@@ -4125,13 +4128,14 @@ function startOdysseusApp() {
   
   attachStrip.addEventListener('drop', async (e) => {
     e.preventDefault();
+    e.stopPropagation();
     attachStrip.style.backgroundColor = '';
     
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
-    await fileHandlerModule.addFiles(files);
+    const added = await fileHandlerModule.addFiles(files);
 
-    uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to chat`);
+    if (added) uiModule.showToast(`Added ${added} file${added > 1 ? 's' : ''} to chat`);
 
   });
   
@@ -4200,11 +4204,12 @@ function startOdysseusApp() {
   window.addEventListener('drop', async (e) => {
     if (!_isFileDrag(e) || !_compareActive()) return;
     e.preventDefault();
+    e.stopPropagation();
     _hideCmpShield();
     const files = Array.from(e.dataTransfer.files || []);
     if (!files.length) return;
-    await fileHandlerModule.addFiles(files);
-    uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to attach`);
+    const added = await fileHandlerModule.addFiles(files);
+    if (added) uiModule.showToast(`Added ${added} file${added > 1 ? 's' : ''} to attach`);
   }, true);
 
   // Load initial data

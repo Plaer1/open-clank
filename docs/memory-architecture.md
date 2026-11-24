@@ -4,15 +4,15 @@ This is an implementation reference, not an installation or recovery guide.
 For daily use read the shared handbook through **Settings → Help**; for
 recovery read [backup coverage](backup-restore.md).
 
-Frankenmemory (`fm-mcp`, Rust + SQLite FTS5) is the default intended memory/RAG
+Memery (Rust + SQLite FTS5) is the default intended memory/RAG
 bank shared by Open Clank and its MiMo engine. Native provider compatibility
 selection remains in source; the retired Chroma vector path is not an optional
-live backend. The architecture below describes the Frankenmemory path and
+live backend. The architecture below describes the Memery path and
 retains implementation/historical names where they identify actual interfaces.
 
 ## The engine
 
-`mcp_servers/frankenmemory` — an MCP stdio server over a single SQLite
+`native/memery` — an MCP stdio server over a single SQLite
 database (`FM_DB_PATH`). Tiers: **raw** (verbatim turn halves), **candidates**
 (heuristically admitted, pending review), **curated** (recallable memories,
 kinds persona/episodic/instruction/fact/fabric/wiki), plus a semantic graph
@@ -38,7 +38,7 @@ auto-memory preference).
 
 - After each saved, non-Temporary Agent turn, `run_post_response_tasks` runs
   `capture_turn_and_enrich` (`services/memory/graph_extractor.py`):
-  `FrankenmemoryProvider.capture()` → fm `capture` with
+  `MemeryProvider.capture()` → fm `capture` with
   `capture_mode="candidate"` (heuristic admission, no LLM), then — when the
   turn was admitted as a candidate — LLM graph enrichment on the task
   endpoint (entities/edges/cues → `graph_upsert`; same prompt, tag
@@ -107,10 +107,9 @@ classifier).
 - The conversation UX is Agent-only. `recall_memory` remains an always-available
   read-only Agent tool while `manage_memory` owns writes. Pulled results inherit
   the trust split: endorsed plain, the rest guard-wrapped.
-- MiMo Agent sessions use the scoped frankenmemory descriptor and native memory
-  manual. Named auxiliary inference has a wildcard tool deny and no generic
+- MiMo Agent sessions request scoped recall through the host service. Named auxiliary inference has a wildcard tool deny and no generic
   conversation endpoint. Temporary Agent and Compare receive no memory capture;
-  Temporary Agent also receives no digest or frankenmemory descriptor.
+  Temporary Agent also receives no digest or Memery access.
 
 ## Open questions (known-unknowns metaplan, 2026-07-17)
 
@@ -135,7 +134,7 @@ question-form even as a fragment.
   archive with `{merged_into}`. Same-question matching is a
   deterministic overlap coefficient over stopword-free, lightly
   stemmed tokens, one conservative threshold (0.6,
-  `fm-core/src/curate/questions.rs`).
+  `native/memery/crates/memery-core/src/curate/questions.rs`).
 - **Resolution (U7)**: three doors, all landing on the same archive
   surface (`archived=1` + `{resolved_by, resolved_at}` — never a plain
   delete): the Brain card's ✓ Resolve, the directed `manage_memory`
@@ -160,8 +159,8 @@ question-form even as a fragment.
 
 ## Provider selection and retired Chroma
 
-`src/app_initializer.py` defaults `MEMORY_PROVIDER` to `frankenmemory`,
-constructing `FrankenmemoryProvider` and a disabled native provider. Its remaining
+`src/app_initializer.py` defaults `MEMORY_PROVIDER` to `memery`,
+constructing `MemeryProvider` and a disabled native provider. Its remaining
 compatibility branch still constructs `NativeMemoryProvider` for an alternate
 selection. That code has not been removed, and these docs do not promise its
 removal or recommend a second deployment authority.
@@ -170,22 +169,19 @@ The initializer sets the historical `memory_vector` slot to `None`; no
 environment toggle restores Chroma as a second live vector/RAG authority.
 Preserve old Chroma payloads for reviewed explicit conversion under
 private operator recovery material, rather than treating them as an
-optional current service. The standalone `mcp_servers/memory_server.py` retains
-its separate native-process path; it is not the default hosted authority.
+optional current service.
 
-`FM_DB_PATH` defaults to `frankenmemory.db` under the resolved data root and can
-be independently overridden. Memory recall/graph projection is not a complete
+New installations use `memery.db` under the resolved data root. Existing installations reopen `frankenmemory.db` in place with its SQLite companions. Set `OPEN_CLANK_MEMERY_DB_PATH` to select an explicit store. If both names exist and point to separate files, the host requires an explicit selection. Memory recall/graph projection is not a complete
 backup: app auth/keys, Copal documents/assets, History and host workspace files
 have their own storage/recovery boundaries.
 
+## Document index administration
+
+The host tool `manage_rag` is available to administrators. It lists indexed sources and status, indexes or removes a directory, rebuilds embedding generations, and rolls back a generation. The host supplies the authenticated owner and the vetted workspace. In a managed Agent turn, directory indexing reads through Agent Files. Changes require approval in the current chat. Replaying a call returns its recorded outcome or reports that the original outcome is unknown.
+
 ## Scope plumbing
 
-Both hosts resolve fm scope from one place: Odysseus passes owner per call
-under `FM_SCOPE_AUTHORITY=trusted-caller`; mimo sessions get
-`FM_OWNER`/`FM_WORKSPACE_ID` from the bridge's MCP descriptor
-(`frankenmemory_mcp_descriptor`) and propagate them verbatim
-(`session-scope.ts`). MiMo runtimes are partitioned per owner
-(`MimoSupervisorPool`), so one child never mixes owners.
+The host binds Memery operations to the authenticated owner and workspace. MiMo requests deeper recall through the host. MiMo runtimes are partitioned per owner (`MimoSupervisorPool`).
 
 ## Tests that pin all this
 
@@ -206,4 +202,4 @@ under `FM_SCOPE_AUTHORITY=trusted-caller`; mimo sessions get
   — JS↔Python classifier parity, chip semantics, canvas layout.
 - `tests/test_authored_ingest_tool.py` + bun `test/memory/authored-ingest.test.ts`
   — the file projection lifecycle.
-- fm engine: `cargo test` in `mcp_servers/frankenmemory`.
+- fm engine: `cargo test` in `native/memery`.

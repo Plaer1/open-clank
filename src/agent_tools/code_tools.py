@@ -1,11 +1,23 @@
 """Friendly read-only code tool; existing app/broker owns all authority."""
 import json
 import os
+from contextvars import ContextVar
+
+_outline_invocation = ContextVar("source_outline_invocation", default=None)
+
+def begin_source_outline_request(request):
+    holder = {"active": True, "request": request, "sidecar": None}
+    return holder, _outline_invocation.set(holder)
+
+def end_source_outline_request(holder, token):
+    holder["active"] = False
+    _outline_invocation.reset(token)
+
 
 
 class SearchCodeTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.openclank.code_query import CodeQueryError, finalize_error, query_code, validate_query, measure_envelope, DEFAULT_BUDGETS
+        from src.openclank.code_query import CodeQueryError, finalize_error, query_code, validate_query, validate_library_query, unavailable_library, measure_envelope, DEFAULT_BUDGETS
         from src.memory_provider import MemoryRequestRejectedError
         from src import ai_interaction
         owner = str(ctx.get("owner") or "")
@@ -13,17 +25,29 @@ class SearchCodeTool:
         workspace = str(ctx.get("authority_workspace_id") or "")
         query = {}
         try:
-            query = validate_query(json.loads(content))
+            raw=json.loads(content)
+            if isinstance(raw,dict) and raw.get('operation')=='library_api':
+                query={'operation':'library_api'}
+                query=validate_library_query(raw)
+            else:
+                query=validate_query(raw)
         except (TypeError, ValueError, CodeQueryError):
-            result = finalize_error({}, "invalid", "search_code requires a bounded code-query JSON object")
+            result = unavailable_library() if query.get('operation')=='library_api' else finalize_error({}, "invalid", "search_code requires a bounded code-query JSON object")
         else:
             provider = getattr(ai_interaction, "_memory_provider", None)
             try:
                 if not owner or not sid or not workspace or provider is None:
                     raise CodeQueryError("denied", "Code chat workspace unavailable")
                 if getattr(provider, "_broker_url", ""):
-                    result = await provider.code_query_session(query=query, session_id=sid, authority_workspace_id=workspace)
+                    holder = _outline_invocation.get()
+                    request = holder.get("request") if isinstance(holder, dict) and holder.get("active") is True else None
+                    result = await provider.code_query_session(query=query, session_id=sid, authority_workspace_id=workspace,
+                        **({"_outline_request": request} if request is not None else {}))
+                    if request is not None and isinstance(result, dict) and set(result) == {"result", "outline"}:
+                        if holder.get("active") is True and isinstance(result.get("outline"), dict): holder["sidecar"] = result["outline"]
+                        result = result["result"]
                 else:
+                    if query.get('operation')=='library_api':raise CodeQueryError('denied','Authenticated code broker required')
                     from src.constants import AUTH_FILE
                     from src.tool_execution import _read_only_auth_snapshot
                     from src.openclank.file_policy import FilePolicyRepository
@@ -38,6 +62,18 @@ class SearchCodeTool:
                 result = finalize_error(query, "denied", "Code chat workspace unavailable")
             except Exception:
                 result = finalize_error(query, "unavailable", "Code query transport unavailable")
+        if query.get('operation')=='library_api':
+            if (type(result) is not dict or result.get('schema')!='open-clank.library-observation/v1'
+                    or result.get('state') not in ('current','unavailable') or result.get('partial') is not True
+                    or (result.get('state')=='unavailable' and set(result)!={'schema','state','partial'})
+                    or (result.get('state')=='current' and (set(result)!={'schema','state','workspace_id','package','manifest','declaration','partial','reasons'}
+                        or result.get('workspace_id')!=workspace or result.get('package')!=query['query']))):
+                result=unavailable_library()
+            output=json.dumps(result,ensure_ascii=False,separators=(',',':'))
+            wrapper={'output':output,'exit_code':0 if result.get('state')=='current' else 1}
+            if len(json.dumps(wrapper,ensure_ascii=False,separators=(',',':')).encode())>32768:
+                result=unavailable_library();wrapper={'output':json.dumps(result,separators=(',',':')),'exit_code':1}
+            return wrapper
         # One payload, not a second duplicate copy in metadata. Locators/hashes
         # and actual excerpts remain visible for retained-context dedup.
         budgets = query.get("budgets", DEFAULT_BUDGETS)

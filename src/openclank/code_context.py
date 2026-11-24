@@ -10,6 +10,8 @@ import re
 from src.openclank.code_query import MAX_QUERY_WORK, query_code
 
 SENTINEL = "[code-evidence-v1 "
+MAX_GRAPH_PROMPT_BUDGET = 24_000
+MIN_GRAPH_PROMPT_BUDGET = 768
 
 
 def code_signal(message):
@@ -153,65 +155,97 @@ async def append_code_context(*, messages, message, session, provider, repositor
     signal = code_signal(message)
     if not signal or type(max_bytes) is not int or type(max_tokens) is not int:
         return messages
+    existing_bytes = _payload_size(messages) if context_length is not None else 0
     budget = min(2048, max_bytes, max_tokens)
     if context_length is not None:
         if type(context_length) is not int or context_length <= 0:
             return messages
         # Byte-per-token upper bound includes the complete retained envelope;
         # conservative under-injection is preferable to context overflow.
-        budget = min(budget, context_length - _payload_size(messages) - 1024)
+        budget = min(budget, context_length - existing_bytes - 1024)
     if budget < 768:
         return messages
+    # Preserve a small per-card allowance. Multiple explicitly named symbols may
+    # share the prompt allowance, including evidence already in retained turns.
+    def prompt_limit():
+        current = prefs_reader() if callable(prefs_reader) else prefs
+        value = current.get("code_context_prompt_budget", MAX_GRAPH_PROMPT_BUDGET) if isinstance(current, dict) else 0
+        return min(MAX_GRAPH_PROMPT_BUDGET, value) if type(value) is int else 0
+
+    retained_parts = [_retained_text([m]) for m in messages]
+    retained = "\n".join(retained_parts)
+    retained_cost = sum(_payload_size(m) for m, text in zip(messages, retained_parts) if SENTINEL in text)
+    remaining = min(prompt_limit() - retained_cost, context_length - existing_bytes - 1024
+                    if context_length else MAX_GRAPH_PROMPT_BUDGET)
+    if remaining < MIN_GRAPH_PROMPT_BUDGET:
+        return messages
+    explicit = re.findall(r"`([\w./:-]{1,128})`", message)
+    signals = list(dict.fromkeys([signal, *explicit]))[:16]
+    out = list(messages)
+    total_added = 0
+    receipt = None
     try:
-        result = await query_code(repository=repository, provider=provider, auth_manager=auth_manager, owner=owner,
-            workspace_id=session.workspace_id, purpose="agent_workspace", session=session,
-            query=dict(operation="search", query=signal, channels=["exact", "identifier"], fields=["label", "source", "properties"], budgets=dict(rows=3, bytes=8192, tokens=8192, hops=0, work=MAX_QUERY_WORK)))
-        if result.get("error"):
-            return messages
-        if not eligible():
-            return messages
-        for hit in result.get("hits", []):
-            props = hit.get("properties") or {}
-            if (hit.get("kind") not in {"declaration", "file"} or hit.get("evidence_state") in {"stale", "suggestion", "ambiguous", "unsupported"}
-                    or props.get("identity_state", "stable") != "stable"
-                    or not any(m.get("channel") in {"exact", "identifier"} for m in hit.get("matches", []))):
-                continue
-            source = hit.get("source") or {}
-            path = source.get("rel_path") or props.get("rel_path")
-            start = (source.get("span") or {}).get("start_byte", 0)
-            if not isinstance(path, str) or type(start) is not int:
-                continue
-            window = await query_code(repository=repository, provider=provider, auth_manager=auth_manager, owner=owner,
+        for signal in signals:
+            available = min(budget, remaining - total_added)
+            if available < MIN_GRAPH_PROMPT_BUDGET:
+                break
+            result = await query_code(repository=repository, provider=provider, auth_manager=auth_manager, owner=owner,
                 workspace_id=session.workspace_id, purpose="agent_workspace", session=session,
-                query=dict(operation="read", read=dict(rel_path=path, start_byte=start, length=min(1024, budget - 600)),
-                    expected_receipt=result.get("receipt"), fields=["source", "excerpt", "properties"], channels=["raw"],
-                    budgets=dict(rows=1, bytes=8192, tokens=8192, hops=0, work=MAX_QUERY_WORK)))
-            if window.get("error"):
+                query=dict(operation="search", query=signal, channels=["exact", "identifier"], fields=["label", "source", "properties"], budgets=dict(rows=3, bytes=8192, tokens=8192, hops=0, work=MAX_QUERY_WORK)))
+            if result.get("error"):
                 continue
+            if receipt is not None and receipt != result.get("receipt"):
+                return messages
+            receipt = result.get("receipt")
             if not eligible():
                 return messages
-            for observed in window.get("hits", []):
-                src, text = observed.get("source"), observed.get("excerpt")
-                if observed.get("current_source_verified") is not True or not isinstance(src, dict) or not isinstance(text, str) or not text:
+            for hit in result.get("hits", []):
+                props = hit.get("properties") or {}
+                if (hit.get("kind") not in {"declaration", "file"} or hit.get("evidence_state") in {"stale", "suggestion", "ambiguous", "unsupported"}
+                        or props.get("identity_state", "stable") != "stable"
+                        or not any(m.get("channel") in {"exact", "identifier"} for m in hit.get("matches", []))):
                     continue
-                span = src.get("span") or {}
-                key = f"{session.workspace_id} {src.get('file_id')} {src.get('source_hash')} {span.get('start_byte')}:{span.get('end_byte')}"
-                retained = _retained_text(messages)
-                if SENTINEL + key in retained or _retained_window(messages, receipt=window.get("receipt"), source=src, text=text):
-                    return messages
-                from src.prompt_security import untrusted_context_message
-                card = untrusted_context_message("verified code source", f"{SENTINEL}{key}]\nObserved source, not runtime behavior. {src['rel_path']}:{span.get('start_line')}-{span.get('end_line')}\n{text}")
-                size = _payload_size(card)
-                if size > budget:
+                source = hit.get("source") or {}
+                path = source.get("rel_path") or props.get("rel_path")
+                start = (source.get("span") or {}).get("start_byte", 0)
+                if not isinstance(path, str) or type(start) is not int:
                     continue
-                out = list(messages)
-                at = next((i for i in range(len(out) - 1, -1, -1) if out[i].get("role") == "user"), len(out))
-                out.insert(at, card)
-                if context_length is not None and _payload_size(out) + 1024 > context_length:
-                    return messages
+                window = await query_code(repository=repository, provider=provider, auth_manager=auth_manager, owner=owner,
+                    workspace_id=session.workspace_id, purpose="agent_workspace", session=session,
+                    query=dict(operation="read", read=dict(rel_path=path, start_byte=start, length=min(1024, available - 600)),
+                        expected_receipt=result.get("receipt"), fields=["source", "excerpt", "properties"], channels=["raw"],
+                        budgets=dict(rows=1, bytes=8192, tokens=8192, hops=0, work=MAX_QUERY_WORK)))
+                if window.get("error"):
+                    continue
                 if not eligible():
                     return messages
-                return out
+                for observed in window.get("hits", []):
+                    src, text = observed.get("source"), observed.get("excerpt")
+                    if observed.get("current_source_verified") is not True or not isinstance(src, dict) or not isinstance(text, str) or not text:
+                        continue
+                    span = src.get("span") or {}
+                    key = f"{session.workspace_id} {src.get('file_id')} {src.get('source_hash')} {span.get('start_byte')}:{span.get('end_byte')}"
+                    if SENTINEL + key in retained or _retained_window(out, receipt=window.get("receipt"), source=src, text=text):
+                        break
+                    from src.prompt_security import untrusted_context_message
+                    card = untrusted_context_message("verified code source", f"{SENTINEL}{key}]\nObserved source, not runtime behavior. {src['rel_path']}:{span.get('start_line')}-{span.get('end_line')}\n{text}")
+                    size = _payload_size(card)
+                    if size + 1 > available:
+                        continue
+                    at = next((i for i in range(len(out) - 1, -1, -1) if out[i].get("role") == "user"), len(out))
+                    out.insert(at, card)
+                    if context_length is not None and existing_bytes + total_added + size + 1 + 1024 > context_length:
+                        return messages
+                    if not eligible():
+                        return messages
+                    retained += "\n" + SENTINEL + key
+                    total_added += size + 1
+                    break
+                else:
+                    continue
+                break
+        if total_added and eligible() and retained_cost + total_added <= prompt_limit():
+            return out
     except Exception:
         return messages
     return messages

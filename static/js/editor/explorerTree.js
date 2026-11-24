@@ -542,6 +542,13 @@ export function createExplorerTree({
       });
     }
     if (onContextMenu) {
+      row.addEventListener('keydown', event => {
+        if (event.defaultPrevented || event.isComposing || event.target !== row
+          || !window.openClankContextMenu?.enabled?.()
+          || (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey))) return;
+        const handled = !row.dispatchEvent(new MouseEvent('contextmenu', { bubbles:true, cancelable:true }));
+        if (handled) event.preventDefault();
+      });
       row.addEventListener('contextmenu', event => {
         try {
           const result = onContextMenu(event, node.data, contextFor(node), records);

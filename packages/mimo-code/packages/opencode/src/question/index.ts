@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { Deferred, Effect, Layer, Schema, Context } from "effect"
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
@@ -8,6 +9,11 @@ import { Flag } from "@/flag/flag"
 import { Log } from "@/util"
 import { withStatics } from "@/util/schema"
 import { QuestionID } from "./schema"
+import { Database, and, count, desc, eq, inArray, lt, or } from "@/storage"
+import { ActorRegistryTable } from "@/actor/actor.sql"
+import { MessageTable, PartTable } from "@/session/session.sql"
+import { QuestionRequestTable, UserInputReceiptTable } from "@/inbox/inbox.sql"
+import { ManagedProvider } from "@/acp/managed-provider"
 
 const log = Log.create({ service: "question" })
 
@@ -68,6 +74,10 @@ export class Tool extends Schema.Class<Tool>("QuestionTool")({
 export class Request extends Schema.Class<Request>("QuestionRequest")({
   id: QuestionID,
   sessionID: SessionID,
+  actorID: Schema.optional(Schema.String),
+  originTurnID: Schema.optional(MessageID),
+  questionRevision: Schema.optional(Schema.Number),
+  blocking: Schema.optional(Schema.Boolean),
   questions: Schema.Array(Info).annotate({
     description: "Questions to ask",
   }),
@@ -133,6 +143,14 @@ export interface Interface {
     questions: ReadonlyArray<Info>
     tool?: Tool
   }) => Effect.Effect<ReadonlyArray<Answer>, RejectedError>
+  readonly askOptional: (input: {
+    sessionID: SessionID
+    actorID: string
+    executionRevision?: number
+    originTurnID: MessageID
+    questions: ReadonlyArray<Info>
+    tool: Tool
+  }) => Effect.Effect<Request, Error>
   readonly reply: (input: { requestID: QuestionID; answers: ReadonlyArray<Answer> }) => Effect.Effect<void>
   readonly reject: (requestID: QuestionID) => Effect.Effect<void>
   readonly list: () => Effect.Effect<ReadonlyArray<Request>>
@@ -141,6 +159,177 @@ export interface Interface {
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Question") {}
+
+/** Persist after the caller has read and matched the authenticated managed binding. */
+export function persistOptionalQuestion(input: {
+  owner: string
+  stableChatID: string
+  sessionID: SessionID
+  actorID: string
+  originTurnID: MessageID
+  questions: ReadonlyArray<Info>
+  tool: Tool
+}): Request {
+  const id = QuestionID.ascending()
+  const revision = 1
+  if (input.questions.length < 1 || input.questions.length > 16) throw new Error("optional question request exceeds the 1–16 question limit")
+  const questions = input.questions.map((question) => ({ ...question }))
+  const payloadHash = createHash("sha256").update(JSON.stringify({
+    sessionID: input.sessionID,
+    actorID: input.actorID,
+    originTurnID: input.originTurnID,
+    tool: input.tool,
+    questionRevision: revision,
+    questions,
+  })).digest("hex")
+  Database.transaction((db) => {
+    const actor = db.select().from(ActorRegistryTable).where(and(
+      eq(ActorRegistryTable.session_id, input.sessionID),
+      eq(ActorRegistryTable.actor_id, input.actorID),
+    )).get()
+    if (!actor || actor.chat_id !== input.stableChatID) throw new Error("question actor is not bound to the authenticated chat")
+    const outstanding = db.select({ n: count() }).from(QuestionRequestTable).where(and(
+      eq(QuestionRequestTable.owner, input.owner),
+      eq(QuestionRequestTable.stable_chat_id, input.stableChatID),
+      eq(QuestionRequestTable.session_id, input.sessionID),
+      eq(QuestionRequestTable.actor_id, input.actorID),
+      inArray(QuestionRequestTable.state, ["pending", "answer-queued", "stale"]),
+    )).get()?.n ?? 0
+    if (outstanding >= 32) throw new Error("optional question request limit reached for this actor")
+    const origin = db.select({ data: MessageTable.data }).from(MessageTable).where(and(
+      eq(MessageTable.session_id, input.sessionID),
+      eq(MessageTable.agent_id, input.actorID),
+      eq(MessageTable.id, input.originTurnID),
+    )).get()
+    if (!origin || origin.data.role !== "user") throw new Error("question origin is not a user turn in this actor slice")
+    const toolPart = db.select({ part: PartTable.data }).from(PartTable).innerJoin(
+      MessageTable,
+      eq(PartTable.message_id, MessageTable.id),
+    ).where(and(
+      eq(PartTable.session_id, input.sessionID),
+      eq(PartTable.message_id, input.tool.messageID),
+      eq(MessageTable.agent_id, input.actorID),
+    )).all().some(({ part }) => part.type === "tool" && (part as { callID?: string }).callID === input.tool.callID)
+    if (!toolPart) throw new Error("question origin tool call is unavailable")
+    const now = Date.now()
+    const row: typeof QuestionRequestTable.$inferInsert = {
+      owner: input.owner,
+      stable_chat_id: input.stableChatID,
+      request_id: String(id),
+      session_id: input.sessionID,
+      actor_id: input.actorID,
+      origin_turn_id: input.originTurnID,
+      tool_message_id: input.tool.messageID,
+      tool_call_id: input.tool.callID,
+      question_revision: revision,
+      plan_revision: null,
+      blocking: 0,
+      questions: questions as Array<Record<string, unknown>>,
+      payload_hash: payloadHash,
+      state: "pending",
+      answer_payload: null,
+      answer_disposition: null,
+      answer_request_id: null,
+      answer_message_id: null,
+      created_at: now,
+      updated_at: now,
+    }
+    db.insert(QuestionRequestTable).values(row).run()
+  }, { behavior: "immediate" })
+  return Schema.decodeUnknownSync(Request)({
+    id,
+    sessionID: input.sessionID,
+    actorID: input.actorID,
+    originTurnID: input.originTurnID,
+    questionRevision: revision,
+    blocking: false,
+    questions,
+    tool: input.tool,
+  })
+}
+
+export function listForActor(input: {
+  owner: string
+  stableChatID: string
+  sessionID: SessionID
+  actorID: string
+  limit: number
+  before?: string
+  requestID?: string
+}) {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) throw new Error("question page limit is invalid")
+  return Database.use((db) => {
+    const actor = db.select().from(ActorRegistryTable).where(and(
+      eq(ActorRegistryTable.session_id, input.sessionID),
+      eq(ActorRegistryTable.actor_id, input.actorID),
+    )).get()
+    if (!actor || actor.chat_id !== input.stableChatID) throw new Error("question actor is not bound to the authenticated chat")
+    const baseScope = and(
+      eq(QuestionRequestTable.owner, input.owner),
+      eq(QuestionRequestTable.stable_chat_id, input.stableChatID),
+      eq(QuestionRequestTable.session_id, input.sessionID),
+      eq(QuestionRequestTable.actor_id, input.actorID),
+      ...(input.requestID ? [eq(QuestionRequestTable.request_id, input.requestID)] : []),
+    )
+    const scope = and(baseScope, inArray(QuestionRequestTable.state, ["pending", "answer-queued", "stale"]))
+    let before
+    if (input.before) {
+      const cursor = db.select({ request_id: QuestionRequestTable.request_id, created_at: QuestionRequestTable.created_at })
+        .from(QuestionRequestTable).where(and(baseScope, eq(QuestionRequestTable.request_id, input.before))).get()
+      if (!cursor) throw new Error("question cursor is unavailable in this actor scope")
+      before = and(scope, or(
+        lt(QuestionRequestTable.created_at, cursor.created_at),
+        and(eq(QuestionRequestTable.created_at, cursor.created_at), lt(QuestionRequestTable.request_id, cursor.request_id)),
+      ))
+    }
+    const rows = db.select().from(QuestionRequestTable).where(before ?? scope)
+      .orderBy(desc(QuestionRequestTable.created_at), desc(QuestionRequestTable.request_id)).limit(input.limit).all()
+    return {
+      items: rows.map((row) => ({
+        requestID: row.request_id,
+        questionRef: `${row.request_id}@${row.question_revision}`,
+        sessionID: row.session_id,
+        actorID: row.actor_id,
+        originTurnID: row.origin_turn_id,
+        questionRevision: row.question_revision,
+        planRevision: row.plan_revision,
+        blocking: row.blocking === 1,
+        questions: row.questions,
+        state: row.state,
+        answerDisposition: row.answer_disposition,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      })),
+      nextCursor: rows.length === input.limit ? rows[rows.length - 1]?.request_id ?? null : null,
+    }
+  })
+}
+
+export function answersForReceipt(input: { owner: string; stableChatID: string; requestID: string }) {
+  return Database.use((db) => {
+    const receipt = db.select({ question_refs: UserInputReceiptTable.question_refs }).from(UserInputReceiptTable).where(and(
+      eq(UserInputReceiptTable.owner, input.owner),
+      eq(UserInputReceiptTable.stable_chat_id, input.stableChatID),
+      eq(UserInputReceiptTable.request_id, input.requestID),
+    )).get()
+    if (!receipt) return []
+    const rows = db.select().from(QuestionRequestTable).where(and(
+      eq(QuestionRequestTable.owner, input.owner),
+      eq(QuestionRequestTable.stable_chat_id, input.stableChatID),
+      eq(QuestionRequestTable.answer_request_id, input.requestID),
+    )).all()
+    const byRef = new Map(rows.map((row) => [`${row.request_id}@${row.question_revision}`, row]))
+    return receipt.question_refs.flatMap((ref) => {
+      const row = byRef.get(ref)
+      return row ? [{
+        requestID: row.request_id,
+        questionRevision: row.question_revision,
+        disposition: row.answer_disposition,
+        ...(row.answer_payload?.answers ? { answers: row.answer_payload.answers } : {}),
+      }] : []
+    })
+  })
+}
 
 export const layer = Layer.effect(
   Service,
@@ -191,6 +380,28 @@ export const layer = Layer.effect(
           pending.delete(id)
         }),
       )
+    })
+
+    const askOptional = Effect.fn("Question.askOptional")(function* (input: {
+      sessionID: SessionID
+      actorID: string
+      executionRevision?: number
+      originTurnID: MessageID
+      questions: ReadonlyArray<Info>
+      tool: Tool
+    }) {
+      const hostContext = input.executionRevision === undefined ? undefined :
+        ManagedProvider.currentActorHostContext(input.sessionID, input.actorID, input.executionRevision)
+      if (!hostContext?.chatID) throw new Error("optional questions require an authenticated managed chat context")
+      const binding = yield* Effect.tryPromise({
+        try: () => ManagedProvider.readManagedSessionBinding(input.sessionID),
+        catch: (error) => error instanceof Error ? error : new Error(String(error)),
+      })
+      if (binding.stableChatID !== hostContext.chatID || binding.engineSessionID !== input.sessionID) throw new Error("optional question managed binding changed")
+      const info = persistOptionalQuestion({ ...input, owner: binding.owner, stableChatID: binding.stableChatID })
+      log.info("persisted optional question", { id: info.id, sessionID: info.sessionID, actorID: input.actorID })
+      yield* bus.publish(Event.Asked, info)
+      return info
     })
 
     const reply = Effect.fn("Question.reply")(function* (input: {
@@ -244,7 +455,7 @@ export const layer = Layer.effect(
       log.info("never-ask", { enabled })
     })
 
-    return Service.of({ ask, reply, reject, list, neverAsk, setNeverAsk })
+    return Service.of({ ask, askOptional, reply, reject, list, neverAsk, setNeverAsk })
   }),
 )
 

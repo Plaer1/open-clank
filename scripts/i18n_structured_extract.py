@@ -9,7 +9,7 @@ extraction marker contract for those modules:
 
 * ``_lesson(key, title, result, completion, destination, explanation, why, body, practice=…)``
 * class/section dicts with ``title`` / ``summary`` / ``description``
-* ``_article(article_id, name, title, body)``
+* Installed manual titles and bodies from ``manual_pages()`` (author rule: -quiet, but with all required info).
 * achievement ``_n`` / ``_s`` / ``_u`` (id, key, title, kind, families, summary)
 
 Stable keys are semantic (``treehouse.*`` / ``docs.*`` / ``award.*``) so S28
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import json
+import runpy
 import sys
 from pathlib import Path
 from typing import Any
@@ -60,13 +61,6 @@ LESSON_COPY_SLOTS = {
     6: "whyThisHelps",
     7: "body",
 }
-
-# Positional UI-copy slots for _article(...)
-ARTICLE_COPY_SLOTS = {
-    2: "title",
-    3: "body",
-}
-ARTICLE_NAME_SLOT = 1
 
 # Positional UI-copy slots for achievement helpers _n/_s/_u
 ACHIEVEMENT_COPY_SLOTS = {
@@ -114,8 +108,8 @@ def _add(
     location: str,
     note: str,
 ) -> None:
-    text = source.replace("\r\n", "\n").strip()
-    if not text or len(text) < 2:
+    text = source if module == "docs" and field == "body" else source.replace("\r\n", "\n").strip()
+    if len(text.strip()) < 2:
         return
     key = _stable(module, owner, field, text)
     if key in seen:
@@ -225,28 +219,16 @@ def extract_field_guide(path: Path) -> list[dict[str, Any]]:
 
 
 def extract_official_docs(path: Path) -> list[dict[str, Any]]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    rel = path.relative_to(ROOT).as_posix()
+    """Read the published bodies with their inline figures and captions."""
+    content = runpy.run_path(str(path))
+    place_media = runpy.run_path(str(path.with_name("official_docs_assets.py")))["place_article_media"]
+    location = path.relative_to(ROOT).as_posix()
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = getattr(func, "id", None) or getattr(func, "attr", None)
-        if name != "_article":
-            continue
-        article_id = _const(node.args[0]) if node.args else "article"
-        loc = f"{rel}:{node.lineno}"
-        name_value = _const(node.args[ARTICLE_NAME_SLOT]) if len(node.args) > ARTICLE_NAME_SLOT else None
-        if name_value and "{OFFICIAL_ROOT_FOLDER}" not in name_value:
-            _add(records, seen, "docs", article_id, "name", name_value, loc, "article name")
-        for index, field in ARTICLE_COPY_SLOTS.items():
-            if index >= len(node.args):
-                continue
-            value = _const(node.args[index])
-            if value:
-                _add(records, seen, "docs", article_id, field, value, loc, field)
+    for article_id, _, title, body, _, _ in content["manual_pages"]():
+        body = place_media(body, content["ARTICLE_ASSETS"].get(article_id, ()))
+        for field, value in (("title", title), ("body", body)):
+            _add(records, seen, "docs", article_id, field, value, location, "manual " + field)
     return records
 
 
@@ -279,7 +261,7 @@ def extract_achievements(path: Path) -> list[dict[str, Any]]:
 def main() -> int:
     records: list[dict[str, Any]] = []
     records.extend(extract_field_guide(ROOT / "src" / "openclank" / "treehouse_field_guide.py"))
-    records.extend(extract_official_docs(ROOT / "src" / "openclank" / "official_docs.py"))
+    records.extend(extract_official_docs(ROOT / "src" / "openclank" / "official_docs_content.py"))
     records.extend(extract_achievements(ROOT / "src" / "openclank" / "treehouse_achievements.py"))
     records.sort(key=lambda item: item["key"])
     payload = {

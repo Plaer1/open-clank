@@ -3,7 +3,7 @@ import { registerMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 import { IS_MAC, isAltGrEvent } from './platform.js';
 import { visibleWindowBounds } from './windowResize.js';
 import {
-  WORKBENCH_MENUS, FILES_WORKBENCH_MENUS, GRAPH_WORKBENCH_MENUS, configureWorkbenchCommands, registerWorkbenchSurface,
+  WORKBENCH_MENUS, IMAGE_WORKBENCH_MENUS, FILES_WORKBENCH_MENUS, GRAPH_WORKBENCH_MENUS, configureWorkbenchCommands, registerWorkbenchSurface,
   captureWorkbenchTarget, workbenchCommandDescriptors, runWorkbenchCommand, restoreWorkbenchTarget,
 } from './workbenchCommands.js';
 
@@ -162,7 +162,14 @@ function createPalette(captured, { prefix, label = 'Open Clank', status, onClose
 }
 
 function menuFor(target) {
-  return target instanceof Node ? [...mounts].find((mount) => mount.host.contains(target)) : null;
+  if (!(target instanceof Element)) return null;
+  const visible = [...mounts].filter(({ element }) => !element.closest('.hidden,[hidden],.modal-minimized'));
+  for (let node = target; node; node = node.parentElement) {
+    const mount = visible.find(({ host }) => host === node);
+    if (mount) return mount;
+  }
+  const modal = target.closest('.modal');
+  return modal ? visible.find(({ host }) => host.closest('.modal') === modal) : null;
 }
 function openWorkbenchPalette(target) {
   if (document.querySelector('dialog:modal')) {
@@ -227,7 +234,7 @@ export function mountWorkbenchMenu({ host, container, before = null, id = host?.
   if (!routerInstalled) initWorkbenchMenu(appOperations);
   const unregisterSurface = surface ? registerWorkbenchSurface(host, { ...surface, kind }) : () => {};
   const prefix = uniquePrefix(id);
-  const menuNames = kind === 'graph' ? GRAPH_WORKBENCH_MENUS : kind === 'files' ? FILES_WORKBENCH_MENUS : WORKBENCH_MENUS;
+  const menuNames = kind === 'graph' ? GRAPH_WORKBENCH_MENUS : kind === 'files' ? FILES_WORKBENCH_MENUS : kind === 'editor' ? [...WORKBENCH_MENUS,...IMAGE_WORKBENCH_MENUS] : WORKBENCH_MENUS;
   const bar = document.createElement('div'); bar.id = `${prefix}-bar`; bar.className = 'workbench-menubar';
   const nav = document.createElement('nav'); nav.className = 'workbench-menu-navigation';
   nav.setAttribute('role', 'menubar'); nav.setAttribute('aria-label', `${label} menu`); nav.setAttribute('aria-orientation', 'horizontal');
@@ -235,6 +242,7 @@ export function mountWorkbenchMenu({ host, container, before = null, id = host?.
     const button = document.createElement('button'); button.type = 'button'; button.id = `${prefix}-${name.toLowerCase()}`;
     button.className = 'workbench-menu-trigger'; button.textContent = name; button.tabIndex = index ? -1 : 0;
     button.dataset.workbenchMenu = name; button.setAttribute('role', 'menuitem'); button.setAttribute('aria-haspopup', 'menu');
+    if (IMAGE_WORKBENCH_MENUS.includes(name)) button.hidden = true;
     button.setAttribute('aria-expanded', 'false'); button.setAttribute('aria-controls', `${prefix}-${name.toLowerCase()}-popup`);
     nav.append(button); return button;
   });
@@ -251,6 +259,9 @@ export function mountWorkbenchMenu({ host, container, before = null, id = host?.
     catch (error) { report(error.message || 'The original applet is unavailable.', status); return null; }
   };
   const rove = (index) => triggers.forEach((button, i) => { button.tabIndex = i === index ? 0 : -1; });
+  const visibleIndices = () => triggers.map((button,index) => button.hidden ? -1 : index).filter(index => index >= 0);
+  const adjacent = (index, direction) => { const visible=visibleIndices(), at=visible.indexOf(index); return visible[(at + direction + visible.length) % visible.length]; };
+  function setContextualMenus(enabled) { const show = enabled === true; for (const button of triggers) if (IMAGE_WORKBENCH_MENUS.includes(button.dataset.workbenchMenu)) button.hidden = !show; if (openedIndex >= 0 && triggers[openedIndex].hidden) close({restore:false}); }
   function close({ restore = true, keepSession = false } = {}) {
     unregisterDismiss(); unregisterDismiss = () => {};
     popup?.remove(); popup = null;
@@ -314,7 +325,7 @@ export function mountWorkbenchMenu({ host, container, before = null, id = host?.
       } else if (event.key === 'Home' || event.key === 'End') {
         event.preventDefault(); (event.key === 'Home' ? items[0] : items.at(-1))?.focus();
       } else if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-        event.preventDefault(); openMenu((index + (event.key === 'ArrowRight' ? 1 : -1) + triggers.length) % triggers.length);
+        event.preventDefault(); openMenu(adjacent(index,event.key === 'ArrowRight' ? 1 : -1));
       } else if (event.key === 'Tab') {
         close({ restore:false }); trigger.focus({ preventScroll:true });
       } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && event.key !== ' ') {
@@ -339,16 +350,16 @@ export function mountWorkbenchMenu({ host, container, before = null, id = host?.
     listen(button, 'keydown', (event) => {
       if (event.isComposing || isAltGrEvent(event)) return;
       if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-        event.preventDefault(); const next = (index + (event.key === 'ArrowRight' ? 1 : -1) + triggers.length) % triggers.length;
+        event.preventDefault(); const next = adjacent(index,event.key === 'ArrowRight' ? 1 : -1);
         if (popup) openMenu(next, { focusItem:false }); else { rove(next); triggers[next].focus(); }
       } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault(); openMenu(index, { last:event.key === 'ArrowUp' });
       } else if (event.key === 'Home' || event.key === 'End') {
-        event.preventDefault(); const next = event.key === 'Home' ? 0 : triggers.length - 1; rove(next); triggers[next].focus();
+        event.preventDefault(); const visible=visibleIndices(), next = event.key === 'Home' ? visible[0] : visible.at(-1); rove(next); triggers[next].focus();
       } else if (event.key === 'Tab') close({ restore:false });
       else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && event.key !== ' ') {
-        const next = menuNames.map((name, i) => ({ name, i })).find((item) => item.i > index && item.name.toLowerCase().startsWith(event.key.toLowerCase()))
-          || menuNames.map((name, i) => ({ name, i })).find((item) => item.name.toLowerCase().startsWith(event.key.toLowerCase()));
+        const next = menuNames.map((name, i) => ({ name, i })).find((item) => !triggers[item.i].hidden && item.i > index && item.name.toLowerCase().startsWith(event.key.toLowerCase()))
+          || menuNames.map((name, i) => ({ name, i })).find((item) => !triggers[item.i].hidden && item.name.toLowerCase().startsWith(event.key.toLowerCase()));
         if (next) { event.preventDefault(); if (popup) openMenu(next.i, { focusItem:false }); else { rove(next.i); triggers[next.i].focus(); } }
       }
     });
@@ -392,7 +403,7 @@ export function mountWorkbenchMenu({ host, container, before = null, id = host?.
     listeners.forEach((remove) => remove()); observer.disconnect(); resizeObserver.disconnect(); unregisterSurface();
     bar.remove(); mounts.delete(instance); mountedHosts.delete(host);
   }
-  const api = Object.freeze({ element:bar, close, openPalette, dispose });
+  const api = Object.freeze({ element:bar, close, openPalette, setContextualMenus, dispose });
   const instance = { host, element:bar, api, close, openPalette, focusMenu };
   mounts.add(instance); mountedHosts.set(host, instance);
   return api;

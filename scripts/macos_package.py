@@ -24,8 +24,9 @@ PYTHON_URL = "https://github.com/astral-sh/python-build-standalone/releases/down
 PYTHON_SHA256 = "d8975d7df4f08f7b1c7aafcdfacbddcec3d366415f2c1a72b2466b6850815933"
 PYTHON_FULL_URL = "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.13.16%2B20261003-aarch64-apple-darwin-pgo%2Blto-full.tar.zst"
 PYTHON_FULL_SHA256 = "ca3eb5bf8110eaed1c3e516be4bd4d52bcf636f8e888359353f274288406bae7"
-HELPERS = ("odysseus-files-service", "odysseus-quicklook-helper", "openclank-history-service", "fm-mcp",
-           "desktop-metadata", "desktop-ocr", "openclank-macos-host-apps")
+HISTORY_HELPERS = ("openclank-history-service", "openclank-history-prepare-copy", "openclank-history-index-copy")
+HELPERS = ("odysseus-files-service", "odysseus-quicklook-helper", "openclank-history-service", "memery-worker", "memery-migrate",
+           *HISTORY_HELPERS[1:], "desktop-metadata", "desktop-ocr", "openclank-macos-host-apps")
 MACHO = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"}
 SPDX_COMMIT = "31ba1a50e5397e00a304dbadc76531740e89ee48"
 
@@ -338,8 +339,8 @@ def build(output: Path, use_existing_engine: bool):
     bindir = internal / "bin"
     bindir.mkdir(exist_ok=True)
     crates = [("packages/odysseus-files/Cargo.toml", HELPERS[:2]),
-              ("packages/openclank-history/Cargo.toml", (HELPERS[2],)),
-              ("mcp_servers/frankenmemory/Cargo.toml", (HELPERS[3],))]
+              ("packages/openclank-history/Cargo.toml", HISTORY_HELPERS),
+              ("native/memery/Cargo.toml", (HELPERS[3], HELPERS[4]))]
     cargo_output = work / "cargo"
     for manifest, names in crates:
         command = ["cargo", "+1.99.0", "build", "--locked", "--release", "--jobs", "2", "--target", "aarch64-apple-darwin",

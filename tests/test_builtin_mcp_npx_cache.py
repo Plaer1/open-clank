@@ -5,6 +5,8 @@ import subprocess
 import sys
 import types
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -37,21 +39,21 @@ def test_npx_package_from_args_prefers_package_after_y_flag(monkeypatch):
 
 
 def test_browser_mcp_cache_requirement_is_opt_in(monkeypatch):
-    monkeypatch.delenv("ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE", raising=False)
+    monkeypatch.delenv("OPEN_CLANK_BROWSER_MCP_REQUIRE_CACHE", raising=False)
     builtin_mcp = _load_builtin_mcp(monkeypatch)
 
     assert builtin_mcp.BROWSER_MCP_REQUIRE_CACHE is False
 
 
 def test_browser_mcp_cache_requirement_can_be_enabled(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE", "1")
+    monkeypatch.setenv("OPEN_CLANK_BROWSER_MCP_REQUIRE_CACHE", "1")
     builtin_mcp = _load_builtin_mcp(monkeypatch)
 
     assert builtin_mcp.BROWSER_MCP_REQUIRE_CACHE is True
 
 
 def test_browser_mcp_args_use_configured_browser_executable(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+    monkeypatch.setenv("OPEN_CLANK_BROWSER_EXECUTABLE", "/usr/bin/chromium")
     builtin_mcp = _load_builtin_mcp(monkeypatch)
 
     args = builtin_mcp._browser_mcp_args(["-y", "@playwright/mcp@latest", "--headless"])
@@ -63,8 +65,8 @@ def test_browser_mcp_args_use_configured_browser_executable(monkeypatch):
 
 
 def test_browser_mcp_args_can_use_persistent_profile_when_requested(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_BROWSER_EXECUTABLE", "/usr/bin/chromium")
-    monkeypatch.setenv("ODYSSEUS_BROWSER_ISOLATED", "0")
+    monkeypatch.setenv("OPEN_CLANK_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+    monkeypatch.setenv("OPEN_CLANK_BROWSER_ISOLATED", "0")
     builtin_mcp = _load_builtin_mcp(monkeypatch)
 
     args = builtin_mcp._browser_mcp_args(["-y", "@playwright/mcp@latest", "--headless"])
@@ -74,7 +76,7 @@ def test_browser_mcp_args_can_use_persistent_profile_when_requested(monkeypatch)
 
 
 def test_browser_mcp_args_respect_explicit_user_data_dir(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+    monkeypatch.setenv("OPEN_CLANK_BROWSER_EXECUTABLE", "/usr/bin/chromium")
     builtin_mcp = _load_builtin_mcp(monkeypatch)
 
     args = builtin_mcp._browser_mcp_args([
@@ -86,8 +88,8 @@ def test_browser_mcp_args_respect_explicit_user_data_dir(monkeypatch):
 
 
 def test_browser_mcp_args_can_keep_sandbox(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_BROWSER_EXECUTABLE", "/usr/bin/chromium")
-    monkeypatch.setenv("ODYSSEUS_BROWSER_NO_SANDBOX", "0")
+    monkeypatch.setenv("OPEN_CLANK_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+    monkeypatch.setenv("OPEN_CLANK_BROWSER_NO_SANDBOX", "0")
     builtin_mcp = _load_builtin_mcp(monkeypatch)
 
     args = builtin_mcp._browser_mcp_args(["-y", "@playwright/mcp@latest", "--headless"])
@@ -183,3 +185,25 @@ def test_npx_cache_check_fallback_treats_timeout_as_cache_miss(monkeypatch, tmp_
             timeout_s=2,
         )
     ) is False
+
+
+def test_browser_startup_builder_pins_version_and_requires_explicit_profile(monkeypatch):
+    builtin_mcp = _load_builtin_mcp(monkeypatch)
+    monkeypatch.setenv("OPEN_CLANK_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+
+    isolated = builtin_mcp.build_browser_mcp_startup("isolated")
+    assert "@playwright/mcp@0.0.83" in isolated["args"]
+    assert "--isolated" in isolated["args"]
+    assert "--headless" in isolated["args"]
+    assert "--extension" not in isolated["args"]
+    assert "/usr/bin/chromium" in isolated["args"]
+
+    with pytest.raises(ValueError, match="selected Chrome profile"):
+        builtin_mcp.build_browser_mcp_startup("extension")
+    extension = builtin_mcp.build_browser_mcp_startup(
+        "extension", profile_dir_name="Profile 2",
+    )
+    assert extension["args"][-3:] == ["--extension", "--profile-dir-name", "Profile 2"]
+    assert "--isolated" not in extension["args"]
+    assert "--headless" not in extension["args"]
+    assert "/usr/bin/chromium" not in extension["args"]

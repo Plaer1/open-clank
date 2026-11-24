@@ -14,6 +14,7 @@ Mechanical inventory only. This tool never authors translations. It:
 
 Usage:
   python3 scripts/i18n_freeze.py            # apply + write freeze artifacts
+  python3 scripts/i18n_freeze.py --manual   # refresh only installed manual copy and its inventory
   python3 scripts/i18n_freeze.py --check    # verify freeze matches catalogs
 """
 
@@ -33,6 +34,10 @@ ROOT = Path(__file__).resolve().parents[1]
 I18N = ROOT / "static" / "i18n"
 FREEZE = I18N / "freeze"
 STRUCTURED_EXTRACT = ROOT / "scripts" / "i18n_structured_extract.py"
+MANUAL_TRANSLATION_INSTRUCTION = (
+    "-quiet, but with all required info. Preserve section order and levels, "
+    "code examples, link and embed targets, and locked product names. Translate visible labels when supported."
+)
 
 PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*|\d+)\}")
 
@@ -49,6 +54,8 @@ PRODUCT_NAMES = (
     "MiMo",
     "Field Guide",
     "Meatbag Tasks",
+    "Buddy",
+    "Clankshop",
 )
 
 # Semantic batch targets from the original S27 slice.
@@ -65,8 +72,11 @@ def read_json(path: Path, fallback: Any = None) -> Any:
 
 
 def write_json(path: Path, value: Any) -> None:
+    content = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+    if path.is_file() and path.read_text(encoding="utf-8") == content:
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
 
 
 def sha256_text(value: str) -> str:
@@ -93,15 +103,32 @@ def normalize_ws(value: str) -> str:
     return " ".join(value.split())
 
 
-def merge_structured(en: dict[str, str]) -> dict[str, Any]:
+def merge_structured(
+    en: dict[str, str], records: list[dict[str, Any]], translated_manual: set[str],
+) -> dict[str, Any]:
     """Merge structured copy into English. Returns change report."""
-    records = load_structured()
     by_source = {v: k for k, v in en.items()}
     by_norm = {normalize_ws(v): k for k, v in en.items()}
     added: list[dict[str, Any]] = []
     reused: list[dict[str, Any]] = []
+    manual: dict[str, dict[str, Any]] = {}
+    archived: dict[str, str] = {}
+    updated: set[str] = set()
     for record in records:
         source = record["source"]
+        key = record["key"]
+        if record["module"] == "docs":
+            manual[key] = record
+            if key in translated_manual and en[key] != source:
+                old = en[key]
+                compatibility = f"{key}.compat-{sha256_text(old)[:12]}"
+                en.setdefault(compatibility, old)
+                archived[compatibility] = key
+            if en.get(key) != source:
+                en[key] = source
+                added.append(record)
+                updated.add(key)
+            continue
         if source in en and record["key"] in en and en[record["key"]] == source:
             reused.append({"key": record["key"], "via": "same-key"})
             continue
@@ -111,37 +138,74 @@ def merge_structured(en: dict[str, str]) -> dict[str, Any]:
         if normalize_ws(source) in by_norm:
             reused.append({"key": record["key"], "via": by_norm[normalize_ws(source)]})
             continue
-        key = record["key"]
         if key in en and en[key] != source:
             digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:8]
             key = f"{key}.{digest}"
         en[key] = source
         added.append({**record, "key": key})
-    return {"added": added, "reused": reused, "records": records}
+    return {"added": added, "reused": reused, "records": records, "manual": manual, "archived": archived, "updated": updated}
 
 
-def pad_catalogs(en: dict[str, str], locales: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def translated_manual_keys(
+    en: dict[str, str], records: list[dict[str, Any]], locales: dict[str, Any],
+) -> set[str]:
+    changed = {
+        item["key"] for item in records
+        if item["module"] == "docs" and item["key"] in en and en[item["key"]] != item["source"]
+    }
+    translated = set()
+    for catalog_id in {meta.get("catalog", locale) for locale, meta in locales.items()} - {"en"}:
+        if not changed:
+            break
+        catalog = read_json(I18N / f"{catalog_id}.json", {})
+        found = {
+            key for key in changed
+            if isinstance(catalog.get(key), str) and catalog[key].strip() and catalog[key] != en[key]
+        }
+        translated.update(found)
+        changed.difference_update(found)
+    return translated
+
+
+def pad_catalogs(
+    en: dict[str, str], locales: dict[str, Any], *,
+    manual: dict[str, Any], archived: dict[str, str], updated: set[str],
+    titles: dict[str, dict[str, str]], manual_only: bool,
+) -> dict[str, dict[str, Any]]:
     """Ensure every dedicated catalog has full key parity via English fallback."""
     stats: dict[str, dict[str, Any]] = {}
+    processed: dict[str, dict[str, Any]] = {}
     for locale, meta in locales.items():
         catalog_name = meta.get("catalog", locale)
         if catalog_name == "en":
             stats[locale] = {"catalog": catalog_name, "padded": 0, "keys": len(en)}
             continue
+        if catalog_name in processed:
+            stats[locale] = processed[catalog_name]
+            continue
         path = I18N / f"{catalog_name}.json"
         catalog = read_json(path, {})
+        for archive_key, current_key in archived.items():
+            catalog.setdefault(archive_key, catalog.get(current_key) or en[archive_key])
+        for current_key in updated:
+            catalog[current_key] = en[current_key]
+        for key, translations in titles.items():
+            if catalog_name in translations:
+                catalog[key] = translations[catalog_name]
         padded = 0
-        for key, source in en.items():
+        selected = {**manual, **archived} if manual_only else en
+        for key in selected:
+            source = en[key]
             if not isinstance(catalog.get(key), str) or not catalog[key].strip():
                 catalog[key] = source
                 padded += 1
         # Drop extra keys that are not in English (honest parity).
-        extras = [key for key in list(catalog) if key not in en]
+        extras = [] if manual_only else [key for key in list(catalog) if key not in en]
         for key in extras:
             del catalog[key]
-        ordered = {key: catalog[key] for key in en}
+        ordered = catalog if manual_only else {key: catalog[key] for key in en}
         write_json(path, ordered)
-        stats[locale] = {
+        stats[locale] = processed[catalog_name] = {
             "catalog": catalog_name,
             "padded": padded,
             "dropped_extra": len(extras),
@@ -150,13 +214,15 @@ def pad_catalogs(en: dict[str, str], locales: dict[str, Any]) -> dict[str, dict[
     return stats
 
 
-def rebuild_ledger(en: dict[str, str], structured_added: list[dict[str, Any]]) -> dict[str, Any]:
+def rebuild_ledger(en: dict[str, str], merge: dict[str, Any]) -> dict[str, Any]:
     ledger = read_json(I18N / "ledger.json", {}) or {}
     entries_by_key = {entry["key"]: entry for entry in ledger.get("entries", [])}
+    structured = {item["key"]: item for item in merge["added"]}
+    structured.update(merge["manual"])
     records = []
     for key, source in en.items():
         prior = entries_by_key.get(key)
-        if prior:
+        if prior and key not in merge["manual"]:
             records.append(
                 {
                     "key": key,
@@ -168,7 +234,7 @@ def rebuild_ledger(en: dict[str, str], structured_added: list[dict[str, Any]]) -
                 }
             )
             continue
-        match = next((item for item in structured_added if item["key"] == key), None)
+        match = structured.get(key)
         if match:
             records.append(
                 {
@@ -188,7 +254,11 @@ def rebuild_ledger(en: dict[str, str], structured_added: list[dict[str, Any]]) -
                     "kind": "compatibility",
                     "status": "compatibility",
                     "locations": [],
-                    "reason": "retained catalog key absent from current first-party census",
+                    "reason": (
+                        "previous manual wording and translations retained outside the live guide"
+                        if key in merge["archived"]
+                        else "retained catalog key absent from current first-party census"
+                    ),
                 }
             )
     records.sort(key=lambda item: item["key"])
@@ -303,8 +373,8 @@ def build_batches(en: dict[str, str], ledger: dict[str, Any], structured: list[d
             group = module
         elif module.startswith("award"):
             group = "award"
-        elif module.startswith("docs"):
-            group = f"docs.{owner}"
+        elif key.startswith("docs.openclank-docs-"):
+            group = ".".join(key.split(".")[:2])
         else:
             group = surface_for(locations, module, key)
         item = {
@@ -343,7 +413,9 @@ def build_batches(en: dict[str, str], ledger: dict[str, Any], structured: list[d
                     "character_count": chars,
                     "complexity": "prose" if prose_share > 0.35 else "mixed",
                     "instruction": (
-                        "Complex prose batch: keep meaning, tone and product voice; "
+                        MANUAL_TRANSLATION_INSTRUCTION
+                        if group.startswith("docs.openclank-docs-")
+                        else "Complex prose batch: keep meaning, tone and product voice; "
                         "prefer natural software language over literal wording."
                         if prose_share > 0.35
                         else "UI label/message batch: concise, consistent terminology; "
@@ -368,6 +440,29 @@ def build_batches(en: dict[str, str], ledger: dict[str, Any], structured: list[d
     return batches
 
 
+def build_manual_batches(
+    en: dict[str, str], ledger: dict[str, Any], structured: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    index = read_json(FREEZE / "batches.json", {})["batches"]
+    existing = {item["group"]: item["id"] for item in index if item["group"].startswith("docs.openclank-docs-")}
+    batches = [
+        read_json(FREEZE / "batches" / f"{item['id']}.json")
+        for item in index
+        if not item["group"].startswith("docs.openclank-docs-")
+    ]
+    next_id = max(int(item["id"].split("-")[-1]) for item in index) + 1
+    manual = {key: source for key, source in en.items() if key.startswith("docs.openclank-docs-")}
+    for batch in build_batches(manual, ledger, structured):
+        old_id = existing.pop(batch["group"], None)
+        if old_id:
+            batch["id"] = old_id
+        else:
+            batch["id"] = f"batch-{next_id:03d}"
+            next_id += 1
+        batches.append(batch)
+    return sorted(batches, key=lambda batch: int(batch["id"].split("-")[-1]))
+
+
 def coverage(en: dict[str, str], catalog: dict[str, str]) -> dict[str, int]:
     translated = 0
     english_fallback = 0
@@ -384,8 +479,11 @@ def coverage(en: dict[str, str], catalog: dict[str, str]) -> dict[str, int]:
     }
 
 
-def write_freeze(registry: dict[str, Any], en: dict[str, str], ledger: dict[str, Any], batches: list[dict[str, Any]]) -> dict[str, Any]:
-    if FREEZE.exists():
+def write_freeze(
+    registry: dict[str, Any], en: dict[str, str], ledger: dict[str, Any],
+    batches: list[dict[str, Any]], *, manual_only: bool = False,
+) -> dict[str, Any]:
+    if not manual_only and FREEZE.exists():
         for path in sorted(FREEZE.rglob("*"), reverse=True):
             if path.is_file():
                 path.unlink()
@@ -439,7 +537,7 @@ def write_freeze(registry: dict[str, Any], en: dict[str, str], ledger: dict[str,
         "brands": read_json(I18N / "brands.json", {}).get("brands", []),
         "stable_tokens": read_json(I18N / "brands.json", {}).get("stable_tokens", []),
         "rules": [
-            "Never translate product names (Open Clank, Copal, Clanker, Imps, Menmery, Lore, TreeHouse, MiMo, Field Guide).",
+            "Never translate the product names listed in this glossary.",
             "Keep locked brand and protocol tokens exactly as in the English source.",
             "Prefer real software terminology people meet in localized interfaces over textbook literalism.",
             "One voice: concise UI labels; complete sentences for errors and help.",
@@ -474,6 +572,7 @@ def write_freeze(registry: dict[str, Any], en: dict[str, str], ledger: dict[str,
             "english_fallback_is_explicit": True,
             "brands_locked": True,
         },
+        "manual": MANUAL_TRANSLATION_INSTRUCTION,
     }
 
     string_manifest = {
@@ -580,7 +679,7 @@ def write_freeze(registry: dict[str, Any], en: dict[str, str], ledger: dict[str,
         "ledger_current_source_count": ledger["current_source_count"],
         "ledger_compatibility_count": ledger["compatibility_count"],
         "advertised_locales": len(locale_manifests),
-        "dedicated_catalogs_including_english": 37,
+        "dedicated_catalogs_including_english": len(dedicated) + 1,
         "english_fallback_locales": len(fallbacks),
         "display_alias_locales": len(aliases),
         "malay": {
@@ -613,6 +712,8 @@ def write_freeze(registry: dict[str, Any], en: dict[str, str], ledger: dict[str,
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="verify freeze matches catalogs without writing")
+    parser.add_argument("--manual", action="store_true", help="refresh only maintained Instruction Manual entries and metadata")
+    parser.add_argument("--manual-titles", type=Path, help="JSON mapping from current manual title keys to translations by catalog ID")
     args = parser.parse_args()
 
     en = read_json(I18N / "en.json", {})
@@ -621,12 +722,12 @@ def main() -> int:
     registry = read_json(I18N / "registry.json", {})
     locales = dict(registry.get("locales") or {})
 
-    merge = merge_structured(dict(en))
-    en = {key: en[key] for key in en}
-    for item in merge["added"]:
-        en[item["key"]] = item["source"]
-    # Keep English catalog in a stable order: existing keys first, then new.
-    # (JSON object order is preserved by our writer.)
+    if args.manual:
+        from i18n_structured_extract import extract_official_docs
+        records = extract_official_docs(ROOT / "src" / "openclank" / "official_docs_content.py")
+    else:
+        records = load_structured()
+    merge = merge_structured(en, records, translated_manual_keys(en, records, locales))
 
     if args.check:
         freeze_manifest = read_json(FREEZE / "manifest.json", {})
@@ -634,8 +735,19 @@ def main() -> int:
         print(json.dumps({"check": "ok" if ok else "drift", "english_keys": len(en), "freeze_keys": freeze_manifest.get("english_keys")}, indent=2))
         return 0 if ok else 1
 
-    pad_stats = pad_catalogs(en, locales)
-    ledger = rebuild_ledger(en, merge["added"])
+    titles = read_json(args.manual_titles) if args.manual_titles else {}
+    if not isinstance(titles, dict) or any(
+        key not in merge["manual"] or merge["manual"][key]["field"] != "title"
+        or not isinstance(translations, dict)
+        or any(not isinstance(value, str) or not value.strip() for value in translations.values())
+        for key, translations in titles.items()
+    ):
+        raise SystemExit("Manual title translations must map current title keys to nonempty catalog strings")
+    pad_stats = pad_catalogs(
+        en, locales, manual=merge["manual"], archived=merge["archived"], updated=merge["updated"],
+        titles=titles, manual_only=args.manual,
+    )
+    ledger = rebuild_ledger(en, merge)
     write_json(I18N / "en.json", en)
     write_json(I18N / "ledger.json", ledger)
 
@@ -644,9 +756,12 @@ def main() -> int:
         "ms-BN": "ms",
         "fr-CA": "fr",
     }
-    registry = update_registry(locales, aliases)
-    batches = build_batches(en, ledger, merge["records"])
-    manifest = write_freeze(registry, en, ledger, batches)
+    if args.manual:
+        batches = build_manual_batches(en, ledger, merge["records"])
+    else:
+        registry = update_registry(locales, aliases)
+        batches = build_batches(en, ledger, merge["records"])
+    manifest = write_freeze(registry, en, ledger, batches, manual_only=args.manual)
 
     report = {
         "structured_added": len(merge["added"]),

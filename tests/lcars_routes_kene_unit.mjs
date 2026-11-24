@@ -227,11 +227,11 @@ test('Kene: topology reset clears paint; style/toggle updates do not restart tra
 test('S11–S24 preserved: rain, rare inversion, graphics substrate, gold accents intact', () => {
   // S24 rare inversion still present and default-on in the theme controls.
   assert.match(themeSource, /key: 'splashRareUpward'.*default: true/);
-  const rainPhysics = readFileSync(join(ROOT, 'static/js/graphics/rain-physics.js'), 'utf8');
-  assert.match(rainPhysics, /RARE_UPWARD_PROBABILITY = 1 \/ 10000/);
+  const rain = readFileSync(join(ROOT, 'static/js/graphics/junction-rain.js'), 'utf8');
+  assert.match(rain, /RARE_UPWARD_PROBABILITY = 1 \/ 10000/);
   // S23 graphics substrate still wired for the rain consumer.
   assert.match(themeSource, /createGraphicsConsumer/);
-  assert.match(themeSource, /createObstacleField/);
+  assert.doesNotMatch(themeSource, /_clankerCodeRainCollision/);
   // S22 gold accents.
   assert.match(themeSource, /THEME_ACCENT_DEFAULT = '#F6BE48'/);
   assert.match(themeSource, /'#B83B78'/); // kept in LEGACY_CLANKER_ACCENTS

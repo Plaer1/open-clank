@@ -26,7 +26,7 @@ from core.operation_models import OperationBase
 from core.provider_models import ProviderBase
 from routes.memory.memory_routes import setup_memory_routes
 from services.memory import MemoryManager
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_scope import CHAT_WORKSPACE
 from src.openclank import operation_router
 from src.openclank.artifacts import ArtifactStore
@@ -209,7 +209,7 @@ def _build_app(data_dir: Path, fm_binary: Path):
         ),
         executor=execute,
     )
-    provider = FrankenmemoryProvider(
+    provider = MemeryProvider(
         command=str(fm_binary),
         env={"FM_DB_PATH": str(data_dir / "frankenmemory.db")},
     )

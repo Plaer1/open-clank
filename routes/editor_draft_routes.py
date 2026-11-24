@@ -23,14 +23,16 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 
 from core.database import EditorDraft, SessionLocal
-from src.auth_helpers import get_current_user
+from src.auth_helpers import is_internal_tool_identity, require_user
 
 logger = logging.getLogger(__name__)
 
 
 class DraftCreate(BaseModel):
+    request_id: Optional[uuid.UUID] = None
     name: Optional[str] = None
     source_image_id: Optional[str] = None
     width: Optional[int] = None
@@ -47,10 +49,15 @@ class DraftUpdate(BaseModel):
     thumbnail: Optional[str] = None
 
 
-def _owns(d: EditorDraft, user: Optional[str]) -> bool:
-    if user is None:
-        return True
-    return (d.owner or None) == user
+def _owner(request: Request) -> str:
+    user = require_user(request)
+    if is_internal_tool_identity(user):
+        raise HTTPException(403, "Editor drafts require a user session")
+    return user
+
+
+def _owns(d: EditorDraft, user: str) -> bool:
+    return bool(user) and d.owner == user
 
 
 def _summary(d: EditorDraft) -> Dict[str, Any]:
@@ -80,12 +87,11 @@ def setup_editor_draft_routes() -> APIRouter:
 
     @router.get("/api/editor-drafts")
     async def list_drafts(request: Request) -> Dict[str, List[Dict[str, Any]]]:
-        user = get_current_user(request)
+        user = _owner(request)
         db = SessionLocal()
         try:
             q = db.query(EditorDraft).filter(EditorDraft.is_active == True)
-            if user is not None:
-                q = q.filter(EditorDraft.owner == user)
+            q = q.filter(EditorDraft.owner == user)
             rows = q.order_by(EditorDraft.updated_at.desc()).limit(200).all()
             return {"drafts": [_summary(d) for d in rows]}
         finally:
@@ -93,7 +99,7 @@ def setup_editor_draft_routes() -> APIRouter:
 
     @router.get("/api/editor-drafts/{draft_id}")
     async def get_draft(request: Request, draft_id: str) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _owner(request)
         db = SessionLocal()
         try:
             d = db.query(EditorDraft).filter(
@@ -110,11 +116,12 @@ def setup_editor_draft_routes() -> APIRouter:
 
     @router.post("/api/editor-drafts")
     async def create_draft(request: Request, body: DraftCreate) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _owner(request)
+        draft_id = str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(["openclank:image-draft", user, str(body.request_id)]))) if body.request_id else str(uuid.uuid4())
         db = SessionLocal()
         try:
             d = EditorDraft(
-                id=str(uuid.uuid4()),
+                id=draft_id,
                 owner=user,
                 name=(body.name or "Untitled")[:200],
                 source_image_id=body.source_image_id,
@@ -127,6 +134,17 @@ def setup_editor_draft_routes() -> APIRouter:
             db.commit()
             db.refresh(d)
             return _summary(d)
+        except IntegrityError:
+            db.rollback()
+            existing = db.get(EditorDraft, draft_id) if body.request_id else None
+            if existing and existing.is_active and _owns(existing, user) and (
+                existing.name == (body.name or "Untitled")[:200]
+                and existing.width == body.width and existing.height == body.height
+                and existing.source_image_id == body.source_image_id and existing.thumbnail == body.thumbnail
+                and _load_payload(existing.payload) == body.payload
+            ):
+                return _summary(existing)
+            raise HTTPException(409, "Draft recovery no longer matches the original request")
         except Exception as e:
             db.rollback()
             logger.warning(f"editor-draft create failed: {e}")
@@ -136,7 +154,7 @@ def setup_editor_draft_routes() -> APIRouter:
 
     @router.put("/api/editor-drafts/{draft_id}")
     async def update_draft(request: Request, draft_id: str, body: DraftUpdate) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _owner(request)
         db = SessionLocal()
         try:
             d = db.query(EditorDraft).filter(
@@ -168,7 +186,7 @@ def setup_editor_draft_routes() -> APIRouter:
 
     @router.delete("/api/editor-drafts/{draft_id}")
     async def delete_draft(request: Request, draft_id: str) -> Dict[str, str]:
-        user = get_current_user(request)
+        user = _owner(request)
         db = SessionLocal()
         try:
             d = db.query(EditorDraft).filter(EditorDraft.id == draft_id).first()

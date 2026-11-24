@@ -1,6 +1,6 @@
 import asyncio
 
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_maintenance import (
     GROOM_OPS,
     groom_all_owners,
@@ -113,7 +113,7 @@ def test_groom_loop_refreshes_owners_and_keeps_workspace_scope(monkeypatch):
 
 
 def test_frankenmemory_groom_uses_mcp_tool():
-    provider = FrankenmemoryProvider(command="fm-mcp")
+    provider = MemeryProvider(command="memery-worker")
     calls = []
 
     async def fake_call(name, args):

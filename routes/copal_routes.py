@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from src.openclank.achievement_producers import record_activity
-from src.openclank.copal_history_wire import capture_metadata, mutation_failure_status
+from src.openclank.copal_history_wire import capture_metadata, finish_capture, mutation_failure_status, settle_terminal_recovery
 import difflib
 import hashlib
 import json
@@ -28,7 +28,7 @@ from urllib.parse import quote
 import yaml
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.middleware import require_admin
@@ -85,7 +85,7 @@ logger = logging.getLogger(__name__)
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _WORKSPACE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-_SESSION_COOKIE = "odysseus_session"
+_SESSION_COOKIE = "open_clank_session"
 _KIND = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _NOTE_PROPERTY = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _NOTE_LINK = re.compile(r"(!?)\[\[([^\]\n]+)\]\]")
@@ -1031,7 +1031,7 @@ def _note_view(document: dict[str, Any]) -> dict[str, Any]:
     try:
         record = json.loads(raw)
         if not isinstance(record, dict) or record.get("schemaVersion") != _NOTE_SCHEMA_VERSION:
-            raise ValueError("unsupported Copal note schema")
+            raise ValueError("unsupported journal page schema")
         body = _note_body_text(record.get("body"))
         properties = _property_values(record.get("properties"))
         relations = record.get("relations")
@@ -1126,7 +1126,7 @@ def _note_result(result: dict[str, Any]) -> dict[str, Any]:
 
 def _require_mutable_note(document: dict[str, Any]) -> None:
     if document.get("kind") in _NOTE_KINDS and (document.get("rawPreserved") or document.get("note_error")):
-        raise HTTPException(409, "Copal note is preserved read-only until its stored schema can be decoded")
+        raise HTTPException(409, "journal page is preserved read-only until its stored schema can be decoded")
 
 
 def _require_nonplanning_document_mutation(document: dict[str, Any]) -> None:
@@ -1387,7 +1387,36 @@ async def _call(request: Request, operation: str, args: dict[str, Any], *, timeo
                 # from arguments: a legitimate repeated write would otherwise
                 # look like an idempotent retry and collide with its history.
                 history_action_id = "route-" + uuid.uuid4().hex
-            history_client = HistoryClient(socket_path, actor_id=scope_owner, account_id=str(account_id))
+            supervisor = getattr(request.app.state, "history_supervisor", None)
+            original_credential = None
+            def assert_copal_writer():
+                from src.auth_helpers import effective_user, is_internal_tool_identity
+                username = require_user(request)
+                manager = request.app.state.auth_manager
+                if (is_internal_tool_identity(username) or getattr(request.state, "api_token", False)
+                        or getattr(request.state, "internal_tool_authenticated", False) or effective_user(request) != username
+                        or manager.account_id(username) != account_id or manager.username_for_account_id(account_id) != username
+                        or _scope(request, args.get("workspace_id")) != journey_scope
+                        or copal_owner_for_user(username) != scope_owner
+                        or request.app.state.history_supervisor is not supervisor or not callable(original_credential)
+                        or original_credential() is not True):
+                    raise HTTPException(403, "Copal write authority changed")
+            if supervisor is None or getattr(request.state, "internal_tool_authenticated", False):
+                history_client = HistoryClient(socket_path, actor_id=scope_owner, account_id=str(account_id))
+            else:
+                try:
+                    original_credential = request.app.state.capture_original_credential(request, require_user(request), account_id)
+                except (ValueError, AttributeError) as exc:
+                    raise HTTPException(403, "Copal write authority unavailable") from exc
+                assert_copal_writer()
+                # Copal authorizes its own managed documents. A Files root is not
+                # required to journal a scoped server mutation. Keep the named
+                # actor on the receipt and the account writer inside this route.
+                try:
+                    token = supervisor.credential_token("*", str(account_id))
+                except HistoryClientError as exc:
+                    raise HTTPException(503, "Copal recovery writer unavailable") from exc
+                history_client = HistoryClient(str(supervisor.socket_path), actor_id=scope_owner, account_id=str(account_id), token=token)
             if committed_receipt is not None:
                 # A replay is already committed. Never prepare a later head
                 # as its original preimage; finish the existing capture only.
@@ -1428,12 +1457,14 @@ async def _call(request: Request, operation: str, args: dict[str, Any], *, timeo
                     "expected_revision": None, "actor_id": scope_owner, "actor_kind": "user", "session_id": None,
                     "run_id": None, "task_id": None, "tool_id": "copal-route", "before_revision": None,
                     "expected_after_revision": None, "original_locator": None, "destination_locator": None,
-                    "timestamp_millis": int(time.time() * 1000), "coverage": {"metadata": {"coverage_kind": "KnownMutationHooks", "roots": [str(args.get("workspace_id") or "")], "exclusions": []}}, "per_resource_outcomes": None,
+                    "timestamp_millis": int(time.time() * 1000), "coverage": {"metadata": {"coverage_kind": "KnownMutationHooks", **({"required_recovery": True} if operation != "checkpoint" else {}), "roots": [str(args.get("workspace_id") or "")], "exclusions": []}}, "per_resource_outcomes": None,
                 }
                 envelope.update(capture_metadata(history_before, workspace=str(args.get("workspace_id") or ""), resource_id=resource_id, destination_name=args.get("name")))
                 try:
-                    if args.get("id") and not isinstance(history_before, dict):
+                    if args.get("id") and (not isinstance(history_before, dict) or history_before.get("id") != args["id"]):
                         raise HistoryClientError("required Copal recovery preimage is unavailable")
+                    if supervisor is not None and not getattr(request.state, "internal_tool_authenticated", False):
+                        assert_copal_writer()
                     await asyncio.to_thread(history_client.prepare, envelope, content=before_bytes, fingerprint=history_fingerprint(before_bytes))
                     history_status.update(status="prepared", durable=False, action_id=history_action_id, phase="before")
                 except (HistoryClientError, OSError, asyncio.TimeoutError) as exc:
@@ -1445,6 +1476,19 @@ async def _call(request: Request, operation: str, args: dict[str, Any], *, timeo
     if history_action_id and operation in capture_operations:
         args = {**args, "action_id": history_action_id}
     try:
+        if history_client is not None and supervisor is not None and not getattr(request.state, "internal_tool_authenticated", False):
+            try:
+                assert_copal_writer()
+            except HTTPException:
+                if committed_receipt is None:
+                    try:
+                        terminal = await asyncio.to_thread(history_client.record_live, history_action_id, {
+                            "action_id": history_action_id, "status": "NotCommitted", "fingerprint": None,
+                            "after_unavailable": True})
+                        await asyncio.to_thread(settle_terminal_recovery, history_client, history_action_id, terminal)
+                    except HistoryClientError:
+                        pass
+                raise
         result = dict(committed_receipt) if committed_receipt is not None else await bridge.call(operation, args, timeout=timeout)
         if history_client is not None and committed_receipt is not None:
             after_bytes = managed_bytes(result.get("doc"))
@@ -1455,11 +1499,11 @@ async def _call(request: Request, operation: str, args: dict[str, Any], *, timeo
             if proven and state == "Complete":
                 # Complete captures have released their lease. Re-recording
                 # live state would falsely downgrade an already durable copy.
-                history_status.update(status="complete", durable=True, phase="complete")
+                history_status.update(await asyncio.to_thread(finish_capture, history_client, history_action_id, {"Action": history_replay_action}))
             elif proven and state in {"Applied", "AfterCaptureFailed"}:
                 try:
-                    await asyncio.to_thread(history_client.complete, history_action_id, content=after_bytes, fingerprint=expected)
-                    history_status.update(status="complete", durable=True, phase="complete")
+                    receipt = await asyncio.to_thread(history_client.complete, history_action_id, content=after_bytes, fingerprint=expected)
+                    history_status.update(await asyncio.to_thread(finish_capture, history_client, history_action_id, receipt))
                 except (HistoryClientError, OSError, asyncio.TimeoutError) as exc:
                     history_status.update(status="failed", durable=False, phase="replay_after", error=str(exc))
             else:
@@ -1504,11 +1548,12 @@ async def _call(request: Request, operation: str, args: dict[str, Any], *, timeo
                         error=str(exc),
                     )
             try:
-                await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": live_status, "fingerprint": history_fingerprint(after_bytes), "after_unavailable": False, "resource_id": after_doc.get("id") if isinstance(after_doc, dict) else None})
+                live_receipt = await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": live_status, "fingerprint": history_fingerprint(after_bytes), "after_unavailable": False, "resource_id": after_doc.get("id") if isinstance(after_doc, dict) else None})
                 if live_status == "Committed":
-                    await asyncio.to_thread(history_client.complete, history_action_id, content=after_bytes, fingerprint=history_fingerprint(after_bytes))
-                    history_status.update(status="complete", durable=True, phase="complete")
+                    receipt = await asyncio.to_thread(history_client.complete, history_action_id, content=after_bytes, fingerprint=history_fingerprint(after_bytes))
+                    history_status.update(await asyncio.to_thread(finish_capture, history_client, history_action_id, receipt))
                 else:
+                    await asyncio.to_thread(settle_terminal_recovery, history_client, history_action_id, live_receipt)
                     history_status.update(status="failed", phase="live_conflict")
             except (HistoryClientError, OSError, asyncio.TimeoutError) as exc:
                 if live_status == "Committed":
@@ -1542,14 +1587,16 @@ async def _call(request: Request, operation: str, args: dict[str, Any], *, timeo
     except asyncio.TimeoutError as exc:
         if history_client is not None:
             try:
-                await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": mutation_failure_status(exc), "fingerprint": None, "after_unavailable": True})
+                live_receipt = await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": mutation_failure_status(exc), "fingerprint": None, "after_unavailable": True})
+                await asyncio.to_thread(settle_terminal_recovery, history_client, history_action_id, live_receipt)
             except Exception:
                 pass
         raise HTTPException(504, {"message": "Mutation outcome Unknown; reconcile before retrying", "live_status": "Unknown", "action_id": history_action_id}) from exc
     except CopalBridgeError as exc:
         if history_client is not None:
             try:
-                await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": mutation_failure_status(exc), "fingerprint": None, "after_unavailable": True})
+                live_receipt = await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": mutation_failure_status(exc), "fingerprint": None, "after_unavailable": True})
+                await asyncio.to_thread(settle_terminal_recovery, history_client, history_action_id, live_receipt)
             except Exception:
                 pass
         message = str(exc)
@@ -1746,10 +1793,28 @@ async def _asset_file(request: Request, scope: dict[str, str], document_id: str,
                 raise
     if asset is None:
         raise HTTPException(404, "Asset not found")
-    path = Path(asset["path"]).resolve()
-    assets_root = (_bridge(request).data_dir / "assets").resolve()
-    if path.parent != assets_root or not path.is_file():
+    # The bridge owns authorization and canonical-root containment. Loose
+    # vault assets may live below nested directories, while legacy Wiki/redb
+    # adapters keep the historical flat asset-root contract.
+    try:
+        path = Path(asset["path"]).resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
         raise HTTPException(404, "Asset not found")
+    if not path.is_file():
+        raise HTTPException(404, "Asset not found")
+    storage_root = asset.get("root")
+    if storage_root:
+        try:
+            path.relative_to(Path(str(storage_root)).resolve(strict=True))
+        except (OSError, RuntimeError, ValueError):
+            raise HTTPException(404, "Asset not found")
+    else:
+        # Legacy Wiki/redb bridges return only path/name; preserve their
+        # existing flat-directory boundary until those adapters provide an
+        # equivalent storage-owned root.
+        assets_root = (_bridge(request).data_dir / "assets").resolve()
+        if path.parent != assets_root:
+            raise HTTPException(404, "Asset not found")
     return path, str(asset.get("name") or document_id)
 
 
@@ -2010,16 +2075,11 @@ async def _import_memes_payload(
 
 def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None) -> APIRouter:
     router = APIRouter(prefix="/api/copal", tags=["copal"])
-    subscribers: dict[tuple[str, str], set[asyncio.Queue]] = defaultdict(set)
+    from src.openclank.resource_event_stream import CopalQueues
+    subscribers = CopalQueues()
 
     def publish(scope: dict[str, str], event: str, data: dict[str, Any]) -> None:
-        for queue in tuple(subscribers[(scope["owner"], scope["workspace_id"])]):
-            if queue.full():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            queue.put_nowait({"event": event, "data": data})
+        subscribers.publish(scope["owner"], scope["workspace_id"], event, data)
 
     def lifecycle_repository(request: Request):
         return policy_repository or getattr(request.app.state, "files_policy_repository", None)
@@ -2949,6 +3009,58 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             raise
         return result
 
+    @router.get("/workload/tasks")
+    async def observe_workload_tasks(request: Request, workspace_id: str, limit: int = 50, cursor: str | None = None):
+        """Observe a current existing task index without reconciliation or recovery."""
+        import base64
+        from src.openclank.orchestration_projection import project_copal_observations
+        from src.openclank.workspace_policy_service import resolve_owned_workspace
+        headers = {"Cache-Control": "private, no-store"}
+        try:
+            if not 1 <= limit <= 100 or not workspace_id or len(workspace_id) > 256:
+                raise ValueError("scope unavailable")
+            owner = require_user(request)
+            auth = getattr(request.app.state, "auth_manager", None)
+            barrier = getattr(request.app.state, "account_request_barrier", None)
+            repository = getattr(request.app.state, "files_policy_repository", None)
+            bridge = _bridge(request)
+            account = auth.account_id(owner) if auth and owner else None
+            if (not getattr(request.state, "authenticated", False) or not account or not barrier or not repository
+                    or auth.username_for_account_id(account) != owner
+                    or not getattr(bridge, "supports_readonly_task_observation", False)):
+                raise ValueError("scope unavailable")
+            async with barrier.admitted(owner):
+                def current():
+                    if auth.account_id(owner) != account or auth.username_for_account_id(account) != owner:
+                        raise ValueError("account changed")
+                    return resolve_owned_workspace(repository, workspace_id=workspace_id, owner_username=owner,
+                                                   auth_manager=auth, purpose="app_folder", observation_only=True)
+                binding = current()
+                canonical_workspace = binding.workspace.id
+                scope = hashlib.sha256(json.dumps([account, owner, canonical_workspace, binding.path], separators=(",", ":")).encode()).hexdigest()
+                after, expected, expected_snapshot = "", None, None
+                if cursor:
+                    if len(cursor) > 8192:
+                        raise ValueError("cursor unavailable")
+                    value = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+                    if (not isinstance(value, dict) or set(value) != {"v", "scope", "revision", "snapshot", "after"}
+                            or value["v"] != 1 or value["scope"] != scope or not isinstance(value["revision"], str)
+                            or not isinstance(value["snapshot"], str) or not isinstance(value["after"], str)):
+                        raise ValueError("cursor unavailable")
+                    after, expected, expected_snapshot = value["after"], value["revision"], value["snapshot"]
+                page = await bridge.observe_task_index(copal_owner_for_user(owner), canonical_workspace, after=after, limit=limit)
+                if (current() != binding or (expected is not None and page["revision"] != expected)
+                        or (expected_snapshot is not None and page["snapshot"] != expected_snapshot)):
+                    raise ValueError("scope changed")
+                next_cursor = None
+                if page["after"]:
+                    raw = json.dumps({"v": 1, "scope": scope, "revision": page["revision"], "snapshot": page["snapshot"], "after": page["after"]}, separators=(",", ":")).encode()
+                    next_cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+                return JSONResponse(project_copal_observations(page["items"], revision=page["revision"],
+                                    observed_at=int(time.time() * 1000), next_cursor=next_cursor), headers=headers)
+        except Exception:
+            return JSONResponse({"error": "Copal task observation unavailable"}, status_code=503, headers=headers)
+
     @router.get("/tasks/query")
     @router.get("/tasks")
     async def query_tasks(
@@ -3719,6 +3831,35 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         # document or source content.
         return {key: value for key, value in marker.items() if key not in {"owner", "workspace_id"}}
 
+    async def submit_journal_structure(request, scope, document):
+        from src.openclank.document_ingestion import journal
+        async def current_document(ident):
+            return _note_view(await _call(request, "get", {**scope,"id":_doc_id(ident)}))
+        return await journal(request,scope,document,get_current=current_document)
+
+    async def submit_attachment_structure(request, scope, document, asset_id):
+        from src.openclank.document_ingestion import attachment
+        doc_id, revision = document.get("id"), document.get("head")
+        if not doc_id or not revision:
+            return {"state":"unavailable"}
+        async def current_asset(ident):
+            return await _asset_file(request,scope,ident)
+        async def is_linked(name):
+            current = _note_view(await _call(request,"get",{**scope,"id":_doc_id(doc_id)}))
+            return (current.get("head") == revision and re.search(
+                rf"!\[\[{re.escape(name)}(?:\|[^\]\n]*)?\]\]", str(current.get("text") or "")) is not None)
+        return await attachment(request,scope,asset_id,get_path=current_asset,is_linked=is_linked)
+
+    async def revoke_structure(request, scope, ident, kind):
+        from src.openclank.document_ingestion import revoke_copal
+        async def absent():
+            try:
+                result = await _call(request,"get",{**scope,"id":_doc_id(ident)})
+                return result.get("id") == ident and result.get("deleted") is True
+            except HTTPException as exc:
+                return exc.status_code == 404
+        return await revoke_copal(request,scope,ident,kind,absent=absent)
+
     @router.post("/attachments/commit")
     async def commit_attachment(payload: AttachmentCommit, request: Request, workspace: str | None = None):
         scope = _scope(request, workspace)
@@ -3749,7 +3890,8 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             committed_hash = str(marker.get("committed_content_hash") or "")
             if committed_hash and hashlib.sha256(str(current_view.get("text") or "").encode("utf-8")).hexdigest() != committed_hash:
                 raise HTTPException(409, detail={"outcome": "resource_changed", "message": "Attachment target changed after commit"})
-            return {"outcome": "unchanged", "actionId": payload.actionId, "assetId": marker.get("asset_id"), "doc": _resource_view(request, scope, current), "receipt": marker.get("receipt") or {"outcome": "unchanged", "actionId": payload.actionId}}
+            structure = await submit_attachment_structure(request,scope,_note_view(current),payload.assetId)
+            return {"outcome": "unchanged", "actionId": payload.actionId, "assetId": marker.get("asset_id"), "doc": _resource_view(request, scope, current), "receipt": marker.get("receipt") or {"outcome": "unchanged", "actionId": payload.actionId}, "documentStructure":structure}
         existing_raw = await _call(request, "get", {**scope, "id": _doc_id(payload.documentId)})
         existing = _note_view(existing_raw)
         current_text = str(existing.get("text") or "")
@@ -3762,7 +3904,8 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             receipt = marker.get("receipt") or {"outcome": "recovered", "actionId": payload.actionId, "assetId": payload.assetId, "documentId": payload.documentId}
             recovered_marker = {**marker, "asset_id": payload.assetId, "asset_name": payload.assetName, "phase": "consumed", "receipt": receipt, "committed_content_hash": committed_hash, "consumed_at": time.time()}
             lifecycle_save(request, scope, payload.actionId, recovered_marker)
-            return {"outcome": "unchanged", "actionId": payload.actionId, "assetId": payload.assetId, "doc": _resource_view(request, scope, existing_raw), "receipt": receipt}
+            structure = await submit_attachment_structure(request,scope,_note_view(existing_raw),payload.assetId)
+            return {"outcome": "unchanged", "actionId": payload.actionId, "assetId": payload.assetId, "doc": _resource_view(request, scope, existing_raw), "receipt": receipt, "documentStructure":structure}
         if existing.get("head") != payload.base or hashlib.sha256(str(existing.get("text") or "").encode("utf-8")).hexdigest() != marker.get("source_text_hash"):
             raise HTTPException(409, detail={"outcome": "stale", "message": "Attachment target changed", "asset": {"id": payload.assetId, "name": payload.assetName}})
         if not re.search(rf"!\[\[{re.escape(payload.assetName)}(?:\|[^\]\n]*)?\]\]", payload.content):
@@ -3790,7 +3933,21 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         receipt = {**guarded, "operationId": payload.actionId, "assetId": payload.assetId, "documentId": payload.documentId}
         lifecycle_save(request, scope, payload.actionId, {**marker, "asset_id": payload.assetId, "asset_name": payload.assetName, "phase": "consumed", "receipt": receipt, "committed_content_hash": hashlib.sha256(payload.content.encode("utf-8")).hexdigest(), "consumed_at": time.time()})
         publish(scope, "document", receipt)
-        return {"outcome": guarded.get("outcome"), "actionId": payload.actionId, "assetId": payload.assetId, "doc": fresh, "receipt": receipt}
+        structure = await submit_attachment_structure(request,scope,fresh,payload.assetId)
+        return {"outcome": guarded.get("outcome"), "actionId": payload.actionId, "assetId": payload.assetId, "doc": fresh, "receipt": receipt, "documentStructure":structure}
+
+    @router.post("/attachments/{action_id}/document-structure/resume")
+    async def resume_attachment_structure(action_id: str, request: Request, workspace: str | None = None):
+        scope = _scope(request,workspace)
+        marker = lifecycle_load(request,scope,action_id)
+        if not marker or marker.get("phase") != "consumed" or not marker.get("document_id"):
+            raise HTTPException(404,"Committed attachment is unavailable")
+        asset = await attachment_asset(request,scope,marker)
+        if asset is None or asset.get("id") != marker.get("asset_id"):
+            raise HTTPException(404,"Committed attachment is unavailable")
+        parent = await _call(request,"get",{**scope,"id":_doc_id(marker["document_id"])})
+        result = await submit_attachment_structure(request,scope,_note_view(parent),asset["id"])
+        return JSONResponse(result,headers={"Cache-Control":"private, no-store"})
 
     @router.delete("/attachments/{action_id}")
     async def abort_attachment(action_id: str, request: Request, workspace: str | None = None):
@@ -3820,8 +3977,7 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         lifecycle_save(request, scope, action_id, {**marker, "asset_id": asset_id or marker.get("asset_id"), "phase": "aborted", "aborted_at": time.time()})
         return {"outcome": "aborted", "phase": "aborted"}
 
-    @router.post("/documents")
-    async def create_document(payload: CreateDocument, request: Request, workspace: str | None = None):
+    async def _create_document(payload: CreateDocument, request: Request, workspace: str | None = None, *, allow_content_recovery: bool = True):
         if not _KIND.fullmatch(payload.kind):
             raise HTTPException(400, "Invalid document kind")
         kind = _WIKI_KIND if payload.corpus == "wiki" and payload.kind == _NOTE_KIND else payload.kind
@@ -3893,43 +4049,45 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             replay = await _find_document_action(request, scope, action_id, action_digest)
             if replay is not None:
                 return replay
-            # A response can be lost after the provider commits and before the
-            # route can persist its receipt. Recover only one exact, scoped
-            # document so a same-name or cross-workspace record is never an
-            # action-id oracle.
-            indexed = await _call(request, "index", {**scope, "kind": kind, "corpus": payload.corpus}, timeout=60)
-            requested_relation_keys = {
-                (str(relation.get("kind") or ""), str(relation.get("target") or ""), str(relation.get("fragment") or ""), str(relation.get("targetDocumentId") or ""), str(relation.get("targetBlockId") or ""))
-                for relation in payload.relations
-            }
-            candidates = []
-            for document in indexed.get("docs") or []:
-                if document.get("name") != _name(payload.name):
-                    continue
-                view = _note_view(document)
-                actual_relation_keys = {
+            if allow_content_recovery:
+                # A response can be lost after the provider commits and before the
+                # route can persist its receipt. Recover only one exact, scoped
+                # document so a same-name or cross-workspace record is never an
+                # action-id oracle.
+                indexed = await _call(request, "index", {**scope, "kind": kind, "corpus": payload.corpus}, timeout=60)
+                requested_relation_keys = {
                     (str(relation.get("kind") or ""), str(relation.get("target") or ""), str(relation.get("fragment") or ""), str(relation.get("targetDocumentId") or ""), str(relation.get("targetBlockId") or ""))
-                    for relation in (view.get("relations") or [])
+                    for relation in payload.relations
                 }
-                if (
-                    view.get("kind") == kind
-                    and view.get("corpus") == payload.corpus
-                    and view.get("text") == payload.content
-                    and (view.get("properties") or {}) == payload.properties
-                    and actual_relation_keys == requested_relation_keys
-                ):
-                    candidates.append(view)
-            if len(candidates) == 1 and not payload.copySourceId:
-                recovered = {"outcome": "created", "actionId": action_id, "doc": candidates[0], "replayed": True}
-                recovered = _note_result(recovered)
-                recovered = await _record_document_action(request, scope, action_id, action_digest, recovered)
-                publish(scope, "document", recovered)
-                return recovered
+                candidates = []
+                for document in indexed.get("docs") or []:
+                    if document.get("name") != _name(payload.name):
+                        continue
+                    view = _note_view(document)
+                    actual_relation_keys = {
+                        (str(relation.get("kind") or ""), str(relation.get("target") or ""), str(relation.get("fragment") or ""), str(relation.get("targetDocumentId") or ""), str(relation.get("targetBlockId") or ""))
+                        for relation in (view.get("relations") or [])
+                    }
+                    if (
+                        view.get("kind") == kind
+                        and view.get("corpus") == payload.corpus
+                        and view.get("text") == payload.content
+                        and (view.get("properties") or {}) == payload.properties
+                        and actual_relation_keys == requested_relation_keys
+                    ):
+                        candidates.append(view)
+                if len(candidates) == 1 and not payload.copySourceId:
+                    recovered = {"outcome": "created", "actionId": action_id, "doc": candidates[0], "replayed": True}
+                    recovered = _note_result(recovered)
+                    recovered = await _record_document_action(request, scope, action_id, action_digest, recovered)
+                    publish(scope, "document", recovered)
+                    return recovered
         result = await _call(
             request,
             "create",
             {**scope, "name": _name(payload.name), "kind": kind, "content": content, "corpus": payload.corpus, **({"action_id": payload.actionId} if payload.actionId else {})},
         )
+        indexed = None
         if result.get("doc", {}).get("id"):
             indexed = await _call(request, "get", {**scope, "id": result["doc"]["id"]})
             if kind == "planning":
@@ -3944,7 +4102,13 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             result = await _record_document_action(request, scope, action_id, action_digest, result)
         _with_task_projection(result, task_projection)
         publish(scope, "document", result)
+        if indexed and kind in _NOTE_KINDS:
+            result["documentStructure"] = await submit_journal_structure(request,scope,_note_view(indexed))
         return result
+
+    @router.post("/documents")
+    async def create_document(payload: CreateDocument, request: Request, workspace: str | None = None):
+        return await _create_document(payload, request, workspace)
 
     @router.put("/documents/{document_id}")
     async def write_document(
@@ -3966,6 +4130,7 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
                 result = await _call(request, "write", {**receipt_args, "content": replay["doc"]["text"]}, committed_receipt=replay)
                 result["doc"] = _resource_view(request, scope, result["doc"])
                 result["actionId"] = payload.actionId
+                result["documentStructure"] = await submit_journal_structure(request,scope,result["doc"])
                 return result
         stored = await _call(request, "get", {**scope, "id": _doc_id(document_id)})
         existing = _note_view(stored)
@@ -4037,6 +4202,8 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             result["actionId"] = payload.actionId
         _with_task_projection(result, task_projection)
         publish(scope, "document", result)
+        if indexed.get("kind") in _NOTE_KINDS:
+            result["documentStructure"] = await submit_journal_structure(request,scope,indexed)
         return result
 
 
@@ -4057,7 +4224,114 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             result["calendar_projection"] = projection
         _with_task_projection(result, await _task_projection_receipt(request, scope))
         publish(scope, "deleted", {"id": document_id})
+        kind = "attachment" if existing.get("kind") == "asset" else "journal"
+        await revoke_structure(request,scope,document_id,kind)
         return result
+
+    def _logical_set_identity(request: Request):
+        from src.auth_helpers import is_internal_tool_identity, effective_user
+        user = require_user(request); manager = getattr(request.app.state, 'auth_manager', None)
+        account = manager.account_id(user) if manager else None
+        if (not account or manager.username_for_account_id(account) != user or (effective_user(request) or user) != user
+                or is_internal_tool_identity(user) or getattr(request.state, 'api_token', False)
+                or getattr(request.state, 'internal_tool_authenticated', False)):
+            raise HTTPException(403, 'A named user session is required')
+        return user, account
+
+    async def _logical_set_body(request: Request):
+        from src.openclank.history_change_sets import strict_json, MAX_DOCUMENT
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > MAX_DOCUMENT + 16384: raise HTTPException(413, 'Change set is too large')
+        try:
+            return strict_json(raw.decode('utf-8', 'strict'))
+        except (ValueError, UnicodeError):
+            raise HTTPException(400, 'Invalid change set')
+
+    @router.post('/logical-change-sets')
+    async def create_logical_change_set(request: Request):
+        from src.openclank.history_change_sets import patch
+        original = _logical_set_identity(request); body = await _logical_set_body(request)
+        if type(body) is not dict or set(body) != {'version','workspace','name','action_id','title','description','members'} or type(body['version']) is not int or body['version'] != 1:
+            raise HTTPException(400, 'Invalid change set')
+        try:
+            if any(type(body[k]) is not str or not body[k] or len(body[k].encode('utf-8','strict')) > 160 for k in ('workspace','action_id')): raise ValueError()
+            name = _name(body['name'])
+            content = patch('', {'version':1,'title':body['title'],'description':body['description'],'members':body['members']}, create=True)
+        except (TypeError, ValueError, UnicodeError): raise HTTPException(400, 'Invalid change set')
+        if request.query_params.get('workspace') not in (None, body['workspace']): raise HTTPException(400, 'Workspace mismatch')
+        scope = _scope(request, body['workspace'])
+        repository = lifecycle_repository(request)
+        if repository is None or _logical_set_identity(request) != original: raise HTTPException(503, 'Change set unavailable')
+        digest = hashlib.sha256(json.dumps({'account':original[1],'scope':scope,'body':body},sort_keys=True,ensure_ascii=False,separators=(',',':')).encode('utf-8','strict')).hexdigest()
+        operation_id = '__logical_set_create__' + hashlib.sha256(body['action_id'].encode('utf-8','strict')).hexdigest()
+        generation = repository.generation()
+        try:
+            prior = repository.reserve_operation(owner_subject_id=original[1],operation_id=operation_id,request_digest=digest,generation=generation,
+                receipt={'operation':'logical_set_create','state':'pending'},phase='logical_set_create_pending')
+        except Exception:
+            raise HTTPException(409, 'Change set operation unavailable')
+        if prior is not None:
+            receipt = prior.get('receipt') or {}
+            if receipt.get('operation') != 'logical_set_create': raise HTTPException(409, 'Change set operation unavailable')
+            return {'version':1,'state':'status_only','receipt':receipt}
+        async def owned():
+            try:
+                if _logical_set_identity(request) != original or repository.generation() != generation: raise ValueError()
+                result = await _create_document(CreateDocument(name=name,kind=_NOTE_KIND,content=content,actionId=body['action_id']),request,body['workspace'],allow_content_recovery=False)
+                doc = result.get('doc') if isinstance(result,dict) else None
+                if (result.get('outcome') != 'created' or result.get('actionId') != body['action_id'] or result.get('replayed') is not False or not isinstance(doc,dict)
+                        or not isinstance(doc.get('id'),str) or not doc['id'] or not isinstance(doc.get('head'),str) or not doc['head']): raise ValueError()
+                receipt = {'operation':'logical_set_create','state':'complete','document_id':doc['id'],'head':doc['head']}
+                repository.record_operation(owner_subject_id=original[1],operation_id=operation_id,request_digest=digest,generation=generation,receipt=receipt,phase='logical_set_create_complete')
+                if _logical_set_identity(request) != original: return {'version':1,'state':'pending'}
+                return {'version':1,'state':'complete','receipt':receipt}
+            except Exception:
+                return {'version':1,'state':'pending'}
+        task = asyncio.create_task(owned())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try: await asyncio.shield(task)
+                except asyncio.CancelledError: continue
+            raise
+
+    @router.get('/logical-change-sets/{document_id}')
+    async def get_logical_change_set(document_id: str, request: Request, workspace: str | None = None):
+        from src.openclank.history_change_sets import parse
+        original = _logical_set_identity(request); scope = _scope(request, workspace)
+        stored = await _call(request, 'get', {**scope, 'id':_doc_id(document_id)})
+        if _logical_set_identity(request) != original: raise HTTPException(409, 'Account changed')
+        doc = _note_view(stored)
+        if doc.get('kind') != _NOTE_KIND or doc.get('deleted') or doc.get('rawPreserved') or doc.get('note_error'):
+            raise HTTPException(404, 'Change set unavailable')
+        try: value = parse(doc.get('text'))
+        except (TypeError, ValueError, UnicodeError): raise HTTPException(404, 'Change set unavailable')
+        if not isinstance(doc.get('head'), str) or not doc['head']: raise HTTPException(503, 'Change set unavailable')
+        return {'version':1, 'document_id':doc['id'], 'head':doc['head'], 'set':value}
+
+    @router.put('/logical-change-sets/{document_id}')
+    async def write_logical_change_set(document_id: str, request: Request):
+        from src.openclank.history_change_sets import patch
+        original = _logical_set_identity(request); body = await _logical_set_body(request)
+        if type(body) is not dict or set(body) != {'version','workspace','base','action_id','title','description','members'} or type(body['version']) is not int or body['version'] != 1:
+            raise HTTPException(400, 'Invalid change set')
+        if any(type(body[k]) is not str or not body[k] or len(body[k].encode('utf-8','strict')) > 160 for k in ('workspace','base','action_id')):
+            raise HTTPException(400, 'Invalid change set')
+        if request.query_params.get('workspace') not in (None, body['workspace']): raise HTTPException(400, 'Workspace mismatch')
+        scope = _scope(request, body['workspace'])
+        stored = await _call(request, 'get', {**scope, 'id':_doc_id(document_id)})
+        if _logical_set_identity(request) != original: raise HTTPException(409, 'Account changed')
+        doc = _note_view(stored)
+        if doc.get('kind') != _NOTE_KIND or doc.get('head') != body['base'] or doc.get('deleted') or doc.get('readOnly') or doc.get('rawPreserved') or doc.get('note_error'):
+            raise HTTPException(409, 'Change set changed or unavailable')
+        try:
+            content = patch(doc.get('text'), {'version':1,'title':body['title'],'description':body['description'],'members':body['members']})
+        except (TypeError, ValueError, UnicodeError): raise HTTPException(400, 'Invalid change set')
+        if _logical_set_identity(request) != original: raise HTTPException(409, 'Account changed')
+        return await write_document(document_id, WriteDocument(content=content, base=body['base'], actionId=body['action_id']), request, body['workspace'])
 
     @router.get("/documents/{document_id}/history")
     async def document_history(document_id: str, request: Request, workspace: str | None = None):
@@ -4087,13 +4361,166 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         publish(scope, "document", result)
         return result
 
+    @router.post("/documents/{document_id}/graph-evidence")
+    async def document_graph_evidence(document_id: str, request: Request, workspace: str | None = None):
+        from src.openclank.journal_graph_evidence import selected_evidence
+        from src.openclank.code_query import CodeQueryError
+        body = await _logical_set_body(request)
+        if (not isinstance(body, dict) or set(body) - {"head", "code"} or not isinstance(body.get("head"), str)
+                or ("code" in body and (not isinstance(body["code"], dict)
+                    or set(body["code"]) != {"codeReceipt", "codeWorkspaceId"}))):
+            raise HTTPException(400, "Invalid evidence selection")
+        identity = _logical_set_identity(request)
+        scope = _scope(request, workspace)
+        generation = request.app.state.files_policy_repository.generation()
+        def current():
+            return (_logical_set_identity(request) == identity and _scope(request, workspace) == scope
+                    and request.app.state.files_policy_repository.generation() == generation)
+        async def read():
+            return _note_view(await _call(request, "get", {**scope, "id": _doc_id(document_id)}))
+        document = await read()
+        if document.get("head") != body["head"] or document.get("deleted") or document.get("rawPreserved"):
+            raise HTTPException(409, "Page revision changed")
+        try:
+            rows = await selected_evidence(request, identity[0], document, copal_scope=scope, code=body.get("code"),
+                tasks=_task_projection(request, scope, document), current=current)
+            operations = (await _call(request, "ops", {**scope, "limit": 32})).get("ops", [])
+            for change in operations[:32]:
+                if document_id in (change.get("changedIds") or []) and change.get("op") and change.get("ts") is not None:
+                    rows["rows"].append({"kind": "changed", "from": {"kind":"operation", "id":change["op"]},
+                        "to": {"kind":"document","id":document_id,"workspace":scope["workspace_id"]},
+                        "label": change.get("kind") or "Document change", "timestamp": change["ts"]})
+            rows["coverage"]["earlierActivityUnchecked"] = len(operations) >= 32
+            latest = await read()
+            if not current() or latest.get("deleted") or latest.get("head") != body["head"] or latest.get("text") != document.get("text"):
+                raise ValueError("Page changed")
+        except (ValueError, CodeQueryError) as exc:
+            raise HTTPException(409, "Page or evidence changed") from exc
+        return JSONResponse(rows, headers={"Cache-Control": "private, no-store"})
+
+    @router.post("/documents/{document_id}/code-mention")
+    async def document_code_mention(document_id: str, payload: dict, request: Request, workspace: str | None = None):
+        from src.openclank.document_code_links import forward
+        from src.openclank.code_query import CodeQueryError
+        scope = _scope(request, workspace)
+        owner = require_user(request)
+        actor = _actor_account_id(request)
+        document_id = _doc_id(document_id)
+        source = _note_view(await _call(request, "get", {**scope, "id":document_id}))
+        try:
+            result = await forward(request, owner, payload, source, copal_scope=scope)
+            latest = _note_view(await _call(request, "get", {**scope, "id":document_id}))
+            if (_scope(request, workspace) != scope or not actor or _actor_account_id(request) != actor
+                    or latest.get("head") != source.get("head") or latest.get("text") != source.get("text")):
+                raise ValueError("The document revision changed")
+            return JSONResponse(result, headers={"Cache-Control":"private, no-store"})
+        except (ValueError, CodeQueryError) as exc:
+            raise HTTPException(409, "Document or code evidence is unavailable or changed") from exc
+
+    @router.post("/documents/{document_id}/document-structure/resume")
+    async def resume_document_structure(document_id: str, request: Request, workspace: str | None = None):
+        scope = _scope(request, workspace)
+        document = await _call(request,"get",{**scope,"id":_doc_id(document_id)})
+        return JSONResponse(await submit_journal_structure(request,scope,_note_view(document)),
+                            headers={"Cache-Control":"private, no-store"})
+
+    @router.post("/documents/{document_id}/citation-locate")
+    async def document_citation_locate(document_id: str, payload: dict, request: Request, workspace: str | None = None):
+        from src.openclank.document_code_links import relocate
+        scope = _scope(request, workspace)
+        owner, actor = require_user(request), _actor_account_id(request)
+        source_id = _doc_id(document_id)
+        def current():
+            return bool(actor and _actor_account_id(request) == actor and _scope(request, workspace) == scope)
+        source = _note_view(await _call(request, "get", {**scope, "id":source_id}))
+        try:
+            result = await relocate(request, owner, source, payload, current=current)
+            latest = _note_view(await _call(request, "get", {**scope, "id":source_id}))
+            if not current() or source.get("head") != latest.get("head") or source.get("text") != latest.get("text"):
+                raise ValueError("Document source changed")
+            return JSONResponse(result, headers={"Cache-Control":"private, no-store"})
+        except ValueError as exc:
+            raise HTTPException(409, "Citing passage is unavailable or changed") from exc
+
+    @router.post("/graph/code-citations")
+    async def graph_code_citations(payload: dict, request: Request, workspace: str | None = None):
+        from src.openclank.document_code_links import reverse
+        from src.openclank.document_journeys import catalogue
+        from src.openclank.code_query import CodeQueryError
+        scope = _scope(request, workspace)
+        actor = _actor_account_id(request)
+        async def current_document(document_id):
+            return _note_view(await _call(request, "get", {**scope, "id":_doc_id(document_id)}))
+        try:
+            documents = await catalogue(_bridge(request), scope)
+            result = await reverse(request, require_user(request), payload, documents, current_document=current_document)
+            if _scope(request, workspace) != scope or not actor or _actor_account_id(request) != actor:
+                raise ValueError("Code or document scope changed")
+            return JSONResponse(result, headers={"Cache-Control":"private, no-store"})
+        except (ValueError, CodeQueryError) as exc:
+            raise HTTPException(409, "Current citing passages are unavailable or changed") from exc
+
+    @router.post("/documents/link-resolutions")
+    async def document_link_resolutions(payload: dict, request: Request, workspace: str | None = None):
+        from src.openclank.document_journeys import catalogue, resolve_outcome
+        entries = payload.get("sources") if isinstance(payload, dict) else None
+        if not isinstance(entries, list) or len(entries) > 200:
+            raise HTTPException(400, "Invalid document resolution request")
+        if any(not isinstance(entry, dict) or set(entry) != {"id", "head", "targets"}
+               or not isinstance(entry["id"], str) or not isinstance(entry["head"], str)
+               or not isinstance(entry["targets"], list) or len(entry["targets"]) > 256
+               or any(not isinstance(value, str) or len(value) > 2048 for value in entry["targets"])
+               for entry in entries) or sum(len(entry["targets"]) for entry in entries) > 4000:
+            raise HTTPException(400, "Invalid document resolution request")
+        scope = _scope(request, workspace)
+        docs = await catalogue(_bridge(request), scope)
+        by_id = {str(doc.get("id")): doc for doc in docs}
+        results = []
+        for entry in entries:
+            source = by_id.get(entry["id"])
+            current = bool(source and str(source.get("head")) == entry["head"])
+            targets = []
+            for target in entry["targets"]:
+                status, resolved = resolve_outcome(target, source, docs) if current and docs.coverage.get("complete") else ("stale" if not current else "unverified", None)
+                targets.append({"status": status, "targetDocumentId": resolved.get("id") if resolved else None,
+                                "targetRevisionId": str(resolved.get("head")) if resolved else None})
+            results.append({"id": entry["id"], "head": entry["head"], "targets": targets})
+        return {"coverage": docs.coverage, "sources": results}
+
+    @router.get("/documents/{document_id}/neighbors")
+    async def document_neighbors(document_id: str, request: Request, direction: str = 'incoming',
+                                 kind: str = 'both', limit: int = 32, cursor: str | None = None,
+                                 witness: str | None = None, workspace: str | None = None):
+        from src.openclank.document_journeys import catalogue
+        from src.openclank.document_neighbors import relation_page
+        if (direction not in ('incoming', 'outgoing') or kind not in ('both', 'link', 'embed')
+                or not 1 <= limit <= 100 or (cursor is not None and len(cursor) > 84)
+                or (witness is not None and not re.fullmatch(r'[0-9a-f]{64}', witness))):
+            raise HTTPException(422, 'Invalid journal connection request')
+        selected = _doc_id(document_id)
+        scope = _scope(request, workspace)
+        account = _actor_account_id(request)
+        docs = await catalogue(_bridge(request), scope)
+        try:
+            result = await asyncio.to_thread(relation_page, docs, scope, selected, direction, kind, limit, cursor, witness)
+        except KeyError as exc:
+            raise HTTPException(404, 'Journal page unavailable') from exc
+        except LookupError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not account or _actor_account_id(request) != account or _scope(request, workspace) != scope:
+            raise HTTPException(409, 'Journal scope changed')
+        return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
     @router.get("/documents/{document_id}/link-occurrences")
     async def document_link_occurrences(document_id: str, request: Request, workspace: str | None = None):
         from src.openclank.document_journeys import catalogue, occurrences
         scope = _scope(request, workspace)
         source = _note_view(await _call(request, "get", {**scope, "id": _doc_id(document_id)}))
-        links = occurrences(source, await catalogue(_bridge(request), scope))
-        return {"documentId": source["id"], "revisionId": str(source.get("head")), "links": links}
+        docs = await catalogue(_bridge(request), scope)
+        links = occurrences(source, docs)
+        return {"documentId": source["id"], "revisionId": str(source.get("head")), "links": links, "coverage": {**docs.coverage, "extractionComplete": False}}
 
     @router.post("/documents/{document_id}/link-navigation")
     async def document_link_navigation(document_id: str, payload: dict, request: Request, workspace: str | None = None):
@@ -4105,8 +4532,11 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         if link is None or str(source.get("head")) != str(payload.get("sourceRevisionId")):
             raise HTTPException(409, "The committed link occurrence changed; navigate from the current document")
         target = await _call(request, "get", {**scope, "id": link["targetDocumentId"]})
-        if target.get("id") != link["targetDocumentId"]:
+        if target.get("id") != link["targetDocumentId"] or str(target.get("head")) != link["targetRevisionId"]:
             raise HTTPException(404, "Link destination is unavailable")
+        current_source = await _call(request, "get", {**scope, "id": link["sourceDocumentId"]})
+        if str(current_source.get("head")) != link["sourceRevisionId"]:
+            raise HTTPException(409, "The committed link occurrence changed; navigate from the current document")
         facts = {key: link[key] for key in ("linkId", "sourceDocumentId", "targetDocumentId")}
         delivered = record_activity(request, "document.link.navigated", str(payload.get("occurrenceId") or uuid.uuid4()),
                                    {**facts, "resolvedToDifferentDocument": True}, workspace_id=scope["workspace_id"], kind="U")
@@ -4442,8 +4872,11 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         }
         session_token = request.cookies.get(_SESSION_COOKIE) if authenticated_owner else None
         key = (scope["owner"], scope["workspace_id"])
-        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
-        subscribers[key].add(queue)
+        queue = subscribers.subscribe(*key)
+        # Passive document-change notifications (no memory state): ended by an owner reset's drain; the page reconnects.
+        barrier = getattr(request.app.state, "account_request_barrier", None)
+        if barrier is not None:
+            barrier.mark_passive_stream()
 
         async def stream() -> AsyncIterator[bytes]:
             try:
@@ -4462,9 +4895,7 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
                             return
                         yield b": keepalive\n\n"
             finally:
-                subscribers[key].discard(queue)
-                if not subscribers[key]:
-                    subscribers.pop(key, None)
+                subscribers.unsubscribe(*key, queue)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 

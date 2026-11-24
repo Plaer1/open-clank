@@ -1,4 +1,5 @@
 import * as path from "path"
+import { ManagedProvider } from "@/acp/managed-provider"
 import type { ProjectID } from "../project/schema"
 import type { SessionID } from "../session/schema"
 
@@ -179,7 +180,7 @@ export function assertMemoryWriteAllowed(input: {
   }
 
   if (agentName === "checkpoint-writer") {
-    if (!isCheckpointWriterAllowed(parts)) {
+    if ((ManagedProvider.enabled() && parts[0] !== "sessions") || !isCheckpointWriterAllowed(parts)) {
       throw new Error(
         `Path '${rel}' is not in the checkpoint-writer allowlist.\n` +
           `Writer may only write to:\n` +

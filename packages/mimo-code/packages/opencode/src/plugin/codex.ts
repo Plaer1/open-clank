@@ -305,6 +305,8 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         {
           label: "ChatGPT Pro/Plus (browser device login)",
           type: "oauth",
+          credentialKinds: ["oauth"],
+          billingLanes: ["subscription"],
           authorize: async () => {
             const deviceResponse = await fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
               method: "POST",
@@ -418,6 +420,8 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         {
           label: "Manually enter API Key",
           type: "api",
+          credentialKinds: ["api"],
+          billingLanes: ["metered_api", "custom"],
         },
       ],
     },

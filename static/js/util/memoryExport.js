@@ -77,12 +77,13 @@ function _moment(value, name) {
 //   assetsOnly      true keeps only asset bytes in the bundle (requires bundle)
 export function buildMemoryExportQuery(options = {}) {
   const opts = options && typeof options === 'object' ? options : {};
-  const bundle = opts.format == null || opts.format === 'bundle' || opts.format === 'v3';
+  const snapshotBundle = opts.format === 'snapshot-v4';
+  const bundle = snapshotBundle || opts.format == null || opts.format === 'bundle' || opts.format === 'v3';
   if (!bundle && opts.format !== 'json') {
-    throw new MemoryExportFilterError('format must be bundle or json.');
+    throw new MemoryExportFilterError('format must be bundle, snapshot-v4, or json.');
   }
   const params = new URLSearchParams();
-  if (bundle) params.set('format', 'bundle');
+  if (bundle) params.set('format', snapshotBundle ? 'snapshot-v4' : 'bundle');
 
   if (opts.sections != null) {
     const requested = _csvTerms(opts.sections, 'sections');
@@ -123,6 +124,7 @@ export function buildMemoryExportQuery(options = {}) {
 }
 
 export function memoryExportFilename(options = {}) {
+  if (options?.format === 'snapshot-v4') return 'open-clank-memory-bundle-v4-snapshots.zip';
   const bundle = options?.format == null || options.format === 'bundle' || options.format === 'v3';
   return bundle ? 'open-clank-memory-bundle-v3.zip' : 'open-clank-memory-export.json';
 }

@@ -1,4 +1,5 @@
 import { PlanEnterTool, PlanExitTool } from "./plan"
+import { randomUUID } from "node:crypto"
 import { Session } from "../session"
 import { QuestionTool } from "./question"
 import { BashTool, bashDescription } from "./bash"
@@ -7,6 +8,9 @@ import { MultiEditTool } from "./multiedit"
 import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { HistoryTool } from "./history"
+import { JsonPreviewTool } from "./json-preview"
+import { ToonPreviewTool } from "./toon-preview"
+import { GcfPreviewTool } from "./gcf-preview"
 import { MemoryTool } from "./memory"
 import { ReadTool } from "./read"
 import { ViewImageTool } from "./view-image"
@@ -74,11 +78,14 @@ import * as BashInteractive from "./bash-interactive"
 import { resolveInvocationStyle } from "./invocation-style"
 import { BuiltinWorkflow } from "@/workflow/builtin"
 import { ToolScriptTool, renderToolScriptDeclarations } from "./tool-script"
+import { NativeAnalysisTool } from "./native-analysis"
 import { toolScriptRegistry } from "./tool-script-ref"
 import { usesGPTToolset } from "./gpt"
 import { ManageFilesTool } from "./manage-files"
 import { ManagedProvider } from "@/acp/managed-provider"
+import { activeAnalysisProfile } from "./native-analysis-profile"
 import { RecoverableError } from "./recoverable"
+import type { ToolWitness } from "../session/recovery-profile"
 
 const log = Log.create({ service: "tool.registry" })
 
@@ -113,13 +120,23 @@ type ActorDef = Tool.InferDef<typeof ActorTool>
 type ReadDef = Tool.InferDef<typeof ReadTool>
 
 type State = {
+  generation: string
   custom: Tool.Def[]
   builtin: Tool.Def[]
   actor: ActorDef
   read: ReadDef
 }
 
+/** Private original-owner witness; not an execution or capture grant. */
+export type MemoryDefinitionWitness = Readonly<{id:"memory" | "question";description:string;schemaJSON:string; current:()=>Effect.Effect<boolean>}>
+export type ArgumentDefinitionWitness = Readonly<{id:"glob" | "grep";description:string;schemaJSON:string; current:()=>Effect.Effect<boolean>}>
 export interface Interface {
+  readonly argumentDefinitionWitness?: (tool: Tool.Def) => ArgumentDefinitionWitness | undefined
+  readonly memoryDefinitionWitness?: (tool: Tool.Def) => MemoryDefinitionWitness | undefined
+  readonly recoveryWitness?: (tool: Tool.Def) => ToolWitness | undefined
+  readonly recoveryDirectFile?: (tool: Tool.Def) => boolean
+  readonly recoveryEnvironment?: () => Effect.Effect<{formatter:import("../session/recovery-profile").FormatterWitness; lsp:import("../session/recovery-profile").EffectOwnerWitness; bus:import("../session/recovery-profile").EffectOwnerWitness} | undefined>
+  readonly provenanceGeneration?: () => Effect.Effect<string>
   readonly ids: () => Effect.Effect<string[]>
   readonly metadata: () => Effect.Effect<Array<{
     id: string
@@ -129,7 +146,7 @@ export interface Interface {
   }>>
   readonly all: () => Effect.Effect<Tool.Def[]>
   readonly named: () => Effect.Effect<{ actor: ActorDef; read: ReadDef }>
-  readonly tools: (model: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info }) => Effect.Effect<Tool.Def[]>
+  readonly tools: (model: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info; argumentWitness?:boolean }) => Effect.Effect<Tool.Def[]>
   readonly reload: () => Effect.Effect<void>
 }
 
@@ -147,6 +164,10 @@ export const layer = Layer.effect(
     const agents = yield* Agent.Service
     const skill = yield* Skill.Service
     const truncate = yield* Truncate.Service
+    // These are the same owner instances supplied to the original edit/write factories.
+    const recoveryFormatter = yield* Format.Service
+    const recoveryLsp = yield* LSP.Service
+    const recoveryBus = yield* Bus.Service
 
     const invalid = yield* InvalidTool
     const actor = yield* ActorTool
@@ -171,15 +192,22 @@ export const layer = Layer.effect(
     const skillsearch = yield* SkillSearchTool
     const mcptoolsearch = yield* McpToolSearchTool
     const historytool = yield* HistoryTool
+    const jsonpreview = yield* JsonPreviewTool
+    const toonpreview = yield* ToonPreviewTool
+    const gcfpreview = yield* GcfPreviewTool
     const memorytool = yield* MemoryTool
     const tasktool = yield* TaskTool
     const crontool = yield* CronTool
     const sessiontool = yield* SessionTool
     const workflowtool = yield* WorkflowTool
     const toolscript = yield* ToolScriptTool
+    const nativeAnalysis = yield* NativeAnalysisTool
     const managefiles = yield* ManageFilesTool
     const agent = yield* Agent.Service
 
+    const recoveryDefinitions = new WeakMap<Tool.Def, { factory: { init: Function } }>()
+    const argumentDefinitions = new WeakMap<Tool.Def, {factory:{init:Function};id:"glob"|"grep"}>()
+    const memoryDefinitions = new WeakMap<Tool.Def, {factory:{init:Function};id:"memory" | "question"}>()
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
         const custom: Tool.Def[] = []
@@ -285,15 +313,27 @@ export const layer = Layer.effect(
           planenter: Tool.init(planenter),
           memory: Tool.init(memorytool),
           history: Tool.init(historytool),
+          jsonpreview: Tool.init(jsonpreview),
+          toonpreview: Tool.init(toonpreview),
+          gcfpreview: Tool.init(gcfpreview),
           task: Tool.init(tasktool),
           cron: Tool.init(crontool),
           session: Tool.init(sessiontool),
           workflow: Tool.init(workflowtool),
           toolscript: Tool.init(toolscript),
+          nativeAnalysis: Tool.init(nativeAnalysis),
           managefiles: Tool.init(managefiles),
         })
 
+        argumentDefinitions.set(tool.glob, {factory:globtool,id:"glob"})
+        argumentDefinitions.set(tool.grep, {factory:greptool,id:"grep"})
+        memoryDefinitions.set(tool.memory, {factory:memorytool,id:"memory"})
+        memoryDefinitions.set(tool.question, {factory:question,id:"question"})
+        recoveryDefinitions.set(tool.edit, { factory: edit })
+        recoveryDefinitions.set(tool.write, { factory: writetool })
+        recoveryDefinitions.set(tool.patch, { factory: patchtool })
         return {
+          generation: randomUUID(),
           custom,
           builtin: [
             tool.invalid,
@@ -320,8 +360,12 @@ export const layer = Layer.effect(
             tool.planenter,
             tool.memory,
             tool.history,
+            tool.jsonpreview,
+            tool.toonpreview,
+            tool.gcfpreview,
             tool.task,
             tool.toolscript,
+            ...(ManagedProvider.enabled() && !!activeAnalysisProfile() ? [tool.nativeAnalysis] : []),
             tool.managefiles,
             ...(Flag.MIMOCODE_EXPERIMENTAL_CRON ? [tool.cron] : []),
             ...(Flag.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR ? [tool.session] : []),
@@ -464,6 +508,11 @@ export const layer = Layer.effect(
     toolScriptRegistry.current = (input) =>
       input ? available(input).pipe(Effect.map((result) => result.filtered)) : all()
 
+    const memoryDefinitionWitnesses = new WeakMap<Tool.Def,MemoryDefinitionWitness>()
+    const argumentDefinitionWitnesses = new WeakMap<Tool.Def, ArgumentDefinitionWitness>()
+    const recoveryWitnesses = new WeakMap<Tool.Def, ToolWitness>()
+    const recoveryDirectFiles = new WeakSet<Tool.Def>()
+    const recoveryWitness = (tool: Tool.Def) => recoveryWitnesses.get(tool)
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
       const availableTools = yield* available(input)
 
@@ -478,6 +527,12 @@ export const layer = Layer.effect(
             description: tool.id === BashTool.id && availableTools.useGPTTools ? bashDescription(true) : tool.description,
             parameters: tool.parameters,
           }
+          const memoryOrigin = memoryDefinitions.get(tool)
+          const argumentOrigin = input.argumentWitness === true ? argumentDefinitions.get(tool) : undefined
+          const argumentInit=argumentOrigin?.factory.init
+          let argumentPre:string|undefined
+          if (argumentOrigin) try {const raw=JSON.stringify(z.toJSONSchema(tool.parameters));if(Buffer.byteLength(raw,'utf8')<=65536) argumentPre=raw} catch {}
+          if (memoryOrigin || argumentOrigin) plugin.requestEmptyToolDefinition?.(output)
           yield* plugin.trigger("tool.definition", { toolID: tool.id }, output)
           const style = resolveStyle(tool.id)
           const useShell = style === "shell" && tool.shell !== undefined
@@ -486,7 +541,7 @@ export const layer = Layer.effect(
           }
           const effective: Tool.Def = useShell ? shellWrap(tool) : tool
           const description = useShell ? tool.shell!.description : output.description
-          return {
+          const resolved = {
             id: tool.id,
             description: [
               description,
@@ -501,6 +556,50 @@ export const layer = Layer.effect(
             execute: effective.execute,
             formatValidationError: effective.formatValidationError,
           }
+          if (argumentOrigin && argumentPre && argumentOrigin.factory.init===argumentInit && !useShell && effective===tool && resolved.id===argumentOrigin.id &&
+              plugin.readEmptyToolDefinition?.(output,tool.id)===true && resolved.parameters===tool.parameters &&
+              resolved.description===tool.description && resolved.execute===tool.execute) {
+            try {
+              const owner=yield* InstanceState.get(state), schemaJSON=JSON.stringify(z.toJSONSchema(resolved.parameters))
+              if (owner.builtin.includes(tool) && schemaJSON===argumentPre) {
+                const factory=argumentOrigin.factory, init=factory.init, params=resolved.parameters, description=resolved.description, execute=resolved.execute
+                const current=()=>Effect.gen(function*(){
+                  const next=yield* InstanceState.get(state)
+                  try {return next===owner && next.generation===owner.generation && next.builtin.includes(tool) && factory.init===init &&
+                    resolved.parameters===params && resolved.description===description && resolved.execute===execute &&
+                    plugin.readEmptyToolDefinition?.(output,tool.id)===true && JSON.stringify(z.toJSONSchema(params))===schemaJSON}
+                  catch{return false}
+                })
+                argumentDefinitionWitnesses.set(resolved,Object.freeze({id:argumentOrigin.id,description,schemaJSON,current}))
+              }
+            } catch {}
+          }
+          if (memoryOrigin && !useShell && effective===tool && resolved.id === memoryOrigin.id &&
+              plugin.readEmptyToolDefinition?.(output,tool.id) === true && resolved.parameters === tool.parameters &&
+              resolved.description === tool.description && resolved.execute === tool.execute) {
+            try {
+              const owner = yield* InstanceState.get(state)
+              const schemaJSON = JSON.stringify(z.toJSONSchema(resolved.parameters))
+              if (owner.builtin.includes(tool) && Buffer.byteLength(schemaJSON,"utf8")<=65536) {
+                const factory=memoryOrigin.factory, init=factory.init, params=resolved.parameters, description=resolved.description, execute=resolved.execute
+                const current=() => Effect.gen(function* () {
+                  const next=yield* InstanceState.get(state)
+                  try { return next===owner && next.generation===owner.generation && next.builtin.includes(tool) &&
+                    factory.init===init && resolved.parameters===params && resolved.description===description && resolved.execute===execute &&
+                    plugin.readEmptyToolDefinition?.(output,tool.id)===true && JSON.stringify(z.toJSONSchema(params))===schemaJSON }
+                  catch { return false }
+                })
+                memoryDefinitionWitnesses.set(resolved,Object.freeze({id:memoryOrigin.id,description,schemaJSON,current}))
+              }
+            } catch { /* Optional provenance never changes tool registration. */ }
+          }
+          const original = recoveryDefinitions.get(tool)
+          if (original && !useShell && effective === tool) {
+            recoveryWitnesses.set(resolved, Object.freeze({ factory: original.factory, init: original.factory.init,
+              initialized: tool.execute, effective: resolved.execute }))
+            if (original.factory === edit || original.factory === writetool) recoveryDirectFiles.add(resolved)
+          }
+          return resolved
         }),
         { concurrency: "unbounded" },
       )
@@ -517,7 +616,15 @@ export const layer = Layer.effect(
       yield* InstanceState.invalidate(state)
     })
 
-    return Service.of({ ids, metadata, all, named, tools, reload })
+    const provenanceGeneration: NonNullable<Interface["provenanceGeneration"]> = Effect.fn("ToolRegistry.provenanceGeneration")(function* () {
+      return (yield* InstanceState.get(state)).generation
+    })
+    const recoveryEnvironment: NonNullable<Interface["recoveryEnvironment"]> = () => Effect.gen(function* () {
+      if (!recoveryFormatter.recoveryWitness || !recoveryLsp.recoveryWitness || !recoveryBus.recoveryWitness) return undefined
+      return {formatter:yield* recoveryFormatter.recoveryWitness(),lsp:yield* recoveryLsp.recoveryWitness(),bus:yield* recoveryBus.recoveryWitness()}
+    })
+    return Service.of({ ids, metadata, all, named, tools, reload, provenanceGeneration, recoveryWitness, argumentDefinitionWitness: (tool) => argumentDefinitionWitnesses.get(tool), memoryDefinitionWitness: (tool) => memoryDefinitionWitnesses.get(tool),
+      recoveryDirectFile: (tool) => recoveryDirectFiles.has(tool), recoveryEnvironment })
   }),
 ).pipe(Layer.provide(Git.defaultLayer))
 

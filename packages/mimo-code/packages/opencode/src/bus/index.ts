@@ -24,6 +24,9 @@ type Payload<D extends BusEvent.Definition = BusEvent.Definition> = {
 type State = {
   wildcard: PubSub.PubSub<Payload>
   typed: Map<string, PubSub.PubSub<Payload>>
+  subscriptions: number
+  generation: bigint
+  active: boolean
 }
 
 export interface Interface {
@@ -38,6 +41,7 @@ export interface Interface {
     callback: (event: Payload<D>) => unknown,
   ) => Effect.Effect<() => void>
   readonly subscribeAllCallback: (callback: (event: any) => unknown) => Effect.Effect<() => void>
+  readonly recoveryWitness?: () => Effect.Effect<import("../session/recovery-profile").EffectOwnerWitness>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Bus") {}
@@ -49,9 +53,12 @@ export const layer = Layer.effect(
       Effect.fn("Bus.state")(function* (ctx) {
         const wildcard = yield* PubSub.unbounded<Payload>()
         const typed = new Map<string, PubSub.PubSub<Payload>>()
+        const instance: State = { wildcard, typed, subscriptions: 0, generation: 0n, active: true }
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
+            instance.active = false
+            instance.generation++
             // Publish InstanceDisposed before shutting down so subscribers see it
             yield* PubSub.publish(wildcard, {
               type: InstanceDisposed.type,
@@ -64,7 +71,7 @@ export const layer = Layer.effect(
           }),
         )
 
-        return { wildcard, typed }
+        return instance
       }),
       { phase: "late" },
     )
@@ -79,6 +86,13 @@ export const layer = Layer.effect(
         return ps as unknown as PubSub.PubSub<Payload<D>>
       })
     }
+
+    // Acquired before PubSub.subscribe; LIFO scope teardown removes the
+    // actual subscription before this reservation is released.
+    const track = (s: State) => Effect.acquireRelease(
+      Effect.sync(() => { s.subscriptions++; s.generation++ }),
+      () => Effect.sync(() => { s.subscriptions--; s.generation++ }),
+    )
 
     function publish<D extends BusEvent.Definition>(def: D, properties: z.output<D["properties"]>) {
       return Effect.gen(function* () {
@@ -108,8 +122,9 @@ export const layer = Layer.effect(
       return Stream.unwrap(
         Effect.gen(function* () {
           const s = yield* InstanceState.get(state)
+          yield* track(s)
           const ps = yield* getOrCreate(s, def)
-          return Stream.fromPubSub(ps)
+          return Stream.fromSubscription(yield* PubSub.subscribe(ps))
         }),
       ).pipe(Stream.ensuring(Effect.sync(() => log.info("unsubscribing", { type: def.type }))))
     }
@@ -119,17 +134,21 @@ export const layer = Layer.effect(
       return Stream.unwrap(
         Effect.gen(function* () {
           const s = yield* InstanceState.get(state)
-          return Stream.fromPubSub(s.wildcard)
+          yield* track(s)
+          return Stream.fromSubscription(yield* PubSub.subscribe(s.wildcard))
         }),
       ).pipe(Stream.ensuring(Effect.sync(() => log.info("unsubscribing", { type: "*" }))))
     }
 
-    function on<T>(pubsub: PubSub.PubSub<T>, type: string, callback: (event: T) => unknown) {
+    function on<T>(s: State, pubsub: PubSub.PubSub<T>, type: string, callback: (event: T) => unknown) {
       return Effect.gen(function* () {
         log.info("subscribing", { type })
         const bridge = yield* EffectBridge.make()
         const scope = yield* Scope.make()
-        const subscription = yield* Scope.provide(scope)(PubSub.subscribe(pubsub))
+        const subscription = yield* Scope.provide(scope)(Effect.gen(function* () {
+          yield* track(s)
+          return yield* PubSub.subscribe(pubsub)
+        }))
 
         yield* Scope.provide(scope)(
           Stream.fromSubscription(subscription).pipe(
@@ -158,15 +177,26 @@ export const layer = Layer.effect(
     ) {
       const s = yield* InstanceState.get(state)
       const ps = yield* getOrCreate(s, def)
-      return yield* on(ps, def.type, callback)
+      return yield* on(s, ps, def.type, callback)
     })
 
     const subscribeAllCallback = Effect.fn("Bus.subscribeAllCallback")(function* (callback: (event: any) => unknown) {
       const s = yield* InstanceState.get(state)
-      return yield* on(s.wildcard, "*", callback)
+      return yield* on(s, s.wildcard, "*", callback)
     })
 
-    return Service.of({ publish, subscribe, subscribeAll, subscribeCallback, subscribeAllCallback })
+    const recoveryWitness: NonNullable<Interface["recoveryWitness"]> = Effect.fn("Bus.recoveryWitness")(function* () {
+      const captured = yield* InstanceState.get(state)
+      const generation = captured.generation
+      // A removed subscription may have started work that outlived teardown.
+      // This first profile only qualifies an owner that never admitted one.
+      const eligible = captured.active && captured.subscriptions === 0 && generation === 0n
+      return Object.freeze({ eligible, current: () => Effect.gen(function* () {
+        const now = yield* InstanceState.get(state)
+        return eligible && now === captured && now.active && now.subscriptions === 0 && now.generation === generation
+      }) })
+    })
+    return Service.of({ publish, subscribe, subscribeAll, subscribeCallback, subscribeAllCallback, recoveryWitness })
   }),
 )
 

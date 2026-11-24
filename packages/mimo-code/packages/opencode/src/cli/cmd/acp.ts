@@ -1,7 +1,8 @@
 import { Log } from "@/util"
 import { bootstrap } from "../bootstrap"
 import { cmd } from "./cmd"
-import { AgentSideConnection, ndJsonStream } from "@agentclientprotocol/sdk"
+import { AgentSideConnection } from "@agentclientprotocol/sdk"
+import { redactedNdJsonStream } from "@/acp/redacted-ndjson"
 import { ACP } from "@/acp/agent"
 import { Server } from "@/server/server"
 import { serverAuthHeaders } from "@/server/auth"
@@ -71,7 +72,7 @@ export const AcpCommand = cmd({
         },
       })
 
-      const stream = ndJsonStream(input, output)
+      const stream = redactedNdJsonStream(input, output)
       const agent = await ACP.init({ sdk })
 
       new AgentSideConnection((conn) => {

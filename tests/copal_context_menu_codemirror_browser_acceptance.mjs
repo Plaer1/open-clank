@@ -119,7 +119,7 @@ await withCopalBrowser({ page }, async ({ evaluate, until }) => {
   assert.equal(await evaluate('document.activeElement?.tagName'), 'BUTTON', 'keyboard invocation keeps menu focus on a command');
   await evaluate('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
   assert.equal(await evaluate('!!document.querySelector("#openclank-context-menu")'), false, 'Escape dismisses keyboard-invoked menu');
-  await evaluate(`(() => { localStorage.setItem('odysseus-custom-context-menu','off'); window.dispatchEvent(new Event('odysseus-context-menu-changed')); })()`);
+  await evaluate(`(() => { localStorage.setItem('openclank-custom-context-menu','off'); window.dispatchEvent(new Event('odysseus-context-menu-changed')); })()`);
   assert.equal(await evaluate('!!document.querySelector("#openclank-context-menu")'), false, 'disabling the setting closes an open menu immediately');
   console.log('App-owned CodeMirror context path: native editor selection, async clipboard focus changes, viewport clamp, object command dispatch, and immediate disable passed.');
 });

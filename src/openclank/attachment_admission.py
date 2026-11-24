@@ -84,7 +84,8 @@ def refresh_domain_references(domain, inventory_reader, *, upload_handler=None, 
     import os
     with upload_handler._index_guard():
         current_generations = upload_handler.attachment_reference_generations()
-        index = upload_handler._load_upload_index(fail_on_error=True)
+        index = upload_handler._conversation_upload_index(allow_empty=True)
+        changed = False
         for key, row in list(index.items()):
             if not isinstance(row, dict) or row.get("id") not in generations:
                 continue
@@ -99,7 +100,9 @@ def refresh_domain_references(domain, inventory_reader, *, upload_handler=None, 
                 updated["reference_claims"] = sorted(claims)
                 updated["reference_generation"] = int(updated.get("reference_generation") or 0) + 1
                 index[key] = updated
-        upload_handler._atomic_write_json(os.path.join(upload_handler.upload_dir, "uploads.json"), index, sync_backup=True)
+                changed = True
+        if changed:
+            upload_handler._atomic_write_json(os.path.join(upload_handler.upload_dir, "uploads.json"), index, sync_backup=True)
     db = image_store.session_factory()
     try:
         if db.get_bind().dialect.name == "sqlite":

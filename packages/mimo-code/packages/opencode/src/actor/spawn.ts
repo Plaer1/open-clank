@@ -1,11 +1,14 @@
-import { Effect, Deferred, Context, Fiber, Layer, Scope, Cause, Schedule } from "effect"
-import type { SessionID, MessageID } from "@/session/schema"
+import { Effect, Deferred, Context, Fiber, Layer, Scope, Cause, Exit, Schedule, Option } from "effect"
+import type { SessionID } from "@/session/schema"
 import type { ProviderID, ModelID } from "@/provider/schema"
-import type { Tool as AITool, ModelMessage } from "ai"
 import { Session } from "@/session"
 import { SessionPrompt } from "@/session/prompt"
+import * as UserInput from "@/session/user-input"
 import { SessionRunState } from "@/session/run-state"
 import { ActorRegistry } from "@/actor/registry"
+import * as ManagedProvider from "@/acp/managed-provider"
+import type { ActorRoutePreflightResult, ActorOptionCandidate } from "@/acp/openclank-protocol"
+import type { InputHandoffClaim, InputHandoffDisposition } from "@/actor/registry"
 import { TaskRegistry } from "@/task/registry"
 import { TaskGate, MAX_TASK_GATE_SUBAGENT_REACT } from "@/task/gate"
 import { Agent } from "@/agent/agent"
@@ -13,7 +16,7 @@ import { Permission } from "@/permission"
 import type { Actor, SpawnMode, ContextMode, ToolWhitelist, Lifecycle, ActorHostContext } from "@/actor/schema"
 import { deriveLiveness, DEFAULT_LIVENESS_STALL_MS } from "@/actor/schema"
 import * as ActorEvents from "@/actor/events"
-import { runTurn } from "@/actor/turn"
+import { ActorExecutionContext, runTurn } from "@/actor/turn"
 import { registerBinding } from "@/actor/spawn-ref"
 import * as ExecutionLock from "@/actor/execution-lock"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
@@ -26,6 +29,15 @@ import { parseReturnHeader, type ReturnStatus } from "./return-header"
 import { Log } from "@/util"
 import { Instance, type InstanceContext } from "@/project/instance"
 import { InstanceRef } from "@/effect/instance-ref"
+import { InstanceState } from "@/effect"
+import { decodeForkContext, encodeForkContext, type EncodedForkContext, type ForkContext, type ForkContextProjection, type ForkContextSource } from "./fork-context"
+import { realpath } from "node:fs/promises"
+import type { DirectoryLease } from "@/actor/registry"
+
+type DirectoryAdmission = { lease: DirectoryLease; transferred: boolean; outer: boolean; retain: boolean }
+type AdmittedSpawn = SpawnInput & { directoryAdmission: DirectoryAdmission }
+
+export type { ForkContext } from "./fork-context"
 
 const log = Log.create({ service: "actor.spawn" })
 
@@ -65,44 +77,6 @@ If applicable, also include below the deliverable:
 
 This format lets the spawning agent and the checkpoint writer extract your progress without parsing free-form prose. Do NOT precede the header with an introduction — your final message must start with "**Status**:".
 `
-
-export interface ForkContext {
-  readonly system: string[]
-  /**
-   * Tool schema as parent would emit at watermark, captured for invariant
-   * verification only. NOT consumed by fork's runLoop for the actual LLM
-   * request — that uses `resolveTools(forkAgent)` for executable tools with
-   * dispatch closures. Schema parity is currently enforced because
-   * checkpoint-writer has no `toolAllowlist` (Task 2.6); both paths call
-   * `registry.tools` with equivalent agent inputs and produce identical
-   * schemas. If `toolAllowlist` is ever re-added, this field would still
-   * snapshot parent's schema while the runtime tools would diverge, silently
-   * breaking cache parity. Test guard: `test/agent/agent.test.ts` asserts
-   * `cp.toolAllowlist === undefined` for checkpoint-writer.
-   */
-  readonly tools: Record<string, AITool>
-  /**
-   * Parent agent's permission ruleset, captured at spawn. The fork evaluates
-   * permissions and filters its LLM-visible tool list against THIS (the parent's)
-   * ruleset rather than the checkpoint-writer agent's own — restoring prompt-cache
-   * tool-visibility parity with the parent and keeping permission semantics
-   * consistent with the captor. Memory-tree writes are still governed by
-   * memory-path-guard (see askEditUnlessMemory), so an inherited `edit:deny`
-   * does not block the writer's own checkpoint files.
-   */
-  readonly parentPermission: Permission.Ruleset
-  readonly inheritedMessages: ModelMessage[]
-  /**
-   * Boundary marker — the last main-slice message id at spawn. Used by fork's
-   * runLoop to filter ownNew messages (belt-and-braces alongside the agent_id
-   * check; agent_id is sufficient on its own, watermark is the documentary
-   * anchor). NEVER use this for slicing inheritedMessages — inheritedMessages
-   * is captured as a complete snapshot at spawn time.
-   * See docs/superpowers/specs/2026-05-26-fork-agent-prefix-cache-design.md
-   */
-  readonly watermarkMsgID: MessageID
-  readonly model: { providerID: ProviderID; modelID: ModelID }
-}
 
 export type AgentOutcome =
   | {
@@ -146,12 +120,20 @@ export interface SpawnInput {
   model?: { providerID: ProviderID; modelID: ModelID }
   /** User/config request before resolving groups and inheritance. */
   requestedModel?: string
+  /** Trusted exact parent execution value, never model-authored. */
+  optionCandidate?: ActorOptionCandidate
   /** Host-owned account/grant/credential/workspace binding for this actor. */
   hostContext?: ActorHostContext
+  /** Private host-user binding, supplied only by an exact admitted parent. */
+  originalOwnerAccountID?: string
   /** Existing actor ID for an explicit continuation. */
   actorID?: string
+  /** Internal root lineage; overwritten from the trusted active execution context. */
+  rootOperationID?: string
   background: boolean
   parentActorID?: string
+  /** Transcript actor/session slice from which a full ForkContext was captured. */
+  forkContextSource?: ForkContextSource
   task_id?: string // Spec ②: bound user-task ID for postStop progress.md validation
   // Peer-only: directory the child session runs in. When set, the child's work
   // fiber is bound to that directory's Instance (via InstanceRef) so all its
@@ -161,6 +143,8 @@ export interface SpawnInput {
   // unset, the child shares the spawner's directory.
   cwd?: string
   forkContext?: ForkContext // NEW
+  /** Set internally by spawn() after validating and encoding the supplied context. */
+  encodedForkContext?: EncodedForkContext
   lifecycle?: Lifecycle
   /**
    * Optional structured-output format. When set to a json_schema format, the
@@ -200,8 +184,15 @@ export interface SpawnResult {
 
 export interface Interface {
   readonly spawn: (input: SpawnInput) => Effect.Effect<SpawnResult>
+  readonly resumeInput?: (input: {
+    sessionID: SessionID
+    actorID: string
+    claim: InputHandoffClaim
+    managedRoute?: ManagedProvider.RouteContext
+  }) => Effect.Effect<InputHandoffDisposition>
+  readonly hasOuterExecution?: (sessionID: SessionID, actorID: string, executionRevision: number) => Effect.Effect<boolean>
   readonly cancel: (sessionID: SessionID, actorID: string, mode: "graceful" | "forced") => Effect.Effect<void>
-  readonly getForkContext: (actorID: string) => Effect.Effect<ForkContext | undefined>
+  readonly getForkContext: (sessionID: SessionID, actorID: string) => Effect.Effect<ForkContextProjection | undefined>
   /**
    * Run ONE stall-watchdog scan pass synchronously (the same body the background
    * fiber repeats every WATCHDOG_SCAN_INTERVAL_MS). Exposed for deterministic
@@ -232,10 +223,12 @@ export const layer = Layer.effect(
     // ForkContext snapshot per actor, captured at spawn for fork agents
     // (contextMode = "full"). Read by fork's runLoop (see prompt.ts) and
     // cleared on terminal status. Fiber tracking moved to SessionRunState.
-    const forkContexts = new Map<string, { revision: number; context: ForkContext }>()
-    const clearForkContext = (actorID: string, revision: number) => {
-      const current = forkContexts.get(actorID)
-      if (current?.revision === revision) forkContexts.delete(actorID)
+    const forkContexts = new Map<string, { revision: number; hash: string; context: ForkContext }>()
+    const forkContextKey = (sessionID: SessionID, actorID: string) => `${sessionID}:${actorID}`
+    const clearForkContext = (sessionID: SessionID, actorID: string, revision: number) => {
+      const key = forkContextKey(sessionID, actorID)
+      const current = forkContexts.get(key)
+      if (current?.revision === revision) forkContexts.delete(key)
     }
 
     // Outer actor fibers are registered before onActorID is invoked. This
@@ -275,17 +268,28 @@ export const layer = Layer.effect(
       task: string
       task_id?: string
       model?: { providerID: ProviderID; modelID: ModelID }
+      variant?: string | null
       source: "spawn" | "hook"
       provenance?: MessageV2.Provenance
       format?: MessageV2.OutputFormat
+      receiptOnly?: boolean
+      executionRevision?: number
     }) {
-      const result = yield* sessionPrompt.prompt({
+      const result = input.receiptOnly
+        ? yield* sessionPrompt.loop({ sessionID: input.sessionID, agentID: input.actorID,
+            afterTurnReady: true,
+            manageExecution: false,
+            ...(input.actorID === "main" && input.executionRevision !== undefined
+              ? { executionRevision: input.executionRevision } : {}),
+            ...(input.model ? { model: input.model } : {}) })
+        : yield* sessionPrompt.prompt({
         sessionID: input.sessionID,
         agent: input.agentType,
         agentID: input.actorID,
         source: input.source,
         provenance: input.provenance,
         model: input.model,
+        ...(input.variant !== undefined ? { variant: input.variant } : {}),
         task_id: input.task_id,
         parts: [{ type: "text", text: input.task }],
         ...(input.format ? { format: input.format } : {}),
@@ -319,9 +323,12 @@ export const layer = Layer.effect(
       background: boolean
       model?: { providerID: ProviderID; modelID: ModelID }
       requestedModel?: string
+      optionCandidate?: ActorOptionCandidate
       hostContext?: ActorHostContext
+      originalOwnerAccountID?: string
       lifecycle: "ephemeral" | "persistent"
       forkContext?: ForkContext
+      encodedForkContext?: EncodedForkContext
       admitPending?: boolean
       /** Called only after the parked outer fiber is registered. */
       onActorID?: (actorID: string) => void
@@ -331,6 +338,15 @@ export const layer = Layer.effect(
       // gate; specialized/system agents and peers create no user tasks.
       gateEligible?: boolean
       format?: MessageV2.OutputFormat
+      receiptClaim?: InputHandoffClaim
+      onClaimDisposition?: (value: InputHandoffDisposition) => void
+      receiptOnly?: boolean
+      frozenReceipts?: readonly UserInput.BoundaryReceipt[]
+      frozenRoute?: ManagedProvider.RouteContext
+      rootOperationID?: string
+      preflightRoute?: ActorRoutePreflightResult
+      managedOperationRelease?: Effect.Effect<void>
+      directoryAdmission: DirectoryAdmission
       // When set, the child's work fiber runs under this InstanceContext (via
       // InstanceRef) instead of inheriting the spawner's. Used by peers placed
       // in their own git worktree so their tools resolve paths/write-boundary
@@ -343,10 +359,29 @@ export const layer = Layer.effect(
       // revision so no durable running row is stranded.
       let begunRevision: number | undefined
       let begunOutcome: Deferred.Deferred<AgentOutcome> | undefined
+      let preflightRoute = input.preflightRoute
+      let preflightExpectedExecutionRevision: number | undefined
+      let operationRelease = input.managedOperationRelease
+      let executionHostContext = input.hostContext
       let installedKey: string | undefined
       let installedRevision: number | undefined
       let installedFiber: Fiber.Fiber<unknown, unknown> | undefined
       const executionKey = cancelKey(input.sessionID, input.actorID)
+      const retirement: { unknown: boolean; lastInnerTurnID?: string; lastTurnOutcome?: "completed" | "cancelled" | "error" } = { unknown: false }
+      const settlement = () => ManagedProvider.enabled() && input.rootOperationID && retirement.lastInnerTurnID
+        ? { rootOperationID: input.rootOperationID, rootSessionID: preflightRoute?.bootstrap.rootSessionID, innerTurnID: retirement.lastInnerTurnID, turnOutcome: retirement.lastTurnOutcome } : undefined
+      const retireManagedExecution = (revision: number, outcome: "success" | "failure" | "cancelled") => Effect.gen(function* () {
+        const identity = settlement()
+        if (!identity || retirement.unknown) return
+        const result = yield* Effect.tryPromise({
+          try: () => ManagedProvider.finishActorExecution({
+            sessionID: input.sessionID, actorID: input.actorID, rootOperationID: identity.rootOperationID, executionRevision: revision,
+          }, outcome),
+          catch: (cause) => new Error(`managed execution retirement failed: ${String(cause)}`),
+        }).pipe(Effect.exit)
+        if (Exit.isSuccess(result) && result.value.accepted)
+          yield* actorReg.clearManagedSettlement(input.sessionID, input.actorID, revision, identity).pipe(Effect.ignore)
+      })
       const settledOutcome = (actor: Actor | undefined): AgentOutcome =>
         actor?.lastOutcome === "failure"
           ? { status: "failure", error: actor.lastError ?? "actor settled during setup" }
@@ -360,6 +395,9 @@ export const layer = Layer.effect(
         return Effect.uninterruptible(
           withExecutionLock(executionKey,
             Effect.gen(function* () {
+              const releaseExit = yield* (operationRelease ?? Effect.void).pipe(Effect.exit)
+              if (Exit.isFailure(releaseExit)) retirement.unknown = true
+              if (retirement.unknown) input.directoryAdmission.retain = true
               if (installedFiber) yield* Fiber.interrupt(installedFiber).pipe(Effect.ignore)
               if (installedKey && installedRevision !== undefined) {
                 yield* Effect.sync(() => {
@@ -367,13 +405,15 @@ export const layer = Layer.effect(
                   if (current?.revision === installedRevision) outerFibers.delete(installedKey!)
                 })
               }
-              const settled = yield* actorReg
-                .settleExecution(input.sessionID, input.actorID, revision, "failure", String(cause))
+              if (retirement.unknown) yield* actorReg.markExecutionUncertain(input.sessionID, input.actorID, revision, settlement()).pipe(Effect.ignore)
+              const settled = retirement.unknown ? false : yield* actorReg
+                .settleExecution(input.sessionID, input.actorID, revision, "failure", String(cause), settlement())
                 .pipe(Effect.orElseSucceed(() => false))
+              if (settled) yield* retireManagedExecution(revision, "failure")
               const winner = settled
                 ? ({ status: "failure", error: String(cause) } as const)
                 : settledOutcome(yield* actorReg.get(input.sessionID, input.actorID))
-              yield* Effect.sync(() => clearForkContext(input.actorID, revision))
+              yield* Effect.sync(() => clearForkContext(input.sessionID, input.actorID, revision))
               if (outcome) yield* Deferred.succeed(outcome, winner).pipe(Effect.ignore)
               return yield* Effect.failCause(cause)
             }),
@@ -381,7 +421,7 @@ export const layer = Layer.effect(
         )
       }
       const setupBody = withExecutionLock(executionKey,
-        Effect.uninterruptibleMask((restore) =>
+        Effect.uninterruptibleMask(() =>
         Effect.gen(function* () {
         const outcome = yield* Deferred.make<AgentOutcome>()
           begunOutcome = outcome
@@ -408,11 +448,22 @@ export const layer = Layer.effect(
         // One durable execution spans every preStop, completion-gate, and
         // postStop turn in this fork. Re-entries must not create fresh terminal
         // rows or expose an idle gap that lets cancellation overwrite success.
-        const executionRevision = yield* actorReg.beginExecution(
-          input.sessionID,
-          input.actorID,
-          input.admitPending ? "pending" : undefined,
-        )
+        let executionRevision: number | undefined
+        if (input.receiptClaim) {
+          const claimExecution = actorReg.beginExecutionForInput
+          if (!claimExecution) return undefined
+          const disposition = yield* claimExecution(input.sessionID, input.actorID, input.receiptClaim)
+          input.onClaimDisposition?.(disposition)
+          if (disposition.kind !== "fresh-claim") return undefined
+          executionRevision = disposition.claimedExecutionRevision
+        } else {
+          executionRevision = yield* actorReg.beginExecution(
+            input.sessionID,
+            input.actorID,
+            input.admitPending ? "pending" : undefined,
+            preflightExpectedExecutionRevision,
+          )
+        }
         if (executionRevision === undefined) {
           const existing = yield* actorReg.get(input.sessionID, input.actorID)
           return yield* Effect.die(
@@ -424,8 +475,59 @@ export const layer = Layer.effect(
           )
         }
           begunRevision = executionRevision
+        if (ManagedProvider.enabled()) {
+          if (!preflightRoute || !input.model || !input.rootOperationID)
+            return yield* Effect.die(new Error("managed actor execution is missing its route preflight"))
+          const storedOwner = actorReg.getDisplayOwner ? yield* actorReg.getDisplayOwner(input.sessionID,input.actorID) : undefined
+          const rootOwner = ManagedProvider.currentHostContext(preflightRoute.bootstrap.rootSessionID)?.ownerAccountID
+          const originalOwnerAccountID = storedOwner && (storedOwner === input.originalOwnerAccountID || storedOwner === rootOwner) ? storedOwner : undefined
+          const activated = yield* Effect.tryPromise({
+            try: () => ManagedProvider.activateActorOperation(
+              {
+                sessionID: input.sessionID,
+                actorID: input.actorID,
+                executionRevision: executionRevision!,
+                rootOperationID: input.rootOperationID!,
+              },
+              preflightRoute!,
+              { providerID: input.model!.providerID, modelID: input.model!.modelID },
+              {
+                ...(originalOwnerAccountID ? { ownerAccountID: originalOwnerAccountID } : {}),
+                ...(input.hostContext?.chatID ? { chatID: input.hostContext.chatID } : {}),
+                ...(input.hostContext?.workspaceID ? { workspaceID: input.hostContext.workspaceID } : {}),
+                ...(input.hostContext?.cwd ? { cwd: input.hostContext.cwd } : {}),
+                ...(input.hostContext?.goalID ? { goalID: input.hostContext.goalID } : {}),
+              },
+            ),
+            catch: (error) => new Error(`managed actor activation failed: ${String(error)}`),
+          }).pipe(Effect.orDie)
+          operationRelease = Effect.gen(function* () {
+            const captured = yield* SessionPrompt.persistManagedActorCapture(session, {
+              sessionID: input.sessionID, actorID: input.actorID, executionRevision: executionRevision!, rootOperationID: input.rootOperationID,
+            }).pipe(Effect.orElseSucceed(() => false))
+            if (!captured) yield* Effect.sync(() => log.warn("managed actor capture was not persisted", {
+              sessionID: input.sessionID, actorID: input.actorID, executionRevision,
+            }))
+          }).pipe(Effect.ensuring(Effect.promise(() => activated.release()).pipe(Effect.orDie)))
+          executionHostContext = {
+            ...(input.hostContext ?? {}), chatID: preflightRoute.bootstrap.stableChatID,
+            accountID: activated.scope.accountID, credentialRevision: activated.scope.credentialRevision,
+            grantID: preflightRoute.grantID, grantRevision: preflightRoute.grantRevision,
+          }
+          const updated = yield* actorReg.updateHostContextForExecution(input.sessionID, input.actorID, executionRevision, executionHostContext)
+          if (!updated) return yield* Effect.die(new Error("managed actor execution changed before binding attribution"))
+          if (!input.receiptOnly) {
+            if (!preflightRoute.modelRequestOptions) return yield* Effect.die(new Error("managed actor model options are unavailable"))
+            const saved = yield* actorReg.updateModelOptionsForExecution(input.sessionID, input.actorID, executionRevision, preflightRoute.modelRequestOptions)
+            if (!saved) return yield* Effect.die(new Error("managed actor execution changed before option attribution"))
+          }
+        }
         if (input.forkContext) {
-          yield* Effect.sync(() => forkContexts.set(input.actorID, { revision: executionRevision, context: input.forkContext! }))
+          yield* Effect.sync(() => forkContexts.set(forkContextKey(input.sessionID, input.actorID), {
+            revision: executionRevision,
+            hash: input.encodedForkContext?.snapshotSHA256 ?? "",
+            context: input.forkContext!,
+          }))
         }
         // A reusable actor may be resumed after an earlier cancellation. The
         // process-local hint is never authority and must not leak across epochs.
@@ -456,7 +558,7 @@ export const layer = Layer.effect(
                     ...(input.model
                       ? { effectiveModel: { providerID: input.model.providerID, modelID: input.model.modelID } }
                       : {}),
-                  ...(input.hostContext ? { hostContext: input.hostContext } : {}),
+                  ...(executionHostContext ? { hostContext: executionHostContext } : {}),
                   ...extra,
                 },
               })
@@ -501,7 +603,10 @@ export const layer = Layer.effect(
               input.actorID,
               runAgentLoop({
                 ...input,
+                ...(ManagedProvider.enabled() && !input.receiptOnly ? { variant: preflightRoute?.modelRequestOptions?.options.reasoning_effort ?? null } : {}),
                 task: reentryDecision ? reentryDecision.reason : input.task,
+                receiptOnly: Boolean(input.receiptOnly && iteration === 0 && !reentryDecision),
+                executionRevision: input.receiptOnly && input.actorID === "main" ? executionRevision : undefined,
                 source: reentryDecision ? "hook" : "spawn",
                 provenance: reentryDecision
                   ? {
@@ -512,12 +617,13 @@ export const layer = Layer.effect(
                     }
                   : undefined,
               }),
-              { executionRevision },
+              { executionRevision, rootOperationID: input.rootOperationID, preflightRoute, retirement, ...(iteration === 0 && input.frozenReceipts ? { frozenReceipts: input.frozenReceipts } : {}) },
             )
             finalText = turn.finalText
             structured = turn.structured
 
             iteration++
+            if (input.actorID === "main") break
             if (iteration > MAX_PRE_REACT) {
               yield* bus.publish(HookEvent.ReActMaxReached, {
                 phase: "pre",
@@ -592,10 +698,11 @@ export const layer = Layer.effect(
                       runAgentLoop({
                         ...input,
                         task: decision.reentryText,
+                        receiptOnly: false,
                         source: "hook",
                         provenance: { hookPhase: "post", hookIteration: gateIter, pluginNames: [], hookIDs: [] },
                       }),
-                      { executionRevision },
+                      { executionRevision, rootOperationID: input.rootOperationID, preflightRoute, retirement },
                     ).pipe(
                       Effect.catch(() =>
                         Effect.gen(function* () {
@@ -637,12 +744,18 @@ export const layer = Layer.effect(
                 // text + completion-gate fields AND structured when present.
                 const deliveryText =
                   structured !== undefined ? JSON.stringify(structured) : (reconciledText ?? "(no output)")
-                const settled = yield* actorReg
-                  .settleExecution(input.sessionID, input.actorID, executionRevision, "success")
+                let settled = yield* actorReg
+                  .settleExecution(input.sessionID, input.actorID, executionRevision, "success", undefined, settlement())
                   .pipe(Effect.orElseSucceed(() => false))
+                if (settled) yield* retireManagedExecution(executionRevision, "success")
+                if (!settled && input.actorID === "main") {
+                  const current = yield* actorReg.get(input.sessionID, input.actorID)
+                  settled = current?.status === "idle" && current.executionRevision === executionRevision &&
+                    current.lastOutcome === "success"
+                }
                 if (!settled) {
                   yield* Deferred.succeed(outcome, { status: "cancelled" as const })
-                  yield* Effect.sync(() => clearForkContext(input.actorID, executionRevision))
+                  yield* Effect.sync(() => clearForkContext(input.sessionID, input.actorID, executionRevision))
                   yield* Effect.sync(() => cancelling.delete(cancelKey(input.sessionID, input.actorID)))
                   return
                 }
@@ -674,7 +787,7 @@ export const layer = Layer.effect(
                   | { reason: string; contributingPluginNames: string[]; contributingHookIDs: string[] }
                   | undefined
 
-                while (true) {
+                while (input.actorID !== "main") {
                   const decision = yield* plugin.triggerActorPostStop({
                     sessionID: input.sessionID,
                     parentSessionID: input.parentSessionID,
@@ -730,6 +843,7 @@ export const layer = Layer.effect(
                     runAgentLoop({
                       ...input,
                       task: postReentry.reason,
+                      receiptOnly: false,
                       source: "hook",
                       provenance: {
                         hookPhase: "post",
@@ -738,7 +852,7 @@ export const layer = Layer.effect(
                         hookIDs: postReentry.contributingHookIDs,
                       },
                     }),
-                    { executionRevision },
+                    { executionRevision, rootOperationID: input.rootOperationID, preflightRoute, retirement },
                   ).pipe(
                     // postStop LLM failure: log + break loop, do NOT propagate
                     Effect.catch(() =>
@@ -756,7 +870,7 @@ export const layer = Layer.effect(
                   lastFinalText = newTurn.finalText
                 }
 
-                yield* Effect.sync(() => clearForkContext(input.actorID, executionRevision))
+                yield* Effect.sync(() => clearForkContext(input.sessionID, input.actorID, executionRevision))
                 yield* Effect.sync(() => cancelling.delete(cancelKey(input.sessionID, input.actorID)))
               }),
             onFailure: (cause) =>
@@ -764,16 +878,19 @@ export const layer = Layer.effect(
                 const cancelled = Cause.hasInterruptsOnly(cause)
                 const error = Cause.pretty(cause)
                 const status: "cancelled" | "failure" = cancelled ? "cancelled" : "failure"
-                const settled = yield* actorReg
+                if (retirement.unknown) yield* actorReg.markExecutionUncertain(input.sessionID, input.actorID, executionRevision, settlement()).pipe(Effect.ignore)
+                const settled = retirement.unknown ? false : yield* actorReg
                   .settleExecution(
                     input.sessionID,
                     input.actorID,
                     executionRevision,
                     status,
                     cancelled ? undefined : error,
+                    settlement(),
                   )
                   .pipe(Effect.orElseSucceed(() => false))
                 if (settled) {
+                  yield* retireManagedExecution(executionRevision, cancelled ? "cancelled" : "failure")
                   yield* notify(cancelled ? "cancelled" : "failed", cancelled ? {} : { error }, executionRevision)
                 }
                 if (!cancelled || !cancelling.has(cancelKey(input.sessionID, input.actorID))) {
@@ -782,7 +899,7 @@ export const layer = Layer.effect(
                     cancelled ? { status: "cancelled" as const } : { status: "failure" as const, error },
                   )
                 }
-                yield* Effect.sync(() => clearForkContext(input.actorID, executionRevision))
+                yield* Effect.sync(() => clearForkContext(input.sessionID, input.actorID, executionRevision))
                 yield* Effect.sync(() => cancelling.delete(cancelKey(input.sessionID, input.actorID)))
               }),
           }),
@@ -813,6 +930,13 @@ export const layer = Layer.effect(
         installedKey = key
         installedRevision = executionRevision
         const outerWork = gatedWork.pipe(
+            Effect.ensuring(Effect.gen(function* () {
+              const releaseExit=yield* (operationRelease ?? Effect.void).pipe(Effect.exit)
+              if (Exit.isFailure(releaseExit)) retirement.unknown=true
+              if (retirement.unknown) input.directoryAdmission.retain=true
+              if (!retirement.unknown) input.directoryAdmission.lease.release()
+              if (Exit.isFailure(releaseExit)) return yield* Effect.failCause(releaseExit.cause)
+            })),
             Effect.ensuring(
               Effect.sync(() => {
                 const current = outerFibers.get(key)
@@ -820,7 +944,12 @@ export const layer = Layer.effect(
               }),
             ),
           )
-          const fiber = yield* restore(outerWork).pipe(Effect.forkIn(scope))
+          // Setup/claim stays masked through registration, but detached actor
+          // work must inherit an interruptible status even when forkWork is
+          // called from its masked setup/transfer block.
+          const fiber = yield* outerWork.pipe(Effect.interruptible, Effect.forkIn(scope))
+          input.directoryAdmission.outer = true
+          input.directoryAdmission.transferred = true
           installedFiber = fiber
           const currentOuter = outerFibers.get(key)
           if (!currentOuter || currentOuter.revision < executionRevision) {
@@ -836,7 +965,7 @@ export const layer = Layer.effect(
             if (installed?.revision === executionRevision) outerFibers.delete(key)
             yield* Fiber.interrupt(fiber).pipe(Effect.ignore)
             yield* Deferred.succeed(outcome, settledOutcome(current)).pipe(Effect.ignore)
-            yield* Effect.sync(() => clearForkContext(input.actorID, executionRevision))
+            yield* Effect.sync(() => clearForkContext(input.sessionID, input.actorID, executionRevision))
             return { fiber, outcome, startGate }
           }
           // Return while the gate is still closed. The callback and final
@@ -847,9 +976,44 @@ export const layer = Layer.effect(
         ),
       )
       const setup = setupBody
-      return Effect.uninterruptible(
+      return Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
+        if (ManagedProvider.enabled() && !preflightRoute) {
+          if (!input.model || !input.rootOperationID)
+            return yield* Effect.die(new Error("managed actor route preflight requires a bound model and root operation"))
+          const current = yield* actorReg.get(input.sessionID, input.actorID)
+          if (!current) return yield* Effect.die(new Error("managed actor route preflight requires a registered actor"))
+          preflightExpectedExecutionRevision = current.executionRevision
+          const parent = input.parentActorID ? yield* actorReg.get(input.parentSessionID, input.parentActorID) : undefined
+          const sameParentModel = !!parent && parent.status === "running" && parent.effectiveModel?.providerID === input.model.providerID &&
+            parent.effectiveModel?.modelID === input.model.modelID
+          const parentScope = sameParentModel && parent
+            ? ManagedProvider.currentScope(input.parentSessionID, parent.actorID, parent.executionRevision) : undefined
+          const inheritedGrant = input.frozenRoute?.grantID ?? (sameParentModel ? parent?.hostContext?.grantID : undefined)
+          const inheritedAccount = input.frozenRoute?.inheritedAccountID ?? (sameParentModel ? parentScope?.accountID : undefined)
+          preflightRoute = yield* restore(Effect.tryPromise({
+            try: () => ManagedProvider.preflightActorRoute({
+              sessionID: input.sessionID,
+              rootOperationID: input.rootOperationID!,
+              actorID: input.actorID,
+              ...(input.parentActorID ? { parentActorID: input.parentActorID } : {}),
+              expectedExecutionRevision: current.executionRevision,
+              model: { providerID: input.model!.providerID, modelID: input.model!.modelID },
+              modelSource: input.requestedModel ? "explicit" : "inherited",
+              ...(!input.receiptOnly ? (input.optionCandidate ? { optionCandidate: input.optionCandidate } : current.modelRequestOptions ? { savedOptionSnapshot: current.modelRequestOptions } : { optionCandidate: { version: 1 as const, source: { kind: "default" as const }, model: { providerID: input.model!.providerID, modelID: input.model!.modelID }, variant: null } }) : {}),
+              ...(inheritedGrant ? { grantID: inheritedGrant } : {}),
+              ...(inheritedAccount ? { inheritedAccountID: inheritedAccount } : {}),
+              ...(input.frozenRoute?.preferredAccountID ? { preferredAccountID: input.frozenRoute.preferredAccountID } : {}),
+            }),
+            catch: (error) => new Error(`managed actor route preflight failed: ${String(error)}`),
+          }).pipe(Effect.orDie))
+          if (input.frozenRoute && (preflightRoute.connectionID !== input.frozenRoute.connectionID ||
+              preflightRoute.modelRouteID !== input.frozenRoute.modelRouteID || preflightRoute.modelID !== input.frozenRoute.modelID ||
+              (input.frozenRoute.grantID && preflightRoute.grantID !== input.frozenRoute.grantID)))
+            return yield* Effect.die(new Error("managed actor route changed from frozen receipt admission"))
+        }
         const parked = yield* setup
+          if (!parked) return undefined
         if (input.onActorID) {
           yield* Effect.sync(() => {
             try {
@@ -872,7 +1036,7 @@ export const layer = Layer.effect(
                 if (installed?.revision === revision) outerFibers.delete(executionKey)
                 yield* Fiber.interrupt(parked.fiber).pipe(Effect.ignore)
               yield* Deferred.succeed(parked.outcome, settledOutcome(current)).pipe(Effect.ignore)
-              yield* Effect.sync(() => clearForkContext(input.actorID, revision))
+              yield* Effect.sync(() => clearForkContext(input.sessionID, input.actorID, revision))
                 return { fiber: parked.fiber, outcome: parked.outcome }
               }
               yield* Deferred.succeed(parked.startGate, undefined)
@@ -884,7 +1048,7 @@ export const layer = Layer.effect(
       ).pipe(Effect.catchCause((cause) => compensate(cause).pipe(Effect.orDie)))
     }
 
-    const spawnPeer = Effect.fn("Actor.spawnPeer")(function* (input: SpawnInput) {
+    const spawnPeer = Effect.fn("Actor.spawnPeer")(function* (input: AdmittedSpawn) {
       const parentHostContext = input.parentActorID
         ? yield* actorReg.get(input.sessionID, input.parentActorID)
         : undefined
@@ -893,10 +1057,10 @@ export const layer = Layer.effect(
       // session tool created), bind the child's work fiber to that directory's
       // Instance so its file tools / write boundary are isolated there. A
       // worktree is just a directory — spawn neither knows nor cares how it was
-      // made. Best-effort: a bad/unresolvable dir falls back to the shared dir.
+      // made. An explicit directory that cannot bind fails before launch.
       const instanceRef = input.cwd
         ? yield* Effect.promise(() => Instance.provide({ directory: input.cwd!, fn: () => Instance.current })).pipe(
-            Effect.catch(() => Effect.succeed(undefined)),
+            Effect.orDie,
           )
         : undefined
 
@@ -942,11 +1106,16 @@ export const layer = Layer.effect(
                 background: input.background,
                 model: input.model,
                 requestedModel: input.requestedModel,
+        ...(input.optionCandidate ? { optionCandidate: input.optionCandidate } : {}),
+                rootOperationID: input.rootOperationID,
                 hostContext,
+                ...(input.originalOwnerAccountID ? { originalOwnerAccountID:input.originalOwnerAccountID } : {}),
                 lifecycle: input.lifecycle ?? "persistent",
                 forkContext: input.forkContext,
+                encodedForkContext: input.encodedForkContext,
                 task_id: input.task_id,
                 format: input.format,
+              directoryAdmission: input.directoryAdmission,
               admitPending: true,
               ...(instanceRef ? { instanceRef } : {}),
             })
@@ -978,11 +1147,12 @@ export const layer = Layer.effect(
                 const cancelled = yield* actorReg.cancelPending(child.id, child.id)
                 if (cancelled) {
                   yield* Deferred.succeed(outcome, { status: "cancelled" as const }).pipe(Effect.ignore)
-                  clearForkContext(child.id, 0)
+                  clearForkContext(child.id, child.id, 0)
                 }
               }
               yield* Effect.sync(() => {
                 pendingOutcomes.delete(pendingKey)
+                if (!input.directoryAdmission.outer && !input.directoryAdmission.retain) input.directoryAdmission.lease.release()
               })
             }),
           ),
@@ -1005,14 +1175,21 @@ export const layer = Layer.effect(
             requestedModel: input.requestedModel,
             effectiveModel: input.model,
             hostContext,
+            ...(input.originalOwnerAccountID ? { originalOwnerAccountID:input.originalOwnerAccountID } : {}),
+            ...(input.encodedForkContext ? { forkContext: input.encodedForkContext } : {}),
           })
           if (input.forkContext) {
             // Peers are standing, addressable sessions. Their initial row and
             // fork snapshot exist before the first inbox-driven turn.
-            forkContexts.set(child.id, { revision: 0, context: input.forkContext })
+            forkContexts.set(forkContextKey(child.id, child.id), {
+              revision: 0,
+              hash: input.encodedForkContext?.snapshotSHA256 ?? "",
+              context: input.forkContext,
+            })
           }
           pendingOutcomes.set(pendingKey, outcome)
           const fiber = yield* launcher.pipe(Effect.interruptible, Effect.forkIn(scope))
+          input.directoryAdmission.transferred = true
           if (input.onActorID) {
             yield* Effect.sync(() => {
               try {
@@ -1033,7 +1210,7 @@ export const layer = Layer.effect(
               if (cancelled) yield* Deferred.succeed(outcome, { status: "cancelled" as const }).pipe(Effect.ignore)
               yield* Effect.sync(() => {
                 pendingOutcomes.delete(pendingKey)
-                if (input.forkContext) clearForkContext(child.id, 0)
+                if (input.forkContext) clearForkContext(child.id, child.id, 0)
               })
               return yield* Effect.failCause(cause)
             }),
@@ -1055,7 +1232,7 @@ export const layer = Layer.effect(
       }
     })
 
-    const spawnSubagent = Effect.fn("Actor.spawnSubagent")(function* (input: SpawnInput) {
+    const spawnSubagent = Effect.fn("Actor.spawnSubagent")(function* (input: AdmittedSpawn) {
       // Once a new registry row exists, keep setup uninterruptible until
       // forkWork has begun the durable revision and parked/registers the outer
       // fiber. Otherwise reclaim can interrupt this caller between register()
@@ -1074,17 +1251,42 @@ export const layer = Layer.effect(
       // A resumed actor keeps its durable host binding unconditionally. The
       // model-facing actor tool has no authority to rebind an existing child;
       // a future rebind must be a separate authenticated host-only operation.
-      const parentHostContext = input.parentActorID
-        ? yield* actorReg.get(input.parentSessionID ?? input.sessionID, input.parentActorID)
+      const sourceActorID = input.encodedForkContext?.sourceActorID ?? input.parentActorID
+      const parentHostContext = sourceActorID || input.encodedForkContext
+        ? yield* actorReg.get(input.parentSessionID ?? input.sessionID, sourceActorID ?? "main")
         : undefined
       const inheritedHostContext = existing
         ? existing.hostContext
             : (input.hostContext ?? parentHostContext?.hostContext)
-      const persistedRequestedModel = input.requestedModel ?? existing?.requestedModel
-          const persistedEffectiveModel: SpawnResult["effectiveModel"] =
-            input.model ?? (existing?.effectiveModel as SpawnResult["effectiveModel"])
+      let runForkContext = input.forkContext
+      let runEncodedForkContext = input.encodedForkContext
+      if (input.context === "full") {
+        if (existing) {
+          const stored = yield* actorReg.getForkContext(input.sessionID, input.actorID!)
+          const projection = yield* getForkContext(input.sessionID, input.actorID!)
+          runForkContext = projection?.context
+          runEncodedForkContext = projection?.encoded
+          if (!stored || !projection || !runForkContext || !runEncodedForkContext)
+            return yield* Effect.die(new Error("full-context actor snapshot is unavailable or invalid"))
+          if (input.encodedForkContext && (input.encodedForkContext.snapshotSHA256 !== stored.snapshotSHA256 ||
+            input.encodedForkContext.sourceSessionID !== stored.sourceSessionID ||
+            input.encodedForkContext.sourceActorID !== stored.sourceActorID))
+            return yield* Effect.die(new Error("existing full-context actor snapshot is immutable"))
+          if (input.model && (input.model.providerID !== stored.modelProviderID || input.model.modelID !== stored.modelID))
+            return yield* Effect.die(new Error("existing full-context actor model cannot be replaced"))
+        } else if (!runForkContext || !input.encodedForkContext) {
+          return yield* Effect.die(new Error("new full-context actor requires a validated durable snapshot"))
+        }
+      }
+      const persistedRequestedModel = existing && input.context === "full"
+        ? existing.requestedModel
+        : input.requestedModel ?? existing?.requestedModel
+      const persistedEffectiveModel: SpawnResult["effectiveModel"] =
+        existing && input.context === "full"
+          ? (existing.effectiveModel as SpawnResult["effectiveModel"])
+          : input.model ?? (existing?.effectiveModel as SpawnResult["effectiveModel"])
 
-      if (existing) {
+      if (existing && input.context !== "full") {
         yield* actorReg.updateModel(input.sessionID, input.actorID!, input.requestedModel, input.model)
       }
 
@@ -1101,7 +1303,7 @@ export const layer = Layer.effect(
       const actor = existing ?? (yield* actorReg.registerAllocated({
         sessionID: input.sessionID,
         mode: "subagent",
-        parentActorID: input.parentActorID,
+        parentActorID: input.encodedForkContext?.sourceActorID ?? input.parentActorID,
         agent: input.agentType,
         description: input.description ?? input.agentType,
         contextMode: input.context,
@@ -1110,8 +1312,10 @@ export const layer = Layer.effect(
         lifecycle: input.lifecycle ?? "ephemeral",
         tools: input.tools,
         requestedModel: input.requestedModel,
-        effectiveModel: input.model,
+        effectiveModel: persistedEffectiveModel,
         hostContext: inheritedHostContext,
+        ...(input.originalOwnerAccountID ? { originalOwnerAccountID:input.originalOwnerAccountID } : {}),
+        ...(runEncodedForkContext ? { forkContext: runEncodedForkContext } : {}),
       }))
       const actorID = actor.actorID
 
@@ -1119,7 +1323,7 @@ export const layer = Layer.effect(
       // Excluded: agents with hardcoded `prompt` (explore/title/summary — own
       // contracts), checkpoint-writer (special — task is itself a complete
       // writer-instruction string), and peer mode (routes via spawnPeer).
-      const { fiber, outcome } = yield* forkWork({
+      const started = yield* forkWork({
         sessionID: input.sessionID,
         parentSessionID: input.parentSessionID ?? input.sessionID,
         parentActorID: input.parentActorID,
@@ -1130,15 +1334,22 @@ export const layer = Layer.effect(
         background: input.background,
         model: persistedEffectiveModel,
         requestedModel: persistedRequestedModel,
+        ...(input.optionCandidate ? { optionCandidate: input.optionCandidate } : {}),
+        rootOperationID: input.rootOperationID,
         hostContext: inheritedHostContext,
+        ...(!existing && input.originalOwnerAccountID ? { originalOwnerAccountID:input.originalOwnerAccountID } : {}),
         lifecycle: input.lifecycle ?? "ephemeral",
-        forkContext: input.forkContext,
+        forkContext: runForkContext,
+        encodedForkContext: runEncodedForkContext,
         task_id: input.task_id,
             onActorID: input.onActorID,
         gateEligible,
         format: input.format,
         instanceRef,
+        directoryAdmission: input.directoryAdmission,
       })
+      if (!started) return yield* Effect.die(new Error("Subagent execution did not start"))
+      const { fiber, outcome } = started
       if (input.onReady) yield* Effect.ignore(input.onReady({ actorID, sessionID: input.sessionID }))
           if (!input.background) yield* restore(Fiber.join(fiber).pipe(Effect.ignore))
       return {
@@ -1153,9 +1364,180 @@ export const layer = Layer.effect(
       )
     })
 
+    const spawnInner = Effect.fn("Actor.spawnInner")(function* (input: AdmittedSpawn) {
+      const activeExecution = Option.getOrUndefined(yield* Effect.serviceOption(ActorExecutionContext))
+      let prepared = { ...input, rootOperationID: activeExecution?.rootOperationID }
+      if (input.forkContext) {
+        const source = input.forkContextSource ?? {
+          sessionID: input.mode === "peer" ? input.sessionID : input.parentSessionID ?? input.sessionID,
+          actorID: input.parentActorID ?? "main",
+        }
+        const sourceActor = yield* actorReg.get(source.sessionID, source.actorID)
+        if (!sourceActor) return yield* Effect.die(new Error("full-context source actor membership is unavailable"))
+        const sourceProjection = sourceActor.mode !== "main" && sourceActor.contextMode === "full"
+          ? yield* getForkContext(source.sessionID, source.actorID)
+          : undefined
+        if (sourceActor.mode !== "main" && sourceActor.contextMode === "full" && !sourceProjection)
+          return yield* Effect.die(new Error("full-context source permission lineage is unavailable"))
+        // Snapshot.model is the destination worker model. Source actor model is
+        // provenance and may differ when a deliberate lower-cost fork is chosen.
+        const proposedHostContext = input.hostContext ?? sourceActor.hostContext
+        if ((proposedHostContext?.chatID ?? null) !== (sourceActor.hostContext?.chatID ?? null) ||
+          (proposedHostContext?.workspaceID ?? null) !== (sourceActor.hostContext?.workspaceID ?? null))
+          return yield* Effect.die(new Error("full-context destination must retain the source chat/workspace lineage"))
+        if (input.model && (input.model.providerID !== input.forkContext.model.providerID ||
+          input.model.modelID !== input.forkContext.model.modelID))
+          return yield* Effect.die(new Error("full-context actor model cannot replace the captured model"))
+        const encodedForkContext = yield* Effect.tryPromise({
+          try: () => encodeForkContext(input.forkContext!, source),
+          catch: (error) => new Error(`full-context snapshot unavailable: ${String(error)}`),
+        }).pipe(Effect.orDie)
+        const inheritedTools = intersectToolWhitelists(
+          sourceProjection?.effectiveToolWhitelist,
+          Array.isArray(sourceActor.tools) ? sourceActor.tools : undefined,
+          Array.isArray(input.tools) ? input.tools : undefined,
+        )
+        prepared = {
+          ...input,
+          rootOperationID: input.rootOperationID ?? activeExecution?.rootOperationID,
+          parentSessionID: input.parentSessionID ?? source.sessionID,
+          parentActorID: source.actorID,
+          forkContextSource: source,
+          encodedForkContext,
+          model: input.model ?? input.forkContext.model,
+          ...(inheritedTools ? { tools: inheritedTools } : {}),
+        }
+      } else if (input.context === "full" && !input.actorID) {
+        return yield* Effect.die(new Error("new full-context actors require a complete captured ForkContext"))
+      }
+      if (prepared.mode === "peer") return yield* spawnPeer(prepared)
+      return yield* spawnSubagent(prepared)
+    })
+
     const spawn = Effect.fn("Actor.spawn")(function* (input: SpawnInput) {
-      if (input.mode === "peer") return yield* spawnPeer(input)
-      return yield* spawnSubagent(input)
+      return yield* Effect.uninterruptibleMask((restore)=>Effect.gen(function* () {
+      if (!(yield* actorReg.assertDirectoryActive(input.parentSessionID ?? input.sessionID, input.parentActorID))) return yield* Effect.die(new Error('parent directory scope retired'))
+      if (input.actorID && !(yield* actorReg.assertDirectoryActive(input.sessionID,input.actorID))) return yield* Effect.die(new Error('actor directory scope retired'))
+      const requested = input.cwd ?? (yield* InstanceState.directory)
+      const directory = yield* Effect.tryPromise({try:()=>realpath(requested),catch:()=>new Error('actor directory unavailable')}).pipe(Effect.orDie)
+      const lease = yield* actorReg.admitExecutionDirectory(directory)
+      if (!lease) return yield* Effect.die(new Error('actor directory unavailable'))
+      const admission:DirectoryAdmission = {lease,transferred:false,outer:false,retain:false}
+      return yield* restore(spawnInner({...input,directoryAdmission:admission})).pipe(Effect.ensuring(Effect.sync(()=>{if (!admission.transferred && !admission.retain) lease.release()})))
+      }))
+    })
+
+    const resumeInput = Effect.fn("Actor.resumeInput")(function* (input: {
+      sessionID: SessionID
+      actorID: string
+      claim: InputHandoffClaim
+      managedRoute?: ManagedProvider.RouteContext
+    }) {
+      if (!(yield* actorReg.assertDirectoryActive(input.sessionID,input.actorID))) return {kind:'unavailable',reason:'directory scope retired'} as const
+      const inspectHandoff = actorReg.inspectInputHandoff
+      const prior = inspectHandoff ? yield* inspectHandoff(input.sessionID, input.actorID, input.claim) : undefined
+      if (prior) {
+        const uncertain = ManagedProvider.enabled() && input.managedRoute
+          ? yield* actorReg.uncertainManagedExecution(input.sessionID, input.actorID) : undefined
+        if (!uncertain || prior.kind !== "existing-claim" || prior.claimedExecutionRevision !== uncertain.executionRevision) return prior
+      }
+      if (ManagedProvider.enabled() && input.managedRoute) {
+        yield* SessionPrompt.reconcileManagedActorExecution(actorReg, input.sessionID, input.actorID,
+          state.assertNotBusy(input.sessionID, input.actorID),
+          (revision) => Effect.sync(() => outerFibers.get(cancelKey(input.sessionID, input.actorID))?.revision === revision))
+      }
+      if (prior && inspectHandoff) return (yield* inspectHandoff(input.sessionID, input.actorID, input.claim)) ?? prior
+      const actor = yield* actorReg.get(input.sessionID, input.actorID)
+      if (!actor) return { kind: "unavailable", reason: "actor membership is unavailable" } as const
+      if (actor.status !== "idle" || actor.executionRevision !== input.claim.expectedExecutionRevision)
+        return { kind: "unavailable", reason: "actor is not idle at the expected execution revision" } as const
+      if (actor.hostContext?.chatID !== input.claim.stableChatID)
+        return { kind: "unavailable", reason: "actor is not bound to this host chat" } as const
+      const forkProjection = actor.mode !== "main" && actor.contextMode === "full"
+        ? yield* getForkContext(input.sessionID, input.actorID)
+        : undefined
+      const forkContext = forkProjection?.context
+      if (actor.mode !== "main" && actor.contextMode === "full" && !forkProjection)
+        return { kind: "unavailable", reason: "full-context actor snapshot is unavailable for resume" } as const
+      let agentType = actor.agent
+      let effectiveModel = actor.effectiveModel
+      if (actor.mode === "main") {
+        const messages = yield* session.messages({ sessionID: input.sessionID, agentID: "main" })
+        const latestUser = messages.findLast((message) => message.info.role === "user")
+        if (latestUser?.info.role === "user") {
+          agentType = latestUser.info.agent
+          effectiveModel ??= { providerID: latestUser.info.model.providerID, modelID: latestUser.info.model.modelID }
+        }
+      }
+      if (!effectiveModel) return { kind: "unavailable", reason: "actor effective model is unavailable" } as const
+      const agentInfo = yield* agents.get(agentType)
+      if (!agentInfo) return { kind: "unavailable", reason: "actor agent configuration is unavailable" } as const
+      if (ManagedProvider.enabled() && !input.managedRoute) return { kind: "route-required" } as const
+      if (input.managedRoute && (input.managedRoute.rootOperationID !== input.claim.rootOperationID ||
+          input.managedRoute.modelID !== effectiveModel.modelID ||
+          (input.managedRoute.providerID !== effectiveModel.providerID && input.managedRoute.connectionID !== effectiveModel.providerID)))
+        return { kind: "unavailable", reason: "managed route does not match the actor's frozen model" } as const
+      const frozenReceipts = yield* Effect.sync(() => UserInput.snapshotBoundary({
+        sessionID: input.sessionID, actorID: input.actorID,
+        binding: { owner: input.claim.owner, stableChatID: input.claim.stableChatID, mapRevision: input.claim.mapRevision,
+          mappingRevision: input.claim.mappingRevision, workspaceRevision: input.claim.workspaceRevision },
+        afterTurnReady: true,
+        prepared: { expectedExecutionRevision: input.claim.expectedExecutionRevision, requestID: input.claim.requestID },
+      }))
+      if (!frozenReceipts.length) return { kind: "unavailable", reason: "the requested input is not the eligible ordered batch prefix" } as const
+      const frozenModel = frozenReceipts[0]!.modelRequestOptions.model
+      if (frozenModel && (frozenModel.providerID !== effectiveModel.providerID || frozenModel.modelID !== effectiveModel.modelID))
+        return { kind: "unavailable", reason: "receipt model does not match the actor's fixed model" } as const
+      if (input.managedRoute && frozenReceipts[0]!.modelRequestOptions.routeID &&
+          frozenReceipts[0]!.modelRequestOptions.routeID !== input.managedRoute.modelRouteID)
+        return { kind: "unavailable", reason: "receipt route does not match the admitted actor route" } as const
+      const currentSession = yield* session.get(input.sessionID)
+      const parentSessionID = actor.mode === "peer" ? (currentSession.parentID ?? input.sessionID) : input.sessionID
+      const requestedDirectory = actor.hostContext?.cwd ?? currentSession.directory
+      const resolvedDirectory = yield* Effect.tryPromise({try:()=>realpath(requestedDirectory),catch:()=>new Error('actor directory unavailable')}).pipe(Effect.option)
+      if (Option.isNone(resolvedDirectory)) return {kind:'unavailable',reason:'actor directory unavailable'} as const
+      let disposition: InputHandoffDisposition = { kind: "unavailable", reason: "resume claim was not attempted" }
+      const start = Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+      const directoryLease = yield* actorReg.admitExecutionDirectory(resolvedDirectory.value)
+      if (!directoryLease) return {kind:'unavailable',reason:'actor directory unavailable'} as const
+      const directoryAdmission:DirectoryAdmission={lease:directoryLease,transferred:false,outer:false,retain:false}
+      const startWork = Effect.gen(function* () {
+      const instanceRef = yield* Effect.tryPromise({try:()=>Instance.provide({directory:requestedDirectory,fn:()=>Instance.current}),catch:()=>new Error('actor directory unavailable')}).pipe(Effect.orDie)
+      const started = yield* forkWork({
+        sessionID: input.sessionID,
+        parentSessionID,
+        parentActorID: actor.parentActorID,
+        actorID: actor.actorID,
+        agentType,
+        task: "",
+        description: actor.description,
+        background: actor.background,
+        model: effectiveModel as SpawnResult["effectiveModel"],
+        requestedModel: actor.requestedModel,
+        rootOperationID: input.claim.rootOperationID,
+        hostContext: actor.hostContext,
+        lifecycle: actor.lifecycle,
+        forkContext,
+        encodedForkContext: forkProjection?.encoded,
+        gateEligible: agentInfo.mode === "subagent" && !agentInfo.prompt && actor.agent !== "checkpoint-writer",
+        receiptOnly: true,
+        frozenReceipts,
+        ...(input.managedRoute ? { frozenRoute: input.managedRoute } : {}),
+        receiptClaim: { ...input.claim, agent: agentType, effectiveModel, expectedReceipts: frozenReceipts,
+          ...(actor.hostContext ? { hostContext: actor.hostContext } : {}) },
+        onClaimDisposition: (value) => { disposition = value },
+        directoryAdmission,
+        instanceRef,
+      })
+      const claimDisposition = disposition as InputHandoffDisposition
+      if (started && claimDisposition.kind === "fresh-claim") {
+        if (!actor.background) yield* Effect.forkIn(Fiber.join(started.fiber).pipe(Effect.ignore), scope)
+      }
+      return claimDisposition
+      })
+      return yield* restore(startWork).pipe(Effect.ensuring(Effect.sync(()=>{if (!directoryAdmission.transferred && !directoryAdmission.retain) directoryLease.release()})))
+      }))
+      return yield* start
     })
 
     // === Unified terminal notification (T41) ===
@@ -1231,7 +1613,7 @@ export const layer = Layer.effect(
             if (pending) yield* Deferred.succeed(pending, { status: "cancelled" as const }).pipe(Effect.ignore)
             yield* notifyTerminal(sessionID, actorID, actor!, "cancelled", actor!.executionRevision)
             yield* Effect.sync(() => {
-              clearForkContext(actorID, actor!.executionRevision)
+              clearForkContext(sessionID, actorID, actor!.executionRevision)
               pendingOutcomes.delete(key)
             })
             return
@@ -1251,10 +1633,16 @@ export const layer = Layer.effect(
           .pipe(Effect.orElseSucceed(() => false))
         if (!settled) return
         yield* Effect.sync(() => cancelling.add(key))
-        const outerWork = outerFibers.get(key)
-        if (outerWork?.revision === actor.executionRevision) {
+        // The actor fiber may be awaiting SessionRunState's main runner. Stop
+        // that nested runner first so its interruption wakes the outer wait;
+        // interrupting only the waiter can otherwise wait forever for the
+        // nested runner to finish on its own.
+        yield* state.cancelActor(sessionID, actorID)
+        const activeOuter = outerFibers.get(key)
+        if (activeOuter?.revision === actor.executionRevision) {
           outerFibers.delete(key)
-          yield* Fiber.interrupt(outerWork.fiber).pipe(Effect.ignore)
+          const interruptFiber = yield* Fiber.interrupt(activeOuter.fiber).pipe(Effect.forkIn(scope))
+          yield* Fiber.join(interruptFiber).pipe(Effect.ignore)
         }
         // A target whose cancellation CAS lost is a complete no-op, including
         // its descendants. Only the winner is allowed to cascade interruption.
@@ -1263,19 +1651,103 @@ export const layer = Layer.effect(
           concurrency: "unbounded",
           discard: true,
         })
-        yield* state.cancelActor(sessionID, actorID)
         yield* notifyTerminal(sessionID, actorID, actor, "cancelled", actor.executionRevision)
-        if (outerWork) yield* Deferred.succeed(outerWork.outcome, { status: "cancelled" as const }).pipe(Effect.ignore)
+        if (activeOuter?.revision === actor.executionRevision) {
+          yield* Deferred.succeed(activeOuter.outcome, { status: "cancelled" as const }).pipe(Effect.ignore)
+        }
         yield* Effect.sync(() => cancelling.delete(cancelKey(sessionID, actorID)))
-        yield* Effect.sync(() => clearForkContext(actorID, actor.executionRevision))
+        yield* Effect.sync(() => clearForkContext(sessionID, actorID, actor.executionRevision))
             }),
         )
         const cleanupFiber = yield* cleanup.pipe(Effect.forkIn(scope, { startImmediately: true }))
         yield* Fiber.join(cleanupFiber).pipe(Effect.ignore)
       })
 
-    const getForkContext = Effect.fn("Actor.getForkContext")(function* (actorID: string) {
-      return forkContexts.get(actorID)?.context
+    const intersectToolWhitelists = (...values: (readonly string[] | undefined)[]) => {
+      const constrained = values.filter((value): value is readonly string[] => value !== undefined)
+      if (!constrained.length) return undefined
+      return [...constrained[0]!].filter((tool) => constrained.every((allowed) => allowed.includes(tool)))
+    }
+
+    const getForkContextInternal: (
+      sessionID: SessionID,
+      actorID: string,
+      seen: Set<string>,
+    ) => Effect.Effect<ForkContextProjection | undefined> = Effect.fn("Actor.getForkContextInternal")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      seen: Set<string>,
+    ) {
+      const key = forkContextKey(sessionID, actorID)
+      if (seen.has(key)) return undefined
+      const nextSeen = new Set(seen)
+      nextSeen.add(key)
+      const stored = yield* actorReg.getForkContext(sessionID, actorID).pipe(Effect.orElseSucceed(() => undefined))
+      if (!stored) return undefined
+      const cached = forkContexts.get(key)
+      const context = cached?.hash === stored.snapshotSHA256
+        ? cached.context
+        : yield* Effect.tryPromise({
+            try: () => decodeForkContext(stored),
+            catch: () => new Error("stored full-context snapshot is invalid"),
+          }).pipe(Effect.orElseSucceed(() => undefined))
+      if (!context) return undefined
+      if (!cached || cached.hash !== stored.snapshotSHA256)
+        forkContexts.set(key, { revision: -1, hash: stored.snapshotSHA256, context })
+
+      const destination = yield* actorReg.get(sessionID, actorID)
+      const source = yield* actorReg.get(stored.sourceSessionID, stored.sourceActorID)
+      if (!destination || !source) return undefined
+      const sourceSession = yield* session.get(stored.sourceSessionID).pipe(Effect.orElseSucceed(() => undefined))
+      const destinationSession = yield* session.get(sessionID).pipe(Effect.orElseSucceed(() => undefined))
+      if (!sourceSession || !destinationSession) return undefined
+
+      let sourceAgentName = source.agent
+      if (stored.sourceActorID === "main") {
+        const sourceMessages = yield* session.messages({ sessionID: stored.sourceSessionID, agentID: "main" })
+        const latestUser = sourceMessages.findLast((message) => message.info.role === "user")
+        if (!latestUser || latestUser.info.role !== "user" || !latestUser.info.agent) return undefined
+        sourceAgentName = latestUser.info.agent
+      }
+      const sourceAgent = yield* agents.get(sourceAgentName).pipe(Effect.orElseSucceed(() => undefined))
+      const destinationAgent = yield* agents.get(destination.agent).pipe(Effect.orElseSucceed(() => undefined))
+      if (!sourceAgent || !destinationAgent) return undefined
+      const sourceProjection = source.mode !== "main" && source.contextMode === "full"
+        ? yield* getForkContextInternal(stored.sourceSessionID, stored.sourceActorID, nextSeen)
+        : undefined
+      if (source.mode !== "main" && source.contextMode === "full" && !sourceProjection) return undefined
+      const sourceTools = Array.isArray(source.tools) ? source.tools : undefined
+      const destinationTools = Array.isArray(destination.tools) ? destination.tools : undefined
+      const effectiveToolWhitelist = intersectToolWhitelists(
+        sourceProjection?.effectiveToolWhitelist,
+        sourceTools,
+        destinationTools,
+      )
+      return {
+        context,
+        encoded: {
+          formatVersion: stored.formatVersion,
+          sourceSessionID: stored.sourceSessionID,
+          sourceActorID: stored.sourceActorID,
+          sourceWatermarkMessageID: stored.sourceWatermarkMessageID,
+          modelProviderID: stored.modelProviderID as ProviderID,
+          modelID: stored.modelID as ModelID,
+          snapshotJSON: stored.snapshotJSON,
+          snapshotSHA256: stored.snapshotSHA256,
+          snapshotBytes: stored.snapshotBytes,
+        },
+        source: { sessionID: stored.sourceSessionID, actorID: stored.sourceActorID },
+        permissionRulesets: [
+          ...(sourceProjection?.permissionRulesets ?? [Agent.runtimePermission(sourceAgent, sourceSession.permission)]),
+          Agent.runtimePermission(destinationAgent, destinationSession.permission),
+        ],
+        ...(effectiveToolWhitelist ? { effectiveToolWhitelist } :
+          (sourceTools || destinationTools ? { effectiveToolWhitelist: [] } : {})),
+      } satisfies ForkContextProjection
+    })
+
+    const getForkContext = Effect.fn("Actor.getForkContext")(function* (sessionID: SessionID, actorID: string) {
+      return yield* getForkContextInternal(sessionID, actorID, new Set())
     })
 
     // === T40 stall watchdog ===
@@ -1390,7 +1862,9 @@ export const layer = Layer.effect(
       Effect.forkIn(scope),
     )
 
-    const impl = Service.of({ spawn, cancel, getForkContext, scanStalledOnce: () => scanStalled })
+    const hasOuterExecution = (sessionID: SessionID, actorID: string, executionRevision: number) =>
+      Effect.sync(() => outerFibers.get(cancelKey(sessionID, actorID))?.revision === executionRevision)
+    const impl = Service.of({ spawn, resumeInput, cancel, getForkContext, hasOuterExecution, scanStalledOnce: () => scanStalled })
     // Late-bind the impl so SessionCheckpoint.tryStartCheckpointWriter can resolve it
     // without forming a layer cycle. See spawn-ref.ts for rationale.
     // Save the previous binding so the finalizer can restore it: when the same

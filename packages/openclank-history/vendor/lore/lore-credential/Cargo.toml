@@ -6,23 +6,50 @@ publish = false
 
 [lib]
 name = "lore_credential"
+test = false
 
 [dependencies]
 base64 = { workspace = true }
 jsonwebtoken = { workspace = true }
-keyring = { workspace = true }
+keyring-core = { workspace = true }
 lore-base = { workspace = true }
 lore-error-set = { workspace = true }
+lore-macro = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
 serde_with = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
 
+[dev-dependencies]
+ctor = { workspace = true }
+lore-base = { workspace = true, features = ["test-util"] }
+lore-credential = { workspace = true, features = ["test-util"] }
+
 [features]
+test-util = []
 trace_log = ["lore-base/trace_log"]
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-keyutils-keyring-store = { workspace = true }
+
 [target.'cfg(target_family = "windows")'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+windows-native-keyring-store = { workspace = true }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+] }
+
+[lints]
+workspace = true

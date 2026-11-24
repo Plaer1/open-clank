@@ -1,0 +1,13 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://openclank.local/contracts/meshy-job-v1.schema.json",
+  "$comment":"Presentation only; the host binds current authenticated account, exact provider credential and Files authority.",
+  "$defs":{
+    "token":{"type":"string","minLength":1,"maxLength":512},
+    "ref":{"type":"string","minLength":1,"maxLength":16384},
+    "parameters":{"type":"object","additionalProperties":false,"required":["prompt","shouldRemesh"],"properties":{"prompt":{"type":"string","minLength":1,"maxLength":800},"shouldRemesh":{"type":"boolean"}}},
+    "prepare":{"type":"object","additionalProperties":false,"required":["sessionID","connectionID","providerAccountID","destinationRef","destinationName","parameters"],"properties":{"sessionID":{"$ref":"#/$defs/token"},"connectionID":{"$ref":"#/$defs/token"},"providerAccountID":{"$ref":"#/$defs/token"},"destinationRef":{"$ref":"#/$defs/ref"},"destinationName":{"type":"string","minLength":1,"maxLength":255},"parameters":{"$ref":"#/$defs/parameters"}}},
+    "profile":{"type":"object","additionalProperties":false,"required":["connectionID","connectionRevision","providerAccountID","providerAccountRevision","credentialVersion","interface"],"properties":{"connectionID":{"$ref":"#/$defs/token"},"connectionRevision":{"type":"integer","minimum":1},"providerAccountID":{"$ref":"#/$defs/token"},"providerAccountRevision":{"type":"integer","minimum":1},"credentialVersion":{"type":"integer","minimum":1},"interface":{"const":"meshy-preview-v1"}}},
+    "prepared":{"type":"object","additionalProperties":false,"required":["jobID","revision","state","profile","destination","parameters","notice"],"properties":{"jobID":{"$ref":"#/$defs/token"},"revision":{"type":"integer","minimum":1},"state":{"const":"prepared"},"profile":{"$ref":"#/$defs/profile"},"destination":{"type":"object","additionalProperties":false,"required":["name","folder"],"properties":{"name":{"type":"string","minLength":1,"maxLength":255},"folder":{"type":"string","maxLength":240}}},"parameters":{"$ref":"#/$defs/parameters"},"notice":{"type":"string","maxLength":512}}}
+  }
+}

@@ -38,6 +38,7 @@ from core.database import (
 )
 from src.auth_helpers import require_user
 from src.openclank.account_request_barrier import AccountRequestBarrier, AccountRequestFenced
+from src.openclank.client_capabilities import project_client_capabilities
 from src.openclank.provider_store import (
     NoEligibleAccount,
     ProviderConflict,
@@ -64,7 +65,9 @@ TUI_SCOPES = frozenset(
         "tui:diagnostics",
     }
 )
+# Interaction authority requires a separate explicit owner-approved pairing.
 DEFAULT_TUI_SCOPES = tuple(sorted(TUI_SCOPES))
+TUI_SCOPES = TUI_SCOPES | frozenset({"tui:questions", "tui:approvals"})
 
 
 class _StrictModel(BaseModel):
@@ -86,6 +89,20 @@ class TurnStartRequest(_StrictModel):
     attachments: list[str] = Field(default_factory=list, max_length=64)
     allow_bash: bool = False
     allow_web_search: bool = False
+
+
+class TurnStatusRequest(_StrictModel):
+    idempotency_key: str = Field(min_length=16, max_length=128)
+
+
+class TuiInteractionReply(_StrictModel):
+    kind: str
+    request_id: str = Field(min_length=1, max_length=200)
+    turn_id: str = Field(min_length=1, max_length=256)
+    revision: int = Field(ge=0, strict=True)
+    answers: list[list[str]] | None = None
+    rejected: bool = Field(default=False, strict=True)
+    option: str | None = None
 
 
 class PoolAdvanceRequest(_StrictModel):
@@ -305,6 +322,22 @@ def _tui_owner(request: Request, *required_scopes: str) -> str:
     return owner
 
 
+def _tui_engine_status(request: Request, owner: str) -> str:
+    # Passive, owner-specific process observation; this never admits a worker.
+    supervisor = getattr(request.app.state, "mimo_supervisor", None)
+    lookup = getattr(supervisor, "worker_for_owner", None)
+    if not callable(lookup):
+        return "unknown"
+    try:
+        worker = lookup(owner)
+        if worker is None:
+            return "not_running"
+        alive = getattr(worker, "is_alive", None)
+        return ("running_unverified" if alive() else "not_running") if callable(alive) else "unknown"
+    except Exception:
+        return "unknown"
+
+
 def _mint_tui_token(flow: _DeviceFlow) -> tuple[str, str, Any]:
     raw_token = "oct_" + secrets.token_urlsafe(32)
     token_id = str(uuid.uuid4())
@@ -462,6 +495,7 @@ def setup_tui_routes(
     *,
     auth_manager: Any | None = None,
     request_barrier: AccountRequestBarrier | None = None,
+    orchestration_router=None,
 ) -> APIRouter:
     provider_store = provider_store or ProviderStore()
     router = APIRouter(tags=["tui-control-plane"])
@@ -567,8 +601,12 @@ def setup_tui_routes(
     def device_approval_page(request: Request, user_code: str = ""):
         owner = require_user(request)
         flow = _device_flows.by_user_code(user_code)
+        descriptions = {
+            "tui:questions": "Read and answer questions in your selected chats",
+            "tui:approvals": "Allow once or reject pending actions in your selected chats",
+        }
         scope_items = "".join(
-            f"<li>{html.escape(scope.removeprefix('tui:').replace('_', ' '))}</li>"
+            f"<li>{html.escape(descriptions.get(scope, scope.removeprefix('tui:').replace('_', ' ')))}</li>"
             for scope in flow.scopes
         )
         return HTMLResponse(
@@ -648,7 +686,57 @@ def setup_tui_routes(
                 "diagnostics": "tui:diagnostics" in set(request.state.api_token_scopes),
             },
             "sessions": session_rows,
+            "operation_capabilities": project_client_capabilities(
+                request.state.api_token_scopes, turn_service=callable(getattr(request.app.state, "openclank_chat_stream_handler", None)), engine_status=_tui_engine_status(request, owner)),
         }
+
+    @router.get("/api/tui/v1/sessions/{session_id}/capabilities")
+    def session_capabilities(request: Request, session_id: str):
+        from src import agent_runs
+        owner = _tui_owner(request, "tui:sessions")
+        with get_db_session() as db:
+            _owned_session(db, owner, session_id)
+        run = agent_runs.get_run(session_id)
+        return project_client_capabilities(request.state.api_token_scopes,
+            turn_service=callable(getattr(request.app.state, "openclank_chat_stream_handler", None)), engine_status=_tui_engine_status(request, owner),
+            run_id=run.run_id if run else None, run_active=agent_runs.is_active(session_id))
+
+    @router.get("/api/tui/v1/sessions/{session_id}/handoff")
+    def session_handoff(request: Request, session_id: str, map_revision: int | None = None):
+        from src.openclank.client_handoff import existing_chat_handoff
+        from src.openclank.orchestration_projection import ProjectionError
+        from src.openclank.session_map import OwnerSessionMap
+        owner = _tui_owner(request, "tui:sessions")
+        with get_db_session() as db:
+            _owned_session(db, owner, session_id)
+        auth = getattr(request.app.state, "auth_manager", None)
+        try:
+            account = auth.account_id(owner) if auth else None
+            if not account or auth.username_for_account_id(account) != owner:
+                raise HTTPException(503, {"code":"ACCOUNT_UNAVAILABLE", "message":"Current account identity is unavailable"})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(503, {"code":"ACCOUNT_UNAVAILABLE", "message":"Current account identity is unavailable"}) from exc
+        supervisor = getattr(request.app.state, "mimo_supervisor", None)
+        runtime_home = getattr(supervisor, "_runtime_home", None)
+        if not callable(runtime_home):
+            raise HTTPException(503, {"code":"SESSION_MAP_UNAVAILABLE", "message":"Existing session mapping is unavailable"})
+        try:
+            mapping = OwnerSessionMap(runtime_home(owner) / "session-map.json", owner)
+            result = existing_chat_handoff(mapping.read(), owner=owner, host_chat_id=session_id, expected_map_revision=map_revision)
+            # Revalidate after projection so a changed map cannot be silently adopted.
+            if existing_chat_handoff(mapping.read(), owner=owner, host_chat_id=session_id, expected_map_revision=result['map_revision']) != result:
+                raise HTTPException(409, {"code":"STALE_MAP", "message":"Existing session mapping changed"})
+            if auth.account_id(owner) != account or auth.username_for_account_id(account) != owner:
+                raise HTTPException(409, {"code":"ACCOUNT_CHANGED", "message":"Account identity changed"})
+            return {**result, "account_id": account}
+        except ProjectionError as exc:
+            raise HTTPException(exc.status, {"code":exc.code, "message":str(exc)}) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(503, {"code":"SESSION_MAP_UNAVAILABLE", "message":"Existing session mapping is unavailable"}) from exc
 
     @router.get("/api/tui/v1/sessions")
     def list_sessions(
@@ -734,71 +822,242 @@ def setup_tui_routes(
 
         from src import agent_runs
 
+        from src.openclank.tui_turns import PROFILE, TuiTurnGuard, profile_ready
+        from src.openclank.account_request_barrier import _current_admission
+        from sqlalchemy import text
+        auth = getattr(request.app.state, "auth_manager", None)
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        admission = _current_admission.get()
+        try:
+            barrier.assert_live_admission(owner, admission)
+            account = auth.account_id(owner)
+            if not account or auth.username_for_account_id(account) != owner:
+                raise ValueError('account changed')
+            credential = request.app.state.capture_original_credential(request, owner, account)
+            def current():
+                try:
+                    if getattr(request.app.state, 'account_request_barrier', None) is not barrier: return False
+                    barrier.assert_live_admission(owner, admission)
+                    return callable(credential) and credential() is True
+                except Exception:
+                    return False
+            if current() is not True:
+                raise ValueError('credential changed')
+        except Exception as exc:
+            raise HTTPException(403, 'Original TUI credential unavailable') from exc
         row_id = _turn_submission_identity(owner, body.idempotency_key)
         request_hash = _turn_request_hash(session_id, body)
-        replay = False
+        root_id, run_id = 'root_' + uuid.uuid4().hex, uuid.uuid4().hex
         with get_db_session() as db:
             row = db.query(TuiTurnSubmission).filter(TuiTurnSubmission.id == row_id).first()
             if row is not None:
-                if row.request_hash != request_hash or row.session_id != session_id:
+                if row.owner != owner or row.request_hash != request_hash or row.session_id != session_id:
                     raise HTTPException(409, "idempotency key was used for a different turn")
-                replay = True
-            else:
-                row = TuiTurnSubmission(
-                    id=row_id,
-                    owner=owner,
-                    session_id=session_id,
-                    idempotency_key=body.idempotency_key,
-                    request_hash=request_hash,
-                    state="submitting",
-                )
-                db.add(row)
-
-        if replay:
-            run = agent_runs.get_run(session_id)
-            if run is not None:
-                return StreamingResponse(
-                    agent_runs.subscribe(session_id, expected_run=run),
-                    media_type="text/event-stream",
-                    headers={"X-Agent-Run-ID": run.run_id},
-                )
-
-            async def completed_replay():
-                yield "event: replay\ndata: {\"status\":\"complete\"}\n\n"
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(completed_replay(), media_type="text/event-stream")
-
+                raise HTTPException(409, {"code":"TURN_RECONCILIATION_REQUIRED",
+                    "message":"This submission already exists; inspect its original status."})
+            if not profile_ready(db):
+                raise HTTPException(503, {"code":"TUI_RUN_PROFILE_UNAVAILABLE",
+                    "message":"The TUI receipt profile is unavailable. Existing SQLite stores require stopped-copy preparation."})
+            _owned_session(db, owner, session_id)
+            if current() is not True:
+                raise HTTPException(403, 'Original TUI credential unavailable')
+            row = TuiTurnSubmission(id=row_id, owner=owner, session_id=session_id,
+                idempotency_key=body.idempotency_key, request_hash=request_hash, state="submitting")
+            db.add(row)
+            db.flush()
+            db.execute(text('UPDATE tui_turn_submissions SET tui_profile=:profile, tui_account_id=:account, '
+                'tui_root_id=:root, tui_run_id=:run WHERE id=:id'),
+                {'profile':PROFILE, 'account':account, 'root':root_id, 'run':run_id, 'id':row_id})
+            if current() is not True:
+                raise HTTPException(403, 'Original TUI credential unavailable')
+        guard = TuiTurnGuard(owner, account, session_id, row_id, request_hash, root_id, run_id, current)
         handler = getattr(request.app.state, "openclank_chat_stream_handler", None)
         if not callable(handler):
             raise HTTPException(503, "canonical turn service is unavailable")
-        synthetic = await _json_request_for_chat(
-            request,
-            {
-                "session": session_id,
-                "message": body.message,
-                "attachments": body.attachments,
-                "allow_bash": body.allow_bash,
-                "allow_web_search": body.allow_web_search,
-                "mode": "agent",
-            },
-        )
+        synthetic = await _json_request_for_chat(request, {
+            "session": session_id, "message": body.message, "attachments": body.attachments,
+            "allow_bash": body.allow_bash, "allow_web_search": body.allow_web_search, "mode":"agent"})
+        synthetic.state.tui_turn_guard = guard
         try:
-            response = await handler(synthetic)
-        except Exception:
-            with get_db_session() as db:
-                row = db.query(TuiTurnSubmission).filter(TuiTurnSubmission.id == row_id).first()
-                if row is not None:
-                    row.state = "failed"
-                    row.error_code = "TURN_REJECTED"
-                    db.add(row)
-            raise
+            return await handler(synthetic)
+        except Exception as exc:
+            # The message may already have committed; never report a rejection or replay it.
+            raise HTTPException(409, {"code":"TURN_RECONCILIATION_REQUIRED",
+                "message":"The original submission outcome is unknown; inspect its status."}) from exc
+        finally:
+            try: del synthetic.state.tui_turn_guard
+            except AttributeError: pass
+
+    @router.post("/api/tui/v1/sessions/{session_id}/turns/status")
+    async def original_turn_status(request: Request, session_id: str, body: TurnStatusRequest):
+        from sqlalchemy import text
+        from src.openclank.tui_turns import PROFILE, TuiTurnGuard, profile_ready
+        from src import agent_runs
+        owner = _tui_owner(request, "tui:sessions")
+        auth = getattr(request.app.state, 'auth_manager', None)
+        from src.openclank.account_request_barrier import _current_admission
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        admission = _current_admission.get()
+        try:
+            barrier.assert_live_admission(owner, admission)
+            account = auth.account_id(owner)
+            if not account or auth.username_for_account_id(account) != owner: raise ValueError()
+            current = request.app.state.capture_original_credential(request, owner, account)
+            if not callable(current) or current() is not True: raise ValueError()
+        except Exception as exc:
+            raise HTTPException(403, 'TUI credential unavailable') from exc
+        outcome = {'session_id':session_id, 'state':'unknown'}
         with get_db_session() as db:
-            row = db.query(TuiTurnSubmission).filter(TuiTurnSubmission.id == row_id).first()
-            if row is not None:
-                row.state = "started"
-                db.add(row)
-        return response
+            _owned_session(db, owner, session_id)
+            if not profile_ready(db): return outcome
+            receipt = db.query(TuiTurnSubmission).filter(TuiTurnSubmission.id == _turn_submission_identity(owner, body.idempotency_key)).first()
+            if receipt is None or receipt.owner != owner or receipt.session_id != session_id: return outcome
+            extra = db.execute(text('SELECT tui_profile,tui_account_id,tui_root_id,tui_run_id FROM tui_turn_submissions WHERE id=:id'), {'id':receipt.id}).first()
+            if extra is None or extra[0] != PROFILE or extra[1] != account: return outcome
+            root_id, run_id = extra[2], extra[3]
+            message = db.query(ChatMessage).filter(ChatMessage.id == root_id, ChatMessage.session_id == session_id, ChatMessage.role == 'user').first()
+            if receipt.state in ('committed','started') and message is not None:
+                outcome['root_operation_id'] = root_id
+                if receipt.state == 'started':
+                    outcome['run_id'] = run_id
+                    run = agent_runs.get_run(session_id)
+                    origin = getattr(run, 'tui_origin', None)
+                    if (type(origin) is TuiTurnGuard and origin.submission_id == receipt.id
+                            and origin.account == account and origin.root_id == root_id
+                            and origin.run_id == run_id and run.run_id == run_id and run.owner == owner):
+                        outcome['state'] = 'active' if run.status == 'running' else ('done' if run.status == 'done' else 'unknown')
+        try:
+            if getattr(request.app.state, 'account_request_barrier', None) is not barrier: raise ValueError()
+            barrier.assert_live_admission(owner, admission)
+            if current() is not True: raise ValueError()
+        except Exception as exc:
+            raise HTTPException(403, 'TUI credential unavailable') from exc
+        return outcome
+
+    @router.get("/api/tui/v1/sessions/{session_id}/interactions")
+    async def list_interactions(request: Request, session_id: str):
+        from src.openclank.tui_interactions import capture, read, read_managed_shell, read_managed_files
+        owner = _tui_owner(request, 'tui:sessions')
+        scopes = set(getattr(request.state, 'api_token_scopes', ()) or ())
+        if not scopes.intersection({'tui:questions','tui:approvals'}):
+            raise HTTPException(403, 'Requires tui:questions or tui:approvals')
+        with get_db_session() as db: _owned_session(db, owner, session_id)
+        worker, current = capture(request, owner)
+        result = read(worker, current, owner, session_id,
+                      questions='tui:questions' in scopes, approvals='tui:approvals' in scopes)
+        if 'tui:approvals' in scopes:
+            account = request.app.state.auth_manager.account_id(owner)
+            items, complete = await read_managed_shell(worker, current, owner, account, session_id)
+            file_items, file_complete = await read_managed_files(worker, current, owner, account, session_id)
+            result['items'].extend(items + file_items)
+            result['complete'] = result['complete'] and complete and file_complete and len(result['items']) <= 32
+            result['items'] = result['items'][:32]
+            result['coverage'] = 'blocking_acp_and_managed_shell_files'
+        return result
+
+    @router.get("/api/tui/v1/sessions/{session_id}/background-shells")
+    async def tui_background_shells(request: Request, session_id: str):
+        from src.openclank.tui_interactions import capture
+        owner = _tui_owner(request, 'tui:sessions')
+        with get_db_session() as db: _owned_session(db, owner, session_id)
+        _, current = capture(request, owner)
+        reader = getattr(orchestration_router, 'tui_shell_discover', None)
+        if not callable(reader) or not current(): raise HTTPException(503, 'Background shells unavailable')
+        value = await reader(request, session_id, current)
+        if not current(): raise HTTPException(403, 'TUI credential or account changed')
+        return value
+
+    @router.get("/api/tui/v1/sessions/{session_id}/background-shell/{job_id}")
+    async def tui_background_shell(request: Request, session_id: str, job_id: str, actor_id: str,
+                                   actor_session_id: str, execution_revision: int, map_revision: int,
+                                   cursor: int = 0, limit: int = 16384):
+        from src.openclank.tui_interactions import capture
+        owner = _tui_owner(request, 'tui:sessions')
+        with get_db_session() as db: _owned_session(db, owner, session_id)
+        _, current = capture(request, owner)
+        reader = getattr(orchestration_router, 'tui_shell_view', None)
+        if not callable(reader) or not current(): raise HTTPException(503, 'Background shell unavailable')
+        value = await reader(request, session_id, job_id, actor_id, actor_session_id,
+                             execution_revision, map_revision, cursor, limit, current)
+        if not current(): raise HTTPException(403, 'TUI credential or account changed')
+        return value
+
+    @router.get("/api/tui/v1/sessions/{session_id}/actors/{actor_id}/questions")
+    async def list_optional_questions(request: Request, session_id: str, actor_id: str, map_revision: int, actor_session_id: str | None = None):
+        from src.openclank.tui_interactions import capture
+        owner = _tui_owner(request, 'tui:sessions', 'tui:questions')
+        with get_db_session() as db: _owned_session(db, owner, session_id)
+        worker, current = capture(request, owner)
+        reader = getattr(orchestration_router, 'tui_question_read', None)
+        if not callable(reader) or not current(): raise HTTPException(503, 'Optional questions unavailable')
+        page = await reader(request, session_id, actor_id, map_revision, actor_session_id, None, None, 32)
+        if not current(): raise HTTPException(403, 'TUI credential or account changed')
+        if any(not isinstance(item.get('tool'), dict) for item in page.get('items', [])):
+            raise HTTPException(503, 'Question tool provenance unavailable')
+        return page
+
+    @router.post("/api/tui/v1/sessions/{session_id}/actors/{actor_id}/question-answer")
+    async def answer_optional_question(request: Request, session_id: str, actor_id: str, map_revision: int):
+        from src.openclank.tui_interactions import capture, TuiInputGuard
+        from src.tool_policy import normalize_turn_policy_snapshot
+        owner = _tui_owner(request, 'tui:sessions', 'tui:questions')
+        with get_db_session() as db: _owned_session(db, owner, session_id)
+        value = await request.json()
+        allowed = {'requestID','handoffID','text','attachmentRefs','uploadIDs','questionRefs','questionAnswers','mode','actorSessionId','turnPolicy','expectedExecutionRevision'}
+        if type(value) is not dict or set(value) - allowed:
+            raise HTTPException(400, 'One question answer and an explicit turn policy are required')
+        if 'turnPolicy' not in value:
+            return {'deliveryState':'unavailable', 'deliveryReason':'An explicit turn policy is required.'}
+        try: choices = normalize_turn_policy_snapshot(value['turnPolicy'])
+        except ValueError as exc: raise HTTPException(400, 'Explicit turn policy unavailable') from exc
+        if choices['noMemory']:
+            return {'deliveryState':'unavailable', 'deliveryReason':'No Memory follow-ups are unavailable in this existing actor context.'}
+        if (choices['mode'] != 'chat' or choices['allowBash'] is not False or choices['allowWebSearch'] is not False
+                or any(choices[key] is not False for key in ('useWeb','useResearch','compareMode','incognito'))):
+            return {'deliveryState':'unavailable', 'deliveryReason':'This TUI answer supports only the displayed chat policy.'}
+        answers, refs = value.get('questionAnswers'), value.get('questionRefs')
+        if (value.get('text') != '' or value.get('attachmentRefs', []) or value.get('uploadIDs', [])
+                or type(answers) is not list or len(answers) != 1 or type(refs) is not list or len(refs) != 1
+                or value.get('mode') not in ('after-turn','steer')):
+            raise HTTPException(400, 'Exactly one question answer is required')
+        reader = getattr(orchestration_router, 'tui_question_read', None)
+        submit = getattr(orchestration_router, 'tui_question_input', None)
+        worker, current = capture(request, owner)
+        if not callable(reader) or not callable(submit) or not current(): raise HTTPException(503, 'Optional question delivery unavailable')
+        answer = answers[0]
+        if type(answer) is not dict or not isinstance(answer.get('requestID'), str): raise HTTPException(400, 'Invalid question answer')
+        page = await reader(request, session_id, actor_id, map_revision, value.get('actorSessionId'), answer['requestID'], None, 32)
+        if not current(): raise HTTPException(403, 'TUI credential or account changed')
+        matches = [item for item in page.get('items', []) if item.get('questionRef') == refs[0] and isinstance(item.get('tool'), dict)]
+        if len(matches) != 1: raise HTTPException(409, 'Original question is stale or unavailable')
+        request.state.tui_input_guard = TuiInputGuard(request, current)
+        try:
+            result = await submit(request, session_id, actor_id, map_revision)
+            if not current():
+                raise HTTPException(409, {'code':'TUI_INPUT_OUTCOME_UNKNOWN','message':'Input outcome is unknown; inspect its original receipt.'})
+            return result
+        finally:
+            try: del request.state.tui_input_guard
+            except AttributeError: pass
+
+    @router.post("/api/tui/v1/sessions/{session_id}/interactions/reply")
+    async def reply_interaction(request: Request, session_id: str, body: TuiInteractionReply):
+        from src.openclank.tui_interactions import capture, resolve, resolve_managed_shell, resolve_managed_files
+        if body.kind not in ('question','approval','shell_approval','file_approval'): raise HTTPException(400, 'Unknown interaction')
+        owner = _tui_owner(request, 'tui:sessions', 'tui:questions' if body.kind == 'question' else 'tui:approvals')
+        if body.kind == 'question':
+            if body.option is not None or (body.rejected and body.answers is not None) or (not body.rejected and body.answers is None):
+                raise HTTPException(400, 'Choose an answer or reject the question')
+        elif body.answers is not None or body.rejected or body.option not in ('once','reject'):
+            raise HTTPException(400, 'Choose an offered approval option')
+        with get_db_session() as db: _owned_session(db, owner, session_id)
+        worker, current = capture(request, owner)
+        if body.kind in ('shell_approval','file_approval'):
+            account = request.app.state.auth_manager.account_id(owner)
+            if body.kind == 'file_approval':
+                return await resolve_managed_files(worker, current, owner, account, session_id, body.model_dump())
+            return await resolve_managed_shell(worker, current, owner, account, session_id, body.model_dump())
+        return resolve(worker, current, owner, session_id, body.model_dump())
 
     @router.get("/api/tui/v1/sessions/{session_id}/turns/active/stream")
     async def stream_active_turn(request: Request, session_id: str, after: int = 0):
@@ -810,6 +1069,11 @@ def setup_tui_routes(
         run = agent_runs.get_run(session_id)
         if run is None:
             raise HTTPException(404, "No retained turn for this session")
+        expected_run_id = request.headers.get("X-Agent-Run-ID")
+        if not expected_run_id:
+            raise HTTPException(400, "An observed run ID is required")
+        if expected_run_id != run.run_id:
+            raise HTTPException(409, "The selected run changed; refresh the active turn")
         return StreamingResponse(
             agent_runs.subscribe(session_id, expected_run=run, after_seq=max(0, after)),
             media_type="text/event-stream",
@@ -823,7 +1087,9 @@ def setup_tui_routes(
             _owned_session(db, owner, session_id)
         from src import agent_runs
 
-        expected_run_id = request.headers.get("X-Agent-Run-ID") or None
+        expected_run_id = request.headers.get("X-Agent-Run-ID")
+        if not expected_run_id:
+            raise HTTPException(400, "An observed run ID is required")
         return {
             "session_id": session_id,
             "stopped": agent_runs.stop(session_id, expected_run_id=expected_run_id),
@@ -862,7 +1128,11 @@ def setup_tui_routes(
                     {
                         "root_turn_id": row.root_turn_id,
                         "actor_id": row.actor_id,
+                        "actor_session_id": row.mimo_session_id,
                         "parent_actor_id": row.parent_actor_id,
+                        "parent_actor_session_id": (
+                            row.mimo_session_id if row.parent_actor_id and row.mode == "subagent" else None
+                        ),
                         "agent": row.agent,
                         "mode": row.mode,
                         "description": row.description,

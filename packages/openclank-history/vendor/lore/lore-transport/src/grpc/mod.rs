@@ -1,11 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
 mod admin_client;
+#[cfg(not(feature = "test-util"))]
 mod environment_client;
+#[cfg(feature = "test-util")]
+pub mod environment_client;
 mod lock_client;
 mod repository_client;
+#[cfg(not(feature = "test-util"))]
 mod revision_client;
+#[cfg(feature = "test-util")]
+pub mod revision_client;
+#[cfg(not(feature = "test-util"))]
 mod storage_client;
+#[cfg(feature = "test-util")]
+pub mod storage_client;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -25,11 +34,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use http::header::AUTHORIZATION;
+use lore_base::error::AddressNotFound;
 use lore_base::lore_debug;
 use lore_base::lore_info;
 use lore_base::lore_trace;
 use lore_base::types::*;
-use lore_base::version::LORE_LIBRARY_VERSION;
 use lore_error_set::prelude::*;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -40,12 +49,12 @@ use tonic::body::Body;
 use tonic::codegen::InterceptedService;
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
-use tonic::transport::ClientTlsConfig;
 use tower::Layer;
 use tower::Service;
 use tower::ServiceBuilder;
 use url::Url;
 
+use crate::auth::AuthEndpoint;
 use crate::auth::exchange::auth_exchange;
 use crate::auth::exchange::auth_exchange_custom_resource;
 use crate::connection::Connection;
@@ -53,7 +62,9 @@ use crate::connection::RECONNECT_MAX_ATTEMPTS;
 use crate::connection::RECONNECT_MAX_DELAY;
 use crate::connection::RECONNECT_START_DELAY;
 use crate::connection::SuppliedCredentials;
+use crate::connection::authenticates_server;
 use crate::error::ProtocolError;
+use crate::tls::grpc_client_tls_config;
 use crate::traits::*;
 use crate::types::*;
 
@@ -89,7 +100,7 @@ pub struct GRPCAuth {
 
 impl GRPCAuth {
     async fn new(
-        auth_url: &str,
+        auth_endpoint: &AuthEndpoint,
         remote_domain: &str,
         identity: &str,
         repository: RepositoryId,
@@ -102,7 +113,7 @@ impl GRPCAuth {
         let ((identity_token, access_token), rotated) = credentials.tokens_and_signal();
 
         let (authentication_token, authorization_token, resolved_identity) = auth_exchange(
-            auth_url,
+            auth_endpoint,
             &remote_domain,
             identity,
             repository,
@@ -121,7 +132,7 @@ impl GRPCAuth {
         let auth_ref = Arc::downgrade(&auth);
         let refresher = Some(lore_base::lore_spawn_net!(grpc_auth_refresher(
             auth_ref,
-            auth_url.to_string(),
+            auth_endpoint.clone(),
             remote_domain,
             resolved_identity,
             repository,
@@ -141,7 +152,7 @@ impl GRPCAuth {
     /// caller-supplied resource identifier. Used for endpoints whose authz
     /// model is not repository-based.
     async fn new_for_custom_resource(
-        auth_url: &str,
+        auth_endpoint: &AuthEndpoint,
         remote_domain: &str,
         identity: &str,
         resource_id: &str,
@@ -155,7 +166,7 @@ impl GRPCAuth {
 
         let (authentication_token, authorization_token, resolved_identity) =
             auth_exchange_custom_resource(
-                auth_url,
+                auth_endpoint,
                 &remote_domain,
                 identity,
                 resource_id,
@@ -175,7 +186,7 @@ impl GRPCAuth {
         let refresher = Some(lore_base::lore_spawn_net!(
             grpc_auth_refresher_custom_resource(
                 auth_ref,
-                auth_url.to_string(),
+                auth_endpoint.clone(),
                 remote_domain,
                 resolved_identity,
                 resource_id.to_string(),
@@ -225,7 +236,7 @@ async fn await_refresh(rotated: &mut tokio::sync::watch::Receiver<u64>) {
 #[allow(clippy::too_many_arguments)]
 async fn grpc_auth_refresher(
     auth: Weak<parking_lot::RwLock<GRPCAuth>>,
-    auth_url: String,
+    auth_endpoint: AuthEndpoint,
     remote_domain: String,
     identity: String,
     repository: RepositoryId,
@@ -242,7 +253,7 @@ async fn grpc_auth_refresher(
 
         let (identity_token, access_token) = credentials.tokens();
         let (authentication_token, authorization_token, _) = auth_exchange(
-            &auth_url,
+            &auth_endpoint,
             &remote_domain,
             &identity,
             repository,
@@ -260,7 +271,7 @@ async fn grpc_auth_refresher(
 #[allow(clippy::too_many_arguments)]
 async fn grpc_auth_refresher_custom_resource(
     auth: Weak<parking_lot::RwLock<GRPCAuth>>,
-    auth_url: String,
+    auth_endpoint: AuthEndpoint,
     remote_domain: String,
     identity: String,
     resource_id: String,
@@ -276,7 +287,7 @@ async fn grpc_auth_refresher_custom_resource(
 
         let (identity_token, access_token) = credentials.tokens();
         let (authentication_token, authorization_token, _) = auth_exchange_custom_resource(
-            &auth_url,
+            &auth_endpoint,
             &remote_domain,
             &identity,
             &resource_id,
@@ -446,11 +457,21 @@ type ResourceId = String;
 /// and vice versa. See `lore_transport::connection::FromSuppliedCredentials`.
 type FromSuppliedCredentials = bool;
 
+#[lore_macro::test_pub]
 pub struct GRPCConnection {
     connection: Weak<Connection>,
     remote_url: Url,
     channel: parking_lot::RwLock<Channel>,
-    auth: DashMap<(AuthUrl, UserIdentity, ResourceId, FromSuppliedCredentials), GRPCAuthRef>,
+    auth: DashMap<
+        (
+            AuthUrl,
+            UserIdentity,
+            ResourceId,
+            FromSuppliedCredentials,
+            crate::connection::CredentialStore,
+        ),
+        GRPCAuthRef,
+    >,
     reconnect: AtomicU32,
     reconnector: Semaphore,
 }
@@ -458,8 +479,8 @@ pub struct GRPCConnection {
 impl GRPCConnection {
     /// Build a connection around an already-established channel, for tests that drive a
     /// storage client against a local server without going through the connect path.
-    #[cfg(test)]
-    pub(crate) fn for_test(remote_url: Url, channel: Channel) -> Self {
+    #[cfg(feature = "test-util")]
+    pub fn for_test(remote_url: Url, channel: Channel) -> Self {
         Self {
             connection: Weak::new(),
             remote_url,
@@ -476,16 +497,17 @@ impl GRPCConnection {
 
     pub async fn repository_authz(
         &self,
-        auth_url: &str,
+        auth_endpoint: &AuthEndpoint,
         identity: &str,
         repository: RepositoryId,
         credentials: &Arc<SuppliedCredentials>,
     ) -> GRPCAuthRef {
         let key = (
-            auth_url.to_string(),
+            auth_endpoint.url.clone(),
             identity.to_string(),
             repository.to_string(),
             credentials.from_supplied_credentials(),
+            crate::connection::credential_store(),
         );
 
         if let Some(auth) = self.auth.get(&key) {
@@ -493,7 +515,7 @@ impl GRPCConnection {
         }
 
         let auth = GRPCAuth::new(
-            auth_url,
+            auth_endpoint,
             self.remote_url.host_str().unwrap_or_default(),
             identity,
             repository,
@@ -511,16 +533,17 @@ impl GRPCConnection {
     /// the connection-local cache.
     pub async fn custom_resource_authz(
         &self,
-        auth_url: &str,
+        auth_endpoint: &AuthEndpoint,
         identity: &str,
         resource: &str,
         credentials: &Arc<SuppliedCredentials>,
     ) -> GRPCAuthRef {
         let key = (
-            auth_url.to_string(),
+            auth_endpoint.url.clone(),
             identity.to_string(),
             resource.to_string(),
             credentials.from_supplied_credentials(),
+            crate::connection::credential_store(),
         );
 
         if let Some(auth) = self.auth.get(&key) {
@@ -528,7 +551,7 @@ impl GRPCConnection {
         }
 
         let auth = GRPCAuth::new_for_custom_resource(
-            auth_url,
+            auth_endpoint,
             self.remote_url.host_str().unwrap_or_default(),
             identity,
             resource,
@@ -632,26 +655,10 @@ async fn lock_connection(remote_url: &Url) -> Arc<RwLock<Weak<GRPCConnection>>> 
 const HTTP2_KEEP_ALIVE_INTERVAL: u64 = 30;
 const HTTP2_KEEP_ALIVE_TIMEOUT: u64 = 20;
 
-static USER_AGENT: OnceLock<String> = OnceLock::new();
-
-/// User agent string for gRPC connections. Reads from `LORE_USER_AGENT` env var,
-/// falls back to a default value.
-pub fn user_agent() -> &'static str {
-    USER_AGENT
-        .get_or_init(|| {
-            std::env::var("LORE_USER_AGENT")
-                .unwrap_or_else(|_| format!("lore-transport/{}", LORE_LIBRARY_VERSION.as_str()))
-        })
-        .as_str()
-}
-
-pub fn set_user_agent(name: String) -> bool {
-    USER_AGENT.set(name).is_ok()
-}
-
 async fn connect_to_endpoint(remote: &str) -> Result<Channel, ProtocolError> {
-    let mut endpoint = tonic::transport::Channel::from_shared(remote.to_string())
-        .internal_with(|| format!("connect: {remote}"))?;
+    let mut endpoint =
+        tonic::transport::Channel::from_shared(crate::uds::channel_uri(remote.to_string()))
+            .internal_with(|| format!("connect: {remote}"))?;
 
     let keep_alive_interval = std::env::var("LORE_HTTP2_KEEP_ALIVE_INTERVAL")
         .ok()
@@ -665,17 +672,12 @@ async fn connect_to_endpoint(remote: &str) -> Result<Channel, ProtocolError> {
         .http2_keep_alive_interval(Duration::from_secs(keep_alive_interval))
         .keep_alive_timeout(Duration::from_secs(keep_alive_timeout));
 
-    if remote.starts_with("https://") {
+    if endpoint.uri().scheme_str() == Some("https") {
         endpoint = endpoint
-            .tls_config(
-                ClientTlsConfig::new()
-                    .assume_http2(true)
-                    .with_webpki_roots()
-                    .with_native_roots(),
-            )
+            .tls_config(grpc_client_tls_config())
             .internal_with(|| format!("configuring TLS for {remote}"))?;
     }
-    let user_agent = user_agent();
+    let user_agent = crate::user_agent();
     endpoint = endpoint
         .user_agent(user_agent)
         .internal_with(|| format!("setting user agent for {remote}"))?;
@@ -687,7 +689,7 @@ async fn connect_to_endpoint(remote: &str) -> Result<Channel, ProtocolError> {
     // Connect from a net-runtime task so the hyper/h2 driver tasks the
     // connection spawns are bound to the net runtime, isolated from compute and
     // file-I/O continuations on the core runtime.
-    let channel = match lore_base::lore_spawn_net!(async move { endpoint.connect().await })
+    let channel = match lore_base::lore_spawn_net!(crate::uds::connect_channel(endpoint))
         .await
         .internal_with(|| format!("gRPC connection task to {remote}"))?
     {
@@ -726,8 +728,7 @@ pub async fn connect(
         .host_str()
         .ok_or_else(|| ProtocolError::internal(format!("remote {remote_url} is invalid")))?;
 
-    // Possible HTTPS schemes: urcs, grpcs, lores
-    let (scheme, default_port) = if parsed_url.scheme().ends_with("s") {
+    let (scheme, default_port) = if authenticates_server(&parsed_url) {
         ("https", GRPCS_PORT_DEFAULT)
     } else {
         ("http", GRPC_PORT_DEFAULT)
@@ -784,6 +785,30 @@ pub async fn connect(
     Ok(connection)
 }
 
+/// Encode a missing address as `FAILED_PRECONDITION` carrying it in the status
+/// details.
+///
+/// The code states that the request cannot be served in the peer's current
+/// state, leaving `NOT_FOUND` to name an absent object alone. The details carry
+/// the address, which [`address_not_found_details`] reads back.
+pub fn address_not_found_status(error: &AddressNotFound, message: impl Into<String>) -> Status {
+    Status::with_details(
+        tonic::Code::FailedPrecondition,
+        message,
+        Bytes::copy_from_slice(&error.address),
+    )
+}
+
+/// Recover the address a peer attached with [`address_not_found_status`].
+///
+/// Details of any other length read as absent, so an address is reconstructed
+/// only from one this side can name in full.
+pub(crate) fn address_not_found_details(status: &Status) -> Option<AddressNotFound> {
+    Some(AddressNotFound {
+        address: status.details().try_into().ok()?,
+    })
+}
+
 async fn handle_error(retry: &mut crate::util::Retry, status: Status) -> Result<(), ProtocolError> {
     match status.code() {
         tonic::Code::ResourceExhausted => {
@@ -799,7 +824,7 @@ async fn handle_error(retry: &mut crate::util::Retry, status: Status) -> Result<
 #[allow(clippy::unused_async)]
 pub async fn storage_client(
     connection: Arc<GRPCConnection>,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     _partition: Partition,
     credentials: &Arc<SuppliedCredentials>,
@@ -811,7 +836,7 @@ pub async fn storage_client(
     let storage = GRPCStorage {
         connection,
         client: storage_client,
-        auth_url: auth_url.to_string(),
+        auth_endpoint: auth_endpoint.clone(),
         identity: identity.to_string(),
         credentials: credentials.clone(),
         session_counter: std::sync::atomic::AtomicU32::new(1),
@@ -825,7 +850,7 @@ pub async fn storage_client(
 
 pub async fn revision_client(
     connection: Arc<GRPCConnection>,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     repository: RepositoryId,
     credentials: &Arc<SuppliedCredentials>,
@@ -836,14 +861,14 @@ pub async fn revision_client(
         connection.channel(),
         repository,
         connection
-            .repository_authz(auth_url, identity, repository, credentials)
+            .repository_authz(auth_endpoint, identity, repository, credentials)
             .await,
     );
 
     let revision = GRPCRevision {
         connection,
         client: RwLock::new(revision_client),
-        auth_url: auth_url.to_string(),
+        auth_endpoint: auth_endpoint.clone(),
         identity: identity.to_string(),
         credentials: credentials.clone(),
         repository,
@@ -856,7 +881,7 @@ pub async fn revision_client(
 
 pub async fn admin_client(
     connection: Arc<GRPCConnection>,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     repository: RepositoryId,
     credentials: &Arc<SuppliedCredentials>,
@@ -867,14 +892,14 @@ pub async fn admin_client(
         connection.channel(),
         repository,
         connection
-            .repository_authz(auth_url, identity, repository, credentials)
+            .repository_authz(auth_endpoint, identity, repository, credentials)
             .await,
     );
 
     let admin = GRPCAdmin {
         connection,
         client: RwLock::new(admin_client),
-        auth_url: auth_url.to_string(),
+        auth_endpoint: auth_endpoint.clone(),
         identity: identity.to_string(),
         credentials: credentials.clone(),
         repository,
@@ -887,7 +912,7 @@ pub async fn admin_client(
 
 pub async fn repository_client(
     connection: Arc<GRPCConnection>,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     credentials: &Arc<SuppliedCredentials>,
 ) -> Result<Arc<dyn Repository>, ProtocolError> {
@@ -896,14 +921,19 @@ pub async fn repository_client(
     let repository_client = repository_client::RepositoryService::new(
         connection.channel(),
         connection
-            .repository_authz(auth_url, identity, RepositoryId::default(), credentials)
+            .repository_authz(
+                auth_endpoint,
+                identity,
+                RepositoryId::default(),
+                credentials,
+            )
             .await,
     );
 
     let repository = GRPCRepository {
         connection,
         client: RwLock::new(repository_client),
-        auth_url: auth_url.to_string(),
+        auth_endpoint: auth_endpoint.clone(),
         identity: identity.to_string(),
         credentials: credentials.clone(),
     };
@@ -915,7 +945,7 @@ pub async fn repository_client(
 
 pub async fn lock_client(
     connection: Arc<GRPCConnection>,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     repository: RepositoryId,
     credentials: &Arc<SuppliedCredentials>,
@@ -926,7 +956,7 @@ pub async fn lock_client(
         connection.channel(),
         repository,
         connection
-            .repository_authz(auth_url, identity, repository, credentials)
+            .repository_authz(auth_endpoint, identity, repository, credentials)
             .await,
     );
 
@@ -934,7 +964,7 @@ pub async fn lock_client(
         connection,
         repository,
         client: RwLock::new(lock_client),
-        auth_url: auth_url.to_string(),
+        auth_endpoint: auth_endpoint.clone(),
         identity: identity.to_string(),
         credentials: credentials.clone(),
     };
@@ -965,7 +995,7 @@ pub fn environment_client(
 pub async fn storage(
     connection: Weak<Connection>,
     remote_url: &str,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     partition: Partition,
     index: usize,
@@ -974,54 +1004,54 @@ pub async fn storage(
     // We open multiple storage connections, only reuse previous connections for the first
     let reuse = index == 0;
     let connection = connect(connection, remote_url, reuse).await?;
-    storage_client(connection, auth_url, identity, partition, credentials).await
+    storage_client(connection, auth_endpoint, identity, partition, credentials).await
 }
 
 pub async fn revision(
     connection: Weak<Connection>,
     remote_url: &str,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     repository: RepositoryId,
     credentials: &Arc<SuppliedCredentials>,
 ) -> Result<Arc<dyn Revision>, ProtocolError> {
     let connection = connect(connection, remote_url, true).await?;
-    revision_client(connection, auth_url, identity, repository, credentials).await
+    revision_client(connection, auth_endpoint, identity, repository, credentials).await
 }
 
 pub async fn repository(
     connection: Weak<Connection>,
     remote_url: &str,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     credentials: &Arc<SuppliedCredentials>,
 ) -> Result<Arc<dyn Repository>, ProtocolError> {
     let connection = connect(connection, remote_url, true).await?;
-    repository_client(connection, auth_url, identity, credentials).await
+    repository_client(connection, auth_endpoint, identity, credentials).await
 }
 
 pub async fn lock(
     connection: Weak<Connection>,
     remote_url: &str,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     repository: RepositoryId,
     credentials: &Arc<SuppliedCredentials>,
 ) -> Result<Arc<dyn Lock>, ProtocolError> {
     let connection = connect(connection, remote_url, true).await?;
-    lock_client(connection, auth_url, identity, repository, credentials).await
+    lock_client(connection, auth_endpoint, identity, repository, credentials).await
 }
 
 pub async fn admin(
     connection: Weak<Connection>,
     remote_url: &str,
-    auth_url: &str,
+    auth_endpoint: &AuthEndpoint,
     identity: &str,
     repository: RepositoryId,
     credentials: &Arc<SuppliedCredentials>,
 ) -> Result<Arc<dyn Admin>, ProtocolError> {
     let connection = connect(connection, remote_url, true).await?;
-    admin_client(connection, auth_url, identity, repository, credentials).await
+    admin_client(connection, auth_endpoint, identity, repository, credentials).await
 }
 
 pub async fn environment(
@@ -1053,7 +1083,7 @@ impl Drop for RequestScopedCounter {
 struct GRPCAdmin {
     connection: Arc<GRPCConnection>,
     client: RwLock<admin_client::AdminService>,
-    auth_url: String,
+    auth_endpoint: AuthEndpoint,
     identity: String,
     credentials: Arc<SuppliedCredentials>,
     repository: RepositoryId,
@@ -1069,7 +1099,7 @@ impl GRPCAdmin {
             self.repository,
             self.connection
                 .repository_authz(
-                    self.auth_url.as_str(),
+                    &self.auth_endpoint,
                     self.identity.as_str(),
                     self.repository,
                     &self.credentials,
@@ -1094,11 +1124,12 @@ impl Admin for GRPCAdmin {
 }
 
 /// Storage protocol implementation over gRPC
+#[lore_macro::test_pub]
 struct GRPCStorage {
     connection: Arc<GRPCConnection>,
     client: storage_client::StorageService,
     /// Auth URL for token exchange.
-    auth_url: String,
+    auth_endpoint: AuthEndpoint,
     /// Identity for token exchange.
     identity: String,
     /// The credentials supplied for the call in progress, shared so a reconnect
@@ -1116,6 +1147,7 @@ struct GRPCStorage {
 /// `GRPCConnection::reconnect` gives up permanently once its own connect retries are exhausted,
 /// but that only covers a remote it cannot reach. One that accepts connections while every RPC
 /// on them fails reconnects successfully every time, so the driving loop needs its own bound.
+#[lore_macro::test_pub]
 const MAX_RECONNECTS_PER_OP: usize = 3;
 
 /// Run an operation, reconnecting and reissuing if it reports the channel is gone.
@@ -1130,6 +1162,11 @@ const MAX_RECONNECTS_PER_OP: usize = 3;
 /// means no reconnect, no backoff, and no route to the permanent give-up that only the connect
 /// loop sets. Bounding the attempts covers the remaining case: a remote that accepts
 /// connections while failing every RPC on them reconnects successfully every round.
+///
+/// The rebuild is boxed. It runs only after a lost channel, and inline it would make every
+/// request's future as large as a reconnect. It runs after the match ends, so the future does
+/// not hold an attempt's result across it.
+#[lore_macro::test_pub]
 async fn with_reconnect<T, Op, OpFut, Rebuild, RebuildFut>(
     connection: &GRPCConnection,
     op: Op,
@@ -1144,9 +1181,10 @@ where
     for _ in 0..MAX_RECONNECTS_PER_OP {
         let reconnect_id = connection.reconnect.load(Ordering::Relaxed);
         match op().await {
-            Err(ProtocolError::Disconnected(_)) => rebuild(reconnect_id).await?,
+            Err(ProtocolError::Disconnected(_)) => {}
             result => return result,
         }
+        Box::pin(rebuild(reconnect_id)).await?;
     }
     Err(ProtocolError::from(lore_base::error::Disconnected))
 }
@@ -1190,7 +1228,12 @@ impl Storage for GRPCStorage {
     ) -> Result<u32, ProtocolError> {
         let auth = self
             .connection
-            .repository_authz(&self.auth_url, &self.identity, partition, &self.credentials)
+            .repository_authz(
+                &self.auth_endpoint,
+                &self.identity,
+                partition,
+                &self.credentials,
+            )
             .await;
         let token = auth.read().authorization_token.clone();
 
@@ -1357,7 +1400,7 @@ impl Storage for GRPCStorage {
 struct GRPCRevision {
     connection: Arc<GRPCConnection>,
     client: RwLock<revision_client::RevisionService>,
-    auth_url: String,
+    auth_endpoint: AuthEndpoint,
     identity: String,
     credentials: Arc<SuppliedCredentials>,
     repository: RepositoryId,
@@ -1373,7 +1416,7 @@ impl GRPCRevision {
             self.repository,
             self.connection
                 .repository_authz(
-                    self.auth_url.as_str(),
+                    &self.auth_endpoint,
                     self.identity.as_str(),
                     self.repository,
                     &self.credentials,
@@ -1394,7 +1437,7 @@ impl Revision for GRPCRevision {
         category: &str,
         creator: &str,
         stack: &[BranchPoint],
-    ) -> Result<Hash, ProtocolError> {
+    ) -> Result<BranchRecord, ProtocolError> {
         with_reconnect(
             &self.connection,
             || async {
@@ -1452,10 +1495,32 @@ impl Revision for GRPCRevision {
         .await
     }
 
-    async fn branch_list(&self) -> Result<BranchListResponse, ProtocolError> {
+    async fn branch_list(
+        &self,
+        creator: Option<&str>,
+        include_deleted: bool,
+    ) -> Result<BranchListResponse, ProtocolError> {
         with_reconnect(
             &self.connection,
-            || async { self.client.read().await.branch_list().await },
+            || async {
+                self.client
+                    .read()
+                    .await
+                    .branch_list(creator, include_deleted)
+                    .await
+            },
+            |reconnect_id| self.reconnect(reconnect_id),
+        )
+        .await
+    }
+
+    async fn branch_list_bounded(
+        &self,
+        limit: usize,
+    ) -> Result<Option<BranchListResponse>, ProtocolError> {
+        with_reconnect(
+            &self.connection,
+            || async { self.client.read().await.branch_list_bounded(limit).await },
             |reconnect_id| self.reconnect(reconnect_id),
         )
         .await
@@ -1513,7 +1578,7 @@ impl Revision for GRPCRevision {
 struct GRPCRepository {
     connection: Arc<GRPCConnection>,
     client: RwLock<repository_client::RepositoryService>,
-    auth_url: String,
+    auth_endpoint: AuthEndpoint,
     identity: String,
     credentials: Arc<SuppliedCredentials>,
 }
@@ -1527,7 +1592,7 @@ impl GRPCRepository {
             channel,
             self.connection
                 .repository_authz(
-                    self.auth_url.as_str(),
+                    &self.auth_endpoint,
                     self.identity.as_str(),
                     RepositoryId::default(),
                     &self.credentials,
@@ -1536,6 +1601,37 @@ impl GRPCRepository {
         );
 
         Ok(())
+    }
+
+    /// A client for the calls about `repository` on the OIDC path: they carry the
+    /// partition's authorization token, as the partition services do, since a Tier 2
+    /// server authorizes them from its partition grant. `None` on the gRPC path, where the login token is
+    /// checked online and these calls keep it.
+    async fn partition_client(
+        &self,
+        repository: RepositoryId,
+    ) -> Option<repository_client::RepositoryService<AuthzInterceptor>> {
+        if !self
+            .auth_endpoint
+            .url
+            .starts_with(crate::auth::oidc::SCHEME_PREFIX)
+        {
+            return None;
+        }
+        let auth = self
+            .connection
+            .repository_authz(
+                &self.auth_endpoint,
+                self.identity.as_str(),
+                repository,
+                &self.credentials,
+            )
+            .await;
+        Some(repository_client::RepositoryService::for_partition(
+            self.connection.channel(),
+            repository,
+            auth,
+        ))
     }
 }
 
@@ -1577,7 +1673,12 @@ impl Repository for GRPCRepository {
     async fn delete(&self, id: RepositoryId) -> Result<(), ProtocolError> {
         with_reconnect(
             &self.connection,
-            || async { self.client.read().await.delete(id).await },
+            || async {
+                match self.partition_client(id).await {
+                    Some(client) => client.delete(id).await,
+                    None => self.client.read().await.delete(id).await,
+                }
+            },
             |reconnect_id| self.reconnect(reconnect_id),
         )
         .await
@@ -1608,7 +1709,12 @@ impl Repository for GRPCRepository {
     async fn metadata_get(&self, id: RepositoryId) -> Result<Hash, ProtocolError> {
         with_reconnect(
             &self.connection,
-            || async { self.client.read().await.metadata_get(id).await },
+            || async {
+                match self.partition_client(id).await {
+                    Some(client) => client.metadata_get(id).await,
+                    None => self.client.read().await.metadata_get(id).await,
+                }
+            },
             |reconnect_id| self.reconnect(reconnect_id),
         )
         .await
@@ -1623,11 +1729,16 @@ impl Repository for GRPCRepository {
         with_reconnect(
             &self.connection,
             || async {
-                self.client
-                    .read()
-                    .await
-                    .metadata_set(id, expected, new)
-                    .await
+                match self.partition_client(id).await {
+                    Some(client) => client.metadata_set(id, expected, new).await,
+                    None => {
+                        self.client
+                            .read()
+                            .await
+                            .metadata_set(id, expected, new)
+                            .await
+                    }
+                }
             },
             |reconnect_id| self.reconnect(reconnect_id),
         )
@@ -1639,7 +1750,7 @@ impl Repository for GRPCRepository {
 struct GRPCLock {
     connection: Arc<GRPCConnection>,
     client: RwLock<lock_client::LockService>,
-    auth_url: String,
+    auth_endpoint: AuthEndpoint,
     identity: String,
     credentials: Arc<SuppliedCredentials>,
     repository: RepositoryId,
@@ -1655,7 +1766,7 @@ impl GRPCLock {
             self.repository,
             self.connection
                 .repository_authz(
-                    self.auth_url.as_str(),
+                    &self.auth_endpoint,
                     self.identity.as_str(),
                     self.repository,
                     &self.credentials,
@@ -1747,118 +1858,5 @@ impl Environment for GRPCEnvironment {
             |reconnect_id| self.reconnect(reconnect_id),
         )
         .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::AtomicUsize;
-
-    use super::*;
-
-    /// A connection that reaches nothing. `with_reconnect` never dials — it only reads the epoch
-    /// and defers to the supplied rebuild — so the tests drive it entirely offline.
-    fn test_connection() -> GRPCConnection {
-        let endpoint = tonic::transport::Endpoint::from_shared("http://127.0.0.1:1".to_string())
-            .expect("test endpoint");
-        let channel = ServiceBuilder::new()
-            .layer(RequestLoggerLayer {})
-            .service(endpoint.connect_lazy());
-        GRPCConnection::for_test("http://127.0.0.1:1".parse().expect("test url"), channel)
-    }
-
-    /// An operation the remote answers is returned as-is, without reconnecting.
-    ///
-    /// Matching the QUIC client, where `NotFound` and friends bubble rather than provoking a
-    /// reconnect: only a lost channel is the transport's business.
-    #[tokio::test]
-    async fn a_server_verdict_is_returned_without_reconnecting() {
-        let connection = test_connection();
-        let rebuilds = AtomicUsize::new(0);
-
-        let result: Result<(), ProtocolError> = with_reconnect(
-            &connection,
-            || async { Err(ProtocolError::from(lore_base::error::NotFound)) },
-            |_| async {
-                rebuilds.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            },
-        )
-        .await;
-
-        assert!(
-            result.is_err_and(|err| err.is_not_found()),
-            "the remote's verdict must reach the caller unchanged",
-        );
-        assert_eq!(
-            rebuilds.load(Ordering::Relaxed),
-            0,
-            "a verdict is not a lost channel, so nothing should reconnect",
-        );
-    }
-
-    /// A remote that keeps reporting a lost channel is given up on rather than retried forever.
-    ///
-    /// `GRPCConnection::reconnect` only gives up permanently when it cannot reach the remote at
-    /// all. One that accepts connections while failing every RPC rebuilds successfully every
-    /// round, so without this bound the loop would never terminate.
-    #[tokio::test]
-    async fn attempts_are_bounded_when_the_channel_never_recovers() {
-        let connection = test_connection();
-        let attempts = AtomicUsize::new(0);
-        let rebuilds = AtomicUsize::new(0);
-
-        let result: Result<(), ProtocolError> = with_reconnect(
-            &connection,
-            || async {
-                attempts.fetch_add(1, Ordering::Relaxed);
-                Err(ProtocolError::from(lore_base::error::Disconnected))
-            },
-            |_| async {
-                rebuilds.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            },
-        )
-        .await;
-
-        assert!(
-            result.is_err_and(|err| err.is_disconnected()),
-            "giving up must report a disconnect",
-        );
-        assert_eq!(attempts.load(Ordering::Relaxed), MAX_RECONNECTS_PER_OP);
-        assert_eq!(rebuilds.load(Ordering::Relaxed), MAX_RECONNECTS_PER_OP);
-    }
-
-    /// Each attempt reads the epoch afresh, so a later attempt still drives a real reconnect.
-    ///
-    /// Capturing it once outside the loop is the defect this pins: after the first rebuild the
-    /// epoch has moved, so every later attempt would hand `reconnect` a stale id, which it reads
-    /// as "somebody else already reconnected" and returns from without doing anything — no
-    /// reconnect, no backoff, and no route to giving up.
-    #[tokio::test]
-    async fn the_epoch_is_read_afresh_for_every_attempt() {
-        let connection = test_connection();
-        let seen = parking_lot::Mutex::new(Vec::new());
-
-        let _: Result<(), ProtocolError> = with_reconnect(
-            &connection,
-            || async { Err(ProtocolError::from(lore_base::error::Disconnected)) },
-            |reconnect_id| {
-                let (seen, connection) = (&seen, &connection);
-                async move {
-                    seen.lock().push(reconnect_id);
-                    connection.reconnect.fetch_add(1, Ordering::Relaxed);
-                    Ok(())
-                }
-            },
-        )
-        .await;
-
-        let seen = seen.lock().clone();
-        assert_eq!(
-            seen,
-            (1..=MAX_RECONNECTS_PER_OP as u32).collect::<Vec<_>>(),
-            "each attempt must observe the epoch left by the previous rebuild",
-        );
     }
 }

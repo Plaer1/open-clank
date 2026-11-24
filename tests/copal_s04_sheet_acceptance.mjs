@@ -77,9 +77,9 @@ await withCopalBrowser({ page, request:async (req, res) => {
   assert.equal(await evaluate('document.querySelector("[data-sheet-action=search]")'), null);
   const clipboardDenied = await evaluate(`(async()=>{const prior=navigator.clipboard;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>Promise.reject(new DOMException('denied','NotAllowedError'))}});const cell=document.querySelector('.copal-sheet-cell');const result=await document.querySelector('.copal-sheet-surface').__openClankSheetContextCommand('copy-sheet-cell',cell);Object.defineProperty(navigator,'clipboard',{configurable:true,value:prior});return result;})()`);
   assert.equal(clipboardDenied, false, 'clipboard denial is reported without an unhandled command');
-  await evaluate(`(()=>{localStorage.setItem('odysseus-custom-context-menu','off');window.dispatchEvent(new Event('odysseus-context-menu-changed'));const cell=document.querySelector('.copal-sheet-cell');cell.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));})()`);
+  await evaluate(`(()=>{localStorage.setItem('openclank-custom-context-menu','off');window.dispatchEvent(new Event('odysseus-context-menu-changed'));const cell=document.querySelector('.copal-sheet-cell');cell.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));})()`);
   assert.equal(await evaluate('document.getElementById("openclank-context-menu")'), null, 'disabled context menu does not intercept the sheet');
-  await evaluate(`localStorage.removeItem('odysseus-custom-context-menu');window.dispatchEvent(new Event('odysseus-context-menu-changed'))`);
+  await evaluate(`localStorage.removeItem('openclank-custom-context-menu');window.dispatchEvent(new Event('odysseus-context-menu-changed'))`);
   const watchBefore = await evaluate(`(async()=>{const selector='.copal-sheet-cell[data-sheet-row-index="0"][data-sheet-column-index="2"]';document.querySelector(selector).focus();await new Promise((resolve)=>setTimeout(resolve,0));const wrap=document.querySelector('.copal-sheet-grid-wrap');wrap.scrollTop=17;return { selected:document.querySelector(selector)?.getAttribute('aria-selected'), scroll:wrap.scrollTop };})()`);
   state.events?.write('event: document\ndata: {"id":"source-1"}\n\n');
   await until('fetch("/api/test-state").then(r=>r.json()).then(s=>s.queries >= 2)');

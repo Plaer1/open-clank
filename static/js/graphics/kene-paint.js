@@ -2,7 +2,9 @@
 // the route polyline: it never infers a cell, a remainder of an edge, or a
 // chord across a corner that the route did not traverse.
 
-const INITIAL_ALPHA = 0.34;
+// Hold the route color long enough to see it after the snake's tail passes.
+const INITIAL_ALPHA = 1;
+const HOLD_MS = 5000;
 const FADE_BUCKETS = 8;
 const MAX_COLORS = 6;
 
@@ -81,7 +83,7 @@ export function createKenePaintTrail({ maxSegments = 16384, decayMs = 2600, cuto
   function prune(time) {
     for (const [key, segment] of segments) {
       const age = Math.max(0, time - segment.time);
-      if (INITIAL_ALPHA * Math.exp(-age / fadeMs) < alphaCutoff) remove(key);
+      if (INITIAL_ALPHA * Math.exp(-Math.max(0, age - HOLD_MS) / fadeMs) < alphaCutoff) remove(key);
     }
   }
 
@@ -104,7 +106,7 @@ export function createKenePaintTrail({ maxSegments = 16384, decayMs = 2600, cuto
     const clippedEnd = clamp(to, edgeStart, edgeEnd);
     if (!(clippedEnd > clippedStart)) return false;
 
-    const mergeKey = `${String(ownerKey)}|${edgeIndex}|${Math.floor(time / 100)}`;
+    const mergeKey = `${String(ownerKey)}|${edgeIndex}|${Math.floor(time / 250)}`;
     const epsilon = Math.max(1e-6, edgeLength * 1e-6);
     const keys = mergeKeys.get(mergeKey);
     if (keys) {
@@ -198,7 +200,7 @@ export function createKenePaintTrail({ maxSegments = 16384, decayMs = 2600, cuto
     const palette = colorList(colors);
 
     for (const segment of segments.values()) {
-      const fade = Math.exp(-Math.max(0, stamp - segment.time) / fadeMs);
+      const fade = Math.exp(-Math.max(0, stamp - segment.time - HOLD_MS) / fadeMs);
       if (INITIAL_ALPHA * fade < alphaCutoff) continue;
       let paintColor = resolveColor(segment.color, palette, colors);
       if (!usedColors.includes(paintColor)) {
@@ -216,22 +218,13 @@ export function createKenePaintTrail({ maxSegments = 16384, decayMs = 2600, cuto
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    for (const group of groups.values()) {
+    for (const group of [...groups.values()].sort((a, b) => b.bucket - a.bucket)) {
       const representativeFade = 1 - ((group.bucket + 0.5) / FADE_BUCKETS);
       const alpha = INITIAL_ALPHA * strength * representativeFade;
       if (alpha <= 0) continue;
       ctx.strokeStyle = group.color;
-      ctx.globalAlpha = alpha * 0.34;
-      ctx.lineWidth = Math.max(1, scale * 3.2);
-      ctx.beginPath();
-      for (const segment of group.segments) {
-        ctx.moveTo(segment.start.x, segment.start.y);
-        ctx.lineTo(segment.end.x, segment.end.y);
-      }
-      ctx.stroke();
-
       ctx.globalAlpha = alpha;
-      ctx.lineWidth = Math.max(0.7, scale * 1.05);
+      ctx.lineWidth = Math.max(1.5, scale * 2);
       ctx.beginPath();
       for (const segment of group.segments) {
         ctx.moveTo(segment.start.x, segment.start.y);

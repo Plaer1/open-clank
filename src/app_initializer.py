@@ -10,7 +10,7 @@ from src.constants import (
 )
 from src.memory import MemoryManager
 from src.memory_provider import MemoryProviderRegistry, NativeMemoryProvider
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_scope import chat_workspace
 from services.memory.skills import SkillsManager
 from core.session_manager import SessionManager
@@ -34,9 +34,9 @@ def create_directories():
         os.makedirs(directory, exist_ok=True)
 
 
-def prepare_frankenmemory_database() -> str:
+def prepare_memery_database() -> str:
     """Admit native current schema and read the durable identity."""
-    from src.frankenmemory_database import prepare_frankenmemory_database as prepare
+    from src.memery_database import prepare_memery_database as prepare
     return prepare(FM_DB_PATH)
 
 def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
@@ -68,39 +68,44 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     from src.default_persona import configure as configure_default_persona
     configure_default_persona(preset_manager)
 
-    # Frankenmemory owns memory retrieval and document RAG. Keep the historical
+    # Memery owns memory retrieval and document RAG. Keep the historical
     # component slot empty for callers that still read it; no environment
     # toggle can resurrect Chroma as a second authority.
     memory_vector = None
     logger.info("Legacy Chroma memory vector path is retired")
 
-    # Register memory providers
-    memory_provider = os.environ.get("MEMORY_PROVIDER", "frankenmemory")
-    if memory_provider == "frankenmemory":
-        database_id = prepare_frankenmemory_database()
-        fm_command = os.environ.get("FM_MCP_COMMAND", "fm-mcp")
-        fm = FrankenmemoryProvider(
-            command=fm_command,
-            workspace_id=chat_workspace(),
-            env={
-                "FM_DB_PATH": FM_DB_PATH,
-                "FM_DB_ID": database_id,
-                "FM_SCOPE_AUTHORITY": "trusted-caller",
-            },
-            # Broker credentials are projected only into scoped child
-            # lifetools processes. The app owns the underlying stdio provider
-            # and must never loop back into its own not-yet-ready HTTP broker.
-            broker_url="",
-            broker_token="",
+    # The guarded source owner remains separate from the selected recall provider.
+    memory_provider = os.environ.get("MEMORY_PROVIDER", "memery")
+    if memory_provider == "frankenmemory":  # persisted provider selection
+        memory_provider = "memery"
+    from src.memery_database import resolve_memory_store_profile
+    profile = resolve_memory_store_profile(FM_DB_PATH)
+    fm = None
+    canonical_memory_provider = None
+    if memory_provider == "memery" or profile in ("guarded-v17", "guarded-v18"):
+        if profile in ("guarded-v17", "guarded-v18"):
+            from src.memery_database import prepare_guarded_memery_database
+            guarded_preparation = prepare_guarded_memery_database(FM_DB_PATH, profile=profile)
+            database_id = guarded_preparation.database_id
+        else:
+            guarded_preparation = None
+            database_id = prepare_memery_database()
+        fm = MemeryProvider(
+            host_worker=True,
+            guarded_preparation=guarded_preparation, workspace_id=chat_workspace(),
+            env={"FM_DB_PATH": guarded_preparation.database_path if guarded_preparation else FM_DB_PATH,
+                 "FM_DB_ID": database_id, "FM_SCOPE_AUTHORITY": "trusted-caller"},
+            broker_url="", broker_token="",
         )
+        if guarded_preparation is not None:
+            canonical_memory_provider = fm
+    if memory_provider == "memery":
         native = NativeMemoryProvider(memory_manager, memory_vector)
         native.enabled = False
         memory_provider_registry = MemoryProviderRegistry([fm, native])
-        logger.info("Memory provider: frankenmemory (native disabled)")
+        logger.info("Memory provider: Memery (native disabled)")
     else:
-        memory_provider_registry = MemoryProviderRegistry([
-            NativeMemoryProvider(memory_manager, memory_vector),
-        ])
+        memory_provider_registry = MemoryProviderRegistry([NativeMemoryProvider(memory_manager, memory_vector)])
         logger.info("Memory provider: native")
 
     # Initialize processors. Provider-always: consumers never see None —
@@ -135,6 +140,7 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         "memory_vector": memory_vector,
         "memory_provider_registry": memory_provider_registry,
         "memory_provider": active_provider,
+        "canonical_memory_provider": canonical_memory_provider,
         "skills_manager": skills_manager,
         "session_manager": session_manager,
         "upload_handler": upload_handler,

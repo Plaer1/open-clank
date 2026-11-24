@@ -85,7 +85,7 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
                        HOME=str(home), APP_BIND='127.0.0.1')
     for key in tuple(environment):
         if key.endswith(('_TOKEN', '_API_KEY')) or key in {'DATABASE_URL', 'OPEN_CLANK_ENGINE_BIN',
-              'ODYSSEUS_DATA_DIR', 'FM_DB_PATH', 'OPEN_CLANK_AUTHORITY_DB_PATH', 'OPEN_CLANK_AGENT_HOME',
+              'FM_DB_PATH', 'OPEN_CLANK_AUTHORITY_DB_PATH', 'OPEN_CLANK_AGENT_HOME',
               'OPEN_CLANK_RUNTIME_PYTHON', 'OPEN_CLANK_PYTHON', 'VIRTUAL_ENV', 'PYTHONHOME', 'PYTHONPATH'}:
             environment.pop(key, None)
     with socket.socket() as listener:
@@ -119,7 +119,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
         return started
 
     def await_fixture_server():
-        deadline = time.monotonic() + 180
+        from src.openclank.server_manager import WINDOWS_PACKAGED_START_SECONDS
+        deadline = time.monotonic() + WINDOWS_PACKAGED_START_SECONDS
         while True:
             if process.poll() is not None:
                 raise RuntimeError('Packaged server exited before readiness; inspect private server log')
@@ -189,9 +190,17 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
             base, cookies, bundle / '_internal/static/vendor/google-emoji/bundle-manifest.json',
             work / 'data/assets/google-emoji/emoji-assets.pack')
         checks.append(CHECK)
+        # New accounts browse explicit locations. Exercise the same permission
+        # flow as Files, scoped to this fixture and its two test files.
+        grant = request('/api/file-policy/locations', {
+            'path': str(home), 'kind': 'directory', 'capabilities': ['read', 'write'],
+            'app_access': True, 'agent_access': False,
+        })
+        if not grant['app_access'] or grant['agent_access'] or grant['access_pending']:
+            raise RuntimeError('Could not grant the fixture folder to Files and Editor')
         roots = request('/api/files-v1/roots')
         host = next(item for item in roots['entries'] if item.get('name') == 'Host locations')
-        home_resource = next(item for item in children(host) if item.get('name') == 'Home')
+        home_resource = next(item for item in children(host) if item.get('name') == home.name)
         home_entries = children(home_resource)
         image_resource = next(item for item in home_entries if item.get('name') == image_fixture.name)
         image_url = '/api/files-v1/thumbnail/' + urllib.parse.quote(image_resource['ref'], safe='')

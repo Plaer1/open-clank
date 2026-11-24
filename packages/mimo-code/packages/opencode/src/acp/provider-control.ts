@@ -6,7 +6,12 @@ import { AppRuntime } from "@/effect/app-runtime"
 import { ModelsDev, Provider, ProviderAuth } from "@/provider"
 import { ProviderID } from "@/provider/schema"
 import type { OpenClankManagedProtocol } from "./openclank-protocol"
-import { parseCodexCatalog, parseCopilotCatalog, parseGenericCatalog, type ParsedDiscovery } from "./provider-discovery"
+import { parseClaudeCatalog, parseCodexCatalog, parseCopilotCatalog, parseGenericCatalog, parseGrokCatalog, type ParsedDiscovery } from "./provider-discovery"
+import { claudeDiscoveryRequest } from "@/plugin/claude"
+import { resolveManagedCapabilities, type CapabilityModel } from "./provider-capabilities"
+import { resolveMimoEndpoint, type MimoBillingLane } from "@/provider/mimo-endpoint-policy"
+import { openCodeProtocol } from "@/provider/opencode-protocol"
+import { InstallationVersion } from "@/installation/version"
 
 const FLOW_TTL_MS = 10 * 60 * 1000
 const DISCOVERY_TIMEOUT_MS = 5_000
@@ -36,11 +41,33 @@ type FamilyDefinition = {
   kinds: readonly ConnectionKind[]
   billingLanes: readonly BillingLane[]
   apiKey: boolean
+  apiKeyLabel?: string
+  apiKeyBillingLanes?: readonly BillingLane[]
   keyless: boolean
   defaultURL?: string
+  endpointPolicy?: Readonly<Record<string, string>>
 }
 
+const COMFY_JOB_FAMILY: FamilyDefinition = {id:"comfyui", displayName:"ComfyUI jobs", adapters:["comfyui-workflow-v1"], kinds:["local"], billingLanes:["local"], apiKey:false, keyless:true}
+
+const SPRIXEN_JOB_FAMILY: FamilyDefinition = {id:"sprixen", displayName:"Sprixen sprite jobs", adapters:["sprixen-sprite-v1"], kinds:["official"], billingLanes:["metered_api"], apiKey:true, keyless:false, defaultURL:"https://api.sprixen.com"}
+const TRIPO_JOB_FAMILY: FamilyDefinition = {id:"tripo", displayName:"Tripo text-to-3D jobs", adapters:["tripo-text3d-v1"], kinds:["official"], billingLanes:["metered_api"], apiKey:true, keyless:false, defaultURL:"https://openapi.tripo3d.ai"}
+const FAL_JOB_FAMILY: FamilyDefinition = {id:"fal", displayName:"Fal media API", adapters:["fal-flux-schnell-v1"], kinds:["official"], billingLanes:["metered_api"], apiKey:true, keyless:false, defaultURL:"https://queue.fal.run"}
+const VOIDLESS_JOB_FAMILY: FamilyDefinition = {id:"voidless", displayName:"Voidless 64px image jobs", adapters:["voidless-image-v1"], kinds:["official"], billingLanes:["metered_api"], apiKey:true, keyless:false, defaultURL:"https://api.voidless.dev"}
+const MESHY_JOB_FAMILY: FamilyDefinition = {id:"meshy", displayName:"Meshy preview jobs", adapters:["meshy-preview-v1"], kinds:["official"], billingLanes:["metered_api"], apiKey:true, keyless:false, defaultURL:"https://api.meshy.ai"}
+const TRELLIS_JOB_FAMILY: FamilyDefinition = {id:"trellis", displayName:"TRELLIS image-to-3D jobs", adapters:["trellis-image3d-v1"], kinds:["local"], billingLanes:["local"], apiKey:false, keyless:true}
+const HUNYUAN_SHAPE_FAMILY: FamilyDefinition = {id:"hunyuan-shape", displayName:"Hunyuan local shape jobs", adapters:["hunyuan3d-v2-shape-v1"], kinds:["local"], billingLanes:["local"], apiKey:false, keyless:true}
+
+const BLENDER_JOB_FAMILY: FamilyDefinition = {id:"blender", displayName:"Blender jobs", adapters:["blender-render-v1"], kinds:["local"], billingLanes:["local"], apiKey:false, keyless:true}
+
 const FAMILY_DEFINITIONS: readonly FamilyDefinition[] = [
+  COMFY_JOB_FAMILY,
+  BLENDER_JOB_FAMILY,
+  TRELLIS_JOB_FAMILY, HUNYUAN_SHAPE_FAMILY,
+  SPRIXEN_JOB_FAMILY,
+  MESHY_JOB_FAMILY,
+  VOIDLESS_JOB_FAMILY,
+  TRIPO_JOB_FAMILY,
   {
     id: "openai",
     displayName: "OpenAI",
@@ -76,13 +103,38 @@ const FAMILY_DEFINITIONS: readonly FamilyDefinition[] = [
     billingLanes: ["metered_api", "subscription"],
     apiKey: true,
     keyless: false,
+    apiKeyBillingLanes: ["metered_api", "subscription"],
+    endpointPolicy: { metered_api: "mimo-metered-api-v1", subscription: "mimo-token-plan-v1" },
+  },
+  {
+    id: "opencode-console",
+    displayName: "OpenCode Console",
+    adapters: ["opencode-native"],
+    kinds: ["official"],
+    billingLanes: ["metered_api"],
+    apiKey: true,
+    keyless: false,
+    defaultURL: "https://opencode.ai/inference",
+    endpointPolicy: { metered_api: "opencode-console-inference-v1" },
+  },
+  {
+    id: "opencode-go",
+    displayName: "OpenCode Go",
+    adapters: ["opencode-native"],
+    kinds: ["subscription"],
+    billingLanes: ["subscription"],
+    apiKey: true,
+    keyless: false,
+    defaultURL: "https://opencode.ai/inference/go",
+    apiKeyBillingLanes: ["subscription"],
+    endpointPolicy: { subscription: "opencode-go-inference-v1" },
   },
   {
     id: "google",
     displayName: "Google",
     adapters: ["google-generative-ai", "google-vertex"],
-    kinds: ["official", "custom_gateway"],
-    billingLanes: ["metered_api", "custom"],
+    kinds: ["official", "subscription", "custom_gateway"],
+    billingLanes: ["metered_api", "subscription", "custom"],
     apiKey: true,
     keyless: false,
   },
@@ -94,6 +146,88 @@ const FAMILY_DEFINITIONS: readonly FamilyDefinition[] = [
     billingLanes: ["metered_api", "subscription", "custom"],
     apiKey: true,
     keyless: false,
+  },
+  {
+    id: "grok",
+    displayName: "Grok subscription",
+    adapters: ["grok-cli-chat"],
+    kinds: ["subscription"],
+    billingLanes: ["subscription"],
+    apiKey: false,
+    keyless: false,
+    defaultURL: "https://cli-chat-proxy.grok.com/v1",
+    endpointPolicy: { subscription: "grok-cli-proxy-v1" },
+  },
+  {
+    id: "zai-coding-plan",
+    displayName: "Z.AI Coding Plan",
+    adapters: ["models-dev-openai-compatible"],
+    kinds: ["subscription"],
+    billingLanes: ["subscription"],
+    apiKey: true,
+    apiKeyLabel: "Z.AI Coding Plan API key",
+    apiKeyBillingLanes: ["subscription"],
+    keyless: false,
+    defaultURL: "https://api.z.ai/api/coding/paas/v4",
+    endpointPolicy: { subscription: "zai-coding-plan-openai-v1" },
+  },
+  {
+    id: "kimi-code-plan-cn",
+    displayName: "Kimi Code Plan (China)",
+    adapters: ["models-dev-openai-compatible"],
+    kinds: ["subscription"],
+    billingLanes: ["subscription"],
+    apiKey: true,
+    apiKeyLabel: "Kimi Code plan key",
+    apiKeyBillingLanes: ["subscription"],
+    keyless: false,
+    defaultURL: "https://api.kimi.com/coding/v1",
+    endpointPolicy: { subscription: "kimi-code-plan-cn-v1" },
+  },
+  {
+    id: "kimi-code-plan-global",
+    displayName: "Kimi Code Plan (Global)",
+    adapters: ["models-dev-openai-compatible"],
+    kinds: ["subscription"],
+    billingLanes: ["subscription"],
+    apiKey: true,
+    apiKeyLabel: "Kimi Code plan key",
+    apiKeyBillingLanes: ["subscription"],
+    keyless: false,
+    defaultURL: "https://api.kimi.ai/coding/v1",
+    endpointPolicy: { subscription: "kimi-code-plan-global-v1" },
+  },
+  {
+    id: "kilo",
+    displayName: "Kilo Gateway",
+    adapters: ["models-dev-openai-compatible"],
+    kinds: ["official"],
+    billingLanes: ["metered_api"],
+    apiKey: true,
+    keyless: false,
+    defaultURL: "https://ai-gateway.kilo.ai/api/v1",
+  },
+  {
+    id: "llmgateway",
+    displayName: "LLM Gateway",
+    adapters: ["models-dev-openai-compatible"],
+    kinds: ["official"],
+    billingLanes: ["metered_api"],
+    apiKey: true,
+    keyless: false,
+    defaultURL: "https://api.llmgateway.io/v1",
+  },
+  {
+    id: "llmgateway-devpass",
+    displayName: "LLM Gateway DevPass",
+    adapters: ["models-dev-openai-compatible"],
+    kinds: ["subscription"],
+    billingLanes: ["subscription"],
+    apiKey: true,
+    apiKeyLabel: "DevPass API key",
+    apiKeyBillingLanes: ["subscription"],
+    keyless: false,
+    defaultURL: "https://api.llmgateway.io/v1",
   },
   {
     id: "openrouter",
@@ -143,6 +277,7 @@ const FAMILY_DEFINITIONS: readonly FamilyDefinition[] = [
 ] as const
 
 const FAMILIES = new Map(FAMILY_DEFINITIONS.map((family) => [family.id, family]))
+// Kept private until the async job adapter and Files commit guard are joined.
 
 export type AuthServices = {
   methods(): Promise<ProviderAuth.Methods>
@@ -190,6 +325,8 @@ type PendingOAuth = {
   targetAccountID?: string
   expectedRevision?: number
   method: number
+  acquisitionMethod: "browser" | "device"
+  expectedCredentialKinds: readonly ("api" | "oauth")[]
   nonce: string
   verifierChallenge: string
   expiresAt: number
@@ -199,7 +336,11 @@ type PendingOAuth = {
   task?: Promise<void>
 }
 
-export class ProviderControlError extends Error {}
+export class ProviderControlError extends Error {
+  constructor(message: string, readonly safeCode = "oauth_exchange_failed") {
+    super(message)
+  }
+}
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -409,34 +550,47 @@ function familyMap(catalog: Record<string, ModelsDev.Provider>): ReadonlyMap<str
   return new Map(familyDefinitions(catalog).map((family) => [family.id, family]))
 }
 
-function operationsForModalities(model: ModelsDev.Model): ProviderModelRoute["operations"] {
-  const input = new Set(model.modalities?.input ?? ["text"])
-  const output = new Set(model.modalities?.output ?? ["text"])
-  const operations = new Set<ProviderModelRoute["operations"][number]>()
-  if (output.has("text")) {
-    operations.add("chat.stream")
-    operations.add("chat.complete")
+function capabilityModelFromDiscovery(model: ParsedDiscovery["models"][number]): CapabilityModel {
+  const modalities = model.capabilities.modalities
+  if (typeof modalities !== "object" || modalities === null || Array.isArray(modalities)) {
+    return { id: model.modelID }
   }
-  if (input.has("image") && output.has("text")) operations.add("vision.describe")
-  if (output.has("image")) operations.add("image.generate")
-  if (output.has("audio")) operations.add("audio.synthesize")
-  if (input.has("audio") && output.has("text")) operations.add("audio.transcribe")
-  if (operations.size === 0) {
-    operations.add("chat.stream")
-    operations.add("chat.complete")
+  const input = (modalities as Record<string, unknown>).input
+  const output = (modalities as Record<string, unknown>).output
+  return {
+    id: model.modelID,
+    modalities: {
+      ...(Array.isArray(input) ? { input: input.filter((item): item is string => typeof item === "string") } : {}),
+      ...(Array.isArray(output) ? { output: output.filter((item): item is string => typeof item === "string") } : {}),
+    },
   }
-  return [...operations]
 }
 
-function frozenModelRoutes(familyID: string, provider: ModelsDev.Provider | undefined): ProviderModelRoute[] {
-  if (!provider) return []
-  return Object.values(provider.models)
+export function retainSupportedOpenCodeModels<T extends { modelID: string }>(familyID: string, models: readonly T[]): T[] {
+  if (familyID !== "opencode-console" && familyID !== "opencode-go") return [...models]
+  return models.filter((model) => openCodeProtocol(familyID, model.modelID) !== undefined)
+}
+
+function frozenModelRoutes(familyID: string, provider: ModelsDev.Provider | undefined, adapterID = "", billingLane: BillingLane = "metered_api"): ProviderModelRoute[] {
+  const models = Object.values(provider?.models ?? {})
+  if (familyID === "xiaomi" && adapterID === "mimo-native") {
+    for (const modelID of ["mimo-v2.6-flash", "mimo-v2.6-pro"]) {
+      if (!models.some((model) => model.id === modelID)) models.push({ id: modelID, name: modelID, modalities: { input: ["text"], output: ["text"] } } as ModelsDev.Model)
+    }
+  }
+  if (!models.length) return []
+  return models
+    .filter((model) => {
+      if (familyID !== "opencode-console" && familyID !== "opencode-go") return true
+      return openCodeProtocol(familyID, model.id) !== undefined
+    })
     .slice(0, MAX_DISCOVERED_MODELS)
     .map((model) => ({
       modelID: model.id,
       displayName: model.name || model.id,
-      operations: operationsForModalities(model),
+      operations: resolveRouteOperations(familyID, adapterID, billingLane, model.id, model).operations,
       capabilities: {
+        ...(openCodeProtocol(familyID, model.id) ? { apiProtocol: openCodeProtocol(familyID, model.id)!.protocol } : {}),
         ...(model.family === undefined ? {} : { family: model.family }),
         release_date: model.release_date,
         attachment: model.attachment,
@@ -450,11 +604,56 @@ function frozenModelRoutes(familyID: string, provider: ModelsDev.Provider | unde
         ...(model.status === undefined ? {} : { status: model.status }),
       },
       provenance: {
-        authority: "managed-engine",
-        catalog: "models.dev-snapshot",
+        authority: "managed-engine" as const,
+          catalog: familyID === "xiaomi" && ["mimo-v2.6-flash", "mimo-v2.6-pro"].includes(model.id)
+            ? "xiaomi-official-v2.6-overlay"
+            : "models.dev-snapshot",
         familyID,
       },
     }))
+    .filter((route) => route.operations.length > 0)
+}
+
+type LocalRouteTuple = [string, string, ProviderModelRoute["operations"], string]
+const LOCAL_EXECUTOR_RECIPES: LocalRouteTuple[] = [
+  ["fastembed/default", "FastEmbed (local)", ["embeddings.create"], "openclank.fastembed.v1"],
+  ["kokoro/Kokoro-82M", "Kokoro 82M (local)", ["audio.synthesize"], "openclank.kokoro.v1"],
+  ["faster-whisper/default", "Faster Whisper (local)", ["audio.transcribe"], "openclank.whisper.v1"],
+  ["diffusion/default", "Diffusion (local)", ["image.generate", "image.edit", "image.inpaint", "image.img2img"], "openclank.diffusion.v1"],
+  ["realesrgan/x4plus", "Real-ESRGAN x4plus (local)", ["image.upscale", "image.denoise"], "openclank.realesrgan.v1"],
+  ["briaai/RMBG-1.4", "RMBG 1.4 (local)", ["image.segment", "image.remove_background"], "openclank.rmbg.v1"],
+  ["gfpgan/clean-v1", "GFPGAN clean (local)", ["image.restore_face"], "openclank.gfpgan.v1"],
+]
+const LOCAL_EXECUTOR_ROUTES: ProviderModelRoute[] = LOCAL_EXECUTOR_RECIPES.map(([modelID, displayName, operations, localExecutorID]) => ({
+  modelID,
+  displayName,
+  operations,
+  capabilities: {
+    localExecutorID,
+    runtimeStatus: "unknown",
+    ...(operations.includes("embeddings.create") ? { batch: true, normalized: true } : {}),
+    ...(operations.some((operation) => operation.startsWith("image.") || operation.startsWith("audio.")) ? { artifacts: true } : {}),
+    ...(modelID === "kokoro/Kokoro-82M" ? { format: "wav", voice: "af_heart", speed: 1 } : {}),
+  },
+  provenance: { authority: "managed-engine", catalog: "openclank-local-executors-v1" },
+})) as ProviderModelRoute[]
+
+function resolveRouteOperations(
+  familyID: string,
+  adapterID: string,
+  billingLane: BillingLane,
+  modelID: string,
+  model: CapabilityModel | undefined,
+  accountModelAccess = false,
+) {
+  return resolveManagedCapabilities({
+    familyID,
+    adapterID,
+    billingLane,
+    modelID,
+    model,
+    accountModelAccess,
+  })
 }
 
 function discoveryURLs(connection: ReturnType<typeof validateConnection>): string[] {
@@ -469,6 +668,9 @@ function discoveryURLs(connection: ReturnType<typeof validateConnection>): strin
   if (connection.familyID === "ollama") {
     const root = path.endsWith("/api") || path.endsWith("/v1") ? path.slice(0, path.lastIndexOf("/")) : path
     return [build(`${root}/api/tags`), build(`${root}/v1/models`)]
+  }
+  if (connection.familyID === "opencode-console" || connection.familyID === "opencode-go") {
+    return [build(`${path}/v1/models`)]
   }
   return [build(path.endsWith("/v1") ? `${path}/models` : `${path}/v1/models`)]
 }
@@ -522,11 +724,24 @@ async function liveModelRoutes(
       if (!response.ok) continue
       const parsed = parseGenericCatalog(await boundedJSON(response))
       if (parsed.models.length === 0) continue
-      return parsed.models.slice(0, MAX_DISCOVERED_MODELS).map((model) => ({
-        ...model,
-        capabilities: { ...model.capabilities, family: connection.familyID },
-        provenance: { ...model.provenance, familyID: connection.familyID },
-      })) as ProviderModelRoute[]
+      return retainSupportedOpenCodeModels(connection.familyID, parsed.models).slice(0, MAX_DISCOVERED_MODELS).flatMap((model) => {
+        const opencode = connection.familyID === "opencode-console" || connection.familyID === "opencode-go"
+          ? openCodeProtocol(connection.familyID, model.modelID)
+          : undefined
+        const operations = resolveRouteOperations(connection.familyID, connection.adapterID, connection.billingLane, model.modelID, capabilityModelFromDiscovery(model), true).operations
+        if (!operations.length) return []
+        return [{
+          ...model,
+          operations,
+          capabilities: { ...model.capabilities, ...(opencode ? { apiProtocol: opencode.protocol } : {}), family: connection.familyID },
+          provenance: {
+            ...model.provenance,
+            authority: "managed-engine" as const,
+            origin: "account-discovery" as const,
+            familyID: connection.familyID,
+          },
+        }]
+      }) as ProviderModelRoute[]
     } catch {
       // Connection creation remains possible while a local server is stopped
       // or while a protected endpoint still needs its optional account.
@@ -536,6 +751,12 @@ async function liveModelRoutes(
 }
 
 function subscriptionDiscoveryURLs(connection: ReturnType<typeof validateConnection>, credential: Auth.Info): string[] {
+  if (connection.familyID === "kimi-code-plan-cn" || connection.familyID === "kimi-code-plan-global") {
+    return connection.normalizedURL ? [`${connection.normalizedURL.replace(/\/+$/, "")}/models`] : []
+  }
+  if (connection.familyID === "opencode-go" && connection.adapterID === "opencode-native") {
+    return ["https://opencode.ai/inference/go/v1/models"]
+  }
   if (connection.familyID === "openai" && connection.adapterID === "openai-responses") {
     return ["https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"]
   }
@@ -550,6 +771,9 @@ function subscriptionDiscoveryURLs(connection: ReturnType<typeof validateConnect
   if (connection.familyID === "xai" && connection.adapterID === "xai-responses") {
     return ["https://api.x.ai/v1/models"]
   }
+  if (connection.familyID === "grok" && connection.adapterID === "grok-cli-chat") {
+    return ["https://cli-chat-proxy.grok.com/v1/models"]
+  }
   if (connection.familyID === "anthropic" && connection.adapterID === "anthropic-messages") {
     return ["https://api.anthropic.com/v1/models"]
   }
@@ -562,6 +786,8 @@ function parseAccountCatalog(
 ): ParsedDiscovery {
   if (connection.familyID === "openai" && connection.adapterID === "openai-responses") return parseCodexCatalog(value)
   if (connection.familyID === "github-copilot" && connection.adapterID === "copilot-chat") return parseCopilotCatalog(value)
+  if (connection.familyID === "grok" && connection.adapterID === "grok-cli-chat") return parseGrokCatalog(value)
+  if (connection.familyID === "anthropic" && connection.adapterID === "anthropic-messages") return parseClaudeCatalog(value)
   return parseGenericCatalog(value)
 }
 
@@ -577,30 +803,39 @@ function enrichDiscoveryModels(
   modelCatalog: Record<string, ModelsDev.Provider>,
 ): ProviderModelRoute[] {
   const metadata = new Map(
-    frozenModelRoutes(connection.familyID, modelCatalog[connection.familyID]).map((route) => [route.modelID, route]),
+    frozenModelRoutes(connection.familyID, modelCatalog[connection.familyID], connection.adapterID, connection.billingLane).map((route) => [route.modelID, route]),
   )
-  return discovered.slice(0, MAX_DISCOVERED_MODELS).map((model) => {
+  return retainSupportedOpenCodeModels(connection.familyID, discovered).slice(0, MAX_DISCOVERED_MODELS).map((model) => {
     const known = metadata.get(model.modelID)
+    const discoveryProvenance = {
+      ...model.provenance,
+      authority: "managed-engine" as const,
+      origin: "account-discovery" as const,
+      familyID: connection.familyID,
+    }
+    const resolved = resolveRouteOperations(connection.familyID, connection.adapterID, connection.billingLane, model.modelID, capabilityModelFromDiscovery(model), true)
     if (!known) {
       return {
         ...model,
-        provenance: { ...model.provenance, familyID: connection.familyID },
+        operations: resolved.operations,
+        provenance: discoveryProvenance,
       } as ProviderModelRoute
     }
     const operations = new Set(known.operations)
+    if (resolved.operations.includes("embeddings.create")) {
+      operations.clear()
+      operations.add("embeddings.create")
+    }
+    if (resolved.operations.includes("web.search")) operations.add("web.search")
     if (model.capabilities.vision === true) operations.add("vision.describe")
     return {
       ...model,
       displayName: known.displayName,
       operations: [...operations],
       capabilities: { ...known.capabilities, ...model.capabilities },
-      provenance: {
-        ...model.provenance,
-        familyID: connection.familyID,
-        metadataCatalog: "models.dev-snapshot",
-      },
+      provenance: { ...discoveryProvenance, metadataCatalog: "models.dev-snapshot" },
     } as ProviderModelRoute
-  })
+  }).filter((route) => route.operations.length > 0)
 }
 
 function discoveryResult(
@@ -612,6 +847,8 @@ function discoveryResult(
   models: ProviderModelRoute[] = [],
   freshness: DiscoveryFreshness = "unknown",
   errorCode?: "discovery_unavailable" | "discovery_partial" | "reauth_required",
+  retryable = false,
+  retryAfterMs?: number,
 ) {
   return {
     status,
@@ -622,7 +859,18 @@ function discoveryResult(
     provenance: { source, observedAt },
     freshness,
     ...(errorCode ? { errorCode } : {}),
+    ...(retryable ? { retryable: true } : {}),
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
   }
+}
+
+function parseRetryAfter(value: string | null, nowMs: number): number | undefined {
+  if (value === null || value.trim() === "") return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(24 * 60 * 60 * 1000, Math.round(seconds * 1000))
+  const date = Date.parse(value)
+  if (!Number.isFinite(date)) return undefined
+  return Math.min(24 * 60 * 60 * 1000, Math.max(0, date - nowMs))
 }
 
 async function accountDiscovery(
@@ -647,6 +895,12 @@ async function accountDiscovery(
       ? credential.refresh
       : credentialToken(credential)
   if (token) headers.set("Authorization", `Bearer ${token}`)
+  if (connection.familyID === "grok" && connection.adapterID === "grok-cli-chat") {
+    if (credential.type !== "oauth") {
+      return discoveryResult(accountID, credentialRevision, "reauth_required", source, now(), [], "fresh", "reauth_required")
+    }
+    headers.set("X-XAI-Token-Auth", "xai-grok-cli")
+  }
   if (connection.familyID === "openai" && connection.kind === "subscription") {
     headers.set("Origin", "https://chatgpt.com")
     headers.set("Referer", "https://chatgpt.com/codex")
@@ -654,29 +908,69 @@ async function accountDiscovery(
       headers.set("ChatGPT-Account-Id", credential.accountId)
     }
   }
+  if ((connection.familyID === "kimi-code-plan-cn" || connection.familyID === "kimi-code-plan-global") && credential.type === "oauth") {
+    const region = connection.familyID === "kimi-code-plan-cn" ? "cn" : "global"
+    if (credential.metadata?.credential_profile !== "kimi-code-device-v1" || credential.metadata.kimi_region !== region) {
+      return discoveryResult(accountID, credentialRevision, "reauth_required", source, now(), [], "fresh", "reauth_required")
+    }
+    headers.set("X-Msh-Platform", "openclank")
+    headers.set("X-Msh-Version", String(InstallationVersion))
+    headers.set("X-Msh-Device-Id", credential.metadata.device_id)
+    headers.set("User-Agent", `openclank/${InstallationVersion}`)
+  }
 
   let sawResponse = false
+  let retryable = false
+  let retryAfterMs: number | undefined
   for (const url of urls) {
+    let response: Response
     try {
-      const response = await fetcher(url, {
-        headers,
-        redirect: "error",
-        signal: AbortSignal.timeout(timeoutMs),
-      })
+      const claudeRequest = connection.familyID === "anthropic" && connection.adapterID === "anthropic-messages"
+        && credential.type === "oauth" ? claudeDiscoveryRequest(credential.access) : undefined
+      const requestURL = claudeRequest?.url ?? url
+      const requestInit = claudeRequest?.init ?? { headers, redirect: "error" as const }
+      response = await fetcher(requestURL, { ...requestInit, signal: AbortSignal.timeout(timeoutMs) })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "TimeoutError") retryable = true
+      else if (error instanceof TypeError) retryable = true
+      continue
+    }
+    try {
       sawResponse = true
       if (response.status === 401 || response.status === 403) {
         return discoveryResult(accountID, credentialRevision, "reauth_required", source, now(), [], "fresh", "reauth_required")
       }
-      if (response.status === 429 || !response.ok) continue
-      const parsed = parseAccountCatalog(connection, await boundedJSON(response))
+      if (response.status === 429 || response.status >= 500) {
+        retryable = true
+        retryAfterMs = parseRetryAfter(response.headers.get("retry-after"), now())
+        continue
+      }
+      if (!response.ok) continue
+      let rawCatalog: unknown
+      let parsed: ParsedDiscovery
+      try {
+        rawCatalog = await boundedJSON(response)
+        parsed = parseAccountCatalog(connection, rawCatalog)
+      } catch {
+        return discoveryResult(accountID, credentialRevision, "unavailable", source, now(), [], "fresh", "discovery_unavailable")
+      }
       const overflow = parsed.models.length > MAX_DISCOVERED_MODELS
       const models = enrichDiscoveryModels(connection, parsed.models, modelCatalog)
+      if (connection.familyID === "anthropic" && connection.adapterID === "anthropic-messages") {
+        const claude = parseClaudeCatalog(rawCatalog)
+        if (claude.status === "malformed") {
+          return discoveryResult(accountID, credentialRevision, "unavailable", source, now(), [], "fresh", "discovery_unavailable")
+        }
+        if (claude.status === "partial") {
+          return discoveryResult(accountID, credentialRevision, "partial", source, now(), models, "fresh", "discovery_partial")
+        }
+      }
       if (parsed.invalidRows > 0 || overflow) {
         return discoveryResult(accountID, credentialRevision, "partial", source, now(), models, "fresh", "discovery_partial")
       }
       return discoveryResult(accountID, credentialRevision, "complete", source, now(), models, "fresh")
     } catch {
-      // The caller retains S06's last-good inventory on transport or parse failure.
+      return discoveryResult(accountID, credentialRevision, "unavailable", source, now(), [], "fresh", "discovery_unavailable")
     }
   }
   return discoveryResult(
@@ -688,6 +982,8 @@ async function accountDiscovery(
     [],
     sawResponse ? "stale" : "unknown",
     "discovery_unavailable",
+    retryable,
+    retryAfterMs,
   )
 }
 
@@ -714,9 +1010,91 @@ function validateConnectionWithFamilies(value: unknown, families: ReadonlyMap<st
   if (familyID === "github-copilot" && settings.enterpriseUrl !== undefined) {
     normalizedEnterpriseHost(settings.enterpriseUrl)
   }
-  const isLocalExecutor = familyID === "local-executor" && adapterID === "openclank-local-executor"
+  const isLocalExecutor = (familyID === "local-executor" && adapterID === "openclank-local-executor") || familyID === "blender" || ["trellis", "hunyuan-shape"].includes(familyID)
   const requestedURL = input.url === "" ? undefined : input.url
-  const url = normalizedURL(requestedURL ?? family.defaultURL, kind, isLocalExecutor)
+  const defaultURL = familyID === "xiaomi" && billingLane === "subscription" ? undefined : family.defaultURL
+  const url = normalizedURL(requestedURL ?? defaultURL, kind, isLocalExecutor)
+  if (familyID === "tripo") {
+    if (url !== "https://openapi.tripo3d.ai" || Object.keys(settings).some((key) => key !== "interface") ||
+        (settings.interface !== undefined && settings.interface !== "tripo-text3d-v1"))
+      throw new ProviderControlError("unsupported Tripo profile")
+    return {familyID,adapterID,kind,billingLane,normalizedURL:url,settings:{interface:"tripo-text3d-v1"},credentialRequired:true,modelRoutes:[]}
+  }
+  if (familyID === "fal") {
+    if (url !== "https://queue.fal.run" || Object.keys(settings).some((key) => key !== "interface") ||
+        (settings.interface !== undefined && settings.interface !== "fal-flux-schnell-v1"))
+      throw new ProviderControlError("unsupported fal profile")
+    return {familyID,adapterID,kind,billingLane,normalizedURL:url,settings:{interface:"fal-flux-schnell-v1"},credentialRequired:true,modelRoutes:[]}
+  }
+  if (familyID === "voidless") {
+    if (url !== "https://api.voidless.dev" || Object.keys(settings).some((key) => key !== "interface") ||
+        (settings.interface !== undefined && settings.interface !== "voidless-image-v1"))
+      throw new ProviderControlError("unsupported Voidless profile")
+    return {familyID,adapterID,kind,billingLane,normalizedURL:url,settings:{interface:"voidless-image-v1"},credentialRequired:true,modelRoutes:[]}
+  }
+  if (familyID === "meshy") {
+    if (url !== "https://api.meshy.ai" || Object.keys(settings).some((key) => key !== "interface") ||
+        (settings.interface !== undefined && settings.interface !== "meshy-preview-v1"))
+      throw new ProviderControlError("unsupported Meshy profile")
+    return {familyID,adapterID,kind,billingLane,normalizedURL:url,settings:{interface:"meshy-preview-v1"},credentialRequired:true,modelRoutes:[]}
+  }
+  if (familyID === "sprixen") {
+    if (url !== "https://api.sprixen.com" || Object.keys(settings).some((key) => key !== "interface") ||
+        (settings.interface !== undefined && settings.interface !== "sprixen-sprite-v1"))
+      throw new ProviderControlError("unsupported Sprixen profile")
+    return { familyID, adapterID, kind, billingLane, normalizedURL:url,
+      settings:{interface:"sprixen-sprite-v1"}, credentialRequired:true, modelRoutes:[] }
+  }
+  if (familyID === "trellis") {
+    const exact=(x:unknown, keys:string[]): x is Record<string,unknown> => !!x && typeof x === "object" && !Array.isArray(x) && Object.keys(x).sort().join(",") === [...keys].sort().join(",")
+    const short=(x:unknown,n:number) => typeof x === "string" && x.isWellFormed() && x.length>0 && Buffer.byteLength(x,"utf8")<=n && !/[\u0000-\u001f\u007f]/u.test(x)
+    const rel=(x:unknown) => short(x,4096) && !(x as string).startsWith("/") && !(x as string).split("/").some(part=>!part || part === "." || part === "..") && !(x as string).includes("\\")
+    const hash=(x:unknown)=>typeof x === "string" && /^[a-f0-9]{64}$/.test(x)
+    const i=settings.interpreter, m=settings.manifest
+    if (url || !exact(settings,["interface","recipe","installationRoot","interpreter","manifest"]) || settings.interface!=="trellis-image3d-v1" || settings.recipe!=="trellis-image-glb-v1" || !short(settings.installationRoot,4096) || !(settings.installationRoot as string).startsWith("/") || !exact(i,["relativePath","sha256","version"]) || !rel(i.relativePath) || !hash(i.sha256) || !short(i.version,128) || !exact(m,["version","sourceRevision","modelRevision","dinoRevision","components"]) || m.version!==1 || !short(m.sourceRevision,256) || !short(m.modelRevision,256) || !short(m.dinoRevision,256) || !Array.isArray(m.components) || m.components.length<1 || m.components.length>64 || m.components.some(c=>!exact(c,["role","relativePath","size","sha256","acquisitionOperationID"]) || !short(c.role,128) || !rel(c.relativePath) || !Number.isSafeInteger(c.size) || (c.size as number)<1 || !hash(c.sha256) || !(c.acquisitionOperationID===null || short(c.acquisitionOperationID,256)))) throw new ProviderControlError("unsupported TRELLIS profile")
+    return {familyID,adapterID,kind,billingLane,settings,credentialRequired:false,modelRoutes:[]}
+  }
+  if (familyID === "hunyuan-shape") {
+    const exact=(v:unknown,keys:string[])=>!!v && typeof v==="object" && !Array.isArray(v) && Object.keys(v).sort().join(",")===keys.sort().join(",")
+    const short=(v:unknown,n:number)=>typeof v==="string" && v.isWellFormed() && !!v && new TextEncoder().encode(v).length<=n && !/[\x00-\x1f\x7f]/.test(v)
+    const rel=(v:unknown)=>short(v,4096) && !(v as string).startsWith("/") && !(v as string).includes("\\") && !(v as string).split("/").some(x=>!x || x==="." || x==="..")
+    const hash=(v:unknown)=>typeof v==="string" && /^[a-f0-9]{64}$/.test(v)
+    const i=settings.interpreter as Record<string,unknown>, m=settings.manifest as Record<string,unknown>
+    if (url || !exact(settings,["interface","recipe","installationRoot","device","interpreter","manifest"]) || settings.interface!=="hunyuan3d-v2-shape-v1" || settings.recipe!=="hunyuan3d-v2-image-glb-v1" || !["cpu-fp32","cuda-fp16"].includes(String(settings.device)) || !short(settings.installationRoot,4096) || !(settings.installationRoot as string).startsWith("/") || !exact(i,["relativePath","sha256","version"]) || !rel(i.relativePath) || !hash(i.sha256) || !short(i.version,128) || !exact(m,["version","sourceRevision","modelRevision","components"]) || m.version!==1 || !short(m.sourceRevision,256) || !short(m.modelRevision,256) || !Array.isArray(m.components) || m.components.length!==6 || m.components.some(c=>!exact(c,["role","relativePath","size","sha256","acquisitionOperationID"]) || !short(c.role,128) || !rel(c.relativePath) || !Number.isSafeInteger(c.size) || (c.size as number)<1 || !hash(c.sha256) || !(c.acquisitionOperationID===null || short(c.acquisitionOperationID,256)))) throw new ProviderControlError("unsupported Hunyuan profile")
+    return {familyID,adapterID,kind,billingLane,settings,credentialRequired:false,modelRoutes:[]}
+  }
+  if (familyID === "blender") {
+    if (url || Object.keys(settings).some((key) => !["interface", "executablePath", "executableSHA256", "executableVersion"].includes(key)) ||
+        (settings.interface !== undefined && settings.interface !== "blender-render-v1") ||
+        typeof settings.executablePath !== "string" || !settings.executablePath.startsWith("/") || settings.executablePath.length > 4096 ||
+        typeof settings.executableSHA256 !== "string" || !/^[0-9a-f]{64}$/.test(settings.executableSHA256) ||
+        typeof settings.executableVersion !== "string" || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(settings.executableVersion))
+      throw new ProviderControlError("unsupported Blender profile")
+    return { familyID, adapterID, kind, billingLane, settings:{interface:"blender-render-v1", executablePath:settings.executablePath,
+      executableSHA256:settings.executableSHA256, executableVersion:settings.executableVersion}, credentialRequired:false, modelRoutes:[] }
+  }
+  if (familyID === "comfyui") {
+    if (!url) throw new ProviderControlError("ComfyUI origin is required")
+    const origin = new URL(url)
+    if (!["127.0.0.1", "[::1]"].includes(origin.hostname) || origin.pathname !== "/" || url !== origin.origin)
+      throw new ProviderControlError("ComfyUI requires an explicit loopback origin")
+    if (Object.keys(settings).some((key) => key !== "interface") || (settings.interface !== undefined && settings.interface !== "comfyui-workflow-v1"))
+      throw new ProviderControlError("unsupported ComfyUI profile")
+    return { familyID, adapterID, kind, billingLane, normalizedURL:url,
+      settings:{interface:"comfyui-workflow-v1"}, credentialRequired:false, modelRoutes:[] }
+  }
+  if (family.endpointPolicy) {
+    const expectedPolicy = family.endpointPolicy[billingLane]
+    if (!expectedPolicy || !url || url !== family.defaultURL) {
+      throw new ProviderControlError("provider endpoint does not match its declared billing lane", "oauth_endpoint_mismatch")
+    }
+  }
+  if (familyID === "kimi-code-plan-cn" || familyID === "kimi-code-plan-global") {
+    const expected = familyID === "kimi-code-plan-cn" ? "https://api.kimi.com/coding/v1" : "https://api.kimi.ai/coding/v1"
+    if (adapterID !== "models-dev-openai-compatible" || kind !== "subscription" || billingLane !== "subscription" || url !== expected) {
+      throw new ProviderControlError("Kimi Code endpoint does not match its selected region", "oauth_endpoint_mismatch")
+    }
+  }
   return {
     familyID,
     adapterID,
@@ -726,84 +1104,17 @@ function validateConnectionWithFamilies(value: unknown, families: ReadonlyMap<st
     settings,
     credentialRequired: !(kind === "local" && family.keyless),
     modelRoutes: isLocalExecutor
-      ? [
-          {
-            modelID: "fastembed/default",
-            displayName: "FastEmbed (local)",
-            operations: ["embeddings.create"],
-            capabilities: {
-              localExecutorID: "openclank.fastembed.v1",
-              batch: true,
-              normalized: true,
-            },
-            provenance: {
-              authority: "managed-engine",
-              catalog: "openclank-local-executors-v1",
-            },
-          },
-          {
-            modelID: "diffusion/default",
-            displayName: "Diffusion (local)",
-            operations: ["image.generate", "image.edit", "image.inpaint", "image.img2img"],
-            capabilities: {
-              localExecutorID: "openclank.diffusion.v1",
-              artifacts: true,
-              normalized: true,
-            },
-            provenance: {
-              authority: "managed-engine",
-              catalog: "openclank-local-executors-v1",
-            },
-          },
-          {
-            modelID: "realesrgan/x4plus",
-            displayName: "Real-ESRGAN x4plus (local)",
-            operations: ["image.upscale", "image.denoise"],
-            capabilities: {
-              localExecutorID: "openclank.realesrgan.v1",
-              artifacts: true,
-              normalized: true,
-            },
-            provenance: {
-              authority: "managed-engine",
-              catalog: "openclank-local-executors-v1",
-            },
-          },
-          {
-            modelID: "briaai/RMBG-1.4",
-            displayName: "RMBG 1.4 (local)",
-            operations: ["image.segment", "image.remove_background"],
-            capabilities: {
-              localExecutorID: "openclank.rmbg.v1",
-              artifacts: true,
-              normalized: true,
-            },
-            provenance: {
-              authority: "managed-engine",
-              catalog: "openclank-local-executors-v1",
-            },
-          },
-          {
-            modelID: "gfpgan/clean-v1",
-            displayName: "GFPGAN clean (local)",
-            operations: ["image.restore_face"],
-            capabilities: {
-              localExecutorID: "openclank.gfpgan.v1",
-              artifacts: true,
-              normalized: true,
-            },
-            provenance: {
-              authority: "managed-engine",
-              catalog: "openclank-local-executors-v1",
-            },
-          },
-        ]
+      ? LOCAL_EXECUTOR_ROUTES
       : [],
   }
 }
 
 export function validateConnection(value: unknown) {
   return validateConnectionWithFamilies(value, FAMILIES)
+}
+
+export function validateComfyJobConnection(value: unknown) {
+  return validateConnectionWithFamilies(value, new Map([[COMFY_JOB_FAMILY.id, COMFY_JOB_FAMILY], [BLENDER_JOB_FAMILY.id, BLENDER_JOB_FAMILY], [TRELLIS_JOB_FAMILY.id, TRELLIS_JOB_FAMILY], [SPRIXEN_JOB_FAMILY.id, SPRIXEN_JOB_FAMILY], [MESHY_JOB_FAMILY.id, MESHY_JOB_FAMILY], [VOIDLESS_JOB_FAMILY.id, VOIDLESS_JOB_FAMILY], [TRIPO_JOB_FAMILY.id, TRIPO_JOB_FAMILY]]))
 }
 
 function authClass(lane: BillingLane): string {
@@ -820,12 +1131,24 @@ function validateAccountWithFamilies(value: unknown, families: ReadonlyMap<strin
   const accountID = text(input.accountID, "provider account ID", 256)
   const credentialRevision = integer(input.credentialRevision, "provider credential revision", 1)
   const family = families.get(connection.familyID)!
+  const acquisitionMethod = input.acquisitionMethod === undefined || input.acquisitionMethod === null
+    ? undefined
+    : text(input.acquisitionMethod, "provider acquisition method", 32)
+  const credentialKind = input.credentialKind === undefined ? undefined : text(input.credentialKind, "provider credential kind", 16)
   if (authMethod === "api_key") {
     if (!family.apiKey) throw new ProviderControlError("this provider connection does not accept API-key accounts")
-    if (connection.billingLane === "subscription") {
+    if (connection.billingLane === "subscription" && !(
+      (connection.familyID === "xiaomi" && connection.adapterID === "mimo-native") ||
+      (connection.familyID === "opencode-go" && connection.adapterID === "opencode-native") ||
+      (connection.familyID === "llmgateway-devpass" && connection.adapterID === "models-dev-openai-compatible") ||
+      (connection.familyID === "zai-coding-plan" && connection.adapterID === "models-dev-openai-compatible") ||
+      ((connection.familyID === "kimi-code-plan-cn" || connection.familyID === "kimi-code-plan-global") && connection.adapterID === "models-dev-openai-compatible")
+    )) {
       throw new ProviderControlError("API keys cannot use the subscription billing lane")
     }
     if (credential.type !== "api") throw new ProviderControlError("provider credential type is not supported")
+    if (credentialKind !== undefined && credentialKind !== "api") throw new ProviderControlError("credential kind does not match the credential")
+    if (acquisitionMethod !== undefined && !["manual-key", "browser", "device"].includes(acquisitionMethod)) throw new ProviderControlError("provider acquisition method is not supported")
     const key = text(credential.key, "provider API key", 131_072)
     const metadata = credential.metadata
     if (metadata !== undefined) {
@@ -835,13 +1158,37 @@ function validateAccountWithFamilies(value: unknown, families: ReadonlyMap<strin
         text(item, "provider credential metadata value", 2048)
       }
     }
-    const normalizedCredential: Auth.Info = {
+    let normalizedCredential: Auth.Info = {
       type: "api",
       key,
       ...(metadata === undefined ? {} : { metadata: metadata as Record<string, string> }),
     }
+    if (connection.familyID === "kimi-code-plan-cn" || connection.familyID === "kimi-code-plan-global") {
+      if (acquisitionMethod !== undefined && acquisitionMethod !== "manual-key") {
+        throw new ProviderControlError("Kimi Code plan keys require manual key entry")
+      }
+    }
+    if (connection.familyID === "xiaomi" && connection.adapterID === "mimo-native") {
+      const endpoint = resolveMimoEndpoint({
+        lane: connection.billingLane as MimoBillingLane,
+        credentialURL: normalizedCredential.metadata?.base_url,
+        connectionURL: connection.normalizedURL,
+      })
+      const expected = family.endpointPolicy?.[connection.billingLane]
+      if (!endpoint || endpoint.policy !== expected) throw new ProviderControlError("MiMo credential endpoint does not match its billing lane", "oauth_endpoint_mismatch")
+      normalizedCredential = {
+        ...normalizedCredential,
+        metadata: { ...normalizedCredential.metadata, base_url: endpoint.url },
+      }
+    }
     return {
       authMethod: "api_key" as const,
+      ...(acquisitionMethod === undefined ? {} : { acquisitionMethod: acquisitionMethod as "manual-key" | "browser" | "device" }),
+      credentialKind: "api" as const,
+      ...(connection.familyID === "xiaomi" && connection.adapterID === "mimo-native"
+        ? { endpointPolicy: family.endpointPolicy?.[connection.billingLane] as "mimo-metered-api-v1" | "mimo-token-plan-v1" | undefined }
+        : {}),
+      ...(family.endpointPolicy ? { endpointPolicy: family.endpointPolicy[connection.billingLane] } : {}),
       authClass: authClass(connection.billingLane),
       credential: normalizedCredential,
       accountID,
@@ -855,6 +1202,28 @@ function validateAccountWithFamilies(value: unknown, families: ReadonlyMap<strin
   if (connection.billingLane !== "subscription" || credential.type !== "oauth") {
     throw new ProviderControlError("OAuth accounts require a subscription connection")
   }
+  if (connection.familyID === "xiaomi" && connection.adapterID === "mimo-native") {
+    throw new ProviderControlError("MiMo Token Plan requires an API credential")
+  }
+  if (connection.familyID === "grok" && acquisitionMethod !== "device") {
+    throw new ProviderControlError("Grok subscription accounts require device authorization")
+  }
+  const kimiRegion = connection.familyID === "kimi-code-plan-cn" ? "cn" : connection.familyID === "kimi-code-plan-global" ? "global" : undefined
+  if (kimiRegion !== undefined) {
+    const metadata = credential.metadata === undefined ? undefined : object(credential.metadata, "Kimi Code OAuth metadata")
+    if (
+      connection.adapterID !== "models-dev-openai-compatible" ||
+      acquisitionMethod !== "device" ||
+      metadata?.kimi_region !== kimiRegion ||
+      metadata?.credential_profile !== "kimi-code-device-v1" ||
+      typeof metadata?.device_id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(metadata?.device_id ?? "")) ||
+      Object.keys(metadata ?? {}).some((key) => !["device_id", "kimi_region", "credential_profile"].includes(key))
+    ) {
+      throw new ProviderControlError("Kimi Code OAuth metadata does not match its selected family", "oauth_endpoint_mismatch")
+    }
+  }
+  if (credentialKind !== undefined && credentialKind !== "oauth") throw new ProviderControlError("credential kind does not match the credential")
   const refresh = text(credential.refresh, "provider OAuth refresh token", 131_072)
   const access = text(credential.access, "provider OAuth access token", 131_072)
   if (typeof credential.expires !== "number" || !Number.isFinite(credential.expires)) {
@@ -869,6 +1238,7 @@ function validateAccountWithFamilies(value: unknown, families: ReadonlyMap<strin
     ...(credential.enterpriseUrl === undefined
       ? {}
       : { enterpriseUrl: normalizedEnterpriseHost(credential.enterpriseUrl) }),
+    ...(kimiRegion === undefined ? {} : { metadata: credential.metadata as Auth.Oauth["metadata"] }),
   }
   if (connection.familyID === "github-copilot" && connection.settings.enterpriseUrl !== undefined) {
     const configuredEnterprise = normalizedEnterpriseHost(connection.settings.enterpriseUrl)
@@ -878,6 +1248,9 @@ function validateAccountWithFamilies(value: unknown, families: ReadonlyMap<strin
   }
   return {
     authMethod: "oauth" as const,
+    ...(acquisitionMethod === undefined ? {} : { acquisitionMethod: acquisitionMethod as "manual-key" | "browser" | "device" }),
+    credentialKind: "oauth" as const,
+    ...(family.endpointPolicy ? { endpointPolicy: family.endpointPolicy[connection.billingLane] } : {}),
     authClass: authClass(connection.billingLane),
     credential: normalizedCredential,
     accountID,
@@ -976,7 +1349,9 @@ export class ControlPlane {
     credential?: Auth.Info,
     modelCatalog?: Record<string, ModelsDev.Provider>,
   ): Promise<ProviderModelRoute[]> {
+    if (connection.familyID === "comfyui" || connection.familyID === "blender" || ["trellis", "hunyuan-shape"].includes(connection.familyID) || connection.familyID === "sprixen" || connection.familyID === "meshy" || connection.familyID === "tripo" || connection.familyID === "fal" || connection.familyID === "voidless") return []
     if (connection.kind === "subscription") return []
+    if (connection.familyID === "google" && connection.adapterID === "google-vertex") return []
     if (connection.modelRoutes.length > 0) return connection.modelRoutes as ProviderModelRoute[]
     const live =
       connection.familyID === "ollama" ||
@@ -987,10 +1362,11 @@ export class ControlPlane {
     }
     const catalog: Record<string, ModelsDev.Provider> =
       modelCatalog ?? (await this.auth.modelCatalog().catch(() => ({})))
-    return frozenModelRoutes(connection.familyID, catalog[connection.familyID])
+    return frozenModelRoutes(connection.familyID, catalog[connection.familyID], connection.adapterID, connection.billingLane)
   }
 
   async connectionValidate(value: unknown) {
+    if (["comfyui", "blender", "trellis", "hunyuan-shape", "sprixen", "meshy", "tripo", "fal", "voidless"].includes(String(object(value, "provider connection").familyID))) return validateConnection(value)
     const modelCatalog = await this.auth.modelCatalog().catch(() => ({}))
     const connection = validateConnectionWithFamilies(value, familyMap(modelCatalog))
     return { ...connection, modelRoutes: await this.models(connection, undefined, modelCatalog) }
@@ -998,8 +1374,10 @@ export class ControlPlane {
 
   async accountValidate(value: unknown) {
     const input = object(value, "provider account")
-    const modelCatalog = await this.auth.modelCatalog().catch(() => ({}))
-    const families = familyMap(modelCatalog)
+    const jobFamily = object(input.connection, "provider connection").familyID
+    const jobDefinition = jobFamily === "sprixen" ? SPRIXEN_JOB_FAMILY : jobFamily === "meshy" ? MESHY_JOB_FAMILY : jobFamily === "tripo" ? TRIPO_JOB_FAMILY : jobFamily === "fal" ? FAL_JOB_FAMILY : jobFamily === "voidless" ? VOIDLESS_JOB_FAMILY : undefined
+    const modelCatalog = jobDefinition ? {} : await this.auth.modelCatalog().catch(() => ({}))
+    const families = jobDefinition ? new Map([[jobDefinition.id, jobDefinition]]) : familyMap(modelCatalog)
     const account = validateAccountWithFamilies(input, families)
     const connection = account.connection
     const live =
@@ -1029,6 +1407,9 @@ export class ControlPlane {
           )
     return {
       authMethod: account.authMethod,
+      acquisitionMethod: account.acquisitionMethod ?? null,
+      credentialKind: account.credentialKind,
+      ...(account.endpointPolicy ? { endpointPolicy: account.endpointPolicy } : {}),
       authClass: account.authClass,
       credential: account.credential,
       accountID: account.accountID,
@@ -1064,7 +1445,18 @@ export class ControlPlane {
       ...(flow.credential
         ? {
             credential: flow.credential,
-            authMethod: "oauth",
+            authMethod: flow.credential.type === "api" ? "api_key" : "oauth",
+            acquisitionMethod: flow.acquisitionMethod,
+            credentialKind: flow.credential.type,
+            ...(flow.providerID === "xiaomi" && flow.credential.type === "api"
+              ? { endpointPolicy: resolveMimoEndpoint({
+                  lane: flow.billingLane as MimoBillingLane,
+                  credentialURL: flow.credential.metadata?.base_url,
+                })?.policy }
+              : {}),
+            ...(FAMILIES.get(flow.providerID)?.endpointPolicy
+              ? { endpointPolicy: FAMILIES.get(flow.providerID)!.endpointPolicy![flow.billingLane] }
+              : {}),
             authClass: authClass(flow.billingLane),
             safeIdentity: safeIdentity(flow.credential),
           }
@@ -1084,6 +1476,19 @@ export class ControlPlane {
         flowID: flow.flowID,
       })
       if (!credential) throw new ProviderControlError("provider OAuth did not return a credential")
+      if ((credential.type !== "api" && credential.type !== "oauth") || !flow.expectedCredentialKinds.includes(credential.type)) {
+        throw new ProviderControlError("provider credential kind does not match the selected auth method", "oauth_credential_mismatch")
+      }
+      let validatedCredential = credential
+      if (credential.type === "api" && flow.providerID === "xiaomi") {
+        const endpoint = resolveMimoEndpoint({
+          lane: flow.billingLane as MimoBillingLane,
+          credentialURL: credential.metadata?.base_url,
+        })
+        const expected = FAMILIES.get("xiaomi")?.endpointPolicy?.[flow.billingLane]
+        if (!endpoint || endpoint.policy !== expected) throw new ProviderControlError("MiMo credential endpoint does not match its billing lane", "oauth_endpoint_mismatch")
+        validatedCredential = { ...credential, metadata: { ...credential.metadata, base_url: endpoint.url } }
+      }
       // A cancellation may race the awaited provider exchange.  TypeScript's
       // local narrowing cannot observe that external mutation, so re-read the
       // shared flow state explicitly after the await.
@@ -1093,12 +1498,12 @@ export class ControlPlane {
         flow.errorCode = flow.state === "expired" ? "oauth_expired" : "oauth_cancelled"
         return
       }
-      flow.credential = credential
+      flow.credential = validatedCredential
       flow.state = "complete"
-    } catch {
+    } catch (error) {
       if (flow.state !== "cancelled" && flow.state !== "expired") {
         flow.state = "failed"
-        flow.errorCode = "oauth_exchange_failed"
+        flow.errorCode = error instanceof ProviderControlError ? error.safeCode : "oauth_exchange_failed"
       }
     }
   }
@@ -1109,12 +1514,26 @@ export class ControlPlane {
       schemaVersion: 1,
       families: familyDefinitions(modelCatalog).map((family) => {
         const providerMethods = FAMILIES.has(family.id) ? (methods[family.id] ?? []) : []
+        const compatibleProviderMethods = providerMethods.flatMap((method, index) => {
+          const billingLanes = (method.billingLanes ?? [...family.billingLanes]).filter((lane) => family.billingLanes.includes(lane))
+          return billingLanes.length > 0 ? [{ method, index, billingLanes }] : []
+        })
         const authMethods = [
-          ...(family.apiKey ? [{ id: "api_key", type: "api" as const, label: "API key" }] : []),
-          ...providerMethods.map((method, index) => ({
+          ...(family.apiKey ? [{
+            id: "api_key",
+            type: "api" as const,
+            label: family.apiKeyLabel ?? "API key",
+            acquisitionMethod: "manual-key" as const,
+            credentialKinds: ["api"] as const,
+            billingLanes: [...(family.apiKeyBillingLanes ?? family.billingLanes.filter((lane) => lane !== "subscription"))],
+          }] : []),
+          ...compatibleProviderMethods.map(({ method, index, billingLanes }) => ({
             id: `oauth:${index}`,
             type: method.type,
             label: method.label,
+            acquisitionMethod: method.acquisitionMethod ?? (method.type === "oauth" ? "browser" as const : "manual-key" as const),
+            credentialKinds: method.credentialKinds ?? [method.type === "oauth" ? "oauth" as const : "api" as const],
+            billingLanes,
             ...(method.prompts ? { prompts: method.prompts } : {}),
           })),
           ...(family.keyless ? [{ id: "none", type: "none" as const, label: "No credential" }] : []),
@@ -1122,9 +1541,10 @@ export class ControlPlane {
         return {
           id: family.id,
           displayName: family.displayName,
-          adapters: [...family.adapters],
+          adapters: family.adapters.filter((adapter) => adapter !== "google-vertex"),
           kinds: [...family.kinds],
           billingLanes: [...family.billingLanes],
+          ...(family.endpointPolicy ? { endpointPolicies: { ...family.endpointPolicy } } : {}),
           authMethods,
           modelCount: Object.keys(modelCatalog[family.id]?.models ?? {}).length,
         }
@@ -1144,6 +1564,15 @@ export class ControlPlane {
     const method = integer(input.method, "OAuth method")
     const methodCatalog = (await this.auth.methods())[identity.providerID] ?? []
     if (methodCatalog[method]?.type !== "oauth") throw new ProviderControlError("OAuth method is not supported")
+    if ((identity.providerID === "kimi-code-plan-cn" || identity.providerID === "kimi-code-plan-global") && methodCatalog[method]?.acquisitionMethod !== "device") {
+      throw new ProviderControlError("Kimi Code plan requires its device authorization method")
+    }
+    if (methodCatalog[method]?.billingLanes && !methodCatalog[method]!.billingLanes!.includes(identity.billingLane as Exclude<BillingLane, "legacy">)) {
+      throw new ProviderControlError("OAuth method does not support this billing lane")
+    }
+    if (identity.providerID === "grok" && methodCatalog[method]?.acquisitionMethod !== "device") {
+      throw new ProviderControlError("Grok subscription requires device authorization")
+    }
     const verifierChallenge = text(input.codeVerifierChallenge, "OAuth verifier challenge", 128)
     if (!/^[A-Za-z0-9_-]{43}$/.test(verifierChallenge))
       throw new ProviderControlError("OAuth verifier challenge is invalid")
@@ -1153,6 +1582,8 @@ export class ControlPlane {
     const flow: PendingOAuth = {
       ...identity,
       method,
+      acquisitionMethod: methodCatalog[method]?.acquisitionMethod === "device" ? "device" : "browser",
+      expectedCredentialKinds: methodCatalog[method]?.credentialKinds ?? ["oauth"],
       verifierChallenge,
       expiresAt,
       state: "pending",
@@ -1190,7 +1621,6 @@ export class ControlPlane {
       expiresAt: flow.expiresAt,
     }
   }
-
   async oauthPoll(value: unknown) {
     this.expire()
     const input = object(value, "OAuth poll request")
@@ -1209,9 +1639,7 @@ export class ControlPlane {
     if (!flow) throw new ProviderControlError("OAuth flow was not found")
     sameFlow(flow, input)
     if (flow.state === "pending") {
-      await this.exchange(flow, input.code === undefined ? undefined : text(input.code, "OAuth code", 131_072))
-    } else if (flow.state === "running" && flow.task) {
-      await flow.task
+      flow.task = this.exchange(flow, input.code === undefined ? undefined : text(input.code, "OAuth code", 131_072))
     }
     return this.result(flow)
   }

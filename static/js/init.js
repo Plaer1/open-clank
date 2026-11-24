@@ -60,15 +60,15 @@ window.__odysseusAuthContextPromise = (async () => {
     if (accountId && document.body) document.body.dataset.accountId = accountId;
     const userBarName = document.getElementById('user-bar-name');
     if (userBarName) userBarName.textContent = liveUser;
-    const KEY = 'odysseus-auth-user';
+    const KEY = 'openclank-auth-user';
     // Keep a non-secret stable owner hint for the pre-module first-paint
     // script. Runtime preference namespaces remain keyed by account_id; the
     // username fallback only covers loopback/auth providers without one.
-    const OWNER_KEY = 'odysseus-auth-owner';
+    const OWNER_KEY = 'openclank-auth-owner';
     const cachedUser = localStorage.getItem(KEY);
     bindModelStateOwner(liveUser, cachedUser || '');
     if (cachedUser && cachedUser !== liveUser) {
-      const _keepKeys = new Set(['odysseus-last-user', KEY, OWNER_KEY]);
+      const _keepKeys = new Set(['openclank-last-user', KEY, OWNER_KEY]);
       const toRemove = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);

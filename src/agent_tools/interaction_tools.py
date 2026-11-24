@@ -115,33 +115,19 @@ class UpdatePlanTool:
         try:
             session_id = str((ctx or {}).get("session_id") or "") if isinstance(ctx, dict) else ""
             owner = str((ctx or {}).get("owner") or "") if isinstance(ctx, dict) else ""
-            if session_id and owner:
-                from src.plan_approval import save_plan_draft
-
-                plan_state = save_plan_draft(session_id, owner, plan)
+            authority = (ctx or {}).get("current_authority") if isinstance(ctx, dict) else None
+            if not session_id or not owner or not callable(authority):
+                raise ValueError("current plan authority unavailable")
+            from src.plan_approval import save_plan_draft
+            plan_state = save_plan_draft(session_id, owner, plan, current_authority=authority)
         except Exception as exc:
-            logger.warning("update_plan: session state mirror failed: %s", exc)
+            logger.warning("update_plan: session state update unavailable: %s", exc)
+            return "update_plan: unavailable", {"error": "The current session's plan authority is unavailable.", "exit_code": 1}
 
-        # Mirror progress to the on-disk plan file when a workspace is active
-        # (owner convention: <workspace>/.clanker/futures/<metaplan>.md).
-        # Best-effort:
-        # a write failure must never break the turn. Reuse the server-bound
-        # relative path so heading/checklist edits cannot fork artifacts.
-        try:
-            from src.plan_files import materialize_plan
-            from src.tool_execution import get_active_workspace
-
-            workspace = get_active_workspace()
-            if workspace:
-                rel = materialize_plan(
-                    workspace,
-                    plan,
-                    relative_path=(plan_state or {}).get("artifact_relpath"),
-                )
-                if rel:
-                    output += f" Saved to {rel}."
-        except Exception as exc:
-            logger.warning("update_plan: on-disk plan mirror failed: %s", exc)
+        # The admitted workflow owns plan artifacts. A draft is not approval,
+        # and this legacy tool has no Files/History writer authority.
+        if not isinstance((plan_state or {}).get("artifact_association"), dict):
+            output += " Plan artifact is unavailable until the workspace Files and History workflow is set up."
         if plan_state:
             # Keep the wire shape consumed by the existing plan dock while
             # carrying the durable revision/digest/status/path metadata.

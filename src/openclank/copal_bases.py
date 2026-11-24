@@ -1262,7 +1262,7 @@ def _typed_relations(doc: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     normalized: list[dict[str, Any]] = []
     for relation in relations[:MAX_TYPED_RELATIONS]:
-        if not isinstance(relation, dict) or relation.get("kind") not in {"link", "embed"}:
+        if not isinstance(relation, dict) or not isinstance(relation.get("kind"), str) or relation.get("kind") not in {"link", "embed"}:
             continue
         target = relation.get("target")
         target_id = relation.get("targetDocumentId", relation.get("target_document_id"))
@@ -1283,11 +1283,27 @@ def _typed_relations(doc: dict[str, Any]) -> list[dict[str, Any]]:
             except UnicodeEncodeError:
                 continue
         item: dict[str, Any] = {"kind": relation["kind"]}
-        if target is not None:
+        if target is not None and not re.match(r'^(?:[A-Za-z][A-Za-z0-9+.-]*:|[\\/]|[A-Za-z]:)', target):
             item["target"] = target
         if target_id is not None:
             item["targetDocumentId"] = target_id
-        if len(item) > 1:
+        fragment = relation.get("fragment")
+        if isinstance(fragment, str) and not re.match(r'^(?:[\\/]|[A-Za-z]:)', fragment):
+            try:
+                if len(fragment.encode('utf-8')) <= MAX_RELATION_TARGET_BYTES:
+                    item["fragment"] = fragment
+            except UnicodeEncodeError:
+                pass
+        source_line = relation.get("sourceLine")
+        if type(source_line) is int and 1 <= source_line <= 10000000:
+            item["sourceLine"] = source_line
+        resolution = relation.get("resolution")
+        if isinstance(resolution, str) and resolution in {"resolved", "ambiguous", "missing", "unverified"}:
+            item["resolution"] = resolution
+        origin = relation.get("origin")
+        if isinstance(origin, str) and origin in {"explicit", "parsed"}:
+            item["origin"] = origin
+        if "target" in item or "targetDocumentId" in item:
             normalized.append(item)
     return normalized
 

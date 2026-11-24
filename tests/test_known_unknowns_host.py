@@ -7,7 +7,7 @@ Layers under test:
 2. manage_memory: add with category unknown/question normalizes and
    stores an open question (U7b directed add); resolve closes one with
    provenance; recall_memory annotates a pulled question as a question.
-3. Live fm-mcp (real binary, house order): manual unknown add surfaces
+3. Live memery-worker (real binary, house order): manual unknown add surfaces
    in digest.open_questions and recall; auto-capture with the category
    is rejected end-to-end (U2 firewall); passive resolution closes the
    question when the answering fact is remembered (U7c); the resolve
@@ -18,7 +18,7 @@ import os
 
 import pytest
 
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_digest import (
     DIGEST_SENTINEL,
     TRUST_SENTINEL,
@@ -28,9 +28,9 @@ from src.memory_digest import (
 
 FM_BIN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "mcp_servers/frankenmemory/target/release/fm-mcp",
+    "native/memery/target/release/memery-worker",
 )
-needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="fm-mcp release binary not built")
+needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="memery-worker release binary not built")
 
 PREFS = {"memory_trust_auto": False, "memory_trust_auto_kinds": {}}
 
@@ -219,7 +219,7 @@ async def test_recall_memory_marks_pulled_questions(monkeypatch):
 
 @needs_fm
 async def test_live_unknown_lifecycle_add_recall_resolve(tmp_path):
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         record = await provider.remember(
@@ -252,7 +252,7 @@ async def test_live_unknown_lifecycle_add_recall_resolve(tmp_path):
 
 @needs_fm
 async def test_live_auto_capture_cannot_mint_unknown(tmp_path):
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         # The auto lane never sends category; even a hostile caller that
@@ -275,7 +275,7 @@ async def test_live_auto_capture_cannot_mint_unknown(tmp_path):
 
 @needs_fm
 async def test_live_passive_resolution_listens_first(tmp_path):
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         await provider.remember("user's name", owner="alice", category="unknown")

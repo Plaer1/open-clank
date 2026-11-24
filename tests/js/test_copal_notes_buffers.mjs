@@ -36,7 +36,7 @@ assert.deepEqual(mergeTemplateProperties({ owner:'local', keep:'yes' }, { owner:
 assert.equal(rebaseTemplateLinks('![asset](../assets/one.png) [wiki](../Wiki/Entry.md#part) ![[../assets/two.png]]', 'Templates/Daily.md', 'Archive/Notes/Today.md'), '![asset](../../assets/one.png) [wiki](../../Wiki/Entry.md#part) ![[../../assets/two.png]]');
 assert.deepEqual(normalizeNotesSettings({ templateFolder:'\\Templates\\', dailyTemplateId:'daily-1' }), {
   previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'show',
-  showTutorialFolder:true, showCopalInFolderWorkspace:false, templateFolder:'Templates', dailyTemplateId:'daily-1',
+  showTutorialFolder:true, templateFolder:'Templates', dailyTemplateId:'daily-1',
 });
 const state = {
   accountId:'account-a', workspace:'workspace-a', storageNamespace:'user:mutable-name', contextEpoch:1,
@@ -149,7 +149,7 @@ assert.equal(sheetInvalidations, 1);
 assert.equal(sheetRefreshes, 1);
 notesContext.noteLeafViews.delete('sheet-leaf');
 
-console.log('copal notes buffer queue tests passed');
+console.log('journal pages buffer queue tests passed');
 
 const recoveryStore = new Map();
 const recoveryStorage = { setItem:(key, value) => recoveryStore.set(key, value), getItem:(key) => recoveryStore.get(key) || null, removeItem:(key) => recoveryStore.delete(key) };

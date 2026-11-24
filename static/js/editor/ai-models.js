@@ -1,3 +1,4 @@
+import { editorIdSelector } from './dom-identity.js';
 /**
  * Managed image-route dropdown loader.
  *
@@ -39,12 +40,12 @@ function setOptions(select, routes, emptyLabel) {
   const previous = select?.value || '';
   if (!select) return;
   select.replaceChildren();
-  const automatic = document.createElement('option');
+  const automatic = select.ownerDocument.createElement('option');
   automatic.value = '';
   automatic.textContent = emptyLabel;
   select.appendChild(automatic);
   for (const route of routes) {
-    const option = document.createElement('option');
+    const option = select.ownerDocument.createElement('option');
     option.value = route.id;
     option.textContent = routeLabel(route);
     select.appendChild(option);
@@ -57,34 +58,46 @@ function setOptions(select, routes, emptyLabel) {
 function showUnavailable(select, label = 'No managed image route configured') {
   if (!select) return;
   select.replaceChildren();
-  const automatic = document.createElement('option');
+  const automatic = select.ownerDocument.createElement('option');
   automatic.value = '';
   automatic.textContent = 'Auto';
   select.appendChild(automatic);
-  const unavailable = document.createElement('option');
+  const unavailable = select.ownerDocument.createElement('option');
   unavailable.disabled = true;
   unavailable.textContent = label;
   select.appendChild(unavailable);
 }
 
-export function wireAIModelSelectors({ container, apiBase }) {
-  const aiGenSelect = document.getElementById('ge-ai-model');
-  const aiInpaintSelect = document.getElementById('ge-ai-inpaint');
+export function wireAIModelSelectors({ container, apiBase, lifetime = null, fetchImpl = globalThis.fetch }) {
+  const doc = container.ownerDocument;
+  const find = id => container.querySelector(editorIdSelector(id));
+  const selects = () => container.querySelectorAll('select.ge-tool-model');
+  const removers = []; let disposed = false, sequence = 0, controller = null;
+  const listen = (node, type, fn, options) => { node.addEventListener(type, fn, options); removers.push(() => node.removeEventListener(type, fn, options)); };
+  const dispose = () => { if (disposed) return; disposed = true; sequence++; controller?.abort(); for (const remove of removers.splice(0)) remove(); };
+  lifetime?.add(dispose);
+  const aiGenSelect = find('ge-ai-model');
+  const aiInpaintSelect = find('ge-ai-inpaint');
   if (!aiGenSelect && !aiInpaintSelect &&
-      !document.querySelector('select.ge-tool-model')) return;
+      !container.querySelector('select.ge-tool-model')) return;
 
   let loading = null;
   async function loadAIModels() {
+    if (disposed) return;
     if (loading) return loading;
+    const request = ++sequence, owner = doc.body.dataset.accountId;
+    controller = new AbortController();
+    const valid = () => !disposed && !lifetime?.disposed && sequence === request && doc.body.dataset.accountId === owner;
     loading = (async () => {
       try {
-        const response = await fetch(`${apiBase}/api/v1/providers/models`, {
-          credentials: 'same-origin',
+        const response = await fetchImpl(`${apiBase}/api/v1/providers/models`, {
+          credentials: 'same-origin', signal: controller.signal,
           cache: 'no-store',
           headers: { Accept: 'application/json' },
         });
         if (!response.ok) throw new Error(`Provider routes unavailable (${response.status})`);
         const payload = await response.json();
+        if (!valid()) return;
         const routes = Array.isArray(payload.models) ? payload.models : [];
 
         setOptions(
@@ -98,7 +111,7 @@ export function wireAIModelSelectors({ container, apiBase }) {
           'Auto',
         );
 
-        for (const select of document.querySelectorAll('select.ge-tool-model')) {
+        for (const select of selects()) {
           const tool = String(select.dataset.geToolModel || '');
           const expected = TOOL_OPERATIONS[tool] || [
             'image.edit',
@@ -122,7 +135,8 @@ export function wireAIModelSelectors({ container, apiBase }) {
           } catch (_) {}
           if (!select.dataset.managedRouteListener) {
             select.dataset.managedRouteListener = '1';
-            select.addEventListener('change', () => {
+            removers.push(() => { delete select.dataset.managedRouteListener; });
+            listen(select, 'change', () => {
               try {
                 if (select.value) localStorage.setItem(storageKey, select.value);
                 else localStorage.removeItem(storageKey);
@@ -131,9 +145,10 @@ export function wireAIModelSelectors({ container, apiBase }) {
           }
         }
       } catch (_) {
+        if (!valid()) return;
         showUnavailable(aiGenSelect);
         showUnavailable(aiInpaintSelect);
-        document.querySelectorAll('select.ge-tool-model').forEach(select => {
+        selects().forEach(select => {
           showUnavailable(select);
         });
       } finally {
@@ -147,17 +162,18 @@ export function wireAIModelSelectors({ container, apiBase }) {
 
   const onProvidersUpdated = () => {
     if (!container.isConnected) {
-      document.removeEventListener('open-clank:providers-updated', onProvidersUpdated);
+      dispose();
       return;
     }
     loadAIModels();
   };
-  document.addEventListener('open-clank:providers-updated', onProvidersUpdated);
+  listen(doc, 'open-clank:providers-updated', onProvidersUpdated);
+  listen(doc, 'openclank:auth-context-changed', dispose);
 
   let lastRefresh = 0;
-  container.addEventListener('mousedown', event => {
+  listen(container, 'mousedown', event => {
     const select = event.target.closest(
-      '#ge-ai-model, #ge-ai-inpaint, select.ge-tool-model',
+      ':is(#ge-ai-model,[data-ge-id="ge-ai-model"]), :is(#ge-ai-inpaint,[data-ge-id="ge-ai-inpaint"]), select.ge-tool-model',
     );
     if (!select) return;
     const now = Date.now();
@@ -165,4 +181,5 @@ export function wireAIModelSelectors({ container, apiBase }) {
     lastRefresh = now;
     loadAIModels();
   }, true);
+  return { dispose, loadAIModels };
 }

@@ -2,5 +2,8 @@
 exact = true
 
 [test]
-root = "./do-not-run-tests-from-root"
-
+# Discovery root: only root-level script tests. Engine/package suites live
+# under packages/*/test and must run from that package (see packages/cli/bunfig.toml).
+root = "./script"
+# Order matters: isolate env first, then policy-guard packages/** paths.
+preload = ["./script/test-isolation-env.ts", "./script/forbid-unisolated-engine-tests.ts"]

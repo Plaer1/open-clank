@@ -258,20 +258,112 @@ class AccountAncillaryLifecycle:
                 else:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def _job_rows(self, owner: str) -> list[tuple[str, dict[str, Any]]]:
+    @staticmethod
+    def _job_matches(row: Mapping[str, Any], owner: str, account_id: str | None) -> bool:
+        if str(row.get('owner') or '').strip().lower() != owner: return False
+        if row.get('kind') is None or (row.get('kind') == 'shell' and row.get('version') in (None,1)): return True
+        if row.get('kind') == 'shell' and row.get('version') == 2:
+            identity=row.get('identity'); recorded=row.get('account_id')
+            if not account_id: raise AccountAncillaryLifecycleError('shell job lifecycle requires an immutable account binding')
+            if recorded != account_id: return False
+            if not isinstance(identity,dict) or identity.get('account_id') != recorded:
+                raise AccountAncillaryLifecycleError('shell job account binding is invalid')
+            return True
+        if row.get('kind') == 'media' and row.get('version') == 1:
+            identity=row.get('identity'); recorded=row.get('account_id')
+            if not account_id: raise AccountAncillaryLifecycleError('media job lifecycle requires an immutable account binding')
+            if recorded != account_id: return False
+            if not isinstance(identity,dict) or identity.get('account_id') != recorded:
+                raise AccountAncillaryLifecycleError('media job account binding is invalid')
+            return True
+        # Unknown records are never attributed by a mutable username alone.
+        identity=row.get('identity')
+        return bool(account_id and row.get('account_id') == account_id and isinstance(identity,dict) and identity.get('account_id') == account_id)
+
+    def _job_rows_from(self, jobs: Mapping[str,dict[str,Any]], owner: str, account_id: str | None = None) -> list[tuple[str, dict[str, Any]]]:
+        for row in jobs.values():
+            if (str(row.get('owner') or '').strip().lower()==owner and row.get('kind')=='shell'
+                and row.get('version')==2 and (not account_id or row.get('account_id')!=account_id)):
+                raise AccountAncillaryLifecycleError('bound shell job belongs to another account')
+            if (str(row.get('owner') or '').strip().lower()==owner and not (row.get('kind') is None or (row.get('kind')=='shell' and row.get('version') in (None,1,2)))
+                and (row.get('kind')!='media' or row.get('version')!=1) and row.get('account_id') in (None,account_id)):
+                raise AccountAncillaryLifecycleError('unknown background job authority requires reconciliation')
         rows = [
             (job_id, row)
-            for job_id, row in self._load_jobs().items()
-            if str(row.get("owner") or "").strip().lower() == owner
+            for job_id, row in jobs.items()
+            if self._job_matches(row,owner,account_id)
         ]
         for job_id, row in rows:
+            if row.get('kind')=='shell' and row.get('version')==2:
+                if row.get('terminate_ready') is True:
+                    raise AccountAncillaryLifecycleError('bound shell control requires exact settlement')
+                control=row.get('terminate_control')
+                if control is not None and (type(control) is not dict
+                    or set(control)!={'version','id','identity','args_sha256','worker_claim_sha256','state','closed'}
+                    or control.get('version')!=1 or control.get('closed') is not True
+                    or row.get('terminate_closed') is not True
+                    or control.get('state') not in ('requested','not_needed')
+                    or control.get('worker_claim_sha256')!=row.get('worker_claim_sha256')):
+                    raise AccountAncillaryLifecycleError('bound shell control requires exact settlement')
+                settlement=row.get('child_settlement')
+                if (row.get('status') not in ('done','failed') or not isinstance(settlement,dict)
+                    or set(settlement)!={'state','waited','child_exit_code','worker_exit_code'}
+                    or settlement.get('state')!='settled' or settlement.get('waited') is not True
+                    or type(settlement.get('child_exit_code')) is not int or type(settlement.get('worker_exit_code')) is not int
+                    or settlement.get('worker_exit_code')!=row.get('exit_code')):
+                    raise AccountAncillaryLifecycleError('bound shell job requires exact settlement')
+                follow=row.get('bound_followup')
+                if follow is not None:
+                    if (type(follow) is not dict or follow.get('state')!='published' or follow.get('cleanup_state')!='settled'
+                        or type(follow.get('body')) is not str
+                        or any(type(follow.get(k)) is not str or not follow[k] for k in ('attempt_id','claim_id','message_id','body_sha256','metadata_json','metadata_sha256'))
+                        or hashlib.sha256(follow['body'].encode('utf-8')).hexdigest()!=follow['body_sha256']
+                        or hashlib.sha256(follow['metadata_json'].encode('utf-8')).hexdigest()!=follow['metadata_sha256']):
+                        raise AccountAncillaryLifecycleError('bound shell continuation requires exact settlement')
+            elif not (row.get('kind') is None or (row.get('kind')=='shell' and row.get('version') in (None,1))):
+                from src.bg_jobs import media_model_lifecycle_safe
+                if row.get('kind')!='media' or row.get('version')!=1 or not media_model_lifecycle_safe(row):
+                    raise AccountAncillaryLifecycleError('media model work requires exact settlement')
+            child = row.get('local_child')
+            if child is not None:
+                receipt = child.get('receipt') if isinstance(child, dict) else None
+                if (not isinstance(child, dict) or child.get('version') != 1 or child.get('state') != 'terminal'
+                        or child.get('job_id') != job_id or child.get('account_id') != row.get('account_id')
+                        or child.get('claim_token') != row.get('submission_token')
+                        or child.get('identity_digest') != row.get('identity_digest')
+                        or not isinstance(receipt, dict) or set(receipt) not in ({'exit_code','output_sha256','output_size'}, {'exit_code','output_sha256','output_size','artifact_id'})
+                        or type(receipt['exit_code']) is not int or type(receipt['output_size']) is not int
+                        or not 0 <= receipt['output_size'] <= 268435456
+                        or (receipt['exit_code'] == 0 and (not isinstance(receipt['output_sha256'], str)
+                            or not re.fullmatch(r'[0-9a-f]{64}', receipt['output_sha256']) or not receipt['output_size']
+                            or not isinstance(receipt.get('artifact_id'), str) or not receipt['artifact_id']))
+                        or (receipt['exit_code'] != 0 and (receipt['output_sha256'] is not None or receipt['output_size'] != 0 or 'artifact_id' in receipt))):
+                    raise AccountAncillaryLifecycleError("local media child requires reconciliation")
             if not _SAFE_ID_RE.fullmatch(job_id):
                 raise AccountAncillaryLifecycleError("background job has an unsafe ID")
-            if str(row.get("status") or "").lower() in {"running", "launching"}:
+            if (row.get("kind") is None or (row.get('kind') == 'shell' and row.get('version') in (None,1))) and str(row.get("status") or "").lower() in {"running", "launching"}:
                 raise AccountAncillaryLifecycleError(
                     "finish or cancel active background jobs before changing this account"
                 )
         return sorted(rows)
+
+    def _job_rows(self, owner: str, account_id: str | None = None) -> list[tuple[str, dict[str, Any]]]:
+        with self._job_store_lock():
+            return self._job_rows_from(self._load_jobs(),owner,account_id)
+
+    def _job_tokens(self, rows: list[tuple[str,dict[str,Any]]]) -> list[str]:
+        result=[]
+        for job_id,row in rows:
+            if row.get('kind') is None or (row.get('kind')=='shell' and row.get('version') in (None,1)):
+                result.append(self._identity_token('job',job_id))
+            else:
+                # Mutable owner alias is deliberately excluded so rename can
+                # preserve the exact recorded facts without false staleness.
+                content={key:value for key,value in row.items() if key!='owner'}
+                try: digest=hashlib.sha256(json.dumps(content,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode('utf-8')).hexdigest()
+                except (TypeError,ValueError,UnicodeError) as exc: raise AccountAncillaryLifecycleError('background job is malformed') from exc
+                result.append(self._identity_token('media-job',job_id,digest))
+        return result
 
     def _email_tables(self) -> list[str]:
         path = self.paths.scheduled_email_db
@@ -337,9 +429,9 @@ class AccountAncillaryLifecycle:
                 )
             return result
 
-    def _items(self, owner: str) -> dict[str, list[str]]:
+    def _items(self, owner: str, account_id: str | None = None) -> dict[str, list[str]]:
         gallery, published, sessions = self._sql_children(owner)
-        jobs = self._job_rows(owner)
+        jobs = self._job_rows(owner,account_id)
         items: dict[str, list[str]] = {
             "gallery_bytes": [
                 self._identity_token("gallery", row["id"], row["name"])
@@ -352,61 +444,89 @@ class AccountAncillaryLifecycle:
                 self._identity_token("todo", path.name)
                 for path in self._todo_paths(sessions)
             ],
-            "background_jobs": [
-                self._identity_token("job", job_id) for job_id, _row in jobs
-            ],
+            "background_jobs": self._job_tokens(jobs),
         }
         for label, path in zip(("note_state", "email_state", "file_trash"), self._state_paths(owner)):
             # These filenames/directories are derived from the mutable owner;
             # use an owner-neutral identity so a successful rename preserves
             # the frozen inventory fingerprint.
             items[label] = [self._identity_token(label, "present")] if self._regular(path, label=label) else []
+        if account_id:
+            from src.openclank.cookbook_state import transaction, owned_rows, row_tokens
+            with transaction(self.paths.data_dir / "cookbook_state.json") as state:
+                items["cookbook_acquisitions"] = row_tokens(owned_rows(state, owner, account_id))
         items.update(self._email_items(owner))
         return items
 
-    def owner_inventory(self, owner: str) -> dict[str, Any]:
+    def owner_inventory(self, owner: str, *, account_id: str | None = None) -> dict[str, Any]:
         owner = _owner(owner)
         with locked(str(self.paths.journal_path)):
-            return _inventory(self._items(owner))
+            return _inventory(self._items(owner,account_id))
 
-    def preview_owner_rename(self, source_owner: str, target_owner: str) -> dict[str, Any]:
+    def preview_owner_rename(self, source_owner: str, target_owner: str, *, account_id: str | None = None) -> dict[str, Any]:
         source = _owner(source_owner)
         target = _owner(target_owner)
         if source == target:
             raise AccountAncillaryLifecycleError("source and target owners must differ")
         with locked(str(self.paths.journal_path)):
-            source_inventory = _inventory(self._items(source))
-            target_inventory = _inventory(self._items(target))
+            source_inventory = _inventory(self._items(source,account_id))
+            target_inventory = _inventory(self._items(target,account_id))
             if target_inventory["count"]:
                 raise AccountAncillaryLifecycleError("ancillary rename target already contains state")
             return {
                 "schema_version": 1,
+                **({'media_account_id':account_id} if account_id else {}),
                 "source": source_inventory,
                 "target": target_inventory,
             }
 
     @staticmethod
-    def _validate_manifest(manifest: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _validate_manifest(manifest: Mapping[str, Any], account_id: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         if not isinstance(manifest, Mapping) or manifest.get("schema_version") != 1:
             raise AccountAncillaryLifecycleError("ancillary lifecycle manifest is invalid")
+        if manifest.get('media_account_id') is not None and manifest.get('media_account_id') != account_id:
+            raise AccountAncillaryLifecycleError('ancillary lifecycle account binding changed')
         source = dict(manifest.get("source") or {})
         target = dict(manifest.get("target") or {})
         if not source.get("fingerprint") or int(target.get("count", -1)) != 0:
             raise AccountAncillaryLifecycleError("ancillary lifecycle manifest is malformed")
         return source, target
 
-    def _rename_jobs(self, source: str, target: str) -> None:
+    def _operation_account_matches(self, operation: Mapping[str, Any], account_id: str | None) -> bool:
+        if 'account_id' in operation:
+            return operation.get('account_id') == account_id
+        # Legacy staged operations carry no account ID; only shell-only state
+        # can use their old recovery path.
+        for owner in (operation.get('source_owner'), operation.get('target_owner')):
+            if owner and any(not (row.get('kind') is None or (row.get('kind') == 'shell' and row.get('version') in (None,1))) for _,row in self._job_rows(str(owner),account_id)):
+                return False
+        return True
+
+    def _rename_jobs(self, source: str, target: str, *, allow_unknown: bool = False, account_id: str | None = None, expected_jobs: tuple[int,str] | None = None) -> None:
         path = self.paths.background_jobs_file
         with self._job_store_lock():
             jobs = self._load_jobs()
+            self._job_rows_from(jobs,source,account_id)
+            self._job_rows_from(jobs,target,account_id)
+            if expected_jobs is not None:
+                source_tokens=self._job_tokens(self._job_rows_from(jobs,source,account_id))
+                target_tokens=self._job_tokens(self._job_rows_from(jobs,target,account_id))
+                expected_count,expected_digest=expected_jobs
+                if not ((len(source_tokens)==expected_count and _digest(source_tokens)==expected_digest and not target_tokens)
+                    or (not source_tokens and len(target_tokens)==expected_count and _digest(target_tokens)==expected_digest)):
+                    raise AccountAncillaryLifecycleError('background jobs changed after lifecycle preflight')
             changes: list[AtomicFileChange] = []
             changed = False
             for job_id, row in jobs.items():
-                if str(row.get("owner") or "").strip().lower() != source:
+                if not self._job_matches(row,source,account_id):
                     continue
+                if not allow_unknown and (row.get('kind') not in (None,'shell','media') or (row.get('kind') == 'shell' and row.get('version') not in (None,1,2)) or (row.get('kind') == 'media' and row.get('version') != 1)):
+                    raise AccountAncillaryLifecycleError('unknown background job kind is unavailable for rename')
                 row["owner"] = target
                 jobs[job_id] = row
                 changed = True
+                if not (row.get('kind') is None or (row.get('kind') == 'shell' and row.get('version') in (None,1,2))):
+                    continue
                 spec = self.paths.background_jobs_dir / f"{job_id}.spec.json"
                 if spec.exists():
                     if spec.is_symlink() or not spec.is_file():
@@ -428,22 +548,19 @@ class AccountAncillaryLifecycle:
             if changes:
                 atomic_write_batch(changes)
 
-    def _purge_jobs(self, owner: str) -> int:
+    def _purge_jobs(self, owner: str, *, account_id: str | None = None) -> tuple[int, bool]:
         """Remove only one owner's already-quiesced durable job rows."""
         with self._job_store_lock():
             jobs = self._load_jobs()
-            removed = [
-                job_id
-                for job_id, row in jobs.items()
-                if str(row.get("owner") or "").strip().lower() == owner
-            ]
+            removed = [job_id for job_id,_ in self._job_rows_from(jobs,owner,account_id)]
+            remote_unproved = any(jobs[job_id].get('kind') == 'media' and (not isinstance(jobs[job_id].get('identity'),dict) or jobs[job_id]['identity'].get('route_kind') != 'local') for job_id in removed)
             if not removed:
-                return 0
+                return 0, False
             retained = {key: row for key, row in jobs.items() if key not in set(removed)}
             atomic_write_json(
                 str(self.paths.background_jobs_file), retained, indent=2
             )
-            return len(removed)
+            return len(removed), remote_unproved
 
     @staticmethod
     def _validate_tree(path: Path) -> None:
@@ -487,17 +604,18 @@ class AccountAncillaryLifecycle:
         source_owner: str,
         target_owner: str,
         manifest: Mapping[str, Any],
+        *, _allow_unknown: bool = False, account_id: str | None = None,
     ) -> dict[str, Any]:
         source = _owner(source_owner)
         target = _owner(target_owner)
-        expected, _empty = self._validate_manifest(manifest)
+        expected, _empty = self._validate_manifest(manifest,account_id)
         with locked(str(self.paths.journal_path)):
-            source_items = self._items(source)
-            target_items = self._items(target)
+            source_items = self._items(source,account_id)
+            target_items = self._items(target,account_id)
             movable = {
                 key for key in expected.get("counts", {})
                 if key.startswith("email:")
-                or key in {"background_jobs", "note_state", "email_state", "file_trash"}
+                or key in {"background_jobs", "cookbook_acquisitions", "note_state", "email_state", "file_trash"}
             }
             empty_fingerprint = _digest([])
             for key in movable:
@@ -527,11 +645,26 @@ class AccountAncillaryLifecycle:
             # SQL-owned byte children keep stable IDs and paths during rename.
             # Their owner changes in the common-SQL transaction, so only the
             # independently owner-keyed domains move here.
-            self._rename_jobs(source, target)
+            self._rename_jobs(source, target, allow_unknown=_allow_unknown,account_id=account_id,
+                expected_jobs=(int(expected.get('counts',{}).get('background_jobs',0)),str(expected.get('fingerprints',{}).get('background_jobs') or '')))
+            if account_id and "cookbook_acquisitions" in movable:
+                from src.openclank.cookbook_state import transaction, save, owned_rows, row_tokens
+                with transaction(self.paths.data_dir / "cookbook_state.json") as state:
+                    source_rows = owned_rows(state, source, account_id)
+                    target_rows = owned_rows(state, target, account_id)
+                    count = int(expected.get("counts", {}).get("cookbook_acquisitions", 0))
+                    fingerprint = expected.get("fingerprints", {}).get("cookbook_acquisitions")
+                    a, b = row_tokens(source_rows), row_tokens(target_rows)
+                    if len(a) == count and _digest(a) == fingerprint and not b:
+                        for key in source_rows:
+                            state["_pinned_acquisitions_v1"][key]["owner"] = target
+                        save(self.paths.data_dir / "cookbook_state.json", state)
+                    elif not (not a and len(b) == count and _digest(b) == fingerprint):
+                        raise AccountAncillaryLifecycleError("Cookbook acquisition inventory changed")
             self._rename_email(source, target)
             self._rename_state_paths(source, target)
-            current_source = _inventory(self._items(source))
-            current_target = _inventory(self._items(target))
+            current_source = _inventory(self._items(source,account_id))
+            current_target = _inventory(self._items(target,account_id))
             for key in movable:
                 if (
                     int(current_source.get("counts", {}).get(key, 0))
@@ -557,13 +690,14 @@ class AccountAncillaryLifecycle:
         source_owner: str,
         target_owner: str,
         manifest: Mapping[str, Any],
+        *, _allow_unknown: bool = False, account_id: str | None = None,
     ) -> dict[str, Any]:
-        self._validate_manifest(manifest)
+        self._validate_manifest(manifest,account_id)
         receipt = self.reconcile_owner_rename(target_owner, source_owner, {
             "schema_version": 1,
-            "source": self.owner_inventory(target_owner),
+            "source": self.owner_inventory(target_owner,account_id=account_id),
             "target": {"count": 0, "fingerprint": "empty"},
-        })
+        }, _allow_unknown=_allow_unknown,account_id=account_id)
         return {**receipt, "state": "restored"}
 
     def _journal(self) -> dict[str, Any]:
@@ -611,7 +745,7 @@ class AccountAncillaryLifecycle:
             )
         return source, target
 
-    def _asset_paths(self, owner: str) -> list[Path]:
+    def _asset_paths(self, owner: str, account_id: str | None = None) -> list[Path]:
         gallery, published, sessions = self._sql_children(owner)
         paths: list[Path] = []
         for row in gallery:
@@ -623,7 +757,9 @@ class AccountAncillaryLifecycle:
             if self._regular(path, label="published asset"):
                 paths.append(path)
         paths.extend(self._todo_paths(sessions))
-        for job_id, _row in self._job_rows(owner):
+        for job_id, _row in self._job_rows(owner,account_id):
+            if not (_row.get('kind') is None or (_row.get('kind') == 'shell' and _row.get('version') in (None,1))):
+                continue
             for suffix in _JOB_SUFFIXES:
                 path = (self.paths.background_jobs_dir / f"{job_id}{suffix}").resolve()
                 if path.parent != self.paths.background_jobs_dir:
@@ -639,10 +775,11 @@ class AccountAncillaryLifecycle:
         manifest: Mapping[str, Any],
         *,
         operation_token: str,
+        account_id: str | None = None,
     ) -> dict[str, Any]:
         source = _owner(source_owner)
         target = _owner(tombstone_owner)
-        expected, _empty = self._validate_manifest(manifest)
+        expected, _empty = self._validate_manifest(manifest,account_id)
         token = str(operation_token or "")
         if not _TOKEN_RE.fullmatch(token):
             raise AccountAncillaryLifecycleError("ancillary lifecycle token is invalid")
@@ -650,23 +787,24 @@ class AccountAncillaryLifecycle:
             journal = self._journal()
             operation = journal["operations"].get(token)
             if operation is None:
-                actual = _inventory(self._items(source))
+                actual = _inventory(self._items(source,account_id))
                 if not _same(actual, expected):
                     raise AccountAncillaryLifecycleError("ancillary owner changed after preflight")
                 quarantine = self.paths.journal_path.parent / "bytes" / token
                 mappings = []
-                for index, path in enumerate(self._asset_paths(source)):
+                for index, path in enumerate(self._asset_paths(source,account_id)):
                     mappings.append({"source": str(path), "target": str(quarantine / f"{index:08d}")})
                 operation = {
                     "source_owner": source,
                     "target_owner": target,
+                    "account_id": account_id,
                     "state": "prepared",
                     "inventory": expected,
                     "files": mappings,
                 }
                 journal["operations"][token] = operation
                 self._save_journal(journal)
-            elif operation.get("source_owner") != source or operation.get("target_owner") != target:
+            elif operation.get("source_owner") != source or operation.get("target_owner") != target or not self._operation_account_matches(operation,account_id):
                 raise AccountAncillaryLifecycleError("ancillary lifecycle token belongs to another owner")
 
             mappings = [
@@ -685,7 +823,7 @@ class AccountAncillaryLifecycle:
                     raise AccountAncillaryLifecycleError("ancillary staged asset was lost")
             operation["state"] = "bytes_staged"
             self._save_journal(journal)
-            self.reconcile_owner_rename(source, target, manifest)
+            self.reconcile_owner_rename(source, target, manifest, _allow_unknown=True,account_id=account_id)
             operation["state"] = "staged"
             self._save_journal(journal)
             return {
@@ -704,6 +842,7 @@ class AccountAncillaryLifecycle:
         manifest: Mapping[str, Any],
         *,
         operation_token: str,
+        account_id: str | None = None,
     ) -> dict[str, Any]:
         source = _owner(source_owner)
         target = _owner(tombstone_owner)
@@ -719,7 +858,9 @@ class AccountAncillaryLifecycle:
                 if isinstance(operation, dict)
                 else []
             )
-            self.compensate_owner_rename(source, target, manifest)
+            if isinstance(operation,dict) and not self._operation_account_matches(operation,account_id):
+                raise AccountAncillaryLifecycleError('ancillary lifecycle account binding changed')
+            self.compensate_owner_rename(source, target, manifest, _allow_unknown=True,account_id=account_id)
             restored = 0
             if isinstance(operation, dict):
                 for source_path, target_path in reversed(mappings):
@@ -739,6 +880,7 @@ class AccountAncillaryLifecycle:
         *,
         expected: Mapping[str, Any] | None = None,
         operation_token: str | None = None,
+        account_id: str | None = None,
     ) -> dict[str, Any]:
         target = _owner(owner)
         token = str(operation_token or "")
@@ -747,13 +889,39 @@ class AccountAncillaryLifecycle:
         with locked(str(self.paths.journal_path)):
             journal = self._journal()
             operation = journal["operations"].get(token)
-            if not isinstance(operation, dict) or operation.get("target_owner") != target:
+            if not isinstance(operation, dict) or operation.get("target_owner") != target or not self._operation_account_matches(operation,account_id):
                 raise AccountAncillaryLifecycleError("ancillary staged deletion was not found")
             mappings = [
                 self._validated_mapping(item, token)
                 for item in operation.get("files", [])
             ]
-            removed_jobs = self._purge_jobs(target)
+            if account_id:
+                from src.openclank.cookbook_state import transaction, save, owned_rows, row_tokens, PRIVATE_KEY
+                with transaction(self.paths.data_dir / "cookbook_state.json") as state:
+                    rows = owned_rows(state, target, account_id)
+                    intent = operation.get("cookbook_purge")
+                    if intent is None:
+                        tokens = row_tokens(rows)
+                        inventory = operation.get("inventory") or {}
+                        if (len(tokens) != int(inventory.get("counts", {}).get("cookbook_acquisitions", 0))
+                                or _digest(tokens) != inventory.get("fingerprints", {}).get("cookbook_acquisitions", _digest([]))):
+                            raise AccountAncillaryLifecycleError("Cookbook acquisition inventory changed")
+                        intent = {key: tok for key, tok in zip(sorted(rows), tokens)}
+                        operation["cookbook_purge"] = intent
+                        self._save_journal(journal)
+                    if not isinstance(intent, dict):
+                        raise AccountAncillaryLifecycleError("invalid Cookbook purge intent")
+                    current_tokens = {tok.rsplit(":", 1)[0]:tok for tok in row_tokens(rows)}
+                    if any(key not in intent or intent[key] != value for key, value in current_tokens.items()):
+                        raise AccountAncillaryLifecycleError("Cookbook acquisition changed during purge")
+                    all_records = state.get(PRIVATE_KEY, {})
+                    if any(key in all_records and key not in rows for key in intent):
+                        raise AccountAncillaryLifecycleError("Cookbook acquisition identity replaced")
+                    for key in rows:
+                        del all_records[key]
+                    if rows:
+                        save(self.paths.data_dir / "cookbook_state.json", state)
+            removed_jobs, remote_cancellation_unproved = self._purge_jobs(target,account_id=account_id)
             if self.paths.scheduled_email_db.exists():
                 with sqlite3.connect(str(self.paths.scheduled_email_db)) as connection:
                     connection.execute("BEGIN IMMEDIATE")
@@ -795,6 +963,7 @@ class AccountAncillaryLifecycle:
                 "operation_token": token,
                 "deleted_assets": deleted,
                 "deleted_jobs": removed_jobs,
+                "remote_cancellation_unproved": True,
                 "inventory": dict(expected or operation.get("inventory") or {}),
             }
 

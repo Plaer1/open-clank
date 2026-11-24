@@ -1,0 +1,35 @@
+{
+  "id": "batch-100",
+  "group": "docs.openclank-docs-workspace-hexes",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1751,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-workspace-hexes.title",
+      "source": "Workspace Hexes",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-workspace-hexes.body",
+      "source": "# Workspace Hexes\n\nIn Files, select a workspace and choose **Open Workspace Hexes** from its context menu. For reusable account instructions, open **Settings → Hexes → General**.\n\n## Inspect before changing a file\n\nThe workspace contract lives in `.clanker/hexes/contract.yaml`. From the workspace, run `openclank hex explain path/to/file` to see which rules apply. Check the active revision before changing the file. Installation policy and the operating system still govern access.\n\n## Maintain the contract\n\nWith owner authorization, edit the contract and run `openclank hex sync` to regenerate the digest in `AGENTS.md`. Executable project checks require separate trust.\n\nIn **Authorized workspaces**, choose the project and **Review changed contract**. Check its hash and scope before choosing **Activate reviewed contract**, if permitted. Use **Promote to General** to reuse a workspace rule. See [[Recovery]] for file recovery and the [contributor reference](https://github.com/Plaer1/open-clank/blob/main/CONTRIBUTING.md#private-workspaces-and-release-inputs) for private workspace conventions.\n\n## General instructions\n\nChoose **New General Hex**. Enter a title and instruction. With no tags it applies across your account. Experimental Workspace or Task tags apply on any positive match. Preview the revisions for the next turn or operation. Running work keeps its pinned revision.\n\nReview the candidate and affected paths before applying a General Hex to a workspace. Review imported or agent-assisted revisions before making them eligible. Mandatory workspace rules still apply.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

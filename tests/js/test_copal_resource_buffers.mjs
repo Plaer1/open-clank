@@ -205,3 +205,48 @@ assert.equal(quotaRegistry.recoverDraft(handle, { envelope:{ body:'accepted' }, 
 assert.equal(createBufferRegistry({ storage }).recoverDraft(handle, { envelope:{ body:'accepted' }, actorId:'acct-a:ws-a', epoch:6 }), null, 'the durable tombstone also survives registry restart');
 
 console.log('copal resource/buffer tests passed');
+
+// Two independent Wiki pages use one origin's localStorage. Saving or
+// discarding one exact recovery must preserve the other page's revision.
+{
+  const records = new Map();
+  const storage = {
+    get length() { return records.size; },
+    key:i => [...records.keys()][i],
+    getItem:key => records.get(key) ?? null,
+    setItem:(key, value) => records.set(key, value),
+    removeItem:key => records.delete(key),
+  };
+  const a = createBufferRegistry({storage}), b = createBufferRegistry({storage});
+  const options = {actorId:'acct-a:ws-a', epoch:1, envelope:{text:'base'}};
+  const first = a.acquire(handle, options.envelope, options);
+  const second = b.acquire(handle, options.envelope, options);
+  const offers = client => client.wikiRecoveryOffers(handle, options, client.wikiRecoveryIndex());
+  const wiki = {consumer:'wiki'};
+  first.apply({text:'first'});
+  second.apply({text:'second'});
+  a.persistDraft(first, wiki);
+  b.persistDraft(second, wiki);
+  assert.deepEqual(offers(a).map(row => row.snapshot.envelope.text).sort(), ['first','second']);
+  const staleOffer = offers(a).find(row => row.snapshot.envelope.text === 'second');
+  second.apply({text:'second, revised'});
+  b.persistDraft(second, wiki);
+  const reader = createBufferRegistry({storage});
+  assert.equal(reader.recoverDraft(handle, {...options,...wiki,wikiOffer:staleOffer}), null);
+  a.discardDraft(first, wiki);
+  assert.deepEqual(offers(reader).map(row => row.snapshot.envelope.text), ['second, revised']);
+
+  // An existing single-slot Wiki draft can be recovered alongside a newer
+  // writer's draft. Saving the recovered branch clears only its own lineage.
+  const legacy = createBufferRegistry({storage});
+  const old = legacy.acquire(handle, options.envelope, options);
+  old.apply({text:'legacy'});
+  legacy.persistDraft(old);
+  const chosen = offers(reader).find(row => row.snapshot.envelope.text === 'legacy');
+  const recovered = reader.recoverDraft(handle, {...options,...wiki,wikiOffer:chosen});
+  assert.equal(recovered.envelope.text, 'legacy');
+  recovered.apply({text:'continued'});
+  reader.persistDraft(recovered, wiki);
+  reader.discardDraft(recovered, wiki);
+  assert.deepEqual(offers(b).map(row => row.snapshot.envelope.text), ['second, revised']);
+}

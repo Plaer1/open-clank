@@ -8,11 +8,12 @@ bytes into a Files database and they never return raw provider IDs to clients;
 from __future__ import annotations
 
 import asyncio
-from src.openclank.copal_history_wire import capture_metadata, mutation_failure_status
+from src.openclank.copal_history_wire import capture_metadata, finish_capture, mutation_failure_status, settle_terminal_recovery
 import hashlib
 import json
 import mimetypes
 import os
+import posixpath
 import re
 import stat as stat_module
 import tempfile
@@ -352,6 +353,7 @@ def _research_report_bytes(data: Mapping[str, Any]) -> bytes:
 
 class CopalFilesProvider:
     name = "copal"
+    _ROOT_LABEL = "Workspace collections"
     _WORKSPACE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
     _ROOT_SORTS = ("name",)
     _DOCUMENT_SORTS = SORT_KEYS
@@ -556,25 +558,57 @@ class CopalFilesProvider:
             _stem, dot, ext = name.rpartition(".")
             asset_name = f".files-attachment-{str(operation_id)[:96]}-{digest[:16]}"
             asset_ext = (ext if dot else "bin").lower()
+            # The current Copal storage authority exposes an owner/workspace
+            # vault root. Use it as the project root for new managed Copal
+            # attachments; adapters without that authority retain v1.
+            scoped_root = callable(getattr(self.bridge, "_vault", None))
+            layout_version = 2 if scoped_root else 1
+            stored_asset_name = asset_name
+            link_target = asset_name
+            if layout_version == 2:
+                from src.openclank.media_ownership import document_media_dir
+                root = self._asset_root(context, workspace)
+                if root is None:
+                    raise FilesFacadeError("Copal workspace root is unavailable", code="provider_unavailable")
+                target_document_path = str(
+                    (target_entry.provenance or {}).get("logical_path") or target_entry.name
+                )
+                layout = document_media_dir(
+                    document_path=target_document_path,
+                    canonical_root=str(root),
+                    origin="workspace",
+                    owner_subject_id=str(context.owner_subject_id),
+                    workspace_id=workspace,
+                    layout_version=layout_version,
+                )
+                stored_asset_name = posixpath.join(layout.media_dir, asset_name)
+                link_target = posixpath.relpath(stored_asset_name, posixpath.dirname(target_document_path) or ".")
             source_revision = source_current.revision or {"kind": "contentDigest", "value": digest}
             target_revision = target_entry.revision or {"kind": "copalHead", "value": ""}
             planned = {
                 "operation_id": str(operation_id), "account_id": str(context.owner_subject_id), "generation": int(context.policy_generation), "phase": "pending", "workspace_id": workspace,
+                "layout_version": layout_version,
                 "preparation_receipt_id": f"prep-{digest[:32]}", "source_revision": dict(source_revision),
                 "target_identity": {"resource_ref": target_ref, "kind": "copal_document"}, "target_revision": dict(target_revision),
-                "insertion": {"format": "markdown", "link_target": asset_name, "label": name, "media_kind": str(content.media_type or "application/octet-stream")},
-                "asset": {"mime_type": str(content.media_type or "application/octet-stream"), "name": asset_name, "revision": {"kind": "contentDigest", "value": digest}},
+                "insertion": {"format": "markdown", "link_target": link_target, "label": name, "media_kind": str(content.media_type or "application/octet-stream")},
+                "asset": {"mime_type": str(content.media_type or "application/octet-stream"), "name": stored_asset_name, "revision": {"kind": "contentDigest", "value": digest}},
                 "source_digest": digest, "request_digest": request_digest, "asset_size": len(data),
                 "source_identity": {"resource_ref": str(source.get("resource_ref") or ""), "provider": str(getattr(source_provider, "name", ""))},
                 "mode": str(mode or "").lower(),
             }
             self._attachment_save(context, str(operation_id), request_digest, planned)
-            result = await self.bridge.call("put_asset_scoped", {
+            put_asset_args = {
                 **self._scope(context, workspace),
-                "name": asset_name,
+                "name": stored_asset_name,
                 "ext": asset_ext,
                 "base64": __import__("base64").b64encode(data).decode("ascii"),
-            })
+            }
+            if layout_version == 2:
+                put_asset_args.update(
+                    media_owner_document_id=document_id,
+                    media_layout_version=layout_version,
+                )
+            result = await self.bridge.call("put_asset_scoped", put_asset_args)
             doc = result.get("doc") if isinstance(result, Mapping) else None
             if not isinstance(doc, Mapping) or not str(doc.get("id") or ""):
                 raise FilesFacadeError("Copal returned an invalid asset", code="provider_unavailable")
@@ -583,12 +617,13 @@ class CopalFilesProvider:
             receipt = {
                 "operation_id": str(operation_id),
                 "generation": int(context.policy_generation),
+                "layout_version": layout_version,
                 "preparation_receipt_id": f"prep-{digest[:32]}",
                 "source_revision": dict(source_revision),
                 "target_identity": {"resource_ref": target_ref, "kind": "copal_document"},
                 "target_revision": dict(target_revision),
-                "insertion": {"format": "markdown", "link_target": asset_name, "label": name, "media_kind": str(content.media_type or "application/octet-stream")},
-                "asset": {"resource_key": asset_key, "mime_type": str(content.media_type or "application/octet-stream"), "name": asset_name, "revision": {"kind": "contentDigest", "value": digest}},
+                "insertion": {"format": "markdown", "link_target": link_target, "label": name, "media_kind": str(content.media_type or "application/octet-stream")},
+                "asset": {"resource_key": asset_key, "mime_type": str(content.media_type or "application/octet-stream"), "name": stored_asset_name, "revision": {"kind": "contentDigest", "value": digest}},
                 "source_digest": digest,
                 "request_digest": request_digest, "asset_size": len(data),
                 "account_id": str(context.owner_subject_id), "workspace_id": workspace,
@@ -723,7 +758,7 @@ class CopalFilesProvider:
                     "original_locator": None,
                     "destination_locator": None,
                     "timestamp_millis": int(__import__("time").time() * 1000),
-                    "coverage": {"metadata": {"coverage_kind": "KnownMutationHooks", "roots": [str(args.get("workspace_id") or self.workspace_id)], "exclusions": []}},
+                    "coverage": {"metadata": {"coverage_kind": "KnownMutationHooks", **({"required_recovery": True} if operation != "checkpoint" else {}), "roots": [str(args.get("workspace_id") or self.workspace_id)], "exclusions": []}},
                     "per_resource_outcomes": None,
                 }
                 if not isinstance(before, Mapping):
@@ -745,7 +780,9 @@ class CopalFilesProvider:
         except BaseException as exc:
             if client is not None:
                 if capture_ready:
-                    try: await asyncio.to_thread(client.record_live, mutation_id, {"action_id": mutation_id, "status": mutation_failure_status(exc), "after_unavailable": True})
+                    try:
+                        receipt = await asyncio.to_thread(client.record_live, mutation_id, {"action_id": mutation_id, "status": mutation_failure_status(exc), "after_unavailable": True})
+                        await asyncio.to_thread(settle_terminal_recovery, client, mutation_id, receipt)
                     except Exception: pass
                 if mutation_failure_status(exc) == "NotCommitted":
                     try: await asyncio.to_thread(client.abort, mutation_id)
@@ -784,7 +821,9 @@ class CopalFilesProvider:
             try:
                 await asyncio.to_thread(client.record_live, mutation_id, {"action_id": mutation_id, "status": "Committed", "fingerprint": fingerprint_after, "after_unavailable": encoded_after is None})
                 receipt = await asyncio.to_thread(client.complete, mutation_id, content=encoded_after, fingerprint=fingerprint_after)
-                history.update(status="complete", durable=True, phase="complete", receipt=receipt if isinstance(receipt, Mapping) else {})
+                history.update(await asyncio.to_thread(finish_capture, client, mutation_id, receipt))
+                if history["durable"]:
+                    history["receipt"] = receipt if isinstance(receipt, Mapping) else {}
             except Exception as exc:
                 try: await asyncio.to_thread(client.after_unavailable, mutation_id)
                 except Exception: pass
@@ -817,7 +856,7 @@ class CopalFilesProvider:
             raise FilesFacadeError("Copal provider is unavailable", code="provider_unavailable")
         return [ProviderResource(
             f"workspace:{self.workspace_id}",
-            "Copal",
+            self._ROOT_LABEL,
             "provider_root",
             ("children", "stat", "search"),
             workspace_id=self.workspace_id,
@@ -865,6 +904,29 @@ class CopalFilesProvider:
             parent_origin_id=self._navigation_origin(state, workspace, corpus, path[:-1]),
             provenance={"domain": "copal", "view": state, "logical_path": "/".join(path)},
         )
+
+    async def resolve_binder_folder(self, context: ProviderContext, *, workspace: str, corpus: str, root: tuple[str, ...]) -> ProviderResource:
+        workspace = self._workspace(workspace)
+        if corpus not in {"notes", "wiki"} or not isinstance(root, tuple) or any(not isinstance(part, str) or not part or part in {".", ".."} or "/" in part or "\\" in part for part in root):
+            raise FilesFacadeError("Binder folder is unavailable", code="resource_unavailable")
+        index = await self._navigation_index(context, workspace, "active", corpus)
+        if root not in index["children"]:
+            raise FilesFacadeError("Binder folder is unavailable", code="resource_unavailable")
+        origin = self._navigation_origin("active", workspace, corpus, root)
+        entry = await self.stat(context, origin_id=origin)
+        if entry.origin_id != origin or "children" not in entry.capabilities:
+            raise FilesFacadeError("Binder folder is unavailable", code="resource_unavailable")
+        return entry
+
+    async def describe_binder_folder(self, context: ProviderContext, *, origin_id: str) -> dict[str, Any]:
+        prefix, workspace, suffix = self._origin_parts(origin_id)
+        if prefix != "active" or suffix is None:
+            raise FilesFacadeError("Choose an active folder under Workspace collections.", code="resource_unavailable")
+        corpus, path = self._navigation_scope(suffix)
+        entry = await self.resolve_binder_folder(context, workspace=workspace, corpus=corpus, root=path)
+        if entry.origin_id != origin_id:
+            raise FilesFacadeError("Binder folder is unavailable", code="resource_unavailable")
+        return {"workspaceId": workspace, "corpus": corpus, "root": list(path)}
 
     @staticmethod
     def _logical_parts(name: Any) -> tuple[str, ...]:
@@ -1029,6 +1091,9 @@ class CopalFilesProvider:
             if preview_kind:
                 capabilities.append("preview")
             capabilities.extend(("rename", "move", "trash"))
+        # HTML assets may be immutable but still have an authorized isolated view.
+        if asset and not trashed and mime_type in {"text/html", "application/xhtml+xml"} and "preview" not in capabilities:
+            capabilities.append("preview")
         return ProviderResource(
             f"document:{workspace}:{document_id}",
             str(row.get("name") or "Untitled"),
@@ -1055,7 +1120,7 @@ class CopalFilesProvider:
         prefix, workspace, suffix = self._origin_parts(origin_id)
         if prefix == "workspace" and suffix is None:
             return ProviderResource(
-                origin_id, "Copal", "provider_root", ("children", "stat", "search"),
+                origin_id, self._ROOT_LABEL, "provider_root", ("children", "stat", "search"),
                 workspace_id=workspace,
                 provenance={"domain": "copal", "workspace": workspace},
                 open_target={"app": "copal_notes"},
@@ -1364,6 +1429,19 @@ class FilesImagesProvider:
     ) -> None:
         self.session_factory = session_factory
         self.image_resolver = image_resolver
+
+    async def resolve_resource_key(self, context: ProviderContext, *, resource_key: Mapping[str, Any]) -> ProviderResource:
+        # A Gallery ID selects an existing owner-scoped image; it is not a grant.
+        account = str(resource_key.get("account_id") or "").strip()
+        origin = str(resource_key.get("resource_id") or "").strip()
+        if (resource_key.get("provider") != "files" or not account or account != str(context.owner_subject_id)
+                or resource_key.get("workspace_id") is not None
+                or re.fullmatch(r"image:[A-Za-z0-9._-]{1,240}", origin) is None):
+            raise FilesFacadeError("Gallery image is unavailable", code="resource_unavailable")
+        entry = await self.stat(context, origin_id=origin)
+        if entry.kind != "image" or entry.revision is None or "preview" not in entry.capabilities:
+            raise FilesFacadeError("Gallery image is unavailable", code="resource_unavailable")
+        return entry
 
     def _import_parent(self, context: ProviderContext, origin_id: str):
         from src.openclank.files_image_store import FilesImageStore, FilesImageError

@@ -1,6 +1,7 @@
 // App-only compact geometry. Neither visual IDs nor preview are evidence.
+import { CODE_GRAPH_DISPLAY } from './graphSettings.js';
 export const MAP_SCHEMA = 'open-clank.code-map/v1';
-export const MAP_RELATIONS = ['containment','import','call','value_reference','type_reference','inherits','implements','render','route','overrides'];
+export const MAP_RELATIONS = ['containment','import','call','value_reference','type_reference','inherits','implements','render','route','overrides','manifest_dependency','sql_table_reference','callback_registration','event_publish','event_consume'];
 const RELATIONS=MAP_RELATIONS;
 const RECEIPT = ['workspace_id','registration_id','source_snapshot_id','checkout_id','head_generation','admission_epoch','policy_generation','config_fingerprint'];
 const ERROR_CODES = ['invalid','invalid_schema','denied','erased','missing','stale_cursor','reindex_required','budget_exceeded','busy','cancelled','unsupported','unavailable','invalid_evidence'];
@@ -33,7 +34,7 @@ export function codeMapKey(value) {
 }
 function equal(a,b) { return codeMapKey(a)===codeMapKey(b); }
 function cost(value) {
-  keys(value,['inspected_entries','sql_vm_steps','metadata_bytes','retained_summary_bytes','serialized_bytes','source_bytes_read','policy_bytes_read','summary_cache_hit'],['native_rpc_calls_completed']);
+  keys(value,['inspected_entries','sql_vm_steps','metadata_bytes','retained_summary_bytes','serialized_bytes','source_bytes_read','policy_bytes_read','summary_cache_hit'],['native_rpc_calls_completed','native_work_us']);
   for(const k of Object.keys(value)) k==='summary_cache_hit'?bool(value[k]):integer(value[k]);
   need(value.source_bytes_read===0);
 }
@@ -63,10 +64,24 @@ export function mapRequest(input) {
 }
 export function validateMapResult(value,input) {
   const r=mapRequest(input);
-  need(bytes(value)<=r.limits.bytes); keys(value,['schema','operation','authority','root','direction','relations','nodes','edges','coverage','page','selection','cost']);
+  need(bytes(value)<=r.limits.bytes); keys(value,['schema','operation','authority','root','direction','relations','nodes','edges','coverage','page','selection','cost'],['representative','territories']);
   need(value.schema===MAP_SCHEMA&&value.operation===r.operation&&value.direction===r.direction&&equal(value.relations,r.relations));
   authority(value.authority);need(r.expected_authority===null||equal(value.authority,r.expected_authority));
   const preview=value.authority.variant==='structure_preview',ids=new Map();
+  if (Object.hasOwn(value,'representative')) {
+    need(!preview && r.operation!=='neighbors' && r.cursor===null);
+    const sample=value.representative;
+    keys(sample,['declaration_id','selection_id','relation','direction','omitted_declarations','omitted_references']);
+    integer(sample.omitted_declarations);integer(sample.omitted_references);
+    if(sample.declaration_id!==null)canonical(sample.declaration_id,'decl');
+    if(sample.selection_id===null)need(sample.relation===null&&sample.direction===null);
+    else {
+      text(sample.selection_id);
+      need(/^vw2:occ:[0-9a-f]{1,128}:[0-9a-f]{64}$/.test(sample.selection_id)
+        && sample.declaration_id!==null && sample.relation!=='containment'
+        && RELATIONS.includes(sample.relation) && sample.direction==='incoming');
+    }
+  }
   need(Array.isArray(value.nodes)&&value.nodes.length<=r.limits.nodes&&Array.isArray(value.edges)&&value.edges.length<=r.limits.edges);
   for(const n of value.nodes){
     keys(n,['id','label','kind','parent','source_files','asset_files','languages'],['resource_id','file_resource_id','symbol_kind','qualified_name']);text(n.id);text(n.label,160);text(n.parent,256,true);integer(n.source_files);integer(n.asset_files);
@@ -79,6 +94,16 @@ export function validateMapResult(value,input) {
     const languages=new Set();let sum=0;for(const l of n.languages){keys(l,['language','count']);text(l.language,32);integer(l.count);need(!languages.has(l.language));languages.add(l.language);sum+=l.count;}need(Number.isSafeInteger(sum)&&sum<=n.source_files);
   }
   need(value.nodes.filter(n=>['repository','folder'].includes(n.kind)).length<=r.limits.groups);
+  if(Object.hasOwn(value,'territories')){
+    need(!preview&&r.operation!=='neighbors'&&r.cursor===null&&Array.isArray(value.territories)&&value.territories.length<=12);
+    const seen=new Set();
+    for(const territory of value.territories){
+      keys(territory,['visual_id','source_files','declarations','observed_references']);
+      need(!seen.has(territory.visual_id)&&['repository','folder'].includes(ids.get(territory.visual_id)?.kind));
+      seen.add(territory.visual_id);
+      integer(territory.source_files);integer(territory.declarations);integer(territory.observed_references);
+    }
+  }
   for(const n of value.nodes){const seen=new Set();let id=n.id;while(ids.has(id)){need(!seen.has(id));seen.add(id);id=ids.get(id).parent;}}
   text(value.root,256,true);
   if(r.operation==='overview')need(value.root===null||ids.get(value.root)?.kind==='repository');
@@ -106,10 +131,10 @@ export function validateMapResult(value,input) {
 // native coverage; eviction invalidates all adjacency completion assertions.
 export function createCodeMapModel({request,getScope,isCurrent=()=>true,getPinned=()=>[],changed=()=>{},maxNodes=2000,maxEdges=5000,maxBytes=4*1024*1024}) {
   need(typeof request==='function'&&typeof getScope==='function');
-  need(Number.isSafeInteger(maxNodes)&&maxNodes>0&&maxNodes<=2000&&Number.isSafeInteger(maxEdges)&&maxEdges>0&&maxEdges<=5000&&Number.isSafeInteger(maxBytes)&&maxBytes>=512&&maxBytes<=16*1024*1024);
+  need(Number.isSafeInteger(maxNodes)&&maxNodes>0&&maxNodes<=CODE_GRAPH_DISPLAY.nodes&&Number.isSafeInteger(maxEdges)&&maxEdges>0&&maxEdges<=CODE_GRAPH_DISPLAY.edges&&Number.isSafeInteger(maxBytes)&&maxBytes>=512&&maxBytes<=CODE_GRAPH_DISPLAY.cacheMiB*1024*1024);
   let serial=0,controller=null,disposed=false,scope=null,sequence=null,aggregateSequence=null;
   let state=empty();const nodes=new Map(),edges=new Map(),proofs=new Map(),sequences=new Map(),bindings=new Map();
-  function empty(){return {status:'idle',authority:null,nodes:[],edges:[],root:null,page:null,coverage:null,selection:null,aggregate:null,error:null,evicted:false,retainedBytes:0,evidenceEnabled:false};}
+  function empty(){return {status:'idle',authority:null,nodes:[],edges:[],root:null,page:null,coverage:null,selection:null,representative:null,territories:[],aggregate:null,diagnostics:null,coldDiagnostics:null,error:null,evicted:false,retainedBytes:0,evidenceEnabled:false};}
   function currentScope(){try{const value=getScope();need(object(value)&&bytes(value)<=16384);return codeMapKey(value);}catch{return null;}}
   const snapshot=()=>{if(scope!==null&&(scope!==currentScope()||!isCurrent())){serial++;controller?.abort();scope=null;clear();}return copy(state);};
   const publish=()=>changed(snapshot());
@@ -125,6 +150,12 @@ export function createCodeMapModel({request,getScope,isCurrent=()=>true,getPinne
   function proofKey(r,a){return codeMapKey({authority:a,root:r.root,direction:r.direction,relations:r.relations});}
   function trim(protectedIds){
     for(const id of getPinned().slice(0,64))if(nodes.has(id))protectedIds.add(id);
+    for(const id of [...protectedIds]){
+      let parent=nodes.get(id)?.parent;
+      while(parent&&nodes.has(parent)&&!protectedIds.has(parent)){
+        protectedIds.add(parent);parent=nodes.get(parent).parent;
+      }
+    }
     // Include all retained IDs/cursors/selection references, not just geometry.
     // Reserve 32 bytes for the accounting counter's own decimal width.
     const size=()=>32+bytes({...state,scope,retainedBytes:0,nodes:[...nodes.values()],edges:[...edges.values()],proofs:[...proofs.values()],aggregateSequence,sequences:[...sequences.values()].map(s=>({workspace:s.workspace,scope:s.scope,query:s.query,cursor:s.cursor,page:s.page,authority:s.authority,seen:[...s.seen],pageNodes:[...s.pageNodes],pageEdges:[...s.pageEdges]})),bindings:[...bindings.values()],sequence:sequence&&{workspace:sequence.workspace,scope:sequence.scope,query:sequence.query,cursor:sequence.cursor,seen:[...sequence.seen],pageNodes:[...sequence.pageNodes],pageEdges:[...sequence.pageEdges]}});
@@ -145,10 +176,12 @@ export function createCodeMapModel({request,getScope,isCurrent=()=>true,getPinne
       if(id===undefined)throw new Error('Code Map cache capacity exceeded');
       nodes.delete(id);bindings.delete(id);evicted=true;
     }
-    if(evicted){proofs.clear();sequences.clear();for(const id of bindings.keys())if(!nodes.has(id))bindings.delete(id);state.evicted=true;}
+    if(evicted){proofs.clear();for(const id of bindings.keys())if(!nodes.has(id))bindings.delete(id);state.evicted=true;}
+    state.territories=state.territories.filter(t=>nodes.has(t.visual_id));
     state.nodes=[...nodes.values()];state.edges=[...edges.values()];state.retainedBytes=size();return evicted;
   }
-  async function run(workspace,input,{more=false,missingIsAbsent=false}={}){
+  async function run(workspace,input,{more=false,missingIsAbsent=false,signal,background=false}={}){
+    if(signal?.aborted)return false;
     let r;try{r=mapRequest(input);}catch{return false;}
     const query=codeMapKey({...r,cursor:null,expected_authority:null});
     if(more)sequence=sequences.get(query);
@@ -158,9 +191,20 @@ export function createCodeMapModel({request,getScope,isCurrent=()=>true,getPinne
     const job=begin(workspace);if(!job)return false;
     if(!more){sequence={workspace,query,scope,cursor:null,page:null,authority:copy(r.expected_authority),seen:new Set(),pageNodes:new Set(),pageEdges:new Set()};sequences.delete(query);while(sequences.size>=64)sequences.delete(sequences.keys().next().value);sequences.set(query,sequence);}
     const previous={state:copy(state),nodes:new Map(nodes),edges:new Map(edges),bindings:new Map(bindings),proofs:new Map(proofs)};
-    state.status='loading';state.error=null;publish();
+    const cancel=()=>{
+      if(!job.current())return;
+      serial++;controller?.abort();controller=null;
+      state=previous.state;
+      if(!background)publish();
+    };
+    signal?.addEventListener('abort',cancel,{once:true});
+    if(!background){state.status='loading';state.error=null;publish();}
     try{
-      const raw=await request(workspace,{mode:'map',request:copy(r)},job.signal);if(!job.current())return false;
+      const started=performance.now();
+      let transportTimings=null;
+      const raw=await request(workspace,{mode:'map',request:copy(r)},job.signal,timings=>{transportTimings=timings;});
+      const browserRoundTripMs=performance.now()-started;
+      if(!job.current())return false;
       typedFailure(raw,'map');
       const value=validateMapResult(raw,r);
       if(value.authority.variant==='structure_preview')need(value.authority.workspace_id===workspace);else need(value.authority.receipt.workspace_id===workspace);
@@ -169,17 +213,42 @@ export function createCodeMapModel({request,getScope,isCurrent=()=>true,getPinne
       if(changedAuthority){nodes.clear();edges.clear();proofs.clear();sequences.clear();bindings.clear();sequences.set(query,sequence);state=empty();}
       // A new root/filter sequence replaces its proof, not every other root's.
       if(!more)proofs.delete(proofKey(r,value.authority));
-      const cursor=value.page.next_cursor;need(cursor===null||!sequence.seen.has(cursor));need(sequence.seen.size<1000);
-      if(cursor!==null)sequence.seen.add(cursor);
+      const cursor=value.page.next_cursor;need(cursor===null||!sequence.seen.has(cursor));
+      if(cursor!==null){
+        if(sequence.seen.size>=256)sequence.seen.delete(sequence.seen.values().next().value);
+        sequence.seen.add(cursor);
+      }
       let novel=0;
       for(const [rows,cache,seen] of [[value.nodes,nodes,sequence.pageNodes],[value.edges,edges,sequence.pageEdges]])for(const row of rows){
         if(cache.has(row.id))need(equal(cache.get(row.id),row));
         if(!seen.has(row.id)){novel++;seen.add(row.id);}cache.delete(row.id);cache.set(row.id,row);
       }
-      need(sequence.pageNodes.size<=2000&&sequence.pageEdges.size<=5000);need(!more||novel>0||value.page.complete);
+      need(!more||novel>0||value.page.complete);
+      // Authenticated cursor progress belongs to the native page sequence. Keep
+      // recent replay identities bounded independently of the display cache.
+      for(const [ids,bound] of [[sequence.pageNodes,CODE_GRAPH_DISPLAY.nodes],[sequence.pageEdges,CODE_GRAPH_DISPLAY.edges]]){
+        while(ids.size>bound)ids.delete(ids.values().next().value);
+      }
       for(const n of nodes.values()){const seen=new Set();let id=n.id;while(nodes.has(id)){need(!seen.has(id));seen.add(id);id=nodes.get(id).parent;}}
       aggregateSequence=null;
       state={...state,authority:value.authority,root:value.root,page:value.page,coverage:value.coverage,selection:value.selection,aggregate:null,status:'ready',error:null,evidenceEnabled:value.authority.variant==='published'};
+      const duration=value=>Number.isFinite(value)&&value>=0&&value<=3600000?value:null;
+      state.diagnostics={operation:r.operation,summaryCacheHit:value.cost.summary_cache_hit,retainedSummaryBytes:value.cost.retained_summary_bytes,
+        nativeWorkMs:duration(value.cost.native_work_us/1000),
+        providerWaitMs:duration(transportTimings?.providerWaitMs),hostEnvelopeMs:duration(transportTimings?.hostEnvelopeMs),
+        browserRoundTripMs:duration(browserRoundTripMs)};
+      if(state.evidenceEnabled&&!state.diagnostics.summaryCacheHit&&!state.coldDiagnostics){
+        state.coldDiagnostics=state.diagnostics;
+      }
+      if(!more && r.operation!=='neighbors')state.representative=value.representative||null;
+      if(value.territories?.length){
+        const territories=new Map(state.territories.map(t=>[t.visual_id,t]));
+        for(const territory of value.territories){
+          if(territories.has(territory.visual_id))need(equal(territories.get(territory.visual_id),territory));
+          territories.delete(territory.visual_id);territories.set(territory.visual_id,territory);
+        }
+        state.territories=[...territories.values()].slice(-48);
+      }
       sequence.authority=copy(value.authority);sequence.cursor=cursor;sequence.page=copy(value.page);
       if(value.authority.variant==='published')for(const n of value.nodes)if(n.resource_id)bindings.set(n.id,{visual_id:n.id,resource_id:n.resource_id,receipt:copy(value.authority.receipt)});
       if(value.selection)bindings.set(value.selection.visual_id,copy(value.selection));
@@ -190,16 +259,20 @@ export function createCodeMapModel({request,getScope,isCurrent=()=>true,getPinne
       trim(protectedIds);publish();return true;
     }catch(error){if(!job.current())return false;if(['denied','erased'].includes(error?.[ERROR_CODE]))clear();else{state=previous.state;for(const [target,source]of [[nodes,previous.nodes],[edges,previous.edges],[bindings,previous.bindings],[proofs,previous.proofs]]){target.clear();for(const [k,v]of source)target.set(k,v);}sequences.clear();sequence=null;aggregateSequence=null;}
       if(missingIsAbsent&&r.root?.kind==='resource'&&r.operation==='neighbors'&&!more&&error?.[ERROR_CODE]==='missing'&&state.authority?.variant==='published'){state.status='ready';state.error=null;publish();return false;}
-      state.status='error';state.error={code:error?.[ERROR_CODE]||'invalid_or_unavailable',message:'Code Map could not be loaded'};publish();return false;}
+      if(!background||!state.authority)state.status='error';
+      state.error={code:error?.[ERROR_CODE]||'invalid_or_unavailable',message:'Code Map could not be loaded'};publish();return false;
+    }finally{signal?.removeEventListener('abort',cancel);}
   }
   async function selectAggregate(selectionId,{cursor=null}={}){
     snapshot();
-    if(state.authority?.variant!=='published'||!state.edges.some(e=>e.selection_id===selectionId))return false;
+    const sample=state.representative?.selection_id===selectionId;
+    if(state.authority?.variant!=='published'||(!sample&&!state.edges.some(e=>e.selection_id===selectionId)))return false;
+    if(sample&&cursor!==null)return false;
     if(cursor!==null&&(state.aggregate?.selection_id!==selectionId||state.aggregate.next_cursor!==cursor||!aggregateSequence||aggregateSequence.references.length>=50))return false;
     text(selectionId);text(cursor,4096,true);
     const a=copy(state.authority),workspace=a.receipt.workspace_id,job=begin(workspace);if(!job)return false;
     const prior=cursor===null?{cursors:[],references:[]}:copy(aggregateSequence);
-    const r={schema:MAP_SCHEMA,authority:a,selection_id:selectionId,cursor,max_refs:50-prior.references.length};
+    const r={schema:MAP_SCHEMA,authority:a,selection_id:selectionId,cursor,max_refs:sample?1:50-prior.references.length};
     try{
       const v=await request(workspace,{mode:'selection',request:r},job.signal);if(!job.current())return false;
       typedFailure(v,'selection');
@@ -214,8 +287,11 @@ export function createCodeMapModel({request,getScope,isCurrent=()=>true,getPinne
   }
   return {run,selectAggregate,snapshot,reset,dispose,
     configure(limits={}){serial++;controller?.abort();controller=null;
-      maxNodes=Math.max(200,Math.min(2000,limits.maxNodes||maxNodes));maxEdges=Math.max(800,Math.min(5000,limits.maxEdges||maxEdges));maxBytes=Math.max(1048576,Math.min(16777216,limits.maxBytes||maxBytes));
-      sequences.clear();sequence=null;proofs.clear();trim(new Set());publish();},
+      maxNodes=Math.max(200,Math.min(CODE_GRAPH_DISPLAY.nodes,limits.maxNodes||maxNodes));maxEdges=Math.max(800,Math.min(CODE_GRAPH_DISPLAY.edges,limits.maxEdges||maxEdges));maxBytes=Math.max(1048576,Math.min(CODE_GRAPH_DISPLAY.cacheMiB*1024*1024,limits.maxBytes||maxBytes));
+      if(limits.preservePaging!==true){sequences.clear();sequence=null;state.page=null;}
+      proofs.clear();
+      if(state.status==='loading') state.status=state.authority?'ready':'idle';
+      trim(new Set());publish();},
     bindingFor:id=>{snapshot();return nodes.has(id)&&bindings.has(id)?copy(bindings.get(id)):null;},
     pageFor:input=>{snapshot();try{const r=mapRequest(input),key=codeMapKey({...r,cursor:null,expected_authority:null});return copy(sequences.get(key)?.page||null);}catch{return null;}},
     hasCompleteAdjacency:r=>{snapshot();return state.authority!==null&&scope===currentScope()&&proofs.has(proofKey(mapRequest(r),state.authority));}};

@@ -2,21 +2,21 @@
   "id": "batch-022",
   "group": "docs.openclank-docs-accounts-models",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 1669,
+  "entry_count": 3,
+  "character_count": 3582,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-accounts-models.body",
-      "source": "# Accounts and Models\n\nOpen Clank is multi-account. Each account owns its own chats, documents, files\nand settings, so two people can share one installation without seeing each\nother's work.\n\n## Your account\n\nYour account is chosen at sign-in. Documents, tasks, memory and settings are\nscoped to that account. If you sign in as someone else you get their\nworkspace, not yours — nothing is merged.\n\nLocal installs without authentication map to a single local account. The\nCopal document store is still scoped per owner internally, so enabling\nauthentication later does not scramble existing data.\n\n## Choosing a model\n\nModels are configured in [Settings](clank://settings/providers). A provider is\nthe service that runs a model — a local runtime, or a hosted API you bring a\nkey for.\n\nPractical guidance:\n\n- Pick a small, fast model for quick edits and summaries.\n- Pick a stronger model for long reasoning, code or research.\n- Switch mid-conversation if a task grows; the transcript keeps both.\n\nCompare is available for side-by-side answers from two models on the same\nprompt. It is useful when you are deciding which model to keep.\n\n## What Open Clank does not do\n\n- It does not choose a model for you or silently fall back to a different\n  provider without telling you.\n- It does not send your documents to a provider unless a tool call or prompt\n  needs them.\n- It does not store provider API keys in your documents or in first-party\n  source.\n\nSee [[Limits and Platform Support]] for what runs where.",
+      "source": "# Accounts and Models\n\nSign in to the Open Clank account that owns your chats and journal pages. Connect a model for that account in [Settings](clank://settings) → **Add Provider**.\n\n## Connect a model\n\n- **Local** connects to a model server running at an address Open Clank can reach. See [[Compare and Cookbook]] for serving a downloaded model.\n- **API** takes a supported endpoint and its credential. The provider’s API quota and billing apply.\n- **Subscription** uses a sign-in method offered by the provider. Model availability follows that account’s entitlements.\n\nIf **Provider login** is waiting, choose **Open current sign-in**. Enter the **Sign-in code** if offered. For manual callbacks, use the authorization-code field and **Complete login** on the original flow. Return to **Add Provider** or **Model Management** to resume an unfinished sign-in. Use **Cancel login** to abandon it. If the result is unclear, check Model Management before starting again.\n\n## Check the inventory and use the route\n\nIn [Model Management](clank://settings/added-models), expand the connection and check **Models**. An empty list can mean the local server is unreachable, the API credential or endpoint needs correction, or the subscription still needs sign-in under **Account & advanced**. Use **Refresh models** after correcting it. A failed refresh can leave the last known list visible.\n\nSelect an available model in Chat. Its response label and [[Usage and Stats|Usage]] show which model answered. Switching models keeps the chat intact.\n\nOn the connection, **Disable** pauses the route and **Delete** removes the connection and its accounts. Use **Remove** on an individual account to detach it. On eligible models, **Share** lets you choose or remove named recipients. Models shared with you appear in Model Management.\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:154"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
@@ -26,10 +26,20 @@
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:154"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
       "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-accounts-models.body.compat-7024ed5d4ec7",
+      "source": "# Accounts and Models\n\nOpen Clank is multi-account. Each account owns its own chats, documents, files\nand settings, so two people can share one installation without seeing each\nother's work.\n\n## Your account\n\nYour account is chosen at sign-in. Documents, tasks, memory and settings are\nscoped to that account. If you sign in as someone else you get their\nworkspace, not yours — nothing is merged.\n\nLocal installs without authentication map to a single local account. The\nCopal document store is still scoped per owner internally, so enabling\nauthentication later does not scramble existing data.\n\n## Choosing a model\n\nModels are configured in [Settings](clank://settings/providers). A provider is\nthe service that runs a model — a local runtime, or a hosted API you bring a\nkey for.\n\nPractical guidance:\n\n- Pick a small, fast model for quick edits and summaries.\n- Pick a stronger model for long reasoning, code or research.\n- Switch mid-conversation if a task grows; the transcript keeps both.\n\nCompare is available for side-by-side answers from two models on the same\nprompt. It is useful when you are deciding which model to keep.\n\n## What Open Clank does not do\n\n- It does not choose a model for you or silently fall back to a different\n  provider without telling you.\n- It does not send your documents to a provider unless a tool call or prompt\n  needs them.\n- It does not store provider API keys in your documents or in first-party\n  source.\n\nSee [[Limits and Platform Support]] for what runs where.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
     }
   ]
 }

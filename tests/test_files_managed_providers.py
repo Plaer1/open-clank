@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 from datetime import datetime
 
 import pytest
@@ -104,6 +105,107 @@ async def test_copal_target_materializes_copal_content_without_document_mutation
     assert result["source_revision"]["value"] == "head-1"
     assert result["asset"]["resource_key"]["resource_id"] == "asset-1"
     assert all(operation not in {"write", "rename", "create"} for operation, _args in bridge.calls)
+
+
+@pytest.mark.asyncio
+async def test_copal_target_uses_v2_project_media_layout_and_records_ownership(tmp_path):
+    bridge = LooseCopalBridge(tmp_path / "vaults")
+    scope = {"owner": "alice", "workspace_id": "default"}
+    target_doc = await bridge.call("create", {
+        **scope, "name": "Projects/Game/Ideas.md", "kind": "note", "content": "# Ideas\n",
+    })
+    document_id = target_doc["doc"]["id"]
+
+    class Source:
+        entry = ProviderResource(
+            "host:source.png", "source.png", "file", ("stat", "read", "download"),
+            revision={"kind": "hostFingerprint", "value": "source-r1"}, mime_type="image/png", size=8,
+        )
+        async def stat(self, context, *, origin_id):
+            return self.entry
+        async def content(self, context, *, origin_id):
+            async def stream(start, length):
+                yield b"png-data"
+            return ProviderContent(origin_id=origin_id, filename="source.png", media_type="image/png", stream=stream, size=8)
+
+    provider = CopalFilesProvider(bridge)
+    context = _context()
+    source = Source()
+    result = await provider.prepare_attachment(
+        context, operation_id="managed-copal-v2", source={"resource_ref": "source"},
+        target={"kind": "copal_document", "resource_ref": "target-ref"}, mode="embed",
+        source_provider=source, source_origin_id=source.entry.origin_id, source_entry=source.entry,
+        target_origin_id=f"document:default:{document_id}",
+    )
+
+    asset_id = result["asset"]["resource_key"]["resource_id"]
+    stored = await bridge.call("asset_path", {**scope, "id": asset_id})
+    assert Path(stored["path"]).relative_to(bridge._vault("alice", "default")).as_posix().startswith(
+        ".media/Projects/Game/Ideas/"
+    )
+    assert Path(stored["path"]).read_bytes() == b"png-data"
+    assert result["layout_version"] == 2
+    assert result["insertion"]["link_target"].startswith("../../.media/Projects/Game/Ideas/")
+    asset_record = bridge._load(bridge._vault("alice", "default"))["documents"][asset_id]
+    assert asset_record["mediaOwnerDocumentId"] == document_id
+    assert asset_record["mediaLayoutVersion"] == 2
+
+
+@pytest.mark.asyncio
+async def test_copal_v2_attachment_retry_recovers_the_nested_asset_path(tmp_path):
+    actual_bridge = LooseCopalBridge(tmp_path / "vaults")
+    scope = {"owner": "alice", "workspace_id": "default"}
+    target_doc = await actual_bridge.call("create", {
+        **scope, "name": "Projects/Game/Ideas.md", "kind": "note", "content": "# Ideas\n",
+    })
+
+    class Store:
+        def __init__(self): self.rows = {}
+        def get_operation(self, *, owner_subject_id, operation_id):
+            return self.rows.get((owner_subject_id, operation_id))
+        def record_operation(self, *, owner_subject_id, operation_id, request_digest, generation, receipt, phase=None):
+            self.rows[(owner_subject_id, operation_id)] = {"receipt": dict(receipt)}
+
+    class ReplyLostBridge:
+        def __init__(self): self.lost = False
+        def _vault(self, owner, workspace): return actual_bridge._vault(owner, workspace)
+        async def call(self, operation, args):
+            result = await actual_bridge.call(operation, args)
+            if operation == "put_asset_scoped" and not self.lost:
+                self.lost = True
+                raise RuntimeError("simulated reply loss after asset commit")
+            return result
+
+    class Source:
+        entry = ProviderResource(
+            "host:source.png", "source.png", "file", ("stat", "read", "download"),
+            revision={"kind": "hostFingerprint", "value": "source-r1"}, mime_type="image/png", size=8,
+        )
+        async def stat(self, context, *, origin_id): return self.entry
+        async def content(self, context, *, origin_id):
+            async def stream(start, length): yield b"png-data"
+            return ProviderContent(origin_id=origin_id, filename="source.png", media_type="image/png", stream=stream, size=8)
+
+    context = _context()
+    source = Source()
+    target_args = {
+        "source": {"resource_ref": "source"},
+        "target": {"kind": "copal_document", "resource_ref": "target-ref"},
+        "mode": "embed", "source_provider": source,
+        "source_origin_id": source.entry.origin_id, "source_entry": source.entry,
+        "target_origin_id": f"document:default:{target_doc['doc']['id']}",
+    }
+    store = Store()
+    provider = CopalFilesProvider(ReplyLostBridge(), operation_store=store)
+    with pytest.raises(RuntimeError, match="reply loss"):
+        await provider.prepare_attachment(context, operation_id="nested-retry", **target_args)
+
+    recovered = CopalFilesProvider(actual_bridge, operation_store=store)
+    receipt = await recovered.attachment_status(context, operation_id="nested-retry")
+    replay = await recovered.prepare_attachment(context, operation_id="nested-retry", **target_args)
+    assert receipt is not None and receipt["layout_version"] == 2
+    assert receipt["asset"]["name"].startswith(".media/Projects/Game/Ideas/")
+    assert replay["asset"]["resource_key"]["resource_id"] == receipt["asset"]["resource_key"]["resource_id"]
 
 
 @pytest.mark.asyncio

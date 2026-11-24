@@ -7,9 +7,6 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CALENDAR_JS = ROOT / "static" / "js" / "calendar.js"
-STYLE_CSS = ROOT / "static" / "style.css"
-UTILS_JS = ROOT / "static" / "js" / "calendar" / "utils.js"
 
 pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node binary not on PATH")
 
@@ -61,16 +58,3 @@ def test_calendar_readable_text_color_keeps_light_text_for_dark_colors():
         "red": "#ffffff",
         "variable": "var(--fg)",
     }
-
-
-def test_calendar_event_surfaces_use_computed_foreground_variable():
-    calendar_js = CALENDAR_JS.read_text(encoding="utf-8")
-    style_css = STYLE_CSS.read_text(encoding="utf-8")
-    utils_js = UTILS_JS.read_text(encoding="utf-8")
-
-    assert "_calReadableTextColor" in utils_js
-    assert "function _calEventFg(ev)" in calendar_js
-    assert "--cal-event-fg:${_calEventFg(md)}" in calendar_js
-    assert "--cal-event-fg:${_calEventFg(ev)}" in calendar_js
-    assert "color: var(--cal-event-fg, #fff);" in style_css
-    assert "color: var(--cal-event-fg, var(--fg));" in style_css

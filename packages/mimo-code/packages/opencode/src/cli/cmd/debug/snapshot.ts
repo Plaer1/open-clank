@@ -15,7 +15,7 @@ const TrackCommand = cmd({
   describe: "track current snapshot state",
   async handler() {
     await bootstrap(process.cwd(), async () => {
-      console.log(await AppRuntime.runPromise(Snapshot.Service.use((svc) => svc.track())))
+      console.log((await AppRuntime.runPromise(Snapshot.Service.use((svc) => svc.track()))) ?? "Automatic snapshots unavailable; recovery uses Lore.")
     })
   },
 })

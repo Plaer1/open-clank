@@ -132,7 +132,7 @@ def qualify(installer, target, parts, output):
             environment = os.environ.copy()
             for name in tuple(environment):
                 if name.endswith(('_TOKEN', '_API_KEY')) or name in {
-                        'DATABASE_URL', 'ODYSSEUS_DATA_DIR', 'PYTHONHOME', 'PYTHONPATH',
+                        'DATABASE_URL', 'OPEN_CLANK_DATA_DIR', 'PYTHONHOME', 'PYTHONPATH',
                         'OPEN_CLANK_RUNTIME_PYTHON', 'OPEN_CLANK_PYTHON', 'OPEN_CLANK_AGENT_HOME'}:
                     environment.pop(name, None)
             system = Path(os.environ['SystemRoot'])

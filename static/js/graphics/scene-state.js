@@ -218,10 +218,10 @@ export function createDrawBatch() {
         value: { text, x, y, size, weight, color, alpha, align, baseline, font, glow: glow || null },
       });
     },
-    /** Queue an image sprite in the same painter order as glyphs. */
-    sprite(source, x, y, width, height, alpha = 1) {
+    /** Queue a sprite, optionally tinting an existing monochrome mask. */
+    sprite(source, x, y, width, height, alpha = 1, tint = null) {
       if (!source) return;
-      glyphCommands.push({ type: 'sprite', source, x, y, width, height, alpha });
+      glyphCommands.push({ type: 'sprite', source, x, y, width, height, alpha, tint });
     },
     /** Flush the batch into a backend adapter and clear. */
     flush(backend) {
@@ -246,14 +246,9 @@ export function createDrawBatch() {
           }
           flushGlyphRun();
           if (typeof backend.drawImage === 'function') {
-            backend.drawImage(
-              command.source,
-              command.x,
-              command.y,
-              command.width,
-              command.height,
-              command.alpha,
-            );
+            const { source, x, y, width, height, alpha, tint } = command;
+            if (tint) backend.drawImage(source, x, y, width, height, alpha, null, tint);
+            else backend.drawImage(source, x, y, width, height, alpha);
           }
         }
         flushGlyphRun();

@@ -22,6 +22,7 @@ import { SessionCheckpoint } from "@/session/checkpoint"
 import { inboxServiceRef } from "@/inbox/inbox-ref"
 import { Effect, Deferred } from "effect"
 import type { ActorHostContext } from "@/actor/schema"
+import * as ManagedProvider from "@/acp/managed-provider"
 
 export interface ActorPromptOps {
   cancel(sessionID: SessionID): void
@@ -790,6 +791,32 @@ export const ActorTool = Tool.define(
         // would let a later prompt silently rebind the child. New actors
         // inherit the current managed scope in Actor.spawnSubagent.
         const hostContext = priorActor ? undefined : hostContextFromExtra(ctx.extra)
+        const execution = ctx.extra?.actorExecution as { sessionID?: string; actorID?: string; executionRevision?: number; rootOperationID?: string } | undefined
+        const recorded = msg.info.metadata?.managedExecution as typeof execution
+        let optionCandidate: import("@/acp/openclank-protocol").ActorOptionCandidate | undefined
+        if (!priorActor && ManagedProvider.enabled() && !execution)
+          return yield* Effect.fail(new Error("Parent actor option provenance is unavailable"))
+        if (!priorActor && execution) {
+          if (!recorded || !execution.rootOperationID || execution.sessionID !== ctx.sessionID ||
+              recorded.sessionID !== execution.sessionID || recorded.actorID !== execution.actorID ||
+              recorded.executionRevision !== execution.executionRevision || recorded.rootOperationID !== execution.rootOperationID ||
+              !execution.actorID || !Number.isSafeInteger(execution.executionRevision))
+            return yield* Effect.fail(new Error("Parent actor option provenance is unavailable"))
+          optionCandidate = { version: 1, source: { kind: "parent_execution", sessionID: execution.sessionID,
+            actorID: execution.actorID, executionRevision: execution.executionRevision, rootOperationID: execution.rootOperationID, messageID: ctx.messageID },
+            model: { providerID: msg.info.providerID, modelID: msg.info.modelID }, variant: msg.info.variant ?? null }
+        }
+        // The host-user owner is private process context, never an actor tool
+        // argument or the provider billing account. Only the exact admitted
+        // parent execution is eligible to mint a new actor owner binding.
+        let originalOwnerAccountID: string | undefined
+        if (!priorActor && execution?.actorID && execution.sessionID === ctx.sessionID &&
+            Number.isSafeInteger(execution.executionRevision) && execution.rootOperationID) {
+          try {
+            if (ManagedProvider.currentRootOperationID(ctx.sessionID, execution.actorID, execution.executionRevision) === execution.rootOperationID)
+              originalOwnerAccountID = ManagedProvider.currentActorHostContext(ctx.sessionID, execution.actorID, execution.executionRevision!)?.ownerAccountID
+          } catch { /* unavailable means an unowned display, never inferred */ }
+        }
         const spawnResult = yield* actor.spawn({
           mode: "subagent",
           sessionID: ctx.sessionID,
@@ -800,7 +827,9 @@ export const ActorTool = Tool.define(
           tools: next.toolAllowlist ? [...next.toolAllowlist] : "INHERIT",
           model,
           requestedModel,
+          ...(optionCandidate ? { optionCandidate } : {}),
           ...(hostContext ? { hostContext } : {}),
+          ...(originalOwnerAccountID ? { originalOwnerAccountID } : {}),
           ...(op.actor_id ? { actorID: op.actor_id } : {}),
           background,
           task_id: effectiveTaskId,

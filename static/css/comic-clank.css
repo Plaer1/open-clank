@@ -1,0 +1,159 @@
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: italic;
+  font-weight: 300;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-LightItalic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-Italic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: italic;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-MediumItalic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: italic;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-SemiBoldItalic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-BoldItalic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-Light.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-Regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-Medium.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-SemiBold.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/static/fonts/ComicClank-Bold.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: italic;
+  font-weight: 300;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-LightItalic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-Italic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: italic;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-MediumItalic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: italic;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-SemiBoldItalic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-BoldItalic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-Light.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-Regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-Medium.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-SemiBold.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Comic Clank Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/static/fonts/ComicClankMono-Bold.woff2') format('woff2');
+}

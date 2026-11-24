@@ -2,21 +2,21 @@
   "id": "batch-034",
   "group": "docs.openclank-docs-tasks",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 1525,
+  "entry_count": 3,
+  "character_count": 3248,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-tasks.body",
-      "source": "# Tasks and Continuations\n\nTasks are durable follow-through items. They are the bridge between \"the\nassistant said it would do X\" and \"X actually happened, and here is where.\"\n\n## Task chats\n\nEach task keeps one durable chat. Opening a task from the toast, the badge or\nthe task list opens that chat — the original one — not whichever conversation\nhappens to be in front. Answering a question in the toast resumes the task\nchat without hijacking your foreground chat.\n\nOpen [Meatbag Tasks](clank://tasks) for the full list, or [the task view](clank://tasks)\ninside Copal.\n\n## Sources\n\nTasks can come from a chat, from a checkbox in a document, or from a\nscheduled run. A checkbox task in a document carries the document identity,\nso the task and the line it came from stay connected.\n\n## Continuations\n\nA continuation is a resumed run of the same task chat. Context accumulates in\nthat task's transcript rather than scattering across new conversations. When\na task is done, its chat remains as the record of what happened.\n\n## Practical habits\n\n- Ask the assistant to create a task when work will outlive the current\n  conversation.\n- Keep one task per outcome; the chat under it holds the detail.\n- Use checkboxes in documents for work that belongs to that document.\n\nNext: [[Memory and Lore]] for what survives a restart, or [[Recovery]] for\nwhat to do when a run goes wrong.",
+      "source": "# Tasks and Continuations\n\nOpen [Tasks](clank://tasks). **Meatbag Tasks** holds work you follow through on. **Clanker Tasks** runs model work on a schedule or on demand. **Workload** shows the commitments, executions and routines the current scope recorded.\n\n## Track your own work\n\nIn **Meatbag Tasks**, create an item, check its title, source and due date, and mark it complete when done. A page checklist stays in the page until you use an explicit task action that creates an item in Tasks.\n\n## Schedule or continue model work\n\nIn **Clanker Tasks → New Task**, set the prompt, model, schedule and output destination. Verify access to that destination. A task with email delivery can send to the saved address. Save and check the next-run time, or use **Run now**.\n\nUse the task log to inspect or stop the current run. **History** shows prior output or errors. Check the previous outcome before retrying a task that can send or modify something. **Pause** and **Resume** control its schedule.\n\nIn Chat, ask explicitly for a task when the work needs its own schedule or record. Open the resulting task chat to answer its question. Follow an existing worker from **Workload** or [[Chat and Workspaces#Inspect a worker or a saved plan|the chat’s worker view]].\n\n## Review repository changes\n\nIn an eligible Host repository folder, choose **Files → Go → Source (Git and Lore)…**. Refresh Git to see working and staged changes. Choose a file if required, select the **Source control action**, then **Review** the saved bytes and target before confirming. If the result is pending, use **Check status**. See [[Recovery]] for Lore file history.\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:535"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
@@ -26,10 +26,20 @@
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:535"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
       "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-tasks.body.compat-0ebb48a52247",
+      "source": "# Tasks and Continuations\n\nTasks are durable follow-through items. They are the bridge between \"the\nassistant said it would do X\" and \"X actually happened, and here is where.\"\n\n## Task chats\n\nEach task keeps one durable chat. Opening a task from the toast, the badge or\nthe task list opens that chat — the original one — not whichever conversation\nhappens to be in front. Answering a question in the toast resumes the task\nchat without hijacking your foreground chat.\n\nOpen [Meatbag Tasks](clank://tasks) for the full list, or [the task view](clank://tasks)\ninside Copal.\n\n## Sources\n\nTasks can come from a chat, from a checkbox in a document, or from a\nscheduled run. A checkbox task in a document carries the document identity,\nso the task and the line it came from stay connected.\n\n## Continuations\n\nA continuation is a resumed run of the same task chat. Context accumulates in\nthat task's transcript rather than scattering across new conversations. When\na task is done, its chat remains as the record of what happened.\n\n## Practical habits\n\n- Ask the assistant to create a task when work will outlive the current\n  conversation.\n- Keep one task per outcome; the chat under it holds the detail.\n- Use checkboxes in documents for work that belongs to that document.\n\nNext: [[Memory and Lore]] for what survives a restart, or [[Recovery]] for\nwhat to do when a run goes wrong.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
     }
   ]
 }

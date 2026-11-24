@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from sqlalchemy import String, Text, JSON, inspect, not_, and_
+from sqlalchemy import String, Text, JSON, inspect, not_, and_, text
 from core.database import Base, ChatMessage, Memory, Document, Session as DbSession
 from src.openclank.attachment_inventory import resource_references
 from src.openclank.conversation_archive import get_conversation_archive
@@ -108,7 +108,14 @@ def deletion_impact(db, *, owner, session_id, upload_handler=None):
     }
 
 
-def erase_retained_content(db, *, owner, session_id, upload_handler=None):
+_SOURCE_PROVIDER_UNSET = object()
+
+
+def erase_retained_content(db, *, owner, session_id, upload_handler=None, source_provider=_SOURCE_PROVIDER_UNSET, _source_capability=None):
+    if source_provider is _SOURCE_PROVIDER_UNSET:
+        raise RuntimeError('Conversation source lifecycle authority is unavailable')
+    from src.openclank.chat_source_bridge import require_chat_source_capability
+    require_chat_source_capability(provider=source_provider, owner=owner, chat_id=session_id, capability=_source_capability)
     generations = upload_handler.attachment_reference_generations() if upload_handler else None
     archive = get_conversation_archive()
     candidates, shared, hashes, unknown = attachment_scope(db, owner=owner, session_id=session_id, archive=archive, upload_handler=upload_handler)
@@ -125,11 +132,16 @@ def erase_retained_content(db, *, owner, session_id, upload_handler=None):
     rag = get_rag_manager()
     if rag is None or not rag.healthy:
         raise RuntimeError("Conversation search-index owner is unavailable")
+    from src.openclank.chat_ratings import purge_chat
+    purge_chat(db,account=archive.resolve_owner(owner),chat_id=session_id)
     archive.begin_chat_erasure(owner=owner, chat_id=session_id)
     rag.erase_external_chat_references(owner=owner, workspace_id=ARCHIVE_INDEX_SCOPE, chat_id=session_id)
     if upload_handler:
         upload_handler.conversation_attachment_intent(owner=owner, session_id=session_id, candidate_ids=candidates, persist=True)
         upload_handler.erase_conversation_attachments(owner=owner, candidate_ids=candidates, shared_ids=shared, shared_hashes=hashes, session_id=session_id, observed_generations=generations)
+    from src.openclank.chat_source_bridge import available
+    if available(db):
+        db.execute(text("DELETE FROM host_source_delivery_intent WHERE owner=:owner AND chat_id=:chat"), {"owner": archive.resolve_owner(owner), "chat": session_id})
     CAPTURE.erase_session(db, owner=owner, session_id=session_id)
     archive.erase_chat(owner=owner, chat_id=session_id)
     from services.stats.ledger import detach_session_events

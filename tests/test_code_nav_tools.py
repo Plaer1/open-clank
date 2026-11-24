@@ -24,13 +24,13 @@ def isolated_file_authority(tmp_path, monkeypatch):
              "AUTH_FILE": str(data / "auth.json"), "FM_DB_PATH": str(data / "fm.db")}
     for name, value in paths.items():
         monkeypatch.setattr(constants, name, value)
-    for name, value in {"OPEN_CLANK_DATA_DIR": paths["DATA_DIR"], "ODYSSEUS_DATA_DIR": paths["DATA_DIR"],
+    for name, value in {"OPEN_CLANK_DATA_DIR": paths["DATA_DIR"],
                         "OPEN_CLANK_AUTHORITY_DB_PATH": paths["APP_DB"],
                         "OPEN_CLANK_AUTHORITY_AUTH_PATH": paths["AUTH_FILE"], "FM_DB_PATH": paths["FM_DB_PATH"]}.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("ODYSSEUS_FILES_TRANSPORT", "framed")
+    monkeypatch.setenv("OPEN_CLANK_FILES_TRANSPORT", "framed")
     for name in list(os.environ):
-        if name.startswith("OPENCLANK_HISTORY_") or name in {"ODYSSEUS_FILES_SOCKET", "ODYSSEUS_FILES_GRPC_SOCKET", "ODYSSEUS_FILES_GRPC_SESSION", "OPEN_CLANK_AGENT_HOME", "THESIUS_AGENT_HOME"}:
+        if name.startswith("OPENCLANK_HISTORY_") or name in {"OPEN_CLANK_FILES_SOCKET", "OPEN_CLANK_FILES_GRPC_SOCKET", "OPEN_CLANK_FILES_GRPC_SESSION", "OPEN_CLANK_AGENT_HOME", "THESIUS_AGENT_HOME"}:
             monkeypatch.delenv(name, raising=False)
     for module in (file_policy, filesystem_registry):
         monkeypatch.setattr(module, "APP_DB", paths["APP_DB"])
@@ -49,8 +49,8 @@ def isolated_file_authority(tmp_path, monkeypatch):
     original_environment = files_service_client.OdysseusFilesClient._service_environment
     def checked_environment(self):
         environment = original_environment(self)
-        for name in ("OPEN_CLANK_DATA_DIR", "ODYSSEUS_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH",
-                     "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "ODYSSEUS_FILES_REGISTRY"):
+        for name in ("OPEN_CLANK_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH",
+                     "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "OPEN_CLANK_FILES_REGISTRY"):
             if environment.get(name):
                 assert Path(environment[name]).resolve().is_relative_to(tmp_path.resolve()), name
         return environment
@@ -84,8 +84,8 @@ def repo(tmp_path, monkeypatch):
     ceiling = registry.add("administrator", str(root), "recursive_directory", ["read"])
     registry.assign_visibility("administrator", "alice", ceiling["id"], ["read"])
     registry.add("alice", str(root), "recursive_directory", ["read"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
-    monkeypatch.setenv("ODYSSEUS_FILES_SERVICE_BIN", str(Path(__file__).resolve().parents[1] / "packages/odysseus-files/target/debug/odysseus-files-service"))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_SERVICE_BIN", str(Path(__file__).resolve().parents[1] / "packages/odysseus-files/target/debug/odysseus-files-service"))
     token = tool_execution._active_workspace.set(str(root))
     try:
         yield root

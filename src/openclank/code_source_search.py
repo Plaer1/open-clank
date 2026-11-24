@@ -1,6 +1,6 @@
 """Explicit literal search of current bytes of policy-admitted catalog files.
 
-Files owns reads/search; Frankenmemory owns catalog selection and receipt.
+Files owns reads/search; Memery owns catalog selection and receipt.
 There is no directory crawl, body index, synthetic declaration or source proof.
 """
 from __future__ import annotations

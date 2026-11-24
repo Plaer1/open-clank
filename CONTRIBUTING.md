@@ -73,6 +73,24 @@ docker compose logs --tail=120 odysseus
 
 Mention what you ran in the pull request description. If you could not run a check, say so.
 
+For a local Memery product build, Rust 1.99.1 has been observed to hit
+an internal compiler error or an undefined generated symbol with the default
+multi-unit development build. If that occurs, an isolated development build
+with debug information disabled and one code generation unit has worked with
+the same compiler and dependencies:
+
+```bash
+cd native/memery
+CARGO_TARGET_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/openclank/fm-rust-compat" \
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_CODEGEN_UNITS=1 \
+cargo build --locked --offline -p memery-worker -p memery-migrate
+```
+
+The offline flag requires the dependencies to be cached. This is an opt-in
+local workaround, not a change to release profiles, supported platforms, or
+installed binaries. Record the compiler version, flags and resulting hashes
+when using its artifacts for a check.
+
 ## Pull Requests
 
 Good pull requests usually include:
@@ -86,6 +104,10 @@ Good pull requests usually include:
 Please keep PRs small. Large PRs that mix unrelated cleanup, formatting, refactors, and behavior changes are much harder to review.
 
 > **Auto-generated PRs.** If you are running an LLM agent (Devin, Cursor, OpenHands, etc.) against this repo: please open an issue describing the problem first instead of opening a PR directly. Bulk agent-generated PRs that don't match the project's visual style or contribution format will be closed without review, even when the underlying fix is correct.
+
+## Writing user documentation
+
+Use **`-quiet, but with all required info`**. Follow the [Instruction Manual author guide](docs/writing-the-manual.md) when editing a page, screenshot, caption, or translation.
 
 ## Style and visual changes
 
@@ -109,9 +131,8 @@ If you are unsure whether a change is "visual," it is. Default to attaching a sc
 
 Don't hardcode values that the project already exposes through a constant or a helper. Hardcoded literals drift out of sync, break on non-default deployments, and reintroduce bugs we've already fixed.
 
-- **Filesystem paths:** never build writable paths from `Path(__file__)...` into the source tree, hardcode `/app/...`, or use a relative `"data/..."` string. Every persisted file and directory has a named constant in `src/constants.py` (for example `AUTH_FILE`, `USER_PREFS_FILE`, `SETTINGS_FILE`, `TTS_CACHE_DIR`). Import and use that named constant; do not re-derive the path locally with `os.path.join(DATA_DIR, "x.json")` or `DATA_DIR / "x.json"`. `DATA_DIR` resolves `OPEN_CLANK_DATA_DIR` first, accepts the legacy
-  `ODYSSEUS_DATA_DIR` alias and normalizes both to the same root, so use it directly only for dynamic paths that have no fixed name (for example per-owner files). If a data file or directory has no constant yet, add one to `src/constants.py`. The source tree is read-only in Docker and `/app/...` does not exist on native runs; guard directory creation so an unwritable path degrades gracefully instead of crashing at import.
-- **Internal API / loopback URLs:** don't hardcode `http://localhost:7777`. Use `internal_api_base()` from `src.constants` (it honors `ODYSSEUS_INTERNAL_BASE` / `APP_PORT`).
+- **Filesystem paths:** never build writable paths from `Path(__file__)...` into the source tree, hardcode `/app/...`, or use a relative `"data/..."` string. Every persisted file and directory has a named constant in `src/constants.py` (for example `AUTH_FILE`, `USER_PREFS_FILE`, `SETTINGS_FILE`, `TTS_CACHE_DIR`). Import and use that named constant; do not re-derive the path locally with `os.path.join(DATA_DIR, "x.json")` or `DATA_DIR / "x.json"`. `DATA_DIR` resolves the configured `OPEN_CLANK_DATA_DIR`, so use it directly only for dynamic paths that have no fixed name (for example per-owner files). If a data file or directory has no constant yet, add one to `src/constants.py`. The source tree is read-only in Docker and `/app/...` does not exist on native runs; guard directory creation so an unwritable path degrades gracefully instead of crashing at import.
+- **Internal API / loopback URLs:** don't hardcode `http://localhost:7777`. Use `internal_api_base()` from `src.constants` (it honors `OPEN_CLANK_INTERNAL_BASE` / `APP_PORT`).
 - **Ports, limits, model lists, and similar:** reuse the existing constant if one exists; if it doesn't and the value is used in more than one place, add a constant rather than copying the literal.
 
 If you need a value that has no constant or helper yet, add it to `src/constants.py` (the single source of truth for paths and config; `core/constants.py` only re-exports it for backward compatibility) and import it, rather than repeating a literal across files.

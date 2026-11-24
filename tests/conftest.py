@@ -17,6 +17,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # file-backed DB across processes - tests needing that must set DATABASE_URL.
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
+# Tests must never reach the owner's live stores. With these unset, src/constants.py resolves DATA_DIR and
+# FM_DB_PATH to <repo>/data, and Python memory writers that default to FM_DB_PATH (services/memory/
+# principal_context.py) then write test owners into the live store (seen 2026-11-12). Explicit values are kept.
+if not os.environ.get("OPEN_CLANK_DATA_DIR"):
+    import atexit, shutil, tempfile
+    _test_data_dir = tempfile.mkdtemp(prefix="openclank-test-data-")
+    atexit.register(shutil.rmtree, _test_data_dir, ignore_errors=True)
+    os.environ["OPEN_CLANK_DATA_DIR"] = _test_data_dir
+os.environ.setdefault("FM_DB_PATH", os.path.join(
+    os.environ["OPEN_CLANK_DATA_DIR"], "frankenmemory.db"))
+
+# A fresh install now defaults to a guarded memory store on Linux when this is unset (src/memery_database.py
+# resolve_memory_store_profile). Default it to the historical legacy profile here so the existing suite keeps
+# exercising what it exercised before; a test that wants the new default deletes this var explicitly.
+os.environ.setdefault("OPENCLANK_MEMORY_STORE_PROFILE", "legacy-v16")
+
 # Pre-import real heavy modules BEFORE any test file's module-level stubs can
 # replace them with MagicMock. Some test files (e.g. test_llm_core_sanitize_*)
 # stub sqlalchemy/core.database at module scope with `if mod not in sys.modules`,

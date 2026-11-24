@@ -103,7 +103,7 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
                        HOME=str(home), APP_BIND='127.0.0.1')
     for key in tuple(environment):
         if key.endswith(('_TOKEN', '_API_KEY')) or key in {'DATABASE_URL', 'OPEN_CLANK_ENGINE_BIN',
-              'ODYSSEUS_DATA_DIR', 'FM_DB_PATH', 'OPEN_CLANK_AUTHORITY_DB_PATH', 'OPEN_CLANK_AGENT_HOME',
+              'FM_DB_PATH', 'OPEN_CLANK_AUTHORITY_DB_PATH', 'OPEN_CLANK_AGENT_HOME',
               'OPEN_CLANK_RUNTIME_PYTHON', 'OPEN_CLANK_PYTHON', 'VIRTUAL_ENV', 'PYTHONHOME', 'PYTHONPATH'}:
             environment.pop(key, None)
     with socket.socket() as listener:
@@ -116,7 +116,7 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
         raise RuntimeError('Disposable qualification ports must differ from live ports')
     from scripts.macos_launch_profile import PROFILE_RELATIVE
     config = home / 'existing-private-config.env'
-    config.write_text('APP_PORT=1\nFM_MCP_COMMAND=/unselected/source/helper\n', encoding='utf-8')
+    config.write_text('APP_PORT=1\nOPEN_CLANK_MEMERY_WORKER=/unselected/source/helper\n', encoding='utf-8')
     profile_path = home / PROFILE_RELATIVE
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text(json.dumps({'schema_version': 1, 'config_file': str(config), 'environment': {
@@ -124,7 +124,7 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
         'OPENCLANK_CONVERSATION_ARCHIVE_DB': str(work / 'data/conversation_archive.sqlite3'),
         'FM_DB_PATH': str(work / 'data/frankenmemory.db'),
         'OPENCLANK_HISTORY_ROOT': str(work / 'data/history'),
-        'ODYSSEUS_FILES_REGISTRY': str(work / 'data/file-roots.json'),
+        'OPEN_CLANK_FILES_REGISTRY': str(work / 'data/file-roots.json'),
         'COPAL_LOOSE_ROOT': str(work / 'data/notes'),
     }}), encoding='utf-8')
     profile_path.chmod(0o600)

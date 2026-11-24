@@ -357,10 +357,10 @@ def _append_pip_install_runner_lines(runner_lines: list[str], cmd: str) -> None:
 
 def _user_shell_path_bootstrap() -> list[str]:
     return [
-        'ODYSSEUS_USER_SHELL="${SHELL:-}"',
-        'if [ -n "$ODYSSEUS_USER_SHELL" ] && [ -x "$ODYSSEUS_USER_SHELL" ]; then',
-        '  ODYSSEUS_USER_PATH="$("$ODYSSEUS_USER_SHELL" -ic \'printf "__ODYSSEUS_PATH__%s\\n" "$PATH"\' 2>/dev/null | sed -n \'s/^__ODYSSEUS_PATH__//p\' | tail -n 1 || true)"',
-        '  if [ -n "$ODYSSEUS_USER_PATH" ]; then export PATH="$ODYSSEUS_USER_PATH:$PATH"; fi',
+        'OPEN_CLANK_USER_SHELL="${SHELL:-}"',
+        'if [ -n "$OPEN_CLANK_USER_SHELL" ] && [ -x "$OPEN_CLANK_USER_SHELL" ]; then',
+        '  OPEN_CLANK_USER_PATH="$("$OPEN_CLANK_USER_SHELL" -ic \'printf "__OPEN_CLANK_PATH__%s\\n" "$PATH"\' 2>/dev/null | sed -n \'s/^__OPEN_CLANK_PATH__//p\' | tail -n 1 || true)"',
+        '  if [ -n "$OPEN_CLANK_USER_PATH" ]; then export PATH="$OPEN_CLANK_USER_PATH:$PATH"; fi',
         'fi',
         # Windows can expose python3 as a Microsoft Store App Execution Alias
         # under WindowsApps. Git Bash sees that stub as present, but it exits
@@ -541,7 +541,7 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "    return int(n)",
         "def scan_ollama():",
         "    if any(m.get('is_ollama') for m in models): return",
-        "    if os.name == 'nt' and not os.environ.get('ODYSSEUS_ALLOW_OLLAMA_CLI_SCAN'): return",
+        "    if os.name == 'nt' and not os.environ.get('OPEN_CLANK_ALLOW_OLLAMA_CLI_SCAN'): return",
         "    if not shutil.which('ollama'): return",
         "    try:",
         "        p = subprocess.run(['ollama', 'list'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=6)",
@@ -791,8 +791,8 @@ def _validate_serve_cmd(v: str | None) -> str | None:
 
 def _append_serve_preflight_exit_lines(runner_lines: list[str], *, keep_shell_open: bool) -> None:
     """Append serve-runner lines that surface preflight failures before exit."""
-    runner_lines.append('if [ -n "$ODYSSEUS_PREFLIGHT_EXIT" ]; then')
-    runner_lines.append('  echo ""; echo "=== Process exited with code $ODYSSEUS_PREFLIGHT_EXIT ==="')
+    runner_lines.append('if [ -n "$OPEN_CLANK_PREFLIGHT_EXIT" ]; then')
+    runner_lines.append('  echo ""; echo "=== Process exited with code $OPEN_CLANK_PREFLIGHT_EXIT ==="')
     if keep_shell_open:
         # Decouple the post-crash interactive shell from the persistent log
         # file. fds 3/4 were saved BEFORE the tee redirect at the top of
@@ -803,7 +803,7 @@ def _append_serve_preflight_exit_lines(runner_lines: list[str], *, keep_shell_op
         runner_lines.append('  sleep 0.2  # let tee child flush + exit')
         runner_lines.append('  exec "${SHELL:-/bin/bash}"')
     else:
-        runner_lines.append('  exit "$ODYSSEUS_PREFLIGHT_EXIT"')
+        runner_lines.append('  exit "$OPEN_CLANK_PREFLIGHT_EXIT"')
     runner_lines.append('fi')
 
 
@@ -812,14 +812,14 @@ def _append_vllm_linux_preflight_lines(runner_lines: list[str]) -> None:
     # Keep the user install bin visible for Open Clank-managed `pip install --user`
     # installs, but then report the actual CLI path so external runtimes are clear.
     runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-    runner_lines.append('ODYSSEUS_VLLM_BIN="$(command -v vllm 2>/dev/null || true)"')
-    runner_lines.append('if [ -z "$ODYSSEUS_VLLM_BIN" ]; then')
+    runner_lines.append('OPEN_CLANK_VLLM_BIN="$(command -v vllm 2>/dev/null || true)"')
+    runner_lines.append('if [ -z "$OPEN_CLANK_VLLM_BIN" ]; then')
     runner_lines.append('  echo "ERROR: vLLM is not installed."')
-    runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+    runner_lines.append('  OPEN_CLANK_PREFLIGHT_EXIT=127')
     runner_lines.append('else')
-    runner_lines.append('  echo "[odysseus] vLLM CLI: $ODYSSEUS_VLLM_BIN"')
-    runner_lines.append('  ODYSSEUS_VLLM_VERSION="$("$ODYSSEUS_VLLM_BIN" --version 2>&1 | head -n 1 || true)"')
-    runner_lines.append('  if [ -n "$ODYSSEUS_VLLM_VERSION" ]; then echo "[odysseus] vLLM version: $ODYSSEUS_VLLM_VERSION"; fi')
+    runner_lines.append('  echo "[odysseus] vLLM CLI: $OPEN_CLANK_VLLM_BIN"')
+    runner_lines.append('  OPEN_CLANK_VLLM_VERSION="$("$OPEN_CLANK_VLLM_BIN" --version 2>&1 | head -n 1 || true)"')
+    runner_lines.append('  if [ -n "$OPEN_CLANK_VLLM_VERSION" ]; then echo "[odysseus] vLLM version: $OPEN_CLANK_VLLM_VERSION"; fi')
     runner_lines.append('fi')
 
 def _append_serve_exit_code_lines(
@@ -829,18 +829,18 @@ def _append_serve_exit_code_lines(
     is_pip_install: bool = False,
 ) -> None:
     """Append serve-runner lines that preserve and report the command exit code."""
-    runner_lines.append('ODYSSEUS_CMD_EXIT=$?')
+    runner_lines.append('OPEN_CLANK_CMD_EXIT=$?')
     if is_pip_install:
-        runner_lines.append('if [ $ODYSSEUS_CMD_EXIT -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; fi')
+        runner_lines.append('if [ $OPEN_CLANK_CMD_EXIT -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; fi')
     if keep_shell_open:
-        runner_lines.append('echo ""; echo "=== Process exited with code $ODYSSEUS_CMD_EXIT ==="')
+        runner_lines.append('echo ""; echo "=== Process exited with code $OPEN_CLANK_CMD_EXIT ==="')
         # See preflight branch above for the rationale on restoring fds 3/4.
         runner_lines.append('exec 1>&3 2>&4 3>&- 4>&- 2>/dev/null || true')
         runner_lines.append('sleep 0.2  # let tee child flush + exit')
         runner_lines.append('exec "${SHELL:-/bin/bash}"')
     else:
-        runner_lines.append('echo ""; echo "=== Process exited with code $ODYSSEUS_CMD_EXIT ==="')
-        runner_lines.append('exit "$ODYSSEUS_CMD_EXIT"')
+        runner_lines.append('echo ""; echo "=== Process exited with code $OPEN_CLANK_CMD_EXIT ==="')
+        runner_lines.append('exit "$OPEN_CLANK_CMD_EXIT"')
 
 
 def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
@@ -879,7 +879,7 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     # the prebuilt path work on minimal Ubuntu installs that lack `unzip`.
     runner_lines.append('    if [ -n "$_odysseus_prebuilt_url" ] && (command -v unzip >/dev/null 2>&1 || command -v bsdtar >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1); then')
     runner_lines.append('      echo "[odysseus] Found prebuilt llama-server: $_odysseus_prebuilt_url"')
-    runner_lines.append('      mkdir -p ~/bin "$HOME/.cache/odysseus/llama-cpp-prebuilt" && cd "$HOME/.cache/odysseus/llama-cpp-prebuilt"')
+    runner_lines.append('      mkdir -p ~/bin "$HOME/.cache/open-clank/llama-cpp-prebuilt" && cd "$HOME/.cache/open-clank/llama-cpp-prebuilt"')
     runner_lines.append('      rm -f llama-cpp.zip')
     runner_lines.append('      if curl -fsSL --max-time 120 "$_odysseus_prebuilt_url" -o llama-cpp.zip && [ -s llama-cpp.zip ]; then')
     runner_lines.append('        rm -rf build && mkdir -p build')
@@ -889,7 +889,7 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     runner_lines.append('          chmod +x "$_odysseus_extracted"')
     runner_lines.append('          ln -sf "$_odysseus_extracted" ~/bin/llama-server')
     runner_lines.append('          _odysseus_libdir="$(dirname "$_odysseus_extracted")"')
-    runner_lines.append('          mkdir -p ~/.config && echo "export LD_LIBRARY_PATH=\\"$_odysseus_libdir:\\${LD_LIBRARY_PATH:-}\\"" > ~/.config/odysseus-llama-cpp-env')
+    runner_lines.append('          mkdir -p ~/.config && echo "export LD_LIBRARY_PATH=\\"$_odysseus_libdir:\\${LD_LIBRARY_PATH:-}\\"" > ~/.config/open-clank-llama-cpp-env')
     runner_lines.append('          _odysseus_have_prebuilt=1')
     runner_lines.append('          echo "[odysseus] Prebuilt llama-server installed at $_odysseus_extracted"')
     runner_lines.append('        fi')
@@ -963,7 +963,7 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     runner_lines.append('        echo "Install on this host: sudo dnf install -y cmake gcc gcc-c++ make git"')
     runner_lines.append('      fi')
     runner_lines.append('      echo "Alternative: install a native llama-server on PATH, then relaunch."')
-    runner_lines.append('      ODYSSEUS_PREFLIGHT_EXIT=127')
+    runner_lines.append('      OPEN_CLANK_PREFLIGHT_EXIT=127')
     runner_lines.append('    fi')
     runner_lines.append('    cd ~/llama.cpp')
     runner_lines.append('    _odysseus_has_vulkan() {')
@@ -1235,7 +1235,7 @@ def _ssh_ps(host, script_path, port=None):
 
 
 # Windows session dir — stored in user's temp on the remote
-WIN_SESSION_DIR = "$env:TEMP\\\\odysseus-sessions"
+WIN_SESSION_DIR = "$env:TEMP\\\\open-clank-sessions"
 
 
 def _diagnose_serve_output(text: str) -> dict | None:

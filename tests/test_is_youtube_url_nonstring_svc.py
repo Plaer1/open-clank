@@ -6,6 +6,7 @@ def test_is_youtube_url_handles_non_string():
     assert is_youtube_url(123) is False
     assert is_youtube_url(None) is False
     assert is_youtube_url(["https://youtu.be/x"]) is False
+    assert is_youtube_url({"u": 1}) is False
 
 
 def test_is_youtube_url_detects_real_urls():

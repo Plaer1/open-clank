@@ -19,7 +19,7 @@
  * editor/tools/transform-drag.js calls `getHandleAt` and routes
  * pointer events.
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 
 /**
  * Position the transform overlay canvas + size its backing bitmap.
@@ -28,7 +28,11 @@ import { state } from '../state.js';
  * imps.js — kept as a parameter so this module has no
  * dependency on a magic number defined elsewhere).
  */
-export function syncOverlay(margin) {
+export function createTransformHandles({ state = legacyState, root = null, lifetime = null } = {}) {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated handles require root and lifetime');
+  let disposed = false;
+  lifetime?.add(() => { disposed = true; });
+function syncOverlay(margin) {
   if (!state.transformOverlay || !state.mainCanvas) return;
   if (!state.transformActive) {
     state.transformOverlay.style.display = 'none';
@@ -115,7 +119,7 @@ function knobPosition(cxh, cyh, rotRad, baseInnerR, rotOffset) {
  * knob into the overlay canvas. The overlay is translated by `margin`
  * so image (0,0) maps to overlay (margin, margin).
  */
-export function drawHandles(margin) {
+function drawHandles(margin) {
   if (!state.transformActive || !state.transformLayer) return;
   syncOverlay(margin);
   if (!state.transformOverlayCtx) return;
@@ -230,7 +234,7 @@ export function drawHandles(margin) {
  * Geometry MUST mirror `drawHandles` exactly, otherwise the user
  * grabs phantom points.
  */
-export function getHandleAt(x, y) {
+function getHandleAt(x, y) {
   if (!state.transformLayer) return null;
   const layer = state.transformLayer;
   const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
@@ -269,3 +273,10 @@ export function getHandleAt(x, y) {
   }
   return null;
 }
+
+  return { syncOverlay: (...args) => !disposed && syncOverlay(...args), drawHandles: (...args) => !disposed && drawHandles(...args), getHandleAt: (...args) => disposed ? null : getHandleAt(...args) };
+}
+const legacyHandles = createTransformHandles();
+export const syncOverlay = legacyHandles.syncOverlay;
+export const drawHandles = legacyHandles.drawHandles;
+export const getHandleAt = legacyHandles.getHandleAt;

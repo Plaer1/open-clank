@@ -91,39 +91,72 @@ def references(text):
 def normalized(name):
     return re.sub(r'\.md$', '', unicodedata.normalize('NFC', str(name)).casefold())
 
-def resolve(target, source, documents):
+def _aliases(doc):
+    properties = doc.get('properties')
+    value = properties.get('aliases') if isinstance(properties, dict) else None
+    return [value] if isinstance(value, str) else [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+def resolve_outcome(target, source, documents):
     path = unquote(re.sub(r'\\([\\`*_[\]{}()#+.!|<>~-])', r'\1', target.split('#', 1)[0]))
     if not path or re.match(r'^[a-z][a-z\d+.-]*:', path, re.I) or path.startswith('//'):
-        return None
+        return ('unsupported', None)
     root = posixpath.normpath(path).lstrip('/')
     relative = posixpath.normpath(posixpath.join(posixpath.dirname(source.get('name', '')), path))
     explicit = path.startswith(('./', '../'))
     for wanted in ([root] if path.startswith('/') else [relative, *([] if explicit else [root])]):
-        matches = [doc for doc in documents if normalized(doc.get('name')) == normalized(wanted)]
+        matches = documents.name_index.get(normalized(wanted), []) if hasattr(documents, 'name_index') else [doc for doc in documents if normalized(doc.get('name')) == normalized(wanted)]
         if matches:
-            return matches[0] if len(matches) == 1 else None
+            return ('resolved', matches[0]) if len(matches) == 1 else ('ambiguous', None)
     if not explicit and '/' not in path:
-        matches = [doc for doc in documents if normalized(posixpath.basename(doc.get('name', ''))) == normalized(path)]
+        matches = documents.basename_index.get(normalized(path), []) if hasattr(documents, 'basename_index') else [doc for doc in documents if normalized(posixpath.basename(doc.get('name', ''))) == normalized(path)]
         if not matches:
-            matches = [doc for doc in documents if any(normalized(alias) == normalized(path) for alias in ([doc.get('properties', {}).get('aliases')] if isinstance(doc.get('properties', {}).get('aliases'), str) else (doc.get('properties', {}).get('aliases') or [])))]
-        return matches[0] if len(matches) == 1 else None
-    return None
+            matches = documents.alias_index.get(normalized(path), []) if hasattr(documents, 'alias_index') else [doc for doc in documents if any(normalized(alias) == normalized(path) for alias in _aliases(doc))]
+        return ('resolved', matches[0]) if len(matches) == 1 else ('ambiguous' if matches else 'missing', None)
+    return ('missing', None)
+
+def resolve(target, source, documents):
+    return resolve_outcome(target, source, documents)[1]
 
 async def catalogue(bridge, scope):
     from routes.copal_routes import _note_view
-    listed = await bridge.call('index', {**scope, 'corpus':'all'}, timeout=60)
-    return [_note_view(doc) for doc in listed.get('docs', [])]
+    listed = await bridge.call('reference_snapshot', {**scope, 'corpus':'all'}, timeout=60)
+    class ScopedCatalogue(list):
+        pass
+    result = ScopedCatalogue(_note_view(doc) for doc in listed.get('docs', []))
+    result.coverage = dict(listed.get('coverage') or {'complete': False, 'generation': None})
+    result.name_index, result.basename_index, result.alias_index = {}, {}, {}
+    for doc in result:
+        for table, keys in ((result.name_index, [normalized(doc.get('name'))]),
+                            (result.basename_index, [normalized(posixpath.basename(doc.get('name') or ''))]),
+                            (result.alias_index, {normalized(alias) for alias in _aliases(doc)})):
+            for key in keys:
+                table.setdefault(key, []).append(doc)
+    def uncertain(doc):
+        properties = doc.get('properties')
+        aliases = properties.get('aliases') if isinstance(properties, dict) else None
+        return (doc.get('note_error') or doc.get('recoveryState') in {'legacy-import', 'unsupported-future', 'malformed-preserved'}
+                or (aliases is not None and not isinstance(aliases, str)
+                    and not (isinstance(aliases, list) and all(isinstance(item, str) for item in aliases))))
+    if any(uncertain(doc) for doc in result):
+        result.coverage.update(complete=False, generation=None)
+    return result
 
 def occurrences(source, documents):
+    coverage = getattr(documents, 'coverage', {})
+    if not coverage.get('complete'):
+        return []
+    current = next((doc for doc in documents if doc.get('id') == source.get('id')), None)
+    if not current or str(current.get('head')) != str(source.get('head')):
+        return []
     result = []
     for ref in references(source.get('text')):
         target = resolve(ref['target'], source, documents)
         if not target or target.get('id') == source.get('id') or target.get('kind') == 'asset':
             continue
-        identity = [source.get('id'), str(source.get('head')), ref['start'], ref['end'], target.get('id')]
+        identity = [source.get('id'), str(source.get('head')), ref['start'], ref['end'], target.get('id'), str(target.get('head'))]
         public = {**ref, 'start': len(str(source.get('text') or '')[:ref['start']].encode('utf-16-le')) // 2, 'end': len(str(source.get('text') or '')[:ref['end']].encode('utf-16-le')) // 2}
         result.append({**public, 'linkId': hashlib.sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest(),
-                       'sourceDocumentId': source['id'], 'sourceRevisionId': str(source['head']), 'targetDocumentId': target['id']})
+                       'sourceDocumentId': source['id'], 'sourceRevisionId': str(source['head']), 'targetDocumentId': target['id'], 'targetRevisionId': str(target.get('head'))})
     return result
 
 async def committed(bridge, scope, document_id, emit):
@@ -166,6 +199,8 @@ async def prepare_move(bridge, scope, document_id, name, write):
     if source.get('name') == name:
         return None
     docs = await catalogue(bridge, scope)
+    if not getattr(docs, 'coverage', {}).get('complete'):
+        raise ValueError('Document reference inventory is incomplete; retry after it is available')
     before = await attachment_snapshot(bridge, scope, source, docs)
     text = str(source.get('text') or '')
     # Loose Copal's existing move planner repairs/moves the mirrored media
@@ -197,7 +232,10 @@ async def finish_move(bridge, scope, prepared, emit):
     source = _note_view(await bridge.call('get', {**scope, 'id': prepared['documentId']}))
     if source.get('name') == prepared['name']:
         return
-    after = await attachment_snapshot(bridge, scope, source, await catalogue(bridge, scope))
+    docs = await catalogue(bridge, scope)
+    if not getattr(docs, 'coverage', {}).get('complete'):
+        raise ValueError('Document reference inventory is incomplete; verification requires review')
+    after = await attachment_snapshot(bridge, scope, source, docs)
     expected = sorted((ref['assetId'], ref['sha256']) for ref in prepared['attachments'])
     actual = sorted((ref['assetId'], ref['sha256']) for ref in after)
     if expected != actual:

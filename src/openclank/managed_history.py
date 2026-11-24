@@ -18,9 +18,11 @@ MUTATE = "_openclank/history/v1/mutate"
 
 
 class ManagedHistoryCallbacks:
-    def __init__(self, archive: ConversationArchive, binding_for: Callable[[str], tuple[str, str]]):
+    def __init__(self, archive: ConversationArchive, binding_for: Callable[[str], tuple[str, str]], timing_for=None, tombstone_for=None):
         self.archive = archive
         self.binding_for = binding_for
+        self.timing_for = timing_for
+        self.tombstone_for = tombstone_for
 
     async def dispatch(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         request = validate_managed_method_request(method, dict(params))
@@ -29,9 +31,49 @@ class ManagedHistoryCallbacks:
             result = self._query(owner, chat_id, request)
             return validate_managed_method_result(method, result)
         if method == MUTATE:
-            result = self._mutate(owner, chat_id, request)
+            if request["operation"] == "tombstone" and self.tombstone_for is not None:
+                accepted = duplicate = 0
+                for event in request["events"]:
+                    result = await self.tombstone_for(str(request["sessionID"]), owner, chat_id, dict(event))
+                    accepted += int(bool(result.get("tombstoned")))
+                    duplicate += int(bool(result.get("duplicate")))
+                result = {"ok": True, "operation": "tombstone", "accepted": accepted,
+                          "duplicate": duplicate, "enqueued": 0}
+            else:
+                result = self._mutate(owner, chat_id, request)
             return validate_managed_method_result(method, result)
         raise ValueError("unsupported managed history callback")
+
+    def exact_output(self, request: Mapping[str, Any], *, account: str, chat: str, actor: str):
+        """Select a qualified source only after the bridge authorizes this scope."""
+        return self.archive.get_qualified_tool_output(
+            account_id=account, chat_id=chat, actor_id=actor, message_id=request['messageID'],
+            part_id=request['partID'], revision=request['revision'], content_hash=request['contentHash'],
+            offset=request['offset'], limit=request['limit'])
+
+    def check_sources(self, refs, *, account: str, chat: str, actor: str, deadline: float):
+        """Bounded content-free T07 checks; the bridge owns live authorization."""
+        import time
+        if not isinstance(refs, list) or not 1 <= len(refs) <= 16:
+            return None
+        if sum(item['outputBytes'] for item in refs) > 262144:
+            return None
+        seen = set()
+        result = []
+        for item in refs:
+            identity = (item['messageID'], item['partID'])
+            if identity in seen or time.monotonic() >= deadline:
+                return None
+            seen.add(identity)
+            page = self.archive.get_qualified_tool_output(
+                account_id=account, chat_id=chat, actor_id=actor, message_id=item['messageID'],
+                part_id=item['partID'], revision=item['revision'], content_hash=item['contentHash'],
+                offset=0, limit=4)
+            if (not page or page['outputSHA256'] != item['outputSHA256']
+                    or page['outputBytes'] != item['outputBytes'] or time.monotonic() >= deadline):
+                return None
+            result.append(dict(item))
+        return result
 
     def _search_kind_and_tool(self, owner: str, chat_id: str, hit: Mapping[str, Any]) -> tuple[str, str | None]:
         if "history_kind" in hit:
@@ -255,6 +297,7 @@ class ManagedHistoryCallbacks:
     def _mutate(self, owner: str, chat_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
         op = str(request["operation"])
         accepted = duplicate = enqueued = 0
+        source_ack = None
         for event in request["events"]:
             item = dict(event)
             if op == "tombstone":
@@ -277,6 +320,15 @@ class ManagedHistoryCallbacks:
                 continue
             part_type = str(item.get("partType") or "text")
             part = SourcePart(owner=owner, chat_id=chat_id, actor_id=str(item.get("actorID") or "main"), message_id=str(item["messageID"]), part_id=str(item["partID"]), runtime_generation="managed-mimo-v1", event_sequence=int(item.get("eventSequence") or 0), role=str(item.get("role") or "assistant"), part_type=part_type, content=item.get("content"), time_created=int(item.get("timeCreated") or 0), time_updated=int(item.get("timeUpdated") or 0), assets=self._managed_assets(str(item["partID"]), part_type, item.get("content")))
-            result = self.archive.append_managed_parts([part], consumer_hint="managed-mimo-history")
+            timing = None
+            if callable(self.timing_for) and item.get("toolTiming") is not None:
+                try:
+                    timing = self.timing_for(item, request["sessionID"], owner, chat_id)
+                except Exception:
+                    timing = None
+            result = self.archive.append_managed_parts([part], consumer_hint="managed-mimo-history", _qualified_tool=timing)
             accepted += int(result["accepted"]); duplicate += int(result["duplicate"]); enqueued += int(result["enqueued"])
-        return {"ok": True, "operation": op, "accepted": accepted, "duplicate": duplicate, "enqueued": enqueued}
+            if len(request['events']) == 1 and timing is not None:
+                source_ack = result.get('source_ack')
+        return {"ok": True, "operation": op, "accepted": accepted, "duplicate": duplicate, "enqueued": enqueued,
+                **({'sourceAck': source_ack} if source_ack is not None else {})}

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.frankenmemory_rag import FrankenmemoryRAG
+from src.memery_rag import MemeryRAG
 
 
 class FixtureEmbedding:
@@ -19,7 +19,7 @@ class FixtureEmbedding:
 
 
 def vector_rag(tmp_path):
-    rag = FrankenmemoryRAG(str(tmp_path / "rag.db"), embedding_client=FixtureEmbedding(),
+    rag = MemeryRAG(str(tmp_path / "rag.db"), embedding_client=FixtureEmbedding(),
                           embedding_provider_ref="owner:alice:fixture")
     assert rag.add_document("cats are playful", {"owner": "alice", "source": "fixture://cats"})
     rag.build_embedding_generation(owner="alice", provider_ref="owner:alice:fixture", publish=True)
@@ -27,7 +27,7 @@ def vector_rag(tmp_path):
 
 
 def test_first_fts_rank_is_not_relevance(tmp_path):
-    rag = FrankenmemoryRAG(str(tmp_path / "rag.db"))
+    rag = MemeryRAG(str(tmp_path / "rag.db"))
     assert rag.add_document("cats are playful", {"owner": "alice", "source": "fixture://cats"})
     hit = rag.search("cats ocean galaxy telescope elephant", owner="alice")[0]
     assert hit["score_components"]["ranks"]["fts"] == 1
@@ -37,7 +37,7 @@ def test_first_fts_rank_is_not_relevance(tmp_path):
 
 @pytest.mark.parametrize("query", ["pineapple", "obsolete"])
 def test_nonmatching_replacement_shadows_entire_parent_source(tmp_path, query):
-    rag = FrankenmemoryRAG(str(tmp_path / "rag.db"))
+    rag = MemeryRAG(str(tmp_path / "rag.db"))
     source = "fixture://shared"
     assert rag.add_document("obsolete pineapple " * 180, {"owner": "alice", "source": source})
     assert rag.add_document("revised banana", {"owner": "alice", "source": source,
@@ -84,7 +84,7 @@ def test_embedding_cancellation_propagates(tmp_path):
 
 def test_chat_gate_does_not_inject_weak_first_fts_hit(tmp_path):
     from src.chat_processor import ChatProcessor
-    rag = FrankenmemoryRAG(str(tmp_path / "rag.db"))
+    rag = MemeryRAG(str(tmp_path / "rag.db"))
     assert rag.add_document("cats are playful", {"owner": "alice", "source": "fixture://cats"})
     processor = ChatProcessor(None, SimpleNamespace(rag_manager=rag))
     preface, sources, _ = asyncio.run(processor.build_context_preface(
@@ -99,7 +99,7 @@ def test_chat_gate_does_not_inject_weak_first_fts_hit(tmp_path):
 
 @pytest.mark.parametrize("unavailable", ["chunks", "documents", "parser", "hydrate"])
 def test_source_authority_shadows_unmaterializable_replacement(tmp_path, unavailable):
-    rag = FrankenmemoryRAG(str(tmp_path / "rag.db"))
+    rag = MemeryRAG(str(tmp_path / "rag.db"))
     source = "fixture://shared"
     assert rag.add_document("obsolete pineapple", {"owner": "alice", "source": source})
     assert rag.add_document("revised banana", {"owner": "alice", "source": source, "workspace_id": "w"})
@@ -118,7 +118,7 @@ def test_source_authority_shadows_unmaterializable_replacement(tmp_path, unavail
 
 
 def test_source_shadow_explanation_retains_ancestor_identity(tmp_path):
-    rag = FrankenmemoryRAG(str(tmp_path / "rag.db"))
+    rag = MemeryRAG(str(tmp_path / "rag.db"))
     source = "fixture://shared"
     assert rag.add_document("parent amber", {"owner": "alice", "source": source})
     parent = rag.search("amber", owner="alice")[0]
@@ -148,7 +148,7 @@ def test_search_schemas_describe_active_capabilities():
 
 
 def test_runtime_fts_failure_is_failed_lane_not_empty_success(tmp_path):
-    rag = FrankenmemoryRAG(str(tmp_path / "rag.db"))
+    rag = MemeryRAG(str(tmp_path / "rag.db"))
     assert rag.add_document("cats are playful", {"owner": "alice", "source": "fixture://source"})
     with sqlite3.connect(rag.db_path) as conn:
         conn.execute("DROP TABLE fm_v2_chunks_fts")
@@ -163,7 +163,7 @@ def test_runtime_fts_failure_is_failed_lane_not_empty_success(tmp_path):
 
 
 def test_forget_between_row_and_source_reads_has_coherent_snapshot(tmp_path):
-    rag = FrankenmemoryRAG(str(tmp_path / "rag.db"))
+    rag = MemeryRAG(str(tmp_path / "rag.db"))
     assert rag.add_document("cats are playful", {"owner": "alice", "source": "fixture://source"})
     with sqlite3.connect(rag.db_path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")

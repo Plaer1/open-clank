@@ -25,7 +25,7 @@ use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 pub use engine::{
-    CaptureAfter, CaptureStatus, CaptureTarget, CopyOutcome, DirectoryEntry, DirectoryPage, DirectorySort,
+    CaptureAfter, CaptureStatus, CaptureTarget, CheckpointSelection, CheckpointBinding, CheckpointTicket, CopyOutcome, DirectoryEntry, DirectoryPage, DirectorySort,
     EditOutcome, EngineConfig, EngineError, FileEngine, FileKind, FileReadPage, Fingerprint,
     MutationCaptureHook, MutationCaptureTicket, ReplaceOutcome, SearchOptions, SearchResult,
     TextEncoding, TextPreview, TextSnapshot, TrashEntry,
@@ -329,6 +329,10 @@ pub enum Operation {
     ReadLines,
     ReadTextPreview,
     OpenHandle,
+    SnapshotFileHash,
+    RegisterCheckpointFile,
+    CheckpointPrepare,
+    CheckpointFinalize,
     Thumbnail,
     Create,
     StageBegin,
@@ -336,10 +340,54 @@ pub enum Operation {
     StageFinish,
     StageAbort,
     Replace,
+    OrdinaryReplace,
+    OrdinaryReplaceStatus,
+    OrdinaryCreate,
+    OrdinaryCreateStatus,
     Patch,
     Append,
     Rename,
     Move,
+    ManagedFileMove,
+    ManagedFileMoveStatus,
+    ManagedFileCleanup,
+    ManagedFolderInspect,
+    ManagedFolderMove,
+    ManagedFolderMoveStatus,
+    ManagedFolderCleanup,
+    CheckoutPrepare,
+    CheckoutStep,
+    CheckoutStatus,
+    CheckoutRollback,
+    CheckoutFinalize,
+    CheckoutProbeChild,
+    WorktreeLookup,
+    WorktreeReleaseCompleted,
+    WorktreeRedoBegin,
+    WorktreeRedoPrepareHistory,
+    WorktreeRedoRestoreAdmin,
+    WorktreeRedoRestoreTree,
+    WorktreeRedoFinish,
+    WorktreeInverseBegin,
+    WorktreeInversePrepareHistory,
+    WorktreeInverseStageHistory,
+    WorktreeInverseVerify,
+    WorktreeInverseQuarantine,
+    WorktreeInverseRelocateAdmin,
+    WorktreeInverseFinish,
+    WorktreeStageBegin,
+    WorktreeStageChunk,
+    WorktreeStageEnd,
+    WorktreeStageSeal,
+    WorktreeStageStatus,
+    WorktreePrivatePrepare,
+    WorktreePrivateAccept,
+    WorktreePrivateMaterialize,
+    WorktreePrivatePrepareHistory,
+    WorktreePrivateBeginPublication,
+    WorktreePrivatePublish,
+    WorktreePrivateCheckPublished,
+    WorktreePrivateFinishPublication,
     Copy,
     Mkdir,
     Trash,
@@ -348,6 +396,13 @@ pub enum Operation {
     ContentSearch,
     WatchSubscribe,
     WatchUnsubscribe,
+}
+
+impl Operation {
+    /// Private staging operations have a tighter encoded transport bound.
+    pub fn is_worktree_stage(self) -> bool {
+        matches!(self,Self::WorktreeLookup|Self::WorktreeReleaseCompleted|Self::WorktreeRedoBegin|Self::WorktreeRedoPrepareHistory|Self::WorktreeRedoRestoreAdmin|Self::WorktreeRedoRestoreTree|Self::WorktreeRedoFinish|Self::WorktreeInverseBegin|Self::WorktreeInversePrepareHistory|Self::WorktreeInverseStageHistory|Self::WorktreeInverseVerify|Self::WorktreeInverseQuarantine|Self::WorktreeInverseRelocateAdmin|Self::WorktreeInverseFinish|Self::WorktreeStageBegin|Self::WorktreeStageChunk|Self::WorktreeStageEnd|Self::WorktreeStageSeal|Self::WorktreeStageStatus|Self::WorktreePrivatePrepare|Self::WorktreePrivateAccept|Self::WorktreePrivateMaterialize|Self::WorktreePrivatePrepareHistory|Self::WorktreePrivateBeginPublication|Self::WorktreePrivatePublish|Self::WorktreePrivateCheckPublished|Self::WorktreePrivateFinishPublication)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

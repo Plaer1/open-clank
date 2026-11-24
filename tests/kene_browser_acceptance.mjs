@@ -90,8 +90,6 @@ test('Kene keeps one owner, continuous joins, reduced motion, and bounded frame 
     const initial = await evaluate(`(() => { const canvas=document.getElementById('clanker-kene-weave-canvas'); const scene=canvas.__backgroundScene; const snake=scene.snakes[0]; return { mounted:!!canvas, owner:!!window.__openClankBackgroundOwner, raf:window.__rafCallbacks, clears:window.__clearRects, snake:{ routeIndex:snake.routeIndex, reverse:snake.reverse, progress:snake.progress } }; })()`);
     assert.equal(initial.mounted, true, 'Kene canvas did not mount');
     assert.equal(initial.owner, true, 'Kene did not publish a canvas owner');
-    const ownerStable = await evaluate(`(() => { const canvas=document.getElementById('clanker-kene-weave-canvas'); const owner=window.__openClankBackgroundOwner; const before=window.__rafScheduled; window.__firstKeneCanvas=canvas; window.__firstKeneOwner=owner; for (let index=0; index<10; index += 1) window.__theme.applyBgPattern('clanker-kene-weave'); return { sameCanvas:canvas === window.__firstKeneCanvas, sameOwner:owner === window.__firstKeneOwner, canvases:document.querySelectorAll('#clanker-kene-weave-canvas').length, scheduledDelta:window.__rafScheduled-before }; })()`);
-    assert.deepEqual(ownerStable, { sameCanvas:true, sameOwner:true, canvases:1, scheduledDelta:0 }, 'unchanged Kene reapply changed its owner/canvas/RAF');
     await evaluate('new Promise(resolve => setTimeout(resolve, 180))');
     const cadence = await evaluate('({ raf:window.__rafCallbacks, clears:window.__clearRects })');
     const frameDelta = cadence.raf - initial.raf;

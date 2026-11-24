@@ -55,14 +55,15 @@ def test_freeze_manifests_inventory_every_advertised_locale_with_explicit_fallba
     locales = json.loads((I18N / "freeze" / "locales.json").read_text(encoding="utf-8"))
     assert freeze["translations_authored"] is False
     assert freeze["advertised_locales"] == 69
-    assert freeze["english_fallback_locales"] == 31
+    fallback_ids = {key for key, meta in REGISTRY["locales"].items() if key != "en" and meta["catalog"] == "en"}
+    assert freeze["english_fallback_locales"] == len(fallback_ids)
     assert freeze["display_alias_locales"] == 1
     assert freeze["malay"]["locale"] == "ms"
     assert freeze["canadian_english"]["catalog"] == "fr"
     by_id = {item["id"]: item for item in locales["locales"]}
     assert set(by_id) == set(LOCALES)
     fallbacks = [item for item in locales["locales"] if item["kind"] == "english-fallback"]
-    assert len(fallbacks) == 31
+    assert {item["id"] for item in fallbacks} == fallback_ids
     for item in fallbacks:
         assert item["catalog"] == "en"
         assert item["english_fallback"] is True
@@ -92,7 +93,9 @@ def test_every_catalog_has_parity_safe_placeholders_and_locked_brands():
             assert isinstance(target, str) and target.strip(), (locale, key)
             assert sorted(PLACEHOLDERS.findall(target)) == sorted(PLACEHOLDERS.findall(source)), (locale, key)
             assert not BIDI_CONTROLS.search(target), (locale, key)
-            assert not re.search(r"</?[a-z][^>]*>", target, re.I), (locale, key)
+            prose = re.sub(r"`(/[a-z][a-z0-9-]*(?: (?:<[a-z][a-z0-9-]*>|[a-z0-9-]+))+)`",
+                          lambda m: "" if m.group() in source else m.group(), target)
+            assert not re.search(r"</?[a-z][^>]*>", prose, re.I), (locale, key)
             for brand in brands:
                 if brand in source:
                     assert brand in target, (locale, key, brand)
@@ -109,9 +112,9 @@ def test_all_served_html_surfaces_load_shared_runtime_and_settings_has_selector(
     index = (ROOT / "static/index.html").read_text(encoding="utf-8")
     assert 'id="set-interface-language"' in index
     assert 'data-language-select' in index
-    # The initial HTML keeps the shipped catalogs small; i18n.js hydrates every
-    # canonical registry entry, including staged English-fallback locales.
-    assert "Object.entries(registry.locales)" in (ROOT / "static/js/i18n.js").read_text(encoding="utf-8")
+    selector = re.search(r'<select\b[^>]*data-language-select[^>]*>(.*?)</select>', index, re.S)
+    initial = set(re.findall(r'<option value="([^"]+)"', selector.group(1)))
+    assert initial <= set(REGISTRY["released_locales"])
 
 
 def test_runtime_preserves_user_content_and_requires_consent_before_browser_switch():
@@ -123,12 +126,12 @@ def test_runtime_preserves_user_content_and_requires_consent_before_browser_swit
     assert "document.documentElement.dir" in runtime
 
 
-def test_service_worker_precaches_runtime_and_all_catalogs():
+def test_service_worker_precaches_only_released_catalogs_and_manifests():
     worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
     assert "/static/js/i18n.js" in worker
     assert "/static/js/custom-context-menu.js" in worker
-    for locale, descriptor in REGISTRY["locales"].items():
-        catalog_name = descriptor.get("catalog", locale)
-        if locale != "en" and catalog_name == "en":
-            continue
-        assert f"/static/i18n/{catalog_name}.json" in worker
+    released = REGISTRY["released_locales"]
+    assert released == ["en", "ja", "zh-Hans", "zh-Hant", "ru", "hi", "es", "es-419"]
+    catalogs = {REGISTRY["locales"][locale]["catalog"] for locale in released}
+    assert set(re.findall(r"'/static/i18n/([^/']+)\.json'", worker)) == catalogs | {"registry"}
+    assert set(re.findall(r"'/static/manifest\.([^/']+)\.json'", worker)) == set(released)

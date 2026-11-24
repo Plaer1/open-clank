@@ -15,7 +15,6 @@ APP_VERSION = "1.0.3"
 def is_openthesius_debug() -> bool:
     v = (
         os.environ.get("OPEN_CLANK_DEBUG")
-        or os.environ.get("OPENTHESIUS_DEBUG")
         or ""
     )
     return v.lower() in ("1", "true", "yes", "on")
@@ -24,13 +23,9 @@ def is_openthesius_debug() -> bool:
 # OPEN_CLANK_AGENT_HOME — per-agent process isolation
 # ---------------------------------------------------------------------------
 # When set, derive Open Clank's data root plus compatibility variables,
-# and FM_DB_PATH so each agent process gets its own data/config under its
+# and the Memery database so each agent process gets its own data/config under its
 # agent home. Explicit overrides in the environment take precedence.
-_LEGACY_AGENT_HOME = os.environ.get("THESIUS_AGENT_HOME")
-_OPEN_CLANK_AGENT_HOME = (
-    os.environ.get("OPEN_CLANK_AGENT_HOME")
-    or _LEGACY_AGENT_HOME
-)
+_OPEN_CLANK_AGENT_HOME = os.environ.get("OPEN_CLANK_AGENT_HOME")
 
 # Snapshot the ORIGINAL default data dir BEFORE we possibly override
 # OPEN_CLANK_DATA_DIR. This lets AUTH_FILE stay pinned to the global
@@ -39,38 +34,44 @@ _ORIGINAL_DEFAULT_DATA_DIR = get_default_data_dir()
 
 if _OPEN_CLANK_AGENT_HOME:
     _h = _OPEN_CLANK_AGENT_HOME
-    if "OPEN_CLANK_DATA_DIR" not in os.environ and "ODYSSEUS_DATA_DIR" not in os.environ:
+    if "OPEN_CLANK_DATA_DIR" not in os.environ:
         os.environ["OPEN_CLANK_DATA_DIR"] = os.path.join(_h, "data")
     if "OPEN_CLANK_GLOBAL_CWD" not in os.environ:
-        os.environ["OPEN_CLANK_GLOBAL_CWD"] = (
-            os.environ.get("OPENTHESIUS_GLOBAL_CWD") or _h
-        )
-    # Compatibility only for operators still using the legacy switch. New
-    # Open Clank workers set their private bundled-runtime home themselves.
-    if _LEGACY_AGENT_HOME and "MIMOCODE_HOME" not in os.environ:
-        os.environ["MIMOCODE_HOME"] = os.path.join(_h, ".mimocode")
-    if "FM_DB_PATH" not in os.environ:
-        os.environ["FM_DB_PATH"] = os.path.join(_h, "data", "frankenmemory.db")
+        os.environ["OPEN_CLANK_GLOBAL_CWD"] = _h
 
 # Base paths
 BASE_DIR = os.path.join(get_app_root(), "")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DATA_DIR = os.path.abspath(os.path.expanduser(
     os.getenv("OPEN_CLANK_DATA_DIR")
-    or os.getenv("ODYSSEUS_DATA_DIR")
     or get_default_data_dir()
 ))
-# One authority, two read-compatible names. Old embedded helpers still read the
-# legacy variable; forcing both to the resolved root prevents split writers.
+# Child processes inherit the same resolved data root.
 os.environ["OPEN_CLANK_DATA_DIR"] = DATA_DIR
-os.environ["ODYSSEUS_DATA_DIR"] = DATA_DIR
 
-# Every fm-mcp child inherits one canonical absolute database path. Resolving
-# here avoids cwd-dependent split brains between Odyssius and Open Clank agent.
-FM_DB_PATH = os.path.abspath(
-    os.path.expanduser(os.environ.get("FM_DB_PATH") or os.path.join(DATA_DIR, "frankenmemory.db"))
-)
-os.environ["FM_DB_PATH"] = FM_DB_PATH
+def _memery_database_path() -> str:
+    for selector in ("OPEN_CLANK_MEMERY_DB_PATH", "FM_DB_PATH", "OPEN_CLANK_FM_DB_PATH"):
+        if selected := os.environ.get(selector):
+            return os.path.abspath(os.path.expanduser(selected))
+    current = os.path.join(DATA_DIR, "memery.db")
+    legacy = os.path.join(DATA_DIR, "frankenmemory.db")
+    # Open existing SQLite files in place so WAL, SHM and active readers stay together.
+    for path in (current, legacy):
+        if not os.path.isfile(path) and (
+            os.path.lexists(path) or any(os.path.lexists(path + suffix) for suffix in ("-wal", "-shm", "-journal"))
+        ):
+            raise RuntimeError("Memery database has detached SQLite companions; select the recovered store explicitly")
+    if os.path.exists(legacy):
+        if os.path.exists(current) and not os.path.samefile(current, legacy):
+            raise RuntimeError("Multiple Memery databases found; select one with OPEN_CLANK_MEMERY_DB_PATH")
+        return legacy
+    return current
+
+
+MEMERY_DB_PATH = _memery_database_path()
+os.environ["OPEN_CLANK_MEMERY_DB_PATH"] = MEMERY_DB_PATH
+FM_DB_PATH = MEMERY_DB_PATH  # Compatibility for legacy callers.
+os.environ["FM_DB_PATH"] = MEMERY_DB_PATH
 
 # Data file paths
 # Single source of truth: every persisted file/dir lives under DATA_DIR, which
@@ -122,7 +123,6 @@ MEMORY_VECTORS_DIR = os.path.join(DATA_DIR, "memory_vectors")
 # Paths with an intentional dedicated env override, defaulting under DATA_DIR.
 MAIL_ATTACHMENTS_DIR = (
     os.getenv("OPEN_CLANK_MAIL_ATTACHMENTS_DIR")
-    or os.getenv("ODYSSEUS_MAIL_ATTACHMENTS_DIR")
     or os.path.join(DATA_DIR, "mail-attachments")
 )
 # `or` (not os.getenv's default arg) so a PRESENT-but-EMPTY value falls back to
@@ -184,15 +184,14 @@ def internal_api_base() -> str:
     Agent tools and background jobs reach admin-gated routes by calling the
     running server over HTTP. Resolution order:
       1. OPEN_CLANK_INTERNAL_BASE - explicit override.
-      2. ODYSSEUS_INTERNAL_BASE  - compatibility override.
-      3. APP_PORT                - http://127.0.0.1:$APP_PORT (docker-compose).
-      4. Fallback http://127.0.0.1:7777 - default.
+      2. APP_PORT                - http://127.0.0.1:$APP_PORT (docker-compose).
+      3. Fallback http://127.0.0.1:7777 - default.
 
     127.0.0.1 (not "localhost") avoids IPv6/DNS ambiguity for a strictly-local
     call. Without this, loopback tools fail with "All connection attempts
     failed" whenever the server is not on the default port.
     """
-    override = os.environ.get("OPEN_CLANK_INTERNAL_BASE") or os.environ.get("ODYSSEUS_INTERNAL_BASE")
+    override = os.environ.get("OPEN_CLANK_INTERNAL_BASE")
     if override:
         return override.rstrip("/")
     return f"http://127.0.0.1:{os.environ.get('APP_PORT', '7777')}"

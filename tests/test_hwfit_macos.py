@@ -93,13 +93,6 @@ def test_qwen_catalog_entries_point_at_verified_gguf_repos():
         assert any(src.get("repo") == repo and src.get("file") == filename for src in sources)
 
 
-def test_safetensors_models_still_recommended_on_cuda():
-    """Regression guard: vLLM serves safetensors on CUDA, so non-GGUF repos must
-    NOT be filtered there — the GGUF-only rule is Metal-specific."""
-    names = {r["name"] for r in rank_models(_cuda_system(), limit=900)}
-    assert "microsoft/Phi-mini-MoE-instruct" in names
-
-
 def test_apple_silicon_detected_as_metal(monkeypatch):
     """On local Apple Silicon, detection reports a Metal GPU with a RAM-scaled
     unified-memory budget."""

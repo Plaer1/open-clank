@@ -9,7 +9,7 @@ import pytest
 
 from src.openclank import code_visual as cv
 
-GOLDENS = Path(__file__).resolve().parents[1] / "mcp_servers/frankenmemory/crates/fm-core/tests/fixtures"
+GOLDENS = Path(__file__).resolve().parents[1] / "native/memery/crates/memery-core/tests/fixtures"
 
 
 def golden(name="published"):

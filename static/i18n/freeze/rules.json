@@ -36,5 +36,6 @@
     "no_silent_fallback_as_complete": true,
     "english_fallback_is_explicit": true,
     "brands_locked": true
-  }
+  },
+  "manual": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported."
 }

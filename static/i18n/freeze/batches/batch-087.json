@@ -1,0 +1,35 @@
+{
+  "id": "batch-087",
+  "group": "docs.openclank-docs-calendar-email",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1998,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-calendar-email.title",
+      "source": "Calendar and Email",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-calendar-email.body",
+      "source": "# Calendar and Email\n\nIn **Copal**, use **Calendar** for appointments and reminders, **Timeline** for dated working notes, and **Email** for mail. To give work a deadline or schedule an assistant run, see [[Tasks and Continuations]].\n\n## Calendar\n\nChoose **New** and check the destination calendar before saving. For CalDAV, connect the account in **Settings → Integrations** and check that the event syncs. To change a repeating event, choose **This event only** or **All recurring events** when Calendar asks for the scope.\n\nAdd a **Reminder** in the event form. Set delivery under **Settings → Reminders**. Browser notifications need browser and OS permission. Email and webhooks need their own connections.\n\n## Timeline\n\nUse **+ Event** in [Timeline](clank://timeline) to put a note or date range on a track. Name the first track if asked. Select the event and choose **Open note** to work in its source.\n\n## Email\n\nConnect a mailbox through **Settings → Integrations**, then choose that account in **Email**. Google OAuth requires configuration. Use a different client if the mailbox requires Microsoft OAuth or Graph Mail. [Mail setup guide](https://github.com/Plaer1/open-clank/blob/main/docs/email-outlook.md).\n\n**Summary** can request analysis. **AI reply** drafts a reply using your configured model and may use its quota. Review the draft before **Send** and check the send result before retrying.\n\n## Email settings\n\nFor a particular mailbox, use **Settings → Email → Open Email Settings**. **Email Reply Writing Style → Extract** uses accessible sent mail to suggest style instructions. Review the result.\n\n**Auto Reply** can send mail automatically. Check the mailbox, dates, message and repeat-sender exclusions before enabling it. **Newsletter Unsubscribe → Clean** shows candidates for review before applying an action.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

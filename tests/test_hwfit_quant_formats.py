@@ -1,5 +1,9 @@
-from services.hwfit.fit import analyze_model, rank_models
+import pytest
+
+from services.hwfit.fit import _native_quant, analyze_model, rank_models
 from services.hwfit.models import (
+    QUANT_BPP,
+    QUANT_QUALITY_PENALTY,
     get_models,
     infer_quantization_from_name,
     is_prequantized,
@@ -76,3 +80,16 @@ def test_selected_gguf_quant_is_strict_not_lower_quant_fallback():
 
     assert fit["quant"] == "Q8_0"
     assert fit["run_mode"] == "no_fit"
+
+
+@pytest.mark.parametrize(("model", "expected"), [
+    ({"name": "Qwen2.5-32B-Instruct-GPTQ-Int4"}, "GPTQ-Int4"),
+    ({"name": "x-GPTQ-Int8"}, "GPTQ-Int8"),
+    ({"name": "SomeModel-AWQ"}, "AWQ-4bit"),
+    ({"name": "x-AWQ-8bit"}, "AWQ-8bit"),
+    ({"name": "model-gptq", "format": ""}, "GPTQ-Int4"),
+])
+def test_native_quant_label_keys_both_cost_maps(model, expected):
+    label = _native_quant(model)
+    assert label == expected
+    assert label in QUANT_BPP and label in QUANT_QUALITY_PENALTY

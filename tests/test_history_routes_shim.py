@@ -23,21 +23,3 @@ def test_legacy_and_canonical_history_module_are_same_object():
         "routes.history_routes shim must resolve to the canonical "
         "routes.history.history_routes module object"
     )
-
-
-def test_monkeypatch_via_legacy_alias_reaches_canonical(monkeypatch):
-    """Patching through the legacy alias must reach the canonical module.
-
-    Several history tests do ``import routes.history_routes as history_routes``
-    followed by ``monkeypatch.setattr(history_routes, "_verify_session_owner",
-    ...)``. For that to take effect at runtime, the legacy module object and the
-    canonical one must be identical.
-    """
-    legacy = importlib.import_module("routes.history_routes")
-    canonical = importlib.import_module("routes.history.history_routes")
-
-    sentinel = object()
-    monkeypatch.setattr(legacy, "setup_history_routes", sentinel)
-    assert canonical.setup_history_routes is sentinel, (
-        "monkeypatch via legacy alias did not reach the canonical module"
-    )

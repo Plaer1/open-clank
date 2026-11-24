@@ -15,6 +15,8 @@ import { Log } from "../../util"
 import { lazy } from "../../util/lazy"
 import { Config } from "../../config"
 import { ExternalImport } from "../../session/external-import"
+import { selectedHistory, selectedHistoryRead } from "../../session/codex-projection-import"
+import { ManagedProvider } from "../../acp/managed-provider"
 import { errors } from "../error"
 
 const log = Log.create({ service: "server" })
@@ -83,6 +85,25 @@ async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>
 
 export const GlobalRoutes = lazy(() =>
   new Hono()
+    .post("/selected-history", async (c) => {
+      c.header("Cache-Control", "private, no-store")
+      if (!ManagedProvider.enabled() || !c.req.raw.body) return c.json({state:"unavailable"}, 403)
+      const reader = c.req.raw.body.getReader()
+      const chunks: Uint8Array[] = []; let total = 0
+      try {
+        while (true) {
+          const part = await reader.read(); if (part.done) break
+          total += part.value.byteLength
+          if (total > 2 * 1024 * 1024) { await reader.cancel(); return c.json({state:"unavailable"}, 413) }
+          chunks.push(part.value)
+        }
+        const bytes = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))
+        const input = JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(bytes))
+        return c.json(input?.phase === "reconcile" ? selectedHistoryRead(input) : selectedHistory(input))
+      } catch {
+        return c.json({state:"unavailable"}, 409)
+      } finally { reader.releaseLock() }
+    })
     .get(
       "/health",
       describeRoute({

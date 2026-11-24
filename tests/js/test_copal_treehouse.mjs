@@ -98,11 +98,11 @@ test('mounted authenticated UI restores account and mode context and previews sc
   await walk(body).find((node) => node.textContent === 'Admin').click();
   await walk(body).find((node) => node.textContent === 'Analytics').click();
   await walk(body).find((node) => node.textContent === 'Learner').click();
-  assert.equal(storage.get('odysseus-treehouse-section:acct-bob:learner:scope:mounted-treehouse-test:school'), 'courses');
-  assert.equal(storage.get('odysseus-treehouse-course:acct-bob:learner:scope:mounted-treehouse-test:school'), 'course:shared');
+  assert.equal(storage.get('openclank-treehouse-section:acct-bob:learner:scope:mounted-treehouse-test:school'), 'courses');
+  assert.equal(storage.get('openclank-treehouse-course:acct-bob:learner:scope:mounted-treehouse-test:school'), 'course:shared');
   await walk(body).find((node) => node.textContent === 'Admin').click();
-  assert.equal(storage.get('odysseus-treehouse-section:acct-bob:admin:scope:mounted-treehouse-test:school'), 'analytics');
-  assert.equal(storage.get('odysseus-treehouse-course:acct-bob:admin:scope:mounted-treehouse-test:school'), '');
+  assert.equal(storage.get('openclank-treehouse-section:acct-bob:admin:scope:mounted-treehouse-test:school'), 'analytics');
+  assert.equal(storage.get('openclank-treehouse-course:acct-bob:admin:scope:mounted-treehouse-test:school'), '');
 });
 
 test('mounted lesson exposes a delivered surface, disposable practice, and active contextual help', async () => {

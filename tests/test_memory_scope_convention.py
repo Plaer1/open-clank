@@ -3,7 +3,7 @@
 Conversational memory writes must carry the canonical workspace ("global",
 fm's own default scope) no matter which entry point produced them. These
 tests pin every deriver to the one symbol (src.memory_scope.chat_workspace)
-and prove the cross-entry-point round trip against the real fm-mcp binary:
+and prove the cross-entry-point round trip against the real memery-worker binary:
 a record written through the Odysseus provider must be visible to a reader
 scoped the way a mimo session is (include_global union).
 """
@@ -13,23 +13,22 @@ import os
 
 import pytest
 
-import mcp_servers.memory_server as memory_server
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_scope import CHAT_WORKSPACE, chat_workspace, memory_owner
-from src.openclank.acp_bridge import frankenmemory_mcp_descriptor
+from src.openclank.acp_bridge import lifetools_mcp_descriptor
 
 FM_BIN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "mcp_servers/frankenmemory/target/release/fm-mcp",
+    "native/memery/target/release/memery-worker",
 )
 
-needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="fm-mcp release binary not built")
+needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="memery-worker release binary not built")
 
 
 @pytest.fixture(autouse=True)
 def _clean_workspace_env(monkeypatch):
     monkeypatch.delenv("FM_WORKSPACE_ID", raising=False)
-    monkeypatch.delenv("ODYSSEUS_MCP_MEMORY_WORKSPACE", raising=False)
+    monkeypatch.delenv("OPEN_CLANK_MCP_MEMORY_WORKSPACE", raising=False)
 
 
 def _descriptor_env(descriptor):
@@ -52,48 +51,39 @@ def test_chat_workspace_env_override(monkeypatch):
 
 
 def test_provider_default_workspace_is_canonical_not_cwd():
-    provider = FrankenmemoryProvider(command="/nonexistent/fm-mcp")
+    provider = MemeryProvider(command="/nonexistent/memery-worker")
     assert provider._workspace_id == CHAT_WORKSPACE
     assert provider._workspace_id != os.getcwd()
 
 
 def test_provider_explicit_workspace_wins():
-    provider = FrankenmemoryProvider(command="/nonexistent/fm-mcp", workspace_id="repo-x")
+    provider = MemeryProvider(command="/nonexistent/memery-worker", workspace_id="repo-x")
     assert provider._workspace_id == "repo-x"
 
 
 def test_fm_descriptor_carries_canonical_workspace(monkeypatch):
     monkeypatch.delenv("FM_DB_PATH", raising=False)
     monkeypatch.delenv("FM_DB_ID", raising=False)
-    descriptor = frankenmemory_mcp_descriptor(owner="alice", session_id="s1")
+    descriptor = lifetools_mcp_descriptor(owner="alice", session_id="s1")
     assert _descriptor_env(descriptor)["FM_WORKSPACE_ID"] == CHAT_WORKSPACE
 
 
 def test_fm_descriptor_explicit_workspace_honored(monkeypatch):
     monkeypatch.delenv("FM_DB_PATH", raising=False)
     monkeypatch.delenv("FM_DB_ID", raising=False)
-    descriptor = frankenmemory_mcp_descriptor(workspace="repo-x", owner="alice", session_id="s1")
+    descriptor = lifetools_mcp_descriptor(memory_workspace_id="repo-x", owner="alice", session_id="s1")
     assert _descriptor_env(descriptor)["FM_WORKSPACE_ID"] == "repo-x"
 
 
 def test_fm_descriptor_maps_anonymous_install_to_local_owner():
-    descriptor = frankenmemory_mcp_descriptor(session_id="s1")
+    descriptor = lifetools_mcp_descriptor(session_id="s1")
     assert _descriptor_env(descriptor)["FM_OWNER"] == "local"
-
-
-def test_memory_server_workspace_fallback_is_canonical():
-    assert memory_server._configured_workspace() == CHAT_WORKSPACE
-
-
-def test_memory_server_env_still_wins(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_MCP_MEMORY_WORKSPACE", "repo-y")
-    assert memory_server._configured_workspace() == "repo-y"
 
 
 @needs_fm
 async def test_chat_writes_carry_canonical_workspace(tmp_path):
     """D3 guardrail: a stray path-workspace on chat records is a regression."""
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         await provider.remember("The greenhouse thermostat lives on channel 4.", owner="alice")
@@ -110,7 +100,7 @@ async def test_automatic_capture_accepts_canonical_workspace(tmp_path):
     """The engine's old guard rejected automatic capture into "global" —
     exactly what every mimo turn sends under the canonical convention. This
     is the shape capture.ts produces; it must land, not bounce."""
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         result = await provider._call_tool(
@@ -142,7 +132,7 @@ async def test_digest_round_trip_reflects_bank(tmp_path):
     """SLICE-03: digest surfaces counts and pinned headlines for the caller's
     scope immediately after a write, and stays empty-but-valid for a
     different owner."""
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         empty = await provider.digest(owner="alice")
@@ -171,7 +161,7 @@ async def test_cross_entry_point_round_trip(tmp_path):
     """Write through the Odysseus provider (canonical workspace); read the way
     a mimo session does — its own session workspace, include_global union on
     the engine side — and the record must surface."""
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         record = await provider.remember("Odysseus stores the amber ledger.", owner="alice")

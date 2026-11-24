@@ -1,4 +1,5 @@
 import { and, asc, count, Database, eq } from "@/storage"
+import { sql } from "drizzle-orm"
 import { InstanceState } from "@/effect"
 import { memorySessionScope } from "@/memory/session-scope"
 import { Effect } from "effect"
@@ -68,6 +69,36 @@ export function read(input: Scope) {
     const row = db.select().from(GoalStateTable).where(whereScope(input)).get()
     if (!row) return emptyEnvelope()
     return assertScoped(input, GoalState.Envelope.parse(row.data))
+  })
+}
+
+/** A bounded, read-only status projection; no goal text or journal leaves this store. */
+export function observe(input: Scope) {
+  return Database.use((db) => {
+    const row = db.select({ revision: GoalStateTable.revision,
+      data: sql<string | null>`CASE WHEN length(CAST(${GoalStateTable.data} AS BLOB)) <= 262144 THEN ${GoalStateTable.data} ELSE NULL END` })
+      .from(GoalStateTable).where(whereScope(input)).get()
+    if (!row) return { state: 'available' as const, stateRevision: 0, active: null, queue: [] }
+    if (typeof row.data !== 'string') throw new Error('goal observation unavailable')
+    let envelope: any
+    try { envelope = JSON.parse(row.data) } catch { throw new Error('goal observation unavailable') }
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
+        !Number.isSafeInteger(envelope.revision) || envelope.revision < 0 || envelope.revision !== row.revision ||
+        (envelope.queue !== undefined && !Array.isArray(envelope.queue)) || envelope.active === null)
+      throw new Error('goal observation unavailable')
+    const ids = new Set<string>()
+    const project = (value: any) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.id !== 'string' ||
+          !value.id || Buffer.byteLength(value.id, 'utf8') > 256 || ids.has(value.id) ||
+          !Number.isSafeInteger(value.revision) || value.revision < 1 || !GoalState.Status.safeParse(value.status).success ||
+          value.owner !== input.owner || value.workspace !== input.workspace || value.project !== input.project || value.sessionID !== input.sessionID)
+        throw new Error('goal observation unavailable')
+      ids.add(value.id)
+      return { id:value.id, revision:value.revision, status:value.status as GoalState.Status }
+    }
+    const queue = envelope.queue ?? []
+    return { state: queue.length > 32 ? 'partial' as const : 'available' as const, stateRevision:row.revision,
+      active: envelope.active === undefined ? null : project(envelope.active), queue:queue.slice(0,32).map(project) }
   })
 }
 

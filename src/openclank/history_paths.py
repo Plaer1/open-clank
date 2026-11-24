@@ -13,7 +13,7 @@ from pathlib import Path
 
 _LEGACY_HISTORY_DATA_DIR = (
     os.environ.get("OPENCLANK_DATA_DIR")
-    if not (os.environ.get("OPEN_CLANK_DATA_DIR") or os.environ.get("ODYSSEUS_DATA_DIR"))
+    if not (os.environ.get("OPEN_CLANK_DATA_DIR"))
     else None
 )
 

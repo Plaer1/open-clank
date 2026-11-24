@@ -101,6 +101,7 @@ export function probeGraphicsCapability(options = {}) {
     forceCanvas2D = false,
     device = null,
     createWebGL2 = null,
+    requireHardware = false,
   } = options;
 
   if (!canvas) {
@@ -137,7 +138,7 @@ export function probeGraphicsCapability(options = {}) {
         premultipliedAlpha: true,
         preserveDrawingBuffer: false,
         powerPreference: 'low-power',
-        failIfMajorPerformanceCaveat: false,
+        failIfMajorPerformanceCaveat: requireHardware,
       });
     }
   } catch (error) {
@@ -153,6 +154,29 @@ export function probeGraphicsCapability(options = {}) {
       webgl2: null,
       accelerated: false,
     };
+  }
+
+  if (requireHardware) {
+    // Some Chromium configurations accept the performance-caveat flag on SwiftShader.
+    // Check both names, since privacy settings can hide the unmasked renderer.
+    let renderer = '';
+    try {
+      renderer = String(gl.getParameter(gl.RENDERER) || '');
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      if (info) renderer += ' ' + (gl.getParameter(info.UNMASKED_RENDERER_WEBGL) || '');
+    } catch (_) { /* The context can still use the browser's original hardware check. */ }
+    if (/swiftshader|llvmpipe|softpipe|software rasterizer|software renderer|microsoft basic render|\bWARP\b/i.test(renderer)) {
+      // The acquired context owns this canvas. Release its resources; the consumer
+      // replaces the surface when installing Canvas2D.
+      try { gl.getExtension('WEBGL_lose_context')?.loseContext(); } catch (_) {}
+      return {
+        backend: BACKEND_CANVAS2D,
+        limits: resolveLimits(device || {}),
+        reason: 'webgl2-software-renderer',
+        webgl2: null,
+        accelerated: false,
+      };
+    }
   }
 
   const deviceLimits = device || readWebGLLimits(gl);

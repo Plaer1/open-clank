@@ -10,11 +10,11 @@ const HELP_EVENT = 'openclank:contextual-help';
 const ASSISTANT_EVENT = 'openclank:assistant-context';
 
 const SURFACES = Object.freeze({
-  editor: { label: 'Editor', lesson: 'fg-editor', description: 'Write, link, and save a note in the active workspace.', next: 'Open a note or create a disposable one, then save it.' },
+  editor: { label: 'Editor', lesson: 'fg-editor', description: 'Use the Text button on the Editor rail to return to your writing workspace. While Text is active, its button toggles Explorer.', next: 'Open a note or create a disposable one, then save it.' },
   files: { label: 'Files', lesson: 'fg-files', description: 'Browse authorized locations and open a resource in Editor.', next: 'Choose an authorized location, then select one file.' },
   assistant: { label: 'Assistant', lesson: 'fg-assistant', description: 'Ask for help with the current workflow while keeping resource contents in the workspace.', next: 'Attach only the current identifiers, then review the scope before sending.' },
   timeline: { label: 'Timeline', lesson: 'fg-timeline', description: 'Plan work with dated notes, spans, and relationships.', next: 'Open a day or task and inspect its linked note.' },
-  wiki: { label: 'Wiki', lesson: 'fg-wiki', description: 'Edit Wiki pages in the dedicated Wiki applet, sharing source content and history with Editor.', next: 'Open a Wiki page, then follow a link or edit its source.' },
+  wiki: { label: 'Wiki', lesson: 'fg-wiki', description: 'Use the Wiki button on the Editor rail to read linked pages and edit their shared source.', next: 'Open a Wiki page, then follow a link or edit its source.' },
   bases: { label: 'Bases', lesson: 'fg-bases', description: 'Query notes with typed properties and keep the source document available.', next: 'Open a Base view and inspect one typed result.' },
   graph: { label: 'Graph', lesson: 'fg-connections', description: 'Explore links between the resources in this workspace.', next: 'Select a node to follow its source relationship.' },
   tasks: { label: 'Tasks', lesson: 'fg-tasks', description: 'Review actionable checkboxes projected from your notes.', next: 'Filter the list, then open the source note for an edit.' },
@@ -26,7 +26,17 @@ const SURFACES = Object.freeze({
   research: { label: 'Research and Gallery', lesson: 'fg-research-media', description: 'Keep a supplied source connected to a reversible media practice.', next: 'Open the source packet and inspect its media reference.' },
   communications: { label: 'Email and Calendar', lesson: 'fg-communications', description: 'Draft local communication and calendar records without external delivery.', next: 'Inspect the local draft and delivery boundary.' },
   operations: { label: 'Operations', lesson: 'fg-operations', description: 'Run safe diagnostics and export only the disposable practice project.', next: 'Review diagnostics, then inspect the scoped export manifest.' },
+  clankshop: { label:'Clankshop', lesson:null },
   treehouse: { label: 'TreeHouse', lesson: 'fg-orientation', description: 'Learn the workflow in a private Field Guide course.', next: 'Open a lesson and use its disposable practice seed.' },
+});
+
+const CLANKSHOP_GUIDES = Object.freeze({
+  workshop: { label:'Clankshop Workshop', description:'The factory routes read and search work to Intake, write and edit work to Assembly, and execution to Calibration. Other observed tool work uses the Workbench. Dispatch, Attention, Recharge and Service show the worker’s recorded state.',
+    next:'Open Debug to give each worker a tool and call rate. Set Read on several workers to see the scan line, or set one worker to zero to see it recharge. Choose a worker before showing a cue.' },
+  drift: { label:'Clankshop Drift', description:'The self-driving car follows a factory proving lane. Recent observed tool arrivals set its pace. Part crates and physical barriers share the car’s lane positions.',
+    next:'Open Debug and adjust individual worker rates. Their combined activity drives the car. Set all the rates to zero to watch the car coast.' },
+  idle: { label:'Clankshop Idle', description:'The robo-eye shows separate input and output signals beside the housing. Tool arrivals briefly light the housing. A signal is unavailable when the loaded snapshots cannot support a rate.',
+    next:'Open Debug and move the input and output sliders separately. Turn on Usage unavailable to preview a missing reading.' },
 });
 
 const SURFACE_ALIASES = Object.freeze({ notes: 'editor', chat: 'assistant', todo: 'tasks', 'meatbag-tasks': 'tasks', 'memory-history': 'continuity', 'treehouse-admin': 'teaching', 'research-media': 'research', 'email-calendar': 'communications', treehouse: 'treehouse' });
@@ -99,6 +109,11 @@ export function normalizeHelpContext(input = {}) {
   const surface = surfaceKey(surfaceValue || input.view || input.resourceKind);
   const spec = SURFACES[surface];
   const scope = currentScope(surface);
+  if (surface==='clankshop') return Object.freeze({
+    ...scope, scopeRevision:scope.revision, surface,
+    view:Object.hasOwn(CLANKSHOP_GUIDES,input.view)?input.view:'workshop',
+    preview:input.preview===true, sourceStatus:'ready', lessonId:null,
+  });
   const revision = Number.isInteger(Number(input.scopeRevision))
     ? Number(input.scopeRevision)
     : scope.revision;
@@ -153,7 +168,14 @@ function providerContext(surface) {
 
 function activeContext(surface = null, root = null) {
   const requested = surface ? surfaceKey(surface) : null;
+  if (requested==='clankshop' || !requested && document.activeElement?.closest?.('#copal-clankshop-modal')) {
+    const shell=root || document.getElementById('copal-clankshop-modal');
+    const applet=shell?.querySelector('.clankshop[data-clankshop-mode]');
+    return normalizeHelpContext({surface:'clankshop',view:applet?.dataset.clankshopMode,
+      preview:applet?.hasAttribute('data-clankshop-preview')});
+  }
   let context = { ...providerContext(requested || null) };
+  if (!requested && context.view==='clankshop') return activeContext('clankshop');
   if (requested) {
     const providerView = String(context.view || '').trim();
     context = {
@@ -350,7 +372,8 @@ function openHelp(input = {}, { focus = true } = {}) {
       selection: null,
       sourceStatus: INVALID_SOURCE_STATUSES.has(supplied.sourceStatus) ? supplied.sourceStatus : 'stale',
     });
-  const spec = SURFACES[context.surface];
+  const localHelp=context.surface==='clankshop';
+  const spec=localHelp ? CLANKSHOP_GUIDES[context.view] : SURFACES[context.surface];
   if (!document.body) return context;
   // Keep the original opener when a help dialog is replaced from inside the
   // current dialog (pin/reopen). The focused pin button is about to be
@@ -404,7 +427,10 @@ function openHelp(input = {}, { focus = true } = {}) {
   helpDialog.querySelector('[data-help-lesson-context]').textContent = context.lessonTitle || context.lessonId || 'Field Guide overview';
   helpDialog.querySelector('[data-help-next]').textContent = spec.next;
   const state = helpDialog.querySelector('[data-help-state]');
-  if (context.sourceStatus === 'stale') state.textContent = 'This selection changed with the workspace. Choose the current resource before attaching it.';
+  if (localHelp) state.textContent=context.preview
+    ? 'Debug is active. Choose Return to live view to leave the local simulation.'
+    : 'Live observation is optional. Debug works with live observation off.';
+  else if (context.sourceStatus === 'stale') state.textContent = 'This selection changed with the workspace. Choose the current resource before attaching it.';
   else if (context.sourceStatus === 'unavailable') state.textContent = 'The active surface is unavailable. The Field Guide lesson is still available.';
   else if (!context.resourceId && !context.selection) state.textContent = 'Nothing is selected yet. Open a resource for more specific help.';
   else state.textContent = 'Only the identifiers and fields shown below are attached; document contents stay in the workspace.';
@@ -414,7 +440,7 @@ function openHelp(input = {}, { focus = true } = {}) {
     if (typeof window.openClankHandbook === 'function') window.openClankHandbook();
   });
   const lesson = helpDialog.querySelector('[data-help-lesson]');
-  lesson.href = lessonHref(context);
+  if (!localHelp) lesson.href = lessonHref(context);
   lesson.setAttribute('aria-label', `Open ${spec.label} Field Guide lesson`);
   const pin = helpDialog.querySelector('[data-help-pin]');
   const pinned = pinnedContext && scopeMatches(pinnedContext) && pinnedContext.resourceId === context.resourceId;
@@ -446,6 +472,11 @@ function openHelp(input = {}, { focus = true } = {}) {
     closeHelp({ restore: false });
     message?.focus({ preventScroll: true });
   });
+  if (localHelp) {
+    lesson.remove(); pin.remove(); ask.remove();
+    helpDialog.querySelector('.openclank-help-context').remove();
+    helpDialog.querySelector('.openclank-help-kicker').textContent='Clankshop';
+  }
   helpDialog.addEventListener('cancel', (event) => { event.preventDefault(); closeHelp(); });
   helpDialog.addEventListener('close', () => {
     // Capture this instance. A pin/reopen can replace the module's global
@@ -464,8 +495,9 @@ function openHelp(input = {}, { focus = true } = {}) {
 }
 
 function contextForButton(button) {
-  const surface = surfaceKey(button.dataset.helpSurface);
   const root = button.closest('.copal-view-window, .files-window');
+  const mode = root?.dataset.editorMode;
+  const surface = mode === 'graph' || mode === 'wiki' ? mode : surfaceKey(button.dataset.helpSurface);
   return activeContext(surface, root);
 }
 
@@ -519,7 +551,10 @@ export function installContextualHelp() {
     if (event.key !== '?' || event.altKey || event.ctrlKey || event.metaKey) return;
     const target = event.target;
     if (target?.matches?.('input, textarea, select, [contenteditable="true"]')) return;
-    event.preventDefault(); openHelp();
+    event.preventDefault();
+    const windowRoot=target?.closest?.('#copal-clankshop-modal');
+    if (windowRoot) openHelp(activeContext('clankshop',windowRoot));
+    else openHelp();
   });
   addSurfaceButtons();
   observer = new MutationObserver((mutations) => mutations.forEach((mutation) => mutation.addedNodes.forEach((node) => { if (node.nodeType === 1) addSurfaceButtons(node); })));

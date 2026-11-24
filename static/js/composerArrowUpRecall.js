@@ -62,7 +62,7 @@ export function wireArrowUpRecall(composer, getUserMessages, options = {}) {
   const norm = (value) => String(value || '').replace(/\r\n/g, '\n').trimEnd();
   const debug = (...args) => {
     try {
-      if (localStorage.getItem('odysseusArrowRecallDebug') === '1') {
+      if (localStorage.getItem('openclankArrowRecallDebug') === '1') {
         console.debug('[arrow-recall]', ...args);
       }
     } catch (_) {}

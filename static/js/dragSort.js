@@ -12,7 +12,7 @@ const instances = new Map();
  * Make a container's children sortable via vertical drag
  */
 export function enable(containerId, itemSelector, options = {}) {
-  const container = document.getElementById(containerId);
+  const container = typeof containerId === 'string' ? document.getElementById(containerId) : containerId;
   if (!container) {
     console.warn('[DragSort] container not found:', containerId);
     return;
@@ -38,6 +38,7 @@ export function enable(containerId, itemSelector, options = {}) {
   let placeholder = null;
   let offsetY = 0;
   let items = [];
+  let snapTimer = null, disposed = false;
 
   function getItems() {
     let all = Array.from(container.querySelectorAll(itemSelector));
@@ -129,7 +130,9 @@ export function enable(containerId, itemSelector, options = {}) {
     draggedEl.style.transition = 'top 0.08s ease-out';
     draggedEl.style.top = snapTop + 'px';
 
-    setTimeout(() => {
+    snapTimer = setTimeout(() => {
+      snapTimer = null;
+      if (disposed || !placeholder?.parentNode || !draggedEl) return;
       placeholder.parentNode.insertBefore(draggedEl, placeholder);
       placeholder.remove();
       draggedEl.classList.remove('dragging');
@@ -246,17 +249,28 @@ export function enable(containerId, itemSelector, options = {}) {
   container.addEventListener('touchend', onTouchEnd);
   container.addEventListener('touchcancel', onTouchEnd);
 
+  let releaseLifetime = null;
   const instance = {
     cleanup: () => {
+      if (disposed) return; disposed = true;
+      if (_touchTimer) clearTimeout(_touchTimer);
+      if (snapTimer) clearTimeout(snapTimer);
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      if (draggedEl) { draggedEl.classList.remove('dragging', 'touch-dragging'); draggedEl.style.cssText = ''; }
+      placeholder?.remove(); draggedEl = null; placeholder = null;
       container.removeEventListener('mousedown', onMouseDown);
       container.removeEventListener('touchstart', onTouchStart);
       container.removeEventListener('touchmove', onTouchMove);
       container.removeEventListener('touchend', onTouchEnd);
       container.removeEventListener('touchcancel', onTouchEnd);
+      if (instances.get(key) === instance) instances.delete(key);
+      releaseLifetime?.(); releaseLifetime = null;
     },
     refresh: () => { items = getItems(); }
   };
   instances.set(key, instance);
+  releaseLifetime = options.lifetime?.add(() => instance.cleanup()) || null;
   return instance;
 }
 

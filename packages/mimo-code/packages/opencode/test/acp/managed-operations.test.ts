@@ -8,7 +8,7 @@ import {
   MockTranscriptionModelV3,
 } from "ai/test"
 import { ACP } from "../../src/acp/agent"
-import { ManagedOperations, extractMimoSearchAnnotations, transformMimoSearchRequestBody } from "../../src/acp/managed-operations"
+import { ManagedOperations, extractMimoSearchAnnotations, searchEnvelope, searchErrorMessage, transformMimoSearchRequestBody } from "../../src/acp/managed-operations"
 import { ManagedProvider } from "../../src/acp/managed-provider"
 import type { OpenClankManagedProtocol } from "../../src/acp/openclank-protocol"
 import { ProviderTest } from "../fake/provider"
@@ -59,6 +59,9 @@ class Host {
         bindingID: "binding-1",
         bindingRevision: this.bindingRevision,
         rootOperationID: params.rootOperationID,
+        scopeKind: params.scopeKind,
+        operationID: params.operationID,
+        modelRouteID: params.modelRouteID,
         connectionID: params.connectionID,
         providerID: params.providerID,
         billingLane: params.billingLane,
@@ -71,10 +74,11 @@ class Host {
       }
     }
     if (method.endsWith("/credential/lease")) {
+      const route = this.calls.find((call) => call.method.endsWith("/account/bind"))!.params
       return {
         leaseID: "lease-1",
-        connectionID: params.connectionID,
-        accountID: params.accountID,
+        connectionID: route.connectionID,
+        accountID: this.rotateAccountOnAttemptTo ?? "account-1",
         credentialRevision: params.expectedCredentialRevision,
         expiresAt: Date.now() + 30_000,
         credential: { type: "api", key: "leased-test-secret" },
@@ -89,6 +93,9 @@ class Host {
         bindingID: "binding-1",
         bindingRevision: this.bindingRevision,
         rootOperationID: route.rootOperationID,
+        scopeKind: route.scopeKind,
+        operationID: route.operationID,
+        modelRouteID: route.modelRouteID,
         connectionID: route.connectionID,
         providerID: route.providerID,
         billingLane: route.billingLane,
@@ -108,6 +115,9 @@ class Host {
         bindingID: "binding-1",
         bindingRevision: this.bindingRevision,
         rootOperationID: route.rootOperationID,
+        scopeKind: route.scopeKind,
+        operationID: route.operationID,
+        modelRouteID: route.modelRouteID,
         connectionID: route.connectionID,
         providerID: route.providerID,
         billingLane: route.billingLane,
@@ -351,17 +361,26 @@ describe("managed non-stream operation router", () => {
     const { result } = await execute(
       "chat.complete",
       { messages: [{ role: "user", content: "hello" }] },
-      runtime({ getLanguage: async () => language }),
+      runtime({ getLanguage: async () => language, modelForRoute: async () => ProviderTest.model({
+        id: ModelID.make("route-model"), providerID: ProviderID.make("connection-1"),
+        variants: { none: { reasoningEffort: "none" } },
+      }) }),
+      undefined, undefined, undefined, undefined,
+      { modelRequestOptions: { version: 1, routeID: "model-route-1", optionRouteID: "option-route-1",
+        catalogRevision: 1, model: { providerID: "connection-1", modelID: "route-model" },
+        options: { reasoning_effort: "none" } } },
     )
     expect(result.output).toEqual({ text: "managed reply" })
     expect(result.committed).toBe(true)
     expect(language.doGenerateCalls).toHaveLength(1)
+    expect(language.doGenerateCalls[0].providerOptions).toEqual({ openai: { store: false, reasoningEffort: "none" } })
   })
 
   test("MiMo web.search uses the bounded hosted-search body transform and empty annotations stay ungrounded", async () => {
     const body = transformMimoSearchRequestBody({ model: "mimo-v2.5", messages: [] }, { count: 4, answer: false })
     expect(body.tools).toEqual([{ type: "web_search", max_keyword: 1, force_search: true, limit: 4 }])
     expect(body.max_completion_tokens).toBe(256)
+    expect(body.thinking).toEqual({ type: "disabled" })
     const language = new MockLanguageModelV3({
       doGenerate: {
         content: [{ type: "text", text: "A prose URL https://not-a-source.example" }],
@@ -392,6 +411,15 @@ describe("managed non-stream operation router", () => {
     }])
     expect(extractMimoSearchAnnotations("not-json")).toEqual([])
     expect(extractMimoSearchAnnotations({ choices: [{ message: { content: "https://prose.example" } }] })).toEqual([])
+  })
+
+  test("MiMo search preserves documented nested usage and typed provider errors", async () => {
+    expect(searchEnvelope({ choices: [], usage: { web_search_usage: { tool_usage: 2, page_usage: 3 } } }).usage)
+      .toEqual({ tool_usage: 2, page_usage: 3 })
+
+    expect(searchErrorMessage({ choices: [{ message: { error_message: "search plugin unavailable" } }] })).toBe(true)
+    expect(searchErrorMessage({ choices: [{ delta: { error_message: "search plugin unavailable" } }] })).toBe(true)
+    expect(searchErrorMessage({ error_message: 42 })).toBe(false)
   })
 
   test("MiMo search deadline aborts the transport and terminalizes the journal", async () => {
@@ -441,6 +469,34 @@ describe("managed non-stream operation router", () => {
     expect(language.doGenerateCalls).toHaveLength(1)
     expect(result.committed).toBe(false)
     expect(host.calls.filter((call) => call.method.endsWith("/journal/cas") && call.params.attempt).length).toBe(1)
+  })
+
+  test("chat cancellation aborts transport without retry and retains unknown outcome", async () => {
+    let started!: () => void
+    const ready = new Promise<void>((resolve) => { started = resolve })
+    const language = new MockLanguageModelV3({
+      doGenerate: async ({ abortSignal }) => {
+        started()
+        await new Promise<void>((resolve) => {
+          if (abortSignal?.aborted) return resolve()
+          abortSignal?.addEventListener("abort", () => resolve(), { once: true })
+        })
+        throw new Error("transport aborted")
+      },
+    })
+    const host = new Host()
+    ManagedProvider.installHostConnection(host as any)
+    const router = new ManagedOperations.Router(host as any, runtime({ getLanguage: async () => language }))
+    const payload = request("chat.complete", { messages: [{ role: "user", content: "cancel" }] })
+    const pending = router.handle(payload)
+    await ready
+    const ack = await router.cancel({ rootOperationID: payload.rootOperationID, idempotencyKey: payload.idempotencyKey })
+    const result = await pending
+    expect(ack.state).toBe("pending")
+    expect(result.state).toBe("failed")
+    expect(result.committed).toBe(true)
+    expect(result.commitReason).toBe("outcome_unknown")
+    expect(language.doGenerateCalls).toHaveLength(1)
   })
 
   test("caller cancellation aborts MiMo transport and leaves a replayable cancelled terminal", async () => {

@@ -103,6 +103,107 @@ pub struct HostMetadata {
     pub resource_type: Option<String>,
 }
 
+/// Private v1 regular-file profile. An absent leaf is a positive observation,
+/// not an empty file or an error fallback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag="state",deny_unknown_fields)]
+pub enum RegularFileStateV1 {
+    Absent,
+    Present { sha256:String, size:u64, mode:u32 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegularFileObservationV1 {
+    pub state:RegularFileStateV1,
+    pub parent_device:u64,
+    pub parent_inode:u64,
+    pub file_device:Option<u64>,
+    pub file_inode:Option<u64>,
+}
+
+/// Separate journal discriminator deliberately fails legacy RestoreState
+/// decoding; a typed operation cannot be adopted as a byte-only restore.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegularFileJournalV1 {
+    pub version:u8,
+    pub consistency:String,
+    pub restore_id:String,
+    pub source_action_id:String,
+    pub source_version_id:String,
+    pub source_selector_hash:String,
+    pub inverse_of:Option<String>,
+    pub destination:ResourceKey,
+    pub expected:RegularFileObservationV1,
+    pub desired:RegularFileStateV1,
+    pub inverse:Option<RegularFileInverseV1>,
+    pub effect_digest:String,
+    pub state:RegularFileJournalStateV1,
+}
+
+/// Original-ID no-effect refusal for a request whose source or reviewed
+/// destination ceased to qualify before an effect journal was created.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegularFileRefusalV1 {
+    pub version:u8,
+    pub state:RegularFileRefusalStateV1,
+    pub consistency:String,
+    pub restore_id:String,
+    pub destination:ResourceKey,
+    pub source_selector_hash:String,
+    pub expected:RegularFileObservationV1,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RegularFileRefusalStateV1 { RegularFileV1Refused }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RegularFileJournalStateV1 { RegularFileV1Prepared, RegularFileV1Applying, RegularFileV1Complete, RegularFileV1Conflict, RegularFileV1Unknown }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegularFileInverseV1 {pub action_id:String,pub receipt:VersionReceipt,pub state:RegularFileStateV1}
+
+pub fn regular_file_effect_digest_v1(journal:&RegularFileJournalV1)->CatalogResult<String> {
+    let operation=match (&journal.expected.state,&journal.desired) {
+        (RegularFileStateV1::Absent,RegularFileStateV1::Absent)=>"no_change",
+        (RegularFileStateV1::Absent,RegularFileStateV1::Present{..})=>"create",
+        (RegularFileStateV1::Present{..},RegularFileStateV1::Absent)=>"delete",
+        (RegularFileStateV1::Present{..},RegularFileStateV1::Present{..})=>"replace",
+    };
+    let preimage=serde_json::to_vec(&("openclank.history.regular-file-effect.v1",&journal.restore_id,&journal.source_action_id,&journal.source_version_id,&journal.source_selector_hash,&journal.inverse_of,&journal.destination,operation,&journal.expected,&journal.desired))?;
+    Ok(format!("{:x}",sha2::Sha256::digest(preimage)))
+}
+
+/// Reads a bounded exact regular file through a no-follow descriptor; any
+/// error other than an absent leaf is unavailable. Identity checks are
+/// optimistic and do not claim confinement of external processes.
+#[cfg(unix)]
+pub fn observe_regular_file_v1(path:&Path) -> CatalogResult<(RegularFileObservationV1,Option<Vec<u8>>)> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt,OpenOptionsExt};
+    let parent=path.parent().ok_or("regular state parent unavailable")?;
+    let parent_file=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(parent)?;
+    let p=parent_file.metadata()?;
+    let parent_still_current=|| -> CatalogResult<bool> {let now=std::fs::symlink_metadata(parent)?;Ok(now.is_dir() && !now.file_type().is_symlink() && now.dev()==p.dev() && now.ino()==p.ino())};
+    if !parent_still_current()? {return Err("regular state parent changed".into())}
+    let mut file=match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(path) {
+        Ok(file)=>file,
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound => {
+            if !parent_still_current()? || std::fs::symlink_metadata(path).map_or_else(|e|e.kind()!=std::io::ErrorKind::NotFound,|_|true) {return Err("regular state changed".into())}
+            return Ok((RegularFileObservationV1{state:RegularFileStateV1::Absent,parent_device:p.dev(),parent_inode:p.ino(),file_device:None,file_inode:None},None));
+        }
+        Err(error)=>return Err(error.into()),
+    };
+    let before=file.metadata()?;
+    if !before.is_file() || before.len()>16*1024*1024 || before.mode() & 0o7000 != 0 {return Err("regular state unsupported".into())}
+    let mut bytes=Vec::new();std::io::Read::by_ref(&mut file).take(16*1024*1024+1).read_to_end(&mut bytes)?;
+    let after=file.metadata()?;let named=std::fs::symlink_metadata(path)?;
+    if !parent_still_current()? || !named.is_file() || named.file_type().is_symlink() || before.dev()!=after.dev() || before.ino()!=after.ino() || before.len()!=after.len() || before.mode()!=after.mode() || before.mtime()!=after.mtime() || before.mtime_nsec()!=after.mtime_nsec() || named.dev()!=after.dev() || named.ino()!=after.ino() || bytes.len() as u64!=after.len() {return Err("regular state changed".into())}
+    Ok((RegularFileObservationV1{state:RegularFileStateV1::Present{sha256:format!("{:x}",sha2::Sha256::digest(&bytes)),size:after.len(),mode:after.mode()&0o777},parent_device:p.dev(),parent_inode:p.ino(),file_device:Some(after.dev()),file_inode:Some(after.ino())},Some(bytes)))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FidelityManifest {
     pub managed_envelope: bool,
@@ -277,6 +378,46 @@ impl FilesystemRestoreProvider {
         crate::platform::finish_publication(&self.receipt_path)?;
         Ok(())
     }
+
+    #[cfg(unix)]
+    pub fn regular_file_receipt_verified_v1(&self,journal:&RegularFileJournalV1)->CatalogResult<bool> {
+        if journal.effect_digest!=regular_file_effect_digest_v1(journal)? || journal.inverse.is_none() || !self.reconcile_apply(&journal.restore_id,&journal.effect_digest)? {return Ok(false)}
+        Ok(true)
+    }
+
+    #[cfg(unix)]
+    fn apply_regular_file_v1(&mut self,journal:&RegularFileJournalV1,bytes:Option<&[u8]>) -> CatalogResult<()> {
+        use std::os::unix::fs::{OpenOptionsExt,PermissionsExt};
+        let (current,_)=observe_regular_file_v1(&self.path)?;
+        if current!=journal.expected {return Err("regular state changed".into())}
+        // This is a point-in-time guard under the cooperating owner lease;
+        // unrelated external writers are not excluded by pathname operations.
+        let parent=self.path.parent().ok_or("regular state parent unavailable")?;
+        match (&journal.expected.state,&journal.desired,bytes) {
+            (RegularFileStateV1::Absent,RegularFileStateV1::Absent,None)=>{},
+            (RegularFileStateV1::Present{..},RegularFileStateV1::Absent,None)=>{
+                if observe_regular_file_v1(&self.path)?.0!=journal.expected {return Err("regular state changed".into())}
+                std::fs::remove_file(&self.path)?;
+            },
+            (expected,RegularFileStateV1::Present{sha256,size,mode},Some(content)) if *mode<=0o777 && *size==content.len() as u64 && *sha256==format!("{:x}",sha2::Sha256::digest(content))=>{
+                let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+                let temp=parent.join(format!(".openclank-regular-{}-{nonce}",std::process::id()));
+                let result=(|| -> CatalogResult<()> {
+                    let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&temp)?;
+                    file.write_all(content)?;file.set_permissions(std::fs::Permissions::from_mode(*mode))?;file.sync_all()?;
+                    if observe_regular_file_v1(&self.path)?.0!=journal.expected {return Err("regular state changed".into())}
+                    if matches!(expected,RegularFileStateV1::Absent) {std::fs::hard_link(&temp,&self.path)?;std::fs::remove_file(&temp)?;} else {std::fs::rename(&temp,&self.path)?;}
+                    Ok(())
+                })();
+                if result.is_err(){let _=std::fs::remove_file(&temp);}result?;
+            },
+            _=>return Err("regular state payload mismatch".into()),
+        }
+        crate::platform::finish_publication(&self.path)?;
+        if observe_regular_file_v1(&self.path)?.0.state!=journal.desired {return Err("regular effect verification unavailable".into())}
+        self.persist_receipt(&journal.restore_id,&journal.effect_digest)?;
+        Ok(())
+    }
 }
 
 impl RestoreProvider for FilesystemRestoreProvider {
@@ -366,6 +507,13 @@ impl RestoreProvider for FilesystemRestoreProvider {
         content: &[u8],
         host_metadata: Option<&HostMetadata>,
     ) -> CatalogResult<()> {
+        // Worktree v2 includes Git-owned administrative metadata. Generic
+        // Files restore may never apply it; only a future Source owner may.
+        let directory_target=host_metadata.and_then(|metadata|metadata.resource_type.as_deref())==Some("Directory")
+            || std::fs::symlink_metadata(&self.path).is_ok_and(|metadata|metadata.is_dir() && !metadata.file_type().is_symlink());
+        if directory_target && content.starts_with(crate::tree_container::MAGIC) {
+            return Err("worktree tree restore requires Source owner".into());
+        }
         let digest = digest_content(content);
         if self.reconcile_apply(restore_id, &digest)? {
             return Ok(());
@@ -746,6 +894,7 @@ fn pre_restore_action(request: &RestoreRequest) -> ActionRequest {
         expected_revision: None,
         actor_id: format!("restore:{}", request.restore_id),
         actor_kind: "restore".into(),
+        managed_tool_origin_v1: None,
         session_id: None,
         run_id: None,
         task_id: None,
@@ -758,6 +907,109 @@ fn pre_restore_action(request: &RestoreRequest) -> ActionRequest {
         coverage: None,
         per_resource_outcomes: None,
     }
+}
+
+/// Consume only an already-reserved v1 journal. The request owner must derive
+/// source state and destination authority before calling this private core.
+/// Applying without an exact provider receipt is permanently unknown here;
+/// this function never issues a second effect after an uncertain result.
+#[cfg(unix)]
+pub async fn apply_regular_file_authorized_v1(
+    coordinator:&HistoryCoordinator,request:&RestoreRequest,source:&VersionReceipt,
+    provider:&mut FilesystemRestoreProvider,inverse_origin:Option<&str>,
+) -> Result<RegularFileJournalV1,RestoreOutcome> {
+    use crate::catalog::VersionContent;
+    let catalog=coordinator.catalog();
+    let mut journal=catalog.get_restore::<RegularFileJournalV1>(&request.restore_id).map_err(|_|RestoreOutcome::Corrupt)?.ok_or(RestoreOutcome::UnknownVersion)?;
+    if journal.version!=1 || journal.consistency!="optimistic_path_guard" || journal.inverse_of.as_deref()!=inverse_origin || journal.restore_id!=request.restore_id || journal.source_action_id!=request.source_action_id || journal.source_version_id!=request.source_version_id || journal.destination!=request.destination || request.account_id!=request.destination.account_id || source.version_id!=request.source_version_id || journal.effect_digest!=regular_file_effect_digest_v1(&journal).map_err(|_|RestoreOutcome::Corrupt)? {return Err(RestoreOutcome::Conflict)}
+    let source_action=catalog.get_action(&request.source_action_id).map_err(|_|RestoreOutcome::Corrupt)?.ok_or(RestoreOutcome::UnknownVersion)?;
+    if crate::tree_container::action_marks_tree(&source_action) {return Err(RestoreOutcome::Unauthorized)}
+    if source_action.actor_account_id!=request.account_id {return Err(RestoreOutcome::Unauthorized)}
+    if let Some(original_id)=inverse_origin {
+        let original=catalog.get_restore::<RegularFileJournalV1>(original_id).map_err(|_|RestoreOutcome::Corrupt)?.ok_or(RestoreOutcome::UnknownVersion)?;
+        let inverse=original.inverse.as_ref().ok_or(RestoreOutcome::UnknownVersion)?;
+        let original_proven=original.state==RegularFileJournalStateV1::RegularFileV1Complete || (original.state==RegularFileJournalStateV1::RegularFileV1Applying && provider.regular_file_receipt_verified_v1(&original).unwrap_or(false));
+        if original.version!=1 || original.consistency!="optimistic_path_guard" || original.effect_digest!=regular_file_effect_digest_v1(&original).map_err(|_|RestoreOutcome::Corrupt)? || !original_proven || original.destination!=journal.destination || inverse.action_id!=format!("{}:pre-restore",original.restore_id) || inverse.action_id!=request.source_action_id || inverse.receipt!=*source || inverse.state!=original.expected.state || inverse.state!=journal.desired {return Err(RestoreOutcome::Unauthorized)}
+    } else {
+        let same=|key:&ResourceKey|key.account_id==journal.destination.account_id && key.workspace_id==journal.destination.workspace_id && key.resource_id==journal.destination.resource_id && matches!(key.provider.as_str(),"mimo-filesystem"|"odysseus-files"|"filesystem");
+        let before=source_action.before_resources.iter().filter(|r|same(&r.resource_key) && r.before.as_ref()==Some(source)).map(|r|(&r.existence,&r.resource_type,&r.metadata));
+        let after=source_action.after_resources.iter().filter(|r|same(&r.resource_key) && &r.after==source).map(|r|(&r.existence,&r.resource_type,&r.metadata));
+        let mut selected=before.chain(after);
+        let (existence,kind,metadata)=selected.next().ok_or(RestoreOutcome::Unauthorized)?;
+        if selected.next().is_some() || *kind!=crate::catalog::ResourceType::File {return Err(RestoreOutcome::Unauthorized)}
+        match (&journal.desired,existence) {
+            (RegularFileStateV1::Absent,crate::catalog::ResourceExistence::Absent)=>{},
+            (RegularFileStateV1::Present{mode,..},crate::catalog::ResourceExistence::Present) if metadata.mode.and_then(crate::operations::regular_file_permissions_v1)==Some(*mode)=>{},
+            _=>return Err(RestoreOutcome::Unauthorized),
+        }
+    }
+    if journal.state==RegularFileJournalStateV1::RegularFileV1Complete {return Ok(journal)}
+    if journal.state==RegularFileJournalStateV1::RegularFileV1Conflict || journal.state==RegularFileJournalStateV1::RegularFileV1Unknown {return Err(RestoreOutcome::Conflict)}
+    if catalog.expiry(&request.source_action_id).map_err(|_|RestoreOutcome::Corrupt)?.is_some_and(|e|matches!(e.state,crate::retention::ExpiryState::Expiring|crate::retention::ExpiryState::Expired)) {return Err(RestoreOutcome::Expired)}
+    let source_bytes=coordinator.read_version(&request.source_action_id,source).await.map_err(|_|RestoreOutcome::Corrupt)?;
+    match (&source.content,&journal.desired,source_bytes.as_deref()) {
+        (VersionContent::Tombstone,RegularFileStateV1::Absent,None)=>{},
+        (VersionContent::Tombstone,_,_)=>return Err(RestoreOutcome::Corrupt),
+        (_,RegularFileStateV1::Present{sha256,size,mode},Some(bytes)) if *mode<=0o777 && *size==bytes.len() as u64 && *sha256==format!("{:x}",sha2::Sha256::digest(bytes))=>{},
+        _=>return Err(RestoreOutcome::Corrupt),
+    }
+    let leases=restore_lease_ids(request);catalog.acquire_leases(&request.restore_id,&leases).map_err(|_|RestoreOutcome::Conflict)?;
+    let result=async {
+        if journal.state==RegularFileJournalStateV1::RegularFileV1Applying {
+            if journal.inverse.as_ref().is_none_or(|v|v.action_id!=format!("{}:pre-restore",request.restore_id) || v.state!=journal.expected.state) {return Err(RestoreOutcome::Corrupt)}
+            if !provider.reconcile_apply(&journal.restore_id,&journal.effect_digest).map_err(|_|RestoreOutcome::Corrupt)? {
+                let old=journal.clone();journal.state=RegularFileJournalStateV1::RegularFileV1Unknown;
+                if !catalog.compare_restore_exact(&request.restore_id,Some(&old),&journal).map_err(|_|RestoreOutcome::Corrupt)? {return Err(RestoreOutcome::Conflict)}
+                return Err(RestoreOutcome::Partial);
+            }
+            let old=journal.clone();journal.state=RegularFileJournalStateV1::RegularFileV1Complete;
+            if !catalog.compare_restore_exact(&request.restore_id,Some(&old),&journal).map_err(|_|RestoreOutcome::Corrupt)? {return Err(RestoreOutcome::Conflict)}
+            return Ok(journal.clone());
+        }
+        if journal.state!=RegularFileJournalStateV1::RegularFileV1Prepared {return Err(RestoreOutcome::Conflict)}
+        let (observed,current)=observe_regular_file_v1(&provider.path).map_err(|_|RestoreOutcome::Corrupt)?;
+        if observed!=journal.expected {return Err(RestoreOutcome::Conflict)}
+        if journal.inverse.is_none() {
+            catalog.release_leases(&request.restore_id,&leases).map_err(|_|RestoreOutcome::Corrupt)?;
+            let action=pre_restore_action(request);
+            let action_id=action.action_id.clone();
+            let begun=begin(catalog,action).map_err(|_|RestoreOutcome::Corrupt)?;
+            let existing=match begun {crate::catalog::BeginResult::New(v)|crate::catalog::BeginResult::Existing(v)=>v};
+            let fingerprint=match &observed.state {RegularFileStateV1::Absent=>"missing".to_owned(),RegularFileStateV1::Present{sha256,size,mode}=>format!("regular-v1:{sha256}:{size}:{mode:o}")};
+            let receipt=if let Some(receipt)=existing.before {receipt} else {
+                let result=coordinator.capture_before(&action_id,current.clone().map(Bytes::from),fingerprint.clone()).await.map_err(|_|RestoreOutcome::Corrupt)?;
+                let receipt=result.before.ok_or(RestoreOutcome::Corrupt)?;
+                coordinator.abort(&action_id).map_err(|_|RestoreOutcome::Corrupt)?;receipt
+            };
+            if receipt.fingerprint!=fingerprint {return Err(RestoreOutcome::Conflict)}
+            let retained=coordinator.read_version(&action_id,&receipt).await.map_err(|_|RestoreOutcome::Corrupt)?;
+            if retained.as_deref()!=current.as_deref() || (matches!(&observed.state,RegularFileStateV1::Absent) != matches!(&receipt.content,VersionContent::Tombstone)) {return Err(RestoreOutcome::Corrupt)}
+            let old=journal.clone();journal.inverse=Some(RegularFileInverseV1{action_id,receipt,state:observed.state.clone()});
+            if !catalog.compare_restore_exact(&request.restore_id,Some(&old),&journal).map_err(|_|RestoreOutcome::Corrupt)? {return Err(RestoreOutcome::Conflict)}
+            catalog.acquire_leases(&request.restore_id,&leases).map_err(|_|RestoreOutcome::Conflict)?;
+        }
+        let inverse=journal.inverse.as_ref().ok_or(RestoreOutcome::Corrupt)?;
+        if inverse.action_id!=format!("{}:pre-restore",request.restore_id) || inverse.state!=journal.expected.state {return Err(RestoreOutcome::Corrupt)}
+        let inverse_bytes=coordinator.read_version(&inverse.action_id,&inverse.receipt).await.map_err(|_|RestoreOutcome::Corrupt)?;
+        match (&inverse.state,&inverse.receipt.content,inverse_bytes.as_deref()) {
+            (RegularFileStateV1::Absent,VersionContent::Tombstone,None)=>{},
+            (RegularFileStateV1::Present{sha256,size,mode},content,Some(bytes)) if !matches!(content,VersionContent::Tombstone) && *mode<=0o777 && *size==bytes.len() as u64 && *sha256==format!("{:x}",sha2::Sha256::digest(bytes))=>{},
+            _=>return Err(RestoreOutcome::Corrupt),
+        }
+        if observe_regular_file_v1(&provider.path).map_err(|_|RestoreOutcome::Corrupt)?.0!=journal.expected {return Err(RestoreOutcome::Conflict)}
+        let old=journal.clone();journal.state=RegularFileJournalStateV1::RegularFileV1Applying;
+        if !catalog.compare_restore_exact(&request.restore_id,Some(&old),&journal).map_err(|_|RestoreOutcome::Corrupt)? {return Err(RestoreOutcome::Conflict)}
+        if provider.apply_regular_file_v1(&journal,source_bytes.as_deref()).is_err() {
+            let old=journal.clone();journal.state=RegularFileJournalStateV1::RegularFileV1Unknown;
+            if !catalog.compare_restore_exact(&request.restore_id,Some(&old),&journal).map_err(|_|RestoreOutcome::Corrupt)? {return Err(RestoreOutcome::Conflict)}
+            return Err(RestoreOutcome::Partial);
+        }
+        let old=journal.clone();journal.state=RegularFileJournalStateV1::RegularFileV1Complete;
+        if !catalog.compare_restore_exact(&request.restore_id,Some(&old),&journal).map_err(|_|RestoreOutcome::Corrupt)? {return Err(RestoreOutcome::Conflict)}
+        Ok(journal.clone())
+    }.await;
+    let _=catalog.release_leases(&request.restore_id,&leases);
+    result
 }
 
 pub async fn prepare_restore(
@@ -807,6 +1059,10 @@ pub async fn prepare_restore_with_metadata(
         .read_version(source_action_id, source)
         .await?
         .map(|bytes| bytes.to_vec());
+    if source_host_metadata.as_ref().and_then(|m|m.resource_type.as_deref())==Some("Directory")
+        && content.as_ref().is_some_and(|bytes| bytes.starts_with(crate::tree_container::MAGIC)) {
+        return Err("worktree tree restore requires Source owner".into());
+    }
     Ok(RestorePlan {
         source_action_id: source_action_id.into(),
         source_version_id: source.version_id.clone(),
@@ -834,6 +1090,9 @@ pub async fn prepare_restore_authorized(
         .get_action(&request.source_action_id)
         .map_err(|_| RestoreOutcome::UnknownVersion)?
         .ok_or(RestoreOutcome::UnknownVersion)?;
+    if action.recovery_only {
+        return Err(RestoreOutcome::UnknownVersion);
+    }
     if action.resource_key.account_id != request.account_id
         || request.destination.account_id != request.account_id
         || ![action.before.as_ref(), action.after.as_ref()]
@@ -849,6 +1108,7 @@ pub async fn prepare_restore_authorized(
     {
         return Err(RestoreOutcome::Unauthorized);
     }
+    if crate::tree_container::action_marks_tree(&action) {return Err(RestoreOutcome::Unauthorized)}
     if let Some(journal) = coordinator.catalog().get_restore::<RestoreJournal>(&request.restore_id).map_err(|_| RestoreOutcome::Corrupt)? {
         if journal.source_action_id != request.source_action_id || journal.source_version_id != request.source_version_id
             || journal.destination != request.destination || journal.expected_destination_fingerprint != request.expected_destination_fingerprint {
@@ -1051,11 +1311,15 @@ pub async fn apply_restore_authorized_durable<P: RestoreProvider + ?Sized>(
     plan: &RestorePlan,
     provider: &mut P,
 ) -> Result<RestoreReceipt, RestoreOutcome> {
+    if plan.source_host_metadata.as_ref().and_then(|m|m.resource_type.as_deref())==Some("Directory")
+        && plan.content.as_ref().is_some_and(|bytes| bytes.starts_with(crate::tree_container::MAGIC)) {return Err(RestoreOutcome::Unauthorized)}
     let mut journal = coordinator
         .catalog()
         .get_restore::<RestoreJournal>(&request.restore_id)
         .map_err(|_| RestoreOutcome::Corrupt)?
         .ok_or(RestoreOutcome::UnknownVersion)?;
+    let source_action=coordinator.catalog().get_action(&journal.source_action_id).map_err(|_|RestoreOutcome::Corrupt)?.ok_or(RestoreOutcome::UnknownVersion)?;
+    if crate::tree_container::action_marks_tree(&source_action) {return Err(RestoreOutcome::Unauthorized)}
     if journal.state == RestoreState::Complete {
         // A retry may verify a committed write, but must never invoke apply again.
         if journal.verification.as_ref().is_some_and(|proof| proof.status == "Pending") {
@@ -1310,6 +1574,8 @@ where
     let Some(content) = plan.content.as_ref() else {
         return Err("source version has no bytes".into());
     };
+    if plan.source_host_metadata.as_ref().and_then(|m|m.resource_type.as_deref())==Some("Directory")
+        && content.starts_with(crate::tree_container::MAGIC) {return Err("worktree tree restore requires Source owner".into());}
     write(content)?;
     Ok(RestoreReceipt {
         verification: None,

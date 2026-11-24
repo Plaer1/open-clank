@@ -7,8 +7,6 @@ Idempotent: skips if the course already exists.
 
 from __future__ import annotations
 
-import copy
-import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,9 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.openclank.copal_treehouse import (
     apply_treehouse_command,
-    compute_treehouse_projections,
-    new_treehouse_state,
-    public_treehouse_snapshot,
     validate_treehouse_state,
 )
 
@@ -97,7 +92,7 @@ MODULES = [
                     "```\n"
                     "data/\n"
                     "  app.db              # Main SQLite database (sessions, models, tasks)\n"
-                    "  frankenmemory.db    # Frankenmemory store (memory, candidates, graph)\n"
+                    "  memery.db          # Memery store (memory, candidates, graph)\n"
                     "  auth.json           # User accounts and roles\n"
                     "  user_prefs.json     # Per-user preferences\n"
                     "  runtime/            # Agent engine, logs, generated content\n"
@@ -107,7 +102,7 @@ MODULES = [
                     "1. `systemctl --user start open-clank` (or `python app.py`)\n"
                     "2. Loads settings, validates config\n"
                     "3. Initializes database (SQLite via SQLAlchemy)\n"
-                    "4. Connects Frankenmemory provider (fm-mcp over MCP stdio)\n"
+                    "4. Connects Memery host service\n"
                     "5. Starts FastAPI server on `127.0.0.1:7777`\n\n"
                     "## Health check\n"
                     "Visit `/health` or use the Diagnostics view in the UI to verify all services are running.\n\n"
@@ -153,7 +148,7 @@ MODULES = [
                     "## Logs\n"
                     "Open Clank writes logs to stdout and optionally to a file:\n"
                     "- Application logs: request/response cycles, errors, tool calls\n"
-                    "- Session logs: per-session transcripts in `~/.odysseus/sessions/`\n"
+                    "- Session logs: review conversations in Chats\n"
                     "- Diagnostics view shows live log output\n\n"
                     "## Graceful shutdown\n"
                     "Ctrl+C triggers `shutdown_lifecycle.py`:\n"
@@ -374,7 +369,7 @@ MODULES = [
     {
         "id": "module:memory",
         "title": "4. Memory, Trust & Review",
-        "description": "Frankenmemory tiers, off/automatic/manual modes, candidate review, and trust boundaries.",
+        "description": "Memery tiers, off/automatic/manual modes, candidate review, and trust boundaries.",
         "activities": [
             {
                 "id": "act:memory-capture",
@@ -384,7 +379,7 @@ MODULES = [
                 "skillIds": ["skill:memory"],
                 "content": (
                     "# Memory Architecture\n\n"
-                    "Open Clank uses **Frankenmemory** — a tiered memory engine (fm-mcp, Rust) over MCP stdio.\n\n"
+                    "Open Clank uses **Memery** — a tiered memory engine backed by a host-owned Rust worker.\n\n"
                     "## Memory tiers\n"
                     "- **Raw**: every captured turn (evidence trail, not recallable)\n"
                     "- **Candidates**: extracted facts pending user review\n"
@@ -811,22 +806,3 @@ def seed_class(state: dict) -> dict:
 
 if __name__ == "__main__":
     raise SystemExit('This legacy default seed is retired. Shared Main Quests are shipped with Open Clank; this command writes nothing.')
-    state_path = Path.home() / ".odysseus" / ".copal" / "treehouse-state.json"
-    if state_path.exists():
-        state = json.loads(state_path.read_text())
-        validate_treehouse_state(state)
-    else:
-        state = new_treehouse_state("Open Clank Learner")
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if COURSE_ID in state["courses"]:
-        print(f"Course '{COURSE_TITLE}' already exists (id: {COURSE_ID}). Skipping.")
-    else:
-        state = seed_class(state)
-        state_path.write_text(json.dumps(state, indent=None, separators=(",", ":"), ensure_ascii=False))
-        print(f"Seeded '{COURSE_TITLE}' with {len(MODULES)} modules, {sum(len(m['activities']) for m in MODULES)} activities, {len(ASSIGNMENTS)} assignments, {len(BADGES)} badges, {len(QUESTS)} quests.")
-
-    proj = compute_treehouse_projections(state)
-    print(f"Total events: {len(state['events'])}")
-    print(f"Skills: {len(state['skills'])}")
-    print(f"Courses: {len(state['courses'])}")

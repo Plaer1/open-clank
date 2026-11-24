@@ -47,6 +47,8 @@ class NormalizedChatRoute:
     billing_lane: str
     operations: tuple[str, ...]
     capabilities: dict[str, Any]
+    catalog_revision: int
+    option_route_id: str
     public_endpoint_id: str
     provider_grant_id: str | None = None
     share_label: str | None = None
@@ -88,6 +90,20 @@ def shared_provider_group_id(
         context=f"provider-share-group:{normalized_recipient}",
     )
     return f"shared_provider_{digest[:24]}"
+
+
+def request_option_route_id(route: NormalizedChatRoute) -> str:
+    """Return the stable public route key used only to bind option selections."""
+
+    return route.option_route_id
+
+
+def _shared_request_option_route_id(recipient: str, grant_id: str, model_route_id: str) -> str:
+    digest = keyed_digest(
+        f"{str(grant_id)}\0{str(model_route_id)}",
+        context=f"provider-share-option-route:{normalized_provider_owner(recipient)}",
+    )
+    return f"pmro_{digest[:24]}"
 
 
 def share_id_from_endpoint(endpoint_id: str | None) -> str | None:
@@ -151,6 +167,11 @@ def _build_owned(
         model_route_id=route.id,
     ):
         raise ChatRouteUnavailable("Selected model is not entitled for this account")
+    return _describe_owned_route(connection, route)
+
+
+def _describe_owned_route(connection: Any, route: Any) -> NormalizedChatRoute:
+    """Project the already authorized account route into picker metadata."""
     normalized_connection_id = _validate_connection_identity(connection.id)
     return NormalizedChatRoute(
         model_route_id=route.id,
@@ -164,6 +185,8 @@ def _build_owned(
         billing_lane=connection.billing_lane,
         operations=tuple(str(value) for value in (route.operations or ())),
         capabilities=dict(route.capabilities or {}),
+        catalog_revision=max(1, int(route.catalog_revision or 1)),
+        option_route_id=str(route.id),
         public_endpoint_id=normalized_connection_id,
     )
 
@@ -204,6 +227,8 @@ def _build_shared(
         billing_lane=scope.billing_lane,
         operations=tuple(str(value) for value in (route.operations or ())),
         capabilities=dict(route.capabilities or {}),
+        catalog_revision=max(1, int(route.catalog_revision or 1)),
+        option_route_id=_shared_request_option_route_id(recipient, grant.id, route.id),
         public_endpoint_id=shared_endpoint_id(grant.id),
         provider_grant_id=grant.id,
         share_label=grant.label,
@@ -383,14 +408,8 @@ def list_chat_routes(
                 model_route_id=route.id,
             ):
                 continue
-            own.append(
-                _build_owned(
-                    store,
-                    owner=recipient,
-                    connection_id=connection.id,
-                    route=route,
-                )
-            )
+            if route.connection_id == connection.id:
+                own.append(_describe_owned_route(connection, route))
 
     shared: list[NormalizedChatRoute] = []
     for grant in store.list_share_grants(recipient=recipient):

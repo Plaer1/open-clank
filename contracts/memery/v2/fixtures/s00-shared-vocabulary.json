@@ -1,0 +1,202 @@
+{
+  "fixture_version": "s00.vocabulary.v1",
+  "status": "planning_contract_not_current_v2_wire",
+  "compatibility": {
+    "current_wire": "frankenmemory.v2 schema.json remains strict and unchanged",
+    "entity_ref": "existing entity_ref retains its current meaning and shape",
+    "knowledge_ref": "distinct future negotiated variant; old peers must reject as unsupported rather than reinterpret entity_ref",
+    "absence": "unknown or omitted is distinct from explicit false, zero, empty string, and typed null",
+    "storage": "fixtures do not create a database, change schema, register jobs, or activate forgetting"
+  },
+  "contracts": [
+    {
+      "name": "SourcePart",
+      "status": "future_host_contract",
+      "fields": [
+        "owner",
+        "chat_id",
+        "actor_id",
+        "message_id",
+        "part_id",
+        "archive_revision",
+        "workspace",
+        "project_optional",
+        "content_hash",
+        "source_locator_optional",
+        "bounded_span_optional",
+        "completed_turn_commit_marker_optional",
+        "availability"
+      ],
+      "authority": "host conversation archive owns canonical owner/chat/actor/message/part/revision identity; workspace/project and content hash are validated metadata; source locator is not a replacement for identity; ACP revisions are distinct",
+      "owner_slice": "S04",
+      "consumers": [
+        "S05",
+        "S06",
+        "S07",
+        "S08",
+        "S11"
+      ],
+      "invariants": [
+        "hydrate authorized exact current revision only; historical hydration is unsupported",
+        "validate content hash, workspace, removal and optional span bounds",
+        "require committed archive part and verified completed-turn marker for eligible automatic capture",
+        "changed revision is stale; missing, deleted or inaccessible source fails closed",
+        "no raw-copy fallback; archive append failure cannot produce durable success"
+      ]
+    },
+    {
+      "name": "MemoryReference",
+      "status": "future_negotiated_contract",
+      "fields": [
+        "owner",
+        "workspace",
+        "project_optional",
+        "block_id",
+        "exact_revision_optional"
+      ],
+      "authority": "existing V2 block identity and immutable revision with owner/scope visibility",
+      "owner_slice": "S01",
+      "consumers": [
+        "S02",
+        "S03",
+        "S06",
+        "S07",
+        "S08",
+        "S10"
+      ],
+      "invariants": [
+        "cross-owner references rejected",
+        "exact revision does not silently become current head",
+        "entity_ref is not a knowledge_ref"
+      ]
+    },
+    {
+      "name": "Proposal",
+      "status": "future_behavior_contract",
+      "fields": [
+        "owner",
+        "workspace",
+        "project_optional",
+        "target_block_id",
+        "expected_revision",
+        "field_before_values",
+        "field_after_values",
+        "provenance",
+        "source_refs",
+        "proposer",
+        "reason",
+        "proposed_classification",
+        "state",
+        "scoped_idempotency_key"
+      ],
+      "authority": "V2 revision and current human-protection authority; proposals are not accepted values",
+      "owner_slice": "S03",
+      "consumers": [
+        "S05",
+        "S08",
+        "S09"
+      ],
+      "invariants": [
+        "stale expected revision cannot overwrite",
+        "legacy unknown is not inferred manual",
+        "manual falsy values remain explicit",
+        "states are pending approved rejected or superseded",
+        "same scoped idempotency key cannot silently change payload"
+      ]
+    },
+    {
+      "name": "Observation",
+      "status": "future_event_contract",
+      "fields": [
+        "owner",
+        "workspace",
+        "event_id",
+        "producer",
+        "scoped_idempotency_key",
+        "payload_hash",
+        "source_part_ref",
+        "memory_ref",
+        "kind",
+        "outcome",
+        "actor_or_operation",
+        "recall_attempt_id",
+        "admission_ref_optional",
+        "occurred_at"
+      ],
+      "authority": "S06 append-only event evidence tied to exact source and memory revision",
+      "owner_slice": "S06",
+      "consumers": [
+        "S07",
+        "S08",
+        "S14"
+      ],
+      "invariants": [
+        "found is not admitted or helpful",
+        "deduplicate retry by scoped identity",
+        "pending turn evidence is bounded and not durable success",
+        "deduplication includes owner workspace producer idempotency kind and exact memory revision",
+        "same-key different payload hash conflicts",
+        "admission references found event where available; helped references admission"
+      ]
+    },
+    {
+      "name": "Job",
+      "status": "future_native_job_contract",
+      "fields": [
+        "owner",
+        "workspace",
+        "project_optional",
+        "job_id",
+        "work_type",
+        "normalized_connection_id",
+        "model_route_id",
+        "source_refs",
+        "policy_revision",
+        "state",
+        "attempt",
+        "fence",
+        "budget",
+        "idempotency_key"
+      ],
+      "authority": "existing V2 jobs and fenced attempts; source and policy revalidated before effects",
+      "owner_slice": "S05",
+      "consumers": [
+        "S04",
+        "S08",
+        "S12",
+        "WB11"
+      ],
+      "invariants": [
+        "busy or unknown does not authorize dispatch",
+        "cancellation is not success",
+        "retry respects idempotency and persisted budget",
+        "connection_id is backend contention key; model_route_id retains exact entitlement route",
+        "separate global one-call cap remains required"
+      ]
+    },
+    {
+      "name": "RatingTarget",
+      "status": "future_chat_feedback_contract",
+      "fields": [
+        "owner",
+        "chat_id",
+        "target_kind",
+        "exact_message_or_snapshot_revision",
+        "ordered_part_boundaries",
+        "rating_optional"
+      ],
+      "authority": "canonical chat message/section or whole-chat snapshot revision and owner access",
+      "owner_slice": "S11",
+      "consumers": [
+        "S06",
+        "S14"
+      ],
+      "invariants": [
+        "unrated differs from zero",
+        "only 0..5 half steps accepted",
+        "Unicode and multi-message boundaries remain exact",
+        "inaccessible or stale targets do not rebind"
+      ]
+    }
+  ]
+}

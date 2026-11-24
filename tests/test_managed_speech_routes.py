@@ -67,10 +67,12 @@ def _client(tmp_path):
     tts = _TTS(tmp_path)
     stt = _STT()
     app = FastAPI()
+    app.state.auth_manager = SimpleNamespace(users={"alice": {}})
 
     @app.middleware("http")
     async def identity(request: Request, call_next):
         request.state.current_user = "alice"
+        request.state.authenticated = True
         if request.headers.get("authorization"):
             request.state.api_token = True
             request.state.api_token_owner = "alice"
@@ -91,6 +93,16 @@ def _route(**_kwargs):
         "model_id": "speech-test",
         "model_name": "Speech Test",
         "connection_id": "pcn_speech",
+    }
+
+
+def _local_route(**_kwargs):
+    return {
+        **_route(**_kwargs),
+        "model_id": "kokoro/Kokoro-82M",
+        "family_id": "local-executor",
+        "adapter_id": "openclank-local-executor",
+        "billing_lane": "local",
     }
 
 
@@ -154,3 +166,56 @@ def test_speech_bearers_require_chat_scope_and_reject_tui_tokens(monkeypatch, tm
 
     assert missing.status_code == 403
     assert tui.status_code == 403
+
+
+def test_local_kokoro_uses_wav_and_fixed_defaults(monkeypatch, tmp_path):
+    client, _, _ = _client(tmp_path)
+    calls = []
+
+    async def synthesize(**kwargs):
+        calls.append(kwargs)
+        return b"RIFFmanaged", "audio/wav", _result("audio.synthesize")
+
+    monkeypatch.setattr(tts_routes, "managed_route_summary", _local_route)
+    monkeypatch.setattr(tts_routes, "synthesize_audio", synthesize)
+    response = client.post("/api/tts/synthesize", json={"text": "hello"})
+
+    assert response.status_code == 200
+    assert calls[0]["voice"] == "af_heart"
+    assert calls[0]["speed"] == 1.0
+    assert calls[0]["response_format"] == "wav"
+    stats = client.get("/api/tts/stats")
+    assert stats.json()["configured"] is True
+    assert stats.json()["runtime_status"] == "unknown"
+    assert stats.json()["ready"] is False
+
+
+def test_local_kokoro_rejects_non_default_speed(monkeypatch, tmp_path):
+    client, service, _ = _client(tmp_path)
+    service._load_settings = lambda _owner: {
+        "tts_enabled": True, "tts_provider": "managed", "tts_voice": "alloy", "tts_speed": "1.25",
+    }
+    monkeypatch.setattr(tts_routes, "managed_route_summary", _local_route)
+    response = client.post("/api/tts/synthesize", json={"text": "hello"})
+    assert response.status_code == 400
+    assert "speed 1" in response.json()["detail"]["message"]
+
+
+def test_kokoro_model_id_on_remote_route_keeps_remote_defaults(monkeypatch, tmp_path):
+    client, _, _ = _client(tmp_path)
+    calls = []
+
+    async def synthesize(**kwargs):
+        calls.append(kwargs)
+        return b"ID3managed", "audio/mpeg", _result("audio.synthesize")
+
+    monkeypatch.setattr(tts_routes, "managed_route_summary", lambda **_kwargs: {
+        **_route(), "model_id": "kokoro/Kokoro-82M", "family_id": "openai",
+        "adapter_id": "openai-responses", "billing_lane": "metered_api",
+    })
+    monkeypatch.setattr(tts_routes, "synthesize_audio", synthesize)
+    response = client.post("/api/tts/synthesize", json={"text": "remote"})
+
+    assert response.status_code == 200
+    assert calls[0]["voice"] == "alloy"
+    assert calls[0]["response_format"] == "mp3"

@@ -187,7 +187,9 @@ class FakeBridge:
                 ]
             }
         if operation == "asset_path":
-            return {"path": str(self.data_dir / "assets" / "asset.png"), "name": "Images/asset.png", "size": 7}
+            if getattr(self, "legacy_asset", False):
+                return {"path": str(self.data_dir / "assets" / "asset.png"), "name": "Images/asset.png", "size": 7}
+            return {"path": str(self.data_dir / "assets" / "► media" / "nested folder" / "asset.png"), "name": "Images/asset.png", "size": 7, "root": str(self.data_dir / "assets")}
         return {"outcome": "created", "doc": {"id": "DOC1"}}
 
 
@@ -1662,16 +1664,32 @@ def test_obsidian_import_preserves_binary_and_dot_namespace_payloads(tmp_path, m
 
 
 def test_asset_delivery_is_scoped_to_owned_asset_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(copal_routes, "require_user", lambda _request: "local")
     http, bridge = client(tmp_path, monkeypatch)
-    (tmp_path / "assets").mkdir()
-    (tmp_path / "assets" / "asset.png").write_bytes(b"png-data")
+    nested_asset = tmp_path / "assets" / "► media" / "nested folder" / "asset.png"
+    nested_asset.parent.mkdir(parents=True)
+    nested_asset.write_bytes(b"png-data")
 
     response = http.get("/api/copal/assets/DOC1?workspace=personal")
 
     assert response.status_code == 200
     assert response.content == b"png-data"
     assert response.headers["content-type"] == "image/png"
-    assert bridge.calls[-1][1] == {"owner": "local", "workspace_id": "personal", "id": "DOC1"}
+    assert bridge.calls[-1][1] == {"owner": "user:local", "workspace_id": "personal", "id": "DOC1"}
+
+
+def test_legacy_asset_delivery_retains_flat_asset_root_boundary(tmp_path, monkeypatch):
+    monkeypatch.setattr(copal_routes, "require_user", lambda _request: "local")
+    http, bridge = client(tmp_path, monkeypatch)
+    bridge.legacy_asset = True
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "asset.png").write_bytes(b"legacy-png")
+
+    response = http.get("/api/copal/assets/DOC1?workspace=personal")
+
+    assert response.status_code == 200
+    assert response.content == b"legacy-png"
 
 
 def test_copal_sidebar_has_all_native_submenus_in_stable_order():
@@ -1807,8 +1825,8 @@ def test_code_editor_folder_picker_is_separate_from_agent_workspace_state():
     source = (ROOT / "static/js/codeEditor.js").read_text()
     workspace = (ROOT / "static/js/workspace.js").read_text()
 
-    assert "const CODE_WORKSPACE_KEY = 'odysseus-code-workspace'" in source
-    assert "odysseus-workspace" not in source
+    assert "const CODE_WORKSPACE_KEY = 'openclank-code-workspace'" in source
+    assert "openclank-workspace" not in source
     assert "window._isAdmin" not in source
     assert "selection_kind: 'app_folder'" in source
     assert "selectionKind: 'app_folder'" in source
@@ -1960,7 +1978,7 @@ def test_copal_reuses_native_window_calendar_and_sidebar_contracts():
     assert "makeWindowDraggable" in windows
     assert "resizeStorageKey: sizeKey" in windows
     assert "`copal-${view}-modal`" in source
-    assert "odysseus-copal-${view}-window-size" in source
+    assert "openclank-copal-${view}-window-size" in source
     assert "id: 'copal-modal'" not in source
     assert "openCalendar" in source
     assert "function renderCalendar()" in source  # dormant, intentionally retained

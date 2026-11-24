@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.memery_writer_fence import connect_writer
+
 from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
@@ -137,44 +139,38 @@ class MemoryMediaStore:
             data_dir = Path(default_data_dir).expanduser().resolve()
         return cls(str(db_path), str(data_dir))
 
+    @staticmethod
+    def _tables_present(conn: sqlite3.Connection) -> bool:
+        return conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN "
+            "('fm_v2_media_assets','fm_v2_media_representations')"
+        ).fetchone()[0] == 2
+
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS fm_v2_media_assets (
-                owner_id TEXT NOT NULL,
-                asset_id TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                media_type TEXT NOT NULL,
-                width INTEGER NOT NULL,
-                height INTEGER NOT NULL,
-                byte_size INTEGER NOT NULL,
-                original_sha256 TEXT NOT NULL,
-                canonical_sha256 TEXT NOT NULL,
-                blob_key TEXT NOT NULL,
-                state TEXT NOT NULL DEFAULT 'active',
-                created_at TEXT NOT NULL,
-                PRIMARY KEY(owner_id, asset_id),
-                UNIQUE(owner_id, source_id, asset_id)
-            );
-            CREATE TABLE IF NOT EXISTS fm_v2_media_representations (
-                owner_id TEXT NOT NULL,
-                representation_id TEXT NOT NULL,
-                asset_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                text TEXT NOT NULL,
-                text_hash TEXT NOT NULL,
-                provenance_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY(owner_id, representation_id),
-                FOREIGN KEY(owner_id, asset_id) REFERENCES fm_v2_media_assets(owner_id, asset_id)
-            );
-            """
-        )
-        return conn
+        conn = connect_writer(self.db_path, timeout=30)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            # Future epochs must never bootstrap optional schema from a read.
+            if conn.execute("PRAGMA user_version").fetchone()[0] != 16:
+                return conn
+            if self._tables_present(conn):
+                return conn
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("PRAGMA user_version").fetchone()[0] != 16:
+                conn.rollback()
+                return conn
+            from src.openclank.memory_optional_schema import apply_optional_schema
+            apply_optional_schema(conn, 'media')
+            conn.commit()
+            return conn
+
+        except BaseException:
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+            raise
 
     def _blob_path(self, owner: str, canonical_sha256: str) -> Path:
         if not isinstance(owner, str) or not owner.strip():
@@ -376,21 +372,25 @@ class MemoryMediaStore:
     def preview_owner_purge(self, owner: str) -> dict[str, Any]:
         """Fingerprint every owner media row and byte before destructive reset."""
 
+        assets: list[dict[str, Any]] = []
+        representations: list[dict[str, Any]] = []
         with self._connect() as conn:
-            assets = [
-                dict(row)
-                for row in conn.execute(
-                    "SELECT asset_id,source_id,canonical_sha256,blob_key,state FROM fm_v2_media_assets WHERE owner_id=? ORDER BY asset_id",
-                    (owner,),
-                ).fetchall()
-            ]
-            representations = [
-                dict(row)
-                for row in conn.execute(
-                    "SELECT representation_id,asset_id,text_hash FROM fm_v2_media_representations WHERE owner_id=? ORDER BY representation_id",
-                    (owner,),
-                ).fetchall()
-            ]
+            # An optional group that was never created holds nothing; a reset must not create it.
+            if self._tables_present(conn):
+                assets = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT asset_id,source_id,canonical_sha256,blob_key,state FROM fm_v2_media_assets WHERE owner_id=? ORDER BY asset_id",
+                        (owner,),
+                    ).fetchall()
+                ]
+                representations = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT representation_id,asset_id,text_hash FROM fm_v2_media_representations WHERE owner_id=? ORDER BY representation_id",
+                        (owner,),
+                    ).fetchall()
+                ]
         files = self._owner_blob_inventory(owner)
         referenced_hashes = {str(row["canonical_sha256"]) for row in assets}
         orphan_files = [
@@ -444,23 +444,27 @@ class MemoryMediaStore:
         new_directory = self._owner_blob_directory(new_owner)
         old_files = self._owner_blob_inventory(old_owner)
         new_files = self._owner_blob_inventory(new_owner)
+        old_assets: list[Any] = []
+        old_representations: list[Any] = []
+        new_asset_count = new_representation_count = 0
         with self._connect() as conn:
-            old_assets = conn.execute(
-                "SELECT * FROM fm_v2_media_assets WHERE owner_id=? ORDER BY asset_id",
-                (old_owner,),
-            ).fetchall()
-            new_asset_count = int(conn.execute(
-                "SELECT count(*) FROM fm_v2_media_assets WHERE owner_id=?",
-                (new_owner,),
-            ).fetchone()[0])
-            old_representations = conn.execute(
-                "SELECT * FROM fm_v2_media_representations WHERE owner_id=? ORDER BY representation_id",
-                (old_owner,),
-            ).fetchall()
-            new_representation_count = int(conn.execute(
-                "SELECT count(*) FROM fm_v2_media_representations WHERE owner_id=?",
-                (new_owner,),
-            ).fetchone()[0])
+            if self._tables_present(conn):
+                old_assets = conn.execute(
+                    "SELECT * FROM fm_v2_media_assets WHERE owner_id=? ORDER BY asset_id",
+                    (old_owner,),
+                ).fetchall()
+                new_asset_count = int(conn.execute(
+                    "SELECT count(*) FROM fm_v2_media_assets WHERE owner_id=?",
+                    (new_owner,),
+                ).fetchone()[0])
+                old_representations = conn.execute(
+                    "SELECT * FROM fm_v2_media_representations WHERE owner_id=? ORDER BY representation_id",
+                    (old_owner,),
+                ).fetchall()
+                new_representation_count = int(conn.execute(
+                    "SELECT count(*) FROM fm_v2_media_representations WHERE owner_id=?",
+                    (new_owner,),
+                ).fetchone()[0])
 
         old_row_count = len(old_assets) + len(old_representations)
         new_row_count = new_asset_count + new_representation_count
@@ -692,6 +696,14 @@ class MemoryMediaStore:
     ) -> dict[str, Any]:
         if not isinstance(source_id, str) or not source_id.strip():
             raise MediaAssetError("asset_source_invalid", "The photo source is invalid.")
+        # Check before creating directories or staging any bytes.  The later
+        # metadata transaction repeats this after obtaining its write lock.
+        admission = self._connect()
+        try:
+            if admission.execute("PRAGMA user_version").fetchone()[0] != 16:
+                raise MediaAssetError("asset_store_unavailable", "Photo storage is unavailable.", retryable=True)
+        finally:
+            admission.close()
         blob = self._blob_path(owner, photo.canonical_sha256)
         stage = None
         try:
@@ -715,6 +727,9 @@ class MemoryMediaStore:
         representation_inserted = False
         try:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("PRAGMA user_version").fetchone()[0] != 16:
+                    raise MediaAssetError("asset_store_unavailable", "Photo storage is unavailable.", retryable=True)
                 cursor = conn.execute(
                     "INSERT OR IGNORE INTO fm_v2_media_assets(owner_id,asset_id,source_id,filename,media_type,width,height,byte_size,original_sha256,canonical_sha256,blob_key,state,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (owner, photo.asset_id, source_id, filename[:255], photo.media_type, photo.width, photo.height, len(photo.bytes), photo.original_sha256, photo.canonical_sha256, self._blob_key(blob), "active", now),

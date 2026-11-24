@@ -6,7 +6,7 @@ import test from 'node:test';
 
 const source=fs.readFileSync(new URL('../../static/js/copal.js',import.meta.url),'utf8');
 function section(start,end){const a=source.indexOf(start),b=source.indexOf(end,a+start.length);assert(a>=0&&b>a);return source.slice(a,b).replace(/^export /gm,'');}
-const actual=[section('function ensureViewWindow(view)','function buildWorkspace()'),section('function buildWorkspace()','// --- Per-entry Copal visibility'),section('function defaultEntryVisibility()','async function saveEntryVisibility()'),section('export function whenReady()','function bindSidebar()'),section('export async function init(','export function getNotesSettings()')].join('\n');
+const actual=[section('function ensureViewWindow(view)','function buildWorkspace()'),section('function buildWorkspace()','// --- Per-entry Copal visibility'),section('function defaultEntryVisibility()','async function saveEntryVisibility()'),section('export function whenReady()','function bindSidebar()'),section('export function init(','export function getNotesSettings()')].join('\n');
 
 function fixture(hook){
  const events=new Map(),calls=[],windows=[],state={contextEpoch:0,windows:new Map(),docs:[],entryVisibility:null,entryVisibilityError:null};
@@ -14,7 +14,7 @@ function fixture(hook){
  const treeHouse={loadState(){calls.push('treehouse-state');},refreshEngagement(){},stopEngagement(){}};
  if(hook!==undefined)treeHouse.setNavigationWindow=hook;
  const deps={state,window,treeHouse,Worker:undefined,planningFeature:{loadState(){calls.push('planning-state');}},VIEWS:['treehouse','graph'],COPAL_LAUNCHER_IDS:['treehouse','graph'],LABELS:{treehouse:'TreeHouse',graph:'Graph'},ENTRY_VIS_KEY:'copal_entry_visibility',
-  suspendCopalScope(){calls.push('suspend');},handleContextObjectCommand(){},configureCopalStorage(){calls.push('storage');},copalStorageKey:v=>v,localStorage:{getItem:()=>null,setItem(){}},
+  suspendCopalScope(){calls.push('suspend');},mountWorkbenchMenu(){},handleContextObjectCommand(){},configureCopalStorage(){calls.push('storage');},copalStorageKey:v=>v,localStorage:{getItem:()=>null,setItem(){}},
   api:async route=>{assert.equal(route,'/status');calls.push('status');return{storage_namespace:'synthetic-init',account_id:'synthetic-account'};},
   createCopalWindow(options){const w={id:options.id,root:{addEventListener(){}},body:{},actions:{append(){}}};windows.push(w);return w;},
   h:()=>({addEventListener(){}}),resolveView:v=>v,featureFor:()=>null,activateView(){},markActive(){},renderView(){},createDocument(){},importVault(){},loadDocuments(){},open(){},
@@ -22,7 +22,7 @@ function fixture(hook){
   location:{pathname:'/',search:''},resolveAppletLocation:()=>null,CustomEvent:class{constructor(type){this.type=type;}},
   fetch:async route=>{assert.equal(route,'/api/prefs/copal_entry_visibility');calls.push('appearance-read');return{ok:true,json:async()=>({value:{}})};},
  };
- const functions=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;${actual};return{init,whenReady,ensureViewWindow};`)(deps);
+ const functions=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;let editorNavigationTicket=0;${actual};return{init,whenReady,ensureViewWindow};`)(deps);
  return{...functions,state,calls,windows,treeHouse};
 }
 

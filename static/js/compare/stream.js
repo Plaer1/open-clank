@@ -107,16 +107,17 @@ async function _runSynthForPane(modelToUse, synthPrompt, synthBody, spinner, his
     const decoder = new TextDecoder();
     let synthText = '';
 
+    let pending = '';
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value);
-      const lines = chunk.split('\n');
+      pending += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      const lines = pending.split('\n');
+      pending = done ? '' : lines.pop();
       for (const line of lines) {
         if (line.startsWith('data: ') && line !== 'data: [DONE]') {
           try {
             const d = JSON.parse(line.slice(6));
-            if (d.delta) {
+            if (d.delta && !d.thinking) {
               synthText += d.delta;
               if (markdownModule && synthText.trim()) {
                 synthBody.innerHTML = markdownModule.processWithThinking(
@@ -130,6 +131,7 @@ async function _runSynthForPane(modelToUse, synthPrompt, synthBody, spinner, his
           } catch (e) {}
         }
       }
+      if (done) break;
     }
 
     // Final highlight
@@ -164,7 +166,9 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
   let metrics = null;
   let timedOut = false;
   let streamOk = false;
-  let currentToolBlock = null;  // track active agent tool block
+  let currentToolBlock = null;
+  const toolBlocks = new Map();
+  const waveTimers = new Set();
   // Idle timeout — abort only if no data is received for this many seconds.
   // Long generations (SVG, big code) are fine as long as the stream stays
   // active. opts.timeout may still tighten this for specific paths.
@@ -217,7 +221,7 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
 
   try {
     const fd = new FormData();
-    fd.append('message', message);
+    fd.append('message', state._selectedModels[paneIdx]?.appendNoMistakes === true ? message + ' no mistakes.' : message);
     fd.append('session', sessionId);
 
     // Compare is always Agent with a server-enforced positive read-only tool set.
@@ -348,11 +352,15 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
               }
               aiBody.appendChild(node);
               currentToolBlock = node;
+              if (json.id) toolBlocks.set(json.id, node);
+              if (node._waveInterval) waveTimers.add(node._waveInterval);
             }
             if (hist) hist.scrollTop = hist.scrollHeight;
 
           // ── Tool output (image or non-image) ──
           } else if (json.type === 'tool_output') {
+            const finished = json.id ? toolBlocks.get(json.id) : currentToolBlock;
+            if (json.id) toolBlocks.delete(json.id);
             if (json.image_url) {
               // Stop image spinner and render generated image in pane
               if (aiMsgEl._imgSpinner) { aiMsgEl._imgSpinner.destroy(); aiMsgEl._imgSpinner = null; }
@@ -383,9 +391,9 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
                 }
                 aiMsgEl._imageData = { url: safeImageUrl, prompt: json.image_prompt, model: json.image_model, size: json.image_size, quality: json.image_quality };
               }
-            } else if (currentToolBlock) {
+            } else if (finished) {
               // Stop wave animation
-              if (currentToolBlock._waveInterval) { clearInterval(currentToolBlock._waveInterval); currentToolBlock._waveInterval = null; }
+              if (finished._waveInterval) { waveTimers.delete(finished._waveInterval); clearInterval(finished._waveInterval); finished._waveInterval = null; }
               const ok = (json.exit_code === 0 || json.exit_code == null);
               const cmd = json.command || '';
               const _toolLabels2 = { bash: 'Terminal', python: 'Python', web_search: 'Web Search', read_file: 'Read File', write_file: 'Write File' };
@@ -395,15 +403,17 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
                 outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${escapeHtml(json.output)}</pre></details>`;
               }
               const cmdHtml = cmd ? `<pre class="agent-thread-cmd">${escapeHtml(cmd)}</pre>` : '';
-              currentToolBlock.className = 'agent-thread-node' + (ok ? '' : ' error');
-              currentToolBlock.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${escapeHtml(tLabel)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml}${outHtml}</div>`;
-              currentToolBlock.querySelector('.agent-thread-header').addEventListener('click', () => currentToolBlock.classList.toggle('open'));
-              currentToolBlock = null;
+              finished.className = 'agent-thread-node' + (ok ? '' : ' error');
+              finished.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${escapeHtml(tLabel)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml}${outHtml}</div>`;
+              finished.querySelector('.agent-thread-header').addEventListener('click', () => finished.classList.toggle('open'));
+              if (currentToolBlock === finished) currentToolBlock = null;
               // Reset text element so next deltas create a fresh container
               aiMsgEl._textEl = null;
               accumulated = '';
             }
             if (hist) hist.scrollTop = hist.scrollHeight;
+          } else if (json.thinking && json.delta) {
+            aiMsgEl._spinner?.updateMessage?.('Thinking…');
           } else if (json.delta) {
             // Skip text deltas if we already rendered an image
             if (aiMsgEl._imageData) continue;
@@ -609,6 +619,7 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
       aiBody.innerHTML = '<span style="color:var(--color-error);">Error: ' + escapeHtml(error.message) + '</span>';
     }
   } finally {
+    for (const timer of waveTimers) clearInterval(timer);
     clearTimeout(timeoutId);
     _timerDone = true;
     cancelAnimationFrame(_rafId);

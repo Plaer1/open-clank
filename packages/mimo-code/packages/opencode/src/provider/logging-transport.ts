@@ -1,5 +1,19 @@
+import { getRuntimeEnvironmentUserAgent } from '@ai-sdk/provider-utils'
+import { sameRequestRoute } from './same-request-route'
+import { verifyGcfRequestFrames, type GcfRequestFramesHandle } from '@/session/gcf-request-frames'
+import { deriveSameRequestRows } from '@/session/gcf-same-request-rows'
+import type { GcfArtifact } from '@/session/gcf-native'
+import { sourceLayoutMessages } from "@/session/source-layout"
+import { observeFinalToolWire } from "@/session/tool-definition-provenance"
+import { sourceAttemptState, sourceAttemptLayout, sourceAttemptRoot, registerSourceWireSettlement } from "@/session/closed-source-provenance"
+import { registerSourceDispatch, invalidateSourceAttempt, acknowledgeSourceWire, type SourceAttemptHandle, type SourceFinalFrame } from "@/session/closed-source-provenance"
+import { JSONParseError, TypeValidationError } from "@ai-sdk/provider"
+import { isPinnedResponsesModel, isPinnedChatModel, pinnedCompatibleChatEndpoint } from "./malformed-origin"
+import { createHash } from "node:crypto"
+import { nativeSingleUserWire, maintenanceCompactionWire, maintenanceChatWire, maintenanceResponsesWire, recallToolWire, contextPrefaceFrame, contextResponsesWire, standingGuidanceWire, nativeMembershipWire, sameNativeMembershipIdentity, type NativeMembershipFrame, type NativeMembershipDelivery, type StandingGuidanceEvidence, type MaintenanceWireCandidate, type ContextPrefaceEvidence, type NativeTextEvidence, type NativeTextDelivery, type NativeDeliveryIdentity, type RecallToolEvidence } from "@/session/context-inspection"
 /** Explicit managed-only transport observation; never discovers external traffic. */
 import { AsyncLocalStorage } from "node:async_hooks"
+import { observeAnthropicFailure, issueAnthropicCallback, type AnthropicFailureProbe } from "./fallback-terminal-witness"
 import type { AccountSelection } from "./account-selection"
 import {
   OpenClankManagedProtocol,
@@ -24,21 +38,75 @@ type SdkEvidence = {
   identityCoverage: "complete" | "partial"
 }
 type CaptureContext = {
+  attempt?: AnthropicFailureProbe
+  started?: boolean
   binding: AccountSelection.Binding
   connection: ExtensionConnection
   admission: LoggingAdmissionResult | null
   dispatches: string[]
+  writes: Set<Promise<unknown>>
   dispatchBase: number
   pendingRetry?: string
   lastSdk?: SdkEvidence
   losses: Set<NonNullable<LoggingEventRequest["lossReasons"]>[number]>
+  codexWindows: Map<string, NonNullable<AccountSelection.AttemptEvidence["codexWindows"]>>
+  requestRateResets: Map<string, { at: string; source: string; observedAt: string; dispatchID: string }>
+  dispatchObservations: Map<string, AccountSelection.DispatchObservation>
+  successSteps: Map<string, AccountSelection.DispatchObservation>
 }
 const contexts = new WeakMap<object, CaptureContext>()
-const sdkDispatchScope = new AsyncLocalStorage<{ scope: object; ids: string[] }>()
+
+/** Private optional tracking arm; does not grant or attest an attempt. */
+export function attachCaptureAttempt(scope: object, attempt: AnthropicFailureProbe): boolean {
+  const context = contexts.get(scope)
+  if (!context || context.attempt || attempt.closed || context.started || context.dispatches.length || context.writes.size) return false
+  context.attempt = attempt
+  return true
+}
+
+/** Retire only this closed arm after every already-issued callback settles. */
+export function retireCaptureAttempt(scope: object, attempt: AnthropicFailureProbe): void {
+  const context=contexts.get(scope)
+  if (!context || context.attempt!==attempt || !attempt.closed) return
+  const release=()=>{ if (contexts.get(scope)===context && context.attempt===attempt && !attempt.callbacks?.size) context.attempt=undefined }
+  if (!attempt.callbacks?.size) { release(); return }
+  void Promise.allSettled([...attempt.callbacks]).then(release)
+}
+
+function issueCapture<T>(authority: CaptureContext, invoke: () => Promise<T>): Promise<T> {
+  authority.started = true
+  return authority.attempt ? issueAnthropicCallback(authority.attempt, invoke) : invoke()
+}
+const sdkFailureResets = new WeakMap<object, { scope: object; reset: { at: string; source: string; observedAt: string; dispatchID: string } }>()
+const sdkFailureDispatch = new WeakMap<object, { scope: object; observation: AccountSelection.DispatchObservation }>()
+type RecallDelivery = { toolCallID: string; attestationID: string; resultSHA256: string; dispatchID: string; bodySHA256: string }
+type ContextDelivery = { contextPartID:string; attestationID:string; textSHA256:string; dispatchID:string; bodySHA256:string }
+type StandingDelivery = {attestationID:string;textSHA256:string;dispatchID:string;bodySHA256:string;systemSHA256:string;wireProfile:"openai-chat"|"codex-responses"}
+export type SameRequestRowsCarrier = { handle:GcfRequestFramesHandle; model:object; artifact:GcfArtifact; current:()=>boolean; graphReferences?:boolean; rows?:boolean }
+const sdkDispatchScope = new AsyncLocalStorage<{ rowView?:SameRequestRowsCarrier; sourceAttempt?:SourceAttemptHandle; sourceAbort?:AbortSignal; sourceFrame?:SourceFinalFrame; membership?:NativeMembershipFrame; deliverMembership?:(receipt:NativeMembershipDelivery)=>Promise<void>; standing?:StandingGuidanceEvidence; deliverStanding?:(receipt:StandingDelivery)=>Promise<void>; scope: object; ids: string[]; candidate?: NativeTextEvidence; deliver?: (receipt: NativeTextDelivery) => Promise<void>; identity?: { sessionID: string; rootOperationID?: string; actorID: string; executionRevision: number; innerTurnID?: string }; recall?: RecallToolEvidence; deliverRecall?: (receipt: RecallDelivery) => Promise<void>; context?:ContextPrefaceEvidence; deliverContext?:(receipt:ContextDelivery)=>Promise<void>; maintenance?:MaintenanceWireCandidate; deliverMaintenance?:(receipt:{dispatchID:string;bodySHA256:string;wireProfile:"openai-chat"|"codex-responses";instructionsSHA256?:string;instructionsClass?:"builtin-compaction-v1"})=>Promise<void> }>()
 
 /** One provider SDK step, including its transport retries, never a shared cursor. */
-export function withSdkDispatches<T>(scope: object | undefined, ids: string[], run: () => T): T {
-  return scope ? sdkDispatchScope.run({ scope, ids }, run) : run()
+export function withSdkDispatches<T>(scope: object | undefined, ids: string[], run: () => T, candidate?: NativeTextEvidence, deliver?: (receipt: NativeTextDelivery) => Promise<void>, identity?: { sessionID: string; rootOperationID?: string; actorID: string; executionRevision: number; innerTurnID?: string }, recall?: RecallToolEvidence, deliverRecall?: (receipt: RecallDelivery) => Promise<void>, context?:ContextPrefaceEvidence, deliverContext?:(receipt:ContextDelivery)=>Promise<void>, maintenance?:MaintenanceWireCandidate, deliverMaintenance?:(receipt:{dispatchID:string;bodySHA256:string;wireProfile:"openai-chat"|"codex-responses";instructionsSHA256?:string;instructionsClass?:"builtin-compaction-v1"})=>Promise<void>, standing?:StandingGuidanceEvidence, deliverStanding?:(receipt:StandingDelivery)=>Promise<void>, membership?:NativeMembershipFrame, deliverMembership?:(receipt:NativeMembershipDelivery)=>Promise<void>, sourceAttempt?:SourceAttemptHandle, sourceAbort?:AbortSignal, sourceFrame?:SourceFinalFrame, rowView?:SameRequestRowsCarrier): T {
+  if (!scope && sourceAttempt) invalidateSourceAttempt(sourceAttempt)
+  return scope ? sdkDispatchScope.run({ scope, ids, candidate, deliver, identity, recall, deliverRecall, context, deliverContext, maintenance, deliverMaintenance, standing, deliverStanding, membership, deliverMembership, sourceAttempt, sourceAbort, sourceFrame, rowView }, run) : run()
+}
+type CodexInnerObservation = { response: Response; dispatchID: string; body: string }
+const codexInnerScope = new AsyncLocalStorage<{ final?: CodexInnerObservation }>()
+/** Observe the actual Codex upstream send, including any post-401 replay. */
+export async function observeCodexInnerSend(url: URL, init: RequestInit, send: () => Promise<Response>): Promise<Response> {
+  const scope = codexInnerScope.getStore()
+  const body = init.body
+  const method = init.method
+  const endpoint = url.href
+  const dispatchID = scope ? crypto.randomUUID() : undefined
+  if (scope) scope.final = undefined
+  const response = await send()
+  if (scope && dispatchID && method === "POST" && endpoint === "https://chatgpt.com/backend-api/codex/responses" &&
+      typeof body === "string" && Buffer.byteLength(body, "utf8") <= 1_000_000 &&
+      !response.redirected && response.url === endpoint) {
+    scope.final = { response, dispatchID, body }
+  }
+  return response
 }
 let pending = 0
 const writes = new Set<Promise<unknown>>()
@@ -54,10 +122,198 @@ export function installCaptureScope<T extends object>(
     connection,
     admission,
     dispatches: [],
+    writes: new Set(),
     dispatchBase: 0,
     losses: new Set(admission ? [] : ["admission_unavailable"]),
+    requestRateResets: new Map(),
+    dispatchObservations: new Map(),
+    successSteps: new Map(),
+    codexWindows: new Map(),
   })
   return scope
+}
+
+/** Bind a private marker to one exact completed SDK step and captured send. */
+export function markSdkSuccessStep(scope:object | undefined, ids:string[], metadata:Record<string, any> | undefined) {
+  const context=scope ? contexts.get(scope) : undefined
+  const clean=metadata && Object.fromEntries(Object.entries(metadata).filter(([key])=>key!=='_openclankSuccessStep'))
+  if (!context || ids.length!==1 || context.successSteps.size>=32) return clean
+  const observation=context.dispatchObservations.get(ids[0]!)
+  if (!observation || observation.httpStatus<200 || observation.httpStatus>299) return clean
+  const marker=crypto.randomUUID()
+  context.successSteps.set(marker,observation)
+  return {...clean,_openclankSuccessStep:{marker}}
+}
+
+export function takeSdkSuccessStep(scope:object | undefined, metadata:Record<string, any> | undefined) {
+  const entry=metadata?._openclankSuccessStep
+  const clean=metadata && Object.fromEntries(Object.entries(metadata).filter(([key])=>key!=='_openclankSuccessStep'))
+  const context=scope ? contexts.get(scope) : undefined
+  const marker=entry && typeof entry==='object' && Object.keys(entry).length===1 ? entry.marker : undefined
+  const observation=typeof marker==='string' ? context?.successSteps.get(marker) : undefined
+  if (typeof marker==='string') context?.successSteps.delete(marker)
+  return {metadata:clean,observation}
+}
+
+/** Parse a bounded RFC3339 calendar value without Date.parse normalization. */
+function strictRfc3339(raw: string, maxFractionDigits: number): number | undefined {
+  if (!raw || raw.length > 64) return
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/.exec(raw)
+  if (!m) return
+  const [,y,mo,d,h,mi,s,fraction,zone] = m
+  const year=Number(y), month=Number(mo), day=Number(d), hour=Number(h), minute=Number(mi), second=Number(s)
+  const leap=year%4===0 && (year%100!==0 || year%400===0)
+  const days=[31,leap?29:28,31,30,31,30,31,31,30,31,30,31]
+  if (month<1 || month>12 || day<1 || day>days[month-1]! || hour>23 || minute>59 || second>59 || (fraction && fraction.length>maxFractionDigits)) return
+  if (zone === "-00:00" || (zone !== "Z" && (Number(zone.slice(1,3)) > 23 || Number(zone.slice(4,6)) > 59))) return
+  const at=Date.parse(raw)
+  return Number.isFinite(at) ? at : undefined
+}
+
+function anthropicRequestRateReset(headers: Headers, now: number) {
+  const raw = headers.get("anthropic-ratelimit-requests-reset")
+  if (!raw || raw.length > 40 || Number(raw.slice(0,4)) < 2000) return
+  const at = strictRfc3339(raw,3)
+  if (at === undefined || at < now || at > now + 31 * 86_400_000) return
+  return { at: new Date(at).toISOString(), source: "anthropic.requests.rate-limit.v1", observedAt: new Date(now).toISOString() }
+}
+
+const sdkCodexWindows = new WeakMap<object, { scope: object; evidence: NonNullable<AccountSelection.AttemptEvidence["codexWindows"]> }>()
+function codexWindowEvidence(headers: Headers, dispatchID: string, now: number): AccountSelection.AttemptEvidence["codexWindows"] {
+  const windows: NonNullable<AccountSelection.AttemptEvidence["codexWindows"]>["windows"] = []
+  for (const window of ["primary", "secondary"] as const) {
+    const prefix = `x-codex-${window}-`
+    const used = headers.get(prefix + "used-percent"), duration = headers.get(prefix + "window-minutes"), reset = headers.get(prefix + "reset-at")
+    if (used === null && duration === null && reset === null) continue
+    if (used === null || !/^(?:0|[1-9]\d{0,4})(?:\.\d{1,6})?$/.test(used)) return
+    const usedPercent = Number(used)
+    if (!Number.isFinite(usedPercent) || usedPercent > 10000) return
+    if (duration !== null && (!/^[1-9]\d{0,5}$/.test(duration) || Number(duration) > 525600)) return
+    if (reset !== null && (!/^[1-9]\d{0,11}$/.test(reset) || !Number.isSafeInteger(Number(reset)))) return
+    const at = reset === null ? undefined : Number(reset) * 1000
+    if (at !== undefined && (!Number.isSafeInteger(at) || at < now || at > now + 366 * 86400000)) return
+    windows.push({window,usedPercent,...(duration === null ? {} : {windowMinutes:Number(duration)}),...(at === undefined ? {} : {resetAt:new Date(at).toISOString()})})
+  }
+  return windows.length ? {source:"openai.codex.subscription.headers.v1",observedAt:new Date(now).toISOString(),dispatchID,windows} : undefined
+}
+
+const malformedBindingKeys = ["bindingID","bindingRevision","rootOperationID","scopeKind","operationID","sessionID","actorID","executionRevision","connectionID","providerID","billingLane","modelID","modelRouteID","accountID","credentialRevision","credentialRequired"] as const
+function malformedBindingIdentity(binding:AccountSelection.Binding):string {
+  return JSON.stringify(malformedBindingKeys.map(key=>binding[key]))
+}
+function malformedAdmissionIdentity(admission:LoggingAdmissionResult):string {
+  const c=admission.context, p=admission.policy
+  return JSON.stringify([admission.admissionID,c.providerID,c.operationID,c.rootOperationID,c.instanceID,c.bindingID,c.bindingRevision,c.identityCoverage,c.persistence.numeric,c.persistence.content,c.persistence.reason,p.revision,p.advanced_enabled])
+}
+const malformedResponses = new WeakMap<object, {scope:object; context:CaptureContext; binding:AccountSelection.Binding; bindingIdentity:string; admission:LoggingAdmissionResult; admissionID:string; admissionIdentity:string; connection:ExtensionConnection; ids:string[]; signal:AbortSignal; observation:AccountSelection.DispatchObservation}>()
+/** Direct pinned-adapter parse failure plus one already-observed 2xx send. */
+export function markMalformedResponse(error:unknown, scope:object | undefined, ids:string[], signal:AbortSignal, model:object) {
+  if (!error || typeof error !== "object" || !scope || !signal || signal.aborted || ids.length !== 1 || !isPinnedResponsesModel(model)
+      || !(JSONParseError.isInstance(error) || TypeValidationError.isInstance(error))) return
+  const context=contexts.get(scope), observed=context?.dispatchObservations.get(ids[0]!)
+  if (!context?.admission || !observed || observed.profile!=="openai.codex.responses.v1" || observed.httpStatus<200 || observed.httpStatus>299) return
+  malformedResponses.set(error,{scope,context,binding:context.binding,bindingIdentity:malformedBindingIdentity(context.binding),admission:context.admission,admissionID:context.admission.admissionID,admissionIdentity:malformedAdmissionIdentity(context.admission),connection:context.connection,ids,signal,observation:{...observed}})
+}
+/** A previously witnessed exact error is sufficient to refuse replay, even if attribution later expires. */
+export function hasObservedMalformedResponse(error:unknown, scope:object | undefined):boolean {
+  if (!error || typeof error !== "object" || !scope) return false
+  return malformedResponses.get(error)?.scope===scope
+}
+
+/** A witnessed malformed 2xx is never safe to retry, even before a step. */
+export function hasMalformedResponse(error:unknown, scope:object | undefined):boolean {
+  if (!error || typeof error !== "object" || !scope) return false
+  const proof=malformedResponses.get(error)
+  return !!proof && proof.scope===scope && contexts.get(scope)===proof.context && proof.context.binding===proof.binding && malformedBindingIdentity(proof.binding)===proof.bindingIdentity && proof.context.admission===proof.admission && proof.admission.admissionID===proof.admissionID && malformedAdmissionIdentity(proof.admission)===proof.admissionIdentity && proof.context.connection===proof.connection && !proof.signal.aborted && proof.ids.length===1 && proof.ids[0]===proof.observation.captureDispatchID
+}
+
+/** Best-effort post-commit annotation; it never controls retry or health. */
+export function emitMalformedDiagnostic(error:unknown, scope:object | undefined, refresh?:{previousCredentialRevision:number;credentialRevision:number}) {
+  if (!error || typeof error !== "object" || !scope) return
+  const proof=malformedResponses.get(error); malformedResponses.delete(error)
+  if (!proof || proof.scope!==scope || contexts.get(scope)!==proof.context || proof.context.binding!==proof.binding || malformedBindingIdentity(proof.binding)!==proof.bindingIdentity || proof.context.admission!==proof.admission || proof.admission.admissionID!==proof.admissionID || malformedAdmissionIdentity(proof.admission)!==proof.admissionIdentity || proof.context.connection!==proof.connection || proof.signal.aborted || proof.ids.length!==1 || proof.ids[0]!==proof.observation.captureDispatchID) return
+  const context=proof.context, admission=proof.admission
+  if (!admission.policy.advanced_enabled) return
+  const observation=proof.observation
+  queue(context, {
+    admissionID:admission.admissionID, dispatchID:observation.captureDispatchID, source:"sdk", sequence:0,
+    diagnosticOnly:refresh ? {version:2,kind:"malformed_success",profile:"openai.codex.responses.v1",httpStatus:observation.httpStatus,upstreamDispatchID:observation.upstreamDispatchID,...refresh} : {version:1,kind:"malformed_success",profile:"openai.codex.responses.v1",httpStatus:observation.httpStatus,upstreamDispatchID:observation.upstreamDispatchID},
+  }, {bestEffort:true})
+}
+
+/** Associate only one actual SDK dispatch with this exact error object. */
+export function recordSdkFailure(error: unknown, scope: object | undefined, dispatchIDs: string[]) {
+  if (!error || typeof error !== "object") return
+  sdkFailureResets.delete(error)
+  sdkCodexWindows.delete(error)
+  sdkFailureDispatch.delete(error)
+  if (!scope || dispatchIDs.length !== 1) return
+  const reset = contexts.get(scope)?.requestRateResets.get(dispatchIDs[0])
+  if (reset) sdkFailureResets.set(error, { scope, reset })
+  const evidence = contexts.get(scope)?.codexWindows.get(dispatchIDs[0])
+  if (evidence) sdkCodexWindows.set(error, {scope,evidence})
+  const observation = contexts.get(scope)?.dispatchObservations.get(dispatchIDs[0])
+  if (observation && observation.httpStatus>=400) sdkFailureDispatch.set(error, {scope,observation})
+}
+
+export function takeSdkFailureDispatch(error: unknown, scope: object | undefined) {
+  if (!scope || !error || typeof error !== 'object') return
+  const item=sdkFailureDispatch.get(error); sdkFailureDispatch.delete(error)
+  return item?.scope===scope ? item.observation : undefined
+}
+
+export function takeSdkFailureReset(error: unknown, scope: object | undefined) {
+  if (!scope || !error || typeof error !== "object") return
+  const evidence = sdkFailureResets.get(error)
+  sdkFailureResets.delete(error)
+  return evidence?.scope === scope ? evidence.reset : undefined
+}
+
+export function takeSdkCodexWindows(error: unknown, scope: object | undefined) {
+  if (!scope || !error || typeof error !== "object") return
+  const item = sdkCodexWindows.get(error)
+  sdkCodexWindows.delete(error)
+  return item?.scope === scope ? item.evidence : undefined
+}
+
+/** Return only the binding identity already attached to this exact scope. */
+export function scopeBinding(scope: object): AccountSelection.Binding | undefined {
+  const binding = contexts.get(scope)?.binding
+  return binding ? Object.freeze({ ...binding, ...(binding.methodPolicy ? { methodPolicy: Object.freeze({ ...binding.methodPolicy }) } : {}) }) as AccountSelection.Binding : undefined
+}
+
+/** Read an existing host capture admission; never register a replacement scope. */
+export function refreshCaptureIdentity(scope: object, binding: AccountSelection.Binding, host: ExtensionConnection) {
+  const context=contexts.get(scope), admission=context?.admission, current=context?.binding
+  const keys=['bindingID','bindingRevision','rootOperationID','scopeKind','operationID','sessionID','actorID','executionRevision',
+    'connectionID','providerID','billingLane','modelID','modelRouteID','accountID','credentialRevision','credentialRequired'] as const
+  if (!context || context.connection!==host || !current || keys.some((key)=>current[key]!==binding[key])
+      || current.methodPolicy!==undefined || binding.methodPolicy!==undefined
+      || typeof admission?.admissionID!=='string' || !admission.admissionID || admission.admissionID.length>256 || admission.context.persistence.numeric!==true
+      || admission.context.bindingID!==binding.bindingID || admission.context.bindingRevision!==binding.bindingRevision
+      || admission.context.rootOperationID!==binding.rootOperationID || admission.context.providerID!==binding.providerID
+      || !admission.context.instanceID) return undefined
+  return {admissionID:admission.admissionID,holderID:admission.context.instanceID,registration:admission}
+}
+
+/** Preserve capture authority across a credential CAS for this exact binding. */
+export function replaceCapturedScope<T extends object>(
+  oldScope: object, nextScope: T, previous: AccountSelection.Binding, next: AccountSelection.Binding, retireOld = false,
+): T {
+  const context = contexts.get(oldScope)
+  const current = context?.binding
+  const samePolicy = (a: AccountSelection.Binding["methodPolicy"], b: AccountSelection.Binding["methodPolicy"]) =>
+    !a || !b ? a === b : a.version === b.version && a.methodID === b.methodID && a.credentialOwner === b.credentialOwner && a.policyRevision === b.policyRevision
+  const keys = ["bindingID", "rootOperationID", "scopeKind", "operationID", "sessionID", "actorID", "executionRevision", "connectionID", "accountID", "modelRouteID"] as const
+  if (!context || !current || keys.some((key) => current[key] !== previous[key] || next[key] !== previous[key]) ||
+      current.bindingRevision !== previous.bindingRevision || next.bindingRevision !== previous.bindingRevision ||
+      current.credentialRevision !== previous.credentialRevision || next.credentialRevision !== (previous.credentialRevision ?? -1) + 1 ||
+      !samePolicy(current.methodPolicy, previous.methodPolicy) || !samePolicy(next.methodPolicy, previous.methodPolicy))
+    throw new Error("Managed provider refreshed scope identity changed")
+  context.binding = next
+  if (retireOld) contexts.delete(oldScope)
+  contexts.set(nextScope, context)
+  return nextScope
 }
 
 export function captureScopeEvidence(
@@ -182,6 +438,19 @@ export async function flushCaptures() {
   await deadline(Promise.allSettled([...writes]), 2100).catch(() => {})
 }
 
+/** Completeness is scoped to this exact admitted execution, not global capture. */
+export async function flushCaptureScope(scope: object | undefined): Promise<boolean> {
+  const context = scope ? contexts.get(scope) : undefined
+  if (!context) return false
+  try {
+    await deadline(Promise.allSettled([...context.writes]), 2100)
+    return context.writes.size === 0 && context.losses.size === 0
+  } catch {
+    context.losses.add("delivery_timeout")
+    return false
+  }
+}
+
 function rpc<T>(invoke: () => Promise<T>): Promise<T> {
   // Timeout limits provider waiting, not the real connection resource lease.
   if (pending >= QUEUE_LIMIT) return Promise.reject(new Error("logging RPC capacity"))
@@ -201,15 +470,19 @@ function rpc<T>(invoke: () => Promise<T>): Promise<T> {
   return underlying
 }
 
-function queue(authority: CaptureContext, event: LoggingEventRequest) {
+function queue(authority: CaptureContext, event: LoggingEventRequest, options?: {bestEffort?:boolean}) {
   if (pending >= QUEUE_LIMIT) {
-    authority.losses.add("queue_full")
+    if (!options?.bestEffort) authority.losses.add("queue_full")
     return
   }
-  const underlying = rpc(() =>
+  const underlying = issueCapture(authority, () => rpc(() =>
     OpenClankManagedProtocol.callHost(authority.connection, "_openclank/logging/v1/events", event),
-  )
+  ))
+  // Optional diagnostics share the bounded RPC queue but cannot delay or
+  // downgrade the ordinary capture/response when the host is unavailable.
+  if (options?.bestEffort) { void underlying.catch(() => {}); return }
   writes.add(underlying)
+  authority.writes.add(underlying)
   void underlying.then(
     (result) => {
       if (!result.accepted) authority.losses.add("write_failed")
@@ -219,6 +492,7 @@ function queue(authority: CaptureContext, event: LoggingEventRequest) {
   void underlying
     .finally(() => {
       writes.delete(underlying)
+      authority.writes.delete(underlying)
     })
     .catch(() => {})
   void deadline(underlying, 2000).catch(() => {
@@ -341,8 +615,8 @@ export function passiveQuota(
     const raw = get(name)
     if (!raw || raw.length > 64) return undefined
     if (format === "rfc3339") {
-      const parsed = Date.parse(raw)
-      return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined
+      const parsed = strictRfc3339(raw, 56)
+      return parsed === undefined ? undefined : new Date(parsed).toISOString()
     }
     let total = 0
     const matches = [...raw.matchAll(/(\d+)(ms|s|m|h)/g)]
@@ -463,6 +737,7 @@ export function captureFetch(fetchFn: typeof fetch, scope: AccountSelection.Scop
   // A standalone CLI can share provider accounts but has no managed authority.
   if (process.env.OPEN_CLANK_MANAGED !== "1" || !authority) return fetchFn
   const captured = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    authority.started = true
     const url = input instanceof Request ? input.url : String(input)
     const wireFormat = /\/messages(?:\?|$)/.test(url)
       ? "anthropic-messages.v1"
@@ -494,7 +769,50 @@ export function captureFetch(fetchFn: typeof fetch, scope: AccountSelection.Scop
       admission.context.persistence.content
     authority.dispatches.push(attemptID)
     const sdkStep = sdkDispatchScope.getStore()
-    if (sdkStep && sdkStep.scope === scope) sdkStep.ids.push(attemptID)
+    if (sdkStep && sdkStep.scope === scope) {
+      sdkStep.ids.push(attemptID)
+      if (sdkStep.sourceAttempt && sdkStep.sourceAbort)
+        registerSourceDispatch(sdkStep.sourceAttempt,sdkStep.identity,sdkStep.sourceAbort,attemptID)
+      else if (sdkStep.sourceAttempt) invalidateSourceAttempt(sdkStep.sourceAttempt)
+    } else if (sdkStep?.sourceAttempt) invalidateSourceAttempt(sdkStep.sourceAttempt)
+    // Choose one effective init before any request logging or wire observation.
+    // This witness is the app-captured default fetch, not a native-intrinsic attestation.
+    const rowView = sdkStep?.rowView
+    const rowModel = rowView ? sameRequestRoute(rowView.model, fetchFn, url) : undefined
+    if (rowView && rowModel && sdkStep?.scope === scope && sdkStep.ids.length === 1 && sdkStep.identity?.rootOperationID &&
+        sdkStep.identity.innerTurnID && typeof input === 'string' && init?.method === 'POST' &&
+        typeof init.body === 'string' && Buffer.byteLength(init.body, 'utf8') <= 51200 && !init.signal?.aborted &&
+        sameRequestRoute(rowView.model, fetchFn, url) === rowModel) {
+      try {
+        const originalInit=init, originalBody=init.body, originalHeaders=init.headers, originalSignal=init.signal
+        const keys=Object.keys(init).sort(), allowed=new Set(['method','body','headers','signal','timeout'])
+        const expectedAgent = `ai-sdk/openai-compatible/2.0.41 ai-sdk/provider-utils/4.0.23 ${getRuntimeEnvironmentUserAgent()}`
+        const eligible=()=>{
+          if (input!==url || originalInit.method!=='POST' || originalInit.body!==originalBody ||
+              originalInit.headers!==originalHeaders || originalInit.signal!==originalSignal || originalSignal?.aborted ||
+              Reflect.ownKeys(originalInit).length!==keys.length || Object.keys(originalInit).sort().join(',')!==keys.join(',') || keys.some(key=>!allowed.has(key)) ||
+              (originalInit as RequestInit & {timeout?:unknown}).timeout!==false ||
+              (Object.getPrototypeOf(originalInit)!==Object.prototype && Object.getPrototypeOf(originalInit)!==null) ||
+              keys.some(key=>{ const descriptor=Object.getOwnPropertyDescriptor(originalInit,key); return !descriptor || !descriptor.enumerable || !('value' in descriptor) })) return false
+          const headers=new Headers(originalInit.headers), names=[...headers.keys()].sort()
+          return names.join(',')==='content-type,user-agent' && headers.get('content-type')==='application/json' &&
+            headers.get('user-agent')===expectedAgent
+        }
+        if (eligible() && rowView.current()) {
+          // If the caller mutates its init during the asynchronous proof, the
+          // raw fallback uses the call-time values and the original abort signal.
+          const baselineInit = { ...originalInit, headers:new Headers(originalHeaders) }
+          init = baselineInit
+          const frames = await verifyGcfRequestFrames(rowView.handle, rowView.artifact)
+          if (eligible()) init = originalInit
+          if (frames && eligible() && rowView.current() && sdkDispatchScope.getStore() === sdkStep &&
+              sdkStep.scope === scope && sdkStep.ids.length === 1 && sameRequestRoute(rowView.model, fetchFn, url) === rowModel) {
+            const derived = deriveSameRequestRows(originalBody, frames, rowView.artifact, rowModel, { graphReferences: rowView.graphReferences === true, rows: rowView.rows !== false })
+            if (derived && eligible() && rowView.current()) init = { ...baselineInit, body: derived.body }
+          }
+        }
+      } catch { /* Optional transform fails closed to the original request. */ }
+    }
     const dispatchIndex = authority.dispatchBase + authority.dispatches.length
     const retryOfDispatchID = authority.pendingRetry
     authority.pendingRetry = undefined
@@ -538,7 +856,7 @@ export function captureFetch(fetchFn: typeof fetch, scope: AccountSelection.Scop
       http.coverage.request_body = "unsupported"
     const requestBodyRead =
       advanced && admission?.policy.request_body_enabled && init?.body === undefined && input instanceof Request
-        ? boundedRequestBody(input).then((value) => {
+        ? issueCapture(authority, () => boundedRequestBody(input)).then((value) => {
             requestBody = value
             if (http?.coverage) http.coverage.request_body = "reported"
           })
@@ -780,12 +1098,12 @@ export function captureFetch(fetchFn: typeof fetch, scope: AccountSelection.Scop
       for (const reason of losses) authority!.losses.add(reason)
       // Request clone observation never blocks upstream dispatch or response.
       if (requestBodyRead) {
-        const deferred = requestBodyRead.then(() => {
+        const deferred = issueCapture(authority!, () => requestBodyRead.then(() => {
           if (requestBody !== undefined) payload.requestBody = captureBody(requestBody, binary)
           if (http?.coverage)
             http.coverage.request_body = object(requestBody).omitted ? String(object(requestBody).omitted) : "reported"
           return queue(authority!, payload)
-        })
+        }))
         writes.add(deferred)
         void deferred.finally(() => writes.delete(deferred)).catch(() => {})
       } else queue(authority!, payload)
@@ -806,9 +1124,218 @@ export function captureFetch(fetchFn: typeof fetch, scope: AccountSelection.Scop
         ...(http ? { http } : {}),
       })
     let res: Response
+    const inner: { final?: CodexInnerObservation } = {}
     try {
-      res = await fetchFn(input, init)
+      res = await codexInnerScope.run(inner, () => observeAnthropicFailure(fetchFn, input, init))
+      const codex = inner.final?.response === res ? inner.final : undefined
       status = res.status
+      // Prove the already-forwarded one-user position against this exact encoded body.
+      if (res.ok && !res.redirected && wireFormat === "chat-completions.v1" && sdkStep && sdkStep.scope === scope && sdkStep.candidate && sdkStep.deliver && sdkStep.identity?.actorID === "main" && sdkStep.identity.rootOperationID && sdkStep.identity.innerTurnID && typeof init?.body === "string" && Buffer.byteLength(init.body, "utf8") <= 1_000_000) {
+        try {
+          const body = JSON.parse(init.body)
+          const proven = nativeSingleUserWire({version:1, sources:[sdkStep.candidate], coverage:"partial", omitted:0}, body.messages)
+          if (proven) {
+            const identity: NativeDeliveryIdentity = {sessionID:sdkStep.identity.sessionID, rootOperationID:sdkStep.identity.rootOperationID, actorID:"main", executionRevision:sdkStep.identity.executionRevision, innerTurnID:sdkStep.identity.innerTurnID}
+            const receipt: NativeTextDelivery = {version:1, identity, profile:"openai-chat-single-user-text-v1", dispatchID:attemptID,
+              bodyDigest:createHash("sha256").update(init.body, "utf8").digest("hex"), source:proven, state:"acknowledged", coverage:"partial"}
+            const delivery = issueCapture(authority, () => sdkStep.deliver!(receipt))
+            writes.add(delivery); authority.writes.add(delivery)
+            void delivery.finally(() => { writes.delete(delivery); authority.writes.delete(delivery) }).catch(() => { authority.losses.add("write_failed") })
+          }
+        } catch { authority.losses.add("parse_degraded") }
+      }
+      if (res.ok && !res.redirected && (wireFormat === "chat-completions.v1" || wireFormat === "responses.v1") && sdkStep && sdkStep.scope === scope &&
+          sdkStep.maintenance && sdkStep.deliverMaintenance && sdkStep.identity?.actorID === "main" &&
+          sdkStep.identity.rootOperationID && sdkStep.identity.innerTurnID && typeof init?.body === "string" &&
+          Buffer.byteLength(init.body,"utf8") <= 1_000_000) {
+        try {
+          const maintenance=sdkStep.maintenance
+          const deliverMaintenance=sdkStep.deliverMaintenance
+          const profile=maintenance.wireProfile
+          const observedBody = profile === "codex-responses" ? codex?.body : init.body
+          const observedID = profile === "codex-responses" ? codex?.dispatchID : attemptID
+          const body = typeof observedBody === "string" ? JSON.parse(observedBody) : undefined
+          const proven = profile === "openai-chat" && wireFormat === "chat-completions.v1" ? maintenanceChatWire(maintenance,body)
+            : profile === "codex-responses" && wireFormat === "responses.v1" && codex ? maintenanceResponsesWire(maintenance,body) : false
+          if (proven && profile && observedID && typeof observedBody === "string") {
+            const delivery = issueCapture(authority, () => deliverMaintenance({dispatchID:observedID,bodySHA256:createHash("sha256").update(observedBody,"utf8").digest("hex"),wireProfile:profile,
+              ...(maintenance.instructionsSHA256 ? {instructionsSHA256:maintenance.instructionsSHA256} : {}),
+              ...(profile === "codex-responses" && maintenance.trustedInstructionsSHA256 &&
+                  maintenance.instructionsSHA256 === maintenance.trustedInstructionsSHA256
+                  ? {instructionsClass:"builtin-compaction-v1" as const} : {})}))
+            writes.add(delivery); authority.writes.add(delivery)
+            void delivery.finally(() => { writes.delete(delivery); authority.writes.delete(delivery) }).catch(() => {})
+          }
+        } catch {}
+      }
+      if (res.ok && !res.redirected && wireFormat === "chat-completions.v1" && sdkStep && sdkStep.scope === scope && sdkStep.recall && sdkStep.deliverRecall && sdkStep.identity?.actorID === "main" && sdkStep.identity.rootOperationID && sdkStep.identity.innerTurnID && typeof init?.body === "string" && Buffer.byteLength(init.body, "utf8") <= 1_000_000) {
+        try {
+          const requestBody=init.body
+          const deliverRecall=sdkStep.deliverRecall
+          const body = JSON.parse(requestBody)
+          const proven = recallToolWire(sdkStep.recall, body.messages)
+          if (proven) {
+            const delivery = issueCapture(authority, () => deliverRecall({toolCallID:proven.toolCallID, attestationID:proven.attestationID,
+              resultSHA256:proven.resultSHA256, dispatchID:attemptID,
+              bodySHA256:createHash("sha256").update(requestBody, "utf8").digest("hex")}))
+            writes.add(delivery); authority.writes.add(delivery)
+            void delivery.finally(() => { writes.delete(delivery); authority.writes.delete(delivery) }).catch(() => {})
+          }
+        } catch {}
+      }
+      if (res.ok && !res.redirected && (wireFormat === "chat-completions.v1" || wireFormat === "responses.v1") && sdkStep && sdkStep.scope === scope && sdkStep.context && sdkStep.deliverContext && sdkStep.identity?.actorID === "main" && sdkStep.identity.rootOperationID && sdkStep.identity.innerTurnID && typeof init?.body === "string" && Buffer.byteLength(init.body, "utf8") <= 1_000_000) {
+        try {
+          const observedBody = sdkStep.context.wireProfile === "codex-responses" ? codex?.body : init.body
+          const observedID = sdkStep.context.wireProfile === "codex-responses" ? codex?.dispatchID : attemptID
+          const body = typeof observedBody === "string" ? JSON.parse(observedBody) : undefined
+          const proven = sdkStep.context.wireProfile === "codex-responses" && wireFormat === "responses.v1" && codex
+            ? contextResponsesWire(sdkStep.context,body)
+            : (sdkStep.context.wireProfile === "openai-chat" || (sdkStep.context.wireProfile === "compatible-chat" &&
+                typeof sdkStep.context.expectedURL === "string" && url === sdkStep.context.expectedURL && res.url === url &&
+                (init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST")) && wireFormat === "chat-completions.v1"
+              ? contextPrefaceFrame(sdkStep.context,body?.messages) : undefined
+          if (proven && observedID && typeof observedBody === "string") {
+            const delivery = issueCapture(authority, () => sdkStep.deliverContext!({contextPartID:proven.contextPartID,attestationID:proven.attestationID,
+              textSHA256:proven.textSHA256,dispatchID:observedID,bodySHA256:createHash('sha256').update(observedBody,'utf8').digest('hex')}))
+            writes.add(delivery); authority.writes.add(delivery)
+            void delivery.finally(() => { writes.delete(delivery); authority.writes.delete(delivery) }).catch(() => {})
+          }
+        } catch {}
+      }
+      if (res.ok && !res.redirected && sdkStep && sdkStep.scope === scope && sdkStep.standing && sdkStep.deliverStanding && sdkStep.identity?.actorID === 'main' && sdkStep.identity.rootOperationID && sdkStep.identity.innerTurnID && typeof init?.body === 'string' && Buffer.byteLength(init.body,'utf8') <= 1_000_000) {
+        try {
+          const standing=sdkStep.standing, deliver=sdkStep.deliverStanding
+          const officialChat = url === 'https://api.openai.com/v1/chat/completions' && res.url === url && (init?.method ?? (input instanceof Request ? input.method : 'GET')) === 'POST'
+          const observedBody=standing.wireProfile==='codex-responses' && wireFormat==='responses.v1' ? codex?.body : standing.wireProfile==='openai-chat' && wireFormat==='chat-completions.v1' && officialChat ? init.body : undefined
+          const observedID=standing.wireProfile==='codex-responses' ? codex?.dispatchID : attemptID
+          const proven=typeof observedBody==='string' && Buffer.byteLength(observedBody,'utf8')<=1_000_000 ? standingGuidanceWire(standing,JSON.parse(observedBody)) : undefined
+          if (proven?.systemSHA256 && observedID && typeof observedBody==='string') {
+            const receipt={attestationID:proven.attestationID,textSHA256:proven.textSHA256,dispatchID:observedID,bodySHA256:createHash('sha256').update(observedBody,'utf8').digest('hex'),systemSHA256:proven.systemSHA256,wireProfile:proven.wireProfile}
+            const delivery=issueCapture(authority,()=>deliver(receipt));writes.add(delivery);authority.writes.add(delivery)
+            void delivery.finally(()=>{writes.delete(delivery);authority.writes.delete(delivery)}).catch(()=>{})
+          }
+        } catch {}
+      }
+      // Exact compatible-chat source layout; no content is persisted by this observation.
+      if (sdkStep?.sourceAttempt && sdkStep.sourceFrame && 'version' in sdkStep.sourceFrame && sdkStep.sourceFrame.version===2 &&
+          res.ok && !res.redirected && !(init?.signal ?? (input instanceof Request ? input.signal : undefined))?.aborted &&
+          sdkStep.scope===scope && sdkStep.ids.length===1 && wireFormat==='chat-completions.v1' &&
+          pinnedCompatibleChatEndpoint(sdkStep.sourceFrame.model)===sdkStep.sourceFrame.endpoint && url===sdkStep.sourceFrame.endpoint && res.url===url &&
+          (init?.method ?? (input instanceof Request ? input.method : 'GET'))==='POST' && typeof init?.body==='string' && Buffer.byteLength(init.body,'utf8')<=1_000_000) {
+        try {
+          const final=sdkStep.sourceFrame, sourceAttempt=sdkStep.sourceAttempt, sourceIdentity=sdkStep.identity
+          const body=JSON.parse(init.body), prefix=final.current(), currentLayout=sourceAttemptLayout(sourceAttempt), root=sourceAttemptRoot(sourceAttempt)
+          const allowed=new Set(['model','messages','stream','stream_options','max_tokens','max_completion_tokens','temperature','top_p','seed','store','tools','tool_choice','prompt_cache_key'])
+          const opts=body?.stream_options, systems=Array.isArray(body?.messages) ? body.messages.filter((item:any)=>item?.role==='system') : []
+          const full=[...final.layout.layout,...final.layout.generated.map(g=>({position:g.position,sha256:g.sha256,synthetic:true}))]
+          if(body && typeof body==='object' && !Array.isArray(body) && Object.keys(body).every(key=>allowed.has(key)) &&
+              (body.tool_choice===undefined || body.tool_choice==='auto') && (body.prompt_cache_key===undefined || body.prompt_cache_key===sourceIdentity?.sessionID) &&
+              (opts===undefined || (opts && typeof opts==='object' && !Array.isArray(opts) && Object.keys(opts).every(key=>key==='include_usage') && typeof opts.include_usage==='boolean')) &&
+              prefix && prefix.unknown.length===0 && body.model===prefix.environment.scope.modelID && currentLayout && root &&
+              JSON.stringify(currentLayout)===JSON.stringify(final.layout) && sourceLayoutMessages(full,body.messages,true) &&
+              systems.length===final.system.length && systems.every((item:any,index:number)=>typeof item.content==='string' && item.content===final.system[index])) {
+            const digest=createHash('sha256').update(init.body,'utf8').digest('hex')
+            if(body.tools===undefined) acknowledgeSourceWire(sourceAttempt,sourceIdentity,attemptID,digest,root,final.current,final.layout)
+            else {
+              let expired=false
+              const current=()=>!expired && sdkStep.sourceAttempt===sourceAttempt && sdkStep.identity===sourceIdentity && sdkStep.sourceFrame===final &&
+                sdkStep.scope===scope && sdkStep.ids.length===1 && sourceAttemptState(sourceAttempt)==='pending' && !!final.current() &&
+                JSON.stringify(sourceAttemptLayout(sourceAttempt))===JSON.stringify(final.layout)
+              const work=(async()=>{let timer:ReturnType<typeof setTimeout>|undefined
+                try {const qualified=await Promise.race([observeFinalToolWire(sourceAttempt,attemptID,digest,body,current),new Promise<false>(resolve=>{timer=setTimeout(()=>{expired=true;resolve(false)},200)})])
+                  if(qualified===true && current())acknowledgeSourceWire(sourceAttempt,sourceIdentity,attemptID,digest,root,final.current,final.layout)
+                  else invalidateSourceAttempt(sourceAttempt)
+                } finally {expired=true;if(timer)clearTimeout(timer)}
+              })()
+              registerSourceWireSettlement(sourceAttempt,work)
+            }
+          }
+        } catch { invalidateSourceAttempt(sdkStep.sourceAttempt) }
+      }
+      // A separate private observation; D01 persisted partial membership is not closure.
+      if (sdkStep?.sourceAttempt && res.ok && !res.redirected && !(init?.signal ?? (input instanceof Request ? input.signal : undefined))?.aborted &&
+          sdkStep.scope===scope && sdkStep.ids.length===1 && sdkStep.sourceFrame && 'frame' in sdkStep.sourceFrame && sdkStep.membership===sdkStep.sourceFrame.frame &&
+          isPinnedChatModel(sdkStep.sourceFrame.frame.model) && url==='https://api.openai.com/v1/chat/completions' && res.url===url &&
+          (init?.method ?? (input instanceof Request ? input.method : 'GET'))==='POST' && typeof init?.body==='string' && Buffer.byteLength(init.body,'utf8')<=1_000_000) {
+        try {
+          const body=JSON.parse(init.body), final=sdkStep.sourceFrame, prefix=final.current()
+          const sourceAttempt=sdkStep.sourceAttempt, sourceIdentity=sdkStep.identity, sourceFrame=sdkStep.sourceFrame
+          const allowed=new Set(['model','messages','stream','stream_options','max_tokens','max_completion_tokens','temperature','top_p','seed','store','tools','tool_choice','prompt_cache_key'])
+          const streamOptions=body?.stream_options
+          const systems=Array.isArray(body?.messages) ? body.messages.filter((item:any)=>item?.role==='system') : []
+          const sources=final.frame.sources
+          if (body && typeof body==='object' && !Array.isArray(body) && Object.keys(body).every(key=>allowed.has(key)) &&
+              (body.tool_choice===undefined || body.tool_choice==='auto') &&
+              (body.prompt_cache_key===undefined || body.prompt_cache_key===sourceIdentity?.sessionID) &&
+              (streamOptions===undefined || (streamOptions && typeof streamOptions==='object' && !Array.isArray(streamOptions) && Object.keys(streamOptions).every(key=>key==='include_usage') && typeof streamOptions.include_usage==='boolean')) &&
+              prefix && prefix.unknown.length===0 && body.model===prefix.environment.scope.modelID && nativeMembershipWire(final.frame,body) &&
+              systems.length===final.system.length && systems.every((item:any,index:number)=>typeof item.content==='string' && item.content===final.system[index]) &&
+              final.frame.roles.filter(role=>role!=='system').length===1 && sources.length===1 && sources[0]?.role==='user') {
+            const digest=createHash('sha256').update(init.body,'utf8').digest('hex')
+            const root={messageID:sources[0].messageID,partID:sources[0].partID,digest:sources[0].digest}
+            if (body.tools===undefined) acknowledgeSourceWire(sourceAttempt,sourceIdentity,attemptID,digest,root,final.current)
+            else {
+              let expired=false
+              const current=()=>!expired && sdkStep.sourceAttempt===sourceAttempt && sdkStep.identity===sourceIdentity && sdkStep.sourceFrame===sourceFrame &&
+                sdkStep.scope===scope && sdkStep.ids.length===1 && sourceAttemptState(sourceAttempt)==='pending' &&
+                !!sourceFrame.current()
+              const work=(async()=>{
+                let timer:ReturnType<typeof setTimeout> | undefined
+                try {
+                  const qualified=await Promise.race([observeFinalToolWire(sourceAttempt,attemptID,digest,body,current),
+                    new Promise<false>(resolve=>{timer=setTimeout(()=>{expired=true;resolve(false)},200)})])
+                  if (qualified===true && current()) acknowledgeSourceWire(sourceAttempt,sourceIdentity,attemptID,digest,root,final.current)
+                  else invalidateSourceAttempt(sourceAttempt)
+                } finally { expired=true; if (timer) clearTimeout(timer) }
+              })()
+              registerSourceWireSettlement(sourceAttempt,work)
+            }
+          }
+        } catch { invalidateSourceAttempt(sdkStep.sourceAttempt) }
+      }
+      if (res.ok && !res.redirected && !(init?.signal ?? (input instanceof Request ? input.signal : undefined))?.aborted && sdkStep && sdkStep.scope===scope && sdkStep.ids.length===1 && sdkStep.membership && sameNativeMembershipIdentity(sdkStep.membership.identity,sdkStep.identity) && isPinnedChatModel(sdkStep.membership.model) && sdkStep.deliverMembership && sdkStep.identity?.actorID==='main' && sdkStep.identity.rootOperationID && sdkStep.identity.innerTurnID && url==='https://api.openai.com/v1/chat/completions' && res.url===url && (init?.method ?? (input instanceof Request ? input.method : 'GET'))==='POST' && typeof init?.body==='string' && Buffer.byteLength(init.body,'utf8')<=1_000_000) {
+        try {
+          const body=init.body, deliver=sdkStep.deliverMembership, identity=sdkStep.identity
+          const proven=nativeMembershipWire(sdkStep.membership,JSON.parse(body))
+          if (proven) {
+            const receipt:NativeMembershipDelivery={version:1,identity:{sessionID:identity.sessionID,rootOperationID:identity.rootOperationID!,actorID:'main',executionRevision:identity.executionRevision,innerTurnID:identity.innerTurnID!},profile:'openai-chat-native-text-v1',dispatchID:attemptID,bodyDigest:createHash('sha256').update(body,'utf8').digest('hex'),state:'acknowledged',coverage:'partial',sources:proven.sources}
+            const delivery=issueCapture(authority,()=>deliver(receipt));writes.add(delivery);authority.writes.add(delivery)
+            void delivery.finally(()=>{writes.delete(delivery);authority.writes.delete(delivery)}).catch(()=>{})
+          }
+        } catch {}
+      }
+      if (status === 429 && codex && wireFormat === "responses.v1" && authority.binding.providerID === "openai" && authority.binding.billingLane === "subscription") {
+        const evidence = codexWindowEvidence(res.headers, codex.dispatchID, Date.now())
+        if (evidence) {
+          authority.codexWindows.set(attemptID,evidence)
+          while (authority.codexWindows.size > 32) authority.codexWindows.delete(authority.codexWindows.keys().next().value!)
+        }
+      }
+      let officialAnthropic = false
+      try {
+        const endpoint = new URL(url)
+        const responseEndpoint = new URL(res.url)
+        const official = (value: URL) => value.protocol === "https:" && value.hostname === "api.anthropic.com" && !value.port && !value.username && !value.password && value.pathname === "/v1/messages"
+        officialAnthropic = !res.redirected && official(endpoint) && official(responseEndpoint)
+      } catch {}
+      if (((status >= 400 && status <= 599) || (status >= 200 && status <= 299)) && !res.redirected) {
+        let observation: AccountSelection.DispatchObservation | undefined
+        if (officialAnthropic && (init?.method ?? (input instanceof Request ? input.method : 'GET')) === 'POST' && wireFormat === 'anthropic-messages.v1' && authority.binding.providerID === 'anthropic' && authority.binding.billingLane === 'metered_api')
+          observation={version:1,profile:'anthropic.messages.v1',captureDispatchID:attemptID,upstreamDispatchID:attemptID,httpStatus:status}
+        else if (codex && wireFormat === 'responses.v1' && authority.binding.providerID === 'openai' && authority.binding.billingLane === 'subscription' && codex.dispatchID!==attemptID)
+          observation={version:1,profile:'openai.codex.responses.v1',captureDispatchID:attemptID,upstreamDispatchID:codex.dispatchID,httpStatus:status}
+        if (observation) {
+          authority.dispatchObservations.set(attemptID,observation)
+          while (authority.dispatchObservations.size>32) authority.dispatchObservations.delete(authority.dispatchObservations.keys().next().value!)
+        }
+      }
+      if (status === 429 && officialAnthropic && wireFormat === "anthropic-messages.v1" && authority.binding.providerID === "anthropic" && authority.binding.billingLane === "metered_api") {
+        const reset = anthropicRequestRateReset(res.headers, Date.now())
+        if (reset) {
+          authority.requestRateResets.set(attemptID, { ...reset, dispatchID: attemptID })
+          while (authority.requestRateResets.size > 32) authority.requestRateResets.delete(authority.requestRateResets.keys().next().value!)
+        }
+      }
       timing.headers_ms = performance.now() - origin
       if (http) {
         http.status = res.status

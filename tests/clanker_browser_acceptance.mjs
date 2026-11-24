@@ -93,10 +93,10 @@ try {
         ready: document.readyState,
         viewport: [innerWidth, innerHeight],
         bodyClasses: [...document.body.classList],
-        authOwner: localStorage.getItem('odysseus-auth-owner'),
-        authUser: localStorage.getItem('odysseus-auth-user'),
-        themeKeys: [...Array(localStorage.length)].map((_, index) => localStorage.key(index)).filter(key => key?.startsWith('odysseus-theme')),
-        themeNames: [...Array(localStorage.length)].map((_, index) => localStorage.key(index)).filter(key => key?.startsWith('odysseus-theme')).map(key => {
+        authOwner: localStorage.getItem('openclank-auth-owner'),
+        authUser: localStorage.getItem('openclank-auth-user'),
+        themeKeys: [...Array(localStorage.length)].map((_, index) => localStorage.key(index)).filter(key => key?.startsWith('openclank-theme')),
+        themeNames: [...Array(localStorage.length)].map((_, index) => localStorage.key(index)).filter(key => key?.startsWith('openclank-theme')).map(key => {
           try { return [key, JSON.parse(localStorage.getItem(key) || 'null')?.name || null]; } catch { return [key, 'invalid']; }
         }),
         themeAuthPromise: !!window.__odysseusAuthContextPromise,
@@ -266,11 +266,11 @@ try {
       // module loads. Seed that namespace so this startup gate tests the
       // persisted-account path instead of intentionally rejecting anonymous
       // state and waiting forever for Kene.
-      localStorage.setItem('odysseus-auth-user', 'theme-test');
-      localStorage.setItem('odysseus-auth-owner', 'theme-test');
-      localStorage.setItem('odysseus-theme:scope:theme-test', JSON.stringify(persistedTheme));
-      localStorage.setItem('odysseus-theme', JSON.stringify(persistedTheme));
-      localStorage.removeItem('odysseus-custom-themes');
+      localStorage.setItem('openclank-auth-user', 'theme-test');
+      localStorage.setItem('openclank-auth-owner', 'theme-test');
+      localStorage.setItem('openclank-theme:scope:theme-test', JSON.stringify(persistedTheme));
+      localStorage.setItem('openclank-theme', JSON.stringify(persistedTheme));
+      localStorage.removeItem('openclank-custom-themes');
       sessionStorage.setItem('__clanker_fresh', '1');
     }
     const realFetch = window.fetch.bind(window);
@@ -394,7 +394,7 @@ try {
   })()`);
   assert(vanillaPaletteFallback.length >= 6, `Synapse collapsed to ${vanillaPaletteFallback.join(', ')} without the body theme class`);
 
-  await evaluate("localStorage.removeItem('odysseus-theme'); localStorage.removeItem('odysseus-theme:scope:theme-test')");
+  await evaluate("localStorage.removeItem('openclank-theme'); localStorage.removeItem('openclank-theme:scope:theme-test')");
   await reloadAndWait("document.readyState === 'complete' && document.querySelectorAll('#themeGrid .theme-swatch').length >= 18 && document.getElementById('clanker-routefield-canvas')?.isConnected", 'fresh theme UI');
   await waitFor("document.getElementById('clanker-routefield-canvas')?.isConnected", 'active Clanker route field');
   const themeModuleLoads = await evaluate(`performance.getEntriesByType('resource')
@@ -734,7 +734,7 @@ try {
     await choose('clanker-matrix-rain');
     const matrixAdvancedOff=enableAdvanced('clanker-matrix-rain');
     const rainToggleKeys=new Set(['splashRainDown','splashRainWaves','splashColorVarianceEnabled','splashRareUpward']);
-    const rainKeys=['splashQuantity','splashRainSpeed','splashRainFlicker','splashRainSpread','splashRainDown','splashRainReverseChance','splashRainWaves','splashCharVariety','splashMinOpacity','splashMaxOpacity','splashSizeVariance','splashColorVarianceEnabled','splashColorVariance','splashRareUpward','splashBounce','splashGravity','splashCollisionForce'];
+    const rainKeys=['splashQuantity','splashRainSpeed','splashRainFlicker','splashRainSpread','splashRainDown','splashRainReverseChance','splashRainWaves','splashCharVariety','splashMinOpacity','splashMaxOpacity','splashSizeVariance','splashColorVarianceEnabled','splashColorVariance','splashRareUpward'];
     // Rare upward toggle defaults ON (S24). Capture scene identity across the
     // advanced-settings toggle — UI-only controls must not reset droplets.
     const rareToggle=control('clanker-matrix-rain','splashRareUpward');
@@ -761,13 +761,13 @@ try {
       rareDefaultOn,
       rainAdvancedStable,
       owner:!!window.__openClankBackgroundOwner,
-      sceneStreams:document.getElementById('clanker-matrix-rain-canvas')?.__backgroundScene?.streams?.length||0,
+      sceneStreams:document.getElementById('clanker-matrix-rain-canvas')?.__backgroundScene?.drops?.length||0,
       stable:document.getElementById('clanker-matrix-rain-canvas')?.isConnected,
     };
 
     await choose('clanker-emoji-rain');
     const emojiRainAdvancedOff=enableAdvanced('clanker-emoji-rain');
-    const emojiRainValues={splashQuantity:1.6,splashRainSpeed:1.4,splashRainFlicker:.3,splashRainSpread:1.7,splashRainDown:true,splashRainReverseChance:78,splashRainWaves:true,splashCharVariety:.55,splashMinOpacity:.5,splashMaxOpacity:.9,splashSizeVariance:.8,splashColorVarianceEnabled:true,splashColorVariance:.8,splashBounce:2.4,splashGravity:.8,splashCollisionForce:2.4};
+    const emojiRainValues={splashQuantity:1.6,splashRainSpeed:1.4,splashRainFlicker:.3,splashRainSpread:1.7,splashRainDown:true,splashRainReverseChance:78,splashRainWaves:true,splashCharVariety:.55,splashMinOpacity:.5,splashMaxOpacity:.9,splashSizeVariance:.8,splashColorVarianceEnabled:true,splashColorVariance:.8};
     rainKeys.forEach(key=>{
       const value=emojiRainValues[key];
       if (rainToggleKeys.has(key)) setToggle(control('clanker-emoji-rain',key), key==='splashRareUpward' ? true : value > .5);
@@ -785,7 +785,7 @@ try {
     // Owner-scoped key is authoritative once auth is established (save() writes
     // THEME_OWNER_PREFIX + owner, not the legacy LS_KEY).
     const saved=(() => {
-      for (const key of ['odysseus-theme:scope:theme-test', 'odysseus-theme']) {
+      for (const key of ['openclank-theme:scope:theme-test', 'openclank-theme']) {
         try { const raw = localStorage.getItem(key); if (raw) return JSON.parse(raw); } catch {}
       }
       return null;
@@ -910,6 +910,7 @@ try {
   await waitFor("document.getElementById('clanker-kene-weave-canvas')?.isConnected", 'restored Signal Weave defaults');
 
   const canvasPatternIds = {
+    'clanker-signal-weave':'clanker-signal-weave-canvas',
     'clanker-routefield':'clanker-routefield-canvas',
     'clanker-kene-weave':'clanker-kene-weave-canvas',
     'clanker-lcars':'clanker-lcars-canvas',
@@ -921,11 +922,11 @@ try {
     'perlin-flow':'perlin-flow-canvas', petals:'petals-canvas', sparkles:'sparkles-canvas', embers:'embers-canvas',
   };
   const patternOrder = [
-    'none', 'clanker-routefield', 'clanker-kene-weave', 'clanker-lcars',
-    'clanker-gem-drift', 'clanker-emoji-drift', 'clanker-matrix-rain', 'clanker-emoji-rain', 'clanker-blueprint', 'dots', 'synapse', 'rain',
+    'none', 'clanker-routefield', 'clanker-kene-weave', 'clanker-signal-weave',
+    'clanker-emoji-drift', 'clanker-matrix-rain', 'clanker-emoji-rain', 'dots', 'synapse', 'rain',
     'constellations', 'perlin-flow', 'petals', 'sparkles', 'embers',
   ];
-  assert.deepEqual(await evaluate("[...document.getElementById('theme-bg-pattern-select').options].map(option => option.value)"), patternOrder);
+  assert.deepEqual(await evaluate("[...document.getElementById('theme-bg-pattern-select').options].filter(option => !option.hidden && !option.disabled).map(option => option.value)"), patternOrder);
   const transitionMatrix = { checked: 0, failures: [] };
   for (const from of patternOrder) {
     const row = await evaluate(`(async () => {
@@ -981,7 +982,7 @@ try {
 
   await evaluate("document.querySelector('#themeGrid [data-theme=\"clanker-light\"]').click()");
   await waitFor("document.body.classList.contains('theme-clanker-light')", 'Clanker Light selection');
-  const light = await evaluate(`(() => { const root=getComputedStyle(document.documentElement),body=getComputedStyle(document.body); const saved=(()=>{ for (const key of ['odysseus-theme:scope:theme-test','odysseus-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw); } catch {} } return null; })(); return { bg:root.getPropertyValue('--bg').trim(), classes:[...document.body.classList], font:body.fontFamily, animation:body.animationName, saved, texture:getComputedStyle(document.querySelector('.sidebar')).backgroundImage }; })()`);
+  const light = await evaluate(`(() => { const root=getComputedStyle(document.documentElement),body=getComputedStyle(document.body); const saved=(()=>{ for (const key of ['openclank-theme:scope:theme-test','openclank-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw); } catch {} } return null; })(); return { bg:root.getPropertyValue('--bg').trim(), classes:[...document.body.classList], font:body.fontFamily, animation:body.animationName, saved, texture:getComputedStyle(document.querySelector('.sidebar')).backgroundImage }; })()`);
   assert.equal(light.bg.toUpperCase(), '#F3EEDB');
   assert(light.classes.includes('bg-pattern-clanker-blueprint'));
   assert.match(light.font, /Liga Comic Mono/); assert.match(light.animation, /clanker-lcars-status-sweep/);
@@ -992,7 +993,7 @@ try {
   await reloadAndWait("document.querySelector('#themeGrid .theme-swatch.active')?.dataset.theme === 'clanker-light'", 'Clanker Light reload persistence');
   await waitFor("!!document.querySelector('#themeGrid [data-theme=\"dark\"]')", 'Original theme swatch');
   assert.equal(await evaluate("(() => { const sw=document.querySelector('#themeGrid [data-theme=\"dark\"]'); if (!sw) return false; sw.click(); return true; })()"), true);
-  const original = await evaluate(`(() => { const saved=(()=>{ for (const key of ['odysseus-theme:scope:theme-test','odysseus-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw); } catch {} } return null; })(); return { classes:[...document.body.classList], font:getComputedStyle(document.body).fontFamily, pattern:saved?.bgPattern || 'none', locked:document.getElementById('theme-font-select').disabled }; })()`);
+  const original = await evaluate(`(() => { const saved=(()=>{ for (const key of ['openclank-theme:scope:theme-test','openclank-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw); } catch {} } return null; })(); return { classes:[...document.body.classList], font:getComputedStyle(document.body).fontFamily, pattern:saved?.bgPattern || 'none', locked:document.getElementById('theme-font-select').disabled }; })()`);
   assert(!original.classes.some(name => name.startsWith('theme-clanker-')));
   assert.match(original.font, /Liga Comic Mono/); assert.equal(original.pattern, 'none'); assert.equal(original.locked, false);
 
@@ -1011,12 +1012,12 @@ try {
   for (const name of ['root','modal','notes','title','copal','preview']) assert.match(fontViews[name], /Georgia/);
   assert.doesNotMatch(fontViews.source, /Georgia/);
 
-  await evaluate(`localStorage.removeItem('odysseus-theme:scope:theme-test'); localStorage.setItem('odysseus-theme', JSON.stringify({
+  await evaluate(`localStorage.removeItem('openclank-theme:scope:theme-test'); localStorage.setItem('openclank-theme', JSON.stringify({
     name:'clanker-dark',
     colors:{bg:'#191A1E',fg:'#FFF4D6',panel:'#25272C',border:'#555A62',red:'#5A9EF5'}
   }))`);
   await reloadAndWait("document.querySelector('#themeGrid .theme-swatch.active')?.dataset.theme === 'clanker-dark' && document.getElementById('clanker-routefield-canvas')", 'legacy Clanker migration');
-  const migration = await evaluate(`(() => { const saved=JSON.parse(localStorage.getItem('odysseus-theme')); return {saved,bg:getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),classes:[...document.body.classList]}; })()`);
+  const migration = await evaluate(`(() => { const saved=JSON.parse(localStorage.getItem('openclank-theme')); return {saved,bg:getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),classes:[...document.body.classList]}; })()`);
   assert.equal(migration.bg.toUpperCase(), '#191A1E');
   assert.equal(migration.saved.colors.bg.toUpperCase(), '#191A1E');
   assert.equal(migration.saved.bgPattern, 'clanker-routefield');
@@ -1114,10 +1115,10 @@ try {
 
   await command('Emulation.setDeviceMetricsOverride', { width:1440, height:1000, deviceScaleFactor:1, mobile:false });
   await evaluate("document.querySelector('#themeGrid [data-theme=\"clanker-light\"]').click()");
-  await waitFor(`(() => { for (const key of ['odysseus-theme:scope:theme-test','odysseus-theme']) { try { const raw=localStorage.getItem(key); if (raw && JSON.parse(raw)?.name === 'clanker-light') return true; } catch {} } return false; })()`, 'saved light theme before login');
+  await waitFor(`(() => { for (const key of ['openclank-theme:scope:theme-test','openclank-theme']) { try { const raw=localStorage.getItem(key); if (raw && JSON.parse(raw)?.name === 'clanker-light') return true; } catch {} } return false; })()`, 'saved light theme before login');
   await command('Page.navigate', { url:`${base}/login` });
   await waitFor("document.readyState === 'complete' && document.body.classList.contains('theme-clanker-dark') && document.getElementById('clanker-routefield-canvas')?.isConnected", 'Clanker login theme');
-  const login = await evaluate(`(async () => { await document.fonts.load("16px 'Liga Comic Mono'"); await document.fonts.load("32px 'Fredoka'"); const root=getComputedStyle(document.documentElement), body=getComputedStyle(document.body), card=getComputedStyle(document.querySelector('.card')); const savedName=(()=>{ for (const key of ['odysseus-theme:scope:theme-test','odysseus-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw)?.name; } catch {} } return null; })(); return { bg:root.getPropertyValue('--bg').trim(), savedName, classes:[...document.body.classList], font:body.fontFamily, backgroundImage:body.backgroundImage, effectCanvasCount:document.querySelectorAll('[data-background-effect-canvas]').length, logoFont:getComputedStyle(document.querySelector('.logo span')).fontFamily, logoMark:document.querySelector('.logo-mark')?.innerHTML, favicon:decodeURIComponent(document.querySelector("link[rel='icon']").href.split(',')[1]), submitBackground:getComputedStyle(document.querySelector('#submitBtn')).backgroundColor, cardBorder:card.borderTopWidth, cardRadius:card.borderTopLeftRadius, cardShadow:card.boxShadow, liga:document.fonts.check("16px 'Liga Comic Mono'"), fredoka:document.fonts.check("32px 'Fredoka'") }; })()`);
+  const login = await evaluate(`(async () => { await document.fonts.load("16px 'Liga Comic Mono'"); await document.fonts.load("32px 'Fredoka'"); const root=getComputedStyle(document.documentElement), body=getComputedStyle(document.body), card=getComputedStyle(document.querySelector('.card')); const savedName=(()=>{ for (const key of ['openclank-theme:scope:theme-test','openclank-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw)?.name; } catch {} } return null; })(); return { bg:root.getPropertyValue('--bg').trim(), savedName, classes:[...document.body.classList], font:body.fontFamily, backgroundImage:body.backgroundImage, effectCanvasCount:document.querySelectorAll('[data-background-effect-canvas]').length, logoFont:getComputedStyle(document.querySelector('.logo span')).fontFamily, logoMark:document.querySelector('.logo-mark')?.innerHTML, favicon:decodeURIComponent(document.querySelector("link[rel='icon']").href.split(',')[1]), submitBackground:getComputedStyle(document.querySelector('#submitBtn')).backgroundColor, cardBorder:card.borderTopWidth, cardRadius:card.borderTopLeftRadius, cardShadow:card.boxShadow, liga:document.fonts.check("16px 'Liga Comic Mono'"), fredoka:document.fonts.check("32px 'Fredoka'") }; })()`);
   assert.match(login.font, /Liga Comic Mono/); assert.match(login.logoFont, /Fredoka/);
   assert.equal(login.bg.toUpperCase(), '#191A1E'); assert.equal(login.savedName, 'clanker-light');
   assert(login.classes.includes('theme-clanker-dark') && login.classes.includes('bg-pattern-clanker-routefield'));

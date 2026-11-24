@@ -1426,9 +1426,48 @@ class UploadHandler:
                 current[key] = updated
             self._atomic_write_json(os.path.join(self.upload_dir, "uploads.json"), current, sync_backup=True)
 
+    def _conversation_upload_index(self, *, allow_empty: bool) -> Dict[str, Any]:
+        """Under the index lock, distinguish a fresh unused store from a missing catalog."""
+        index_path = os.path.join(self.upload_dir, "uploads.json")
+        if allow_empty and not os.path.lexists(index_path):
+            controls = {".attachment-inventory.json", ".lifecycle.lock",
+                        ".conversation-deletions.json", ".conversation-deletions.json.bak"}
+            with os.scandir(self.upload_dir) as entries:
+                unused = all(item.name in controls and item.is_file(follow_symlinks=False) for item in entries)
+            if unused:
+                baseline = self.attachment_inventory_status()
+                if baseline.get("complete") is True and baseline.get("origin") == "new-empty-owner":
+                    return {}
+        return self._load_upload_index(fail_on_error=True)
+
+    def retire_chat_input_receipt_claims(self, *, owner: str, session_id: str) -> int:
+        """Release only receipt staging claims after the owning chat is retired."""
+        from src.openclank.attachment_inventory import input_receipt_claim_prefix
+
+        owner_key = str(owner or "").strip().lower()
+        prefix = input_receipt_claim_prefix(owner_key, session_id)
+        changed = 0
+        with self._index_guard():
+            current = self._conversation_upload_index(allow_empty=True)
+            for key, row in list(current.items()):
+                if not isinstance(row, dict) or str(row.get("owner") or "").strip().lower() != owner_key:
+                    continue
+                claims = set(row.get("reference_claims") or [])
+                retired = {claim for claim in claims if isinstance(claim, str) and claim.startswith(prefix)}
+                if not retired:
+                    continue
+                updated = dict(row)
+                updated["reference_claims"] = sorted(claims - retired)
+                updated["reference_generation"] = int(updated.get("reference_generation") or 0) + 1
+                current[key] = updated
+                changed += len(retired)
+            if changed:
+                self._atomic_write_json(os.path.join(self.upload_dir, "uploads.json"), current, sync_backup=True)
+        return changed
+
     def attachment_reference_generations(self) -> Dict[str, str]:
         with self._index_guard():
-            index = self._load_upload_index(fail_on_error=True)
+            index = self._conversation_upload_index(allow_empty=True)
             grouped = {}
             for row in index.values():
                 if isinstance(row, dict) and row.get("id"):
@@ -1471,7 +1510,7 @@ class UploadHandler:
         """Review only indexed owned uploads with a complete reference snapshot."""
         owner = self._owner_key(owner)
         with self._index_guard():
-            index = self._load_upload_index(fail_on_error=True)
+            index = self._conversation_upload_index(allow_empty=not candidate_ids)
             exclusive, shared = set(), set()
             total_bytes = 0
             for upload_id in candidate_ids:
@@ -1502,7 +1541,7 @@ class UploadHandler:
         """Erase exact exclusive uploads; atomic index retirement is retryable."""
         with self._index_guard():
             impact = self.conversation_attachment_impact(owner=owner, candidate_ids=candidate_ids, shared_ids=shared_ids, shared_hashes=shared_hashes, session_id=session_id, observed_generations=observed_generations)
-            current = self._load_upload_index(fail_on_error=True)
+            current = self._conversation_upload_index(allow_empty=not candidate_ids)
             for upload_id in impact["exclusive_ids"]:
                 rows = [row for row in current.values() if isinstance(row, dict) and row.get("id") == upload_id]
                 paths = {os.path.realpath(str(row["path"])) for row in rows}
@@ -1523,6 +1562,14 @@ class UploadHandler:
         """
         file_hash = info.get("hash")
         if file_hash:
+            generated=info.get('generated_summary_origin')
+            if generated is not None:
+                payload=generated.get('payload') if isinstance(generated,dict) else None
+                if not isinstance(payload,dict) or payload.get('upload_id')!=info.get('id'):
+                    raise UploadOwnerLifecycleError('generated upload origin is malformed')
+                origin={field:value for field,value in payload.items() if field!='upload_id'}
+                digest=hashlib.sha256(json.dumps(origin,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()
+                return f'{new_owner}:{file_hash}:generated:{digest}'
             return f"{new_owner}:{file_hash}"
 
         # Fallback for rows without an explicit hash (should not happen in modern Open Clank)
@@ -1567,6 +1614,9 @@ class UploadHandler:
             return 0
 
         uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
+        from src.openclank.attachment_inventory import input_receipt_claim_owner_prefix
+        old_claim_prefix = input_receipt_claim_owner_prefix(old_owner_normalized)
+        new_claim_prefix = input_receipt_claim_owner_prefix(new_owner)
         with self._index_guard():
             current = self._load_upload_index()
             if not current:
@@ -1582,6 +1632,15 @@ class UploadHandler:
                 if isinstance(info, dict) and str(info.get("owner", "")).strip().lower() == old_owner_normalized:
                     new_info = dict(info)
                     new_info["owner"] = new_owner
+                    claims = set(new_info.get("reference_claims") or [])
+                    rebased_claims = {
+                        new_claim_prefix + claim[len(old_claim_prefix):]
+                        if isinstance(claim, str) and claim.startswith(old_claim_prefix)
+                        else claim
+                        for claim in claims
+                    }
+                    if rebased_claims != claims:
+                        new_info["reference_claims"] = sorted(rebased_claims)
                     base_key = self._renamed_upload_index_key(key, new_info, old_owner_normalized, new_owner)
                     new_key = self._unique_upload_index_key(
                         base_key,
@@ -1720,8 +1779,12 @@ class UploadHandler:
             logger.error(f"Failed to get upload stats: {e}")
             return {"error": str(e)}
     
-    def save_upload(self, u: UploadFile, client_ip: str, owner: str = None) -> dict:
+    def save_upload(self, u: UploadFile, client_ip: str, owner: str = None, *, _generated_summary=None) -> dict:
         """Save uploaded file with enhanced security and organization."""
+        if _generated_summary is not None:
+            from src.openclank.generated_summary_attachment import VerifiedGeneratedSummary, _SEAL
+            if type(_generated_summary) is not VerifiedGeneratedSummary or _generated_summary._seal is not _SEAL or _generated_summary.owner != owner:
+                raise ValueError('Generated result unavailable')
         # Rate limiting
         now = time.time()
         with self._upload_rate_lock:
@@ -1789,7 +1852,7 @@ class UploadHandler:
             existing_files = self._load_upload_index()
             stale_keys = []
             for key, info in existing_files.items():
-                if info.get("hash") == file_hash and info.get("owner") == owner:
+                if _generated_summary is None and not info.get('generated_summary_origin') and info.get("hash") == file_hash and info.get("owner") == owner:
                     stored_path = info.get("path")
                     if stored_path and os.path.exists(stored_path) and self._inside_upload_dir(stored_path):
                         existing_key = key
@@ -1816,7 +1879,7 @@ class UploadHandler:
                     live_key = existing_key
                     if live_key not in current:
                         for k, v in current.items():
-                            if v.get("hash") == file_hash and v.get("owner") == owner:
+                            if not v.get('generated_summary_origin') and v.get("hash") == file_hash and v.get("owner") == owner:
                                 live_key = k
                                 existing_file = v
                                 break
@@ -1866,6 +1929,9 @@ class UploadHandler:
                 while chunk := file_obj.read(8192):
                     f.write(chunk)
         except Exception as e:
+            # An interrupted write (client gone, disk error) must not leave a partial original on disk; nothing is indexed yet.
+            try: os.unlink(file_path)
+            except OSError: pass
             raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
         
         # Create file metadata
@@ -1885,15 +1951,44 @@ class UploadHandler:
             "client_ip": client_ip,
             "owner": owner,
         }
+        if _generated_summary is not None:
+            from src.openclank.generated_summary_attachment import seal_upload
+            try:
+                file_metadata['generated_summary_origin']=seal_upload(_generated_summary,file_id,file_hash)
+            except Exception:
+                os.unlink(file_path)
+                raise
         # Capture image dimensions (EXIF-rotated) so the chat thumbnail skeleton
         # can size itself to the right aspect ratio before the bytes arrive.
         if content_type.startswith("image/"):
             try:
-                from PIL import Image, ImageOps
-                with Image.open(file_path) as _im:
-                    _im = ImageOps.exif_transpose(_im)
-                    file_metadata["width"] = _im.width
-                    file_metadata["height"] = _im.height
+                from src.openclank.media_input_policy import HEAD_BYTES, evaluate, receipt_for
+                with open(file_path, "rb") as _hf:
+                    _head = _hf.read(HEAD_BYTES)
+                # Vision is irrelevant here (route_has_vision=True): this only guards the Pillow decode.
+                _rc = evaluate(declared_type=content_type, byte_size=file_size, head=_head,
+                               route_has_vision=True, max_bytes=self.max_upload_size)
+                if _rc["reason"] not in ("too_many_pixels", "side_too_long"):
+                    from PIL import Image, ImageOps
+                    try:
+                        with Image.open(file_path) as _im:  # header-only parse
+                            # Any other outcome (odd/unsupported types) keeps the old Pillow path,
+                            # but never decodes (exif_transpose) a pixel bomb.
+                            # Pillow's header dimensions; `animated` stays what the container header proved (or None).
+                            _rc = {**receipt_for(content_type, file_size, _im.width, _im.height,
+                                                 max_bytes=self.max_upload_size), "animated": _rc["animated"]}
+                            if _rc["outcome"] == "admit":
+                                _im = ImageOps.exif_transpose(_im)
+                                file_metadata["width"] = _im.width
+                                file_metadata["height"] = _im.height
+                    except Image.DecompressionBombError:  # Pillow refused at open
+                        _rc = receipt_for(content_type, file_size, None, None, reason="too_many_pixels")
+                # The receipt of every evaluated image input is kept on the upload record (sent or omitted).
+                file_metadata["media_input"] = _rc
+                if _rc["outcome"] != "admit":
+                    # Upload still succeeds with the original bytes; dimensions stay unset (unknown).
+                    logger.info("Image not decoded for %s: %s (%s bytes, %sx%s)",
+                                file_id, _rc["reason"], file_size, _rc["width"], _rc["height"])
             except Exception as e:
                 logger.warning(f"Failed to read image dimensions for {file_id}: {e}")
         
@@ -1901,10 +1996,29 @@ class UploadHandler:
         with self._index_guard():
             try:
                 current = self._load_upload_index() if os.path.exists(uploads_db_path) else {}
-                storage_key = f"{owner}:{file_hash}" if owner else file_hash
-                current[storage_key] = file_metadata
-                self._atomic_write_json(uploads_db_path, current)
+                storage_key = (f"{owner}:{file_hash}:generated:{hashlib.sha256(json.dumps(_generated_summary.origin,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()}" if _generated_summary is not None
+                               else f"{owner}:{file_hash}" if owner else file_hash)
+                previous=current.get(storage_key) if _generated_summary is not None else None
+                if previous is not None:
+                    from src.openclank.generated_summary_attachment import seal_upload
+                    import hmac
+                    expected=seal_upload(_generated_summary,previous.get('id'),file_hash)
+                    actual=previous.get('generated_summary_origin')
+                    if (not isinstance(actual,dict) or actual.get('payload')!=expected['payload'] or not isinstance(actual.get('mac'),str)
+                        or not hmac.compare_digest(actual['mac'],expected['mac']) or not self._inside_upload_dir(previous.get('path') or '')
+                        or not os.path.isfile(previous.get('path') or '')): raise ValueError('Generated attachment conflict')
+                    with open(previous['path'],'rb') as existing:
+                        if self.calculate_file_hash(existing)!=file_hash: raise ValueError('Generated attachment changed')
+                    os.unlink(file_path)
+                    file_metadata=previous
+                else:
+                    current[storage_key] = file_metadata
+                    self._atomic_write_json(uploads_db_path, current)
             except Exception as e:
+                if _generated_summary is not None:
+                    try: os.unlink(file_path)
+                    except OSError: pass
+                    raise
                 logger.warning(f"Failed to update uploads database: {e}")
         
         logger.info(f"File uploaded successfully: {original_filename} ({file_size} bytes)")

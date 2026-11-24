@@ -7,7 +7,7 @@ which resolves the path via ``_resolve_allowed_personal_dir`` first. This pins
 the parity fix.
 
 ``_resolve_allowed_personal_dir`` is a closure inside ``setup_personal_routes``,
-so this is a source-level test, matching test_personal_dir_symlink_escape.py.
+so this check inspects the ordering of the two removal sinks.
 """
 import ast
 from pathlib import Path
@@ -21,15 +21,6 @@ def _function_source(src_text: str, name: str) -> str:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return ast.get_source_segment(src_text, node)
     raise AssertionError(f"{name} not found in {SRC}")
-
-
-def test_remove_directory_confines_path():
-    body = _function_source(SRC.read_text(), "remove_directory_from_rag")
-    assert "_resolve_allowed_personal_dir(" in body, (
-        "remove_directory_from_rag must call _resolve_allowed_personal_dir to "
-        "confine the user-supplied directory to PERSONAL_DIR (parity with "
-        "add_directory_to_rag)"
-    )
 
 
 def test_confinement_runs_before_removal_sinks():

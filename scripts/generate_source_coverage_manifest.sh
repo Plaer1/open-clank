@@ -135,7 +135,7 @@ mkdir -p "$(dirname "$out")"
     'packages/Copal/.references|separately owned legacy Copal study payloads; not relocated by root R01'
     'packages/mimo-code|protected unrelated dirty MiMo source tree'
     'packages/mimo-code/node_modules|installed dependency tree'
-    'mcp_servers/frankenmemory/target|generated Rust build output'
+    'native/memery/target|generated Rust build output'
     'packages/Copal/.node_modules.bak-20260708-143848|installed dependency backup'
     'packages/Copal/.next|generated Next build output'
     'packages/Copal/out|generated static export'

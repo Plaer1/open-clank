@@ -3,7 +3,7 @@
   "group": "memory",
   "surface": "memory",
   "entry_count": 213,
-  "character_count": 17981,
+  "character_count": 17939,
   "complexity": "mixed",
   "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
   "entries": [
@@ -510,8 +510,8 @@
       "complexity": "label"
     },
     {
-      "key": "ui.digest.unavailable.is.the.frankenmemory.provider.running",
-      "source": "Digest unavailable — is the frankenmemory provider running?",
+      "key": "ui.digest.unavailable.is.the.memery.provider.running",
+      "source": "Digest unavailable — is the Memery provider running?",
       "placeholders": [],
       "kind": "js-string",
       "status": "live",
@@ -873,8 +873,8 @@
       "complexity": "label"
     },
     {
-      "key": "ui.frankenmemory.keeps.raw.evidence.separate",
-      "source": "Frankenmemory keeps raw evidence separate.",
+      "key": "ui.memery.keeps.raw.evidence.separate",
+      "source": "Memery keeps raw evidence separate.",
       "placeholders": [],
       "kind": "js-string-html-text",
       "status": "live",
@@ -899,8 +899,8 @@
       "complexity": "label"
     },
     {
-      "key": "ui.graph.unavailable.is.the.frankenmemory.provider.running",
-      "source": "Graph unavailable — is the frankenmemory provider running?",
+      "key": "ui.graph.unavailable.is.the.memery.provider.running",
+      "source": "Graph unavailable — is the Memery provider running?",
       "placeholders": [],
       "kind": "js-string",
       "status": "live",

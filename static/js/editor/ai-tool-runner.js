@@ -32,7 +32,7 @@
  *
  * @returns {(endpoint: string, extraPayload: object, layerName: string, btn: HTMLButtonElement, opts?: { busyLabel?: string }) => Promise<void>}
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 
 const KNOWN_DEPS = ['realesrgan', 'rembg'];
 
@@ -40,9 +40,25 @@ export function createApplyImageTool({
   flatten, saveState, createLayer, composite, renderLayerPanel,
   deriveBusyLabel, getSelectedAIEndpoint,
   openCookbookForDependency, openCookbookForImg2img,
-  spinnerModule, uiModule,
+  spinnerModule, uiModule, markSceneChanged = () => {}, state = legacyState, root = null, lifetime = null, captureOrigin = null, resultHooks = null, beginMutation = () => true, endMutation = () => {}, fetchImpl = globalThis.fetch, ImageClass = globalThis.Image,
 }) {
+  if (state !== legacyState && (!root || !lifetime || typeof captureOrigin !== 'function')) throw new TypeError('isolated AI runner requires ownership');
+  captureOrigin ||= () => () => 'current';
   return async function applyImageTool(endpoint, extraPayload, layerName, btn, opts) {
+    if (lifetime?.disposed) return {status:'retired'};
+    const check = captureOrigin();
+    const resultId = resultHooks?.reserve();
+    let submitted = false, received = false;
+    const controller = new AbortController();
+    let pendingImage = null;
+    let rejectDecode = null;
+    let spinnerDestroyed = false;
+    const destroySpinner = () => { if (spinnerDestroyed) return; spinnerDestroyed = true; try { btnSpinner?.destroy(); } catch {} };
+    const retire = () => { destroySpinner(); controller.abort(); if (pendingImage) { pendingImage.onload = null; pendingImage.onerror = null; pendingImage.src = ''; pendingImage = null; } rejectDecode?.(Object.assign(new Error('AI operation retired'), {name:'AbortError'})); };
+    const unregister = lifetime?.add(retire) || (() => {});
+    const current = () => !lifetime?.disposed && check() === 'current';
+    const requireCurrent = () => { if (!current()) throw Object.assign(new Error('Image changed while AI was working; run it again.'), {code:'origin_changed'}); };
+    const payload = { ...(extraPayload || {}) };
     const origHTML = btn.innerHTML;
     const origWidth = btn.offsetWidth;  // lock width so the button doesn't jump
     btn.disabled = true;
@@ -58,7 +74,7 @@ export function createApplyImageTool({
       btnSpinner = spinnerModule.create('', 'clean', 'whirlpool');
       const sp = btnSpinner.createElement();
       btn.appendChild(sp);
-      const txt = document.createElement('span');
+      const txt = (root?.ownerDocument || document).createElement('span');
       txt.className = 'ge-btn-busy-label';
       txt.textContent = busyLabel;
       btn.appendChild(txt);
@@ -66,22 +82,26 @@ export function createApplyImageTool({
     } catch { btn.textContent = busyLabel; }
     // Tool-specific managed route picker. A blank selection delegates to the
     // owner's ordered Images bindings in the operation router.
-    if (!extraPayload.model_route_id) {
+    if (!payload.model_route_id) {
       const m = /\/api\/image\/([\w-]+)/.exec(endpoint || '');
       const type = m ? m[1].replace('upscale-ai', 'upscale').replace('remove-bg', 'rembg') : null;
       const sel = getSelectedAIEndpoint(type);
-      if (sel.modelRouteId) extraPayload.model_route_id = sel.modelRouteId;
+      if (sel.modelRouteId) payload.model_route_id = sel.modelRouteId;
     }
     try {
+      requireCurrent();
       const flatCanvas = flatten();
       const imageB64 = flatCanvas.toDataURL('image/png').split(',')[1];
-      const body = { image: imageB64, ...extraPayload };
-      const res = await fetch(endpoint, {
+      const body = { image: imageB64, ...payload };
+      if (resultId) { resultHooks.submit(resultId); submitted = true; }
+      const res = await fetchImpl(endpoint, {
+        signal: controller.signal,
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       if (!res.ok) {
+        if (resultId) {resultHooks.reject(resultId); submitted=false;}
         let err = res.statusText;
         try { const e = await res.json(); err = e.detail || e.error || err; } catch {}
         throw new Error(err);
@@ -89,21 +109,35 @@ export function createApplyImageTool({
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (!data.image) throw new Error('No image returned');
-      const img = new Image();
-      img.onload = () => {
-        if (!state.editorOpen) return; // user closed mid-decode (v2 review HIGH-4)
-        saveState();
-        const layer = createLayer(layerName, state.imgWidth, state.imgHeight);
-        layer.ctx.drawImage(img, 0, 0);
-        state.layers.push(layer);
-        state.activeLayerId = layer.id;
-        composite();
-        renderLayerPanel();
-        if (uiModule) uiModule.showToast(layerName + ' complete', 4500);
-      };
-      img.onerror = () => { if (uiModule) uiModule.showToast('Failed to load result', 6000); };
-      img.src = 'data:image/png;base64,' + data.image;
+      if (resultId) {resultHooks.receive(resultId,{bytes:data.image,mime:'image/png',metadata:{label:layerName}}); received=true;}
+      if (!current()) {uiModule?.showToast('Result retained for this image.',6000); return {status:'retained'};}
+      const img = await new Promise((resolve, reject) => {
+        rejectDecode = reject;
+        pendingImage = new ImageClass();
+        pendingImage.onload = () => { const image = pendingImage; pendingImage = null; rejectDecode = null; resolve(image); };
+        pendingImage.onerror = () => { pendingImage = null; rejectDecode = null; reject(new Error('Failed to load result')); };
+        pendingImage.src = 'data:image/png;base64,' + data.image;
+      });
+      requireCurrent();
+      const mutation=beginMutation(); if (!mutation) {uiModule?.showToast('Result retained for this image.',6000); return {status:'retained'};}
+      try {
+      saveState();
+      const layer = createLayer(layerName, state.imgWidth, state.imgHeight);
+      layer.ctx.drawImage(img, 0, 0);
+      state.layers.push(layer);
+      if (opts?.onApplied) { const value=opts.onApplied(layer); if (value && typeof value.then==='function') throw new Error('Image result callback must be synchronous'); }
+      markSceneChanged();
+      if (resultId) resultHooks.resolve(resultId);
+      state.activeLayerId = layer.id;
+      composite(); renderLayerPanel();
+      uiModule?.showToast(layerName + ' complete', 4500);
+      return { status: 'applied', layer };
+      } finally {endMutation(mutation);}
     } catch (e) {
+      if (resultId && !received) { try { if (submitted) resultHooks.unknown(resultId); else resultHooks.resolve(resultId); } catch (_) {} }
+      if (received) { if (!lifetime?.disposed && check() !== 'retired') uiModule?.showToast('Result retained for this image.',6000); return {status:'retained'}; }
+      if (e?.name === 'AbortError' || lifetime?.disposed || check() === 'retired') return {status:'retired'};
+      if (e?.code === 'origin_changed') { uiModule?.showToast(e.message, 6000); return {status:'changed'}; }
       // Detect known failure modes and surface an action-toast.
       const msg = (e?.message || '').toLowerCase();
       const needsImg2Img = (
@@ -135,11 +169,11 @@ export function createApplyImageTool({
         }
       }
     } finally {
-      btn.disabled = false;
-      btn.classList.remove('ge-btn-processing');
-      try { btnSpinner?.destroy(); } catch {}
-      btn.innerHTML = origHTML;
-      btn.style.minWidth = '';
+      unregister();
+      destroySpinner();
+      if (!lifetime?.disposed && check() !== 'retired') {
+        btn.disabled = false; btn.classList.remove('ge-btn-processing'); btn.innerHTML = origHTML; btn.style.minWidth = '';
+      }
     }
   };
 }

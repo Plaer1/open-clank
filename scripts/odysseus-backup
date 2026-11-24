@@ -105,8 +105,8 @@ def _is_known_sqlite_store(relative: Path | PurePosixPath | str) -> bool:
         return False
     name = folded_parts[-1]
     is_mimocode_store = (
-        name == "mimocode.db"
-        or (name.startswith("mimocode-") and name.endswith(".db"))
+        name in {"mimocode.db", "openclank.db"}
+        or (name.startswith(("mimocode-", "openclank-")) and name.endswith(".db"))
     )
     if len(folded_parts) == 1:
         return name in _KNOWN_TOP_LEVEL_SQLITE_NAMES or is_mimocode_store

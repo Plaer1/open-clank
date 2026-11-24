@@ -166,9 +166,12 @@ class ManagedCapabilities(BaseModel):
     operations: list[str]
     artifactTransfer: bool
     localExecutor: bool
+    providerAuthContract: int
+    providerMethodPolicyContract: int
+    privateRuntimeContract: int | None = None
 
 
-def client_capability_offer() -> dict[str, Any]:
+def client_capability_offer(*, private_runtime: bool = False) -> dict[str, Any]:
     return {
         "protocolVersion": PROTOCOL_VERSION,
         "providerStoreVersion": PROVIDER_STORE_VERSION,
@@ -180,10 +183,13 @@ def client_capability_offer() -> dict[str, Any]:
         "operations": sorted(MODEL_OPERATIONS),
         "artifactTransfer": True,
         "localExecutor": True,
+        "providerAuthContract": 1,
+        "providerMethodPolicyContract": 1,
+        **({"privateRuntimeContract": 1} if private_runtime else {}),
     }
 
 
-def validate_initialize_result(result: dict[str, Any]) -> ManagedCapabilities:
+def validate_initialize_result(result: dict[str, Any], *, private_runtime: bool = False) -> ManagedCapabilities:
     if not isinstance(result, dict):
         raise ManagedProtocolError("managed engine initialize result is not an object")
     metadata = result.get("_meta")
@@ -201,12 +207,16 @@ def validate_initialize_result(result: dict[str, Any]) -> ManagedCapabilities:
         "schemaHash": SCHEMA_SHA256,
         "artifactTransfer": True,
         "localExecutor": True,
+        "providerAuthContract": 1,
+        "providerMethodPolicyContract": 1,
     }
     for field, expected in exact.items():
         if getattr(capabilities, field) != expected:
             raise ManagedProtocolError(
                 f"managed engine {field} is incompatible: expected {expected!r}"
             )
+    if capabilities.privateRuntimeContract != (1 if private_runtime else None):
+        raise ManagedProtocolError("managed engine private runtime contract is incompatible")
     method_set = set(capabilities.methods)
     operation_set = set(capabilities.operations)
     if len(method_set) != len(capabilities.methods) or method_set != MANAGED_METHODS:

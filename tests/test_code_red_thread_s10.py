@@ -23,7 +23,7 @@ scope = lifecycle.scope
 async def test_authorized_lazy_workspace_to_current_evidence_and_no_resurrection(scope, tmp_path, monkeypatch):
     from core.models import Session
     from src import ai_interaction
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
     from src.memory_provider import MemoryRequestRejectedError
     from src.tool_schemas import function_call_to_tool_block
     from src.tool_execution import execute_tool_block
@@ -137,7 +137,7 @@ async def test_authorized_lazy_workspace_to_current_evidence_and_no_resurrection
         # Restart the exact same isolated owner/database, not an installed fallback.
         command, environment = provider._command, dict(provider._env)
         await provider.shutdown()
-        provider = FrankenmemoryProvider(command=command, env=environment)
+        provider = MemeryProvider(command=command, env=environment)
         await provider.initialize()
         ai_interaction.set_memory_manager(None, provider=provider)
         app = mounted(scope, provider)

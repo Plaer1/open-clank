@@ -19,7 +19,7 @@ from src.openclank.resource_refs import issue_resource_ref
 from tests.test_files_facade_routes import _app
 from tests.test_linux_host_apps import desktop  # reusable isolated XDG recording fixture
 
-pytestmark = pytest.mark.skipif(not os.environ.get('ODYSSEUS_FILES_SERVICE_BIN'), reason='explicit native Files binary required')
+pytestmark = pytest.mark.skipif(not os.environ.get('OPEN_CLANK_FILES_SERVICE_BIN'), reason='explicit native Files binary required')
 
 
 async def test_actual_linux_files_editor_bytes_and_conflict(tmp_path):
@@ -27,7 +27,7 @@ async def test_actual_linux_files_editor_bytes_and_conflict(tmp_path):
     def native(owner, scope):
         key = (owner, json.dumps(scope, sort_keys=True))
         if key not in clients:
-            clients[key] = OdysseusFilesClient(owner, app_scope=scope, transport='grpc', binary=os.environ['ODYSSEUS_FILES_SERVICE_BIN'])
+            clients[key] = OdysseusFilesClient(owner, app_scope=scope, transport='grpc', binary=os.environ['OPEN_CLANK_FILES_SERVICE_BIN'])
         return clients[key]
     app, _, sessions = _app(tmp_path, native)
     root = tmp_path / 'workspace ü space'
@@ -137,7 +137,7 @@ async def test_real_host_and_managed_gio_dispatch(tmp_path, desktop, monkeypatch
     monkeypatch.setenv('WAYLAND_DISPLAY', os.environ.get('WAYLAND_DISPLAY') or 'fixture-session')
     clients = []
     def native(owner, scope):
-        client = OdysseusFilesClient(owner, app_scope=scope, transport='grpc', binary=os.environ['ODYSSEUS_FILES_SERVICE_BIN'])
+        client = OdysseusFilesClient(owner, app_scope=scope, transport='grpc', binary=os.environ['OPEN_CLANK_FILES_SERVICE_BIN'])
         clients.append(client)
         return client
     app, owner, sessions = _app(tmp_path, native)

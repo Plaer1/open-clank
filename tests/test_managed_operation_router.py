@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.operation_models import OperationBase
-from core.provider_models import ProviderBase, ProviderConnection
+from core.provider_models import ProviderBase, ProviderConnection, ProviderOperationBinding
 from src.openclank.artifacts import ArtifactStore
 from src.openclank.operation_journal import OperationConflict, OperationJournalStore
 from src.openclank.operation_router import (
@@ -97,6 +97,38 @@ def _route(
         display_name=model_id,
         operations=(operation,),
     )
+
+
+def test_recover_prepared_discovers_only_exact_unique_journal(operation_environment):
+    from dataclasses import replace
+    import json
+    from src.openclank.operation_router import _thaw_json
+    store, factory, artifacts = operation_environment
+    _route(store,connection_id='conn-recover',route_id='route-recover',model_id='model-recover',operation='chat.complete')
+    router = ManagedOperationRouter(session_factory=factory,artifact_store=artifacts)
+    request = ManagedOperationRequest(owner='alice',operation='chat.complete',model_route_id='route-recover',
+        root_operation_id='root-recover',idempotency_key='recover-operation-001',input={'messages':[{'role':'user','content':'x'}]})
+    prepared = router.prepare(request)
+    payload = _thaw_json(prepared.payload)
+    journal_request = {key:payload[key] for key in ('operation','routes','input','artifactInputs','options')}
+    row, _ = OperationJournalStore(factory).begin(owner='alice',root_operation_id=request.root_operation_id,
+        operation=request.operation,idempotency_key=request.idempotency_key,request=journal_request,
+        connection_id='conn-recover',billing_lane='local',model_route_id='route-recover')
+    result = router.recover_prepared(prepared,authenticated_owner='alice')
+    assert result == {'state':'unknown','operationID':row.id,'revision':row.revision}
+    changed = router.prepare(replace(request,input={'messages':[{'role':'user','content':'changed'}]}))
+    assert router.recover_prepared(changed,authenticated_owner='alice') == {'state':'unknown'}
+    with pytest.raises(ManagedOperationProtocolError):
+        router.recover_prepared(prepared,authenticated_owner='bob')
+    receipt = {'operationID':row.id,'rootOperationID':request.root_operation_id,'operation':'chat.complete',
+        'modelRouteID':'route-recover','connectionID':'conn-recover','billingLane':'local','state':'cancelled',
+        'committed':False,'output':{'errorCode':'cancelled'},'artifacts':[],'replayed':False}
+    artifact = artifacts.put(owner='alice',chunks=(json.dumps(receipt).encode(),),media_type='application/vnd.openclank.operation-result+json')
+    artifacts.acknowledge(owner='alice',artifact_id=artifact.id)
+    journal = OperationJournalStore(factory)
+    row = journal.cas(owner='alice',operation_id=row.id,expected_revision=row.revision,state='cancelled',artifact_id=artifact.id)
+    recovered = router.recover_prepared(prepared,authenticated_owner='alice')
+    assert recovered['state'] == 'terminal' and recovered['operationID'] == row.id and recovered['result'].state == 'cancelled'
 
 
 def test_route_preflight_exposes_only_safe_enabled_owner_choices(
@@ -279,7 +311,6 @@ async def test_router_sends_only_the_selected_model_route_and_artifacts(
             "output": {},
             "artifacts": [
                 {
-                    "name": "image",
                     "artifactID": output.id,
                     "contentSHA256": output.content_sha256,
                     "sizeBytes": output.size_bytes,
@@ -394,6 +425,122 @@ async def test_router_rejects_route_escape_and_precommit_completion(
     router._executor = uncommitted
     with pytest.raises(ManagedOperationProtocolError, match="commit barrier"):
         await router.execute(request)
+
+
+def test_result_validation_accepts_persisted_pin_over_request_preference(
+    operation_environment,
+):
+    store, factory, artifacts = operation_environment
+    connection = store.create_connection(
+        owner="alice",
+        connection_id="connection-policy",
+        family_id="test-provider",
+        adapter_id="test-adapter",
+        kind="api",
+        billing_lane="subscription",
+        label="Policy test",
+    )
+    route = store.create_model_route(
+        owner="alice",
+        connection_id=connection.id,
+        model_route_id="route-policy",
+        provider_model_id="model-policy",
+        display_name="Policy model",
+        operations=("chat.complete",),
+    )
+    selected = store.create_account(
+        owner="alice",
+        connection_id=connection.id,
+        account_id="policy-pinned-account",
+        label="Pinned account",
+        auth_method="api_key",
+        auth_class="api_key",
+        credentials={"api_key": "synthetic-key"},
+    )
+    store.create_account(
+        owner="alice",
+        connection_id=connection.id,
+        account_id="request-preferred-account",
+        label="Request preferred account",
+        auth_method="api_key",
+        auth_class="api_key",
+        credentials={"api_key": "synthetic-other-key"},
+    )
+    with factory() as db:
+        db.add(
+            ProviderOperationBinding(
+                id="binding-policy-pin",
+                owner="alice",
+                credential_owner="alice",
+                root_operation_id="root-policy-pin",
+                connection_id=connection.id,
+                provider_id="test-provider",
+                billing_lane="subscription",
+                model_id="model-policy",
+                selected_account_id=selected.id,
+                credential_revision=1,
+                source="pinned",
+                policy_snapshot={
+                    "version": 1,
+                    "source": "explicit",
+                    "policy_revision": 4,
+                    "mode": "pinned",
+                    "account_id": selected.id,
+                    "same_model_fallback": False,
+                    "ordered_account_ids": [selected.id],
+                },
+            )
+        )
+        db.commit()
+
+    router = ManagedOperationRouter(
+        session_factory=factory,
+        artifact_store=artifacts,
+        executor=None,
+    )
+    request = ManagedOperationRequest(
+        owner="alice",
+        operation="chat.complete",
+        model_route_id=route.id,
+        preferred_account_id="request-preferred-account",
+        input={"messages": []},
+        root_operation_id="root-policy-pin",
+    )
+    raw = {
+        "operationID": "op-policy-pin",
+        "rootOperationID": request.root_operation_id,
+        "operation": request.operation,
+        "state": "complete",
+        "committed": True,
+        "commitReason": "response_returned",
+        "modelRouteID": route.id,
+        "connectionID": connection.id,
+        "billingLane": connection.billing_lane,
+        "bindingID": "binding-policy-pin",
+        "selectedAccountID": selected.id,
+        "output": {"text": "synthetic result"},
+        "artifacts": [],
+        "replayed": False,
+    }
+    result = router._validate_result(
+        owner="alice",
+        request=request,
+        routes=router._resolve_routes(request),
+        raw=raw,
+    )
+    assert result.selected_account_id == selected.id
+
+    with factory() as db:
+        binding = db.get(ProviderOperationBinding, "binding-policy-pin")
+        binding.model_id = "different-model"
+        db.commit()
+    with pytest.raises(ManagedOperationProtocolError, match="different from the bound request"):
+        router._validate_result(
+            owner="alice",
+            request=request,
+            routes=router._resolve_routes(request),
+            raw=raw,
+        )
 
 
 @pytest.mark.asyncio
@@ -627,3 +774,55 @@ def test_artifact_attachment_never_fabricates_commitment(operation_environment):
     explicit = journal.cas(owner="alice", operation_id=row.id, expected_revision=complete.revision, commit_reason="provider_result")
     assert explicit.committed is True
     assert explicit.commit_reason == "provider_result"
+
+
+@pytest.mark.asyncio
+async def test_search_service_prepares_real_managed_operation_and_finalizes_once(operation_environment, monkeypatch):
+    from services.search import service
+    import src.openclank.operation_router as operation_router
+    store, factory, artifacts = operation_environment
+    store.create_connection(owner="alice", connection_id="connection-mimo", family_id="xiaomi",
+                            adapter_id="mimo-native", kind="api", billing_lane="metered_api", label="MiMo")
+    store.create_model_route(owner="alice", connection_id="connection-mimo", model_route_id="route-search",
+                             provider_model_id="mimo-v2.5", display_name="MiMo Search", operations=("web.search",))
+    calls = []
+    async def execute(owner, payload):
+        calls.append((owner, payload))
+        return {"operationID": "op-search-0001", "rootOperationID": payload["rootOperationID"],
+                "operation": "web.search", "state": "complete", "committed": True,
+                "commitReason": "response_returned", "modelRouteID": "route-search",
+                "connectionID": "connection-mimo", "billingLane": "metered_api",
+                "output": {"status": "complete", "results": [{"url": "https://source.example/a", "title": "A"}]},
+                "artifacts": [], "replayed": False}
+    router = ManagedOperationRouter(session_factory=factory, artifact_store=artifacts, executor=execute)
+    monkeypatch.setattr(router, "route_preflight", lambda **kwargs: {"configured": True, "selected_model_route_id": "route-search"})
+    monkeypatch.setattr(operation_router, "get_operation_router", lambda: router)
+    monkeypatch.setattr(service, "_get_search_settings", lambda: {"search_provider": "mimo", "search_result_count": 4})
+    svc = service.SearchService(fetch_content=False)
+    prepared = svc.prepare_search("  actual query  ", owner="alice", mode="answer", deadline=10,
+                                  root_operation_id="root-search-fixture", idempotency_key="search-fixture-00001")
+    assert isinstance(prepared, service.PreparedSearch) and calls == []
+    assert prepared.snapshots == ()
+    wire = prepared.managed_prepared.payload
+    assert wire["input"]["query"] == "actual query" and wire["input"]["count"] == 4 and wire["input"]["answer"] is True
+    assert wire["rootOperationID"] == "root-search-fixture" and wire["idempotencyKey"] == "search-fixture-00001"
+    assert 10 <= wire["options"]["deadlineMs"] <= 10000
+    result = await router.execute_prepared(prepared.managed_prepared)
+    assert len(calls) == 1 and svc.project_managed(prepared, result).results[0].url == "https://source.example/a"
+    raw = await execute(*calls[0])
+    assert router.finalize(prepared.managed_prepared, raw) is result
+    raw["operationID"] = "different-result"
+    with pytest.raises(ManagedOperationProtocolError, match="conflicting"):
+        router.finalize(prepared.managed_prepared, raw)
+
+
+@pytest.mark.parametrize("state,code", [("failed", "model_not_found"), ("cancelled", "cancelled")])
+def test_search_projection_preserves_managed_terminal_failure(state, code):
+    from types import SimpleNamespace
+    from services.search.service import SearchService
+    prepared = SimpleNamespace(query="q", caller="chat", mode="results", started=0)
+    output = {"errorCode": "model_not_found"} if state == "failed" else {}
+    managed = SimpleNamespace(state=state, output=output, selected_account_id="a", model_route_id="r")
+    response = SearchService().project_managed(prepared, managed)
+    assert response.status == state and response.error["code"] == code
+    assert response.account_id == "a" and response.model_route == "r"

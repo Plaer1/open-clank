@@ -1,0 +1,35 @@
+{
+  "id": "batch-088",
+  "group": "docs.openclank-docs-clankshop",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1517,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-clankshop.title",
+      "source": "Clankshop",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-clankshop.body",
+      "source": "# Clankshop\n\nOpen **Copal → Clankshop** to watch chat activity or try it with simulated workers.\n\n## Follow live work\n\nTurn on **Live** to observe eligible chats. Select a worker to see its latest action. **Open chat**, **Open question** or **Open chat permission** returns you to the conversation. **Open chat with this text** fills the composer for review.\n\n- **Workshop** shows each worker’s station and reported action.\n- **Drift** turns tool activity into speed and traffic. Under **Route**, **Mega Highway** uses a shared road and **Highway Spaghetti** uses branches that merge.\n- **Idle** shows activity meters and the robot eye.\n\nCounters describe the activity of loaded chats. For the outcome, open the chat or check [[Tasks and Continuations]]. **View settings → Pause in background** pauses the scene when you leave its window.\n\n## Simulate each worker\n\nOpen **Debug** and set **Workers**, then give each a tool category and calls per second. Choose a **Cue worker** and **Preview cue** and select **Show cue**. In Drift, **Drift course** adjusts the selected route and playback speed. **Return to live view** leaves the simulation without sending any actions to chat.\n\n## Adjust audio\n\nChoose **Enable audio**. Under **Audio settings**, adjust **Music volume**, **Effects volume** or an individual cue. **Background audio** offers full, quarter or silent volume.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

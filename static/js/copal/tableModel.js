@@ -842,6 +842,8 @@ const FORMULA_ERRORS = Object.freeze({
   VALUE: '#VALUE!',
   NAME: '#NAME?',
   FORMULA: '#FORMULA!',
+  BUDGET: '#BUDGET!',
+  CANCELLED: '#CANCELLED!',
 });
 
 function formulaError(code, message) {
@@ -873,6 +875,8 @@ export function evaluateFormula(formula, model, options = {}) {
     const result = evaluateExpression(formula, model, {
       visiting: options.visiting || new Set(),
       depth: options.depth || 0,
+      memo: options.memo, budget: options.budget, isCurrent: options.isCurrent,
+      sheetId: options.sheetId, resolveSheet: options.resolveSheet, budgets: options.budgets,
     });
     return { value: formatResult(result) };
   } catch (e) {
@@ -884,7 +888,13 @@ export function evaluateFormula(formula, model, options = {}) {
 export function evaluateCell(model, row, col, options = {}) {
   const raw = model?.rows?.[row]?.cells?.[col] ?? '';
   if (typeof raw !== 'string' || !raw.startsWith('=')) return { value: raw, raw };
-  return evaluateFormula(raw, model, options);
+  if (!options.memo) return evaluateFormula(raw, model, options);
+  try {
+    const result = resolveCellAt(model, row, col, {visiting:options.visiting || new Set(), depth:options.depth || 0,
+      memo:options.memo, budget:options.budget, isCurrent:options.isCurrent,
+      sheetId:options.sheetId, resolveSheet:options.resolveSheet, budgets:options.budgets});
+    return {value:formatResult(result)};
+  } catch (error) { return errorResult(error); }
 }
 
 function evaluateExpression(formula, model, ctx) {
@@ -902,15 +912,32 @@ function resolveCellRef(ref, model, ctx) {
   return resolveCellAt(model, row, col, ctx);
 }
 
+function consumeFormulaWork(ctx, cost = 1) {
+  if (typeof ctx.isCurrent === 'function' && !ctx.isCurrent()) throw formulaError('CANCELLED', 'Calculation was superseded');
+  const budget = ctx.budgets ? ctx.budgets.get(ctx.sheetId) : ctx.budget;
+  if (ctx.budgets && !budget) throw formulaError('REF', 'Sheet calculation unavailable');
+  if (budget) {
+    if (!Number.isFinite(budget.remaining) || budget.remaining < cost) {
+      budget.remaining = 0;
+      throw formulaError('BUDGET', 'Calculation work limit exceeded');
+    }
+    budget.remaining -= cost;
+  }
+}
+
 function resolveCellAt(model, row, col, ctx) {
-  const key = `${row},${col}`;
+  consumeFormulaWork(ctx);
+  const key = ctx.resolveSheet ? JSON.stringify([ctx.sheetId, row, col]) : `${row},${col}`;
   if (ctx.visiting.has(key)) throw formulaError('CYCLE', `Circular reference at ${indexToCol(col)}${row}`);
   if (ctx.depth >= FORMULA_MAX_DEPTH) throw formulaError('CYCLE', `Formula depth exceeds ${FORMULA_MAX_DEPTH}`);
+  if (ctx.memo?.has(key)) return ctx.memo.get(key);
   const raw = model.rows[row]?.cells?.[col] ?? '';
   if (typeof raw === 'string' && raw.startsWith('=')) {
     ctx.visiting.add(key);
     try {
-      return parseExpr(raw.slice(1).trim(), model, { ...ctx, depth: ctx.depth + 1 });
+      const value = parseExpr(raw.slice(1).trim(), model, { ...ctx, depth: ctx.depth + 1 });
+      ctx.memo?.set(key, value); // only completed values, never errors or partial cycles
+      return value;
     } finally {
       ctx.visiting.delete(key);
     }
@@ -934,7 +961,7 @@ function coerceCellValue(raw) {
   return trimmed;
 }
 
-function resolveRange(rangeStr, model, ctx) {
+function resolveRange(rangeStr, model, ctx, strict = false) {
   const parts = rangeStr.split(':');
   if (parts.length !== 2) throw formulaError('REF', `Invalid range: ${rangeStr}`);
   const startMatch = /^([A-Z]+)(\d+)$/i.exec(parts[0].trim());
@@ -945,6 +972,9 @@ function resolveRange(rangeStr, model, ctx) {
   const startRow = parseInt(startMatch[2], 10);
   const endCol = colToIndex(endMatch[1].toUpperCase());
   const endRow = parseInt(endMatch[2], 10);
+  if (strict && (startRow < 1 || endRow < 1 || startRow >= model.rows.length || endRow >= model.rows.length ||
+      startCol < 0 || endCol < 0 || startCol >= model.columns || endCol >= model.columns))
+    throw formulaError('REF', 'Missing qualified range endpoint');
 
   const values = [];
   let count = 0;
@@ -960,7 +990,8 @@ function resolveRange(rangeStr, model, ctx) {
 }
 
 function parseExpr(expr, model, ctx) {
-  const tokens = tokenize(expr);
+  consumeFormulaWork(ctx, 1 + Math.ceil(expr.length / 32));
+  const tokens = tokenize(expr, !!ctx.resolveSheet);
   let pos = 0;
 
   function peek() { return tokens[pos]; }
@@ -1036,6 +1067,13 @@ function parseExpr(expr, model, ctx) {
     const t = peek();
     if (!t) throw formulaError('VALUE', 'Unexpected end of expression');
     if (t === '#REF!') { consume(); throw formulaError('REF', 'Missing reference'); }
+    if (typeof t === 'object' && t.kind === 'qualified') {
+      consume();
+      const target = ctx.resolveSheet(t.sheet);
+      if (!target?.model || typeof target.sheetId !== 'string') throw formulaError('REF', 'Missing or ambiguous sheet');
+      const next = {...ctx, sheetId:target.sheetId};
+      return t.ref.includes(':') ? resolveRange(t.ref, target.model, next, true) : resolveCellRef(t.ref, target.model, next);
+    }
 
     // Parentheses
     if (t === '(') {
@@ -1115,12 +1153,23 @@ function parseExpr(expr, model, ctx) {
   return result;
 }
 
-function tokenize(expr) {
+function tokenize(expr, qualified = false) {
   const tokens = [];
   let i = 0;
   while (i < expr.length) {
     // Skip whitespace
     if (/\s/.test(expr[i])) { i++; continue; }
+
+    // A qualified reference is recognized only for a workbook-owned resolver.
+    // A quoted sheet name uses doubled apostrophes; other quoted text remains a literal.
+    if (qualified) {
+      const rest = expr.slice(i);
+      const match = /^(?:'((?:[^']|'')*)'|([A-Za-z_][A-Za-z0-9_]*))!([A-Za-z]+[0-9]+(?::[A-Za-z]+[0-9]+)?)(?![A-Za-z0-9_.:!])/u.exec(rest);
+      if (match) {
+        tokens.push({kind:'qualified', sheet:match[1] === undefined ? match[2] : match[1].replace(/''/g, "'"), ref:match[3]});
+        i += match[0].length; continue;
+      }
+    }
 
     // Operators
     if (expr[i] === '>' && expr[i + 1] === '=') { tokens.push('>='); i += 2; continue; }
@@ -1178,7 +1227,6 @@ function columnCurrencyCode(model, col) {
 
 // ─── Interactive table widget ────────────────────────────────────────────────
 
-const tableOwners = new WeakMap();
 
 export function createTableWidget(model, onEdit, { h, editable = true, locale, onStatus } = {}) {
   // h: hyperscript helper (optional, falls back to DOM APIs)
@@ -1378,7 +1426,6 @@ export function createTableWidget(model, onEdit, { h, editable = true, locale, o
     for (let c = 0; c < widgetModel.columns; c++) {
       const th = el('th', {
         'data-row': '0', 'data-col': String(c),
-        'data-copal-context-object': 'table',
         'data-column-type': columnType(c) || '',
         tabindex: '-1',
         onclick: () => setActiveCell(0, c),
@@ -1412,7 +1459,6 @@ export function createTableWidget(model, onEdit, { h, editable = true, locale, o
         const parsed = parseTypedCell(raw, columnType(c));
         const td = el('td', {
           'data-row': String(r), 'data-col': String(c),
-          'data-copal-context-object': 'table',
           'data-cell-status': parsed.status,
           tabindex: '-1',
           onclick: () => setActiveCell(r, c),
@@ -1446,92 +1492,68 @@ export function createTableWidget(model, onEdit, { h, editable = true, locale, o
     if (activeRow < 0) setActiveCell(0, 0);
   });
 
-  function columnCommands() {
-    const c = activeCol;
-    const type = columnType(c);
+  function tableCommands({ row, col }) {
+    if (!editable) return [];
+    const sort = [
+      { id:'table-sort-asc', label:'Sort ascending', menu:'Sort', edit:{ type:'sort', col, direction:'asc' } },
+      { id:'table-sort-desc', label:'Sort descending', menu:'Sort', edit:{ type:'sort', col, direction:'desc' } },
+    ];
+    const types = ['text', 'number', 'date', 'currency'].map(type => ({
+      id:`table-type-${type}`, label:`Type: ${type}`, menu:'Column type', radio:true, checked:columnType(col) === type,
+      edit:{ type:'setColumnType', col, columnType:type },
+    }));
+    if (row > 0) return [
+      { id:'table-insert-row-above', label:'Insert row above', edit:{ type:'insertRow', afterRow:row - 1 } },
+      { id:'table-insert-row-below', label:'Insert row below', edit:{ type:'insertRow', afterRow:row } },
+      ...(widgetModel.rows.length > 2 ? [{ id:'table-delete-row', label:'Delete row', destructive:true, edit:{ type:'deleteRow', row } }] : []),
+      ...(row > 1 ? [{ id:'table-move-row-up', label:'Move row up', edit:{ type:'moveRow', fromRow:row, toRow:row - 1 } }] : []),
+      ...(row < widgetModel.rows.length - 1 ? [{ id:'table-move-row-down', label:'Move row down', edit:{ type:'moveRow', fromRow:row, toRow:row + 1 } }] : []),
+      ...sort, ...types,
+    ];
+    const align = ['left', 'center', 'right'].map(alignment => ({
+      id:`table-align-${alignment}`, label:`Align ${alignment}`, menu:'Alignment', radio:true, checked:(widgetModel.alignments[col] || 'left') === alignment,
+      edit:{ type:'setAlignment', col, alignment },
+    }));
     return [
-      { label: 'Insert column left', id: 'table-insert-column-left', disabled: !editable },
-      { label: 'Insert column right', id: 'table-insert-column-right', disabled: !editable },
-      { label: 'Delete column', id: 'table-delete-column', disabled: !editable || widgetModel.columns <= 1 },
-      { label: 'Move column left', id: 'table-move-column-left', disabled: !editable || c <= 0 },
-      { label: 'Move column right', id: 'table-move-column-right', disabled: !editable || c >= widgetModel.columns - 1 },
-      { label: 'Sort ascending', id: 'table-sort-asc', disabled: !editable },
-      { label: 'Sort descending', id: 'table-sort-desc', disabled: !editable },
-      { label: `Type: text${type === 'text' ? ' ✓' : ''}`, id: 'table-type-text', disabled: !editable },
-      { label: `Type: number${type === 'number' ? ' ✓' : ''}`, id: 'table-type-number', disabled: !editable },
-      { label: `Type: date${type === 'date' ? ' ✓' : ''}`, id: 'table-type-date', disabled: !editable },
-      { label: `Type: currency${type === 'currency' ? ' ✓' : ''}`, id: 'table-type-currency', disabled: !editable },
-      { label: 'Align left', id: 'table-align-left', disabled: !editable },
-      { label: 'Align center', id: 'table-align-center', disabled: !editable },
-      { label: 'Align right', id: 'table-align-right', disabled: !editable },
+      { id:'table-insert-column-left', label:'Insert column left', edit:{ type:'insertColumn', afterCol:col - 1 } },
+      { id:'table-insert-column-right', label:'Insert column right', edit:{ type:'insertColumn', afterCol:col } },
+      ...(widgetModel.columns > 1 ? [{ id:'table-delete-column', label:'Delete column', destructive:true, edit:{ type:'deleteColumn', col } }] : []),
+      ...(col > 0 ? [{ id:'table-move-column-left', label:'Move column left', edit:{ type:'moveColumn', fromCol:col, toCol:col - 1 } }] : []),
+      ...(col < widgetModel.columns - 1 ? [{ id:'table-move-column-right', label:'Move column right', edit:{ type:'moveColumn', fromCol:col, toCol:col + 1 } }] : []),
+      ...sort, ...types, ...align,
     ];
   }
 
-  function rowCommands() {
-    return [
-      { label: 'Insert row above', id: 'table-insert-row-above', disabled: !editable },
-      { label: 'Insert row below', id: 'table-insert-row-below', disabled: !editable },
-      { label: 'Delete row', id: 'table-delete-row', disabled: !editable || widgetModel.rows.length <= 2 },
-      { label: 'Move row up', id: 'table-move-row-up', disabled: !editable || activeRow <= 1 },
-      { label: 'Move row down', id: 'table-move-row-down', disabled: !editable || activeRow >= widgetModel.rows.length - 1 },
-    ];
-  }
-
-  const tableAdapter = {
-    capture: (target) => ({
-      row: Number(target?.dataset?.row),
-      col: Number(target?.dataset?.col),
-      editable,
-    }),
-    commands: (request) => {
-      const row = Number(request.adapterContext?.row);
-      const col = Number(request.adapterContext?.col);
-      if (!Number.isInteger(row) || !Number.isInteger(col)) return [];
-      activeRow = row; activeCol = col;
-      if (row === 0) return columnCommands();
-      return [...rowCommands(), ...columnCommands().filter((entry) => entry.id.startsWith('table-sort-') || entry.id.startsWith('table-type-'))];
-    },
-    execute: (command, request) => {
-      const row = Number(request.adapterContext?.row);
-      const col = Number(request.adapterContext?.col);
-      if (!Number.isInteger(row) || !Number.isInteger(col)) return false;
-      if (!editable && String(command).startsWith('table-') && command !== 'table-inspect') {
-        notify('This document is read-only. Table structure and cells cannot be changed.', true);
-        return true;
-      }
-      activeRow = row; activeCol = col;
-      if (command === 'table-insert-column-left') onEdit({ type: 'insertColumn', afterCol: col - 1 });
-      else if (command === 'table-insert-column-right') onEdit({ type: 'insertColumn', afterCol: col });
-      else if (command === 'table-delete-column' && widgetModel.columns > 1) onEdit({ type: 'deleteColumn', col });
-      else if (command === 'table-move-column-left' && col > 0) onEdit({ type: 'moveColumn', fromCol: col, toCol: col - 1 });
-      else if (command === 'table-move-column-right' && col < widgetModel.columns - 1) onEdit({ type: 'moveColumn', fromCol: col, toCol: col + 1 });
-      else if (command === 'table-insert-row-above' && row > 0) onEdit({ type: 'insertRow', afterRow: row - 1 });
-      else if (command === 'table-insert-row-below') onEdit({ type: 'insertRow', afterRow: row });
-      else if (command === 'table-delete-row' && widgetModel.rows.length > 2) onEdit({ type: 'deleteRow', row });
-      else if (command === 'table-move-row-up' && row > 1) onEdit({ type: 'moveRow', fromRow: row, toRow: row - 1 });
-      else if (command === 'table-move-row-down' && row < widgetModel.rows.length - 1) onEdit({ type: 'moveRow', fromRow: row, toRow: row + 1 });
-      else if (command === 'table-sort-asc') onEdit({ type: 'sort', col, direction: 'asc' });
-      else if (command === 'table-sort-desc') onEdit({ type: 'sort', col, direction: 'desc' });
-      else if (command === 'table-type-text') onEdit({ type: 'setColumnType', col, columnType: 'text' });
-      else if (command === 'table-type-number') onEdit({ type: 'setColumnType', col, columnType: 'number' });
-      else if (command === 'table-type-date') onEdit({ type: 'setColumnType', col, columnType: 'date' });
-      else if (command === 'table-type-currency') onEdit({ type: 'setColumnType', col, columnType: 'currency' });
-      else if (command === 'table-align-left') onEdit({ type: 'setAlignment', col, alignment: 'left' });
-      else if (command === 'table-align-center') onEdit({ type: 'setAlignment', col, alignment: 'center' });
-      else if (command === 'table-align-right') onEdit({ type: 'setAlignment', col, alignment: 'right' });
-      else return false;
+  const captureCell = target => {
+    const cell = target.closest('th[data-row][data-col], td[data-row][data-col]');
+    if (!cell || cell.closest('.copal-table-widget') !== container) return null;
+    const row = Number(cell.dataset.row);
+    const col = Number(cell.dataset.col);
+    if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || col < 0 || row >= widgetModel.rows.length || col >= widgetModel.columns) return null;
+    return { cell, row, col };
+  };
+  const isCurrent = request => {
+    const captured = request.adapterContext;
+    if (!captured?.cell.isConnected) return false;
+    const current = captureCell(captured.cell);
+    return current?.row === captured.row && current.col === captured.col;
+  };
+  registerAdapter(container, {
+    editingCommands:false,
+    hitTest:target => target.closest('input, textarea, select, [contenteditable="true"]') ? 'native' : true,
+    capture:target => captureCell(target),
+    isCurrent,
+    commands:request => isCurrent(request) ? tableCommands(request.adapterContext) : [],
+    execute:(id, request) => {
+      if (!isCurrent(request) || refuseMutation()) return false;
+      const command = tableCommands(request.adapterContext).find(item => item.id === id);
+      if (!command) return false;
+      const { row, col } = request.adapterContext;
+      setActiveCell(row, col);
+      onEdit(command.edit);
       return true;
     },
-  };
-  tableOwners.set(container, tableAdapter);
-  registerAdapter(container, tableAdapter);
-  window.__openClankTableContextCommand = (command, target) => {
-    const owner = target?.closest?.('.copal-table-widget');
-    const adapter = owner ? tableOwners.get(owner) : null;
-    if (!adapter) return false;
-    const request = { adapterContext: adapter.capture(target) };
-    return adapter.execute(command, request);
-  };
+  });
 
   renderBody();
   return container;

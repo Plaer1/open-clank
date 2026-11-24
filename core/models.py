@@ -5,7 +5,8 @@ Pure data models — no database logic, no side effects.
 These are simple datacontainers. All persistence is handled by SessionManager.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import RLock
 from typing import Dict, List, Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -87,6 +88,9 @@ class Session:
     # Stable server Workspace identity. The physical path is derived only
     # after current policy resolution for each turn.
     workspace_id: Optional[str] = None
+    response_style: str = 'normal'
+    response_style_revision: int = 0
+    _history_lock: Any = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.headers is None:
@@ -104,7 +108,7 @@ class Session:
     def _history(self, messages: List[ChatMessage]):
         self.history = messages
 
-    def add_message(self, message: ChatMessage):
+    def add_message(self, message: ChatMessage, *, origin_admission=None, connector_guard=None, channel_guard=None, tui_guard=None):
         """
         Add a message to this session.
 
@@ -112,23 +116,39 @@ class Session:
         message_count. Delegates to SessionManager for persistence
         if available.
         """
-        self.history.append(message)
-        self.message_count = len(self.history)
+        if origin_admission is not None:
+            from src.openclank.chat_source_bridge import HostOriginAdmission
+            if type(origin_admission) is not HostOriginAdmission:
+                raise TypeError("trusted host origin admission required")
+        if (channel_guard is not None or tui_guard is not None) and _SESSION_MANAGER_INSTANCE is None:
+            raise RuntimeError('Channel persistence authority unavailable')
+        with self._history_lock:
+            if _SESSION_MANAGER_INSTANCE:
+                cached = _SESSION_MANAGER_INSTANCE.sessions.get(self.id)
+                if cached is not None and cached is not self:
+                    raise RuntimeError('Session cache changed')
+            self.history.append(message)
+            self.message_count = len(self.history)
 
-        # Delegate to session manager for persistence. A failed commit must not
-        # leave an in-memory message that the stream can mistake for durable.
-        if _SESSION_MANAGER_INSTANCE:
-            try:
-                persisted = _SESSION_MANAGER_INSTANCE._persist_message(self.id, message)
-                if not persisted:
-                    raise RuntimeError(f"Session {self.id} no longer exists")
-            except Exception:
-                if self.history and self.history[-1] is message:
-                    self.history.pop()
-                else:
-                    self.history = [item for item in self.history if item is not message]
-                self.message_count = len(self.history)
-                raise
+            # Delegate to session manager for persistence. A failed commit must not
+            # leave an in-memory message that the stream can mistake for durable.
+            if _SESSION_MANAGER_INSTANCE:
+                try:
+                    kwargs = {}
+                    if origin_admission is not None: kwargs['origin_admission'] = origin_admission
+                    if connector_guard is not None: kwargs['connector_guard'] = connector_guard
+                    if channel_guard is not None: kwargs['channel_guard'] = channel_guard
+                    if tui_guard is not None: kwargs['tui_guard'] = tui_guard
+                    persisted = _SESSION_MANAGER_INSTANCE._persist_message(self.id, message, **kwargs)
+                    if not persisted:
+                        raise RuntimeError(f"Session {self.id} no longer exists")
+                except Exception:
+                    if self.history and self.history[-1] is message:
+                        self.history.pop()
+                    else:
+                        self.history = [item for item in self.history if item is not message]
+                    self.message_count = len(self.history)
+                    raise
 
     def get_context_messages(self) -> List[Dict[str, Any]]:
         """Get messages in format for LLM API.

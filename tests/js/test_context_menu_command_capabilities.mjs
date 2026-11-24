@@ -3,7 +3,7 @@ import { createCodeMirrorContextAdapter } from '../../static/js/custom-context-m
 
 // Minimal mounted CodeMirror contract. Selection transforms require text;
 // select-next can select the word at a cursor when that capability exists.
-function makeEditor(selectedText = '') {
+function makeEditor(selectedText = '', language = 'markdown') {
   const body = 'line one\nline two';
   const state = {
     doc: {
@@ -24,6 +24,7 @@ function makeEditor(selectedText = '') {
       posAtCoords: () => 0,
     },
     getSelection: () => state.selection,
+    getStatus: () => ({ language:{ id:language }, canUndo:false, canRedo:true }),
     getSelectedText: () => selectedText,
     selectNextMatch: () => true,
   };
@@ -54,6 +55,11 @@ function requestFor(selectedText) {
   assert.equal(byId['indent'].disabled, undefined, 'indent stays usable');
   assert.equal(byId['insert-template'].disabled, true, 'insert template needs the owning editor callback');
   assert.equal(byId['new-from-template'].disabled, true, 'new from template needs the owning editor callback');
+  const visible = new Set(adapter.projectCommands(request, commands).map(item => item.id));
+  assert(visible.has('select-next-match') && visible.has('duplicate-line'));
+  assert(!visible.has('format-bold') && !visible.has('select-all-matches') && !visible.has('insert-template'));
+  const history = adapter.editingCommands(request, [{id:'undo'}, {id:'redo'}]);
+  assert.deepEqual(history.map(item => item.id), ['redo']);
 }
 
 // Non-empty selection: selection-only commands enabled.
@@ -64,6 +70,10 @@ function requestFor(selectedText) {
   assert.equal(byId['select-next-match'].disabled, false, 'select-next-match enabled with selection');
   assert.equal(byId['format-bold'].disabled, false, 'bold enabled with selection');
   assert.equal(byId['duplicate-line'].disabled, undefined);
+  assert(adapter.projectCommands(request, commands).some(item => item.id === 'format-bold'));
+  const code = createCodeMirrorContextAdapter(makeEditor('line', 'python'));
+  const codeRequest = { adapterContext:code.capture(), editable:true };
+  assert(!code.projectCommands(codeRequest, code.commands(codeRequest)).some(item => item.id.startsWith('format-')));
 }
 
 // Text alone does not invent a missing editor capability.

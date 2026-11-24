@@ -49,10 +49,17 @@
  *   uiModule:               object,
  * }} deps
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 import { isAltGrEvent } from '../platform.js';
 
 export function wireKeyboardShortcuts(deps) {
+  const { state = legacyState, root = null, lifetime = null, isFocused = null } = deps;
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated shortcuts require root and lifetime');
+  const currentRoot = () => root || state.container;
+  const ownerDocument = currentRoot()?.ownerDocument || document;
+  let disposed = false;
+  const focused = () => typeof isFocused === 'function' ? isFocused() :
+    (state === legacyState || Boolean(currentRoot()?.contains(ownerDocument.activeElement)));
   const {
     toolbar, toolKeyMap,
     composite, saveState, undo, redo,
@@ -62,11 +69,11 @@ export function wireKeyboardShortcuts(deps) {
     wandDeleteSelection, wandCopyToNewLayer,
     lassoDeleteSelection, lassoCopyToLayer, lassoToMask,
     buildLassoMask, drawLassoOverlay,
-    activeLayer, uiModule,
+    activeLayer, uiModule, captureLassoPreview = () => {}, captureClipboardOrigin = () => null, clipboardOriginCurrent = () => true, cutSelection = () => false, clearSelection = () => false,
   } = deps;
 
-  document.addEventListener('keydown', (e) => {
-    if (!state.editorOpen || !state.container?.getClientRects().length) return;
+  const onKeyDown = (e) => {
+    if (disposed || lifetime?.disposed || !focused() || !state.editorOpen || !currentRoot()?.getClientRects().length) return;
     // `?` toggles the cheatsheet. Don't fire while typing in a text
     // field — the user might be typing a prompt with a `?`.
     if (e.key === '?' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
@@ -91,23 +98,13 @@ export function wireKeyboardShortcuts(deps) {
       if (e.shiftKey && (e.key === 'D' || e.key === 'd')) {
         if (state.wandMask || state.lassoPoints.length) {
           e.preventDefault();
-          if (state.wandMask) {
-            saveState();
-            state.wandMask = null;
-            state.wandLayerId = null;
-            state.wandLastSeed = null;
-          }
-          if (state.lassoPoints.length) {
-            state.lassoPoints = [];
-            state.lassoActive = false;
-          }
-          composite();
+          clearSelection();
         }
       }
       // Save shortcuts — match the hints shown in the Save dropdown.
       if ((e.key === 's' || e.key === 'S') && !e.altKey) {
         e.preventDefault();
-        document.getElementById(e.shiftKey ? 'ge-export-gallery' : 'ge-save')?.click();
+        currentRoot()?.querySelector(e.shiftKey ? ':is(#ge-export-gallery,[data-ge-id="ge-export-gallery"])' : ':is(#ge-save,[data-ge-id="ge-save"])')?.click();
       }
       if (e.shiftKey && e.key === 'T') { e.preventDefault(); resizeCustomPrompt(); }
       if (e.altKey && e.key === 't') { e.preventDefault(); startTransform(); }
@@ -142,43 +139,43 @@ export function wireKeyboardShortcuts(deps) {
           const isCut = e.key === 'x';
           const src = state.layers.find(l => l.id === state.wandLayerId);
           if (!src) return;
+          const origin = captureClipboardOrigin();
+          if (!clipboardOriginCurrent(origin)) return;
           // Clip source by wand mask into a temp canvas.
           const w = src.canvas.width, h = src.canvas.height;
-          const tmp = document.createElement('canvas');
+          const tmp = ownerDocument.createElement('canvas');
           tmp.width = w; tmp.height = h;
           const tCtx = tmp.getContext('2d');
           tCtx.drawImage(src.canvas, 0, 0);
           tCtx.globalCompositeOperation = 'destination-in';
           tCtx.drawImage(state.wandMask, 0, 0);
+          if (!clipboardOriginCurrent(origin) || (isCut && !cutSelection('wand', src, tmp, origin))) return;
           state.internalClipboard = tmp;
+          const publishOrigin = captureClipboardOrigin();
           tmp.toBlob(blob => {
+            if (disposed || lifetime?.disposed || !focused() || !clipboardOriginCurrent(publishOrigin)) return;
             if (blob && navigator.clipboard?.write) {
               navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
-                uiModule.showToast(isCut ? 'Cut to clipboard' : 'Copied to clipboard');
-              }).catch(() => uiModule.showToast(isCut ? 'Cut (editor only)' : 'Copied (editor only)'));
+                if (!disposed && !lifetime?.disposed) uiModule.showToast(isCut ? 'Cut to clipboard' : 'Copied to clipboard');
+              }).catch(() => { if (!disposed && !lifetime?.disposed) uiModule.showToast(isCut ? 'Cut (editor only)' : 'Copied (editor only)'); });
             }
           }, 'image/png');
-          if (isCut) {
-            // Cut also moves the selection to a new layer + erases source.
-            wandCopyToNewLayer();
-            wandDeleteSelection();
-          }
           return;
         }
       }
       if ((e.key === 'x' || e.key === 'c') && state.lassoPoints.length >= 3) {
         e.preventDefault();
-        const layer = activeLayer();
-        if (!layer) return;
+        const layer = activeLayer(), origin = captureClipboardOrigin();
+        if (!layer || !clipboardOriginCurrent(origin)) return;
         const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
-        const feather = parseInt(document.getElementById('ge-lasso-feather')?.value || '0');
-        const grow = parseInt(document.getElementById('ge-lasso-grow')?.value || '0');
+        const feather = parseInt(currentRoot()?.querySelector(':is(#ge-lasso-feather,[data-ge-id="ge-lasso-feather"])')?.value || '0');
+        const grow = parseInt(currentRoot()?.querySelector(':is(#ge-lasso-grow,[data-ge-id="ge-lasso-grow"])')?.value || '0');
         const w = layer.canvas.width, h = layer.canvas.height;
         const mask = buildLassoMask(w, h, off.x, off.y, feather, grow);
         const srcData = layer.ctx.getImageData(0, 0, w, h);
         const maskData = mask.getContext('2d').getImageData(0, 0, w, h);
         // Build clipped image.
-        const tmp = document.createElement('canvas');
+        const tmp = ownerDocument.createElement('canvas');
         tmp.width = w; tmp.height = h;
         const tCtx = tmp.getContext('2d');
         const outData = tCtx.createImageData(w, h);
@@ -192,23 +189,19 @@ export function wireKeyboardShortcuts(deps) {
           }
         }
         tCtx.putImageData(outData, 0, 0);
-        state.internalClipboard = tmp;
         const isCut = e.key === 'x';
+        if (!clipboardOriginCurrent(origin) || (isCut && !cutSelection('lasso', layer, tmp, origin))) return;
+        state.internalClipboard = tmp;
+        const publishOrigin = captureClipboardOrigin();
         tmp.toBlob(blob => {
+          if (disposed || lifetime?.disposed || !focused() || !clipboardOriginCurrent(publishOrigin)) return;
           if (blob && navigator.clipboard?.write) {
             navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
-              uiModule.showToast(isCut ? 'Cut to clipboard' : 'Copied to clipboard');
-            }).catch(() => uiModule.showToast(isCut ? 'Cut (editor only)' : 'Copied (editor only)'));
+              if (!disposed && !lifetime?.disposed) uiModule.showToast(isCut ? 'Cut to clipboard' : 'Copied to clipboard');
+            }).catch(() => { if (!disposed && !lifetime?.disposed) uiModule.showToast(isCut ? 'Cut (editor only)' : 'Copied (editor only)'); });
           }
         }, 'image/png');
-        if (e.key === 'x') {
-          const savedPts = [...state.lassoPoints];
-          state.lassoPoints = savedPts;
-          lassoDeleteSelection();
-        } else {
-          state.lassoPoints = [];
-          composite();
-        }
+        if (!isCut) { state.lassoPoints = []; composite(); }
       }
       // Ctrl+C with no active selection → copy the entire active layer
       // to the system clipboard as a PNG. Gives a "just copy this image"
@@ -219,11 +212,14 @@ export function wireKeyboardShortcuts(deps) {
         const layer = activeLayer();
         if (layer && layer.canvas && layer.canvas.width > 0) {
           e.preventDefault();
-          layer.canvas.toBlob(blob => {
+          const origin = captureClipboardOrigin(), canvas = layer.canvas;
+          if (!clipboardOriginCurrent(origin)) return;
+          canvas.toBlob(blob => {
+            if (disposed || lifetime?.disposed || !focused() || !clipboardOriginCurrent(origin) || layer.canvas !== canvas || !state.layers.includes(layer)) return;
             if (blob && navigator.clipboard?.write) {
               navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-                .then(() => uiModule.showToast('Layer copied to clipboard'))
-                .catch(() => uiModule.showToast('Copy failed (clipboard permission denied?)'));
+                .then(() => { if (!disposed && !lifetime?.disposed) uiModule.showToast('Layer copied to clipboard'); })
+                .catch(() => { if (!disposed && !lifetime?.disposed) uiModule.showToast('Copy failed (clipboard permission denied?)'); });
             }
           }, 'image/png');
           return;
@@ -237,6 +233,7 @@ export function wireKeyboardShortcuts(deps) {
           { x: state.imgWidth, y: state.imgHeight }, { x: 0, y: state.imgHeight },
         ];
         state.lassoActive = false;
+        captureLassoPreview();
         composite();
         drawLassoOverlay();
         uiModule.showToast('All selected — Ctrl+C to copy, Del to delete');
@@ -267,5 +264,14 @@ export function wireKeyboardShortcuts(deps) {
       if (e.key === 'c') { e.preventDefault(); lassoCopyToLayer(); }
       if (e.key === 'm') { e.preventDefault(); lassoToMask(); }
     }
-  });
+  };
+  ownerDocument.addEventListener('keydown', onKeyDown);
+  const dispose = () => {
+    if (disposed) return false;
+    disposed = true;
+    ownerDocument.removeEventListener('keydown', onKeyDown);
+    return true;
+  };
+  lifetime?.add(dispose);
+  return dispose;
 }

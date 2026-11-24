@@ -251,9 +251,21 @@ Use this skill.
           expect(requests[0].patterns).toContain("tool-skill")
           expect(requests[0].always).toContain("tool-skill")
           expect(result.metadata.dir).toBe(skill)
+          const receipt = result.metadata.skillUse as { name: string; bodySHA256: string; source: string }
+          expect(receipt.name).toBe("tool-skill")
+          expect(receipt.bodySHA256).toBe(createHash("sha256").update("# Tool Skill\n\nUse this skill.").digest("hex"))
+          expect(receipt.source).toBe(path.join(skill, "SKILL.md"))
+          const projection = yield* Effect.promise(() => import("../../../../../../static/js/skillUseReceipt.js"))
+          const visible = projection.skillUseReceipt({ exit_code: 0, structured: { rawOutput: { metadata: result.metadata } } })
+          expect(visible?.bodySHA256).toBe(receipt.bodySHA256)
+          expect(projection.skillUseReceipt({ exit_code: 1, structured: { rawOutput: { metadata: result.metadata } } })).toBeNull()
           expect(result.output).toContain(`<skill_content name="tool-skill">`)
           expect(result.output).toContain(`Base directory for this skill: ${pathToFileURL(skill).href}`)
           expect(result.output).toContain(`<file>${file}</file>`)
+          yield* Effect.promise(() => Bun.write(path.join(skill, "SKILL.md"), "replacement"))
+          const changed = yield* Effect.exit(tool.execute({ name: "tool-skill" }, ctx))
+          expect(changed._tag).toBe("Failure")
+          expect(projection.skillUseReceipt({ exit_code: 0, structured: { rawOutput: { metadata: result.metadata } } })?.bodySHA256).toBe(receipt.bodySHA256)
         }),
       { git: true },
     ),

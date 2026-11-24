@@ -94,6 +94,12 @@ def get_emoji_catalogs() -> dict:
     return _catalogs_for_identity(_verified_identity())
 
 
+def packaged_artwork_ready() -> bool:
+    """Check the existing verified immutable catalogue without serializing it."""
+    catalogs = get_emoji_catalogs()
+    return bool(catalogs.get('google')) and bool(catalogs.get('kitchen'))
+
+
 @lru_cache(maxsize=1)
 def _kitchen_text_for_identity(identity: tuple[int, ...]) -> str:
     return "\n".join(_catalogs_for_identity(identity)["kitchen"]) + "\n"

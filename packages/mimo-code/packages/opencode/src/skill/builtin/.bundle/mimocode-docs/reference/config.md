@@ -147,7 +147,7 @@ The trigger is the model's prompt capacity (`limit.input` when the provider publ
 |-----|---------|
 | `experimental.maxMode` | `max` agent runs N parallel reasoning candidates, judge picks winner (`candidates`, default 5) |
 | `experimental.batch_tool` | Enable the batch tool |
-| `experimental.predict_next_prompt` | Inline ghost-text next-prompt prediction (default on) |
+| `experimental.predict_next_prompt` | Inline ghost-text next-prompt prediction (default off) |
 | `experimental.continue_loop_on_deny` | Keep looping when a tool call is denied |
 | `experimental.primary_tools` | Tools restricted to primary agents |
 | `experimental.mcp_timeout` | MCP request timeout (ms) |

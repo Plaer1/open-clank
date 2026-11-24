@@ -9,6 +9,8 @@ import { Agent } from "@/agent/agent"
 import { SessionCwd } from "./session-cwd"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { ManagedProvider } from "@/acp/managed-provider"
+import { transferWebfetchHtml } from "./webfetch-view"
+import { transferStructuredSearch } from "../session/tool-view-structured-search"
 
 export interface Metadata {
   [key: string]: any
@@ -118,7 +120,7 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
           if (ManagedProvider.enabled() && (!managed || managed.transition)) {
             throw new Error("managed session binding is unavailable or reconciling")
           }
-          yield* Effect.try({
+          const normalized = yield* Effect.try({
             try: () => toolInfo.parameters.parse(args),
             catch: (error) => {
               // Bad arguments are always agent-recoverable: the model sees the
@@ -130,8 +132,8 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
               return new RecoverableError(validationErrorMessage(id, error), { cause: error })
             },
           })
-          const execution = execute(args, ctx)
-          const resources = toolInfo.resources?.(args, ctx)
+          const execution = execute(normalized, ctx)
+          const resources = toolInfo.resources?.(normalized, ctx)
           const result = yield* resources
             ? AppFileSystem.scheduleFileResources(resources, execution, ctx.abort)
             : execution
@@ -145,7 +147,7 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
             sessionID: ctx.sessionID,
             ...(ctx.callID ? { callID: ctx.callID } : {}),
           })
-          return {
+          const wrapped = {
             ...result,
             output: truncated.content,
             metadata: {
@@ -154,6 +156,9 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
               ...(truncated.truncated && { outputPath: truncated.outputPath }),
             },
           }
+          if (id === 'webfetch') transferWebfetchHtml(result,wrapped)
+          if (id === 'mcp_tool_search') transferStructuredSearch(result,wrapped)
+          return wrapped
         }).pipe(Effect.orDie, Effect.withSpan("Tool.execute", { attributes: attrs }))
       }
       return toolInfo

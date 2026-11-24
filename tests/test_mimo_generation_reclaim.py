@@ -25,8 +25,8 @@ def test_retired_generation_dir_is_removed(tmp_path):
     owners = tmp_path / "owners"
     gen_dir = owners / "abc" / "generations" / "3-deadbeef"
     gen_dir.mkdir(parents=True)
-    (gen_dir / "mimocode").mkdir()
-    (gen_dir / "mimocode" / "state.json").write_text("{}")
+    (gen_dir / "openclank-engine").mkdir()
+    (gen_dir / "openclank-engine" / "state.json").write_text("{}")
 
     pool = _bare_pool(owners)
     pool._reclaim_generation_dir("abc", _FakeWorker(gen_dir))

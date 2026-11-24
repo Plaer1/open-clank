@@ -58,6 +58,22 @@ test('clean base/wiki ingress preserves existing representation mapping on refre
  }
 });
 
+test('reopening a clean Host resource updates the base of the next edit', () => {
+ const f = setup();
+ const handle = normalizeResourceHandle(resource());
+ const id = f.openResource(handle, {text:'# first'});
+ const before = {text:'# first', metadata:handle.metadata};
+ const buffer = createBufferRegistry({storage:null}).acquire(handle, before);
+ f.current.noteBuffers.set(id, buffer);
+ f.current.noteAcceptedEnvelopes = new Map([[id, before]]);
+ f.openResource(resource('image', 'markdown', 'fp-2'), {text:'# from disk'});
+ assert.equal(buffer.state().dirty, false);
+ assert.equal(buffer.envelope.text, '# from disk');
+ assert.equal(f.current.noteAcceptedEnvelopes.get(id).text, '# from disk');
+ buffer.apply({...buffer.envelope, text:'# next edit'});
+ assert.equal(buffer.snapshot().expectedRevision.value, 'fp-2');
+});
+
 test('dirty buffer reopen focuses only; Cancel retains draft, CAS, representation and undo',async()=>{
  const f=setup(),handle=normalizeResourceHandle(resource()),id=f.openResource(handle,{kind:'text',name:'image.md',text:'# saved'}),doc=f.state.docs[0];
  const registry=createBufferRegistry({storage:null});const buffer=registry.acquire(handle,{text:'# saved'},{save:async()=>{throw Error('Reopen must never Save');}});

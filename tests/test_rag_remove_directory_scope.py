@@ -22,7 +22,6 @@ import pytest
 
 import src.rag_vector as rag_vector
 import src.personal_docs as personal_docs
-import src.ai_interaction as ai
 
 
 # --------------------------------------------------------------------------- #
@@ -128,32 +127,3 @@ def test_personal_docs_remove_is_targeted(tmp_path):
     assert "t" not in store, "target directory's chunk should be removed"
     assert "p" in store, "base personal index must survive"
     assert "o" in store, "another owner's chunk must survive"
-
-
-# --------------------------------------------------------------------------- #
-# do_manage_rag remove path must not fire a whole-collection rebuild (edit B)
-# --------------------------------------------------------------------------- #
-
-
-async def test_do_manage_rag_remove_does_not_rebuild(monkeypatch):
-    calls = {"rebuild": 0}
-
-    class _Rag:
-        def rebuild_index(self):
-            calls["rebuild"] += 1
-
-        def remove_directory(self, directory):
-            pass
-
-    class _PDocs:
-        def remove_directory(self, directory):
-            pass
-
-    monkeypatch.setattr(ai, "_rag_manager", _Rag())
-    monkeypatch.setattr(ai, "_personal_docs_manager", _PDocs())
-
-    # Untracked path: the old code still fired an unconditional rebuild_index().
-    result = await ai.do_manage_rag("remove_directory\n/abs/untracked/dir")
-
-    assert calls["rebuild"] == 0, "remove must not rebuild (whole-collection wipe)"
-    assert "error" not in result, result

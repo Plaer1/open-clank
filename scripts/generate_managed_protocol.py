@@ -23,9 +23,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 SCHEMA = ROOT / "contracts/openclank/managed-provider-v2.schema.json"
 PYTHON_OUTPUT = ROOT / "src/openclank/generated/managed_provider_contract.py"
-TYPESCRIPT_OUTPUT = ROOT / "packages/mimo-code/packages/opencode/src/acp/generated/openclank-managed-contract.ts"
+TYPESCRIPT_OUTPUT = ROOT / "packages/mimo-code/packages/cli/src/acp/generated/openclank-managed-contract.ts"
 VENDOR_MANIFEST = ROOT / "packages/mimo-code/openclank-vendor.json"
 PROVENANCE_SCHEMA = ROOT / "contracts/openclank/engine-provenance-v1.schema.json"
+PROVENANCE_SCHEMA_V2 = ROOT / "contracts/openclank/engine-provenance-v2.schema.json"
+
+
+def _v2_provenance_with_pin(data):
+    schema = json.loads(PROVENANCE_SCHEMA_V2.read_text(encoding='utf-8'))
+    pin = schema['properties']['managed_schema']['properties']
+    pin['id']['const'] = data['schema_id']
+    pin['version']['const'] = data['schema_version']
+    pin['sha256']['const'] = data['digest']
+    return json.dumps(schema, indent=2) + '\n'
 FAMILY_CATALOG = ROOT / "src/openclank/provider_family_catalog.py"
 
 
@@ -62,8 +72,8 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
     mapping = schema.get("x-openclank-methods")
     if not isinstance(methods, list) or not isinstance(operations, list) or not isinstance(mapping, dict):
         raise RuntimeError("managed schema is missing method or operation metadata")
-    if len(methods) != 31 or len(set(methods)) != 31:
-        raise RuntimeError(f"managed contract must contain 31 unique methods; found {len(methods)}")
+    if len(methods) != 104 or len(set(methods)) != 104:
+        raise RuntimeError(f"managed contract must contain 104 unique methods; found {len(methods)}")
     if len(operations) != 16 or len(set(operations)) != 16:
         raise RuntimeError(f"managed contract must contain 16 unique operations; found {len(operations)}")
     if set(mapping) != set(methods):
@@ -76,15 +86,40 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
     # owner or chat selector and is authenticated from the engine session.
     session_methods = [method for method in methods if method.startswith(("_openclank/session/", "_openclank/history/"))]
     logging_methods = [method for method in methods if method.startswith("_openclank/logging/")]
-    if (len(provider_store), len(provider_control), len(operation_methods), len(session_methods), len(logging_methods)) != (9, 7, 6, 7, 2):
-        raise RuntimeError("managed method families must contain 9 store, 7 control, 6 operation, 7 session and 2 logging methods")
+    if (len(provider_store), len(provider_control), len(operation_methods), len(session_methods), len(logging_methods)) != (10, 7, 6, 79, 2):
+        raise RuntimeError("managed method families must contain 10 store, 7 control, 6 operation, 79 session and 2 logging methods")
+    # These added session callbacks keep their Host-owned direction.
+    for method in ("_openclank/session/v1/evolve/operate", "_openclank/session/v1/input-origin/sync",
+                   "_openclank/session/v1/memory/inferred-proposal", "_openclank/session/v1/memory/inferred-proposal/status",
+                   "_openclank/session/v1/workflow/artifact", "_openclank/session/v1/workflow/artifact/status",
+                   "_openclank/session/v1/workflow/artifact/read",
+                   "_openclank/session/v1/git-operation/recheck", "_openclank/session/v1/git-operation/finish",
+                   "_openclank/session/v1/workflow/snapshot/read",
+                   "_openclank/session/v1/git-fetch/recheck", "_openclank/session/v1/git-fetch/finish",
+                   "_openclank/session/v1/git-push/recheck", "_openclank/session/v1/git-push/finish",
+                   "_openclank/session/v1/git-checkout/phase",
+                   "_openclank/session/v1/git-worktree/phase", "_openclank/session/v1/dispatch/admit",
+                   "_openclank/session/v1/worker-naming/request", "_openclank/session/v1/files/mutate"):
+        if mapping.get(method, {}).get("direction") != "engine_to_host":
+            raise RuntimeError("managed turn authority callback must remain engine_to_host")
     directions = {method: mapping[method].get("direction") for method in methods}
     if any(direction not in {"engine_to_host", "host_to_engine"} for direction in directions.values()):
         raise RuntimeError("managed method wire mappings must declare a valid callback direction")
     engine_methods = [method for method in methods if directions[method] == "host_to_engine"]
-    expected_engine_methods = provider_control + ["_openclank/operations/v1/execute", "_openclank/operations/v1/cancel", "_openclank/session/v1/settings/effective"]
+    expected_engine_methods = provider_control + ["_openclank/operations/v1/execute", "_openclank/operations/v1/cancel", "_openclank/session/v1/settings/effective", "_openclank/session/v1/actor/settlement-read", "_openclank/session/v1/maintenance/summary-read", "_openclank/session/v1/mcp/health", "_openclank/session/v1/tools/capabilities", "_openclank/session/v1/queued-source/markers", "_openclank/session/v1/queued-source/retire-marker", "_openclank/session/v1/queued-source/read", "_openclank/session/v1/messages/source-map", "_openclank/session/v1/fork/create"]
     if set(engine_methods) != set(expected_engine_methods):
         raise RuntimeError("managed callback directions do not preserve host engine authority")
+    endpoint_policies = schema.get("x-openclank-endpoint-policies")
+    if (not isinstance(endpoint_policies, dict) or not endpoint_policies
+        or any(not isinstance(family, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", family) is None
+               or not isinstance(lanes, dict) or not lanes or set(lanes) - {"metered_api", "subscription"}
+               or any(not isinstance(policy, str) or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", policy) is None for policy in lanes.values())
+               for family, lanes in endpoint_policies.items())):
+        raise RuntimeError("managed provider endpoint-policy mapping is missing or invalid")
+    policy_values = sorted({policy for lanes in endpoint_policies.values() for policy in lanes.values()})
+    if defs.get("providerEndpointPolicy", {}).get("enum") != policy_values:
+        raise RuntimeError("provider endpoint-policy schema and mapping disagree")
+
     return {
         "schema_id": schema.get("$id"),
         "schema_version": defs.get("capabilityDeclaration", {}).get("properties", {}).get("schemaVersion", {}).get("const"),
@@ -100,6 +135,7 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
         "operations": operations,
         "directions": directions,
         "wire_mappings": mapping,
+        "endpoint_policies": endpoint_policies,
     }
 
 
@@ -132,6 +168,7 @@ HOST_CALLBACK_METHODS = frozenset({tuple_literal(data["host_callback_methods"])}
 MODEL_OPERATIONS = frozenset({tuple_literal(data["operations"])})
 METHOD_DIRECTIONS = {directions}
 METHOD_WIRE_MAPPINGS = {mappings}
+PROVIDER_ENDPOINT_POLICIES = {data["endpoint_policies"]!r}
 '''
 
 
@@ -147,6 +184,7 @@ export const OPERATION_ROUTER_VERSION = 1 as const
 export const SCHEMA_VERSION = {data["schema_version"]} as const
 export const SCHEMA_ID = {json.dumps(data["schema_id"])} as const
 export const SCHEMA_HASH = {json.dumps(data["digest"])} as const
+export const PROVIDER_ENDPOINT_POLICIES = {json.dumps(data["endpoint_policies"], indent=2)} as const
 
 export const PROVIDER_STORE_METHODS = {array(data["provider_store_methods"])}
 export const PROVIDER_CONTROL_METHODS = {array(data["provider_control_methods"])}
@@ -207,6 +245,7 @@ def _update_digest_consumers(data: dict[str, Any]) -> None:
         count=1,
     )
     _write(PROVENANCE_SCHEMA, provenance)
+    _write(PROVENANCE_SCHEMA_V2, _v2_provenance_with_pin(data))
 
     family = FAMILY_CATALOG.read_text(encoding="utf-8")
     family, count = re.subn(r'(_MANAGED_SCHEMA_VERSION = )\d+', rf"\g<1>{data['schema_version']}", family)
@@ -218,6 +257,45 @@ def _update_digest_consumers(data: dict[str, Any]) -> None:
     family, count = re.subn(r'(_ENGINE_SOURCE_SHA256 = ")[0-9a-f]{64}(")', rf"\g<1>{source_digest}\g<2>", family)
     if count != 1:
         raise RuntimeError("provider family catalogue engine-source digest marker is missing")
+    _write(FAMILY_CATALOG, family)
+
+
+def _update_schema_digest_consumers(data: dict[str, Any]) -> None:
+    """Refresh only managed-schema digests, preserving aggregate source stamps."""
+    vendor = json.loads(VENDOR_MANIFEST.read_text(encoding="utf-8"))
+    vendor["managed_schema"] = {
+        "id": data["schema_id"],
+        "version": data["schema_version"],
+        "repository_path": "contracts/openclank/managed-provider-v2.schema.json",
+        "sha256": data["digest"],
+    }
+    _write(VENDOR_MANIFEST, json.dumps(vendor, indent=2) + "\n")
+
+    provenance = PROVENANCE_SCHEMA.read_text(encoding="utf-8")
+    provenance = re.sub(
+        r'("id": \{ "const": ")[^"]+(" \})',
+        rf"\g<1>{data['schema_id']}\g<2>", provenance, count=1,
+    )
+    provenance = re.sub(
+        r'("version": \{ "const": )\d+( \})',
+        rf"\g<1>{data['schema_version']}\g<2>", provenance, count=1,
+    )
+    provenance = re.sub(
+        r'("sha256": \{ "const": ")[0-9a-f]{64}(" \})',
+        rf"\g<1>{data['digest']}\g<2>", provenance, count=1,
+    )
+    _write(PROVENANCE_SCHEMA, provenance)
+    _write(PROVENANCE_SCHEMA_V2, _v2_provenance_with_pin(data))
+
+    family = FAMILY_CATALOG.read_text(encoding="utf-8")
+    family, version_count = re.subn(
+        r'(_MANAGED_SCHEMA_VERSION = )\d+', rf"\g<1>{data['schema_version']}", family
+    )
+    family, hash_count = re.subn(
+        r'(_MANAGED_SCHEMA_SHA256 = ")[0-9a-f]{64}(")', rf"\g<1>{data['digest']}\g<2>", family
+    )
+    if version_count != 1 or hash_count != 1:
+        raise RuntimeError("managed schema digest consumers are missing or ambiguous")
     _write(FAMILY_CATALOG, family)
 
 
@@ -243,6 +321,8 @@ def _check_digest_consumers(data: dict[str, Any]) -> list[str]:
         or f'"sha256": {{ "const": "{data["digest"]}" }}' not in provenance
     ):
         errors.append(str(PROVENANCE_SCHEMA.relative_to(ROOT)))
+    if PROVENANCE_SCHEMA_V2.read_text(encoding='utf-8') != _v2_provenance_with_pin(data):
+        errors.append(str(PROVENANCE_SCHEMA_V2.relative_to(ROOT)))
     family = FAMILY_CATALOG.read_text(encoding="utf-8")
     if f'_MANAGED_SCHEMA_VERSION = {data["schema_version"]}' not in family:
         errors.append(str(FAMILY_CATALOG.relative_to(ROOT)))
@@ -256,17 +336,21 @@ def _check_digest_consumers(data: dict[str, Any]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--write", action="store_true", help="write deterministic bindings and digest consumers")
+    mode.add_argument("--write", action="store_true", help="write deterministic bindings and all digest consumers")
+    mode.add_argument("--write-bindings", action="store_true", help="write bindings and schema digests without source fingerprints")
     mode.add_argument("--check", action="store_true", help="check bindings and digest consumers without writing")
     args = parser.parse_args()
     schema, digest = _load_schema()
     data = _bindings(schema, digest)
     expected_python = _py_text(data)
     expected_typescript = _ts_text(data)
-    if args.write:
+    if args.write or args.write_bindings:
         _write(PYTHON_OUTPUT, expected_python)
         _write(TYPESCRIPT_OUTPUT, expected_typescript)
-        _update_digest_consumers(data)
+        if args.write:
+            _update_digest_consumers(data)
+        else:
+            _update_schema_digest_consumers(data)
         return 0
 
     errors: list[str] = []

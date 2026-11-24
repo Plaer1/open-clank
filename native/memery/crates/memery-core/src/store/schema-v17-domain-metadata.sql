@@ -1,0 +1,3 @@
+-- Optional offline profile: guarded domain/metadata writers only; no runtime DDL.
+CREATE TRIGGER s01_metadata_revision_guard BEFORE INSERT ON fm_v2_knowledge_revisions WHEN (NEW.kind='domain_definition' OR EXISTS (SELECT 1 FROM fm_v2_revision_metadata m WHERE m.owner_id=NEW.owner_id AND m.block_id=NEW.block_id)) AND fm_domain_metadata_authorized() <> 1 BEGIN SELECT RAISE(ABORT, 'metadata-aware revision requires guarded writer'); END;
+CREATE TRIGGER s01_metadata_insert_guard BEFORE INSERT ON fm_v2_revision_metadata WHEN fm_domain_metadata_authorized() <> 1 BEGIN SELECT RAISE(ABORT, 'metadata requires guarded writer'); END;

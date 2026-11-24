@@ -68,7 +68,7 @@ await withCopalBrowser({page,overrides}, async ({evaluate,until}) => {
   for (const op of ['overview','cues','expand','trace']) for (const error of [false,true]) for (const invalidate of ['reload','account','workspace','generation','admission','unmount','forget']) {
     await load();const held=await begin(op);
     if (invalidate==='account') await evaluate(`document.body.dataset.accountId='owner-'+Math.random();window.dispatchEvent(new Event('openclank:auth-context-changed'))`);
-    if (invalidate==='workspace') await evaluate(`localStorage.setItem('odysseus-workspace-id','ws-'+Math.random());window.dispatchEvent(new Event('workspace-change'))`);
+    if (invalidate==='workspace') await evaluate(`localStorage.setItem('openclank-workspace-id','ws-'+Math.random());window.dispatchEvent(new Event('workspace-change'))`);
     if (invalidate==='unmount') {
       await evaluate(`document.querySelector('canvas').remove()`);
     } else if (invalidate==='generation' && op==='overview') await load('g2');
@@ -106,7 +106,7 @@ await withCopalBrowser({page,overrides}, async ({evaluate,until}) => {
     await load();await evaluate(`audit.probe.seed();audit.deleteRefused=${refused};audit.holdConfirm=${phase==='confirm'};audit.holdDelete=${phase==='delete'};void(audit.deleteJob=audit.memory.deleteMemory('base'));`);
     await until(phase==='confirm'?'audit.confirms.length>0':'audit.deletes.length>0');const beforeDeleteCount=await evaluate(`audit.calls.filter(c=>c.method==='DELETE').length`);
     if(change==='account')await evaluate(`document.body.dataset.accountId='delete-owner-'+Math.random();window.dispatchEvent(new Event('openclank:auth-context-changed'))`);
-    if(change==='workspace')await evaluate(`localStorage.setItem('odysseus-workspace-id','delete-ws-'+Math.random());window.dispatchEvent(new Event('workspace-change'))`);
+    if(change==='workspace')await evaluate(`localStorage.setItem('openclank-workspace-id','delete-ws-'+Math.random());window.dispatchEvent(new Event('workspace-change'))`);
     if(change==='reload')await load();
     if(change==='unmount')await evaluate(`document.querySelector('canvas').remove()`);
     const before=await snapshot();await evaluate(phase==='confirm'?'audit.confirms.shift()(true);audit.deleteJob':'audit.deletes.shift()();audit.deleteJob');assert.deepEqual(await snapshot(),before,`${phase} ${change} ${refused}`);if(phase==='confirm')assert.equal(await evaluate(`audit.calls.filter(c=>c.method==='DELETE').length`),beforeDeleteCount,'invalid confirmation must not send DELETE');await evaluate('audit.holdConfirm=false;audit.holdDelete=false;');groups++;
@@ -115,7 +115,7 @@ await withCopalBrowser({page,overrides}, async ({evaluate,until}) => {
   for(const phase of ['list','prefs'])for(const change of ['account','workspace','reload','unmount']){
     await load();await evaluate(`audit.probe.seed();audit.deleteRefused=false;audit.holdList=${phase==='list'};audit.holdPrefs=${phase==='prefs'};void(audit.deleteJob=audit.memory.deleteMemory('base'));`);await until(phase==='list'?'audit.lists.length>0':'audit.prefs.length>0');assert.equal((await snapshot()).memoriesLoading,false,'background post-delete refresh must not strand Browse spinner');
     if(change==='account')await evaluate(`document.body.dataset.accountId='refresh-owner-'+Math.random();window.dispatchEvent(new Event('openclank:auth-context-changed'))`);
-    if(change==='workspace')await evaluate(`localStorage.setItem('odysseus-workspace-id','refresh-ws-'+Math.random());window.dispatchEvent(new Event('workspace-change'))`);
+    if(change==='workspace')await evaluate(`localStorage.setItem('openclank-workspace-id','refresh-ws-'+Math.random());window.dispatchEvent(new Event('workspace-change'))`);
     if(change==='reload')await load();if(change==='unmount')await evaluate(`document.querySelector('canvas').remove()`);
     const before=await snapshot();await evaluate(phase==='list'?'audit.lists.shift()();audit.deleteJob':'audit.prefs.shift()();audit.deleteJob');assert.deepEqual(await snapshot(),before,`late ${phase} refresh after ${change}`);assert.equal((await snapshot()).memoriesLoading,false);await evaluate('audit.holdList=false;audit.holdPrefs=false;');groups++;
   }

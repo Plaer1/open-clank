@@ -1,4 +1,10 @@
-New round-eye artwork: built-in image_gen edit, 7 October 2026.
+LETTERING — Comic Clank Mono Bold 0.300 (700), 19 November 2026.
+Source: owner-supplied ComicClankMono-Bold.otf (SIL OFL 1.1).
+Source SHA-256: e9f8d0abde8c25ffed042f2e02f7354fc74d2e98b5f16dc663257ff516ee2ff3
+FontTools mapped the characters through the font cmap and converted each glyph to an SVG path. The four transparent vector compositions and the backed square are the masters. Square and wide compositions use independent optical spacing and center their painted bounds, with the sky blue lead-in spanning 48% of the outlined O. The README banner uses the same face for both lines. The triangle and eye retain the original geometry.
+For each master, rsvg-convert --width SIZE --keep-aspect-ratio renders its 1024- and 2048-pixel PNG variants. The contact sheet composites the 1024 variants onto a neutral checkerboard with Pillow and labels them with Comic Clank Mono Regular 0.300 (400). Its OTF SHA-256 is 1188a3ce929d5750e0019c414b5428b04b95f1d9e45f30f84857fb0111c8f52f. The Web font is a FontTools WOFF2 subset of the Bold OTF containing the characters in “Open Clank” and retains the original name and license metadata.
+
+ROUND-EYE ARTWORK — built-in image_gen edit, 7 October 2026.
 Input supplied by the user. Original output preserved in Originals at 1254 × 1254 RGBA. 2048 export is an upscale; 1024 export is downsampled. Alpha preserved. This asset is raster, not an editable vector.
 
 Final prompt:

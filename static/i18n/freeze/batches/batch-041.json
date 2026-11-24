@@ -2,8 +2,8 @@
   "id": "batch-041",
   "group": "graph",
   "surface": "graph",
-  "entry_count": 13,
-  "character_count": 851,
+  "entry_count": 14,
+  "character_count": 906,
   "complexity": "mixed",
   "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
   "entries": [
@@ -175,6 +175,19 @@
         "packages/Copal/src/hooks/useVaultIndex.ts:38"
       ],
       "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.code.graph",
+      "source": "Code Graph",
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:4543",
+        "static/js/copal/codeMapWorkbench.js:221"
+      ],
+      "placeholders": [],
+      "context": "Editor Graph menu and source graph title",
       "complexity": "label"
     }
   ]

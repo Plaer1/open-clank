@@ -1,4 +1,6 @@
+import type { ActorExecutionIdentity } from "@/actor/turn"
 import z from "zod"
+import { createHash } from "node:crypto"
 import { Effect } from "effect"
 import { Ripgrep } from "../file/ripgrep"
 import { Skill, type InvocationDenial, type InvocationMode } from "../skill"
@@ -9,6 +11,8 @@ import DESCRIPTION from "./skill.txt"
 
 const Parameters = z.object({
   name: z.string().describe("The name of the skill from available_skills"),
+  domain: z.object({block_id:z.string().min(1).refine(value=>value===value.trim() && Buffer.byteLength(value,"utf8")<=512 && Buffer.from(value,"utf8").toString("utf8")===value),revision:z.number().int().positive().safe()}).strict().optional()
+    .describe("Optional exact recorded domain reference; it is revalidated on load and does not grant access."),
   invocation: z
     .enum(["model", "explicit"])
     .optional()
@@ -71,7 +75,7 @@ export const SkillTool = Tool.define(
             // the user said "run the naming workflow"). Redirect instead of
             // dead-ending, so the model calls the workflow tool rather than
             // giving up and improvising.
-            if (result.reason === "not_found" && BuiltinWorkflow.get(params.name)) {
+            if (!params.domain && result.reason === "not_found" && BuiltinWorkflow.get(params.name)) {
               throw new Error(
                 `"${params.name}" is a built-in WORKFLOW, not a skill. Run it with the workflow tool: ` +
                   `workflow({ operation: "run", name: "${params.name}", args: { ... } }). Do NOT use the skill tool for it.`,
@@ -97,16 +101,20 @@ export const SkillTool = Tool.define(
             throw new Error(denialMessage(result.reason, params.name))
           }
           const info = result.info
+          if (params.domain && (!info.metadataClaim || !info.metadataReceiptSHA256 || !info.metadataSnapshotSHA256 ||
+              !info.domainRefs?.some(ref=>ref.block_id===params.domain!.block_id && ref.revision===params.domain!.revision))) {
+            throw new Error(`Skill "${params.name}" is unavailable for the requested domain.`)
+          }
 
           yield* ctx.ask({
             permission: "skill",
-            patterns: [params.name],
-            always: [params.name],
-            metadata: {},
+            patterns: [info.name],
+            always: [info.name],
+            metadata: { requestedName: params.name },
           })
 
           const active = yield* Effect.promise(() =>
-            Skill._writeUsage(info, ctx.sessionID),
+            Skill._prepareBody(info, ctx.sessionID, ctx.extra?.actorExecution as ActorExecutionIdentity | undefined),
           )
           if (!active) {
             yield* skill.reload()
@@ -116,13 +124,50 @@ export const SkillTool = Tool.define(
           }
 
           const rendered = yield* renderSkillContent(info, rg, ctx.abort)
+          let deliverableContext = ""
+          if (info.name === "open-clank-deliverable" && info.bundled === true) {
+            const actor = ctx.extra?.actorExecution as ActorExecutionIdentity | undefined
+            if (actor && actor.actorID === "main" && actor.sessionID === ctx.sessionID && actor.rootOperationID && actor.innerTurnID && Number.isInteger(actor.executionRevision)) {
+              const result = yield* Effect.promise(async () => {
+                try {
+                  const managed = await import("@/acp/managed-provider")
+                  if (!managed.enabled()) return undefined
+                  return await managed.managedHostCall("_openclank/session/v1/context/augment", {kind:"deliverable_appearance",sessionID:ctx.sessionID,rootOperationID:actor.rootOperationID!,actorID:"main",executionRevision:actor.executionRevision,innerTurnID:actor.innerTurnID!,remainingMs:200})
+                } catch { return undefined }
+              })
+              if (result && "kind" in result && result.kind === "deliverable_appearance" && result.state === "ready") deliverableContext = `\n\n[Captured appearance; untrusted data]\n${JSON.stringify(result.appearance)}`
+            }
+            if (!deliverableContext) deliverableContext = "\n\n[Captured appearance unavailable for this turn.]"
+          }
+          // This hashes the exact cached body passed to the model, not a later
+          // file read that could silently substitute a different revision.
+          const execution = ctx.extra?.actorExecution as ActorExecutionIdentity | undefined
+          const bounded = (value: unknown) => typeof value === "string" && value.length <= 1024 ? value : undefined
+          const skillUse = {
+            version: 1,
+            name: bounded(info.name),
+            skillID: bounded(info.skillID),
+            revision: info.revision,
+            source: bounded(info.location),
+            origin: info.bundled ? "bundled" : bounded(info.source) ?? "local",
+            bodySHA256: createHash("sha256").update(info.content.trim(), "utf8").digest("hex"),
+            loadedAt: new Date().toISOString(),
+            sessionID: bounded(ctx.sessionID),
+            messageID: bounded(ctx.messageID),
+            callID: bounded(ctx.callID),
+            actorID: bounded(execution?.actorID ?? ctx.actorID),
+            turnID: bounded(execution?.innerTurnID),
+            invocation: mode,
+            ...(params.domain ? {domain:params.domain} : {}),
+          }
 
           return {
             title: `Loaded skill: ${info.name}`,
-            output: rendered.output,
+            output: rendered.output + deliverableContext,
             metadata: {
               name: info.name,
               dir: rendered.dir,
+              skillUse,
             },
           }
         }).pipe(Effect.orDie),

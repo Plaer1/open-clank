@@ -1,4 +1,5 @@
 import { uiIcon } from './uiIcons.js';
+import { reasoningEffortOption, serializeReasoningEffortSelection, restoreReasoningEffortSelection } from './modelRequestOptions.js';
 // Unified Open Clank provider control plane.
 //
 // This browser module is deliberately a projection of /api/v1/providers/**.
@@ -17,7 +18,7 @@ import {
 
 const API_ROOT = '/api/v1/providers';
 const FAMILY_CACHE_KEY = 'open-clank:provider-families:v1';
-const FAMILY_CACHE_FORMAT = 1;
+const FAMILY_CACHE_FORMAT = 2;
 const FAMILY_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const VIEW_FRESH_MAX_AGE_MS = 30 * 1000;
 const REQUEST_TIMEOUT_MS = 8 * 1000;
@@ -25,8 +26,22 @@ const FAMILY_ENRICH_TIMEOUT_MS = 45 * 1000;
 const OAUTH_STATUS_RETRY_BASE_MS = 1200;
 const OAUTH_STATUS_RETRY_MAX_MS = 10 * 1000;
 const OAUTH_STATUS_RETENTION_MS = 10 * 60 * 1000;
+const OAUTH_MAX_OBSERVATION_FAILURES = 6;
+const OAUTH_MAX_OUTAGE_MS = 60 * 1000;
+const OAUTH_START_TIMEOUT_MS = 20 * 1000;
+const OAUTH_STATUS_TIMEOUT_MS = 25 * 1000;
+const OAUTH_MAX_RETRY_AFTER_MS = 60 * 1000;
 const OAUTH_FLOW_STORAGE_KEY = 'open-clank:provider-oauth-flow:v1';
 const FAMILY_PICKER_SEARCH_THRESHOLD = 12;
+const PROVIDER_SEARCH_ALIASES = Object.freeze({
+  xiaomi: ['mimo', 'mi mo', 'xiaomi mimo', 'token plan', 'tokenplan'],
+});
+const MIMO_TOKEN_PLAN_ENDPOINTS = Object.freeze([
+  { value: '', label: 'Choose a Token Plan endpoint', hint: 'Required for a manual Token Plan key' },
+  { value: 'https://token-plan-cn.xiaomimimo.com/v1', label: 'China (CN)', hint: 'token-plan-cn.xiaomimimo.com' },
+  { value: 'https://token-plan-sgp.xiaomimimo.com/v1', label: 'Singapore (SGP)', hint: 'token-plan-sgp.xiaomimimo.com' },
+  { value: 'https://token-plan-ams.xiaomimimo.com/v1', label: 'Amsterdam (AMS)', hint: 'token-plan-ams.xiaomimimo.com' },
+]);
 const PURPOSES = Object.freeze([
   ['chat', 'Chat', ['chat.stream', 'chat.complete']],
   ['utility', 'Utility', ['chat.stream', 'chat.complete']],
@@ -45,6 +60,10 @@ let bound = false;
 let loading = null;
 let onCatalogChanged = async () => {};
 let activeOAuth = null;
+let oauthGeneration = 0;
+let startingLogin = false;
+let activeLoginLookup = null;
+let lastLoginLookupAt = 0;
 let loadGeneration = 0;
 const eligibilityLoads = new Map();
 const connectionDetailLoads = new Map();
@@ -54,6 +73,8 @@ const openAccountDetails = new Set();
 const openShareChoosers = new Set();
 const modelSearchQueries = new Map();
 const enrichedFamilyAuthMethods = new Map();
+const familyAuthRequests = new Map();
+const CLAUDE_SUBSCRIPTION_METHOD = 'anthropic.claude_subscription';
 const loadedAt = new Map();
 const detailControllers = new Set();
 let shareDirectoryLoad = null;
@@ -62,6 +83,21 @@ let bindingsLoad = null;
 let bindingsLoaded = false;
 let renderedFamilySignature = '';
 let familyCatalogKey = '';
+let familyCatalogSchema = 1;
+
+function preferenceKey(mode) {
+  const owner = document.body?.dataset?.accountId;
+  return owner ? 'open-clank:provider-picker:' + encodeURIComponent(owner) + ':' + mode : null;
+}
+
+function rememberedProvider(mode, value) {
+  try {
+    const key = preferenceKey(mode);
+    if (!key) return '';
+    if (value) sessionStorage.setItem(key, value);
+    return sessionStorage.getItem(key) || '';
+  } catch { return ''; }
+}
 let detailEpoch = 0;
 let deferredInvalidationGeneration = 0;
 let state = emptyState();
@@ -407,6 +443,7 @@ function emptyState() {
   return {
     families: [],
     connections: [],
+    engineInstallation: 'unverified',
     accounts: new Map(),
     models: [],
     eligibility: new Map(),
@@ -453,7 +490,7 @@ function readCachedFamilies() {
       sessionStorage.removeItem(FAMILY_CACHE_KEY);
       return [];
     }
-    return cached.families;
+    return cached;
   } catch (_) {
     try { sessionStorage.removeItem(FAMILY_CACHE_KEY); } catch (_) {}
     return [];
@@ -474,6 +511,7 @@ function writeCachedFamilies(data) {
       format: FAMILY_CACHE_FORMAT,
       schema_version: schemaVersion,
       cached_at: Date.now(),
+      catalog_key: data.catalog_key || '',
       families,
     }));
   } catch (_) {}
@@ -491,16 +529,42 @@ function acceptFamilyCatalog(data) {
   const nextCatalogKey = typeof data?.catalog_key === 'string' ? data.catalog_key : '';
   if (familyCatalogKey && nextCatalogKey && familyCatalogKey !== nextCatalogKey) {
     enrichedFamilyAuthMethods.clear();
+    familyAuthRequests.clear();
   }
   if (nextCatalogKey) familyCatalogKey = nextCatalogKey;
   const bundled = Array.isArray(data?.families) ? data.families : [];
-  writeCachedFamilies(data);
-  return bundled.map(family => {
+  familyCatalogSchema = data.schema_version;
+  const merged = bundled.map(family => {
     const methods = enrichedFamilyAuthMethods.get(String(family?.id || ''));
-    return methods
+    return !family.auth_methods_complete && methods
       ? { ...family, auth_methods: methods, auth_methods_complete: true }
       : family;
   });
+  writeCachedFamilies({...data, families:merged});
+  return merged;
+}
+
+function loadFamilyAuthMethods(familyId) {
+  const pending = familyAuthRequests.get(familyId);
+  if (pending) return pending;
+  const catalogKey = familyCatalogKey;
+  const promise = request(`/families/${encodeURIComponent(familyId)}/auth-methods`, {
+    method: 'POST', timeoutMs: FAMILY_ENRICH_TIMEOUT_MS, timeoutLabel: 'Provider sign-in methods',
+  }).then(data => {
+    if (data.family_id !== familyId || !Array.isArray(data.auth_methods)) {
+      throw new Error('Provider sign-in methods returned an invalid response.');
+    }
+    if (catalogKey && catalogKey !== familyCatalogKey) throw new Error('Provider list changed. Retry sign-in methods.');
+    const index = state.families.findIndex(item => item.id === familyId);
+    if (index < 0) throw new Error('Provider is no longer available.');
+    state.families[index] = {...state.families[index],auth_methods:data.auth_methods,auth_methods_complete:true};
+    enrichedFamilyAuthMethods.set(familyId,data.auth_methods);
+    if (catalogKey) writeCachedFamilies({schema_version:familyCatalogSchema,catalog_key:catalogKey,families:state.families});
+  }).finally(() => {
+    if (familyAuthRequests.get(familyId) === promise) familyAuthRequests.delete(familyId);
+  });
+  familyAuthRequests.set(familyId,promise);
+  return promise;
 }
 
 function acceptManagementSnapshot(data) {
@@ -511,10 +575,12 @@ function acceptManagementSnapshot(data) {
     || !data?.shares
     || !Array.isArray(data.shares.received)
   ) {
-    throw new Error('Added Models returned an invalid response.');
+    throw new Error('Model Management returned an invalid response.');
   }
   return {
     connections: data.connections,
+    engineInstallation: ['verified', 'missing', 'unusable'].includes(data.engine_installation)
+      ? data.engine_installation : 'unverified',
     models: data.models,
     receivedShares: data.shares.received,
   };
@@ -608,6 +674,54 @@ function safeDetail(data, status) {
   return `Provider request failed (${status})`;
 }
 
+const OAUTH_SAFE_MESSAGES = Object.freeze({
+  oauth_validation_failed: 'Provider login could not be completed. Check the login details and try again.',
+  oauth_worker_lost: 'Provider login is no longer available. Check Model Management before starting another login.',
+  oauth_timeout: 'Sign-in timed out. Start a new sign-in to try again.',
+  oauth_exchange_failed: 'Provider login could not be exchanged. Check Model Management before starting another login.',
+  oauth_credential_mismatch: 'This login returned a credential type the selected method does not support. Choose another sign-in method and retry.',
+  oauth_endpoint_mismatch: 'The returned endpoint does not match this billing lane. Choose a supported MiMo Token Plan endpoint and retry.',
+  oauth_completion_failed: 'Provider login could not be completed. Check Model Management before starting another login.',
+  oauth_revision_conflict: 'The provider account changed while signing in. Refresh Model Management and try again.',
+  oauth_reauth_required: 'The provider declined this sign-in. Start a new login to reconnect the account.',
+  oauth_discovery_unavailable: 'Provider models are temporarily unavailable. Check Model Management and try again later.',
+  oauth_cancelled: 'Provider login was cancelled.',
+  oauth_expired: 'This provider login has expired. Start a new login when ready.',
+  beta_disabled: 'Enable Claude subscription Beta in this card before signing in.',
+  beta_policy_stale: 'Claude subscription Beta settings changed. Review the setting and try again.',
+  native_gate_unavailable: 'This Open Clank engine cannot start Claude subscription Beta.',
+  invalid_stored_policy: 'Claude subscription Beta settings are unavailable.',
+});
+
+function boundedRetryAfter(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= OAUTH_MAX_RETRY_AFTER_MS
+    ? parsed
+    : null;
+}
+
+function knownOAuthCode(value) {
+  const code = typeof value === 'string' ? value : '';
+  return Object.hasOwn(OAUTH_SAFE_MESSAGES, code) ? code : null;
+}
+
+function oauthMessage(code, fallback = 'Login status could not be confirmed. Check Model Management before starting another login.') {
+  return OAUTH_SAFE_MESSAGES[knownOAuthCode(code)] || fallback;
+}
+
+class ProviderRequestError extends Error {
+  constructor({ status = 0, code = null, retryable = false, retryAfterMs = null, safeMessage }) {
+    super(safeMessage || `Provider request failed (${status || 'network error'})`);
+    this.name = 'ProviderRequestError';
+    this.status = Number.isFinite(status) ? status : 0;
+    this.code = knownOAuthCode(code);
+    this.retryable = Boolean(retryable);
+    this.retryAfterMs = boundedRetryAfter(retryAfterMs);
+    this.safeMessage = safeMessage || oauthMessage(this.code, this.message);
+  }
+}
+
 function idempotencyKey() {
   try {
     if (globalThis.crypto?.randomUUID) return `web-${globalThis.crypto.randomUUID()}`;
@@ -659,7 +773,22 @@ async function request(path, options = {}) {
         if (response.ok) throw new Error(`${timeoutLabel} returned an invalid response`);
       }
     }
-    if (!response.ok) throw new Error(safeDetail(data, response.status));
+    if (!response.ok) {
+      const detail = data && typeof data.detail === 'object' && !Array.isArray(data.detail)
+        ? data.detail
+        : data;
+      const code = knownOAuthCode(detail?.code || detail?.error_code)
+        || (response.status === 422 ? 'oauth_validation_failed' : null);
+      const retryAfterMs = boundedRetryAfter(detail?.retry_after_ms ?? data?.retry_after_ms);
+      const retryable = detail?.retryable === true || data?.retryable === true;
+      throw new ProviderRequestError({
+        status: response.status,
+        code,
+        retryable,
+        retryAfterMs,
+        safeMessage: safeDetail(data, response.status),
+      });
+    }
     return data;
   } catch (error) {
     if (timedOut) throw new Error(`${timeoutLabel} timed out`);
@@ -675,7 +804,7 @@ function setStatus(message, isError = false) {
     const status = byId(id);
     if (!status) continue;
     // The Add page stays task-focused. Background loading/routing warnings
-    // belong on Added Models/Advanced; only an error that blocks the user's
+    // belong on Model Management/Advanced; only an error that blocks the user's
     // current add action is shown above the quick forms.
     status.textContent = id === 'provider-control-status' && !isError
       ? ''
@@ -738,6 +867,51 @@ function authMethodsFor(family) {
   });
 }
 
+function authMethodAcquisition(method) {
+  return method?.acquisitionMethod || method?.acquisition_method || '';
+}
+
+function authMethodCredentialKinds(method) {
+  return method?.credentialKinds || method?.credential_kinds || [];
+}
+
+function authMethodBillingLanes(method) {
+  return method?.billingLanes || method?.billing_lanes || [];
+}
+
+function authMethodSupports(method, credentialKind, billingLane) {
+  const kinds = authMethodCredentialKinds(method);
+  const lanes = authMethodBillingLanes(method);
+  return (!kinds.length || kinds.includes(credentialKind))
+    && (!lanes.length || lanes.includes(billingLane));
+}
+
+export function providerAuthMethodsForBillingLane(family, billingLane) {
+  const methods = authMethodsFor(family);
+  const familyKinds = family?.kinds || [];
+  return methods.filter(method => {
+    if (method.type === 'api_key') {
+      return (billingLane !== 'subscription' || authMethodBillingLanes(method).length > 0)
+        && authMethodSupports(method, 'api', billingLane);
+    }
+    if (method.type === 'oauth') {
+      const allowedKind = billingLane === 'subscription'
+        ? familyKinds.includes('subscription')
+        : billingLane === 'metered_api'
+          ? familyKinds.includes('official')
+          : billingLane === 'custom'
+            ? familyKinds.includes('custom_gateway')
+            : billingLane === 'local' && familyKinds.includes('local');
+      return allowedKind && authMethodSupports(
+        method,
+        authMethodCredentialKinds(method)[0] || 'oauth',
+        billingLane,
+      );
+    }
+    return method.type === 'none' && billingLane === 'local' && familyKinds.includes('local');
+  });
+}
+
 function oauthMethodIndex(method) {
   const match = String(method?.id || '').match(/^oauth:(\d+)$/);
   return match ? Number(match[1]) : 0;
@@ -792,16 +966,20 @@ function healthFor(account) {
     if (entry) rows.push(entry);
   }
   if (!account.enabled) return { tone: 'off', label: 'Disabled', detail: '' };
+  if (['api_key', 'oauth'].includes(account.auth_method) && account.has_credential === false) {
+    return { tone: 'bad', label: 'Credential missing', detail: 'Add a key or reconnect the account.' };
+  }
   if (!rows.length) return { tone: 'quiet', label: 'No model health yet', detail: '' };
   if (rows.some(item => item.account_state === 'reauth_required')) {
     return { tone: 'bad', label: 'Sign-in required', detail: '' };
   }
-  const cooldown = rows.find(item => item.account_cooldown_until || item.model_cooldown_until);
-  if (cooldown) {
+  const cooldowns = rows.flatMap(row => [row.account_cooldown_until, row.model_cooldown_until])
+    .map(value => Date.parse(value || '')).filter(value => Number.isFinite(value) && value > Date.now());
+  if (cooldowns.length) {
     return {
       tone: 'warn',
-      label: 'Cooling down',
-      detail: cooldown.account_cooldown_until || cooldown.model_cooldown_until || '',
+      label: 'Some routes are cooling down',
+      detail: `Latest local cooldown ends ${new Date(Math.max(...cooldowns)).toLocaleString()}. Provider quota and reset are unreported.`,
     };
   }
   const eligible = rows.filter(item => item.eligible).length;
@@ -809,7 +987,7 @@ function healthFor(account) {
   return {
     tone: eligible === rows.length ? 'good' : 'warn',
     label: `${eligible}/${rows.length} model route${rows.length === 1 ? '' : 's'} eligible`,
-    detail: '',
+    detail: 'Provider quota and reset are unreported.',
   };
 }
 
@@ -822,15 +1000,17 @@ function announceCatalogChange() {
   return onCatalogChanged();
 }
 
-async function changed(message) {
+async function changed(message, addedConnectionId = null) {
   invalidateLoadedViews();
-  await load({ force: true, view: activeManagementView() });
-  setStatus(message);
-  // Refresh the visible Added Models surface first. Other model pickers update
-  // in the background instead of holding this page behind their own reads.
   Promise.resolve(announceCatalogChange()).catch(error => {
     console.warn('[provider-control] catalogue refresh failed', error);
   });
+  if (addedConnectionId && activeManagementView() === 'services') {
+    await openAddedModels(addedConnectionId);
+  } else {
+    await load({ force: true, view: activeManagementView() });
+  }
+  setStatus(message);
 }
 
 function beginDetailRequest() {
@@ -854,7 +1034,7 @@ function cancelInFlightDetailLoads() {
   bindingsLoad = null;
 }
 
-async function fetchState(view, onProgress = () => {}, signal = undefined) {
+async function fetchState(view, onProgress = () => {}, signal = undefined, refreshCatalog = false) {
   const next = {
     families: [...state.families],
     connections: [...state.connections],
@@ -870,8 +1050,8 @@ async function fetchState(view, onProgress = () => {}, signal = undefined) {
   let requiredSucceeded = false;
   const publish = phase => onProgress(next, [...warnings], phase);
 
-  // Add Models owns only the nonsecret family catalogue. Connected models,
-  // shares, accounts, routing, and health belong to Added Models and must not
+  // Add Provider owns only the nonsecret family catalogue. Connected models,
+  // shares, accounts, routing, and health belong to Model Management and must not
   // compete with this first usable paint.
   if (view === 'services') {
     try {
@@ -888,10 +1068,10 @@ async function fetchState(view, onProgress = () => {}, signal = undefined) {
     return { next, warnings, requiredSucceeded };
   }
 
-  // Added Models uses owner-local persisted projections. A family read is
+  // Model Management uses owner-local persisted projections. A family read is
   // needed only when neither memory nor the validated session cache supplied
   // labels for the connection rows.
-  const catalogRequest = next.families.length
+  const catalogRequest = next.families.length && !refreshCatalog
     ? null
     : request('/families', {
       signal,
@@ -899,7 +1079,7 @@ async function fetchState(view, onProgress = () => {}, signal = undefined) {
     });
   const managementRequest = request('/management-snapshot', {
     signal,
-    timeoutLabel: 'Added Models snapshot',
+    timeoutLabel: 'Model Management snapshot',
   });
   const catalogTask = catalogRequest ? (async () => {
     try {
@@ -915,6 +1095,7 @@ async function fetchState(view, onProgress = () => {}, signal = undefined) {
       const data = await managementRequest;
       const snapshot = acceptManagementSnapshot(data);
       next.connections = snapshot.connections;
+      next.engineInstallation = snapshot.engineInstallation;
       next.models = snapshot.models;
       next.receivedShares = snapshot.receivedShares;
       requiredSucceeded = true;
@@ -1043,7 +1224,7 @@ async function loadBindings(options = {}) {
   }
 }
 
-function oauthPromptEditor(host, method) {
+function oauthPromptEditor(host, method, initialValues = {}) {
   const controls = new Map();
   const prompts = Array.isArray(method?.prompts) ? method.prompts : [];
   const syncVisibility = () => {
@@ -1071,6 +1252,7 @@ function oauthPromptEditor(host, method) {
         })),
       });
       controlNode = control.root;
+      if (Object.hasOwn(initialValues, prompt.key)) control.value = String(initialValues[prompt.key] || '');
     } else {
       control = element('input', {
         class: 'settings-input',
@@ -1078,6 +1260,7 @@ function oauthPromptEditor(host, method) {
         autocomplete: 'off',
         placeholder: prompt.placeholder || '',
       });
+      if (Object.hasOwn(initialValues, prompt.key)) control.value = String(initialValues[prompt.key] || '');
       controlNode = control;
     }
     const wrapper = field(prompt.message || prompt.key, controlNode);
@@ -1098,7 +1281,7 @@ function oauthPromptEditor(host, method) {
 }
 
 async function openAddedModels(connectionId) {
-  const tab = document.querySelector?.('[data-settings-tab="added-models"]');
+  const tab = document.querySelector?.('[data-provider-view="added-models"]');
   tab?.click?.();
   await load({ view: 'added-models' });
   selectConnection(connectionId);
@@ -1114,6 +1297,43 @@ async function refreshConnectionsForAdd() {
   };
 }
 
+function renderClaudeBetaControl(host, onChange) {
+  const panel = element('div', { class: 'provider-control-field' });
+  const toggle = element('input', { type: 'checkbox', disabled: true });
+  const label = element('label', { class: 'provider-control-field' });
+  label.append(toggle, element('span', { class: 'settings-label' }, 'Claude subscription Beta'));
+  const message = element('span', { class: 'admin-toggle-sub', role: 'status' }, 'Loading Beta settings…');
+  panel.append(label, message);
+  host.append(panel);
+  let policy;
+  const show = data => {
+    policy = data;
+    toggle.checked = data?.methods?.[CLAUDE_SUBSCRIPTION_METHOD]?.enabled === true;
+    toggle.disabled = !Number.isSafeInteger(data?.revision);
+    message.textContent = data?.managed_admission?.available
+      ? 'Direct account login. Anthropic may bill Open Clank chats against usage credits even when your plan has usage remaining.'
+      : 'Beta access is unavailable on this engine.';
+    onChange();
+  };
+  const load = async () => {
+    try { show(await request('/method-policy')); }
+    catch { toggle.disabled = true; message.textContent = 'Beta settings are unavailable. Try refreshing.'; onChange(); }
+  };
+  toggle.addEventListener('change', async () => {
+    const desired = toggle.checked;
+    toggle.disabled = true;
+    onChange();
+    try {
+      show(await request('/method-policy', { method: 'PUT', body: { enabled: desired, expected_revision: policy.revision } }));
+    } catch {
+      await load();
+      message.textContent = 'Beta settings changed or could not be saved. Review the current setting and try again.';
+    }
+  });
+  void load();
+  return { canStart: () => !toggle.disabled && toggle.checked && policy?.managed_admission?.available === true, refresh:load };
+}
+
 function renderCreateConnection() {
   const host = byId('provider-control-create');
   if (!host) return;
@@ -1123,7 +1343,7 @@ function renderCreateConnection() {
   host.replaceChildren();
   const addableFamilies = state.families.filter(item => item.id !== 'local-executor');
   if (!addableFamilies.length) {
-    host.append(element('p', { class: 'admin-empty' }, 'Loading providers… Your existing models are already available under Added Models. Use Refresh if this does not clear.'));
+    host.append(element('p', { class: 'admin-empty' }, 'Loading providers… Your existing models are already available under Model Management. Use Refresh if this does not clear.'));
     renderedFamilySignature = signature;
     return;
   }
@@ -1142,7 +1362,7 @@ function renderCreateConnection() {
         label: item.display_name || item.id,
         hint: count ? `${count} model${count === 1 ? '' : 's'}` : '',
         logo: familyLogo(item),
-        search: `${item.display_name || ''} ${item.id || ''}`,
+        search: `${item.display_name || ''} ${item.id || ''} ${(PROVIDER_SEARCH_ALIASES[item.id] || []).join(' ')}`,
       };
     });
   }
@@ -1151,14 +1371,15 @@ function renderCreateConnection() {
     if (!families.length) return null;
     const isLocal = mode === 'local';
     const isSubscription = mode === 'subscription';
-    const preferredFamily = families.find(item => item.id === (isLocal ? 'ollama' : 'openai')) || families[0];
+    const remembered = rememberedProvider(mode);
+    const preferredFamily = families.find(item => item.id === remembered) || families.find(item => item.id === (isLocal ? 'ollama' : 'openai')) || families[0];
     const form = element('form', {
       class: 'admin-card provider-control-quick-form provider-control-add-card',
       'data-provider-add-mode': mode,
     });
     const heading = element('div', { class: 'provider-control-add-heading' });
     const headingCopy = element('div', { class: 'provider-control-add-title' });
-    const title = isLocal ? 'Add Local Models' : isSubscription ? 'Add Subscription Models' : 'Add API Models';
+    const title = isLocal ? 'Add Local Provider' : isSubscription ? 'Add Subscription Provider' : 'Add API Provider';
     headingCopy.append(
       iconNode(isLocal ? ADD_ICON : API_ADD_ICON, 'provider-control-add-title-icon'),
       element('h2', {}, title),
@@ -1177,12 +1398,12 @@ function renderCreateConnection() {
       label: isLocal ? 'Local model provider' : isSubscription ? 'Subscription provider' : 'API model provider',
       options: providerOptions(families),
       value: preferredFamily.id,
-      searchable: families.length > FAMILY_PICKER_SEARCH_THRESHOLD,
+      searchable: families.length > FAMILY_PICKER_SEARCH_THRESHOLD || families.some(item => PROVIDER_SEARCH_ALIASES[item.id]),
       showTriggerHint: false,
       className: 'provider-control-family-picker',
       menuClassName: 'provider-control-family-picker-menu',
       menuAnchor: () => pickerMenuAnchor,
-      onChange: () => syncFamily(true),
+      onChange: () => { rememberedProvider(mode,family.value); syncFamily(true); },
     });
     const url = element('input', {
       class: 'settings-input provider-control-url-input',
@@ -1193,11 +1414,34 @@ function renderCreateConnection() {
       'aria-label': isLocal ? 'Local model server URL' : 'Provider base URL',
     });
     const urlShell = element('div', { class: 'provider-control-url-shell' });
+    const blenderPath = element('input', { type:'text', placeholder:'Absolute Blender executable path', 'aria-label':'Blender executable path' });
+    const blenderHash = element('input', { type:'text', placeholder:'Executable SHA-256', 'aria-label':'Blender executable SHA-256' });
+    const blenderVersion = element('input', { type:'text', placeholder:'Blender version', 'aria-label':'Blender version' });
+    const trellisDeclaration = element('textarea', { class:'settings-input', rows:8, placeholder:'Reviewed local model installation declaration (JSON)', 'aria-label':'local model installation declaration' });
+    const trellisFields = element('div', { className:'hidden' });
+    trellisFields.append(field('Reviewed local installation',trellisDeclaration,'Provide the reviewed manifest; configuration does not establish GPU readiness.'));
+    const blenderFields = element('div', { className:'hidden' });
+    blenderFields.append(blenderPath, blenderHash, blenderVersion);
     const routeHint = element('div', {
       class: 'provider-control-route-hint hidden',
       'aria-live': 'polite',
     });
-    urlShell.append(url, routeHint);
+    urlShell.append(url, routeHint, trellisFields);
+    const tokenPlanEndpoint = createThemedPicker({
+      label: 'MiMo Token Plan endpoint',
+      options: MIMO_TOKEN_PLAN_ENDPOINTS,
+      value: '',
+      showTriggerHint: false,
+      className: 'provider-control-token-plan-picker',
+      menuClassName: 'provider-control-token-plan-menu',
+      menuAnchor: () => providerCombo,
+    });
+    const tokenPlanEndpointField = field(
+      'MiMo Token Plan endpoint',
+      tokenPlanEndpoint.root,
+      'Select the regional OpenAI-compatible endpoint for this subscription key.',
+    );
+    tokenPlanEndpointField.classList?.add?.('provider-control-token-plan-field', 'hidden');
     const authChoices = element('div', {
       class: 'provider-control-methods',
       role: 'group',
@@ -1211,12 +1455,25 @@ function renderCreateConnection() {
       placeholder: isLocal ? 'API key (optional)' : 'API key',
       'aria-label': 'API key',
     });
+    const labelInput = element('input', {
+      class: 'settings-input provider-control-label-input',
+      type: 'text',
+      maxlength: 160,
+      autocomplete: 'off',
+      placeholder: 'Connection label',
+      'aria-label': 'Connection label',
+    });
+    const labelField = field('Connection label', labelInput);
+    labelField.classList?.add?.('provider-control-connection-label-field');
     const credentialIcon = iconNode(KEY_ICON, 'provider-control-credential-icon');
     const credentialShell = element('div', { class: 'provider-control-credential-shell' });
     credentialShell.append(credentialIcon, secret);
     const save = button('Add', 'admin-btn-add provider-control-add-submit');
     save.type = 'submit';
     save.dataset.providerFocusKey = `add:${mode}:submit`;
+    const pasteLogin = button('Paste callback', 'admin-btn-add');
+    pasteLogin.type = 'submit';
+    pasteLogin.hidden = true;
     const actionRow = element('div', { class: 'provider-control-add-action-row' });
     actionRow.append(credentialShell, save);
     const providerCombo = element('div', { class: 'provider-control-provider-combo' });
@@ -1226,6 +1483,39 @@ function renderCreateConnection() {
     pickerMenuAnchor = providerCombo;
     let methodId = '';
     let readPromptValues = () => ({});
+    let methodRequestGeneration = 0;
+    let methodLoading = false;
+    let methodTimer;
+    let methodError = '';
+    let submitGeneration = 0;
+    let formIdentityGeneration = 0;
+    let currentPromptMethodId = '';
+    let currentPromptSignature = '';
+    const promptDrafts = new Map();
+    let submitting = false;
+    let claudeBeta = null;
+    const betaHost = element('div',{class:'provider-control-claude-beta'},'');
+    const actionStatus = element('p',{class:'admin-toggle-sub',role:'status','aria-live':'polite'});
+    actionStatus.hidden = true;
+    const claudeSelected = () => isSubscription && family.value === 'anthropic';
+    const claudeBlocked = () => claudeSelected() && selectedMethod().type === 'oauth' && !claudeBeta?.canStart();
+    function showActionStatus(message, error = false) {
+      actionStatus.hidden = !message;
+      actionStatus.textContent = message;
+      actionStatus.classList.toggle('provider-control-error',error);
+    }
+
+    function applySubmittingControls() {
+      pasteLogin.disabled = submitting || pasteLogin.hidden || claudeBlocked();
+      family.disabled = submitting;
+      tokenPlanEndpoint.disabled = submitting;
+      url.disabled = submitting;
+      labelInput.disabled = submitting;
+      secret.disabled = submitting;
+      for (const control of [...(authChoices.querySelectorAll?.('button') || []), ...(promptHost.querySelectorAll?.('input,button') || [])]) {
+        control.disabled = submitting;
+      }
+    }
 
     function contract() {
       return familyFor(family.value) || families.find(item => item.id === family.value) || {};
@@ -1234,10 +1524,7 @@ function renderCreateConnection() {
     function availableMethods() {
       const methods = authMethodsFor(contract());
       if (isLocal) return methods.filter(method => ['none', 'api_key'].includes(method.type));
-      if (isSubscription) return methods.filter(method => method.type === 'oauth');
-      return methods.filter(method => !(
-        method.type === 'oauth' && (contract().kinds || []).includes('subscription')
-      ));
+      return providerAuthMethodsForBillingLane(contract(), isSubscription ? 'subscription' : 'metered_api');
     }
 
     function authMethodsIncomplete() {
@@ -1246,14 +1533,21 @@ function renderCreateConnection() {
 
     function selectedMethod() {
       const methods = availableMethods();
+      const isKimiCodePlan = ['kimi-code-plan-cn', 'kimi-code-plan-global'].includes(contract().id);
       const unavailable = {
         id: 'unavailable',
         type: 'unavailable',
         label: isSubscription ? 'Subscription login unavailable' : 'Sign-in methods unavailable',
       };
-      if (isSubscription && !methods.some(method => method.type === 'oauth')) return unavailable;
+      if (isSubscription && !methods.length) return unavailable;
       if (!isLocal && !methods.length) return unavailable;
       return methods.find(method => method.id === methodId)
+        || (isKimiCodePlan
+          ? methods.find(method => method.type === 'oauth' && authMethodAcquisition(method) === 'device')
+          : null)
+        || (isKimiCodePlan && authMethodsIncomplete()
+          ? { id: 'unavailable', type: 'unavailable', label: 'Load Kimi Code device sign-in' }
+          : null)
         || (isLocal ? methods.find(method => method.type === 'none') : null)
         || methods.find(method => method.type === 'api_key')
         || methods.find(method => method.type === 'oauth')
@@ -1267,8 +1561,8 @@ function renderCreateConnection() {
       const kinds = contract().kinds || [];
       if (isLocal && kinds.includes('local')) return 'local';
       if (isSubscription && kinds.includes('subscription')) return 'subscription';
-      if (method.type === 'oauth' && kinds.includes('subscription')) return 'subscription';
       if (kinds.includes('official')) return 'official';
+      if (method.type === 'oauth' && kinds.includes('subscription')) return 'subscription';
       if (kinds.includes('custom_gateway')) return 'custom_gateway';
       return preferredKind(contract(), method);
     }
@@ -1279,7 +1573,7 @@ function renderCreateConnection() {
       methodId = chosen.id;
       authChoices.replaceChildren();
       const seenAlternatives = new Set();
-      const alternatives = methods.filter(item => item.id !== methodId).filter(item => {
+      const alternatives = methods.filter(item => item.id !== methodId && !(claudeSelected() && item.type === 'oauth')).filter(item => {
         const key = item.type === 'api_key' ? 'api_key' : item.id;
         if (seenAlternatives.has(key)) return false;
         seenAlternatives.add(key);
@@ -1293,6 +1587,7 @@ function renderCreateConnection() {
       for (const method of alternatives) {
         const label = method.label || authLabel(method.type);
         const choice = button(`Use ${label} instead`, 'provider-control-method-choice');
+        choice.disabled = submitting;
         choice.addEventListener('click', () => {
           methodId = method.id;
           syncMethod();
@@ -1301,39 +1596,38 @@ function renderCreateConnection() {
         authChoices.append(choice);
       }
       if (authMethodsIncomplete()) {
-        const enrich = button(
-          methods.length ? 'Load more sign-in methods' : 'Load sign-in methods',
-          'provider-control-method-choice',
-        );
-        enrich.addEventListener('click', async () => {
-          enrich.disabled = true;
-          enrich.textContent = 'Loading sign-in methods…';
-          try {
-            const data = await request(`/families/${encodeURIComponent(family.value)}/auth-methods`, {
-              method: 'POST',
-              timeoutMs: FAMILY_ENRICH_TIMEOUT_MS,
-              timeoutLabel: 'Provider sign-in methods',
-            });
-            const index = state.families.findIndex(item => item.id === family.value);
-            if (index < 0) throw new Error('Provider family is no longer available.');
-            state.families[index] = {
-              ...state.families[index],
-              auth_methods: Array.isArray(data.auth_methods) ? data.auth_methods : [],
-              auth_methods_complete: true,
-            };
-            enrichedFamilyAuthMethods.set(
-              family.value,
-              Array.isArray(data.auth_methods) ? data.auth_methods : [],
-            );
-            syncFamily(false);
-            renderedFamilySignature = familyRenderSignature(state.families);
-          } catch (error) {
-            enrich.disabled = false;
-            enrich.textContent = methods.length ? 'Retry sign-in methods' : 'Retry loading sign-in methods';
-            setStatus(error.message, true);
-          }
-        });
-        authChoices.append(enrich);
+        if (methodError) {
+          const retry = button('Retry sign-in methods','provider-control-method-choice');
+          retry.disabled = submitting;
+          retry.title = methodError;
+          retry.addEventListener('click',() => void enrichSelectedFamily());
+          authChoices.append(element('p',{class:'admin-toggle-sub provider-control-error',role:'status'},methodError),retry);
+        } else {
+          authChoices.append(element('p',{class:'admin-toggle-sub',role:'status'},'Loading sign-in methods…'));
+        }
+      }
+    }
+
+    async function enrichSelectedFamily() {
+      if (!form.isConnected || !authMethodsIncomplete() || methodLoading) return;
+      const familyId = String(family.value);
+      const generation = ++methodRequestGeneration;
+      const current = () => form.isConnected && generation === methodRequestGeneration && family.value === familyId;
+      methodLoading = true;
+      methodError = '';
+      renderMethodChoices();
+      try {
+        await loadFamilyAuthMethods(familyId);
+        if (!current()) return;
+        methodLoading = false;
+        syncFamily(false);
+        renderedFamilySignature = familyRenderSignature(state.families);
+      } catch (error) {
+        if (!current()) return;
+        methodLoading = false;
+        methodError = error.message || 'Sign-in methods could not be loaded.';
+        renderMethodChoices();
+        syncMethod();
       }
     }
 
@@ -1342,37 +1636,92 @@ function renderCreateConnection() {
       const unavailable = method.type === 'unavailable';
       const kind = selectedKind(method);
       const needsUrl = isLocal || kind === 'custom_gateway';
-      url.classList?.toggle?.('hidden', !needsUrl);
-      routeHint.classList?.toggle?.('hidden', needsUrl && !unavailable);
+      const needsTokenPlanEndpoint = contract().id === 'xiaomi'
+        && isSubscription
+        && method.type === 'api_key';
+      const isKimiCodePlan = ['kimi-code-plan-cn', 'kimi-code-plan-global'].includes(contract().id);
+      url.classList?.toggle?.('hidden', !needsUrl || ['blender','trellis','hunyuan-shape'].includes(contract().id));
+      trellisFields.classList?.toggle?.('hidden', !['trellis','hunyuan-shape'].includes(contract().id));
+      blenderFields.classList?.toggle?.('hidden', contract().id !== 'blender');
+      routeHint.classList?.toggle?.('hidden', needsUrl && !unavailable && !['comfyui','blender','trellis','hunyuan-shape'].includes(contract().id));
       routeHint.textContent = unavailable
         ? authMethodsIncomplete()
-          ? 'Load this provider’s sign-in methods before adding it.'
+          ? methodError ? 'Sign-in methods could not be loaded.' : 'Loading sign-in methods…'
           : isSubscription
             ? 'This provider does not offer subscription login.'
             : 'This provider has no compatible sign-in method.'
-        : method.type === 'oauth' ? 'Browser account' : 'Official provider API';
+        : contract().id === 'tripo' ? 'Text-to-3D geometry jobs only; provider credits may be charged.'
+        : contract().id === 'meshy' ? 'Text-to-3D preview jobs only; provider credits may be charged.'
+        : contract().id === 'sprixen' ? 'Sprite generation job profile; provider credits may be charged.'
+        : contract().id === 'voidless' ? 'Voidless flux2-klein 64px PNG image jobs only; provider credits may be charged.'
+        : contract().id === 'trellis' ? 'Experimental local TRELLIS job profile; configured does not mean GPU-ready.'
+        : contract().id === 'hunyuan-shape' ? 'Experimental local Hunyuan shape profile; configured does not establish runtime readiness.'
+        : contract().id === 'blender' ? 'Local Blender job profile; no model or automatic installation.'
+        : contract().id === 'comfyui' ? 'Local job profile only; no chat models. Cost is unknown.'
+        : contract().id === 'xiaomi'
+          ? isSubscription
+            ? method.type === 'oauth'
+              ? 'Sign in to MiMo Token Plan.'
+              : 'Token Plan subscription key. Choose a supported regional endpoint below.'
+            : 'MiMo API Models use pay-as-you-go billing. Token Plan is listed separately under Subscription Models.'
+          : isKimiCodePlan
+            ? method.type === 'oauth' ? 'Kimi Code device login' : 'Kimi Code subscription key'
+            : method.type === 'oauth' ? 'Browser account' : 'Official provider API';
+      if (contract().id === 'xiaomi') {
+        description.textContent = isSubscription
+          ? 'Sign in to MiMo Token Plan, or enter your key and choose its region. Token Plan is a subscription.'
+          : 'MiMo API Models use pay-as-you-go billing. Token Plan is a separate subscription option.';
+      } else if (isKimiCodePlan) {
+        description.textContent = 'Sign in to your Kimi Code plan, or enter a Kimi Code plan key. China and Global use separate endpoints and subscription accounts.';
+      } else {
+        description.textContent = isLocal
+          ? 'Connect Ollama or another model server running on your network.'
+          : isSubscription
+            ? 'Sign in with a supported provider account to add its subscription models.'
+            : 'Connect an API key endpoint such as OpenAI, Anthropic, DeepSeek, or OpenRouter.';
+      }
+      tokenPlanEndpointField.classList?.toggle?.('hidden', !needsTokenPlanEndpoint);
       url.required = needsUrl && !unavailable;
       const usesSecret = method.type === 'api_key';
       credentialShell.classList?.toggle?.('hidden', !usesSecret);
       secret.required = usesSecret;
-      secret.placeholder = isLocal ? 'API key for a protected server' : 'API key';
+      secret.placeholder = isLocal ? 'API key for a protected server' : isKimiCodePlan ? 'Kimi Code plan key' : 'API key';
       promptHost.classList?.toggle?.('hidden', method.type !== 'oauth');
-      readPromptValues = method.type === 'oauth' ? oauthPromptEditor(promptHost, method) : () => ({});
-      if (method.type !== 'oauth') promptHost.replaceChildren();
-      save.disabled = unavailable;
+      if (method.type === 'oauth') {
+        const signature = JSON.stringify(method.prompts || []);
+        if (currentPromptMethodId !== method.id || currentPromptSignature !== signature) {
+          if (currentPromptMethodId) promptDrafts.set(currentPromptMethodId, readPromptValues());
+          currentPromptMethodId = method.id;
+          currentPromptSignature = signature;
+          readPromptValues = oauthPromptEditor(promptHost, method, promptDrafts.get(method.id) || {});
+        }
+      } else {
+        if (currentPromptMethodId) promptDrafts.set(currentPromptMethodId, readPromptValues());
+        currentPromptMethodId = '';
+        currentPromptSignature = '';
+        readPromptValues = () => ({});
+        promptHost.replaceChildren();
+      }
+      save.disabled = unavailable || submitting || claudeBlocked();
+      const pasteMethod = claudeSelected() && availableMethods().find(item => item.id === 'oauth:1');
+      pasteLogin.hidden = !pasteMethod;
+      pasteLogin.disabled = !pasteMethod || save.disabled;
+      pasteLogin.dataset.methodId = pasteMethod?.id || '';
       save.textContent = unavailable
-        ? isSubscription && !authMethodsIncomplete() ? 'Unavailable' : 'Sign-in required'
+        ? authMethodsIncomplete() && !methodError ? 'Loading…' : 'Unavailable'
         : method.type === 'oauth' ? (method.label || 'Sign in') : 'Add';
       if (method.type === 'none') {
         primaryRow.append(save);
         actionRow.classList?.add?.('hidden');
       } else {
-        actionRow.append(save);
+        actionRow.append(save, pasteLogin);
         actionRow.classList?.remove?.('hidden');
       }
+      if (claudeSelected() && method.id === 'oauth:0') save.textContent = 'Sign in with browser';
       save.setAttribute('aria-label', method.type === 'oauth'
         ? `Continue with ${method.label || 'provider login'}`
         : `Add ${contract().display_name || contract().id || 'models'}`);
+      applySubmittingControls();
     }
 
     function syncFamily(resetUrl = false) {
@@ -1381,41 +1730,100 @@ function renderCreateConnection() {
       const preferred = isLocal
         ? methods.find(method => method.type === 'none') || methods.find(method => method.type === 'api_key')
         : isSubscription
-          ? methods.find(method => method.type === 'oauth')
+          ? (['kimi-code-plan-cn', 'kimi-code-plan-global'].includes(selected.id)
+            ? methods.find(method => method.type === 'oauth' && authMethodAcquisition(method) === 'device')
+              || (authMethodsIncomplete() ? { id: 'unavailable', type: 'unavailable' } : methods.find(method => method.type === 'oauth'))
+            : methods.find(method => method.type === 'oauth'))
           : methods.find(method => method.type === 'api_key') || methods.find(method => method.type === 'oauth') || methods[0];
-      methodId = preferred?.id || (isLocal ? 'none' : 'unavailable');
       if (resetUrl) {
+        methodId = preferred?.id || (isLocal ? 'none' : 'unavailable');
+      } else if (!methods.some(method => method.id === methodId)) {
+        methodId = preferred?.id || (isLocal ? 'none' : 'unavailable');
+      }
+      if (resetUrl) {
+        methodRequestGeneration += 1;
+        clearTimeout(methodTimer);
+        methodLoading = false;
+        methodError = '';
+        formIdentityGeneration += 1;
+        showActionStatus('');
+        promptDrafts.clear();
+        currentPromptMethodId = '';
+        currentPromptSignature = '';
         url.value = selected.id === 'ollama' ? 'http://localhost:11434' : '';
+        if (selected.id === 'comfyui') url.value = 'http://127.0.0.1:8188';
+        if (selected.id === 'voidless') url.value = 'https://api.voidless.dev';
+        if (selected.id === 'kimi-code-plan-cn') url.value = 'https://api.kimi.com/coding/v1';
+        if (selected.id === 'kimi-code-plan-global') url.value = 'https://api.kimi.ai/coding/v1';
+        labelInput.value = selected.display_name || selected.id || '';
+        tokenPlanEndpoint.value = '';
         secret.value = '';
       }
+      betaHost.hidden = !claudeSelected();
+      if (claudeSelected() && !claudeBeta) claudeBeta = renderClaudeBetaControl(betaHost,syncMethod);
       renderMethodChoices();
       syncMethod();
+      if (resetUrl && authMethodsIncomplete()) methodTimer = setTimeout(() => void enrichSelectedFamily(),150);
     }
 
     form.addEventListener('submit', async event => {
       event.preventDefault();
+      if (save.disabled || submitting) return;
       save.disabled = true;
       const selected = contract();
-      const method = selectedMethod();
+      const selectedFamilyId = String(selected.id || family.value);
+      const selectedMethodId = selectedMethod().id;
+      const method = event.submitter === pasteLogin
+        ? availableMethods().find(item => item.id === pasteLogin.dataset.methodId)
+        : selectedMethod();
+      if (!method) { syncMethod(); return; }
       const kind = selectedKind(method);
       const lane = preferredLane(selected, kind);
       const adapter = (selected.adapters || [])[0];
-      const enteredUrl = url.value.trim();
+      const needsTokenPlanEndpoint = selectedFamilyId === 'xiaomi'
+        && isSubscription
+        && method.type === 'api_key';
+      const enteredUrl = needsTokenPlanEndpoint ? tokenPlanEndpoint.value : url.value.trim();
+      const enteredLabel = labelInput.value.trim();
       const enteredSecret = secret.value;
+      const promptValues = method.type === 'oauth' ? readPromptValues() : {};
+      const requestGeneration = ++submitGeneration;
+      const identityGeneration = formIdentityGeneration;
+      const setSubmitting = value => {
+        submitting = value;
+        applySubmittingControls();
+      };
       secret.value = '';
+      family.close();
+      setSubmitting(true);
       let connection = null;
       let created = false;
+      let loginPopup = null;
       try {
-        if (method.type === 'unavailable') throw new Error('Load this provider’s sign-in methods first.');
+        if (method.type === 'unavailable') throw new Error('Sign-in methods are unavailable.');
+        if (claudeBlocked()) throw new Error('Enable Claude subscription Beta before signing in.');
         if (!adapter) throw new Error(`${selected.display_name || selected.id} is not ready to connect.`);
-        if ((isLocal || kind === 'custom_gateway') && !enteredUrl) throw new Error('Enter the model server URL.');
+        if (!['blender','trellis','hunyuan-shape'].includes(selectedFamilyId) && (isLocal || kind === 'custom_gateway') && !enteredUrl) throw new Error('Enter the model server URL.');
+        if (needsTokenPlanEndpoint && !enteredUrl) throw new Error('Choose a supported MiMo Token Plan endpoint.');
+        if (!enteredLabel) throw new Error('Enter a connection label.');
         if (method.type === 'api_key' && !enteredSecret) throw new Error('Enter an API key.');
-        // Add Models does not preload owner management data. Refresh just the
+        // Add Provider does not preload owner management data. Refresh just the
         // connection identities at submit time so an existing exact endpoint
         // receives the new account instead of being duplicated.
+        if (method.type === 'oauth') {
+          if (activeOAuth || startingLogin) {
+            revealProviderLogin();
+            return;
+          }
+          loginPopup = reserveOAuthPopup();
+        }
+        showActionStatus(method.type === 'oauth' ? 'Preparing provider sign-in…' : 'Adding provider…');
         await refreshConnectionsForAdd();
-        connection = state.connections.find(item => (
-          item.family_id === family.value
+        if (requestGeneration !== submitGeneration
+          || identityGeneration !== formIdentityGeneration
+          || selectedMethod().id !== selectedMethodId) return;
+        connection = ['blender','trellis','hunyuan-shape'].includes(selectedFamilyId) ? null : state.connections.find(item => (
+          item.family_id === selectedFamilyId
           && item.adapter_id === adapter
           && item.kind === kind
           && item.billing_lane === lane
@@ -1426,13 +1834,13 @@ function renderCreateConnection() {
             method: 'POST',
             mutation: true,
             body: {
-              family_id: family.value,
+              family_id: selectedFamilyId,
               adapter_id: adapter,
               kind,
               billing_lane: lane,
-              label: selected.display_name || selected.id || family.value,
-              url: enteredUrl || null,
-              settings: {},
+              label: enteredLabel,
+              url: ['trellis','hunyuan-shape'].includes(selectedFamilyId) ? null : (enteredUrl || null),
+              settings: selectedFamilyId === 'blender' ? { executablePath:blenderPath.value.trim(), executableSHA256:blenderHash.value.trim(), executableVersion:blenderVersion.value.trim() } : ['trellis','hunyuan-shape'].includes(selectedFamilyId) ? JSON.parse(trellisDeclaration.value) : {},
               enabled: true,
             },
           });
@@ -1444,17 +1852,21 @@ function renderCreateConnection() {
             mutation: true,
             body: { label: `Account ${accountsFor(connection.id).length + 1}`, api_key: enteredSecret },
           });
-          await changed(`${selected.display_name || connection.label} added.`);
-          await openAddedModels(connection.id);
+          await changed(`${selected.display_name || connection.label} added.`,
+            ['sprixen','meshy','tripo','fal','voidless'].includes(selectedFamilyId) ? null : connection.id);
         } else if (method.type === 'oauth') {
-          const started = await startOAuth(connection, null, method, readPromptValues());
-          if (!started) return;
-          await announceCatalogChange();
-          await load({ force: true });
-          setStatus(`Finish ${method.label || 'provider login'} in the opened window.`);
+          const popup = loginPopup;
+          loginPopup = null;
+          const started = await startOAuth(connection,null,method,promptValues,{loginPopup:popup,onError:message=>showActionStatus(message,true)});
+          if (!started) {
+            if (claudeSelected()) void claudeBeta?.refresh();
+            return;
+          }
+          showActionStatus('');
+          invalidateLoadedViews();
         } else {
-          await changed(`${selected.display_name || connection.label} added.`);
-          await openAddedModels(connection.id);
+          await changed(`${selected.display_name || connection.label} added.`,
+            ['comfyui','blender'].includes(selectedFamilyId) ? null : connection.id);
         }
       } catch (error) {
         if (created && connection?.id && method.type === 'api_key' && enteredSecret) {
@@ -1464,17 +1876,23 @@ function renderCreateConnection() {
             });
           } catch (_) {}
         }
-        setStatus(error.message, true);
+        if (requestGeneration === submitGeneration && identityGeneration === formIdentityGeneration) {
+          showActionStatus(error.message,true);
+        }
       } finally {
+        loginPopup?.close();
         secret.value = '';
-        // Programmatic submission can reach this path even while an
-        // incomplete family is fail-closed. Do not accidentally turn that
-        // state into an enabled, keyless Add button after the rejected submit.
-        save.disabled = selectedMethod().type === 'unavailable';
+        if (requestGeneration === submitGeneration && identityGeneration === formIdentityGeneration) {
+          setSubmitting(false);
+          // Programmatic submission can reach this path even while an
+          // incomplete family is fail-closed. Do not accidentally turn that
+          // state into an enabled, keyless Add button after the rejected submit.
+          save.disabled = selectedMethod().type === 'unavailable' || claudeBlocked();
+        }
       }
     });
 
-    form.append(heading, description, primaryRow, authChoices, promptHost, actionRow);
+    form.append(heading, description, labelField, primaryRow, blenderFields, tokenPlanEndpointField, authChoices, betaHost, promptHost, actionRow, actionStatus);
     syncFamily(true);
     return form;
   }
@@ -1522,8 +1940,9 @@ function renderAccount(connection, account, index, accounts) {
     element('span', { class: 'admin-badge' }, authLabel(account.auth_method)),
     accountHealthBadge(account),
   );
+  const healthDetail = healthFor(account).detail;
   const metadata = element('div', { class: 'admin-toggle-sub' },
-    `${account.auth_class || 'provider'}${identity ? ` · ${identity}` : ''}`,
+    `${account.auth_class || 'provider'}${identity ? ` · ${identity}` : ''}${healthDetail ? ` · ${healthDetail}` : ''}`,
   );
   const actions = element('div', { class: 'provider-control-actions' });
   if (accounts.length > 1) {
@@ -1561,11 +1980,96 @@ function renderAccount(connection, account, index, accounts) {
   });
   actions.append(enabled);
   const family = familyFor(connection) || {};
-  const reconnectMethod = authMethodsFor(family).find(method => method.type === 'oauth');
-  if (account.auth_method === 'oauth' && reconnectMethod) {
-    const reauth = button('Reconnect');
-    reauth.addEventListener('click', () => startOAuth(connection, account, reconnectMethod));
+  const expectedKind = account.auth_method === 'api_key' ? 'api' : account.auth_method === 'oauth' ? 'oauth' : '';
+  const isKimiCodePlan = ['kimi-code-plan-cn', 'kimi-code-plan-global'].includes(connection.family_id);
+  const reconnectMethods = authMethodsFor(family).filter(method => (
+    (method.type === 'oauth' || method.type === 'api_key')
+    && authMethodSupports(method, expectedKind, connection.billing_lane)
+    && (!account.acquisition_method || authMethodAcquisition(method) === account.acquisition_method)
+  ));
+  if (!account.acquisition_method) {
+    row.append(element('p', { class: 'admin-toggle-sub provider-control-acquisition-choice' },
+      'This account’s original sign-in method is unknown. Choose how to reconnect; it will be recorded after a successful update.'));
+  }
+  for (const method of reconnectMethods) {
+    if (method.type === 'api_key') {
+      const keyLabel = method.label || (isKimiCodePlan ? 'Kimi Code plan key' : 'API key');
+      const replace = button(account.acquisition_method ? `Replace ${keyLabel}` : `Reconnect with ${keyLabel}`);
+      replace.addEventListener('click', () => {
+        actions.querySelectorAll?.('[data-provider-account-form]')?.forEach(item => item.remove());
+        const form = element('form', { class: 'provider-control-form', 'data-provider-account-form': 'api-key-reconnect' });
+        const secret = element('input', { class: 'settings-input', type: 'password', required: true, autocomplete: 'off', placeholder: keyLabel });
+        const save = button('Replace key', 'admin-btn-add');
+        save.type = 'submit';
+        const cancel = button('Cancel');
+        cancel.addEventListener('click', () => { secret.value = ''; form.remove(); });
+        form.addEventListener('submit', async event => {
+          event.preventDefault();
+          const apiKey = secret.value;
+          secret.value = '';
+          save.disabled = true;
+          try {
+            await request(`/accounts/${encodeURIComponent(account.id)}`, {
+              method: 'PATCH',
+              mutation: true,
+              revision: account.revision,
+              body: { api_key: apiKey },
+            });
+            await changed('Provider API key reconnected.');
+          } catch (error) {
+            setStatus(error.message, true);
+            save.disabled = false;
+          } finally {
+            secret.value = '';
+          }
+        });
+        const buttons = element('div', { class: 'provider-control-actions' });
+        buttons.append(save, cancel);
+        form.append(field(keyLabel, secret, 'Write-only. The current key remains active unless the new key is accepted.'));
+        form.append(buttons);
+        actions.append(form);
+        secret.focus?.();
+      });
+      actions.append(replace);
+      continue;
+    }
+    const reauth = button(
+      account.acquisition_method
+        ? 'Reconnect'
+        : `Reconnect with ${authMethodAcquisition(method) === 'device' ? 'device login' : 'browser login'}`,
+    );
+    reauth.addEventListener('click', () => startOAuth(connection,account,method,{}, {loginPopup:reserveOAuthPopup()}));
     actions.append(reauth);
+  }
+  if (!account.acquisition_method && family.auth_methods_complete === false) {
+    const loadMethods = button('Load reconnect methods');
+    loadMethods.addEventListener('click', async () => {
+      const requestedFamilyId = String(connection.family_id || '');
+      const requestedAccountRevision = account.revision;
+      loadMethods.disabled = true;
+      loadMethods.textContent = 'Loading…';
+      try {
+        const data = await request(`/families/${encodeURIComponent(requestedFamilyId)}/auth-methods`, {
+          method: 'POST',
+          timeoutMs: FAMILY_ENRICH_TIMEOUT_MS,
+          timeoutLabel: 'Provider reconnect methods',
+        });
+        if (!row.isConnected || requestedFamilyId !== connection.family_id || requestedAccountRevision !== account.revision) return;
+        if (data.family_id !== requestedFamilyId || !Array.isArray(data.auth_methods)) {
+          throw new Error('Provider sign-in methods returned for a different family.');
+        }
+        const index = state.families.findIndex(item => item.id === requestedFamilyId);
+        if (index < 0) throw new Error('Provider family is no longer available.');
+        state.families[index] = { ...state.families[index], auth_methods: data.auth_methods, auth_methods_complete: true };
+        enrichedFamilyAuthMethods.set(requestedFamilyId, data.auth_methods);
+        await load({ force: true, view: 'added-models' });
+      } catch (error) {
+        setStatus(error.message, true);
+        loadMethods.disabled = false;
+        loadMethods.textContent = 'Retry reconnect methods';
+      }
+    });
+    actions.append(loadMethods);
   }
   const remove = button('Remove', 'admin-btn-delete');
   remove.addEventListener('click', async () => {
@@ -1593,7 +2097,7 @@ function renderAccount(connection, account, index, accounts) {
 
 function renderAddAccount(connection, host) {
   const family = familyFor(connection) || {};
-  const methods = authMethodsFor(family);
+  const methods = providerAuthMethodsForBillingLane(family, connection.billing_lane);
   const apiMethod = methods.find(method => method.type === 'api_key');
   const oauthMethods = methods.filter(method => method.type === 'oauth');
   const keyless = methods.some(method => method.type === 'none');
@@ -1602,14 +2106,19 @@ function renderAddAccount(connection, host) {
   if (keyless && connection.billing_lane === 'local') {
     controls.append(element('span', { class: 'admin-toggle-sub' }, 'No API key is required. Add one only if this local server is protected.'));
   }
-  if (apiMethod && connection.billing_lane !== 'subscription') {
-    const open = button(connection.billing_lane === 'local' ? 'Add optional API key' : 'Add API key', 'admin-btn-add');
+  const isMimoTokenPlan = connection.family_id === 'xiaomi'
+    && connection.adapter_id === 'mimo-native'
+    && connection.billing_lane === 'subscription';
+  if (apiMethod) {
+    const keyLabel = apiMethod.label || 'API key';
+    const open = button(isMimoTokenPlan ? 'Add Token Plan API key' : connection.billing_lane === 'local' ? 'Add optional API key' : `Add ${keyLabel}`, 'admin-btn-add');
     open.addEventListener('click', () => {
       controls.querySelectorAll?.('[data-provider-account-form]')?.forEach(item => item.remove());
       const form = element('form', { class: 'provider-control-form', 'data-provider-account-form': 'api-key' });
       const label = element('input', { class: 'settings-input', type: 'text', maxlength: 160, required: true, autocomplete: 'off', value: `Account ${accountsFor(connection.id).length + 1}` });
-      const secret = element('input', { class: 'settings-input', type: 'password', required: true, autocomplete: 'off', placeholder: 'API key' });
+      const secret = element('input', { class: 'settings-input', type: 'password', required: true, autocomplete: 'off', placeholder: keyLabel });
       const save = button('Save account', 'admin-btn-add');
+      if (isMimoTokenPlan && !connection.url) save.disabled = true;
       save.type = 'submit';
       const cancel = button('Cancel');
       cancel.addEventListener('click', () => {
@@ -1639,7 +2148,11 @@ function renderAddAccount(connection, host) {
       actions.append(save, cancel);
       form.append(
         field('Account label', label),
-        field('API key', secret, 'Write-only: the browser clears this field immediately after submission.'),
+        field(keyLabel, secret, isMimoTokenPlan
+          ? connection.url
+            ? `Write-only. Uses this connection endpoint: ${connection.url}.`
+            : 'Set a supported Token Plan endpoint on this connection before adding a key.'
+          : 'Write-only: the browser clears this field immediately after submission.'),
         actions,
       );
       controls.append(form);
@@ -1652,7 +2165,7 @@ function renderAddAccount(connection, host) {
     login.addEventListener('click', () => {
       controls.querySelectorAll?.('[data-provider-account-form]')?.forEach(item => item.remove());
       if (!(method.prompts || []).length) {
-        startOAuth(connection, null, method);
+        startOAuth(connection,null,method,{}, {loginPopup:reserveOAuthPopup()});
         return;
       }
       const form = element('form', { class: 'provider-control-form', 'data-provider-account-form': `oauth-${method.id}` });
@@ -1666,7 +2179,7 @@ function renderAddAccount(connection, host) {
         event.preventDefault();
         submit.disabled = true;
         try {
-          if (await startOAuth(connection, null, method, values())) form.remove();
+          if (await startOAuth(connection,null,method,values(), {loginPopup:reserveOAuthPopup()})) form.remove();
         } finally {
           submit.disabled = false;
         }
@@ -1684,8 +2197,12 @@ function renderAddAccount(connection, host) {
   host.append(controls);
 }
 
-function oauthPanel() {
-  return byId('provider-control-oauth');
+function oauthPanel(view) {
+  const panel = byId('provider-control-oauth');
+  if (!view) return panel;
+  const slot = byId(view === 'added-models' ? 'provider-login-added' : 'provider-login-add');
+  if (panel && slot && panel.parentElement !== slot) slot.append(panel);
+  return panel;
 }
 
 function oauthExpiryMs(value) {
@@ -1700,7 +2217,7 @@ function readOAuthFlowSession() {
     const value = JSON.parse(raw);
     const flowId = typeof value?.flow_id === 'string' ? value.flow_id : '';
     const expiresAtMs = Number(value?.expires_at_ms);
-    if (!/^[A-Za-z0-9_-]{16,128}$/.test(flowId) || !Number.isFinite(expiresAtMs) || expiresAtMs <= 0) {
+    if (!/^[A-Za-z0-9_-]{16,128}$/.test(flowId) || !Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
       globalThis.sessionStorage?.removeItem(OAUTH_FLOW_STORAGE_KEY);
       return null;
     }
@@ -1729,14 +2246,114 @@ function forgetOAuthFlow(flowId) {
 }
 
 function stopOAuthPolling() {
+  oauthPanel()?.replaceChildren();
   if (activeOAuth?.timer) clearTimeout(activeOAuth.timer);
+  activeOAuth?.abortController?.abort();
   forgetOAuthFlow(activeOAuth?.flowId);
+  if (activeOAuth?.onFocus) window.removeEventListener('focus', activeOAuth.onFocus);
+  activeOAuth?.loginPopup?.close();
   activeOAuth = null;
+}
+
+function normalizeManualCallback(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return { code: '', state: '' };
+  try {
+    const url = new URL(raw);
+    if (url.username || url.password) return { code: raw, state: '', invalid: true };
+    const codeValues = url.searchParams.getAll('code');
+    const stateValues = url.searchParams.getAll('state');
+    if (codeValues.length > 1 || stateValues.length > 1) return { code: raw, state: '', invalid: true };
+    const code = codeValues[0] || '';
+    const state = stateValues[0] || '';
+    if (code || state) return { code: raw, state };
+  } catch (_) {}
+  const hash = raw.match(/^([^#]+)#([^#]+)$/);
+  return hash ? { code: raw, state: hash[2] } : { code: raw, state: '' };
+}
+
+function addOAuthManualControls(result, flow) {
+  if (!flow || result.method !== 'code' || flow.manualControlsLoaded) return;
+  const stateInput = element('input', {
+    class: 'settings-input', type: 'text', autocomplete: 'off',
+    placeholder: 'State from the callback URL', value: result.state || '',
+  });
+  const codeInput = element('input', {
+    class: 'settings-input', type: 'text', autocomplete: 'off',
+    placeholder: 'Authorization code (if provided)',
+  });
+  const finish = button('Complete login', 'admin-btn-add');
+  const updateFromPaste = () => {
+    const parsed = normalizeManualCallback(codeInput.value);
+    flow.manualInputInvalid = Boolean(parsed.invalid);
+    if (parsed.state) {
+      if (stateInput.value && stateInput.value !== parsed.state) {
+        flow.manualInputInvalid = true;
+        return;
+      }
+      stateInput.value = parsed.state;
+    }
+  };
+  codeInput.addEventListener('change', updateFromPaste);
+  codeInput.addEventListener('blur', updateFromPaste);
+  finish.addEventListener('click', async () => {
+    updateFromPaste();
+    if (flow.manualInputInvalid) {
+      flow.status.textContent = 'The pasted callback has an invalid or conflicting state. Check the callback value.';
+      return;
+    }
+    finish.disabled = true;
+    try {
+      const done = await request(`/oauth/flows/${encodeURIComponent(flow.flowId)}/callback`, {
+        method: 'POST', mutation: true,
+        timeoutMs: OAUTH_START_TIMEOUT_MS,
+        body: { state: stateInput.value.trim(), code: codeInput.value.trim() || null },
+      });
+      if (activeOAuth !== flow || activeOAuth?.generation !== flow.generation) return;
+      codeInput.value = '';
+      if (!(await applyOAuthOutcome(flow, done))) flow.status.textContent = `Status: ${done.status}`;
+    } catch (error) {
+      if (activeOAuth !== flow || activeOAuth?.generation !== flow.generation) return;
+      codeInput.value = '';
+      flow.status.textContent = error instanceof ProviderRequestError
+        ? oauthMessage(error.code, 'Login status could not be confirmed. Check Model Management.')
+        : 'Login status could not be confirmed. Check Model Management.';
+      finish.disabled = false;
+    }
+  });
+  const host = flow.status.parentElement || flow.status.parentNode;
+  host?.insertBefore(field('OAuth state', stateInput), flow.status);
+  host?.insertBefore(field('Authorization code', codeInput), flow.status);
+  host?.insertBefore(finish, flow.status);
+  flow.manualControls = [stateInput, codeInput, finish];
+  flow.manualControlsLoaded = true;
+}
+
+function closeLoginWithMessage(message) {
+  stopOAuthPolling();
+  setStatus(message,true);
+}
+
+async function applyOAuthOutcome(flow, result) {
+  if (!flow || activeOAuth !== flow || activeOAuth.generation !== flow.generation) return false;
+  if (result.status === 'complete') {
+    stopOAuthPolling();
+    oauthPanel()?.replaceChildren();
+    setStatus('Provider account connected.');
+    await changed('Provider account connected.', result.account?.connection_id);
+    return true;
+  }
+  if (['failed', 'cancelled', 'expired'].includes(result.status)) {
+    const message = oauthMessage(result.error_code, `Login ${result.status}.`);
+    closeLoginWithMessage(message);
+    return true;
+  }
+  return false;
 }
 
 function addOAuthPublicDetails(result) {
   const flow = activeOAuth;
-  if (!flow || flow.flowId !== result.flow_id || flow.detailsLoaded) return;
+  if (!flow || flow.flowId !== result.flow_id) return;
   if (typeof result.instructions === 'string' && result.instructions) {
     flow.instructions.textContent = result.instructions;
     flow.instructions.classList?.remove?.('hidden');
@@ -1745,13 +2362,15 @@ function addOAuthPublicDetails(result) {
     flow.loginLink = element(
       'a',
       { class: 'admin-btn-add', href: result.url, target: '_blank', rel: 'noopener noreferrer' },
-      'Open provider login',
+      'Open current sign-in',
     );
     flow.loginLinkHost.append(flow.loginLink);
     flow.loginLinkHost.classList?.remove?.('hidden');
-    if (flow.openLoginOnStart) {
-      try { window.open?.(result.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
-      flow.openLoginOnStart = false;
+    if (flow.loginPopup) {
+      const popup = flow.loginPopup;
+      flow.loginPopup = null;
+      try { popup.location.replace(result.url); }
+      catch { popup.close(); }
     }
   }
   const userCode = typeof result.user_code === 'string' && /^[A-Za-z0-9-]{4,64}$/.test(result.user_code)
@@ -1793,14 +2412,14 @@ function addOAuthPublicDetails(result) {
     flow.copyButton = copyButton;
     flow.copyFeedback = copyFeedback;
   }
-  flow.detailsLoaded = Boolean(flow.instructions.textContent || flow.loginLink || flow.copyButton);
 }
 
 function mountOAuthFlow(result, options = {}) {
   const panel = oauthPanel();
   if (!panel) return null;
+  if (activeOAuth) stopOAuthPolling();
   const flowId = String(result.flow_id || '');
-  const card = element('div', { class: 'admin-card provider-control-oauth-card' });
+  const card = element('section', { class: 'admin-card provider-control-oauth-card' });
   const title = options.title
     || (result.mode === 'reauth' ? 'Reconnect provider account' : 'Provider login');
   card.append(element('h2', {}, title));
@@ -1813,16 +2432,18 @@ function mountOAuthFlow(result, options = {}) {
     class: 'admin-toggle-sub',
     role: 'status',
     'aria-live': 'polite',
-  }, options.statusText || `Status: ${result.status || 'pending'}`);
+  }, options.statusText || 'Waiting for sign-in…');
   const cancel = button('Cancel login');
   card.append(instructions, loginLinkHost, codeHost, status, cancel);
   panel.replaceChildren(card);
   const expiresAtMs = oauthExpiryMs(result.expires_at);
   activeOAuth = {
     flowId,
+    generation: ++oauthGeneration,
     status,
     timer: null,
     expiresAtMs,
+    originalExpiresAtMs: expiresAtMs,
     retryCount: 0,
     instructions,
     loginLinkHost,
@@ -1831,33 +2452,45 @@ function mountOAuthFlow(result, options = {}) {
     copyButton: null,
     copyFeedback: null,
     codeExpired: false,
-    detailsLoaded: false,
-    openLoginOnStart: Boolean(options.openLoginOnStart),
+    loginPopup: options.loginPopup || null,
+    manualControlsLoaded: false,
+    pollInFlight: false,
+    abortController: null,
+    observationFailures: 0,
+    outageStartedAt: 0,
+    expiryReconciled: false,
+    manualInputInvalid: false,
   };
+  const flow = activeOAuth;
+  flow.onFocus = () => {
+    if (activeOAuth !== flow || flow.pollInFlight || !(Date.now() >= flow.nextPollAt)) return;
+    clearTimeout(flow.timer);
+    void pollOAuth(flowId);
+  };
+  window.addEventListener('focus', flow.onFocus);
   rememberOAuthFlow(flowId, expiresAtMs);
   addOAuthPublicDetails({ ...result, flow_id: flowId });
+  addOAuthManualControls(result, activeOAuth);
   cancel.addEventListener('click', async () => {
     const current = activeOAuth;
     if (!current || current.flowId !== flowId) return;
     cancel.disabled = true;
     try {
-      const done = await request(`/oauth/flows/${encodeURIComponent(flowId)}`, { method: 'DELETE' });
-      if (done.status === 'complete') {
-        status.textContent = 'Provider login saved to the account pool.';
-        stopOAuthPolling();
-        panel.replaceChildren();
-        await changed('Provider login saved to the account pool.');
-        return;
-      }
+      const done = await request(`/oauth/flows/${encodeURIComponent(flowId)}`, {
+        method: 'DELETE', timeoutMs: OAUTH_STATUS_TIMEOUT_MS,
+      });
+      if (activeOAuth !== current || current.generation !== activeOAuth?.generation) return;
       if (done.status === 'cancelled') {
         stopOAuthPolling();
         panel.replaceChildren();
+        setStatus(oauthMessage('oauth_cancelled'));
         return;
       }
-      status.textContent = `Login ${done.status || 'status unknown'}`;
+      if (await applyOAuthOutcome(current, done)) return;
+      status.textContent = oauthMessage(done.error_code, `Login ${done.status || 'status unknown'}.`);
       cancel.disabled = false;
     } catch (_) {
-      if (activeOAuth?.flowId === flowId) {
+      if (activeOAuth === current && activeOAuth?.generation === current.generation) {
         status.textContent = 'Cancellation could not be confirmed. Login status checks will continue.';
         cancel.disabled = false;
       }
@@ -1867,52 +2500,104 @@ function mountOAuthFlow(result, options = {}) {
 }
 
 async function pollOAuth(flowId) {
-  if (!activeOAuth || activeOAuth.flowId !== flowId) return;
+  if (!activeOAuth || activeOAuth.flowId !== flowId || activeOAuth.pollInFlight) return;
+  const instance = activeOAuth;
+  const generation = instance.generation;
+  activeOAuth.nextPollAt = Infinity;
+  activeOAuth.pollInFlight = true;
+  activeOAuth.abortController = new AbortController();
   try {
-    const result = await request(`/oauth/flows/${encodeURIComponent(flowId)}`);
-    if (!activeOAuth || activeOAuth.flowId !== flowId) return;
+    const result = await request(`/oauth/flows/${encodeURIComponent(flowId)}`, {
+      timeoutMs: OAUTH_STATUS_TIMEOUT_MS,
+      signal: activeOAuth.abortController.signal,
+    });
+    if (!activeOAuth || activeOAuth !== instance || activeOAuth.generation !== generation) return;
     addOAuthPublicDetails({ ...result, flow_id: flowId });
+    addOAuthManualControls(result, activeOAuth);
     if (Number.isFinite(Date.parse(String(result.expires_at || '')))) {
-      activeOAuth.expiresAtMs = oauthExpiryMs(result.expires_at);
+      activeOAuth.expiresAtMs = Math.min(activeOAuth.originalExpiresAtMs, oauthExpiryMs(result.expires_at));
       rememberOAuthFlow(flowId, activeOAuth.expiresAtMs);
     }
     activeOAuth.retryCount = 0;
-    activeOAuth.status.textContent = `Status: ${result.status}`;
-    if (result.status === 'complete') {
-      stopOAuthPolling();
-      oauthPanel()?.replaceChildren();
-      await changed('Provider login saved to the account pool.');
+    activeOAuth.observationFailures = 0;
+    activeOAuth.outageStartedAt = 0;
+    activeOAuth.status.textContent = 'Waiting for the provider…';
+    if (!['pending', 'running', 'complete', 'failed', 'cancelled', 'expired'].includes(result.status)) {
+      closeLoginWithMessage('Login status is unavailable. Check Model Management before starting another login.');
       return;
     }
-    if (['failed', 'cancelled', 'expired'].includes(result.status)) {
-      activeOAuth.status.textContent = `Login ${result.status}${result.error_code ? ` · ${result.error_code}` : ''}`;
-      if (activeOAuth.copyButton) {
-        activeOAuth.codeExpired = true;
-        activeOAuth.copyButton.disabled = true;
-        activeOAuth.copyFeedback.textContent = result.status === 'expired'
-          ? 'This sign-in code has expired.'
-          : 'This sign-in code is no longer available.';
-      }
-      stopOAuthPolling();
+    if (await applyOAuthOutcome(activeOAuth, result)) return;
+    const retryAfter = boundedRetryAfter(result.retry_after_ms);
+    const remaining = activeOAuth.expiresAtMs - Date.now();
+    if (remaining <= 0) {
+      closeLoginWithMessage('This provider login expired before completion. Check Model Management before starting another login.');
       return;
     }
-    activeOAuth.timer = setTimeout(() => pollOAuth(flowId), 1200);
-  } catch (_) {
+    if (retryAfter !== null && retryAfter > Math.max(0, remaining)) {
+      closeLoginWithMessage('Login status could not be confirmed. Check Model Management before starting another login.');
+      return;
+    }
+    activeOAuth.nextPollAt = Date.now() + (retryAfter ?? 0);
+    activeOAuth.timer = setTimeout(() => pollOAuth(flowId), retryAfter ?? 1200);
+  } catch (error) {
     const flow = activeOAuth;
-    if (!flow || flow.flowId !== flowId) return;
-    if (Date.now() >= flow.expiresAtMs + OAUTH_STATUS_RETENTION_MS) {
-      flow.status.textContent = 'Login status could not be confirmed. Check Added Models before starting another login.';
-      stopOAuthPolling();
+    if (!flow || flow !== instance || flow.generation !== generation || flow.flowId !== flowId) return;
+    const terminal = error instanceof ProviderRequestError
+      && ([401, 403, 404, 410, 422].includes(error.status)
+        || error.retryable === false && Boolean(error.code));
+    if (terminal) {
+      closeLoginWithMessage(oauthMessage(error.code, error.status === 401 || error.status === 403
+        ? 'Your session or access has expired. Sign in again, then check Model Management.'
+        : error.status === 404 || error.status === 410
+          ? 'This login can no longer be resumed. Check Model Management before starting another login.'
+          : 'Provider login could not be completed. Check Model Management before starting another login.'));
+      return;
+    }
+    const now = Date.now();
+    flow.observationFailures += 1;
+    if (!flow.outageStartedAt) flow.outageStartedAt = now;
+    if (now >= flow.expiresAtMs || flow.observationFailures >= OAUTH_MAX_OBSERVATION_FAILURES
+      || now - flow.outageStartedAt >= OAUTH_MAX_OUTAGE_MS) {
+      closeLoginWithMessage('Login status could not be confirmed. Check Model Management before starting another login.');
       return;
     }
     flow.retryCount += 1;
-    const delay = Math.min(
+    const delay = error?.retryAfterMs ?? Math.min(
       OAUTH_STATUS_RETRY_BASE_MS * (2 ** Math.min(flow.retryCount - 1, 4)),
       OAUTH_STATUS_RETRY_MAX_MS,
     );
+    if (error?.retryAfterMs !== null && error?.retryAfterMs !== undefined && error.retryAfterMs > Math.max(0, flow.expiresAtMs - now)) {
+      closeLoginWithMessage('Login status could not be confirmed. Check Model Management before starting another login.');
+      return;
+    }
     flow.status.textContent = `Could not check login status. Retrying in ${Math.ceil(delay / 1000)} seconds…`;
     flow.timer = setTimeout(() => pollOAuth(flowId), delay);
+  } finally {
+    if (activeOAuth === instance && activeOAuth?.generation === generation) {
+      activeOAuth.pollInFlight = false;
+      activeOAuth.abortController = null;
+    }
   }
+}
+
+function revealProviderLogin() {
+  const panel = oauthPanel();
+  panel?.scrollIntoView?.({block:'center'});
+  (activeOAuth?.loginLink || panel?.querySelector('button'))?.focus();
+  setStatus('Continue in the current sign-in card.');
+}
+
+function discoverActiveLogin(force = false) {
+  if (activeOAuth || startingLogin || activeLoginLookup) return;
+  if (!force && Date.now() - lastLoginLookupAt < VIEW_FRESH_MAX_AGE_MS) return;
+  const generation = oauthGeneration;
+  activeLoginLookup = request('/oauth/active').then(({flow}) => {
+    if (generation !== oauthGeneration) return;
+    lastLoginLookupAt = Date.now();
+    if (!flow?.flow_id || activeOAuth || startingLogin) return;
+    mountOAuthFlow(flow, {title:'Current provider sign-in'});
+    void pollOAuth(flow.flow_id);
+  }).catch(() => {}).finally(() => { activeLoginLookup = null; });
 }
 
 function restoreOAuthFlow() {
@@ -1929,15 +2614,43 @@ function restoreOAuthFlow() {
   pollOAuth(saved.flowId);
 }
 
-async function startOAuth(connection, account = null, method = null, inputs = {}) {
-  const panel = oauthPanel();
-  if (!panel) return;
+function reserveOAuthPopup() {
+  if (globalThis.navigator?.userActivation?.isActive === false) return null;
+  let popup = null;
+  try {
+    popup = window.open('about:blank','_blank');
+    if (!popup) return null;
+    popup.opener = null;
+    popup.document.title = 'Open Clank sign-in';
+    popup.document.body.textContent = 'Preparing provider sign-in…';
+    return popup;
+  } catch {
+    popup?.close();
+    return null;
+  }
+}
+
+async function startOAuth(connection, account = null, method = null, inputs = {}, {loginPopup = null,onError = null} = {}) {
+  const panel = oauthPanel(document.activeElement?.closest?.('[data-provider-section]')?.dataset.providerSection);
+  if (!panel) { loginPopup?.close(); return false; }
+  if (activeOAuth || startingLogin) {
+    loginPopup?.close();
+    const message = 'Finish or cancel the current sign-in first.';
+    onError?.(message);
+    setStatus(message,true);
+    panel.scrollIntoView?.({block:'nearest'});
+    return false;
+  }
   const selectedMethod = method || authMethodsFor(familyFor(connection)).find(item => item.type === 'oauth');
   if (!selectedMethod) {
+    loginPopup?.close();
     setStatus('This provider does not offer a login method.', true);
+    onError?.('This provider does not offer a login method.');
     return false;
   }
   stopOAuthPolling();
+  startingLogin = true;
+  const startGeneration = ++oauthGeneration;
   panel.replaceChildren(element('p', { class: 'admin-toggle-sub' }, 'Starting provider login…'));
   try {
     const path = account
@@ -1946,6 +2659,7 @@ async function startOAuth(connection, account = null, method = null, inputs = {}
     const result = await request(path, {
       method: 'POST',
       mutation: true,
+      timeoutMs: OAUTH_START_TIMEOUT_MS,
       revision: account?.revision,
       body: {
         label: account?.label || `Account ${accountsFor(connection.id).length + 1}`,
@@ -1953,46 +2667,44 @@ async function startOAuth(connection, account = null, method = null, inputs = {}
         inputs,
       },
     });
+    if (startGeneration !== oauthGeneration) return false;
     const status = mountOAuthFlow(result, {
-      title: account ? `Reconnect ${account.label}` : `Add ${connection.label} login`,
-      openLoginOnStart: true,
+      title: account ? `Reconnect ${account.label}` : `Sign in to ${connection.label}`,
+      loginPopup,
     })?.status;
     if (!status) return false;
-    if (result.method === 'code') {
-      const stateInput = element('input', { class: 'settings-input', type: 'text', autocomplete: 'off', placeholder: 'State from the callback URL', value: result.state || '' });
-      const codeInput = element('input', { class: 'settings-input', type: 'text', autocomplete: 'off', placeholder: 'Authorization code (if provided)' });
-      const finish = button('Complete login', 'admin-btn-add');
-      finish.addEventListener('click', async () => {
-        finish.disabled = true;
-        try {
-          const done = await request(`/oauth/flows/${encodeURIComponent(result.flow_id)}/callback`, {
-            method: 'POST',
-            mutation: true,
-            body: { state: stateInput.value.trim(), code: codeInput.value.trim() || null },
-          });
-          codeInput.value = '';
-          status.textContent = `Status: ${done.status}`;
-          if (done.status === 'complete') {
-            stopOAuthPolling();
-            panel.replaceChildren();
-            await changed('Provider login saved to the account pool.');
-          }
-        } catch (error) {
-          codeInput.value = '';
-          status.textContent = error.message;
-          finish.disabled = false;
-        }
-      });
-      status.parentElement?.insertBefore(field('OAuth state', stateInput), status);
-      status.parentElement?.insertBefore(field('Authorization code', codeInput), status);
-      status.parentElement?.insertBefore(finish, status);
-    }
+    loginPopup = null;  // The flow owns a reserved window until it receives the login URL.
+    panel.scrollIntoView?.({block:'nearest'});
+    setStatus('Continue with the link in the provider sign-in card.');
     pollOAuth(result.flow_id);
     return true;
   } catch (error) {
+    if (startGeneration !== oauthGeneration) return false;
     panel.replaceChildren();
-    setStatus(error.message, true);
+    let message = 'Could not reach Open Clank to start provider sign-in. Retry when the app is connected.';
+    if (error instanceof ProviderRequestError) {
+      const fallback = error.status === 401 || error.status === 403
+        ? 'Your browser session or permissions could not authorize sign-in.'
+        : error.status === 503
+          ? 'Open Clank’s local provider engine could not start sign-in (503).'
+          : `Open Clank could not start provider sign-in (HTTP ${error.status}).`;
+      message = oauthMessage(error.code, fallback);
+      if (error.status === 503) {
+        const causes = {
+          'managed provider engine is unavailable': 'The local provider worker is unavailable. Try again when the engine is ready.',
+          'managed provider method policy capability is unavailable': 'The local engine could not confirm support for this sign-in method.',
+          'managed provider engine returned an incompatible response': 'Open Clank and its local provider engine disagree on the sign-in protocol.',
+          'managed provider operation timed out': 'The local provider engine timed out while starting sign-in.',
+        };
+        if (Object.hasOwn(causes, error.safeMessage)) message = causes[error.safeMessage];
+      }
+    }
+    setStatus(message,true);
+    onError?.(message);
     return false;
+  } finally {
+    startingLogin = false;
+    loginPopup?.close();
   }
 }
 
@@ -2122,6 +2834,109 @@ function renderModelShareControl(model) {
   return wrapper;
 }
 
+// The provider settings list exposes the raw server-owned route capability.
+// Adapt its declared values to the existing route-bound option control; the
+// policy writer independently validates the exact catalog revision and value.
+export function crossModelThinkingModel(candidate) {
+  if (!candidate || !Number.isSafeInteger(candidate.catalog_revision) || candidate.catalog_revision < 1 || !candidate.id) return null;
+  const values = candidate.capabilities?.reasoning_effort;
+  const request_options = Array.isArray(values) ? [{id:'reasoning_effort', type:'enum', label:'Thinking',
+    catalog_revision:candidate.catalog_revision, values}] : [];
+  return { option_route_id:candidate.id, catalog_revision:candidate.catalog_revision, capabilities:{request_options} };
+}
+
+function renderCrossModelPolicy(model, connection) {
+  const box = element('details', { class: 'provider-control-cross-model' });
+  box.append(element('summary', {}, 'Optional alternative model'));
+  const status = element('p', { class: 'admin-toggle-sub' }, 'Load the saved policy to configure one alternative.');
+  const load = button('Load policy');
+  const policyStatus = value => {
+    if (!value.saved_enabled) return 'Alternative is off.';
+    const readiness = value.route_profile_readiness === 'route_profile_ready'
+      ? 'Route and profile are ready.' : 'Route and profile are not currently ready; check the route and accounts.';
+    const runtime = value.runtime_available === true ? 'Runtime is available.' : 'Runtime is unavailable.';
+    return `Alternative saved. ${readiness} ${runtime} Eligibility is checked when each chat starts.`;
+  };
+  const controls = element('div');
+  box.append(status, load, controls);
+  load.addEventListener('click', async () => {
+    load.disabled = true;
+    controls.replaceChildren();
+    try {
+      const saved = await request(`/models/${encodeURIComponent(model.id)}/cross-model-policy`);
+      if (!box.isConnected) return;
+      if (!saved.supported || !Number.isSafeInteger(saved.route_revision)) {
+        status.textContent = 'This policy profile is unavailable.'; return;
+      }
+      const choices = state.models.filter(candidate => candidate.id !== model.id && candidate.enabled !== false
+        && state.connections.some(c => c.id === candidate.connection_id && c.enabled !== false
+          && c.billing_lane === connection.billing_lane));
+      const select = element('select', { class: 'settings-input', 'aria-label': 'Alternative model' });
+      select.append(element('option', { value: '' }, 'Off'));
+      for (const candidate of choices) select.append(element('option', { value: candidate.id }, candidate.display_name || candidate.model_id));
+      const old = saved.policy;
+      if (old && (!Array.isArray(old.alternatives) || old.alternatives.length > 1)) {
+        status.textContent = 'This saved policy cannot be edited here.'; return;
+      }
+      if (old?.enabled && (old.alternatives?.length !== 1 || !old.alternatives[0]?.options ||
+          typeof old.alternatives[0].options !== 'object' || Array.isArray(old.alternatives[0].options))) {
+        status.textContent = 'The saved alternative options are unavailable; reload after correcting the policy.'; return;
+      }
+      if (old?.enabled && old.alternatives?.length === 1) select.value = old.alternatives[0].route_id;
+      if (old?.enabled && !select.value) { status.textContent = 'The saved alternative is unavailable; reload after correcting the route.'; return; }
+      const thinking = element('select', { class: 'settings-input', 'aria-label': 'Alternative thinking' });
+      const thinkingHint = element('p', { class: 'admin-toggle-sub' });
+      const renderThinking = (selection = null) => {
+        const choice = choices.find(candidate => candidate.id === select.value);
+        const projected = crossModelThinkingModel(choice);
+        const descriptor = reasoningEffortOption(projected);
+        thinking.replaceChildren();
+        thinking.append(element('option', {value:'inherit'}, 'Default'));
+        for (const effort of descriptor?.values || []) thinking.append(element('option', {value:effort}, effort));
+        let restored = selection && descriptor ? restoreReasoningEffortSelection(projected, selection) : null;
+        if (selection && !descriptor) {
+          const empty = selection.route_id === choice?.id && selection.catalog_revision === choice?.catalog_revision &&
+            selection.options && typeof selection.options === 'object' && !Array.isArray(selection.options) && Object.keys(selection.options).length === 0;
+          restored = { status: empty ? 'default' : 'stale', value: 'inherit' };
+        }
+        if (restored?.status === 'stale') {
+          thinking.append(element('option', {value:'_stale'}, 'Saved choice unavailable — choose again'));
+          thinking.value = '_stale';
+        } else thinking.value = restored?.value || 'inherit';
+        thinking.disabled = !choice;
+        thinkingHint.textContent = descriptor ? 'Thinking is bound to this model and catalog revision.' :
+          'No explicit thinking choices are declared for this model; Default uses its provider setting.';
+      };
+      renderThinking(old?.enabled ? old.alternatives[0]?.options : null);
+      select.addEventListener('change', () => renderThinking());
+      const save = button('Save alternative');
+      save.addEventListener('click', async () => {
+        save.disabled = true;
+        try {
+          const choice = choices.find(candidate => candidate.id === select.value);
+          if (select.value && (!choice || !Number.isSafeInteger(choice.catalog_revision))) throw new Error('Alternative route unavailable');
+          if (choice && thinking.value === '_stale') throw new Error('Choose a current alternative thinking setting.');
+          const projected = crossModelThinkingModel(choice);
+          const descriptor = reasoningEffortOption(projected);
+          const selection = !choice ? null : descriptor ? serializeReasoningEffortSelection(projected, thinking.value) :
+            thinking.value === 'inherit' ? { route_id: choice.id, catalog_revision: choice.catalog_revision, options: {} } : null;
+          if (choice && !selection) throw new Error('Alternative thinking is unavailable.');
+          const alternatives = choice ? [{ route_id: choice.id, options: selection }] : [];
+          const policy = { version: 1, enabled: !!choice, revision: (old?.revision || 0) + 1, alternatives };
+          const result = await request(`/models/${encodeURIComponent(model.id)}/cross-model-policy`, { method: 'PUT', mutation: true, revision: saved.route_revision, body: policy });
+          if (!box.isConnected) return;
+          status.textContent = policyStatus(result);
+          select.disabled = true; thinking.disabled = true; save.disabled = true; load.disabled = false;
+        } catch (error) { if (box.isConnected) { status.textContent = `Could not save policy: ${error.message}`; save.disabled = false; } }
+      });
+      status.textContent = policyStatus(saved);
+      controls.append(field('Alternative', select), field('Alternative thinking', thinking), thinkingHint, save);
+    } catch (error) { if (box.isConnected) status.textContent = `Policy unavailable: ${error.message}`; }
+    finally { if (box.isConnected) load.disabled = false; }
+  });
+  return box;
+}
+
 function renderModels(connection) {
   const models = modelsFor(connection.id);
   const section = element('div', { class: 'provider-control-models' });
@@ -2167,7 +2982,7 @@ function renderModels(connection) {
   const draw = () => {
     contents.replaceChildren();
     if (!models.length) {
-      contents.append(element('p', { class: 'admin-toggle-sub' }, 'No model routes are published for this connection yet.'));
+      contents.append(element('p', { class: 'admin-toggle-sub' }, connection.billing_lane === 'subscription' && loadedConnectionAccounts.has(connection.id) && !accountsFor(connection.id).length ? 'Sign in under Account & advanced to load subscription models.' : 'No models are available for this connection yet.'));
       return;
     }
     for (const model of models) {
@@ -2175,19 +2990,30 @@ function renderModels(connection) {
       const eligible = eligibility?.filter(row => row.eligible).length;
       const modelName = model.display_name || model.model_id;
       const providerModelId = model.model_id && model.model_id !== modelName ? model.model_id : '';
-      const readiness = eligibility === undefined
-        ? 'Available'
-        : eligibility.length === 0
-          ? (connection.billing_lane === 'local'
-              ? 'Local server'
-              : (loadedConnectionAccounts.has(connection.id)
-                  ? accountsFor(connection.id).length
-                  : Number(connection.account_count || 0))
-                ? 'Account connected'
-                : 'No account connected')
-          : eligible > 0
-            ? `${eligible} account${eligible === 1 ? '' : 's'} ready`
-            : 'Account needs attention';
+      const accountCount = loadedConnectionAccounts.has(connection.id)
+        ? accountsFor(connection.id).length : connection.account_count;
+      const readiness = model.enabled === false || connection.enabled === false ? 'Disabled'
+        : eligibility === undefined ? 'Eligibility unconfirmed'
+        : eligibility.length === 0 ? (
+          connection.billing_lane === 'local' ? 'Local server connection · model eligibility unconfirmed'
+            : accountCount === 0 ? 'No account connected' : 'No account eligibility reported'
+        )
+        : eligible > 0 ? `${eligible} eligible account${eligible === 1 ? '' : 's'}`
+        : 'Account needs attention';
+      const modalities = model.capabilities?.modalities;
+      const modality = kind => Array.isArray(modalities?.[kind])
+        ? modalities[kind].filter(value => typeof value === 'string' && /^[a-z_-]{1,24}$/i.test(value)).join(', ')
+        : '';
+      const input = modality('input');
+      const output = modality('output');
+      const catalog = model.provenance?.catalog;
+      const declaredThinking = Array.isArray(model.capabilities?.reasoning_effort) && model.capabilities.reasoning_effort.length > 0;
+      const evidence = [
+        input && `Input ${input}`,
+        output && `Output ${output}`,
+        declaredThinking ? 'Thinking values declared' : model.operations?.some(op => op.startsWith('chat.')) ? 'Thinking values undeclared' : '',
+        typeof catalog === 'string' && /^[a-z0-9._-]{1,64}$/i.test(catalog) ? `Catalog ${catalog}` : '',
+      ].filter(Boolean);
       const item = element('div', { class: 'provider-control-model' });
       item.dataset.search = `${modelName} ${providerModelId}`.toLowerCase();
       item.hidden = Boolean(search?.value.trim() && !item.dataset.search.includes(search.value.trim().toLowerCase()));
@@ -2199,8 +3025,10 @@ function renderModels(connection) {
         element('strong', {}, modelName),
         element('span', { class: 'admin-toggle-sub' }, [providerModelId, readiness].filter(Boolean).join(' · ')),
       );
+      if (evidence.length) item.children[1].append(element('span', { class: 'admin-toggle-sub' }, evidence.join(' · ')));
       if (model.enabled !== false && String(model.visibility || 'visible') === 'visible') {
         item.append(renderModelShareControl(model));
+        item.append(renderCrossModelPolicy(model, connection));
       }
       contents.append(item);
     }
@@ -2257,17 +3085,20 @@ function renderConnection(connection) {
     ? (connection.billing_lane === 'local' ? 'No key required' : 'Account details on open')
     : !accountCount && connection.billing_lane === 'local'
       ? 'No key required'
+      : !accountCount && connection.billing_lane === 'subscription' ? 'Sign-in required'
+      : connection.reauth_count > 0 ? `${connection.reauth_count} account${connection.reauth_count === 1 ? '' : 's'} need${connection.reauth_count === 1 ? 's' : ''} sign-in`
       : `${accountCount || 'No'} account${accountCount === 1 ? '' : 's'}`;
   const title = identity.children[1];
   title.append(
     element('strong', { class: 'provider-control-connection-name' }, displayLabel),
-    element('span', { class: 'admin-toggle-sub' }, 'Click to manage models'),
+
   );
   const badges = element('div', { class: 'provider-control-badges' });
   const isLocal = connection.kind === 'local' || connection.billing_lane === 'local';
   const modelCount = modelsFor(connection.id).length;
   badges.append(
-    element('span', { class: 'admin-badge provider-control-kind-badge' }, isLocal ? 'LOCAL' : 'API'),
+    element('span', { class: 'admin-badge provider-control-kind-badge' },
+      isLocal ? 'Local' : connection.billing_lane === 'subscription' ? 'Subscription' : 'API'),
     element('span', { class: `admin-badge${connection.enabled ? '' : ' admin-badge-off'}` }, connection.enabled ? `${modelCount} model${modelCount === 1 ? '' : 's'}` : 'Disabled'),
   );
   const chevron = element('span', { class: 'provider-control-connection-chevron', 'aria-hidden': 'true' });
@@ -2294,28 +3125,38 @@ function renderConnection(connection) {
   const remove = button('Delete', 'admin-btn-delete');
   remove.dataset.providerFocusKey = `connection:${connection.id}:delete`;
   remove.addEventListener('click', async () => {
-    const confirmDelete = window.styledConfirm || window.confirm;
-    const allowed = typeof confirmDelete !== 'function'
-      || await confirmDelete(`Delete ${connection.label} and its accounts?`, { confirmText: 'Delete', danger: true });
-    if (!allowed) return;
     remove.disabled = true;
+    const path = `/connections/${encodeURIComponent(connection.id)}`;
     try {
-      await request(`/connections/${encodeURIComponent(connection.id)}`, {
-        method: 'DELETE',
-        mutation: true,
-        revision: connection.revision,
-      });
-      await changed('Connection removed.');
+      const current = await request(path, { cache: 'no-store' });
+      const question = `Delete ${current.label} and its accounts?`;
+      const allowed = window.styledConfirm
+        ? await window.styledConfirm(question, { confirmText: 'Delete', danger: true })
+        : window.confirm(question);
+      if (!allowed) return;
+      await request(path, { method: 'DELETE', mutation: true, revision: current.revision });
+      await changed('Provider removed.');
     } catch (error) {
-      setStatus(error.message, true);
+      if (error.status === 404) await changed('Provider already removed.');
+      else if (error.status === 412) await changed('This provider changed during confirmation. Review it and select Delete again.');
+      else setStatus(error.message, true);
+    } finally {
       remove.disabled = false;
     }
   });
   headingActions.append(toggle, remove);
   heading.append(expand, headingActions);
   card.append(heading);
+  const installation = {
+    missing: 'Managed engine missing. Install a matching Open Clank build.',
+    unusable: 'Managed engine verification failed. Check Help for the installed version.',
+    unverified: 'Managed engine installation unconfirmed.',
+  }[state.engineInstallation];
+  const unsupported = family?.adapters?.length > 0 && !family.adapters.includes(connection.adapter_id);
+  const readiness = unsupported ? 'Transport is outside this catalog. Choose a supported connection.'
+    : installation && !isLocal ? installation : '';
   const metadata = element('div', { class: 'provider-control-url' },
-    [connection.url || family?.display_name || connection.family_id, accountSummary].filter(Boolean).join(' · '),
+    [connection.url || family?.display_name || connection.family_id, accountSummary, readiness].filter(Boolean).join(' · '),
   );
   card.append(metadata);
   const body = element('div', {
@@ -2332,6 +3173,12 @@ function renderConnection(connection) {
     advancedBody.replaceChildren(
       element('div', { class: 'admin-toggle-sub provider-control-technical' }, `${connection.kind.replaceAll('_', ' ')} · ${connection.adapter_id} · ${laneLabel(connection.billing_lane)}`),
     );
+    if (['trellis','hunyuan-shape'].includes(connection.family_id)) {
+      const declaration=element('textarea',{class:'settings-input',rows:8,placeholder:'Paste replacement reviewed declaration (JSON)','aria-label':'Replace local model installation declaration'});
+      const replace=button('Replace reviewed installation');
+      replace.addEventListener('click',async()=>{replace.disabled=true;try { const settings=JSON.parse(declaration.value); await request(`/connections/${encodeURIComponent(connection.id)}`,{method:'PATCH',mutation:true,revision:connection.revision,body:{settings}}); declaration.value=''; await changed('local model installation declaration replaced.'); } catch(error){setStatus(error.message,true);replace.disabled=false;} });
+      advancedBody.append(field('Local installation',declaration,'Paste a complete reviewed declaration to replace it. Existing paths remain private.'),replace);
+    }
     if (!loadedConnectionAccounts.has(connection.id)) {
       advancedBody.append(element('p', { class: 'admin-toggle-sub' }, 'Open to load account details.'));
       return;
@@ -2339,13 +3186,78 @@ function renderConnection(connection) {
     const pool = element('div', { class: 'provider-control-pool' });
     const accounts = accountsFor(connection.id);
     pool.append(element('h3', {}, accounts.length > 1 ? `Account rotation pool (${accounts.length})` : `Accounts (${accounts.length})`));
+    if (connection.billing_lane !== 'local') {
+      const currentPolicy = connection.account_pool_policy || null;
+      const policyBox = element('section', { class: 'provider-control-account-policy' });
+      policyBox.append(element('strong', {}, 'Account selection policy'));
+      policyBox.append(element('p', { class: 'admin-toggle-sub' },
+        'Legacy automatic keeps the current rotation and same-model retry behavior. Explicit fallback can use another account for this model only, before output is committed.'));
+      const mode = element('select', { class: 'settings-input', 'aria-label': 'Account selection policy' });
+      for (const [value, label] of [
+        ['', 'Legacy automatic'],
+        ['round_robin', 'Round robin'],
+        ['preferred', 'Preferred account'],
+        ['pinned', 'Pinned account'],
+      ]) {
+        const option = element('option', { value }, label);
+        option.selected = (currentPolicy?.mode || '') === value;
+        mode.append(option);
+      }
+      const account = element('select', { class: 'settings-input', 'aria-label': 'Policy account' });
+      account.append(element('option', { value: '' }, 'Choose an account'));
+      for (const item of accounts) {
+        const option = element('option', { value: item.id }, item.label || item.id);
+        option.selected = item.id === currentPolicy?.account_id;
+        account.append(option);
+      }
+      const fallbackLabel = element('label', { class: 'provider-control-policy-fallback' });
+      const fallback = element('input', { type: 'checkbox', checked: currentPolicy?.same_model_fallback === true });
+      fallbackLabel.append(fallback, element('span', {}, 'Allow same-model fallback before output is committed'));
+      const savePolicy = button('Save selection policy', 'admin-btn-add');
+      const syncPolicyFields = () => {
+        account.hidden = !['preferred', 'pinned'].includes(mode.value);
+        fallbackLabel.hidden = mode.value === '' || mode.value === 'pinned';
+        if (mode.value === 'pinned') fallback.checked = false;
+      };
+      mode.addEventListener('change', syncPolicyFields);
+      syncPolicyFields();
+      savePolicy.addEventListener('click', async () => {
+        if (['preferred', 'pinned'].includes(mode.value) && !account.value) {
+          setStatus('Choose an account for the selected policy.', true);
+          return;
+        }
+        savePolicy.disabled = true;
+        try {
+          const accountPoolPolicy = mode.value ? {
+            version: 1,
+            mode: mode.value,
+            ...(['preferred', 'pinned'].includes(mode.value) && account.value
+              ? { account_id: account.value }
+              : {}),
+            same_model_fallback: mode.value !== 'pinned' && fallback.checked,
+          } : null;
+          await request(`/connections/${encodeURIComponent(connection.id)}`, {
+            method: 'PATCH',
+            mutation: true,
+            revision: connection.revision,
+            body: { account_pool_policy: accountPoolPolicy },
+          });
+          await changed('Account selection policy saved.');
+        } catch (error) {
+          setStatus(error.message, true);
+          savePolicy.disabled = false;
+        }
+      });
+      policyBox.append(field('Policy', mode), field('Account', account), fallbackLabel, savePolicy);
+      pool.append(policyBox);
+    }
     if (accounts.length) {
       accounts.forEach((account, index) => pool.append(renderAccount(connection, account, index, accounts)));
     } else {
       pool.append(element('p', { class: 'admin-toggle-sub' },
         connection.billing_lane === 'local'
           ? 'This local lane does not require an account.'
-          : 'No accounts yet. Add account remains available so credentials never overwrite one another.',
+          : 'Connect an account to use this provider.',
       ));
     }
     renderAddAccount(connection, pool);
@@ -2367,7 +3279,9 @@ function renderConnection(connection) {
     body.dataset.rendered = '1';
     modelsView = renderModels(connection);
     advanced = element('details', { class: 'provider-control-connection-advanced' });
-    advanced.open = openAccountDetails.has(connection.id);
+    advanced.open = openAccountDetails.has(connection.id) || connection.reauth_count > 0 || (
+      connection.billing_lane === 'subscription' && accountCountKnown && accountCount === 0
+    );
     const advancedSummary = element('summary', {
       'data-provider-focus-key': `connection:${connection.id}:advanced`,
     }, accountCount > 1 ? 'Accounts & advanced' : 'Account & advanced');
@@ -2500,6 +3414,7 @@ function connectionRenderSignature(connection) {
     connection,
     family: familyFor(connection),
     models: modelsFor(connection.id),
+    engineInstallation: state.engineInstallation,
     deferredInvalidationGeneration,
   });
 }
@@ -2523,16 +3438,23 @@ function reconcileChildren(parent, desired) {
   });
 }
 
+function addedConnections() {
+  // OAuth start reserves a reusable row before it can save an account.
+  return state.connections.filter(connection =>
+    connection.billing_lane !== 'subscription' || connection.account_count !== 0 || modelsFor(connection.id).length > 0);
+}
+
 function renderConnections(options = {}) {
   const host = byId('provider-control-connections');
   if (!host) return;
   const renderState = captureListRenderState(host);
   const receivedGroups = groupedReceivedShares();
-  if (!state.connections.length && !receivedGroups.length) {
+  const added = addedConnections();
+  if (!added.length && !receivedGroups.length) {
     const empty = element('div', { class: 'admin-empty provider-control-empty' });
     empty.append(element('p', {}, 'No models added yet. Connect an API provider or local model server to get started.'));
-    const add = button('Add models', 'admin-btn-add');
-    add.addEventListener('click', () => document.querySelector?.('[data-settings-tab="services"]')?.click?.());
+    const add = button('Add Provider', 'admin-btn-add');
+    add.addEventListener('click', () => document.querySelector?.('[data-provider-view="services"]')?.click?.());
     empty.append(add);
     host.replaceChildren(empty);
     restoreListRenderState(host, renderState);
@@ -2563,11 +3485,13 @@ function renderConnections(options = {}) {
       ? existing
       : renderReceivedShareConnection(share);
   };
-  const local = state.connections.filter(connection => connection.kind === 'local' || connection.billing_lane === 'local');
-  const api = state.connections.filter(connection => !local.includes(connection));
+  const local = added.filter(connection => connection.kind === 'local' || connection.billing_lane === 'local');
+  const subscriptions = added.filter(connection => connection.billing_lane === 'subscription');
+  const api = added.filter(connection => !local.includes(connection) && !subscriptions.includes(connection));
   const groups = [];
   const groupRows = [
     ['local', 'Local', local.map(connectionRow)],
+    ['subscription', 'Subscriptions', subscriptions.map(connectionRow)],
     ['api', 'API', [...api.map(connectionRow), ...receivedGroups.map(receivedRow)]],
   ];
   for (const [id, label, rows] of groupRows) {
@@ -2662,10 +3586,11 @@ function renderBindings() {
 
 function renderSummary() {
   const receivedGroups = groupedReceivedShares();
-  const providerCount = state.connections.length + receivedGroups.length;
+  const added = addedConnections();
+  const providerCount = added.length + receivedGroups.length;
   const sharedModelCount = receivedGroups.reduce((count, share) => count + share.models.length, 0);
   const modelCount = state.models.length + sharedModelCount;
-  const projectedCounts = state.connections.map(connection => {
+  const projectedCounts = added.map(connection => {
     if (loadedConnectionAccounts.has(connection.id)) return accountsFor(connection.id).length;
     const count = Number(connection.account_count);
     return Number.isInteger(count) && count >= 0 ? count : null;
@@ -2700,7 +3625,7 @@ function render() {
 
 function activeManagementView(requested = '') {
   if (requested === 'services' || requested === 'added-models') return requested;
-  const added = document.querySelector?.('[data-settings-panel="added-models"]');
+  const added = document.querySelector?.('[data-provider-section="added-models"]');
   return added && !added.classList?.contains?.('hidden') ? 'added-models' : 'services';
 }
 
@@ -2744,12 +3669,19 @@ export async function load(options = {}) {
     renderSummary();
     return;
   }
+  discoverActiveLogin(options.refreshCatalog);
   loadedAt.delete(view);
   if (view === 'added-models') cancelInFlightDetailLoads();
   if (!state.families.length) {
     const cachedFamilies = readCachedFamilies();
-    if (cachedFamilies.length) {
-      state = { ...state, families: cachedFamilies };
+    if (cachedFamilies?.families?.length) {
+      familyCatalogKey = cachedFamilies.catalog_key || '';
+      if (familyCatalogKey) {
+        for (const family of cachedFamilies.families) {
+          if (family.auth_methods_complete) enrichedFamilyAuthMethods.set(family.id,family.auth_methods);
+        }
+      }
+      state = { ...state, families: cachedFamilies.families };
     }
     renderCreateConnection();
     renderSummary();
@@ -2766,7 +3698,6 @@ export async function load(options = {}) {
         renderedProgress = true;
         if (phase === 'catalog') {
           renderCreateConnection();
-          if (view === 'added-models') renderConnections();
         }
         else if (phase === 'core' || phase === 'shared') renderConnections({
           refreshOpenHealth: phase === 'core',
@@ -2778,9 +3709,9 @@ export async function load(options = {}) {
         renderSummary();
         const progressMessage = phase === 'catalog'
           ? 'Provider catalog loaded. Loading your models…'
-          : 'Added Models snapshot loaded.';
+          : 'Model Management snapshot loaded.';
         setStatus(warnings.length ? `Loaded available provider data; ${warnings.length} section${warnings.length === 1 ? '' : 's'} still retrying.` : progressMessage);
-      }, controller.signal);
+      }, controller.signal, options.refreshCatalog);
       if (generation !== loadGeneration) return;
       state = result.next;
       if (result.requiredSucceeded) loadedAt.set(view, Date.now());
@@ -2790,7 +3721,7 @@ export async function load(options = {}) {
         const blocked = !result.requiredSucceeded && (
           view === 'services' ? !state.families.length : !state.connections.length && !state.receivedShares.length
         );
-        const subject = view === 'services' ? 'Provider catalogue' : 'Added Models';
+        const subject = view === 'services' ? 'Provider catalogue' : 'Model Management';
         setStatus(`${subject} loaded available data, but ${result.warnings.join('; ')}. Refresh to retry.`, blocked);
       } else {
         setStatus('');
@@ -2812,7 +3743,7 @@ export function init(options = {}) {
   if (!root || bound) return;
   bound = true;
   onCatalogChanged = options.onCatalogChanged || onCatalogChanged;
-  byId('provider-control-refresh')?.addEventListener('click', () => load({ force: true, view: 'services' }));
+  byId('provider-control-refresh')?.addEventListener('click', () => load({ force: true, view: 'added-models', refreshCatalog: true }));
   for (const refresh of document.querySelectorAll?.('[data-provider-control-refresh]') || []) {
     refresh.addEventListener('click', () => load({ force: true, view: 'added-models' }));
   }

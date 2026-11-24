@@ -1,4 +1,4 @@
-"""Opt-in cookie-auth HTTP import/review/export/reset against actual fm-mcp.
+"""Opt-in cookie-auth HTTP import/review/export/reset against actual memery-worker.
 
 No builds, live app, bearer/test-user identity injection, extraction model,
 browser or all-agent-reset claim. A child process establishes isolated paths
@@ -17,10 +17,10 @@ import sys
 import pytest
 
 
-FM_BIN = os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN", "")
+FM_BIN = os.environ.get("OPEN_CLANK_TEST_MEMERY_WORKER_BIN", "")
 pytestmark = pytest.mark.skipif(
     not FM_BIN or not Path(FM_BIN).is_file(),
-    reason="explicit existing OPEN_CLANK_TEST_FM_MCP_BIN required; never builds",
+    reason="explicit existing OPEN_CLANK_TEST_MEMERY_WORKER_BIN required; never builds",
 )
 
 
@@ -35,8 +35,8 @@ def test_cookie_auth_native_import_review_export_and_owner_reset(tmp_path):
         "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE",
     ) if key in os.environ}
     env.update({
-        "OPEN_CLANK_TEST_FM_MCP_BIN": str(binary),
-        "OPEN_CLANK_DATA_DIR": str(data), "ODYSSEUS_DATA_DIR": str(data),
+        "OPEN_CLANK_TEST_MEMERY_WORKER_BIN": str(binary),
+        "OPEN_CLANK_DATA_DIR": str(data),
         "FM_DB_PATH": str(data / "frankenmemory.db"),
         "DATABASE_URL": "sqlite:///" + str(data / "app.db"),
         "AUTH_ENABLED": "true", "PYTHONDONTWRITEBYTECODE": "1",
@@ -67,7 +67,7 @@ async def _exercise(data: Path):
     from services.memory.import_batch import MemoryImportBatchStore
     from services.memory.skills import SkillsManager
     from src.constants import DATA_DIR, FM_DB_PATH, USER_PREFS_FILE
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
     from src.memory_scope import chat_workspace
     from src.openclank.account_request_barrier import AccountRequestBarrier, AccountRequestFenced
     from src.openclank.file_policy import FilePolicyRepository
@@ -85,8 +85,8 @@ async def _exercise(data: Path):
     auth = AuthManager(str(data / "auth.json"))
     policy = FilePolicyRepository(data / "app.db")
     sessions, memory, skills = SessionManager(), MemoryManager(str(data)), SkillsManager(str(data))
-    provider = FrankenmemoryProvider(
-        command=os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"], workspace_id=chat_workspace(),
+    provider = MemeryProvider(
+        command=os.environ["OPEN_CLANK_TEST_MEMERY_WORKER_BIN"], workspace_id=chat_workspace(),
         env={"FM_DB_PATH": str(data / "frankenmemory.db")},
     )
     barrier = AccountRequestBarrier(auth.is_account_lifecycle_fenced)
@@ -109,7 +109,7 @@ async def _exercise(data: Path):
     app.include_router(setup_auth_routes(auth))
     app.include_router(setup_memory_routes(memory, sessions, memory_provider=provider, skills_manager=skills))
     transport = httpx.ASGITransport(app=app, client=("203.0.113.19", 54321))
-    binary_path = Path(os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"]).resolve(strict=True)
+    binary_path = Path(os.environ["OPEN_CLANK_TEST_MEMERY_WORKER_BIN"]).resolve(strict=True)
     binary_hash_before = __import__("hashlib").sha256(binary_path.read_bytes()).hexdigest()
     try:
         await provider.initialize()

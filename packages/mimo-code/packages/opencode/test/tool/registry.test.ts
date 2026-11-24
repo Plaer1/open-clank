@@ -5,6 +5,7 @@ import { Effect, Layer } from "effect"
 import { Instance } from "../../src/project/instance"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { ToolRegistry } from "../../src/tool"
+import { projectExecCapabilities, TOOL_SCRIPT_LIMITS } from "../../src/tool/tool-script"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
@@ -17,6 +18,24 @@ afterEach(async () => {
 })
 
 describe("tool.registry", () => {
+  it.live("projects the selected registry exec candidate and its actual limits", () =>
+    provideTmpdirInstance(() => Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
+      const enabled = yield* registry.tools({providerID: "opencode" as any, modelID: "gpt-5" as any, agent})
+      const restricted = yield* registry.tools({providerID: "opencode" as any, modelID: "gpt-5" as any, agent: {...agent, toolAllowlist: ["read"]}})
+      const a = projectExecCapabilities(enabled)
+      const b = projectExecCapabilities(restricted)
+      expect(a.registryCandidate).toBe(true)
+      expect(a.limits).toEqual(TOOL_SCRIPT_LIMITS)
+      expect(a.declarations).toContain("declare const tools")
+      expect(a.modelOffered).toBeNull()
+      expect(a.callAdmissible).toBeNull()
+      expect(b.registryCandidate).toBe(false)
+      expect(b.limits).toBeNull()
+      expect(b.declarations).toBeNull()
+    })),
+  )
   it.live("loads tools from .mimocode/tool (singular)", () =>
     provideTmpdirInstance((dir) =>
       Effect.gen(function* () {

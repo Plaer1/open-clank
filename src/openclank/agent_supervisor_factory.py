@@ -27,9 +27,6 @@ def selected_agent_supervisor_backend(explicit: str | None = None) -> str:
             DEFAULT_AGENT_SUPERVISOR_BACKEND,
         )
     ).strip().lower()
-    # ``mimo`` is accepted only as a rollback/config compatibility spelling.
-    if value == "mimo":
-        return "acp"
     if value == "rust":
         if os.environ.get("OPEN_CLANK_AGENT_SUPERVISOR_ENABLE_RUST") != "1":
             raise AgentSupervisorConfigurationError(
@@ -46,14 +43,19 @@ def selected_agent_supervisor_backend(explicit: str | None = None) -> str:
 def build_agent_supervisor(
     *,
     backend: str | None = None,
+    canonical_source_provider: Any = None,
     **options: Any,
 ) -> AgentSupervisor:
     selected = selected_agent_supervisor_backend(backend)
     if selected == "acp":
         from src.openclank.acp_supervisor_adapter import build_acp_supervisor
 
+        if canonical_source_provider is not None:
+            options["canonical_source_provider"] = canonical_source_provider
         return build_acp_supervisor(**options)
     if selected == "rust":
+        if canonical_source_provider is not None:
+            raise AgentSupervisorConfigurationError("guarded source provider requires ACP")
         from src.openclank.rust_supervisor_adapter import RustSupervisorAdapter
 
         socket_path = options.pop("socket_path", None)

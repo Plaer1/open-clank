@@ -107,7 +107,7 @@ def test_memory_export_preserves_the_token(tmp_path, monkeypatch):
 
 
 def test_digest_identity_rendering_feeds_injection_and_preview():
-    from src.frankenmemory_provider import _render_digest_identity
+    from src.memery_provider import _render_digest_identity
     from src.memory_digest import render_digest
 
     digest = {

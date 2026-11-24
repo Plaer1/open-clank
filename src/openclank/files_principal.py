@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
-
 from fastapi import HTTPException, Request
 
 from src.auth_helpers import require_user
 
 
-def files_principal(request: Request, *, repository=None) -> tuple[str, str, bool]:
+def files_principal(request: Request, *, repository=None, management=False) -> tuple[str, str, bool]:
     username = str(require_user(request) or "").strip().lower()
     if not username:
         raise HTTPException(401, "Authentication required")
@@ -18,10 +16,12 @@ def files_principal(request: Request, *, repository=None) -> tuple[str, str, boo
     if not subject_id:
         # Mutable usernames must not inherit refs after account recreation.
         raise HTTPException(503, "Immutable account identity is unavailable")
-    # Only the anonymous local installation gets the local administrator lane;
-    # named users and agent identities retain their existing account checks.
-    is_admin = bool(auth_manager and auth_manager.is_admin(username))
-    if repository is not None:
-        if auth_manager is not None and hasattr(auth_manager, "users"):
-            repository.sync_subjects(auth_manager.users)
-    return str(subject_id), username, is_admin
+    if repository is not None and hasattr(auth_manager, "users"):
+        repository.sync_subjects(auth_manager.users)
+    if management:
+        host_access = auth_manager.is_admin(username)
+    else:
+        eligible = getattr(auth_manager, "filesystem_access_eligible", None)
+        host_access = bool(repository is not None and callable(eligible) and eligible(username, subject_id)
+                           and repository.full_filesystem_access(subject_id)["human"])
+    return str(subject_id), username, host_access

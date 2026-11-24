@@ -217,8 +217,12 @@ export function createTreeHouseTopicWeb(getContext) {
       root.append(h('button',{class:'copal-btn',text:'Main Quests',onclick:()=>openHome()}));
       return false;
     }
-    const button=(text,fn,attrs={})=>h('button',{class:'copal-btn',type:'button',text,onclick:action(fn),...attrs});
-    const markdown=text=>h('div',{class:'th-lesson-body copal-meme-body'},renderMarkdown(text||'',new Set(),null,{treeHouseTopicLinks:true}));
+    const button=(text,fn,attrs={},command=null)=>{
+      const node=h('button',{class:'copal-btn',type:'button',text,onclick:action(fn),...attrs});
+      if(command) context().registerTreeHouseAction?.(node,command,()=>action(fn)({currentTarget:node}));
+      return node;
+    };
+    const markdown=(text,treeHouseImageUrls)=>h('div',{class:'th-lesson-body copal-meme-body'},renderMarkdown(text||'',new Set(),null,{treeHouseTopicLinks:true,treeHouseImageUrls}));
     const progressBlock=p=>h('p',{class:'th-web-progress',role:'status',text:topicProgressLabel(p)});
     const heading=h('header',{class:'th-web-head'},h('h1',{text:'TreeHouse'}));
     root.append(heading);
@@ -237,7 +241,7 @@ export function createTreeHouseTopicWeb(getContext) {
     if(!selected.courseId) {
       root.append(h('h2',{text:summary?.title||'Quests'}),progressBlock(summary),h('p',{text:'Quests are independently available. Required Quests determine Main Quest completion.'}));
       const grid=h('div',{class:'th-course-grid'});
-      for(const subject of arr(main.subjects)) {const p=progress.get(subject.id)?.progress||subject.progress;grid.append(h('article',{class:'th-web-card'},h('h3',{text:subject.title}),h('p',{text:subject.objective||''}),h('small',{text:subject.required?'Required Quest':'Elective Quest'}),progressBlock(p),button(p?.resumeActivityId?'Resume Quest':'Open Quest',()=>openSubject(subject.id),{'data-subject-id':subject.id})));}
+      for(const subject of arr(main.subjects)) {const p=progress.get(subject.id)?.progress||subject.progress;grid.append(h('article',{class:'th-web-card'},h('h3',{text:subject.title}),h('p',{text:subject.objective||''}),h('small',{text:subject.required?'Required Quest':'Elective Quest'}),progressBlock(p),button(p?.resumeActivityId?'Resume Quest':'Open Quest',()=>openSubject(subject.id),{'data-subject-id':subject.id},{id:'open-treehouse-quest',label:'Open Quest'})));}
       root.append(grid,button('Reset this Main Quest',()=>reset('root',selected.rootId)));return true;
     }
     const subject=subjects.get(selected.courseId), detail=units.get(topicSourceKey({kind:'system',sourceId:SYSTEM,courseId:selected.courseId},selected.unitId));
@@ -245,17 +249,45 @@ export function createTreeHouseTopicWeb(getContext) {
     const p=progress.get(selected.courseId)?.progress||subject.progress;
     crumbs.append(h('span',{text:subject.subject.title}));root.append(progressBlock(summary),progressBlock(p));
     const layout=h('div',{class:'th-web-layout'}), outline=h('nav',{'aria-label':'Quest lessons',class:'th-web-outline'});
-    for(const unit of arr(subject.units))outline.append(button(unit.title,()=>openSubject(selected.courseId,unit.id),{'aria-current':unit.id===selected.unitId?'page':false}));
-    const lesson=h('article',{class:'th-lesson th-web-unit','data-treehouse-unit':detail.unit.id},h('h2',{text:detail.unit.title}),markdown(topicDisplayContent(detail.unit)));
+    const courseId = selected.courseId;
+    const lessonCommand = { id:'open-treehouse-lesson', label:'Open lesson' };
+    for(const unit of arr(subject.units))outline.append(button(unit.title,()=>openSubject(courseId,unit.id),{'aria-current':unit.id===selected.unitId?'page':false},lessonCommand));
+    const treeHouseImageUrls = new Set(arr(detail.resources).filter(item =>
+      detail.unit.resourceIds?.includes(item.id) && item.unitIds?.includes(detail.unit.id)
+      && item.kind === 'image' && item.mime === 'image/png'
+      && /^\/static\/treehouse\/(?:fixtures|projects)\/[a-z0-9][a-z0-9/_.-]*\.png$/.test(item.url)
+      && !item.url.includes('..')
+    ).map(item => item.url));
+    const lesson=h('article',{class:'th-lesson th-web-unit','data-treehouse-unit':detail.unit.id},h('h2',{text:detail.unit.title}),markdown(topicDisplayContent(detail.unit),treeHouseImageUrls));
     if(detail.contentSource && context().openLessonSource){const sourceOrigin=capture();lesson.append(button(detail.contentSource.canEditInFiles?'Edit source':'View source',()=>current(sourceOrigin)?context().openLessonSource(detail.subjectId,detail.unit.id,{sourceRef:detail.sourceRef,host:lesson}):null),button('Refresh lesson',async()=>{if(!current(sourceOrigin))return;await unitDetail(detail.subjectId,detail.unit.id,true);if(current(sourceOrigin))rerender();}));}
-    for(const section of detail.unit.optionalSections||[])lesson.append(h('details',{class:'th-web-disclosure'},h('summary',{text:section.title}),markdown(section.content)));
-    lesson.addEventListener('click',event=>{const link=event.target.closest?.('a[href^="#treehouse-unit="]');if(!link)return;event.preventDefault();try {const unitId=decodeURIComponent(link.getAttribute('href').slice('#treehouse-unit='.length));if(!/^(cs|games|ai):[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/.test(unitId))throw new Error('Lesson link is unavailable.');void action(()=>openSubject(unitId.split(':').slice(0,2).join(':'),unitId))(event);}catch(e){context().setStatus(e.message,true);}});
+    for(const section of detail.unit.optionalSections||[])lesson.append(h('details',{class:'th-web-disclosure'},h('summary',{text:section.title}),markdown(section.content,treeHouseImageUrls)));
+    const lessonLink = target => {
+      const link = target.closest('a[href^="#treehouse-unit="]');
+      return link && lesson.contains(link) ? link : null;
+    };
+    const lessonLinkId = link => {
+      try { const id = decodeURIComponent(link?.getAttribute('href').slice('#treehouse-unit='.length) || ''); return /^(cs|games|ai):[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/.test(id) ? id : null; }
+      catch { return null; }
+    };
+    const followLessonLink = id => openSubject(id.split(':').slice(0,2).join(':'),id);
+    lesson.addEventListener('click',event=>{
+      const link=lessonLink(event.target);if(!link)return;
+      event.preventDefault();
+      const id=lessonLinkId(link);
+      if(id) void action(()=>followLessonLink(id))(event);
+      else context().setStatus('Lesson link is unavailable.',true);
+    });
+    context().registerTreeHouseAction?.(lesson,lessonCommand,link=>action(()=>followLessonLink(lessonLinkId(link)))({currentTarget:link}),target=>{
+      if(target.closest('img'))return null;
+      const link=lessonLink(target);return lessonLinkId(link)?link:null;
+    },lessonLinkId);
+
     for(const assetId of detail.unit.assetIds||[]) {const host=h('section',{class:'th-web-asset','aria-label':'Interactive practice'});lesson.append(host);const origin=capture();void import('./treehouseLearningAssets.js').then(({mountLearningAsset})=>{if(!current(origin)||!host.isConnected)return;const mounted=mountLearningAsset({host,assetId,unitId:detail.unit.id,registry:detail.assetRegistry||[],theme:document.documentElement.dataset.theme});disposers.push(()=>mounted?.destroy?.());}).catch(()=>{if(host.isConnected)host.textContent='Interactive practice is unavailable. The written lesson remains available.';});}
     const publicSources=arr(detail.sources).filter(source=>{try {const u=new URL(source.url);return u.protocol==='https:' && !u.username && !u.password;}catch{return false;}});
     if(publicSources.length)lesson.append(h('details',{class:'th-web-disclosure'},h('summary',{text:'Sources'}),...publicSources.map(source=>h('p',{},h('a',{href:source.url,rel:'noopener noreferrer',target:'_blank',text:source.title||'Primary source'}),source.claim||source.supportedClaim? h('span',{text:` · ${source.claim||source.supportedClaim}`}):''))));
     const metadata=arr(subject.units).find(unit=>unit.id===detail.unit.id);
     const links=h('nav',{'aria-label':'Connected lessons',class:'th-web-links'});
-    for(const link of metadata?.topicLinks||[])links.append(button(`${link.type==='requires'?'Needed for practice':link.type==='recommended'?'Recommended':'Related'}: ${link.targetTitle||link.toId}`,()=>openSubject(link.targetSubjectId,link.toId),{title:link.reason||''}));
+    for(const link of metadata?.topicLinks||[])links.append(button(`${link.type==='requires'?'Needed for practice':link.type==='recommended'?'Recommended':'Related'}: ${link.targetTitle||link.toId}`,()=>openSubject(link.targetSubjectId,link.toId),{title:link.reason||''},lessonCommand));
     if(links.childNodes.length)lesson.append(links);
     renderResources(lesson,detail,{h,button});
     const missing=(detail.assignments||[]).some(assignment=>assignment.completionEvidence==='observed-success')?detail.actionAvailability?.unmetPrerequisites||[]:[];

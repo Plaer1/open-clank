@@ -5,7 +5,7 @@ import DESCRIPTION from "./session.txt"
 import SHELL_DESCRIPTION from "./session.shell.txt"
 import { tokenize } from "./shell-tokenize"
 import z from "zod"
-import { Effect, Deferred } from "effect"
+import { Effect, Deferred, Exit } from "effect"
 import { Session } from "@/session"
 import { Worktree } from "@/worktree"
 import { Instance } from "@/project/instance"
@@ -21,6 +21,7 @@ import { spawnRef } from "@/actor/spawn-ref"
 import { inboxServiceRef } from "@/inbox/inbox-ref"
 import { prefixCaptureRef } from "@/session/prefix-capture-ref"
 import type { ForkContext, Interface as ActorInterface } from "@/actor/spawn"
+import { encodeForkContext } from "@/actor/fork-context"
 import { Bus } from "@/bus"
 import { Git } from "@/git"
 import { TuiEvent } from "@/cli/cmd/tui/event"
@@ -59,6 +60,7 @@ function SIDE_QUESTION_PROMPT(question: string): string {
 // and actor are untouched.
 export function forkQuery(deps: {
   sessions: Session.Interface
+  actorRegistry: ActorRegistry.Interface
   provider: Provider.Interface
   actor: ActorInterface
 }, targetSessionID: SessionID, question: string, selectedModel?: { providerID: ProviderID; modelID: ModelID }) {
@@ -79,7 +81,9 @@ export function forkQuery(deps: {
     const mainSlice = sliceOf("main")
     // Prefer "main" when it carries real activity; otherwise fall back to the
     // peer child's own-session slice (agent_id === targetSessionID).
-    const msgs = mainSlice.some((m) => m.info.role === "user") ? mainSlice : sliceOf(targetSessionID)
+    const selectedMainSlice = mainSlice.some((m) => m.info.role === "user")
+    const sourceActorID = selectedMainSlice ? "main" : targetSessionID
+    const msgs = selectedMainSlice ? mainSlice : sliceOf(targetSessionID)
     const watermark = msgs.at(-1)?.info.id
     // Graceful: a target whose selected slice has no history (or no user
     // message) can't be snapshotted — buildPrefix needs a user message and
@@ -88,15 +92,29 @@ export function forkQuery(deps: {
     if (!watermark || msgs.length === 0 || !hasUserMessage)
       return `(session ${targetSessionID} has no activity yet — nothing to ask about.)`
 
-    // b. agentName for the prefix: the target's last assistant agent identity,
-    // falling back to "build". Only affects the captured system-prompt baseline;
-    // tools are OVERRIDDEN to read-only at spawn regardless.
+    // b. Resolve the agent from the exact selected transcript slice. A
+    // synthetic default here would capture a different prompt/permission set.
     const lastAssistant = msgs.findLast((m) => m.info.role === "assistant")
-    const agentName = (lastAssistant?.info as { agent?: string } | undefined)?.agent ?? "build"
+    const lastUser = msgs.findLast((m) => m.info.role === "user")
+    const agentName = (lastAssistant?.info as { agent?: string } | undefined)?.agent ??
+      (lastUser?.info as { agent?: string } | undefined)?.agent
+    if (!agentName) return "(fork-query unavailable: selected transcript actor identity is unavailable)"
 
-    // Model for the prefix + the fork's LLM call: the project default. The prefix
-    // captor needs a concrete provider/model; the answer quality is the default's.
-    const model = selectedModel ?? (yield* deps.provider.defaultModel())
+    // Preserve the source actor's durable effective model. A caller may restate
+    // it, but cannot switch the model for a captured full-context prefix or fall
+    // back to a project default.
+    const sourceActor = yield* deps.actorRegistry.get(targetSessionID, sourceActorID)
+    if (!sourceActor)
+      return "(fork-query unavailable: source actor membership is unavailable)"
+    if (sourceActorID !== "main" && sourceActor.agent !== agentName)
+      return "(fork-query unavailable: transcript slice does not match its registered actor agent)"
+    let model = sourceActor.effectiveModel
+    if (selectedModel) {
+      const resolved = yield* Effect.exit(deps.provider.getModel(selectedModel.providerID, selectedModel.modelID))
+      if (!Exit.isSuccess(resolved)) return "(fork-query unavailable: selected worker model is not authorized or available)"
+      model = { providerID: resolved.value.providerID, modelID: resolved.value.id }
+    }
+    if (!model) return "(fork-query unavailable: source actor effective model is unavailable)"
     const providerID = model.providerID as ProviderID
     const modelID = model.modelID as ModelID
 
@@ -120,6 +138,13 @@ export function forkQuery(deps: {
       watermarkMsgID: watermark as MessageID,
       model: { providerID, modelID },
     } satisfies ForkContext
+    // Validate and bound the immutable snapshot before creating a child
+    // session, so capture/codec failures cannot leave partial actors.
+    const encoded = yield* Effect.tryPromise({
+      try: () => encodeForkContext(forkCtx, { sessionID: targetSessionID, actorID: sourceActorID }),
+      catch: (error) => error instanceof Error ? error : new Error(String(error)),
+    }).pipe(Effect.orElseSucceed(() => undefined))
+    if (!encoded) return "(fork-query unavailable: captured prefix is invalid or exceeds its size limit)"
 
     // d. Ephemeral child session under the target hosts the query actor (like
     // checkpoint-writer). Parented to the target keeps it discoverable/cleanable.
@@ -136,6 +161,8 @@ export function forkQuery(deps: {
       mode: "subagent",
       sessionID: childSession.id,
       parentSessionID: targetSessionID,
+      parentActorID: sourceActorID,
+      forkContextSource: { sessionID: targetSessionID, actorID: sourceActorID },
       agentType: agentName,
       description: "fork-query",
       task: SIDE_QUESTION_PROMPT(question),
@@ -208,7 +235,7 @@ const createOperation = z.strictObject({
   model: z.string().min(1).optional().describe("Model group/tier name or literal provider/model for the child."),
   title: z.string().min(1).optional().describe("Title for the child session. Defaults to the task prefix."),
   dir: z.string().min(1).optional().describe("Working directory the child runs in (any project or path). Defaults to the orchestrator's directory."),
-  isolate: z.boolean().optional().describe("Run the child in its own git worktree of `dir` (concurrent-edit isolation). Non-git dir falls back to shared."),
+  isolate: z.boolean().optional().describe("Run the child in its own git worktree of `dir`; failure stops creation."),
   topic: z
     .string()
     .min(1)
@@ -630,6 +657,22 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
               topicOf(child.title) === op.topic,
           )
           if (match) {
+            // Existing topic metadata does not prove that a child owns the
+            // requested isolated worktree. Refuse before delivering the task.
+            if (op.isolate) {
+              return yield* Effect.fail(new Error("Cannot verify isolation for the existing topic; choose a different topic or explicitly reuse it without isolation"))
+            }
+            if (op.dir) {
+              let sameDirectory = false
+              try {
+                sameDirectory = realpathSync(op.dir) === realpathSync(match.child.directory)
+              } catch {
+                // Unreadable or missing paths cannot establish identity.
+              }
+              if (!sameDirectory) {
+                return yield* Effect.fail(new Error("Existing topic does not match the requested directory"))
+              }
+            }
             const childID = match.child.id
             const inboxSvc = inboxServiceRef.current
             if (!inboxSvc) {
@@ -673,7 +716,6 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         const targetDir = op.dir ?? (yield* InstanceState.directory)
 
         let effectiveDir = targetDir
-        let isolateNotice = ""
         if (op.isolate) {
           // LOAD-BEARING: Worktree.create resolves against the AMBIENT Instance
           // (InstanceState.context = (yield* InstanceRef) ?? Instance.current).
@@ -684,7 +726,7 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
           // InstanceState.context. NotGitError is a synchronous throw inside an
           // Effect.fn (a DEFECT, not a typed failure), so Effect.catch can't see
           // it; Effect.exit captures any non-success (failure OR defect) and we
-          // degrade to shared — never fail the create.
+          // fail closed before spawning if isolation cannot be created.
           const ctxResult = yield* Effect.exit(
             Effect.promise(() => Instance.provide({ directory: targetDir, fn: () => Instance.current })),
           )
@@ -697,10 +739,10 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
                   Effect.map((exit) => (exit._tag === "Success" ? exit.value.directory : undefined)),
                 )
             : undefined
-          if (wtDir) effectiveDir = wtDir
-          else
-            isolateNotice =
-              " (note: --isolate ignored — directory is not a git repo or worktree creation failed; running shared)"
+          if (!wtDir) {
+            return yield* Effect.fail(new Error("Requested worktree isolation could not be created; no child was started"))
+          }
+          effectiveDir = wtDir
         }
 
         const result = yield* actor.spawn({
@@ -741,7 +783,7 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
           output:
             `Created child session ${result.sessionID} (mode: ${op.mode ?? "build"}) in ${effectiveDir}.` +
             (op.topic ? ` Tagged with topic '${op.topic}' for reuse.` : ``) +
-            (op.isolate && !isolateNotice ? ` Isolated in its own worktree.` : isolateNotice) +
+            (op.isolate ? ` Isolated in its own worktree.` : ``) +
             ` Running in the background.`,
           metadata: { sessionID: result.sessionID } as Metadata,
         }
@@ -964,39 +1006,16 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
       if (op.action === "cancel") {
         const actor = yield* requireActor()
         yield* actor.cancel(op.sessionID as SessionID, op.sessionID, "graceful")
-        // Remove the child's worktree in ITS OWN project's Instance: a child may
-        // live in a worktree of a DIFFERENT project than us, and Worktree.remove's
-        // `git worktree remove` resolves against the ambient Instance. Resolve the
-        // child dir's InstanceContext and provide it as InstanceRef. Worktree.remove
-        // is a no-op for a non-worktree dir, so shared-dir children are safe.
-        // Best-effort throughout (Effect.exit): never fail the cancel. The
-        // orchestrator only cancels once a child's work is merged or abandoned
-        // (prompt rule), so this never discards live work.
-        const child = yield* sessions.get(op.sessionID as SessionID).pipe(Effect.catch(() => Effect.succeed(undefined)))
-        let removed = false
-        if (child) {
-          const ctxExit = yield* Effect.exit(
-            Effect.promise(() => Instance.provide({ directory: child.directory, fn: () => Instance.current })),
-          )
-          if (ctxExit._tag === "Success") {
-            const remExit = yield* worktreeSvc
-              .remove({ directory: child.directory })
-              .pipe(Effect.provideService(InstanceRef, ctxExit.value), Effect.exit)
-            removed = remExit._tag === "Success" ? remExit.value : false
-          }
-        }
         return {
           title: `Cancelled ${op.sessionID}`,
-          output:
-            `Requested cancellation of session ${op.sessionID}.` +
-            (removed ? ` Removed its worktree (branch deleted).` : ``),
+          output: `Requested cancellation of session ${op.sessionID}. Its worktree and branch were retained.`,
           metadata: { sessionID: op.sessionID } as Metadata,
         }
       }
 
       if (op.action === "ask") {
         const actor = yield* requireActor()
-        const answer = yield* forkQuery({ sessions, provider, actor }, op.session_id as SessionID, op.question)
+        const answer = yield* forkQuery({ sessions, actorRegistry: actorReg, provider, actor }, op.session_id as SessionID, op.question)
         return {
           title: `Asked ${op.session_id}`,
           output: answer,

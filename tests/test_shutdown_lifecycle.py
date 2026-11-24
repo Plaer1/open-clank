@@ -183,7 +183,7 @@ async def test_application_files_shutdown_closes_actual_native_transport(tmp_pat
     authority = tmp_path / "app.db"
     monkeypatch.setenv("OPEN_CLANK_AUTHORITY_DB_PATH", str(authority))
     monkeypatch.setattr(file_policy, "APP_DB", str(authority))
-    monkeypatch.setenv("ODYSSEUS_FILES_SERVICE_BIN", binary)
+    monkeypatch.setenv("OPEN_CLANK_FILES_SERVICE_BIN", binary)
     monkeypatch.setattr(files_service_client, "_CLIENTS", {})
     monkeypatch.setattr(files_service_client, "_AGENT_CLIENTS", {})
     monkeypatch.setattr(files_service_client, "_HISTORY_BINDING_PROVIDER", None)

@@ -8,11 +8,17 @@ SCHEMA = "open-clank.index-scheduler/v1"
 THREADS_KEY = "code_index_max_threads"
 REVISION_KEY = "code_index_settings_revision"
 LIMIT_KEYS = {"max_files": "code_index_max_files", "max_source_bytes": "code_index_max_source_bytes", "max_file_bytes": "code_index_max_file_bytes", "max_generation_bytes": "code_index_max_generation_bytes"}
-HARD_LIMITS = {"max_files": 10000, "max_source_bytes": 64 * 1024 * 1024, "max_file_bytes": 512 * 1024, "max_generation_bytes": 8 * 1024 * 1024 * 1024}
+MAX_INDEXED_FILES = 75_000
+LEGACY_MAX_INDEXED_FILES = 10_000
+MiB = 1024 * 1024
+GiB = 1024 * MiB
+HARD_LIMITS = {"max_files": MAX_INDEXED_FILES, "max_source_bytes": GiB, "max_file_bytes": 16 * MiB, "max_generation_bytes": 32 * GiB}
 READ_ONLY_LIMITS = {"max_queued_jobs": 32, "max_descriptor_bytes": 64 * 1024,
-                    "max_retained_data_bytes": 256 * 1024 * 1024, "max_generation_disk_bytes": 8 * 1024 * 1024 * 1024,
-                    "max_source_records": 4000000, "max_resolution_records": 4000000}
-DEFAULT_LIMITS = {**HARD_LIMITS, "max_generation_bytes": 2 * 1024 * 1024 * 1024}
+                    "max_retained_data_bytes": 256 * 1024 * 1024, "max_generation_disk_bytes": HARD_LIMITS["max_generation_bytes"],
+                    "max_source_records": 16000000, "max_resolution_records": 16000000}
+_LEGACY_RECORD_LIMITS = {**READ_ONLY_LIMITS, "max_source_records": 4000000, "max_resolution_records": 4000000}
+DEFAULT_LIMITS = {"max_files": MAX_INDEXED_FILES, "max_source_bytes": 256 * MiB, "max_file_bytes": 4 * MiB, "max_generation_bytes": 8 * GiB}
+_PREVIOUS_DEFAULT = {"max_files": MAX_INDEXED_FILES, "max_source_bytes": 64 * MiB, "max_file_bytes": MiB // 2, "max_generation_bytes": 2 * GiB}
 MANAGED_DEFAULTS = {THREADS_KEY: 2, **{key: DEFAULT_LIMITS[name] for name, key in LIMIT_KEYS.items()}}
 MANAGED_KEYS = tuple(MANAGED_DEFAULTS)
 
@@ -34,15 +40,30 @@ def validate_limits(value):
     return limits
 
 
+def upgrade_unsaved_defaults(settings):
+    """Revision zero is factory configuration. Preserve every explicitly saved preference."""
+    if settings.get(REVISION_KEY, 0) != 0 or settings.get(THREADS_KEY, 2) != 2:
+        return settings
+    for count in (MAX_INDEXED_FILES, LEGACY_MAX_INDEXED_FILES):
+        previous = {**_PREVIOUS_DEFAULT, "max_files": count}
+        if all(settings.get(key, previous[name]) == previous[name] for name, key in LIMIT_KEYS.items()):
+            return {**settings, **{key: DEFAULT_LIMITS[name] for name, key in LIMIT_KEYS.items()}}
+    return settings
+
+
 def configured_limits(settings):
     return validate_limits({name: settings.get(key, DEFAULT_LIMITS[name]) for name, key in LIMIT_KEYS.items()})
+
+
+def legacy_default_limits(desired, revision, limits):
+    return revision == 0 and desired == 2 and limits == {**DEFAULT_LIMITS, "max_files": LEGACY_MAX_INDEXED_FILES}
 
 
 def configured(settings):
     desired = integer(settings.get(THREADS_KEY, 2), THREADS_KEY, 1, 32)
     revision = integer(settings.get(REVISION_KEY, 0), REVISION_KEY, 0, MAX_REVISION)
     limits = configured_limits(settings)
-    if revision == 0 and (desired != 2 or limits != DEFAULT_LIMITS):
+    if revision == 0 and (desired != 2 or limits != DEFAULT_LIMITS) and not legacy_default_limits(desired, revision, limits):
         raise ValueError("Indexing settings need a saved revision")
     return desired, revision
 
@@ -67,13 +88,18 @@ def prepare_settings(current, patch):
 
 def configuration_request(settings):
     desired, revision = configured(settings)
-    return ({"action": "configure", "revision": revision, "max_threads": desired, "limits": configured_limits(settings)}
-            if revision else {"action": "status"})
+    limits = configured_limits(settings)
+    if revision or legacy_default_limits(desired, revision, limits):
+        return {"action": "configure", "revision": revision, "max_threads": desired, "limits": limits}
+    return {"action": "status"}
 
 
 def preserve_scheduler_revision(incoming, persisted):
     """Unrelated stale whole-settings writers cannot roll back this preference."""
     value = deepcopy(incoming)
+    persisted = upgrade_unsaved_defaults(persisted)
+    incoming = upgrade_unsaved_defaults(incoming) if any(key in incoming for key in MANAGED_KEYS) else incoming
+    value.update(incoming)
     previous = integer(persisted.get(REVISION_KEY, 0), REVISION_KEY, 0, MAX_REVISION)
     if not any(key in incoming for key in (*MANAGED_KEYS, REVISION_KEY)):
         for key in (*MANAGED_KEYS, REVISION_KEY):
@@ -108,7 +134,7 @@ def validate_status(value):
         integer(value[key], key, 1, 32)
     desired_limits = validate_limits(value["desired_limits"])
     effective_limits = validate_limits(value["effective_limits"])
-    if value["hard_limits"] != {**HARD_LIMITS, **READ_ONLY_LIMITS}:
+    if value["hard_limits"] not in ({**HARD_LIMITS, **READ_ONLY_LIMITS}, {**HARD_LIMITS, **_LEGACY_RECORD_LIMITS}):
         raise ValueError("Unsupported code indexing hard limits")
     integer(value["active"], "active", 0, value["effective"])
     integer(value["queued"], "queued", 0, 32)
@@ -126,10 +152,12 @@ async def readback(provider, settings, *, apply=False):
     result = {"native_status": "unavailable", "status": "pending", "desired": None,
               "revision": None, "native_revision": None, "effective_revision": None,
               "effective": None, "active": None, "queued": None, "drain_pending": None,
-              "desired_limits": None, "effective_limits": None, "hard_limits": None}
+              "desired_limits": None, "effective_limits": None, "hard_limits": None, "legacy_file_default": False}
     try:
         desired, revision = configured(settings)
-        result.update(desired=desired, revision=revision, desired_limits=configured_limits(settings))
+        limits = configured_limits(settings)
+        result.update(desired=desired, revision=revision, desired_limits=limits,
+                      legacy_file_default=legacy_default_limits(desired, revision, limits))
         method = getattr(provider, "code_index_scheduler", None)
         if method is None:
             return result

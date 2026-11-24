@@ -291,7 +291,7 @@ def test_host_namespace_is_opaque_rust_backed_and_capability_truthful(tmp_path):
             ("link", "symlink"),
         ]
         assert next(row for row in page if row["kind"] == "file")["capabilities"] == [
-            "download", "move", "open", "preview", "rename", "stat", "write",
+            "download", "move", "open", "preview", "rename", "stat", "trash", "write",
         ]
         file_entry = next(row for row in page if row["kind"] == "file")
         opened = client.post("/api/files-v1/action", json={"resource_ref": file_entry["ref"], "action": "open", "args": {}})

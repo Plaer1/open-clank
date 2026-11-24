@@ -1,5 +1,5 @@
 import { createWikiAuthoring } from './wikiAuthoring.js';
-import { linkedMentions } from './notesModel.js';
+
 
 let stylesInstalled = false;
 function installStyles() {
@@ -15,6 +15,7 @@ function installStyles() {
 export function createWikiWorkspace({ h, core }) {
   installStyles();
   let query = '', collection = 'all';
+  let backlinkPanel = null, backlinkKey = null;
   const authoring = createWikiAuthoring({ h,
     capture:() => core.capture(), isCurrent:target => core.isCurrent(target),
     documents:() => core.documents(), notify:message => core.notify(message),
@@ -65,10 +66,12 @@ export function createWikiWorkspace({ h, core }) {
       h('span', { text:'This article is read-only.' }),
       ...(core.canCopy?.(target.doc) ? [button('Make editable copy', () => core.copy(target.doc))] : [])));
     else if (target?.editor) tools.append(authoring.toolbar());
-    const backlinks = h('details', { class:'copal-wiki-backlinks' }, h('summary', { text:'Backlinks' }));
-    const incoming = target?.doc ? linkedMentions(core.documents(), target.doc) : [];
-    for (const mention of incoming) backlinks.append(button(mention.doc.name, () => core.open(mention.doc.id)));
-    if (!incoming.length) backlinks.append(h('p', { text:'No recorded incoming links.' }));
+    const key = target?.docId ? JSON.stringify([target.scope,target.generation,target.docId,target.head]) : null;
+    if (!key || key !== backlinkKey) {
+      backlinkKey = key;
+      backlinkPanel = key ? core.connections(target) : h('span');
+    }
+    const backlinks = backlinkPanel;
     const menu = h('details', { class:'copal-wiki-library-menu' }, h('summary', { text:'Library' }),
       button('Import .memes', () => core.importMemes()), button('Export .memes', () => core.exportMemes()),
       button('Page properties', () => core.properties()), button('Links and relations', () => core.links()));

@@ -2,21 +2,21 @@
   "id": "batch-031",
   "group": "docs.openclank-docs-memory-lore",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 1666,
+  "entry_count": 3,
+  "character_count": 6108,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-memory-lore.body",
-      "source": "# Memory and Lore\n\nOpen Clank has two related but separate memory systems. **Memory** (the Brain\nsurface) is what the assistant recalls between sessions. **Lore** is the\nrecovery ledger that lets work be undone and reconstructed.\n\n## Memory\n\nMemory capture is optional and per-account. When enabled, the assistant can\nsave short recollections that later sessions can use. You can review, edit and\ndelete saved memories from [Settings](clank://settings) under Brain.\n\nMemory never replaces your documents. It is recall, not storage — the\nauthoritative record of your work is Copal and the chat transcript.\n\n## Lore\n\nLore is the durable preimage and action ledger behind recoverable operations.\nWhen a managed save happens — an Imps project save, a guarded document\ncommit — the previous state is captured first. If capture fails, the save is\nrefused rather than leaving an unrecoverable hole.\n\nYou do not interact with Lore directly. You see it in History and in the\nundo/restore affordances that depend on it.\n\n## History\n\nDocument history lists checkpoints and changes for a single document. From\nthere you can inspect a prior version and restore it. History is scoped to\nthe document and the account.\n\nSee [Settings](clank://settings/history) for retention budgets.\n\n## What memory is not\n\n- It is not a search index over everything you have ever typed.\n- It is not shared between accounts.\n- It is not a substitute for saving a document you care about.\n\n[[Recovery]] covers what to do when something goes wrong.",
+      "source": "# Memory and Lore\n\n| If you need… | Open… |\n| --- | --- |\n| What was said or which tools ran | The original chat or transcript |\n| A fact or preference the assistant can recall | [Memery](clank://memory) |\n| Reported or estimated token counts | [[Usage and Stats]] |\n| An earlier state of a file | The project's or document's History |\n\n## Semantic memory\n\nTo save a preference, open **Memery → Add → Add Memory**, type it, select a category and press Enter. If it goes to review, open **Inspect → Candidates → Pending**. Check the wording and source, then **Edit**, **Promote**, or **Reject**. Promoted entries appear under **Curated**. Other profiles save the entry directly in **Memories**.\n\nIn **Inspect**, **Raw trajectory** shows captured evidence, **History** shows revisions, and **Quarantined** shows items withheld from recall. For eligible pending additions, use **Select for atomic batch** to preview and approve several together. If the result is unknown, choose **Check original status**.\n\nTo correct an outdated claim, open the newer item in **Memories → … → Details → Review relationship**. Choose the earlier item or **Find suggested pairs**. Use **Compare evidence** to read both claims and their sources. Choose **Preview supersession → Confirm supersession** or **Decline pair**. **Detach** removes a confirmed link while keeping both histories.\n\n## Review an import batch\n\nUse **Add → Add Memory → Import** to select files. When processing finishes, open **review** on the banner in **Memories**. Check suggestions against their sources and edit, save or reject each one. Use **check import status** for files that need attention.\n\nUse **Export as Markdown** for one file or **Export as Markdown files (zip)** for separate files in a ZIP. When you import an Open Clank Markdown export, the text goes through review.\n\n## Move reviewed knowledge\n\n1. From a memory's **…** menu, choose **Export knowledge snapshot…**. Preview the full text and category before **Confirm and download**. For several memories, use **Select → Export selected as snapshots…** and check the included count.\n2. In the receiving account, choose **Add → Add Memory → Import snapshot…** or **Import snapshot bundle…**. Use **Preview** for a single file or **Start import** for a bundle. Read the text and category and choose **Create review draft** for each item you want.\n3. In **Memories → review**, decide which drafts to retain. Inspect skipped or refused bundle items and preview again if the bytes change. Check the original status for an unknown outcome.\n\nFor a saved folder analysis, choose **Check original files** on the memory. Select the original Host folder under its owned workspace. **Compare saved snapshot** reports the result for each component, including any it could not verify.\n\n## Skills, prompts and admission\n\n1. Open **Add → Add Skill → Marketplace…** and choose an offered source. Select **Preview catalog → View components → Review skill** for the skill you want. Review the publisher, release and files before **Create draft**.\n2. In **Skills**, open the draft, read the instructions and companion files, then **Publish** to make it available. **Settings → Inject Skills** controls how many relevant skills can join a request. Zero turns off automatic injection.\n3. In chat, expand **Skill used: …** to see the loaded revision and files when a receipt is available. To withdraw a skill, choose **Unpublish** on its card.\n\nTo move a published skill, use **Export snapshot…**, preview its contents and download it. Use **Add Skill → Import snapshot…** in the receiving account to review and create an independent draft.\n\n## Timeline and Graph\n\n**Memery → Graph** shows memory relationships. [[Graph]] follows links between journal pages or saved source. For an open chat, **Inspect → Journal coverage** shows chat consolidation progress. On a synthesis candidate, use **Review Journal sources → Open source chat** to review its citations. Open [[Journal]] for personal pages.\n\n## Lore and recovery\n\nUse the document's or project's **History** to inspect earlier file states before restoring. See [[Recovery]] for file restoration and pending operations.\n\n**Settings → Nuke my Brain data** previews removal of selected live Memery data. Review the chosen categories and result. Source files, exports and backups are retained separately.\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:487"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
@@ -26,10 +26,20 @@
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:487"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
       "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-memory-lore.body.compat-26319d6b9ace",
+      "source": "# Memory and Lore\n\nOpen Clank has two related but separate memory systems. **Memory** (the Brain\nsurface) is what the assistant recalls between sessions. **Lore** is the\nrecovery ledger that lets work be undone and reconstructed.\n\n## Memory\n\nMemory capture is optional and per-account. When enabled, the assistant can\nsave short recollections that later sessions can use. You can review, edit and\ndelete saved memories from [Settings](clank://settings) under Brain.\n\nMemory never replaces your documents. It is recall, not storage — the\nauthoritative record of your work is Copal and the chat transcript.\n\n## Lore\n\nLore is the durable preimage and action ledger behind recoverable operations.\nWhen a managed save happens — an Imps project save, a guarded document\ncommit — the previous state is captured first. If capture fails, the save is\nrefused rather than leaving an unrecoverable hole.\n\nYou do not interact with Lore directly. You see it in History and in the\nundo/restore affordances that depend on it.\n\n## History\n\nDocument history lists checkpoints and changes for a single document. From\nthere you can inspect a prior version and restore it. History is scoped to\nthe document and the account.\n\nSee [Settings](clank://settings/history) for retention budgets.\n\n## What memory is not\n\n- It is not a search index over everything you have ever typed.\n- It is not shared between accounts.\n- It is not a substitute for saving a document you care about.\n\n[[Recovery]] covers what to do when something goes wrong.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
     }
   ]
 }

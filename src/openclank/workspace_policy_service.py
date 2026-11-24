@@ -40,6 +40,7 @@ def resolve_owned_workspace(
     owner_username: str,
     auth_manager: object,
     purpose: WorkspacePurpose,
+    observation_only: bool = False,
 ) -> WorkspaceBinding:
     """Resolve a Workspace for an already authenticated effective owner.
 
@@ -51,7 +52,6 @@ def resolve_owned_workspace(
     identifier = str(workspace_id or "").strip()
     owner = str(owner_username or "").strip().lower()
     account_id = getattr(auth_manager, "account_id", None)
-    admin_check = getattr(auth_manager, "is_admin", None)
     subject_id = account_id(owner) if callable(account_id) and owner else None
     if not identifier or not subject_id:
         raise WorkspacePolicyServiceError(
@@ -71,12 +71,17 @@ def resolve_owned_workspace(
             "Workspace is unavailable",
             code="workspace_unavailable",
         )
+    eligible = getattr(auth_manager, "filesystem_access_eligible", None)
+    broad = (repository.full_filesystem_access(str(subject_id))
+             if callable(eligible) and eligible(owner, subject_id) else {})
     return resolve_workspace_binding(
         repository,
         workspace,
         subject_id=str(subject_id),
-        is_admin=bool(callable(admin_check) and admin_check(owner)),
+        is_admin=purpose == "app_folder" and broad.get("human") is True,
+        agent_full_access=purpose == "agent_workspace" and broad.get("agent") is True,
         purpose=purpose,
+        observation_only=observation_only,
     )
 
 
@@ -134,6 +139,8 @@ def resolve_workspace_binding(
     subject_id: str,
     is_admin: bool,
     purpose: WorkspacePurpose,
+    observation_only: bool = False,
+    agent_full_access: bool = False,
 ) -> WorkspaceBinding:
     """Resolve one stable Workspace through the current policy generation."""
 
@@ -146,12 +153,13 @@ def resolve_workspace_binding(
         ) from error
     decision = repository.resolve(
         subject_id=subject_id,
-        is_admin=is_admin,
-        origin="agent" if purpose == "agent_workspace" else "app",
+        is_admin=is_admin or agent_full_access,
+        origin="agent" if purpose == "agent_workspace" and not agent_full_access else "app",
         location_id=location.id,
         capability="read",
         workspace_id=workspace.id,
         relative_resource=workspace.relative_folder,
+        observation_only=observation_only,
     )
     if not decision.allowed:
         raise WorkspacePolicyServiceError(
@@ -186,6 +194,7 @@ def bind_workspace_path(
     name: str | None = None,
     media_adoption: object | None = None,
     media_receipt: object | None = None,
+    agent_full_access: bool = False,
 ) -> WorkspaceBinding:
     """Create/reuse a Workspace without granting any new Agent/People access."""
 
@@ -215,10 +224,9 @@ def bind_workspace_path(
 
     if candidates:
         _depth, location, relative = max(candidates, key=lambda item: item[0])
-    elif is_admin and purpose == "app_folder":
-        # Cataloging a physical App folder creates no People or Agent binding.
-        # Admin App access remains the existing host lane; Agent use still fails
-        # below unless an explicit Agent binding already exists.
+    elif (is_admin and purpose == "app_folder") or agent_full_access:
+        # Record the explicitly selected directory's identity without creating
+        # People access, Agent access or an operation approval.
         try:
             location = repository.create_location(
                 actor_subject_id=actor_subject_id,
@@ -239,8 +247,8 @@ def bind_workspace_path(
 
     decision = repository.resolve(
         subject_id=owner_subject_id,
-        is_admin=is_admin,
-        origin="agent" if purpose == "agent_workspace" else "app",
+        is_admin=is_admin or agent_full_access,
+        origin="agent" if purpose == "agent_workspace" and not agent_full_access else "app",
         location_id=location.id,
         capability="read",
         relative_resource=relative,
@@ -266,6 +274,7 @@ def bind_workspace_path(
         subject_id=owner_subject_id,
         is_admin=is_admin,
         purpose=purpose,
+        agent_full_access=agent_full_access,
     )
     # Workspace creation adopts only provenance-backed loose media into the new
     # root's mirror.  Adoption is best-effort and never blocks the workspace

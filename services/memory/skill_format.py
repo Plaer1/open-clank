@@ -102,6 +102,13 @@ def _parse_scalar(raw: str) -> Any:
     if raw.lower() in ("null", "none", "~"):
         return None
     if (raw[0] == raw[-1]) and raw[0] in ("'", '"'):
+        if raw[0] == '"':
+            try:
+                value = json.loads(raw)
+                if isinstance(value, str):
+                    return value
+            except (ValueError, TypeError):
+                pass
         return raw[1:-1]
     # Try number
     try:
@@ -355,6 +362,8 @@ class Skill:
     verification: List[str] = field(default_factory=list)
     body_extra: str = ""
     hidden: bool = False
+    resource_metadata: Optional[Dict[str, Any]] = None  # Untrusted claim until a separate publication receipt validates it.
+    unknown_frontmatter_raw: str = ""  # Preserve fields this version does not interpret.
     # Sidecar (not persisted in SKILL.md)
     uses: int = 0
     last_used: Optional[int] = None
@@ -402,6 +411,9 @@ class Skill:
         if hidden:
             fm["hidden"] = True
         fm["created"] = self.created or _now_iso()
+        if self.resource_metadata is not None:
+            from src.openclank.resource_metadata import encode_envelope
+            fm["openclank_metadata_v1"] = encode_envelope(self.resource_metadata)
         return fm
 
     def to_dict(self) -> Dict[str, Any]:
@@ -439,6 +451,10 @@ class Skill:
             "last_used": self.last_used,
             "path": self.path,
         }
+        if self.resource_metadata is not None:
+            from copy import deepcopy
+            d["resource_metadata_claim"] = deepcopy(self.resource_metadata)
+            d["resource_metadata_authority"] = "external_unverified"
         # Back-compat aliases for the old API/UI
         d["title"] = self.description or self.name.replace("-", " ").title()
         d["problem"] = self.when_to_use
@@ -470,12 +486,25 @@ class Skill:
             "verification": list(self.verification),
             "body_extra": self.body_extra,
         }
+        if self.resource_metadata is not None:
+            from src.openclank.resource_metadata import validate_envelope
+            payload["openclank_metadata_v1"] = validate_envelope(self.resource_metadata)
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @classmethod
     def from_markdown(cls, text: str, *, path: Optional[str] = None) -> "Skill":
         fm, body = parse_frontmatter(text)
+        from src.openclank.resource_metadata import decode_envelope
+        metadata = decode_envelope(fm["openclank_metadata_v1"]) if "openclank_metadata_v1" in fm else None
+        known={"name","skill_id","revision","parent_revision","content_hash","description","version","category","tags","platforms","requires_toolsets","fallback_for_toolsets","status","confidence","source","source_status","source_uri","source_revision","source_memory_ids","teacher_model","owner","hidden","created","openclank_metadata_v1"}
+        raw_unknown=[]
+        if text.startswith("---"):
+            stop=text.find("\n---",3);chunk=text[3:stop].lstrip("\n") if stop>=0 else ""; keep=False
+            for line in chunk.splitlines():
+                match=_FM_KEY_RE.match(line)
+                if match:keep=match.group(1) not in known
+                if keep:raw_unknown.append(line)
         sections = parse_body(body)
         raw_name = fm.get("name")
         name = slugify(raw_name if raw_name not in (None, "") else fm.get("description", ""), fallback="skill")
@@ -516,11 +545,14 @@ class Skill:
             verification=list(sections["verification"]),
             body_extra=sections["body_extra"],
             hidden=bool(fm.get("hidden", False)),
+            resource_metadata=metadata, unknown_frontmatter_raw="\n".join(raw_unknown),
             path=path,
         )
 
     def to_markdown(self) -> str:
         fm = emit_frontmatter(self.to_frontmatter())
+        if self.unknown_frontmatter_raw:
+            fm += "\n" + self.unknown_frontmatter_raw
         body = emit_body({
             "when_to_use": self.when_to_use,
             "procedure": self.procedure,

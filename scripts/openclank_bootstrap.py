@@ -170,7 +170,8 @@ def verify_portable_payload() -> dict | None:
         raise EngineBuildError("portable helper inventory is invalid") from exc
     if not isinstance(inventory, dict) or inventory.get("schema_version") != 1 or inventory.get("target") != target_name:
         raise EngineBuildError("portable helper inventory target/schema disagrees")
-    required_helpers = {"odysseus-files-service.exe", "odysseus-shell-thumbnail-helper.exe", "openclank-history-service.exe", "fm-mcp.exe", "openclank-windows-host-apps.exe", "openclank-windows-desktop-capture.exe"}
+    required_helpers = {"odysseus-files-service.exe", "odysseus-shell-thumbnail-helper.exe", "openclank-history-service.exe", "memery-worker.exe", "openclank-windows-host-apps.exe", "openclank-windows-desktop-capture.exe"}
+    if target_name == "windows-x64": required_helpers.add("memery-migrate.exe")
     admitted_helpers = set()
     artifacts = inventory.get("artifacts")
     if not isinstance(artifacts, list):
@@ -332,7 +333,6 @@ def packaged_engine_expectations() -> dict[str, str]:
 def _data_dir(value: Path | None) -> Path:
     configured = value or Path(
         os.environ.get("OPEN_CLANK_DATA_DIR")
-        or os.environ.get("ODYSSEUS_DATA_DIR")
         or get_default_data_dir()
     )
     return configured.expanduser().resolve()
@@ -375,7 +375,7 @@ def _parser() -> argparse.ArgumentParser:
 
     runtime = sub.add_parser(
         "runtime",
-        help="resolve admitted Python, LifeTools, fm-mcp, and optional browser runtimes",
+        help="resolve admitted Python, LifeTools, memery-worker, and optional browser runtimes",
     )
     runtime.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     runtime.add_argument("--browser", action="store_true")

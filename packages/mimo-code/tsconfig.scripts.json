@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "@tsconfig/bun/tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["bun"],
+    "noUncheckedIndexedAccess": false,
+    "noEmit": true
+  },
+  "include": [
+    "script/**/*.ts",
+    "packages/cli/script/**/*.ts",
+    "packages/sdk/script/**/*.ts"
+  ],
+  "exclude": [
+    "packages/cli/script/generate.ts",
+    "packages/cli/script/schema.ts"
+  ]
+}

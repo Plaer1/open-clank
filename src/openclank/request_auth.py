@@ -43,10 +43,11 @@ def install_request_auth(app, *, auth_manager, session_factory, api_token_model,
         "/api/tui/v1/info",
         "/api/tui/v1/device/start",
         "/api/tui/v1/device/token",
-        "/api/internal/frankenmemory/tool",
+        "/api/internal/memery/tool",
         "/api/internal/copal/tool",
         "/login",
     }
+    _BROWSER_CONTROL_BROKER_PATH = "/api/internal/browser-control/tool"
     # Bootstrap serves code/fonts/icons and translations, never an HTML app shell
     # or arbitrary static data. Every other static request passes session auth.
     _AUTH_BOOTSTRAP_STATIC_PREFIXES = ("/static/js/", "/static/fonts/", "/static/icons/", "/static/i18n/")
@@ -69,6 +70,8 @@ def install_request_auth(app, *, auth_manager, session_factory, api_token_model,
     ]
 
     def _is_auth_exempt(path: str, method: str = "GET") -> bool:
+        if path == _BROWSER_CONTROL_BROKER_PATH:
+            return str(method or "").upper() == "POST"
         # Boot/login UI reads these settings before it has a session. Writes
         # are owner-scoped and must pass normal authentication plus the account
         # lifecycle admission barrier.
@@ -96,6 +99,71 @@ def install_request_auth(app, *, auth_manager, session_factory, api_token_model,
     _token_cache: dict = {}
     _token_cache_lock = _asyncio.Lock()
     _token_cache_dirty = True
+
+    def capture_original_credential(request, owner, account):
+        """Retain an ingress credential check without granting new authority."""
+        if (request.app is not app or getattr(app.state, 'auth_manager', None) is not auth_manager
+                or not getattr(request.state, 'authenticated', False)
+                or not owner or not account or auth_manager.account_id(owner) != account
+                or auth_manager.username_for_account_id(account) != owner):
+            raise ValueError('request credential unavailable')
+        internal=bool(getattr(request.state,'internal_tool_authenticated',False))
+        api=bool(getattr(request.state,'api_token',False))
+        bearer=request.headers.get('authorization','')
+        cookie=request.cookies.get(SESSION_COOKIE)
+        if internal and api: raise ValueError('request credential unavailable')
+        kind='internal' if internal else 'api' if api else 'cookie'
+        token_id=None; snapshot=None
+        if kind=='api':
+            if not bearer.startswith(('Bearer ody_','Bearer oct_','Bearer occ_')): raise ValueError('request credential unavailable')
+            raw=bearer[7:];token_id=getattr(request.state,'api_token_id',None)
+            if not isinstance(token_id,str) or not 12<=len(raw)<=100: raise ValueError('request credential unavailable')
+            def read_token():
+                db=SessionLocal()
+                try:
+                    row=db.query(ApiToken).filter(ApiToken.id==token_id).first()
+                    if (row is None or row.is_active is not True or getattr(row,'revoked_at',None) is not None
+                            or (getattr(row,'expires_at',None) is not None and row.expires_at<=datetime.utcnow())): return None
+                    name=normalize_known_username(auth_manager.users,getattr(row,'owner',None))
+                    scopes=tuple(s.strip() for s in (getattr(row,'scopes','') or 'chat').split(',') if s.strip())
+                    return (name,row.token_hash,row.token_prefix,getattr(row,'client_kind',None) or 'api',scopes)
+                finally: db.close()
+            snapshot=read_token()
+            if (snapshot is None or snapshot[0]!=owner or snapshot[2]!=raw[:8]
+                    or snapshot[3]!=getattr(request.state,'api_token_client_kind',None)
+                    or tuple(getattr(request.state,'api_token_scopes',()) or ())!=snapshot[4]
+                    or getattr(request.state,'api_token_owner',None)!=owner
+                    or not _bcrypt.checkpw(raw.encode(),snapshot[1].encode())):
+                raise ValueError('request credential unavailable')
+        elif kind=='internal':
+            from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+            secret=request.headers.get(INTERNAL_TOOL_HEADER)
+            if (not secret or not secrets.compare_digest(secret,INTERNAL_TOOL_TOKEN)
+                    or not _is_trusted_loopback(request)
+                    or normalize_known_username(auth_manager.users,request.headers.get(INTERNAL_TOOL_OWNER_HEADER))!=owner):
+                raise ValueError('request credential unavailable')
+        elif not cookie or auth_manager.get_username_for_token(cookie)!=owner:
+            raise ValueError('request credential unavailable')
+        def current():
+            try:
+                if (request.app is not app or getattr(app.state,'auth_manager',None) is not auth_manager
+                        or getattr(app.state,'capture_original_credential',None) is not capture_original_credential
+                        or auth_manager.account_id(owner)!=account or auth_manager.username_for_account_id(account)!=owner
+                        or auth_manager.is_account_lifecycle_fenced(owner)):
+                    return False
+                if kind=='cookie':
+                    return request.cookies.get(SESSION_COOKIE)==cookie and auth_manager.get_username_for_token(cookie)==owner
+                if kind=='api':
+                    return request.headers.get('authorization','')==bearer and read_token()==snapshot
+                from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+                return (request.headers.get(INTERNAL_TOOL_HEADER)==secret and secrets.compare_digest(secret,INTERNAL_TOOL_TOKEN)
+                        and _is_trusted_loopback(request)
+                        and normalize_known_username(auth_manager.users,request.headers.get(INTERNAL_TOOL_OWNER_HEADER))==owner)
+            except Exception:
+                return False
+        if not current(): raise ValueError('request credential unavailable')
+        return current
+    app.state.capture_original_credential = capture_original_credential
 
     def _token_cache_invalidate():
         app.state._token_cache_dirty = True
@@ -222,9 +290,9 @@ def install_request_auth(app, *, auth_manager, session_factory, api_token_model,
 
             # --- Bearer token auth (API tokens for external integrations) ---
             auth_header = request.headers.get("authorization", "")
-            if auth_header.startswith(("Bearer ody_", "Bearer oct_")):
+            if auth_header.startswith(("Bearer ody_", "Bearer oct_", "Bearer occ_")):
                 raw_token = auth_header[7:]
-                requested_kind = "tui" if raw_token.startswith("oct_") else "api"
+                requested_kind = "tui" if raw_token.startswith("oct_") else "channel" if raw_token.startswith("occ_") else "api"
                 # Sanity check: tokens are a four-character prefix plus a
                 # high-entropy URL-safe body.
                 if len(raw_token) < 12 or len(raw_token) > 100:
@@ -257,6 +325,12 @@ def install_request_auth(app, *, auth_manager, session_factory, api_token_model,
                                 status_code=409,
                                 content={"error": "Account lifecycle operation in progress"},
                             )
+                        if matched_kind == "channel":
+                            from src.openclank.channels.channel_token import path_allowed
+                            from src.settings import load_settings as _load_channel_flag
+                            # Only the routes the channel bridge needs, and only while chat channels are switched on.
+                            if not path_allowed(path, request.method) or not _load_channel_flag().get("channels_enabled"):
+                                return JSONResponse(status_code=403, content={"error": "Channel token is confined to the channel bridge routes"})
                         if matched_kind == "tui" and not path.startswith("/api/tui/v1/"):
                             return JSONResponse(
                                 status_code=403,

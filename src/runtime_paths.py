@@ -49,7 +49,7 @@ def get_default_data_dir() -> str:
     """Return the default path to the data directory.
 
     In normal runs, this is a 'data' subdirectory under the app root.
-    In frozen builds, it is a persistent user directory (~/.open-clank/data)
+    In frozen builds, it is a persistent user directory
     to prevent SQLite databases and other persistent files from being
     written to the ephemeral, temporary extraction bundle directory.
     """
@@ -58,6 +58,9 @@ def get_default_data_dir() -> str:
         current = home / ".open-clank"
         if (home / ".odysseus").is_dir() and not current.exists():
             raise RuntimeError("Legacy home requires .clanker/tools/migrations/python/secondary.py home-root")
+        if sys.platform == "win32" and not (current / "data").is_dir():
+            local = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+            return str(local / "OpenClank" / "data")
         return str(current / "data")
     return os.path.join(get_app_root(), "data")
 
@@ -191,21 +194,22 @@ def _executable_candidates(repo_root: Path, env_names: Sequence[str], relative: 
     )
 
 
-def resolve_fm_mcp(repo_root: Path | str | None = None) -> RuntimeIdentity:
+def resolve_memery_worker(repo_root: Path | str | None = None) -> RuntimeIdentity:
     root = Path(repo_root or get_app_root()).resolve()
-    candidates = _executable_candidates(
-        root,
-        ("FM_MCP_COMMAND", "OPEN_CLANK_FM_MCP"),
-        (("bin/fm-mcp.exe",) if os.name == "nt" else ("bin/fm-mcp",)) +
-        ("mcp_servers/frankenmemory/target/release/fm-mcp", "mcp_servers/frankenmemory/target/release/fm-mcp.exe"),
-        ("fm-mcp",),
-    )
+    name = "memery-worker.exe" if os.name == "nt" else "memery-worker"
+    if getattr(sys, "frozen", False):
+        candidates = [root / "bin" / name]
+    else:
+        candidates = _executable_candidates(
+            root, ("OPEN_CLANK_MEMERY_WORKER",),
+            (f"bin/{name}", f"native/memery/target/release/{name}"), (name,),
+        )
     diagnostics = []
     for path in candidates:
         if path.is_file() and (os.name == "nt" or os.access(path, os.X_OK)):
-            return RuntimeIdentity(kind="fm_mcp", path=str(path.resolve()))
+            return RuntimeIdentity(kind="memery_worker", path=str(path.resolve()))
         diagnostics.append({"path": str(path), "code": "artifact_not_found"})
-    raise RuntimeResolutionError("artifact_not_found", "fm-mcp executable is not available", diagnostics)
+    raise RuntimeResolutionError("artifact_not_found", "Memery worker executable is not available", diagnostics)
 
 
 def resolve_lifetools(repo_root: Path | str | None = None) -> RuntimeIdentity:
@@ -235,7 +239,7 @@ def _browser_candidates() -> list[Path]:
     else:
         relative = ("/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable")
         commands = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
-    return _unique_paths([os.environ.get("OPEN_CLANK_BROWSER_EXECUTABLE", ""), os.environ.get("ODYSSEUS_BROWSER_EXECUTABLE", ""), *relative, *(Path(found) for command in commands if (found := shutil.which(command)))])
+    return _unique_paths([os.environ.get("OPEN_CLANK_BROWSER_EXECUTABLE", ""), *relative, *(Path(found) for command in commands if (found := shutil.which(command)))])
 
 
 def resolve_browser() -> RuntimeIdentity:
@@ -258,9 +262,9 @@ def resolve_browser() -> RuntimeIdentity:
 def resolve_runtime_bundle(repo_root: Path | str | None = None, *, include_browser: bool = False) -> dict:
     root = Path(repo_root or get_app_root()).resolve()
     python = resolve_python(root)
-    fm = resolve_fm_mcp(root)
+    fm = resolve_memery_worker(root)
     lifetools = resolve_lifetools(root)
-    result = {"python": python.as_dict(), "fm_mcp": fm.as_dict(), "lifetools": lifetools.as_dict()}
+    result = {"python": python.as_dict(), "memery_worker": fm.as_dict(), "lifetools": lifetools.as_dict()}
     if include_browser:
         result["browser"] = resolve_browser().as_dict()
     return result

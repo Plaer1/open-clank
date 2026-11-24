@@ -1,0 +1,616 @@
+import { RecoverableError } from "@/tool/recoverable"
+import { Config } from "../config"
+import z from "zod"
+import { Provider } from "../provider"
+import { ModelID, ProviderID } from "../provider/schema"
+import { generateObject, streamObject, type ModelMessage } from "ai"
+import { Instance } from "../project/instance"
+import { Truncate } from "../tool"
+import { usesCodexMode } from "../tool/gpt"
+import { Auth } from "../auth"
+import { ProviderTransform } from "../provider"
+
+import PROMPT_GENERATE from "./generate.txt"
+import PROMPT_GENERATE_GPT from "./prompt/generate-gpt.txt"
+import PROMPT_GENERAL from "./prompt/general.txt"
+import PROMPT_EXPLORE from "./prompt/explore.txt"
+import PROMPT_SUMMARY from "./prompt/summary.txt"
+import PROMPT_COMPACTION from "./prompt/compaction.txt"
+import PROMPT_TITLE from "./prompt/title.txt"
+import PROMPT_CHAT from "./prompt/chat.txt"
+import { Permission } from "@/permission"
+import { mergeDeep, pipe, sortBy, values } from "remeda"
+import { Global } from "@/global"
+import path from "path"
+import { Plugin } from "@/plugin"
+import { Skill } from "../skill"
+import { Effect, Context, Layer } from "effect"
+import { InstanceState } from "@/effect"
+import * as Option from "effect/Option"
+import * as OtelTracer from "@effect/opentelemetry/Tracer"
+
+// Only the original built-in owner may mark its actual post-configuration object.
+const bundledChatPrompts = new WeakMap<object, {prompt:string; mode:string; native:boolean | undefined}>()
+/** Process-private provenance, not an agent name or prompt-byte lookup. */
+export function ownsBundledChatPrompt(value:Info):boolean {
+  const mark=bundledChatPrompts.get(value)
+  if (!mark) return false
+  const prompt=Object.getOwnPropertyDescriptor(value,"prompt")
+  return !!prompt && "value" in prompt && prompt.value===mark.prompt && value.mode===mark.mode && value.native===mark.native
+}
+
+export const Info = z
+  .object({
+    name: z.string(),
+    description: z.string().optional(),
+    mode: z.enum(["subagent", "primary", "all"]),
+    native: z.boolean().optional(),
+    hidden: z.boolean().optional(),
+    topP: z.number().optional(),
+    temperature: z.number().optional(),
+    color: z.string().optional(),
+    permission: Permission.Ruleset.zod,
+    // Non-overridable rules appended AFTER the user/session permissions during
+    // runtime evaluation (see runtimePermission). Use for agent invariants that
+    // config must not be able to relax — e.g. plan mode's edit/write block.
+    hardPermission: Permission.Ruleset.zod.optional(),
+    model: z
+      .object({
+        modelID: ModelID.zod,
+        providerID: ProviderID.zod,
+      })
+      .optional(),
+    modelRef: z.string().optional(),
+    variant: z.string().optional(),
+    prompt: z.string().optional(),
+    completionGate: z.boolean().optional(),
+    options: z.record(z.string(), z.any()),
+    steps: z.number().int().positive().optional(),
+    toolAllowlist: z.array(z.string()).optional(),
+  })
+  .meta({
+    ref: "Agent",
+  })
+export type Info = z.infer<typeof Info>
+
+export interface Interface {
+  readonly get: (agent: string) => Effect.Effect<Info>
+  readonly list: () => Effect.Effect<Info[]>
+  readonly defaultAgent: () => Effect.Effect<string>
+  readonly generate: (input: {
+    description: string
+    model?: { providerID: ProviderID; modelID: ModelID }
+  }) => Effect.Effect<{
+    identifier: string
+    whenToUse: string
+    systemPrompt: string
+  }>
+}
+
+type State = Omit<Interface, "generate">
+
+export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
+
+// Merge an agent's permission with the user/session ruleset, then re-append the
+// agent's hardPermission so those invariants win over any allow rule a user or
+// session approval could introduce. Every permission-evaluation site routes
+// through this — there is no per-agent name special-casing.
+export function runtimePermission(agent: Info, permission?: Permission.Ruleset) {
+  return Permission.merge(agent.permission, permission ?? [], agent.hardPermission ?? [])
+}
+
+/**
+ * Resolve an agent name that was stored on a historical message. Unrecognized
+ * names (including the retired `compose` agent) fall back to the default agent
+ * so legacy sessions remain readable. Live/explicit agent selection still goes
+ * through `Agent.get` and errors on a missing name.
+ */
+export function resolveStoredAgent(
+  agents: { get: (name: string) => Effect.Effect<Info>; defaultAgent: () => Effect.Effect<string> },
+  name: string,
+): Effect.Effect<Info> {
+  return Effect.gen(function* () {
+    // Agent.get is typed Effect<Info> but resolves to undefined for a missing
+    // name; annotate rather than cast so the compiler tracks the real shape.
+    const found: Info | undefined = yield* agents.get(name)
+    if (found) return found
+    return yield* agents.get(yield* agents.defaultAgent())
+  })
+}
+
+export const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const config = yield* Config.Service
+    const auth = yield* Auth.Service
+    const plugin = yield* Plugin.Service
+    const skill = yield* Skill.Service
+    const provider = yield* Provider.Service
+
+    const state = yield* InstanceState.make<State>(
+      Effect.fn("Agent.state")(function* (_ctx) {
+        const cfg = yield* config.get()
+        const skillDirs = yield* skill.dirs()
+        const whitelistedDirs = [Truncate.GLOB, ...skillDirs.map((dir) => path.join(dir, "*"))]
+
+        const defaults = Permission.fromConfig({
+          "*": "allow",
+          doom_loop: "ask",
+          skill: {
+            "*": "allow",
+          },
+          plan_exit: "deny",
+          external_directory: {
+            "*": "ask",
+            ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
+          },
+          question: "deny",
+          // mirrors github.com/github/gitignore Node.gitignore pattern for .env files
+          read: {
+            "*": "allow",
+            "*.env": "ask",
+            "*.env.*": "ask",
+            "*.env.example": "allow",
+          },
+        })
+
+        const user = Permission.fromConfig(cfg.permission ?? {})
+
+        const agents: Record<string, Info> = {
+          build: {
+            name: "build",
+            color: "#fb8147",
+            description: "Executes tools based on configured permissions.",
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+                plan_exit: "allow",
+              }),
+              user,
+            ),
+            mode: "primary",
+            native: true,
+          },
+          // Max mode is experimental and opt-in: only registered when
+          // `experimental.maxMode` is configured. This keeps the default agent
+          // set as {build, plan} when the feature is off.
+          ...(cfg.experimental?.maxMode
+            ? {
+                max: {
+                  name: "max",
+                  color: "#e85d75",
+                  description:
+                    "Max mode (experimental). Runs N parallel reasoning candidates each step and executes the best one. Same permissions as build.",
+                  options: {},
+                  permission: Permission.merge(
+                    defaults,
+                    Permission.fromConfig({
+                      question: "allow",
+                    }),
+                    user,
+                  ),
+                  mode: "primary" as const,
+                  native: true,
+                },
+              }
+            : {}),
+          plan: {
+            name: "plan",
+            color: "#c7e2a8",
+            description: "Plan mode. Disallows all edit tools.",
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+                plan_exit: "allow",
+                external_directory: {
+                  [path.join(Global.Path.data, "plans", "*")]: "allow",
+                },
+              }),
+              user,
+            ),
+            // Plan mode's one hard invariant: writes to non-plan files are
+            // blocked and user/session config must NOT be able to relax it.
+            // Re-appended after the user merge by runtimePermission so it always
+            // wins. (Every write tool — write/edit/multiedit/apply_patch/
+            // notebook_edit — funnels through ctx.ask({ permission: "edit" }),
+            // so this single rule governs all file writes.) Deliberately scoped
+            // to edit only: bash/workflow are left to the
+            // model's own read-only discipline + plan prompt, matching the
+            // project's "trust the model, permission layer is a backstop"
+            // stance. The "*":"deny" carries a non-"*" allow exception, so the
+            // edit tool stays in the schema (no tool-list mutation on mode
+            // switch, see PR #1207).
+            hardPermission: Permission.fromConfig({
+              edit: {
+                "*": "deny",
+                [path.join(".openclank", "plans", "*.md")]: "allow",
+                [path.relative(Instance.worktree, path.join(Global.Path.data, path.join("plans", "*.md")))]: "allow",
+              },
+            }),
+            mode: "primary",
+            native: true,
+          },
+          compose: {
+            name: "compose",
+            color: "#a7a3d8",
+            description:
+              "Compose mode (deprecated). Orchestrates workflows with built-in compose skills. For Fable/Sol-class models, use Build and run /compose-next instead.",
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+                skill: { "compose:*": "allow" },
+              }),
+              user,
+            ),
+            mode: "primary",
+            native: true,
+          },
+          // Chat profile (identity metaplan Slice 02/05, ruling R2): a real
+          // conversation mode — NOT build with a wildcard deny. Its
+          // prompt replaces the provider coding-agent framing entirely, so a
+          // chat turn is never told it is a CLI coding agent with file
+          // tools it cannot use. The host persona arrives via
+          // PromptInput.system. hardPermission keeps user/session config from
+          // relaxing the invariant: the ONLY model-callable tool is the
+          // read-only memory search (pull affordance, memory-trust metaplan
+          // T8 — the model chooses to recall from the injected index pitch).
+          // Registered after build so defaultAgent() (first visible primary)
+          // stays build.
+          chat: {
+            name: "chat",
+            color: "#8fb8de",
+            description: "Chat mode. Plain conversation — read-only memory recall is the only tool.",
+            options: {},
+            prompt: PROMPT_CHAT,
+            permission: Permission.merge(defaults, user),
+            hardPermission: Permission.fromConfig({
+              "*": "deny",
+              question: "allow",
+              memory: "allow",
+            }),
+            mode: "primary",
+            native: true,
+          },
+          general: {
+            name: "general",
+            color: "#aac4e1",
+            description:
+              "Full-capability general-purpose subagent for autonomous read/write work, including investigation, implementation, debugging, testing, and multi-step delivery. It inherits the parent's available tool surface and can complete a delegated task end to end.",
+            permission: Permission.merge(defaults, user),
+            options: {},
+            mode: "subagent",
+            prompt: PROMPT_GENERAL,
+            completionGate: true,
+            native: true,
+          },
+          explore: {
+            name: "explore",
+            color: "#f5c9b0",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                grep: "allow",
+                glob: "allow",
+                list: "allow",
+                bash: "allow",
+                exec: "allow",
+                webfetch: "allow",
+                websearch: "allow",
+                codesearch: "allow",
+                read: "allow",
+                external_directory: {
+                  "*": "ask",
+                  ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
+                },
+              }),
+              user,
+            ),
+            description: `Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.`,
+            prompt: PROMPT_EXPLORE,
+            options: {},
+            mode: "subagent",
+            native: true,
+          },
+          title: {
+            name: "title",
+            mode: "subagent",
+            options: {},
+            native: true,
+            hidden: true,
+            modelRef: "lite",
+            temperature: 0.5,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                StructuredOutput: "allow",
+              }),
+              user,
+            ),
+            prompt: PROMPT_TITLE,
+            toolAllowlist: [],
+          },
+          summary: {
+            name: "summary",
+            mode: "subagent",
+            options: {},
+            native: true,
+            hidden: true,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+              }),
+              user,
+            ),
+            prompt: PROMPT_SUMMARY,
+            toolAllowlist: [],
+          },
+          compaction: {
+            name: "compaction",
+            mode: "subagent",
+            options: {},
+            native: true,
+            hidden: true,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+              }),
+              user,
+            ),
+            prompt: PROMPT_COMPACTION,
+            toolAllowlist: [],
+          },
+          "checkpoint-writer": {
+            name: "checkpoint-writer",
+            mode: "subagent" as const,
+            options: {},
+            native: true,
+            hidden: true,
+            // No `prompt` field — fork agent contract: at spawn time,
+            // tryStartCheckpointWriter captures parent's full LLM request prefix
+            // (system + tools + messages-to-watermark) into a frozen ForkContext,
+            // stored in Actor service's in-memory map. fork's runLoop reads from
+            // that snapshot instead of recomputing from this agent's identity.
+            // See docs/superpowers/specs/2026-05-26-fork-agent-prefix-cache-design.md
+            //
+            // No `toolAllowlist` field — fork agents must mirror parent's tool
+            // schema for prefix-cache alignment. Runtime tool restriction is
+            // enforced via actor.tools whitelist (set in tryStartCheckpointWriter).
+            // Permission inherits `defaults` (+ user) only — NO bespoke block.
+            // At runtime the fork's LLM-visible tool schema is filtered against the
+            // PARENT agent's permission (ForkContext.parentPermission, fed to
+            // handle.process in prompt.ts's fork branch), so it matches the parent
+            // (prompt-cache parity). NOTE: the per-call ctx.ask still evaluates this
+            // agent's own permission, but that is bounded by the actor.tools whitelist
+            // (set in tryStartCheckpointWriter) and memory-path-guard — the real write
+            // authority — so inheriting `defaults` over-grants nothing in practice.
+            // Memory writes skip the edit ask (askEditUnlessMemory), and any
+            // un-answerable ask fails clean (SYSTEM_SPAWNED_AGENT_TYPES →
+            // interactive:false). See
+            // docs/superpowers/specs/2026-06-05-checkpoint-writer-permission-deadlock-design.md
+            permission: Permission.merge(defaults, user),
+          },
+          dream: {
+            name: "dream", mode: "subagent" as const, options: {}, native: true, hidden: true,
+            prompt: "Memory consolidation requires the admitted Host maintenance adapter.",
+            permission: Permission.fromConfig({ "*": "deny" }), toolAllowlist: [],
+          },
+          distill: {
+            name: "distill", mode: "subagent" as const, options: {}, native: true, hidden: true,
+            prompt: "Distillation requires the admitted Host teacher adapter.",
+            permission: Permission.fromConfig({ "*": "deny" }), toolAllowlist: [],
+          },
+        }
+
+        const originalBundledChat = agents.chat
+        const chatPromptWasConfigured = Object.prototype.hasOwnProperty.call(cfg.agent?.chat ?? {}, "prompt")
+        for (const [key, value] of Object.entries(cfg.agent ?? {})) {
+          if (value.disable) {
+            delete agents[key]
+            continue
+          }
+          let item = agents[key]
+          if (!item)
+            item = agents[key] = {
+              name: key,
+              mode: "all",
+              permission: Permission.merge(defaults, user),
+              options: {},
+              native: false,
+            }
+          if (value.model) {
+            if (value.model.includes("/")) item.model = Provider.parseModel(value.model)
+            else item.modelRef = value.model
+          }
+          item.variant = value.variant ?? item.variant
+          item.prompt = value.prompt ?? item.prompt
+          item.description = value.description ?? item.description
+          item.temperature = value.temperature ?? item.temperature
+          item.topP = value.top_p ?? item.topP
+          item.mode = value.mode ?? item.mode
+          item.color = value.color ?? item.color
+          item.hidden = value.hidden ?? item.hidden
+          item.name = value.name ?? item.name
+          item.steps = value.steps ?? item.steps
+          item.toolAllowlist = value.tool_allowlist ?? item.toolAllowlist
+          item.options = mergeDeep(item.options, value.options ?? {})
+          item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
+        }
+
+        // Only the same built-in object without any configured prompt replacement
+        // receives this private marker; equality of names or bytes is insufficient.
+        if (originalBundledChat && agents.chat === originalBundledChat && !chatPromptWasConfigured &&
+            originalBundledChat.prompt === PROMPT_CHAT) {
+          bundledChatPrompts.set(originalBundledChat,{prompt:PROMPT_CHAT,mode:originalBundledChat.mode,native:originalBundledChat.native})
+          // The marker dies with the actual InstanceState owner; a retained old
+          // agent object cannot survive cache invalidation as current evidence.
+          yield* Effect.addFinalizer(() => Effect.sync(() => bundledChatPrompts.delete(originalBundledChat)))
+        }
+
+        // Ensure Truncate.GLOB and skill directories are allowed unless explicitly configured
+        for (const name in agents) {
+          const agent = agents[name]
+          const globs = whitelistedDirs.filter(
+            (glob) =>
+              !agent.permission.some(
+                (r) => r.permission === "external_directory" && r.action === "deny" && r.pattern === glob,
+              ),
+          )
+          if (globs.length === 0) continue
+
+          agents[name].permission = Permission.merge(
+            agents[name].permission,
+            Permission.fromConfig({ external_directory: Object.fromEntries(globs.map((g) => [g, "allow" as const])) }),
+          )
+        }
+
+        const get = Effect.fnUntraced(function* (agent: string) {
+          if ((agent === "dream" || agent === "distill") && agents[agent]?.native)
+            return yield* Effect.die(new RecoverableError(agent === "dream"
+              ? "Memory consolidation requires the admitted Host maintenance adapter"
+              : "Distillation requires the admitted Host teacher adapter"))
+          return agents[agent]
+        })
+
+        const list = Effect.fnUntraced(function* () {
+          const cfg = yield* config.get()
+          return pipe(
+            agents,
+            values(),
+            sortBy(
+              [(x) => cfg.default_agent !== undefined && x.name === cfg.default_agent, "desc"],
+              [(x) => x.name === "build", "desc"],
+              [(x) => x.name === "plan", "desc"],
+              [(x) => x.name === "max", "desc"],
+              [(x) => x.name, "asc"],
+            ),
+          )
+        })
+
+        const defaultAgent = Effect.fnUntraced(function* () {
+          const c = yield* config.get()
+          if (c.default_agent) {
+            const agent = agents[c.default_agent]
+            if (!agent) throw new Error(`default agent "${c.default_agent}" not found`)
+            if (agent.mode === "subagent") throw new Error(`default agent "${c.default_agent}" is a subagent`)
+            if (agent.hidden === true) throw new Error(`default agent "${c.default_agent}" is hidden`)
+            return agent.name
+          }
+          const visible = Object.values(agents).find((a) => a.mode !== "subagent" && a.hidden !== true)
+          if (!visible) throw new Error("no primary visible agent found")
+          return visible.name
+        })
+
+        return {
+          get,
+          list,
+          defaultAgent,
+        } satisfies State
+      }),
+    )
+
+    return Service.of({
+      get: Effect.fn("Agent.get")(function* (agent: string) {
+        return yield* InstanceState.useEffect(state, (s) => s.get(agent))
+      }),
+      list: Effect.fn("Agent.list")(function* () {
+        return yield* InstanceState.useEffect(state, (s) => s.list())
+      }),
+      defaultAgent: Effect.fn("Agent.defaultAgent")(function* () {
+        return yield* InstanceState.useEffect(state, (s) => s.defaultAgent())
+      }),
+      generate: Effect.fn("Agent.generate")(function* (input: {
+        description: string
+        model?: { providerID: ProviderID; modelID: ModelID }
+      }) {
+        const cfg = yield* config.get()
+        const model = input.model ?? (yield* provider.defaultModel())
+        const resolved = yield* provider.getModel(model.providerID, model.modelID)
+        const language = yield* provider.getLanguage(resolved)
+        const tracer = cfg.experimental?.openTelemetry
+          ? Option.getOrUndefined(yield* Effect.serviceOption(OtelTracer.OtelTracer))
+          : undefined
+
+        const system = [
+          PROMPT_GENERATE,
+          ...(usesCodexMode() ? [PROMPT_GENERATE_GPT] : []),
+        ]
+        yield* plugin.trigger("experimental.chat.system.transform", { model: resolved }, { system })
+        const existing = yield* InstanceState.useEffect(state, (s) => s.list())
+
+        // TODO: clean this up so provider specific logic doesnt bleed over
+        const authInfo = yield* auth.get(model.providerID).pipe(Effect.orDie)
+        const isOpenaiOauth = model.providerID === "openai" && authInfo?.type === "oauth"
+
+        const params = {
+          experimental_telemetry: {
+            isEnabled: cfg.experimental?.openTelemetry,
+            tracer,
+            metadata: {
+              userId: cfg.username ?? "unknown",
+            },
+          },
+          temperature: 0.3,
+          messages: [
+            ...(isOpenaiOauth
+              ? []
+              : system.map(
+                  (item): ModelMessage => ({
+                    role: "system",
+                    content: item,
+                  }),
+                )),
+            {
+              role: "user",
+              content: `Create an agent configuration based on this request: "${input.description}".\n\nIMPORTANT: The following identifiers already exist and must NOT be used: ${existing.map((i) => i.name).join(", ")}\n  Return ONLY the JSON object, no other text, do not wrap in backticks`,
+            },
+          ],
+          model: language,
+          schema: z.object({
+            identifier: z.string(),
+            whenToUse: z.string(),
+            systemPrompt: z.string(),
+          }),
+        } satisfies Parameters<typeof generateObject>[0]
+
+        if (isOpenaiOauth) {
+          return yield* Effect.promise(async () => {
+            const result = streamObject({
+              ...params,
+              providerOptions: ProviderTransform.providerOptions(resolved, {
+                instructions: system.join("\n"),
+                store: false,
+              }),
+              onError: () => {},
+            })
+            for await (const part of result.fullStream) {
+              if (part.type === "error") throw part.error
+            }
+            return result.object
+          })
+        }
+
+        return yield* Effect.promise(() => generateObject(params).then((r) => r.object))
+      }),
+    })
+  }),
+)
+
+export const defaultLayer = layer.pipe(
+  Layer.provide(Plugin.defaultLayer),
+  Layer.provide(Provider.defaultLayer),
+  Layer.provide(Auth.defaultLayer),
+  Layer.provide(Config.defaultLayer),
+  Layer.provide(Skill.defaultLayer),
+)
+
+export * as Agent from "./agent"

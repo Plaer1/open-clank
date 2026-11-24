@@ -1,4 +1,6 @@
+import { bindCardActionMenu } from './cardActionMenu.js';
 import { uiIcon } from './uiIcons.js';
+import { catalogHasModelChoice } from './modelCatalog.js';
 // Session Management Functions
 // This module handles all session-related operations
 
@@ -30,7 +32,7 @@ const SIDEBAR_MAX_VISIBLE = 10;
 const FOLDER_MAX_VISIBLE = 5;
 let _showAllSessions = false;
 let _expandedFolders = {};  // folderName -> true if "show more" clicked
-let _sortMode = Storage.get('odysseus-session-sort') || 'active'; // default to last active
+let _sortMode = Storage.get('openclank-session-sort') || 'active'; // default to last active
 const DATE_SECTION_COLLAPSE_KEY = 'ody-session-date-section-collapsed';
 let _autoCreateInProgress = false; // guard against recursive auto-create
 const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key for incognito session IDs
@@ -330,6 +332,7 @@ let _sessionListFocused = false;
 function _deselectCurrentSession(sid) {
   if (currentSessionId !== sid) return;
   currentSessionId = null;
+  document.dispatchEvent(new Event('openclank:chat-status-scope'));
   uiModule.el('chat-history').innerHTML = '';
   uiModule.el('current-meta').textContent = 'Open Clank Chat';
   Storage.remove('lastSessionId');
@@ -387,8 +390,8 @@ function _normalizeSessionsList(fetched) {
 export function initDependencies() {}
 
 // ── Folder state persistence ──
-const FOLDER_STATE_KEY = 'odysseus-folder-state';
-const FOLDER_ORDER_KEY = 'odysseus-folder-order';
+const FOLDER_STATE_KEY = 'openclank-folder-state';
+const FOLDER_ORDER_KEY = 'openclank-folder-order';
 
 function loadFolderState() {
   return Storage.getJSON(FOLDER_STATE_KEY, {});
@@ -421,117 +424,29 @@ async function moveToFolder(sessionId, folderName) {
   renderSessionList();
 }
 
-/** Build the "Move to folder" submenu for a session dropdown. */
-function buildFolderSubmenu(sessionId, currentFolder, dropdown) {
-  const folders = getFolderNames();
-
-  const moveItem = document.createElement('div');
-  moveItem.className = 'dropdown-item-compact';
-  moveItem.style.position = 'relative';
-  const _folderIcon = uiIcon("folder", 14);
-  moveItem.innerHTML = '<span class="dropdown-icon">' + _folderIcon + '</span><span>Move to folder</span>';
-
-  const sub = document.createElement('div');
-  sub.className = 'dropdown session-folder-submenu';
-
-  // "No folder" option
-  const noneOpt = document.createElement('div');
-  noneOpt.className = 'dropdown-item-compact';
-  if (!currentFolder) noneOpt.style.opacity = '0.5';
-  noneOpt.textContent = '(No folder)';
-  noneOpt.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    await moveToFolder(sessionId, '');
-    dropdown.style.display = 'none';
-    sub.style.display = 'none';
-  });
-  sub.appendChild(noneOpt);
-
-  // Existing folders
-  folders.forEach(f => {
-    const opt = document.createElement('div');
-    opt.className = 'dropdown-item-compact';
-    if (f === currentFolder) opt.style.opacity = '0.5';
-    opt.textContent = f;
-    opt.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await moveToFolder(sessionId, f);
-      // Auto-flip to By Folder view so the user can see where the
-      // chat went, same as when creating a new folder.
+function sessionFolderActions(s, valid) {
+  const menu = 'Move to folder';
+  return [
+    { id: 'folder-none', label: '(No folder)', menu, checked: !s.folder, run: () => moveToFolder(s.id, '') },
+    ...getFolderNames().map(folder => ({
+      id: 'folder:' + folder, label: folder, menu, checked: folder === s.folder,
+      run: async () => {
+        await moveToFolder(s.id, folder);
+        setSortMode('group');
+      },
+    })),
+    { separator: true, menu },
+    { id: 'folder-new', label: 'New folder', menu, dialog: true, run: async () => {
+      const name = await styledPrompt('Name this folder:', {
+        title: 'New folder',
+        placeholder: 'e.g. Work, Research, Drafts',
+        confirmText: 'Create',
+      });
+      if (!name?.trim() || !valid()) return;
+      await moveToFolder(s.id, name.trim());
       setSortMode('group');
-      dropdown.style.display = 'none';
-      sub.style.display = 'none';
-    });
-    sub.appendChild(opt);
-  });
-
-  // "New folder" option
-  const newOpt = document.createElement('div');
-  newOpt.className = 'dropdown-item-compact';
-  newOpt.style.color = 'var(--accent-primary)';
-  newOpt.textContent = '+ New Folder';
-  newOpt.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const name = await styledPrompt('Name this folder:', {
-      title: 'New folder',
-      placeholder: 'e.g. Work, Research, Drafts',
-      confirmText: 'Create',
-    });
-    if (!name || !name.trim()) return;
-    await moveToFolder(sessionId, name.trim());
-    // Auto-flip to By Folder view so the user immediately sees the
-    // folder they just created — otherwise the new folder disappears
-    // into the flat list and looks like the action did nothing.
-    setSortMode('group');
-    dropdown.style.display = 'none';
-    sub.style.display = 'none';
-  });
-  sub.appendChild(newOpt);
-
-  moveItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (sub.style.display === 'block') {
-      sub.style.display = 'none';
-    } else {
-      const rect = moveItem.getBoundingClientRect();
-      const isMobile = window.innerWidth <= 768;
-      sub.style.top = '-9999px';
-      sub.style.display = 'block';
-      const subRect = sub.getBoundingClientRect();
-
-      if (isMobile) {
-        // On mobile: position below the dropdown, centered
-        const ddRect = dropdown.getBoundingClientRect();
-        sub.style.left = Math.max(8, ddRect.left) + 'px';
-        sub.style.width = Math.min(ddRect.width, window.innerWidth - 16) + 'px';
-        const topBelow = ddRect.bottom + 4;
-        if (topBelow + subRect.height > window.innerHeight) {
-          sub.style.top = Math.max(8, ddRect.top - subRect.height - 4) + 'px';
-        } else {
-          sub.style.top = topBelow + 'px';
-        }
-      } else {
-        // Desktop: to the right
-        sub.style.left = rect.right + 2 + 'px';
-        sub.style.width = '';
-        if (rect.top + subRect.height > window.innerHeight) {
-          sub.style.top = Math.max(2, window.innerHeight - subRect.height - 4) + 'px';
-        } else {
-          sub.style.top = rect.top + 'px';
-        }
-        // Clamp right edge
-        if (rect.right + 2 + subRect.width > window.innerWidth - 8) {
-          sub.style.left = Math.max(8, rect.left - subRect.width - 2) + 'px';
-        }
-      }
-    }
-  });
-
-  sub.addEventListener('click', (e) => e.stopPropagation());
-  document.addEventListener('click', () => { sub.style.display = 'none'; });
-  document.body.appendChild(sub);
-
-  return moveItem;
+    } },
+  ];
 }
 
 /** Create a single session list-item element. */
@@ -621,273 +536,9 @@ function createSessionItem(s) {
   span.title = (s.model ? s.model.split('/').pop() + ' · ' : '') + chatTitle;
   span.classList.add('text-ellipsis');
 
-  // Double-click to rename (only when session is already selected)
-  if (!isOpenClaw) {
-    span.addEventListener('dblclick', (e) => {
-      if (currentSessionId !== s.id) return; // must be selected first
-      e.stopPropagation();
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.value = s.name || '';
-      input.className = 'session-rename-input';
-      span.replaceWith(input);
-      input.focus();
-      input.select();
-      const _stopGuard = _guardSidebarDuringRename();
-      const commit = async () => {
-        const newName = input.value.trim();
-        if (newName && newName !== s.name) {
-          const fd = new FormData();
-          fd.append('name', newName);
-          await fetch(`${API_BASE}/api/session/${s.id}`, { method: 'PATCH', body: fd });
-          s.name = newName;
-          uiModule.showToast('Renamed');
-        }
-        _forceSidebarOpen();
-        renderSessionList();
-        _stopGuard();
-      };
-      input.addEventListener('blur', commit);
-      input.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
-        if (ev.key === 'Escape') { input.removeEventListener('blur', commit); _forceSidebarOpen(); renderSessionList(); _stopGuard(); }
-      });
-    });
-  }
-
-  // Clicking anywhere on the row selects the session (except drag handle and menu)
-  // On mobile, suppress click if user was scrolling (touchmove detected)
-  // Long press on mobile shows context menu
-  let _touchMoved = false;
-  let _longPressTimer = null;
-  let _longPressed = false;
-  div.addEventListener('touchstart', (e) => {
-    _touchMoved = false;
-    _longPressed = false;
-    if (window.innerWidth > 768) return;
-    _longPressTimer = setTimeout(() => {
-      _longPressed = true;
-      // Haptic feedback if available
-      if (navigator.vibrate) navigator.vibrate(30);
-      // Show the session dropdown directly (menu button is hidden on mobile)
-      const dd = div._sessionDropdown;
-      if (dd) {
-        // Close any other open dropdowns
-        document.querySelectorAll('.dropdown').forEach(d => { if (d !== dd) d.style.display = 'none'; });
-        const rect = div.getBoundingClientRect();
-        dd.style.position = 'fixed';
-        dd.style.left = rect.left + 'px';
-        dd.style.top = (rect.bottom + 4) + 'px';
-        dd.style.right = 'auto';
-        dd.style.display = 'block';
-        dd.style.zIndex = '1000';
-        // Clamp to viewport
-        requestAnimationFrame(() => {
-          const mr = dd.getBoundingClientRect();
-          if (mr.bottom > window.innerHeight - 8) dd.style.top = (rect.top - mr.height - 4) + 'px';
-          if (mr.right > window.innerWidth - 8) { dd.style.left = 'auto'; dd.style.right = '8px'; }
-        });
-        // Close on tap outside
-        const close = (ev) => { if (!dd.contains(ev.target)) { dd.style.display = 'none'; document.removeEventListener('click', close, true); } };
-        setTimeout(() => document.addEventListener('click', close, true), 100);
-      }
-    }, 500);
-  }, { passive: true });
-  div.addEventListener('touchmove', () => {
-    _touchMoved = true;
-    if (_longPressTimer) { clearTimeout(_longPressTimer); _longPressTimer = null; }
-  }, { passive: true });
-  div.addEventListener('touchend', () => {
-    if (_longPressTimer) { clearTimeout(_longPressTimer); _longPressTimer = null; }
-  }, { passive: true });
-  div.addEventListener('click', (e) => {
-    if (e.target.closest('.item-drag-handle') || e.target.closest('.session-fav') || e.target.closest('.hamburger') || e.target.closest('.session-dropdown') || e.target.closest('.session-rename-input') || e.target.closest('.session-select-cb')) return;
-    if (_touchMoved || _longPressed) { _touchMoved = false; _longPressed = false; return; }
-    // In select mode, toggle dot instead of navigating
-    if (_selectMode) {
-      const dot = div.querySelector('.session-select-cb');
-      if (dot) dot.click();
-      return;
-    }
-    selectSession(s.id);
-  });
-
-  // Create a dropdown menu button
-  const menuBtn = document.createElement('button');
-  menuBtn.innerHTML = uiIcon("chevron-down", 18);
-  menuBtn.title = 'Session actions';
-  menuBtn.className = 'hamburger session-menu-btn';
-
-  // Create dropdown menu
-  const dropdown = document.createElement('div');
-  dropdown.className = 'dropdown session-dropdown session-dropdown-menu';
-
-  // Create menu items
-  const _icon = (svg) => `<span class="dropdown-icon">${svg}</span>`;
-  const _renameIcon = uiIcon("edit", 14);
-  const _archiveIcon = uiIcon("archive", 14);
-  const _deleteIcon = uiIcon("trash", 14);
-  const _copyIcon = uiIcon("copy", 14);
-
-  const renameItem = document.createElement('div');
-  renameItem.className = 'dropdown-item-compact';
-  renameItem.innerHTML = _icon(_renameIcon) + '<span>Rename</span>';
-
-  const archiveItem = document.createElement('div');
-  archiveItem.className = 'dropdown-item-compact';
-  archiveItem.innerHTML = _icon(_archiveIcon) + '<span>Archive</span>';
-
-  const deleteItem = document.createElement('div');
-  deleteItem.className = 'dropdown-item-compact dropdown-item-danger';
-  deleteItem.innerHTML = _icon(_deleteIcon) + '<span>Delete</span><span class="dropdown-shortcut">' + _mod + '+Alt+D</span>';
-
-
-
-  dropdown.appendChild(renameItem);
-
-  // Star/Unstar item
-  if (!isOpenClaw) {
-    const _favIcon = s.is_important
-      ? uiIcon("bookmark", 14)
-      : uiIcon("bookmark-filled", 14);
-    const starItem = document.createElement('div');
-    starItem.className = 'dropdown-item-compact';
-    starItem.innerHTML = _icon(_favIcon) + '<span>' + (s.is_important ? 'Unfavorite' : 'Favorite') + '</span><span class="dropdown-shortcut">' + _mod + '+Alt+F</span>';
-    starItem.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const newVal = !s.is_important;
-      const fd = new FormData();
-      fd.append('important', newVal);
-      await fetch(`${API_BASE}/api/session/${s.id}/important`, { method: 'POST', body: fd });
-      s.is_important = newVal;
-      dropdown.style.display = 'none';
-      renderSessionList();
-    });
-    dropdown.appendChild(starItem);
-  }
-
-  const copyItem = document.createElement('div');
-  copyItem.className = 'dropdown-item-compact';
-  copyItem.innerHTML = _icon(_copyIcon) + '<span>Copy Chat</span>';
-  copyItem.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    dropdown.style.display = 'none';
-    try {
-      const res = await fetch(`${API_BASE}/api/history/${s.id}`);
-      const data = await res.json();
-      const msgs = data.history || [];
-      if (!msgs.length) { uiModule.showToast('No messages to copy'); return; }
-      const lines = msgs
-        .filter(m => m.role === 'user' || m.role === 'assistant')
-        .map(m => {
-          const label = m.role === 'user' ? 'You' : 'AI';
-          const text = typeof m.content === 'string' ? m.content.trim() : JSON.stringify(m.content);
-          return `${label}: ${text}`;
-        });
-      const text = lines.join('\n\n');
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch (_clipErr) {
-        // Fallback for non-secure contexts
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.cssText = 'position:fixed;left:-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-      }
-      uiModule.showToast('Chat copied to clipboard');
-    } catch (e) {
-      console.error('Copy chat failed:', e);
-      uiModule.showError('Failed to copy chat');
-    }
-  });
-
-  // Rename is already appended above (line 393)
-
-  // "Select" — enter bulk select mode with this session pre-selected
-  if (!isOpenClaw) {
-    const selectMoreItem = document.createElement('div');
-    selectMoreItem.className = 'dropdown-item-compact';
-    selectMoreItem.innerHTML = _icon('<span style="font-size:16px;line-height:1;">●</span>') + '<span>Select</span>';
-    selectMoreItem.addEventListener('click', (e) => {
-      e.stopPropagation();
-      dropdown.style.display = 'none';
-      _enterSelectMode();
-      const dot = div.querySelector('.session-select-cb');
-      if (dot) { dot._checked = true; dot.innerHTML = '●'; dot.style.opacity = '1'; dot.style.color = 'var(--accent, var(--red))'; _selectedIds.add(s.id); _updateBulkCount(); }
-    });
-    // On mobile, "Select" is the primary multi-pick action — put it at the top
-    // of the menu. On desktop keep its original position.
-    if (window.innerWidth <= 768) {
-      dropdown.insertBefore(selectMoreItem, dropdown.firstChild);
-    } else {
-      dropdown.appendChild(selectMoreItem);
-    }
-  }
-
-  // Copy & Move to folder
-  const folderItem = buildFolderSubmenu(s.id, s.folder, dropdown);
-  dropdown.appendChild(copyItem);
-  dropdown.appendChild(folderItem);
-
-  // Separator before destructive actions
-  const _sep = document.createElement('div');
-  _sep.style.cssText = 'height:1px;margin:3px 0;background:color-mix(in srgb,var(--border) 40%,transparent)';
-  dropdown.appendChild(_sep);
-
-  dropdown.appendChild(archiveItem);
-  dropdown.appendChild(deleteItem);
-
-  // Mobile-only Cancel — explicit close for touch users. CSS hides it on
-  // desktop (outside-click already dismisses cleanly there).
-  const _cancelIcon = uiIcon("close", 14);
-  const cancelItem = document.createElement('div');
-  cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
-  cancelItem.innerHTML = _icon(_cancelIcon) + '<span>Cancel</span>';
-  cancelItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    dropdown.style.display = 'none';
-  });
-  dropdown.appendChild(cancelItem);
-
-  // Add event listeners
-  menuBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    // Close any other open dropdowns
-    document.querySelectorAll('.dropdown').forEach(d => {
-      if (d !== dropdown) d.style.display = 'none';
-    });
-    // Toggle this dropdown
-    if (dropdown.style.display === 'block') {
-      dropdown.style.display = 'none';
-    } else {
-      // Position the dropdown using viewport coords
-      const rect = menuBtn.getBoundingClientRect();
-      dropdown.style.left = '';
-      dropdown.style.right = (window.innerWidth - rect.right) + 'px';
-      // Show off-screen first to measure height
-      dropdown.style.top = '-9999px';
-      dropdown.style.display = 'block';
-      const ddRect = dropdown.getBoundingClientRect();
-      // Flip above if not enough room below
-      if (rect.bottom + 2 + ddRect.height > window.innerHeight) {
-        dropdown.style.top = Math.max(2, rect.top - ddRect.height - 2) + 'px';
-      } else {
-        dropdown.style.top = rect.bottom + 2 + 'px';
-      }
-    }
-  });
-
-  renameItem.addEventListener('click', () => {
-    dropdown.style.display = 'none';
+  function renameSession() {
+    if (!span.isConnected || div.querySelector('.session-rename-input')) return;
     _forceSidebarOpen();
-    // Find the session row's name span and start inline editing
-    const sessionEl = document.querySelector(`.list-item[data-session-id="${s.id}"]`);
-    if (!sessionEl) return;
-    const span = sessionEl.querySelector('.grow');
-    if (!span || sessionEl.querySelector('.session-rename-input')) return;
     const input = document.createElement('input');
     input.type = 'text';
     input.value = s.name || '';
@@ -895,7 +546,7 @@ function createSessionItem(s) {
     span.replaceWith(input);
     input.focus();
     input.select();
-    const _stopGuard = _guardSidebarDuringRename();
+    const stopGuard = _guardSidebarDuringRename();
     const commit = async () => {
       const newName = input.value.trim();
       if (newName && newName !== s.name) {
@@ -907,26 +558,105 @@ function createSessionItem(s) {
       }
       _forceSidebarOpen();
       renderSessionList();
-      _stopGuard();
+      stopGuard();
     };
     input.addEventListener('blur', commit);
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
-      if (ev.key === 'Escape') { input.removeEventListener('blur', commit); _forceSidebarOpen(); renderSessionList(); _stopGuard(); }
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') input.blur();
+      if (e.key === 'Escape') {
+        input.removeEventListener('blur', commit);
+        _forceSidebarOpen();
+        renderSessionList();
+        stopGuard();
+      }
+      if (e.key === 'Enter' || e.key === 'Escape') e.preventDefault();
     });
-  });
+  }
+  if (!isOpenClaw) {
+    span.addEventListener('dblclick', e => {
+      if (currentSessionId !== s.id) return;
+      e.stopPropagation();
+      renameSession();
+    });
+  }
 
-  deleteItem.addEventListener('click', async () => {
-    if (s.is_important) {
-      uiModule.showToast('Unfavorite before deleting');
-      dropdown.style.display = 'none';
+  div.addEventListener('click', e => {
+    if (e.target.closest('.item-drag-handle, .session-fav, .hamburger, .session-rename-input, .session-select-cb')) return;
+    if (_selectMode) {
+      div.querySelector('.session-select-cb')?.click();
       return;
     }
-    dropdown.style.display = 'none';
+    selectSession(s.id);
+  });
+
+  const menuBtn = document.createElement('button');
+  menuBtn.type = 'button';
+  menuBtn.innerHTML = uiIcon("chevron-down", 18);
+  menuBtn.title = 'Session actions';
+  menuBtn.className = 'hamburger session-menu-btn';
+
+  async function toggleFavorite() {
+    const newVal = !s.is_important;
+    const fd = new FormData();
+    fd.append('important', newVal);
+    await fetch(`${API_BASE}/api/session/${s.id}/important`, { method: 'POST', body: fd });
+    s.is_important = newVal;
+    renderSessionList();
+  }
+
+  async function copyChat(valid) {
+    try {
+      const res = await fetch(`${API_BASE}/api/history/${s.id}`);
+      const data = await res.json();
+      if (!valid()) return;
+      const msgs = data.history || [];
+      if (!msgs.length) { uiModule.showToast('No messages to copy'); return; }
+      const text = msgs
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .map(m => {
+          const label = m.role === 'user' ? 'You' : 'AI';
+          const content = typeof m.content === 'string' ? m.content.trim() : JSON.stringify(m.content);
+          return `${label}: ${content}`;
+        }).join('\n\n');
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_clipErr) {
+        if (!valid()) return;
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }
+      uiModule.showToast('Chat copied to clipboard');
+    } catch (error) {
+      console.error('Copy chat failed:', error);
+      uiModule.showError('Failed to copy chat');
+    }
+  }
+
+  function selectRow() {
+    if (!_selectMode) _enterSelectMode();
+    const dot = div.querySelector('.session-select-cb');
+    if (dot) {
+      dot._checked = true;
+      dot.innerHTML = '●';
+      dot.style.opacity = '1';
+      dot.style.color = 'var(--accent, var(--red))';
+      _selectedIds.add(s.id);
+      _updateBulkCount();
+    }
+  }
+
+  async function deleteSession(valid) {
+    if (s.is_important) return;
     if (!await confirmChatDeletion([s.id])) {
       _forceSidebarOpen();
       return;
     }
+    if (!valid() || s.is_important) return;
     const wasCurrentSession = currentSessionId === s.id;
     // If streaming, abort it before deleting
     if (wasCurrentSession && window.chatModule && window.chatModule.abortCurrentRequest) {
@@ -951,35 +681,49 @@ function createSessionItem(s) {
       _forceSidebarOpen();
     }
     await loadSessions();
-  });
+  }
 
-  archiveItem.addEventListener('click', async () => {
-    dropdown.style.display = 'none';
+  async function archiveSession() {
     _forceSidebarOpen();
     try {
       const response = await fetch(`${API_BASE}/api/session/${s.id}/archive`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
-      if (response.ok) {
-        _forceSidebarOpen();
-        await loadSessions();
-        dropdown.style.display = 'none';
-        uiModule.showToast('Session archived');
-      } else {
-        throw new Error('Failed to archive session');
-      }
+      if (!response.ok) throw new Error('Failed to archive session');
+      _forceSidebarOpen();
+      await loadSessions();
+      uiModule.showToast('Session archived');
     } catch (error) {
       console.error('Error archiving session:', error);
       uiModule.showError('Failed to archive session');
     }
-  });
+  }
 
-  // Dropdowns are closed by the shared global listener (_initDropdownDismiss)
-
-  // Prevent dropdown from closing when clicking inside it
-  dropdown.addEventListener('click', (e) => {
-    e.stopPropagation();
+  bindCardActionMenu(div, {
+    button: menuBtn,
+    exclude: '.item-drag-handle, .session-fav, .session-select-cb',
+    current: () => isOpenClaw || sessions.includes(s),
+    allowGesture: () => !_selectMode,
+    items: valid => {
+      const items = [{ id: 'rename', label: 'Rename', icon: 'edit', disabled: !span.isConnected, run: renameSession }];
+      if (!isOpenClaw) {
+        items.push({ id: 'favorite', label: s.is_important ? 'Unfavorite' : 'Favorite',
+          icon: s.is_important ? 'bookmark' : 'bookmark-filled', shortcut: _mod + '+Alt+F', run: toggleFavorite });
+        const select = { id: 'select', label: 'Select', icon: 'select', run: selectRow };
+        if (window.innerWidth <= 768) items.unshift(select);
+        else items.push(select);
+      }
+      items.push(
+        { id: 'copy', label: 'Copy Chat', icon: 'copy', run: () => copyChat(valid) },
+        ...sessionFolderActions(s, valid),
+        { separator: true },
+        { id: 'archive', label: 'Archive', icon: 'archive', run: archiveSession },
+        { id: 'delete', label: 'Delete', icon: 'trash', shortcut: _mod + '+Alt+D', dialog: true, destructive: true,
+          disabled: !!s.is_important, disabledReason: s.is_important ? 'Unfavorite before deleting' : '', run: () => deleteSession(valid) },
+      );
+      return items;
+    },
   });
 
   div.appendChild(span);
@@ -1003,10 +747,6 @@ function createSessionItem(s) {
   }
 
   div.appendChild(menuBtn);
-  dropdown.addEventListener('click', (e) => e.stopPropagation());
-  document.body.appendChild(dropdown);
-  div._sessionDropdown = dropdown;
-
   return div;
 }
 
@@ -1144,9 +884,6 @@ function _renderSessionListImpl() {
       console.warn('Failed to restore session order:', e);
     }
   }
-
-  // Clean up any previous session dropdowns and folder submenus from body
-  document.querySelectorAll('.session-dropdown, .folder-submenu').forEach(d => d.remove());
 
   const _frag = document.createDocumentFragment();
 
@@ -1818,12 +1555,34 @@ export async function loadSessions() {
     // picker would still show the old model's name from cached state). See
     // the targetId resolution above (hash → currentSession → lastSessionId →
     // most-recent).
+    const captureDefaultRequest = () => {
+      const pending = _pendingChat, nav = getSessionNavigationToken(), sid = currentSessionId;
+      const account = window.chatModule?.ratingAccountScope?.(), bodyAccount = document.body?.dataset?.accountId;
+      if (sid || !account?.owner || account.sid !== null || account.owner !== bodyAccount
+          || pending?.styleCreateUnknown || pending?.modelId || pending?.endpointId || pending?.url || pending?.modelRouteId) return null;
+      const style = pending?.responseStyle;
+      return {pending, current: () => { const now=window.chatModule?.ratingAccountScope?.(); return _pendingChat===pending
+        && currentSessionId===sid && getSessionNavigationToken()===nav && now?.owner===account.owner
+        && now.authEpoch===account.authEpoch && now.sid===account.sid && document.body?.dataset?.accountId===bodyAccount
+        && !pending?.styleCreateUnknown && !pending?.modelId && !pending?.endpointId && !pending?.url && !pending?.modelRouteId
+        && pending?.responseStyle===style; }};
+    };
+    const applyDefault = (capture, dc) => {
+      if (!capture.current()) return false;
+      if (capture.pending) {
+        Object.assign(capture.pending, {url:dc.endpoint_url, modelId:dc.model, endpointId:dc.endpoint_id || '', source:'default'});
+        updateModelPicker();
+      } else createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default', {preserveComposer:true});
+      return true;
+    };
     if (_isFirstLoad) {
       sessionStorage.setItem('ody-session-active', '1');
-      if (!targetId) {
+      const capture = !targetId ? captureDefaultRequest() : null;
+      if (capture) {
         try {
           const dcRes = await fetch(`${API_BASE}/api/default-chat`);
           const dc = await dcRes.json();
+          if (!capture.current()) return false;
           if (dc.endpoint_url && dc.model) {
             // Check if there's already an empty session with this model we can reuse
             const emptyDefault = activeSessions.find(s =>
@@ -1831,10 +1590,10 @@ export async function loadSessions() {
               String(s.endpoint_id || '') === String(dc.endpoint_id || '') &&
               String(s.endpoint_url || '') === String(dc.endpoint_url || '')
             );
-            if (emptyDefault) {
+            if (emptyDefault && !capture.pending) {
               targetId = emptyDefault.id;
             } else {
-              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
+              if (!applyDefault(capture, dc)) return false;
               // On mobile, hide sidebar so user lands directly in chat
               if (window.innerWidth < 768) {
                 const sb = document.getElementById('sidebar');
@@ -1874,16 +1633,16 @@ export async function loadSessions() {
       }
       updateModelPicker();
       // Only auto-create if there are truly zero sessions (not just unselected)
-      if (activeSessions.length === 0 && !_autoCreateInProgress) {
+      const capture = activeSessions.length === 0 && !_autoCreateInProgress ? captureDefaultRequest() : null;
+      if (capture) {
         _autoCreateInProgress = true;
         try {
           const dcRes = await fetch(`${API_BASE}/api/default-chat`);
           const dc = await dcRes.json();
-          if (dc.endpoint_url && dc.model) {
-            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
-          }
+          if (!capture.current()) return false;
+          if (dc.endpoint_url && dc.model) applyDefault(capture, dc);
         } catch (_) { /* no default model — that's fine, user can /setup */ }
-        _autoCreateInProgress = false;
+        finally { _autoCreateInProgress = false; }
       }
     }
   } catch (error) {
@@ -1894,7 +1653,7 @@ export async function loadSessions() {
   return true;
 }
 
-export async function selectSession(id, { keepSidebar = false, showLoading = true, immediateLoading = false, preserveComposer = false } = {}) {
+export async function selectSession(id, { keepSidebar = false, showLoading = true, immediateLoading = false, preserveComposer = false, awaitSessionState = false } = {}) {
   let navToken = null;
   let loadingTimer = null;
   // Exit compare mode cleanly if active
@@ -2195,10 +1954,15 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
         window.chatModule.checkBackgroundStream(id);
       }
       if (window.chatModule && window.chatModule.restoreSessionState) {
-        window.chatModule.restoreSessionState(id);
-      }
+        const restoring = window.chatModule.restoreSessionState(id);
+        if (awaitSessionState) {
+          await restoring;
+          if (navToken !== _sessionNavToken || currentSessionId !== id) return false;
+        }
+      } else if (awaitSessionState) return false;
     } catch (e) {
       console.warn('checkBackgroundStream error:', e);
+      if (awaitSessionState) return false;
     }
     // Check server for active stream (survives page refresh)
     _checkServerStream(id);
@@ -2206,7 +1970,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     if (window.documentModule) {
       const docBtn = document.getElementById('overflow-doc-btn');
       const meta = sessions.find(s => s.id === id);
-      const shouldOpen = localStorage.getItem('odysseus-doc-open-' + id) === '1';
+      const shouldOpen = localStorage.getItem('openclank-doc-open-' + id) === '1';
       const hasDocs = !!(meta && meta.has_documents);
       if (docBtn) {
         docBtn.classList.remove('active');
@@ -2284,6 +2048,7 @@ export function createDirectChat(url, modelId, endpointId, source = 'manual', op
   _skipAutoSelect = true;
   _suppressNextSessionLoading = true;
   currentSessionId = null;
+  document.dispatchEvent(new Event('openclank:chat-status-scope'));
   try { window.__odysseusLastSelectedSessionId = ''; } catch (_) {}
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);
@@ -2333,17 +2098,34 @@ export function createDirectChat(url, modelId, endpointId, source = 'manual', op
 export async function materializePendingSession() {
   if (_pendingMaterializePromise) return _pendingMaterializePromise;
   const pending = _pendingChat;
-  if (!pending) return false;
+  if (!pending || pending.styleCreateUnknown) return false;
 
   const materializePromise = (async () => {
 
     const incognitoChk = document.getElementById('incognito-toggle');
-    const isIncognito = incognitoChk && incognitoChk.checked;
-    const base = (pending.modelId || 'model').split('/').pop();
+    const isIncognito = !!(incognitoChk && incognitoChk.checked);
+    const navigationToken = getSessionNavigationToken();
+    const styleAccount = window.chatModule?.ratingAccountScope?.();
+    if (!styleAccount?.owner || styleAccount.sid !== null || document.body?.dataset?.accountId !== styleAccount.owner) return false;
+    const styleMode = pending.responseStyle || 'normal';
+    if (!['normal','concise','brief','minimal'].includes(styleMode)) return false;
+    const choice = { modelId: pending.modelId || '', url: pending.url || '', endpointId: pending.endpointId || '' };
+    const styleCurrent=()=>{const now=window.chatModule?.ratingAccountScope?.();return _pendingChat===pending && pending.modelId===choice.modelId && (pending.url || '')===choice.url && (pending.endpointId || '')===choice.endpointId && (pending.responseStyle || 'normal')===styleMode && getSessionNavigationToken()===navigationToken && now?.owner===styleAccount.owner && now.authEpoch===styleAccount.authEpoch && now.sid===null && document.body?.dataset?.accountId===styleAccount.owner && !!document.getElementById('incognito-toggle')?.checked===isIncognito;};
+    if (!choice.modelId || !styleCurrent()) return false;
+    let items;
+    try {
+      const catalog = await fetch(`${API_BASE}/api/models`, { credentials: 'same-origin' });
+      if (!catalog.ok) return false;
+      items = (await catalog.json()).items;
+    } catch (_) { return false; }
+    if (!styleCurrent() || !catalogHasModelChoice(items, choice.modelId, choice.endpointId, choice.url)) return false;
+    const base = choice.modelId.split('/').pop();
     const name = isIncognito ? 'Nobody' : `${base} ${new Date().toLocaleTimeString()}`;
 
     const fd = new FormData();
     fd.append('name', name);
+    if (!isIncognito) fd.append('response_style', styleMode);
+    if (isIncognito) fd.append('incognito', 'true');
     fd.append('endpoint_url', pending.url || '');
     fd.append('model', pending.modelId || '');
     if (pending.url && pending.modelId) {
@@ -2357,35 +2139,43 @@ export async function materializePendingSession() {
       fd.append('workspace_id', pendingWorkspaceId);
     }
 
+    if (!styleCurrent()) return false;
     let res;
     try {
       res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd });
     } catch (e) {
-      uiModule.showError('Failed to reach backend: ' + e);
+      if (_pendingChat===pending) pending.styleCreateUnknown=true;
+      if (styleCurrent()) uiModule.showError('Chat creation outcome is unknown; the draft was preserved.');
       return false;
     }
 
+    if (!styleCurrent()) { if (_pendingChat===pending) pending.styleCreateUnknown=true; return false; }
     let payload;
     try {
       payload = await res.json();
     } catch {
-      payload = { detail: await res.text() };
-    }
-
-    if (!res.ok) {
-      uiModule.showError(`Session create failed (${res.status}) ${payload.detail || JSON.stringify(payload)}`);
+      if (_pendingChat===pending && (res.ok || res.status >= 500)) pending.styleCreateUnknown=true;
+      if (styleCurrent()) uiModule.showError('Chat creation response unavailable; the draft was preserved.');
       return false;
     }
-    if (!payload.id) {
-      uiModule.showError('Session create failed: backend returned no session ID');
+
+    if (!styleCurrent()) { if (_pendingChat===pending) pending.styleCreateUnknown=true; return false; }
+    if (!res.ok) {
+      if (res.status >= 500) pending.styleCreateUnknown=true;
+      uiModule.showError(res.status >= 500 ? 'Chat creation outcome is unknown; the draft was preserved.' : `Session create failed (${res.status}) ${payload.detail || JSON.stringify(payload)}`);
+      return false;
+    }
+    if (!payload.id || (!isIncognito && (payload.response_style !== styleMode || payload.response_style_revision !== 0))) {
+      if (styleCurrent()) pending.styleCreateUnknown=true;
+      uiModule.showError('Chat creation outcome is unknown; the draft was preserved.');
       return false;
     }
 
     // The user may have opened an existing chat while this deferred default
     // session was being created. Do not let a stale response steal
     // currentSessionId and make the next send land in a brand-new chat.
-    if (_pendingChat !== pending) {
-      if (payload.id) {
+    if (!styleCurrent() || !!document.getElementById('incognito-toggle')?.checked !== isIncognito) {
+      if (payload.id && styleCurrent()) {
         fetch(`${API_BASE}/api/session/${encodeURIComponent(payload.id)}`, { method: 'DELETE' }).catch(() => {});
       }
       return false;
@@ -2411,6 +2201,7 @@ export async function materializePendingSession() {
     _sessionRouteRevisions.set(materialized.id, (_sessionRouteRevisions.get(materialized.id) || 0) + 1);
     _pendingChat = null;
     currentSessionId = materialized.id;
+    document.dispatchEvent(new Event('openclank:chat-status-scope'));
     if (!isIncognito) {
       Storage.set('lastSessionId', materialized.id);
     }
@@ -2448,6 +2239,7 @@ export function preMaterializePendingSession() {
   }, 250);
 }
 
+export function isPendingChatMaterializing() { return !!_pendingMaterializePromise; }
 export function hasPendingChat() { return !!_pendingChat; }
 export function getPendingChat() { return _pendingChat; }
 export function clearPendingChat() {
@@ -2469,7 +2261,10 @@ export function getSessions() {
 
 export function setSessionWorkspaceId(sessionId, workspaceId) {
   const session = sessions.find((item) => item.id === sessionId);
-  if (session) session.workspace_id = String(workspaceId || '') || null;
+  const next = String(workspaceId || '') || null;
+  if (!session || session.workspace_id === next) return;
+  session.workspace_id = next;
+  if (sessionId === getCurrentSessionId()) document.dispatchEvent(new Event('openclank:chat-status-scope'));
 }
 
 function acknowledgeSessionRoute(sessionId, route) {
@@ -2496,9 +2291,7 @@ export function getCurrentModel() {
   const sess = sessions.find(x => x.id === currentSessionId);
   if (sess && sess.model) return sess.model;
   if (_pendingChat && _pendingChat.modelId) return _pendingChat.modelId;
-  // Last-resort compatibility for special views that only paint the label.
-  const label = document.getElementById('model-picker-label');
-  return label ? label.textContent.trim() : null;
+  return null;
 }
 
 /** Endpoint URL serving the current (or pending) session's model. Used to
@@ -2903,7 +2696,6 @@ function _initAllDropdowns() {
     acknowledgeSessionRoute,
     createDirectChat,
   });
-  _initDropdownDismiss();
   _initBulkSelect();
 }
 if (document.readyState === 'loading') {
@@ -2912,78 +2704,17 @@ if (document.readyState === 'loading') {
   _initAllDropdowns();
 }
 
-// Shared global listener to close all session dropdowns on click-away or Escape
-function _initDropdownDismiss() {
-  document.addEventListener('click', (e) => {
-    if (e.target.closest('.session-dropdown-menu, .session-folder-submenu')) return;
-    document.querySelectorAll('.session-dropdown-menu, .session-folder-submenu').forEach(d => d.style.display = 'none');
-  });
-  // Watch the sidebar — when it's hidden (any path: hamburger, swipe, mobile
-  // collapse), close any open session dropdowns so they don't orphan over
-  // the page.
-  const _sb = document.getElementById('sidebar');
-  if (_sb) {
-    new MutationObserver(() => {
-      if (_sb.classList.contains('hidden')) {
-        document.querySelectorAll('.session-dropdown-menu, .session-folder-submenu').forEach(d => d.style.display = 'none');
-      }
-    }).observe(_sb, { attributes: true, attributeFilter: ['class'] });
-  }
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    // Esc must dismiss both the parent dropdown AND the Move-to-folder
-    // submenu in one keypress — previously only the dropdown closed and
-    // the submenu was left orphaned on screen.
-    document.querySelectorAll('.session-dropdown-menu, .session-folder-submenu').forEach(d => d.style.display = 'none');
+function _bindArchiveActions(card, items, current) {
+  bindCardActionMenu(card, {
+    button: card.querySelector('.archive-menu-btn'),
+    current,
+    exclude: '.memory-select-cb',
+    items: valid => items(valid).map(({ id, label, icon, action, danger }) => ({
+      id: id || label.toLowerCase(), label, icon: icon || label.toLowerCase(),
+      run: action, destructive: !!danger, dialog: !!danger,
+    })),
   });
 }
-
-// ──────────────────────────────────────────────
-// Shared: positioned dropdown menu
-// ──────────────────────────────────────────────
-
-/**
- * Show a dropdown menu anchored to a button, using the existing
- * .dropdown / .dropdown-item-compact / .session-dropdown-menu CSS.
- * Items: [{ label, action, danger? }]
- * Returns a close() function.
- */
-function _showDropdown(anchorEl, items) {
-  // Close any open archive dropdown
-  document.querySelectorAll('.session-dropdown-menu.archive-dd').forEach(d => d.remove());
-
-  const dd = document.createElement('div');
-  dd.className = 'dropdown session-dropdown-menu archive-dd';
-  for (const item of items) {
-    const row = document.createElement('div');
-    row.className = 'dropdown-item-compact' + (item.danger ? ' dropdown-item-danger' : '');
-    row.innerHTML = '<span>' + item.label + '</span>';
-    row.addEventListener('click', (e) => {
-      e.stopPropagation();
-      close();
-      item.action();
-    });
-    dd.appendChild(row);
-  }
-  document.body.appendChild(dd);
-
-  // Position using viewport coords (same pattern as session menus)
-  const rect = anchorEl.getBoundingClientRect();
-  dd.style.right = (window.innerWidth - rect.right) + 'px';
-  dd.style.top = '-9999px';
-  dd.style.display = 'block';
-  const ddRect = dd.getBoundingClientRect();
-  if (rect.bottom + 2 + ddRect.height > window.innerHeight) {
-    dd.style.top = Math.max(2, rect.top - ddRect.height - 2) + 'px';
-  } else {
-    dd.style.top = (rect.bottom + 2) + 'px';
-  }
-
-  function close() { dd.remove(); }
-  // Existing _initDropdownDismiss handles click-away + Escape for .session-dropdown-menu
-  return close;
-}
-
 
 // ──────────────────────────────────────────────
 // Archive Browser
@@ -3020,6 +2751,7 @@ async function _arcPeekOpen(sid) {
 
     // Set as current session so chat renders
     currentSessionId = sid;
+    document.dispatchEvent(new Event('openclank:chat-status-scope'));
 
     // Find the archived session metadata
     const meta = _arc.data.find(s => s.id === sid);
@@ -3066,8 +2798,8 @@ async function _arcRestore(sid) {
   } catch { uiModule.showError('Failed to restore session'); }
 }
 
-async function _arcDelete(sid) {
-  if (!await confirmChatDeletion([sid])) return;
+async function _arcDelete(sid, valid = () => true) {
+  if (!await confirmChatDeletion([sid]) || !valid()) return;
   try {
     const res = await eraseChatById(sid);
     if (!res.ok) throw new Error('Failed');
@@ -3239,14 +2971,11 @@ function _arcRenderCard(s) {
       _arcUpdateBulkBar();
     });
   }
-  card.querySelector('.archive-menu-btn').addEventListener('click', (e) => {
-    e.stopPropagation();
-    _showDropdown(e.currentTarget, [
-      { label: 'Open', action: () => _arcPeekOpen(s.id) },
-      { label: 'Restore', action: () => _arcRestore(s.id) },
-      { label: 'Delete', action: () => _arcDelete(s.id), danger: true },
-    ]);
-  });
+  _bindArchiveActions(card, valid => [
+    { label: 'Open', icon: 'external', action: () => _arcPeekOpen(s.id) },
+    { label: 'Restore', icon: 'refresh', action: () => _arcRestore(s.id) },
+    { label: 'Delete', icon: 'trash', action: () => _arcDelete(s.id, valid), danger: true },
+  ], () => !_arc.selectMode);
   card.addEventListener('click', () => {
     if (_arc.selectMode) {
       if (_arc.selected.has(s.id)) _arc.selected.delete(s.id);
@@ -3473,14 +3202,11 @@ function _renderLibChats(grid) {
       if (_lib.selectMode) { _toggleLibSelect(card, s.id); return; }
       closeLibrary(); selectSession(s.id);
     });
-    card.querySelector('.archive-menu-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      _showDropdown(e.currentTarget, [
-        { label: 'Open', action: () => { closeLibrary(); selectSession(s.id); } },
-        { label: 'Archive', action: async () => { await fetch(`${API_BASE}/api/session/${s.id}/archive`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }); await loadSessions(); _renderLibGrid(); } },
-        { label: 'Delete', action: async () => { if (!await confirmChatDeletion([s.id])) return; await eraseChatById(s.id); await loadSessions(); _renderLibGrid(); }, danger: true },
-      ]);
-    });
+    _bindArchiveActions(card, valid => [
+      { label: 'Open', icon: 'external', action: () => { closeLibrary(); selectSession(s.id); } },
+      { label: 'Archive', action: async () => { await fetch(`${API_BASE}/api/session/${s.id}/archive`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }); await loadSessions(); _renderLibGrid(); } },
+      { label: 'Delete', icon: 'trash', action: async () => { if (!await confirmChatDeletion([s.id]) || !valid()) return; await eraseChatById(s.id); await loadSessions(); _renderLibGrid(); }, danger: true },
+    ], () => !_lib.selectMode && _lib.tab === 'chats');
     grid.appendChild(card);
   }
 }
@@ -3504,13 +3230,10 @@ async function _renderLibArchive(grid) {
         if (e.target.closest('.archive-menu-btn,.memory-select-cb')) return;
         if (_lib.selectMode) { _toggleLibSelect(card, s.id); return; }
       });
-      card.querySelector('.archive-menu-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        _showDropdown(e.currentTarget, [
-          { label: 'Restore', action: async () => { await fetch(`${API_BASE}/api/session/${s.id}/restore`, { method: 'POST' }); await loadSessions(); _renderLibGrid(); } },
-          { label: 'Delete', action: async () => { if (!await confirmChatDeletion([s.id])) return; await eraseChatById(s.id); _renderLibGrid(); }, danger: true },
-        ]);
-      });
+      _bindArchiveActions(card, valid => [
+        { label: 'Restore', icon: 'refresh', action: async () => { await fetch(`${API_BASE}/api/session/${s.id}/restore`, { method: 'POST' }); await loadSessions(); _renderLibGrid(); } },
+        { label: 'Delete', icon: 'trash', action: async () => { if (!await confirmChatDeletion([s.id]) || !valid()) return; await eraseChatById(s.id); _renderLibGrid(); }, danger: true },
+      ], () => !_lib.selectMode && _lib.tab === 'archive');
       grid.appendChild(card);
     }
   } catch (e) { console.error('Library archive error:', e); grid.innerHTML = '<div class="doclib-empty">Failed to load archive</div>'; }
@@ -3542,13 +3265,10 @@ async function _renderLibDocuments(grid) {
           setTimeout(() => { if (window.documentModule.loadSessionDocs) window.documentModule.loadSessionDocs(d.session_id); }, 300);
         }
       });
-      card.querySelector('.archive-menu-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        _showDropdown(e.currentTarget, [
-          { label: 'Open', action: () => { if (d.session_id) { closeLibrary(); selectSession(d.session_id); } } },
-          { label: 'Delete', action: async () => { if (!await uiModule.styledConfirm('Delete?', { confirmText: 'Delete', danger: true })) return; await fetch(`${API_BASE}/api/document/${d.id}`, { method: 'DELETE' }); _renderLibGrid(); }, danger: true },
-        ]);
-      });
+      _bindArchiveActions(card, valid => [
+        { label: 'Open', icon: 'external', action: () => { if (d.session_id) { closeLibrary(); selectSession(d.session_id); } } },
+        { label: 'Delete', icon: 'trash', action: async () => { if (!await uiModule.styledConfirm('Delete?', { confirmText: 'Delete', danger: true }) || !valid()) return; await fetch(`${API_BASE}/api/document/${d.id}`, { method: 'DELETE' }); _renderLibGrid(); }, danger: true },
+      ], () => !_lib.selectMode && _lib.tab === 'documents');
       grid.appendChild(card);
     }
   } catch (e) { console.error('Library documents error:', e); grid.innerHTML = '<div class="doclib-empty">Failed to load documents</div>'; }
@@ -3587,27 +3307,21 @@ async function _renderLibResearch(grid) {
         if (e.target.closest('.archive-menu-btn') || e.target.closest('.memory-select-cb')) return;
         window.open(`${API_BASE}/api/research/report/${item.id}`, '_blank');
       });
-      const menuBtn = card.querySelector('.archive-menu-btn');
-      if (menuBtn) {
-        menuBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          _showDropdown(e.currentTarget, [
-            { label: 'Open Report', action: () => window.open(`${API_BASE}/api/research/report/${item.id}`, '_blank') },
-            { label: 'Re-run', action: () => {
-              const modal = document.getElementById('library-modal');
-              if (modal) modal.style.display = 'none';
-              const msgInput = document.getElementById('message');
-              if (msgInput) { msgInput.value = item.query; msgInput.focus(); }
-              uiModule.showToast('Toggle Research and send to re-run');
-            }},
-            { label: 'Delete', danger: true, action: async () => {
-              if (!await window.styledConfirm('Delete this research?', { confirmText: 'Delete', danger: true })) return;
-              await fetch(`${API_BASE}/api/research/${item.id}`, { method: 'DELETE' });
-              _renderLibGrid();
-            }},
-          ]);
-        });
-      }
+      _bindArchiveActions(card, valid => [
+        { id: 'open-report', label: 'Open Report', icon: 'external', action: () => window.open(`${API_BASE}/api/research/report/${item.id}`, '_blank') },
+        { id: 'rerun', label: 'Re-run', icon: 'refresh', action: () => {
+          const modal = document.getElementById('library-modal');
+          if (modal) modal.style.display = 'none';
+          const msgInput = document.getElementById('message');
+          if (msgInput) { msgInput.value = item.query; msgInput.focus(); }
+          uiModule.showToast('Toggle Research and send to re-run');
+        }},
+        { label: 'Delete', icon: 'trash', danger: true, action: async () => {
+          if (!await window.styledConfirm('Delete this research?', { confirmText: 'Delete', danger: true }) || !valid()) return;
+          await fetch(`${API_BASE}/api/research/${item.id}`, { method: 'DELETE' });
+          _renderLibGrid();
+        }},
+      ], () => !_lib.selectMode && _lib.tab === 'research');
       grid.appendChild(card);
     }
   } catch (e) { console.error('Library research error:', e); grid.innerHTML = '<div class="doclib-empty">Failed to load research</div>'; }
@@ -3743,8 +3457,8 @@ export function closeArchive() {
 export function getSortMode() { return _sortMode; }
 export function setSortMode(mode) {
   _sortMode = mode || null;
-  if (mode) Storage.set('odysseus-session-sort', mode);
-  else Storage.remove('odysseus-session-sort');
+  if (mode) Storage.set('openclank-session-sort', mode);
+  else Storage.remove('openclank-session-sort');
   renderSessionList();
 }
 
@@ -3766,9 +3480,11 @@ const sessionModule = {
   materializePendingSession,
   preMaterializePendingSession,
   hasPendingChat,
+  isPendingChatMaterializing,
   getPendingChat,
   clearPendingChat,
   getCurrentSessionId,
+  isCurrentSessionIncognito,
   getSessions,
   setSessionWorkspaceId,
   getCurrentModel,

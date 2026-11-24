@@ -1,0 +1,15 @@
+/* One selected-worker inspector inside the Tasks Workload detail region (also hosted by the shared chat panel). */
+.agent-run-inspector { display:flex; flex-direction:column; gap:6px; min-width:0; overflow-wrap:anywhere; }
+.agent-run-inspector .ari-head { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.agent-run-inspector .ari-head h4 { margin:0; flex:1 1 auto; }
+.agent-run-inspector .ari-nav { display:flex; align-items:center; gap:8px; }
+.agent-run-inspector .ari-label { opacity:.7; font-size:.85em; }
+.agent-run-inspector .ari-edge { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:3px 0; border-top:1px solid var(--border-color, #555); font-size:.9em; }
+.agent-run-inspector .ari-edge code { padding:0 4px; border:1px solid var(--border-color, #555); border-radius:4px; }
+.agent-run-inspector .ari-transcript { max-height:40vh; overflow-y:auto; display:flex; flex-direction:column; gap:4px; }
+.agent-run-inspector .ari-message { margin:0; padding:4px 0; border-top:1px solid var(--border-color, #555); white-space:pre-wrap; }
+.agent-run-inspector .ari-follow textarea { width:100%; box-sizing:border-box; }
+.agent-run-inspector h5 { margin:6px 0 2px; }
+
+.agent-run-inspector .ari-message-meta { display:block; opacity:.7; }
+.agent-run-inspector .ari-message p { margin:3px 0 0; white-space:pre-wrap; }

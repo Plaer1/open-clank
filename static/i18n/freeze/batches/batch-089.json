@@ -1,0 +1,35 @@
+{
+  "id": "batch-089",
+  "group": "docs.openclank-docs-compare-cookbook",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1513,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-compare-cookbook.title",
+      "source": "Compare and Cookbook",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-compare-cookbook.body",
+      "source": "# Compare and Cookbook\n\n## Compare connected answers\n\nOpen **Compare** from the sidebar or rail. Select at least two available models and send the same prompt to both. Read the answered cards and check their provider and model labels before choosing a preference. If one card fails, inspect its route before rerunning. Each model uses its own request and quota. See [[Usage and Stats]].\n\n## Serve a local model\n\n1. Open **Cookbook** and choose the host that will serve the model. **What Fits?** estimates memory and shows suggested engines and formats.\n2. Choose an artifact in **Download → Scan / Download**, or enter the repository under **Direct Download**. Check its destination and follow progress in **Running**.\n3. Open the downloaded model in **Launch**. Review the engine, model and port before starting the server. Wait for readiness in **Running** and check the endpoint.\n4. Select the model in Chat if it is connected. Otherwise, add its reachable address under **Settings → Add Provider → Local**, then check **Model Management**. See [[Accounts and Models]].\n\nFor a failed launch or download, open the task output in **Running**. Resolve the reported dependency, artifact, host or port issue before retrying. Use **Running** to see whether a saved preset’s server is live. See [[Limits and Platform Support]] for host requirements.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

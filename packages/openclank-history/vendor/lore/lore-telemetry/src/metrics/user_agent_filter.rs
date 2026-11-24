@@ -6,6 +6,16 @@ use rand::random;
 use regex::RegexSet;
 use tracing::info;
 
+/// Recorded when a user agent was supplied but matched none of the configured patterns.
+///
+/// Shared by metric labels and tracing span fields so the two can be correlated; a caller that
+/// substitutes its own string breaks that join silently.
+pub const USER_AGENT_UNKNOWN: &str = "<unknown>";
+
+/// Recorded when no user agent was supplied at all, in place of calling
+/// [`normalize`](UserAgentFilter::normalize).
+pub const USER_AGENT_NONE: &str = "<none>";
+
 pub enum NormalizeOutput {
     KnownAgent(Arc<str>),
     Unknown,
@@ -75,97 +85,5 @@ impl Default for UserAgentFilter {
             patterns: RegexSet::empty(),
             unknown_sample_rate: 0.0,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assert_known(output: NormalizeOutput, expected: &str) {
-        match output {
-            NormalizeOutput::KnownAgent(label) => assert_eq!(&*label, expected),
-            NormalizeOutput::Unknown => panic!("expected KnownAgent, got Unknown"),
-        }
-    }
-
-    fn assert_unknown(output: NormalizeOutput) {
-        assert!(matches!(output, NormalizeOutput::Unknown));
-    }
-
-    #[test]
-    fn no_patterns_allows_all() {
-        let filter = UserAgentFilter::new::<String>(&[]).unwrap();
-        assert_known(filter.normalize("my-client/1.0"), "my-client/1.0");
-    }
-
-    #[test]
-    fn default_filter_allows_all() {
-        let filter = UserAgentFilter::default();
-        assert_known(filter.normalize("anything"), "anything");
-    }
-
-    #[test]
-    fn matching_pattern_passes_through() {
-        let filter = UserAgentFilter::new(&["my-client/.*"]).unwrap();
-        assert_known(filter.normalize("my-client/1.0"), "my-client/1.0");
-    }
-
-    #[test]
-    fn non_matching_maps_to_unknown() {
-        let filter = UserAgentFilter::new(&["my-client/.*"]).unwrap();
-        assert_unknown(filter.normalize("other-client/1.0"));
-    }
-
-    #[test]
-    fn multiple_patterns_any_match_passes_through() {
-        let filter = UserAgentFilter::new(&["my-client/.*", "other-client/.*"]).unwrap();
-        assert_known(filter.normalize("other-client/1.0"), "other-client/1.0");
-    }
-
-    #[test]
-    fn invalid_regex_returns_error() {
-        assert!(UserAgentFilter::new(&["[invalid"]).is_err());
-    }
-
-    #[test]
-    fn partial_pattern_match_passes_through() {
-        let filter = UserAgentFilter::new(&["my-client"]).unwrap();
-        assert_known(filter.normalize("my-client/1.0"), "my-client/1.0");
-    }
-
-    #[test]
-    fn zero_sample_rate_always_unknown() {
-        let filter = UserAgentFilter::new(&["my-client/.*"])
-            .unwrap()
-            .with_unknown_sample_rate(0.0);
-        for _ in 0..100 {
-            assert_unknown(filter.normalize("other-client/1.0"));
-        }
-    }
-
-    #[test]
-    fn full_sample_rate_still_returns_unknown_label() {
-        // Sampling logs the value but the metric label is always <unknown>.
-        let filter = UserAgentFilter::new(&["my-client/.*"])
-            .unwrap()
-            .with_unknown_sample_rate(1.0);
-        assert_unknown(filter.normalize("other-client/1.0"));
-    }
-
-    #[test]
-    fn sample_rate_clamped_above_one() {
-        let filter = UserAgentFilter::new(&["my-client/.*"])
-            .unwrap()
-            .with_unknown_sample_rate(2.0);
-        assert_unknown(filter.normalize("other-client/1.0"));
-    }
-
-    #[test]
-    fn sample_rate_clamped_below_zero() {
-        let filter = UserAgentFilter::new(&["my-client/.*"])
-            .unwrap()
-            .with_unknown_sample_rate(-1.0);
-        assert_unknown(filter.normalize("other-client/1.0"));
     }
 }

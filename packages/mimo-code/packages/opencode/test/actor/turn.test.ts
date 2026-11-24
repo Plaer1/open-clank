@@ -4,7 +4,8 @@ import { Instance } from "../../src/project/instance"
 import { ActorRegistry } from "../../src/actor/registry"
 import { Bus } from "../../src/bus"
 import { Session } from "../../src/session"
-import { runTurn } from "../../src/actor/turn"
+import { ActorExecutionContext, runTurn } from "../../src/actor/turn"
+import type { ActorRoutePreflightResult } from "../../src/acp/openclank-protocol"
 import { tmpdir } from "../fixture/fixture"
 
 const testLayer = Layer.mergeAll(ActorRegistry.defaultLayer, Bus.defaultLayer, Session.defaultLayer)
@@ -31,6 +32,49 @@ async function withTurn(
 }
 
 describe("runTurn (Plan 1 / Task 3)", () => {
+  test("carries route-only preflight with trusted actor execution context", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await withTurn(tmp.path, async (rt) => {
+      const parent = await rt.runPromise(Session.Service.use((s) => s.create()))
+      const sid = parent.id
+      await rt.runPromise(ActorRegistry.Service.use((reg) => reg.register({
+        sessionID: sid,
+        actorID: "preflight-actor",
+        mode: "subagent",
+        agent: "main",
+        description: "main",
+        contextMode: "full",
+        background: false,
+        lifecycle: "persistent",
+      })))
+      const preflightRoute = {
+        connectionID: "conn-test",
+        providerID: "openai",
+        billingLane: "metered_api",
+        modelID: "model-test",
+        modelRouteID: "route-test",
+        bootstrap: { stableChatID: "chat-test", owner: "owner-test", rootSessionID: sid, sessionID: sid,
+          actorID: "preflight-actor", rootOperationID: "root-test", expectedExecutionRevision: 0,
+          mapRevision: 1, mappingRevision: 1, workspaceRevision: 1, modelRouteID: "route-test" },
+      } satisfies ActorRoutePreflightResult
+      const identity = await rt.runPromise(runTurn(
+        sid,
+        "preflight-actor",
+        Effect.gen(function* () {
+          return yield* ActorExecutionContext
+        }),
+        { rootOperationID: "root-test", preflightRoute },
+      ))
+      expect(identity).toMatchObject({
+        sessionID: sid,
+        actorID: "preflight-actor",
+        rootOperationID: "root-test",
+        preflightRoute,
+      })
+      expect(identity.executionRevision).toBeGreaterThan(0)
+    })
+  })
+
   test("running → idle / success when work succeeds", async () => {
     await using tmp = await tmpdir({ git: true })
     await withTurn(tmp.path, async (rt) => {

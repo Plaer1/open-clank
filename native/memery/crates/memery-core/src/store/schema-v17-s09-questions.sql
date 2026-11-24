@@ -1,0 +1,4 @@
+-- Optional offline-only guarded question writer compatibility.
+CREATE TRIGGER s09_question_curated_insert BEFORE INSERT ON curated WHEN NEW.kind IN ('unknown','open_question') AND fm_s09_question_capability() IS NOT 'openclank.questions.writer.v1' BEGIN SELECT RAISE(ABORT,'qualified question writer required'); END;
+CREATE TRIGGER s09_question_curated_update BEFORE UPDATE OF kind,metadata,archived ON curated WHEN (OLD.kind IN ('unknown','open_question') OR NEW.kind IN ('unknown','open_question')) AND fm_s09_question_capability() IS NOT 'openclank.questions.writer.v1' BEGIN SELECT RAISE(ABORT,'qualified question writer required'); END;
+CREATE TRIGGER s09_question_revision_insert BEFORE INSERT ON fm_v2_knowledge_revisions WHEN NEW.kind='open_question' AND fm_s09_question_capability() IS NOT 'openclank.questions.writer.v1' BEGIN SELECT RAISE(ABORT,'qualified question writer required'); END;

@@ -11,12 +11,13 @@
 // SessionPrompt.layer (which already holds all needed services) populates
 // this ref on initialisation; tryStartCheckpointWriter reads it at call time.
 //
-// Missing ref at call time → tryStartCheckpointWriter logs a warning and
-// proceeds without forkContext (same guard as a missing spawnRef).
+// Missing ref at call time → checkpoint full-context capture is unavailable;
+// callers must skip before creating/registering an actor, never spawn without it.
 import type { Effect } from "effect"
 import type { SessionID } from "./schema"
 import type { ModelMessage, Tool as AITool } from "ai"
 import type { Permission } from "../permission"
+import type { ToolViewContext } from './tool-view-assembly'
 
 export interface PrefixCaptureResult {
   readonly system: string[]
@@ -43,6 +44,7 @@ export type PrefixCaptureFn = (input: {
   // `MessageV2.WithParts[]` but importing that type here would
   // re-introduce the SessionCheckpoint↔ToolRegistry cycle.
   msgs: unknown[]
-}) => Effect.Effect<PrefixCaptureResult, never>
+  toolViewContext?: ToolViewContext
+}) => Effect.Effect<PrefixCaptureResult, Error>
 
 export const prefixCaptureRef: { current: PrefixCaptureFn | undefined } = { current: undefined }

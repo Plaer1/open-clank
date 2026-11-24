@@ -69,11 +69,24 @@ class FakeNode {
     }
   }
 
+  appendChild(child) {
+    this.append(child);
+    return child;
+  }
+
   prepend(...children) {
     children.reverse().forEach(child => {
       child.parentNode = this;
       this.children.unshift(child);
     });
+  }
+
+  insertBefore(child, reference) {
+    child.parentNode = this;
+    const index = this.children.indexOf(reference);
+    if (index < 0) this.children.push(child);
+    else this.children.splice(index, 0, child);
+    return child;
   }
 
   replaceChildren(...children) {
@@ -157,6 +170,9 @@ const routingDetails = new FakeNode('details');
 routingDetails.append(ids.get('provider-control-bindings'));
 
 globalThis.window = globalThis;
+const windowEvents = new EventTarget();
+window.addEventListener = windowEvents.addEventListener.bind(windowEvents);
+window.removeEventListener = windowEvents.removeEventListener.bind(windowEvents);
 globalThis.window.confirm = () => true;
 const sessionValues = new Map();
 globalThis.sessionStorage = {
@@ -168,6 +184,8 @@ const documentListeners = new Map();
 globalThis.document = {
   createElement: tagName => new FakeNode(tagName),
   getElementById: id => ids.get(id) || null,
+  querySelector: selector => selector === 'link[data-oc-icons]' ? null : null,
+  head: new FakeNode('head'),
   addEventListener(name, callback) {
     if (!documentListeners.has(name)) documentListeners.set(name, []);
     documentListeners.get(name).push(callback);
@@ -183,6 +201,7 @@ globalThis.document = {
 globalThis.CustomEvent = class CustomEvent { constructor(name, options) { this.type = name; this.detail = options?.detail; } };
 
 const requests = [];
+const policyPatches = [];
 let failReceivedShares = false;
 let malformedSnapshot = false;
 let failModelRefresh = true;
@@ -190,6 +209,14 @@ let heldCorePaths = new Set();
 let abortedCoreRequests = 0;
 let holdAccountRequest = false;
 let abortedAccountRequests = 0;
+let oauthPollCount = 0;
+let oauthCallbackCase = false;
+let observationFailureCase = false;
+let lateStartCase = false;
+let lateStartCalls = 0;
+let rejectLateStart;
+const oauthFlowId = 'flow-422-terminal-case';
+const restoredCodeFlowId = 'flow-restored-code-case';
 let ownedShares = [{
   id: 'psg-owned', recipient: 'allie', connection_id: 'pcn-openai-api',
   billing_lane: 'metered_api', label: 'GPT Example',
@@ -294,6 +321,12 @@ function jsonResponse(data, ok = true, status = 200) {
 globalThis.fetch = async (url, options = {}) => {
   requests.push({ url, options });
   const path = String(url);
+  if (options.method === 'PATCH' && path.endsWith(`/connections/${connection.id}`)) {
+    const body = JSON.parse(options.body);
+    policyPatches.push(body);
+    Object.assign(connection, body, { revision: connection.revision + 1 });
+    return jsonResponse(connection);
+  }
   const heldPath = [...heldCorePaths].find(suffix => path.endsWith(suffix));
   if (heldPath) {
     heldCorePaths.delete(heldPath);
@@ -326,6 +359,7 @@ globalThis.fetch = async (url, options = {}) => {
     if (failModelRefresh) return jsonResponse({ detail: 'model discovery unavailable' }, false, 503);
     return jsonResponse({ connection_id: connection.id, revision: 8, models: [model] });
   }
+  if (path.endsWith('/oauth/active')) return jsonResponse({flow: null});
   if (path.endsWith('/families')) return jsonResponse({ schema_version: 1, families: [family, localFamily, internalFamily] });
   if (path.endsWith('/management-snapshot')) {
     if (failReceivedShares) throw new Error('received shares temporarily unavailable');
@@ -339,6 +373,42 @@ globalThis.fetch = async (url, options = {}) => {
     });
   }
   if (path.endsWith('/connections')) return jsonResponse({ connections: [connection] });
+  if (options.method === 'POST' && path.endsWith(`/connections/${connection.id}/oauth/start`)) {
+    if (lateStartCase && ++lateStartCalls === 1) {
+      return new Promise((_resolve, reject) => { rejectLateStart = reject; });
+    }
+    oauthPollCount = 0;
+    return jsonResponse({
+      flow_id: oauthFlowId,
+      status: 'pending',
+      method: oauthCallbackCase ? 'code' : 'device',
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      instructions: 'Authorize this provider login in the opened browser.',
+    }, true, 201);
+  }
+  if (options.method === 'POST' && path.endsWith(`/oauth/flows/${oauthFlowId}/callback`)) {
+    return jsonResponse({ status: 'failed', error_code: 'oauth_validation_failed' });
+  }
+  if (path.endsWith(`/oauth/flows/${oauthFlowId}`)) {
+    oauthPollCount += 1;
+    if (observationFailureCase) throw new Error('synthetic observation outage');
+    if (oauthPollCount === 1) {
+      return jsonResponse({
+        flow_id: oauthFlowId,
+        status: 'pending',
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+    }
+    return jsonResponse({ detail: 'provider validation rejected this login' }, false, 422);
+  }
+  if (path.endsWith(`/oauth/flows/${restoredCodeFlowId}`)) {
+    return jsonResponse({
+      flow_id: restoredCodeFlowId,
+      status: 'pending',
+      method: 'code',
+      expires_at: new Date(Date.now() - 1_000).toISOString(),
+    });
+  }
   if (path.endsWith(`/connections/${connection.id}/accounts`)) {
     if (!holdAccountRequest) return jsonResponse({ accounts });
     return new Promise((_resolve, reject) => {
@@ -393,7 +463,7 @@ globalThis.fetch = async (url, options = {}) => {
 };
 
 sessionStorage.setItem('open-clank:provider-families:v1', JSON.stringify({
-  format: 1,
+  format: 2,
   schema_version: 1,
   cached_at: Date.now(),
   families: [family, localFamily, internalFamily],
@@ -408,19 +478,19 @@ providerControl.init({
   },
 });
 const initialLoad = providerControl.load();
-assert.match(allText(ids.get('provider-control-create')), /Add API Models/,
+assert.match(allText(ids.get('provider-control-create')), /Add API Provider/,
   'a validated session family cache paints Add Models before network completion');
-assert.match(allText(ids.get('provider-control-create')), /Add Local Models/,
+assert.match(allText(ids.get('provider-control-create')), /Add Local Provider/,
   'the cached first paint includes local providers');
 await initialLoad;
 
-assert.equal(requests.length, 1, 'Add Models first paint reads only the family catalogue');
+assert.deepEqual(requests.map(item => new URL(item.url, 'http://localhost').pathname), ['/api/v1/providers/oauth/active', '/api/v1/providers/families']);
 const freshAddRequestCount = requests.length;
 await providerControl.load({ view: 'services' });
 assert.equal(requests.length, freshAddRequestCount,
   'an immediate Add Models revisit reuses the completed fresh view');
 await providerControl.load({ view: 'added-models' });
-assert.equal(requests.length, 2,
+assert.equal(requests.length, freshAddRequestCount + 1,
   'Added Models first paint adds one owner management snapshot');
 assert.equal(requests.filter(item => item.url.endsWith('/management-snapshot')).length, 1);
 const freshAddedRequestCount = requests.length;
@@ -450,13 +520,13 @@ assert.equal(requests.some(item => item.url.endsWith(`/connections/${connection.
   'account pools are lazy');
 
 const quickAddText = allText(ids.get('provider-control-create'));
-assert.match(quickAddText, /Add API Models/);
-assert.match(quickAddText, /Add Local Models/);
-assert.match(quickAddText, /Use Browser login instead/);
+assert.match(quickAddText, /Add API Provider/);
+assert.match(quickAddText, /Add Local Provider/);
+assert.match(quickAddText, /Browser login/);
 assert.doesNotMatch(quickAddText, /Internal executor/, 'engine-only providers stay out of quick add');
 
 const quickForms = descendants(ids.get('provider-control-create'), 'form');
-assert.deepEqual(quickForms.map(form => form.dataset.providerAddMode).sort(), ['local', 'remote'],
+assert.deepEqual(quickForms.map(form => form.dataset.providerAddMode).sort(), ['local', 'remote', 'subscription'],
   'Add Models exposes separate compact local and remote forms');
 const providerUiNodes = [...ids.values()];
 assert.equal(providerUiNodes.flatMap(node => descendants(node, 'select')).length, 0,
@@ -528,7 +598,7 @@ assert.equal(expandConnection.attributes.get('aria-expanded'), 'true');
 assert.ok(requests.some(item => item.url.endsWith(`/connections/${connection.id}/eligibility`)));
 assert.equal(requests.some(item => item.url.endsWith(`/models/${model.id}/eligibility`)), false,
   'expansion uses one connection-level eligibility summary');
-assert.match(allText(ids.get('provider-control-connections')), /1 account ready/);
+assert.match(allText(ids.get('provider-control-connections')), /1 eligible account/);
 
 const staleAccountDetails = descendants(connectionRow, 'details')
   .find(item => item.classList.contains('provider-control-connection-advanced'));
@@ -545,7 +615,62 @@ assert.equal(abortedAccountRequests, 1,
   'provider invalidation aborts an in-flight lazy account read');
 assert.ok(requests.some(item => item.url.endsWith(`/connections/${connection.id}/accounts`)));
 assert.match(allText(ids.get('provider-control-connections')), /Account rotation pool \(2\)/);
+assert.match(allText(ids.get('provider-control-connections')), /Account selection policy/);
+assert.match(allText(ids.get('provider-control-connections')), /Allow same-model fallback/);
 assert.match(allText(ids.get('provider-control-connections')), /Add account/);
+const policyMode = descendants(ids.get('provider-control-connections'), 'select')
+  .find(item => item.attributes.get('aria-label') === 'Account selection policy');
+const policyAccount = descendants(ids.get('provider-control-connections'), 'select')
+  .find(item => item.attributes.get('aria-label') === 'Policy account');
+policyMode.value = 'preferred';
+await policyMode.dispatch('change');
+policyAccount.value = 'pac-a';
+policyMode.value = 'round_robin';
+await policyMode.dispatch('change');
+const savePolicy = descendants(ids.get('provider-control-connections'), 'button')
+  .find(item => item.textContent === 'Save selection policy');
+await savePolicy.dispatch('click');
+assert.deepEqual(policyPatches.at(-1), {
+  account_pool_policy: {
+    version: 1,
+    mode: 'round_robin',
+    same_model_fallback: false,
+  },
+}, 'switching a preferred policy to round robin omits its stale account ID');
+
+// OAuth lifecycle preparation case: the active module must classify a host
+// 422 as terminal. It must not send a generic observation retry after the
+// host has rejected the flow, and the visible text must be safe/actionable.
+const browserLogin = descendants(ids.get('provider-control-connections'), 'button')
+  .find(item => item.textContent === 'Browser login');
+assert.ok(browserLogin, 'expanded account controls expose the active browser-login action');
+await browserLogin.dispatch('click');
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.ok(requests.some(item => (
+  item.options.method === 'POST'
+  && item.url.endsWith(`/connections/${connection.id}/oauth/start`)
+)), 'OAuth start uses the v1 provider control plane');
+await new Promise(resolve => setTimeout(resolve, 1_350));
+const oauthPollRequests = requests.filter(item => item.url.endsWith(`/oauth/flows/${oauthFlowId}`));
+assert.equal(oauthPollCount, 2, 'pending is observed once before the terminal host response');
+assert.equal(oauthPollRequests.length, 2, 'a terminal host response does not trigger generic retry polling');
+assert.match(allText(ids.get('provider-control-added-status')), /could not be completed|rejected|validation/i,
+  '422 renders safe actionable terminal text');
+assert.doesNotMatch(allText(ids.get('provider-control-added-status')), /provider validation rejected this login/,
+  'arbitrary host/provider detail is not rendered verbatim');
+
+// A manual callback terminal result uses the same outcome path and disables
+// its controls instead of leaving a pending poll or an enabled submit action.
+oauthCallbackCase = true;
+await browserLogin.dispatch('click');
+await new Promise(resolve => setTimeout(resolve, 0));
+const callbackFinish = descendants(ids.get('provider-control-oauth'), 'button')
+  .find(item => item.textContent === 'Complete login');
+assert.ok(callbackFinish, 'manual/code start exposes the callback completion action');
+await callbackFinish.dispatch('click');
+assert.equal(callbackFinish.disabled, true, 'terminal callback disables the completion action');
+assert.match(allText(ids.get('provider-control-added-status')), /could not be completed|validation/i);
+oauthCallbackCase = false;
 
 const shareButton = descendants(ids.get('provider-control-connections'), 'button')
   .find(item => item.textContent === 'Share');
@@ -630,5 +755,49 @@ await providerControl.load({ force: true, view: 'added-models' });
 assert.match(allText(ids.get('provider-control-connections')), /OpenAI API/,
   'a malformed successful response cannot replace the last valid snapshot');
 assert.match(ids.get('provider-control-added-status').textContent, /invalid response/i);
+
+// Six consecutive observation failures exhaust the bounded outage budget;
+// draining queued timers must not issue a seventh status request.
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+const queuedTimers = [];
+globalThis.setTimeout = (callback, delay) => {
+  const timer = { callback, delay, cancelled: false };
+  queuedTimers.push(timer);
+  return timer;
+};
+globalThis.clearTimeout = timer => { if (timer) timer.cancelled = true; };
+observationFailureCase = true;
+await browserLogin.dispatch('click');
+for (let attempt = 0; attempt < 6; attempt += 1) {
+  await Promise.resolve();
+  const timer = queuedTimers.find(item => !item.cancelled && !item.ran);
+  assert.ok(timer, `observation failure ${attempt + 1} schedules a bounded retry`);
+  timer.ran = true;
+  timer.callback();
+  await Promise.resolve();
+}
+await Promise.resolve();
+assert.equal(oauthPollCount, 6, 'six observation failures stop without a seventh fetch');
+assert.match(allText(ids.get('provider-control-added-status')), /could not be confirmed|Added Models/i);
+observationFailureCase = false;
+globalThis.setTimeout = realSetTimeout;
+globalThis.clearTimeout = realClearTimeout;
+
+// A second click during start cannot create a duplicate login.
+lateStartCase = true;
+lateStartCalls = 0;
+const oldStart = browserLogin.dispatch('click');
+await Promise.resolve();
+const newStart = browserLogin.dispatch('click');
+await newStart;
+await Promise.resolve();
+assert.equal(lateStartCalls, 1);
+assert.match(allText(ids.get('provider-control-oauth')), /Starting provider login/);
+rejectLateStart?.(new Error('old start rejected'));
+await oldStart;
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.equal(allText(ids.get('provider-control-oauth')), '', 'failed start releases the card for a retry');
+lateStartCase = false;
 
 console.log('Unified provider UI contract checks passed');

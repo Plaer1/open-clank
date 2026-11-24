@@ -31,6 +31,7 @@ fn request(action: &str, operation: &str, actor: &str) -> ActionRequest {
         expected_revision: Some("rev-1".into()),
         actor_id: actor.into(),
         actor_kind: "user".into(),
+        managed_tool_origin_v1: None,
         session_id: None,
         run_id: None,
         task_id: None,

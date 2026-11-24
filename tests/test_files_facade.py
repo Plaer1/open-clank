@@ -1147,6 +1147,118 @@ async def test_host_base_snapshot_is_authorized_metadata_only_and_bounded():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_rel", "source_kind", "destination_rel"),
+    [
+        ("Project/Note.md", "File", "Archive"),
+        ("Project", "Directory", "Archive/Project"),
+    ],
+)
+async def test_host_transfer_blocks_directory_change_with_exact_media_provenance(
+    tmp_path, source_rel, source_kind, destination_rel
+):
+    root = tmp_path / "workspace"
+    source = str(root / source_rel)
+    destination = str(root / destination_rel)
+    document_rel = "Project/Note.md" if source_kind == "File" else "Project/Nested/Note.md"
+    record = {
+        "canonical_root": str(root), "origin": "workspace", "owner_subject_id": "account-alice",
+        "workspace_id": "default", "document_id": "opaque-ref", "document_path": document_rel,
+        "asset_name": "image.png", "asset_digest": "sha256:" + "a" * 64 + ":4", "layout_version": 2,
+    }
+
+    class Store:
+        def list_operations(self, **kwargs):
+            assert kwargs["owner_subject_id"] == "account-alice"
+            return [{"receipt": {"provenance": record}}]
+
+    class Registry:
+        def app_scope(self, username, *, is_admin=False): return {"host": True}
+
+    class Client:
+        def __init__(self): self.operations = []
+        async def request(self, operation, path, payload=None):
+            self.operations.append(operation)
+            if operation == "stat":
+                return {"data": {"path": path, "kind": source_kind, "fingerprint": "fp"}}
+            raise AssertionError("move must not reach the Host service")
+
+    client = Client()
+    provider = HostFilesProvider(
+        registry=Registry(), client_factory=lambda username, **kwargs: client, operation_store=Store()
+    )
+    with pytest.raises(FilesFacadeError) as rejected:
+        await provider.transfer(
+            _context(workspace_id="default"), source_origin_id=_origin(source),
+            destination_origin_id=_origin(destination), operation="move", collision="fail",
+            expected_revision={"value": "fp"}, operation_id="stable-move",
+        )
+    assert rejected.value.code == "managed_media_move_unsupported"
+    assert client.operations == ["stat"]
+
+
+@pytest.mark.asyncio
+async def test_host_same_directory_file_rename_keeps_managed_media_path_valid(tmp_path):
+    class Store:
+        def list_operations(self, **kwargs):
+            return [{"receipt": {"provenance": {
+                "canonical_root": str(tmp_path), "origin": "workspace", "owner_subject_id": "account-alice",
+                "workspace_id": "default", "document_id": "opaque-ref", "document_path": "Note.md",
+                "asset_name": "image.png", "asset_digest": "sha256:" + "a" * 64 + ":4", "layout_version": 2,
+            }}}]
+
+    class Registry:
+        def app_scope(self, username, *, is_admin=False): return {"host": True}
+
+    class Client:
+        def __init__(self): self.operations = []
+        async def request(self, operation, path, payload=None):
+            self.operations.append(operation)
+            moved = payload.get("destination") if operation == "move" else path
+            return {"data": {"path": moved or path, "kind": "File", "fingerprint": "fp", "size": 1}}
+
+    client = Client()
+    provider = HostFilesProvider(registry=Registry(), client_factory=lambda username, **kwargs: client, operation_store=Store())
+    await provider.action(
+        _context(workspace_id="default"), origin_id=_origin(str(tmp_path / "Note.md")),
+        action="rename", args={"name": "Renamed.md"}, action_id="same-dir-rename",
+    )
+    assert "move" in client.operations
+
+
+@pytest.mark.asyncio
+async def test_host_folder_rename_blocks_when_descendant_has_managed_media(tmp_path):
+    root = tmp_path / "workspace"
+
+    class Store:
+        def list_operations(self, **kwargs):
+            return [{"receipt": {"provenance": {
+                "canonical_root": str(root), "origin": "workspace", "owner_subject_id": "account-alice",
+                "workspace_id": "default", "document_id": "opaque-ref", "document_path": "Folder/Nested/Note.md",
+                "asset_name": "image.png", "asset_digest": "sha256:" + "a" * 64 + ":4", "layout_version": 2,
+            }}}]
+
+    class Registry:
+        def app_scope(self, username, *, is_admin=False): return {"host": True}
+
+    class Client:
+        def __init__(self): self.operations = []
+        async def request(self, operation, path, payload=None):
+            self.operations.append(operation)
+            return {"data": {"path": path, "kind": "Directory", "fingerprint": "fp"}}
+
+    client = Client()
+    provider = HostFilesProvider(registry=Registry(), client_factory=lambda username, **kwargs: client, operation_store=Store())
+    with pytest.raises(FilesFacadeError) as rejected:
+        await provider.action(
+            _context(workspace_id="default"), origin_id=_origin(str(root / "Folder")),
+            action="rename", args={"name": "Renamed"}, action_id="folder-rename",
+        )
+    assert rejected.value.code == "managed_media_move_unsupported"
+    assert client.operations == ["stat"]
+
+
+@pytest.mark.asyncio
 async def test_import_legacy_provider_fails_closed_before_dispatch(monkeypatch):
     import src.openclank.files_facade as facade_module
 

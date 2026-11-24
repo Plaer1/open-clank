@@ -1,0 +1,7 @@
+Open Clank is provided as is, without warranty, to the extent permitted by law. We cannot guarantee protection against data loss. Keep an independent backup of files you want to keep.
+
+Double-check AI output before relying on it. Review generated changes and commands before applying them.
+
+Keep agents under reasonable human supervision. Limit their permissions to the task. Require your approval before they delete data, spend money, publish work or take other consequential actions.
+
+Open Clank is licensed under AGPL-3.0-or-later. These setup notices preserve the rights granted by that license and the licenses of included components.

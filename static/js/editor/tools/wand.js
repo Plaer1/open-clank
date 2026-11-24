@@ -17,11 +17,14 @@
  *   runMagicWand: (cx: number, cy: number, mode: 'replace'|'add'|'subtract') => void,
  * }} deps
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 import { canvasCoords } from '../canvas-coords.js';
 
-export function createWandTool({ activeLayer, saveState, composite, wandHits, runMagicWand }) {
-  return {
+export function createWandTool({ state = legacyState, root = null, lifetime = null, activeLayer, saveState, composite, wandHits, runMagicWand, clearWand = null }) {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated tool requires root and lifetime');
+  let disposed = false;
+  lifetime?.add(() => { disposed = true;  });
+  const tool = {
     click(e) {
       const layer = activeLayer();
       if (!layer) return;
@@ -33,6 +36,7 @@ export function createWandTool({ activeLayer, saveState, composite, wandHits, ru
       else if (e.altKey) mode = 'subtract';
       // Click INSIDE the existing selection with no modifier → deselect.
       if (mode === 'replace' && wandHits(coords.x, coords.y)) {
+        if (clearWand) return clearWand({history:true});
         saveState();
         state.wandMask = null;
         state.wandLayerId = null;
@@ -43,4 +47,9 @@ export function createWandTool({ activeLayer, saveState, composite, wandHits, ru
       runMagicWand(coords.x, coords.y, mode);
     },
   };
+  for (const key of Object.keys(tool)) {
+    const invoke = tool[key];
+    tool[key] = (...args) => disposed ? false : invoke(...args);
+  }
+  return tool;
 }

@@ -368,9 +368,9 @@ function initNameDropdown() {
         }
         // Hide built-in preset
         if (isBuiltin) {
-          const hidden = loadStoredArray('odysseus-hidden-presets');
+          const hidden = loadStoredArray('openclank-hidden-presets');
           if (!hidden.includes(charName)) hidden.push(charName);
-          localStorage.setItem('odysseus-hidden-presets', JSON.stringify(hidden));
+          localStorage.setItem('openclank-hidden-presets', JSON.stringify(hidden));
         }
         // Deactivate if this was the active character
         if (presets.custom && presets.custom.character_name === charName) {
@@ -457,7 +457,7 @@ function _populateCharSelect() {
     select.appendChild(group);
   }
 
-  const hiddenPresets = loadStoredArray('odysseus-hidden-presets');
+  const hiddenPresets = loadStoredArray('openclank-hidden-presets');
   const builtins = PROMPT_TEMPLATES.filter(t => !savedNames.has(t.name) && !hiddenPresets.includes(t.name));
   if (builtins.length) {
     const group = document.createElement('optgroup');
@@ -551,9 +551,9 @@ function initPersistentChat() {
       await fetch(`${API_BASE}/api/session/${sessionId}/important`, { method: 'POST', body: favFd });
 
       // Save session → character mapping so it restores on switch
-      const charSessions = loadStoredObject('odysseus-char-sessions');
+      const charSessions = loadStoredObject('openclank-char-sessions');
       charSessions[sessionId] = charName;
-      localStorage.setItem('odysseus-char-sessions', JSON.stringify(charSessions));
+      localStorage.setItem('openclank-char-sessions', JSON.stringify(charSessions));
 
       // Close modal, reload sessions, switch to the new chat
       const modal = document.getElementById('custom-preset-modal');
@@ -1314,7 +1314,7 @@ export function onSessionSwitch(sessionId) {
   _setSessionPersonaState(null);
   _syncSessionPersona(sessionId);
 
-  const charSessions = loadStoredObject('odysseus-char-sessions');
+  const charSessions = loadStoredObject('openclank-char-sessions');
 
   // Leaving a persistent chat — deactivate for this switch only
   if (window._persistentChatSession) {
@@ -1362,10 +1362,10 @@ export function isPersistentChat() {
  * Remove a session from persistent chat mappings (call when session is deleted).
  */
 export function removePersistentChat(sessionId) {
-  const charSessions = loadStoredObject('odysseus-char-sessions');
+  const charSessions = loadStoredObject('openclank-char-sessions');
   if (charSessions[sessionId]) {
     delete charSessions[sessionId];
-    localStorage.setItem('odysseus-char-sessions', JSON.stringify(charSessions));
+    localStorage.setItem('openclank-char-sessions', JSON.stringify(charSessions));
   }
   // If we were in that persistent chat, fully clear state
   if (window._persistentChatSession === sessionId) {

@@ -93,6 +93,8 @@ export function clearGeneratedServerPassword() {
 }
 
 export const Flag = {
+  // Host-owned process mode; never supplied by an ACP prompt or tool input.
+  OPEN_CLANK_PRIVATE_RUNTIME: process.env["OPEN_CLANK_PRIVATE_RUNTIME"] === "1",
   OTEL_EXPORTER_OTLP_ENDPOINT: process.env["OTEL_EXPORTER_OTLP_ENDPOINT"],
   OTEL_EXPORTER_OTLP_HEADERS: process.env["OTEL_EXPORTER_OTLP_HEADERS"],
 

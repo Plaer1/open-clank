@@ -16,7 +16,7 @@ SCHEMA = ROOT / "contracts/openclank/agent-driver-v1.schema.json"
 RESPONSE_SCHEMA = ROOT / "contracts/openclank/agent-driver-response-v1.schema.json"
 FIXTURES = ROOT / "contracts/openclank/agent-driver-v1/fixtures"
 RESPONSE_FIXTURES = FIXTURES / "responses"
-TS_PROTOCOL = ROOT / "packages/mimo-code/packages/opencode/src/openclank-runtime/protocol.ts"
+TS_PROTOCOL = ROOT / "packages/mimo-code/packages/cli/src/openclank-runtime/protocol.ts"
 RUST_WIRE = ROOT / "packages/openclank-agent-supervisor/src/driver_wire.rs"
 
 

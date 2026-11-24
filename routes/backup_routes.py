@@ -56,7 +56,6 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         memory_owner = resolve_memory_owner(
             user
             or os.environ.get("OPEN_CLANK_MEMORY_OWNER")
-            or os.environ.get("ODYSSEUS_MEMORY_OWNER")
         )
 
         # Memories (filtered by owner when auth is enabled)
@@ -165,7 +164,6 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         memory_owner = resolve_memory_owner(
             user
             or os.environ.get("OPEN_CLANK_MEMORY_OWNER")
-            or os.environ.get("ODYSSEUS_MEMORY_OWNER")
         )
         try:
             body = await request.json()
@@ -185,6 +183,52 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                 raise HTTPException(400, "Backup memory checksum mismatch")
 
         imported = []
+        # Imported annotations remain unverified assertions, never current scores.
+        if "chat_ratings" in body:
+            from src.auth_helpers import require_user, is_internal_tool_identity
+            from src.openclank.chat_ratings import import_historical, RatingUnavailable, RatingConflict
+            from core.database import SessionLocal
+            from sqlalchemy import text
+            import asyncio
+            rating_user = require_user(request)
+            auth = getattr(request.app.state, "auth_manager", None)
+            barrier = getattr(request.app.state, "account_request_barrier", None)
+            account = auth.account_id(rating_user) if auth and not is_internal_tool_identity(rating_user) else None
+            if not account or auth.username_for_account_id(account) != rating_user or barrier is None:
+                raise HTTPException(503, "Rating import unavailable")
+            def import_ratings():
+                if auth.account_id(rating_user) != account or auth.username_for_account_id(account) != rating_user:
+                    raise RatingUnavailable("Rating import unavailable")
+                db = SessionLocal()
+                try:
+                    db.execute(text("BEGIN IMMEDIATE"))
+                    count = import_historical(db, account=account, bundle=body["chat_ratings"])
+                    if auth.account_id(rating_user) != account or auth.username_for_account_id(account) != rating_user:
+                        raise RatingUnavailable("Rating import unavailable")
+                    db.commit()
+                    return count
+                except BaseException:
+                    db.rollback()
+                    raise
+                finally:
+                    db.close()
+            try:
+                async with barrier.admitted(rating_user):
+                    task = asyncio.create_task(asyncio.to_thread(import_ratings))
+                    try:
+                        count = await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        while not task.done():
+                            try:
+                                await asyncio.shield(task)
+                            except asyncio.CancelledError:
+                                continue
+                        raise
+            except RatingConflict as exc:
+                raise HTTPException(409, "Rating import conflict") from exc
+            except RatingUnavailable as exc:
+                raise HTTPException(503, "Rating import unavailable") from exc
+            imported.append(f"{count['imported']} historical unverified ratings")
 
         # ── Memories ──
         if "memories" in body and isinstance(body["memories"], list):
@@ -308,7 +352,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         if "settings" in body and isinstance(body["settings"], dict):
             current = load_settings()
             current.update(body["settings"])
-            save_settings(current)
+            save_settings(current, allow_memory_graph='memory_graph' in body['settings'])
             imported.append("settings")
 
         # ── Features ──
@@ -320,10 +364,8 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
 
         # ── Preferences ──
         if "preferences" in body and isinstance(body["preferences"], dict):
-            from routes.prefs_routes import _load_for_user, _save_for_user
-            current = _load_for_user(user)
-            current.update(body["preferences"])
-            _save_for_user(user, current)
+            from routes.prefs_routes import _update_for_user
+            _update_for_user(user, body["preferences"])
             imported.append("preferences")
 
         # ── S29 achievement ledger ──

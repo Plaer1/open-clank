@@ -26,7 +26,7 @@ class _Request:
 
 
 class _Provider:
-    provider_id = "frankenmemory"
+    provider_id = "memery"
 
     def __init__(self):
         self.calls = []

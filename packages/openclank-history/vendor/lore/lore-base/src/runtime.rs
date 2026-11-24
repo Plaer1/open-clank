@@ -18,61 +18,97 @@ use pin_project::pinned_drop;
 use serde::Deserialize;
 use tokio::runtime::Handle;
 use tokio::task::JoinSet;
+use tokio::task::futures::TaskLocalFuture;
 
 // ---------------------------------------------------------------------------
 // Instruments
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoreTaskLifecycleEvent {
     Started,
     Completed,
     Dropped,
 }
 
-pub type RuntimeTaskEventCallback =
-    Box<dyn Fn(LoreTaskLifecycleEvent, &LoreTaskSpawnLocation) + Send + Sync>;
-
-static RUNTIME_TASK_EVENTS: OnceLock<RuntimeTaskEventCallback> = OnceLock::new();
-
-pub fn set_task_lifecycle_callback(callback: RuntimeTaskEventCallback) -> bool {
-    let result = RUNTIME_TASK_EVENTS.set(callback);
-
-    result.is_ok()
-}
-
-pub struct LoreTaskSpawnLocation {
+/// What was true where a task was spawned, captured once as it is created.
+///
+/// Every event a task emits carries this same value, so an up/down counter keyed on these fields
+/// pairs a task's increment with its decrement. Re-resolving a field per event would not pair
+/// them: a task is created on its spawner's thread but polled and dropped on a worker's, under
+/// whatever context is ambient there — which for
+/// [`lore_spawn_net_nocontext!`](crate::lore_spawn_net_nocontext) is deliberately not the
+/// spawner's, so the two ends would count against different series.
+pub struct LoreTaskSpawn {
     pub file: &'static str,
     pub line: u32,
+    /// Labels the `LORE_CONTEXT` ambient where the task was spawned.
+    pub context_label: &'static str,
+}
+
+/// Observes the tasks spawned through the `lore_spawn*` macros.
+pub trait TaskLifecycleObserver: Send + Sync {
+    /// Labels the `LORE_CONTEXT` a task is being spawned under.
+    ///
+    /// Called once per task, on the spawning thread before the task reaches a runtime, so the
+    /// ambient context is still the spawning caller's. The label is stored on the task and handed
+    /// back to [`Self::on_event`] for every event it goes on to emit.
+    fn context_label(&self) -> &'static str;
+
+    /// Reports one event in a task's life, carrying the facts captured at its spawn.
+    fn on_event(&self, event: LoreTaskLifecycleEvent, spawn: &LoreTaskSpawn);
+}
+
+static RUNTIME_TASK_OBSERVER: OnceLock<Box<dyn TaskLifecycleObserver>> = OnceLock::new();
+
+/// Installs the process's task lifecycle observer, reporting whether it took.
+///
+/// Tasks already in flight stay unobserved rather than reporting only their end, so an observer
+/// counting tasks never sees a decrement whose increment it missed.
+pub fn set_task_lifecycle_observer(observer: Box<dyn TaskLifecycleObserver>) -> bool {
+    RUNTIME_TASK_OBSERVER.set(observer).is_ok()
+}
+
+fn report_task_event(spawn: Option<&LoreTaskSpawn>, event: LoreTaskLifecycleEvent) {
+    if let Some(spawn) = spawn
+        && let Some(observer) = RUNTIME_TASK_OBSERVER.get()
+    {
+        observer.on_event(event, spawn);
+    }
 }
 
 #[pin_project(PinnedDrop)]
 pub struct ObservedTask<F> {
     #[pin]
     inner: F,
-    location: LoreTaskSpawnLocation,
+    /// `None` when no observer was installed as the task was created, which keeps such a task
+    /// silent for its whole life rather than reporting an end with no matching start.
+    spawn: Option<LoreTaskSpawn>,
     ran_to_completion: bool,
 }
 
 impl<F> ObservedTask<F> {
-    /// Wraps a future with state events.
+    /// Wraps a future so its lifecycle reaches the installed [`TaskLifecycleObserver`].
     ///
-    /// If runtime callback has not been initialised yet, the wrapper is
-    /// inert
+    /// Inert if no observer has been installed yet.
     #[track_caller]
     pub fn new(inner: F) -> Self {
         let caller = ::std::panic::Location::caller();
-        let location = LoreTaskSpawnLocation {
-            file: caller.file(),
-            line: caller.line(),
-        };
 
-        if let Some(callback) = RUNTIME_TASK_EVENTS.get() {
-            callback(LoreTaskLifecycleEvent::Started, &location);
-        }
+        let spawn = RUNTIME_TASK_OBSERVER.get().map(|observer| {
+            let spawn = LoreTaskSpawn {
+                file: caller.file(),
+                line: caller.line(),
+                context_label: observer.context_label(),
+            };
+            observer.on_event(LoreTaskLifecycleEvent::Started, &spawn);
+
+            spawn
+        });
 
         Self {
             inner,
-            location,
+            spawn,
             ran_to_completion: false,
         }
     }
@@ -86,9 +122,7 @@ impl<F: Future> Future for ObservedTask<F> {
         let result = this.inner.poll(cx);
         if result.is_ready() {
             *this.ran_to_completion = true;
-            if let Some(callback) = RUNTIME_TASK_EVENTS.get() {
-                callback(LoreTaskLifecycleEvent::Completed, this.location);
-            }
+            report_task_event(this.spawn.as_ref(), LoreTaskLifecycleEvent::Completed);
         }
         result
     }
@@ -98,10 +132,8 @@ impl<F: Future> Future for ObservedTask<F> {
 impl<F> PinnedDrop for ObservedTask<F> {
     fn drop(self: Pin<&mut Self>) {
         let this = self.project();
-        if !*this.ran_to_completion
-            && let Some(callback) = RUNTIME_TASK_EVENTS.get()
-        {
-            callback(LoreTaskLifecycleEvent::Dropped, this.location);
+        if !*this.ran_to_completion {
+            report_task_event(this.spawn.as_ref(), LoreTaskLifecycleEvent::Dropped);
         }
     }
 }
@@ -127,6 +159,80 @@ pub fn try_lore_context() -> Option<Arc<dyn Any + Send + Sync>> {
     LORE_CONTEXT.try_with(|ctx| ctx.clone()).ok()
 }
 
+/// A spawned task scoped to the `LORE_CONTEXT` it was spawned under, or unscoped if there was none.
+/// Both cases are one type, so the runtime's task machinery is compiled once for each spawned
+/// future type.
+#[pin_project(project = ContextTaskProjection)]
+pub enum ContextTask<F> {
+    Scoped(#[pin] TaskLocalFuture<Arc<dyn Any + Send + Sync>, ObservedTask<F>>),
+    Unscoped(#[pin] ObservedTask<F>),
+}
+
+impl<F: Future> Future for ContextTask<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        match self.project() {
+            ContextTaskProjection::Scoped(task) => task.poll(cx),
+            ContextTaskProjection::Unscoped(task) => task.poll(cx),
+        }
+    }
+}
+
+/// `future` observed and scoped to the current `LORE_CONTEXT`, if one is set, as a [`ContextTask`].
+#[track_caller]
+pub fn spawned_task<F: Future>(future: F) -> ContextTask<F> {
+    let task = ObservedTask::new(future);
+    match try_lore_context() {
+        Some(context) => ContextTask::Scoped(LORE_CONTEXT.scope(context, task)),
+        None => ContextTask::Unscoped(task),
+    }
+}
+
+/// `function`, to run within its caller's `LORE_CONTEXT`, if one is set. Both cases are one closure
+/// type, so the runtime's blocking task machinery is compiled once for each spawned closure type.
+pub fn spawned_blocking_task<F, T>(function: F) -> impl FnOnce() -> T + Send + 'static
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: 'static,
+{
+    let context = try_lore_context();
+    move || match context {
+        Some(context) => LORE_CONTEXT.sync_scope(context, function),
+        None => function(),
+    }
+}
+
+/// A [`JoinSet`] that detaches its tasks when dropped rather than aborting them, for tasks that
+/// must not stop part way. A detached task runs to its end, and its output is dropped then.
+pub struct DetachingJoinSet<T: 'static>(JoinSet<T>);
+
+impl<T: 'static> Default for DetachingJoinSet<T> {
+    fn default() -> Self {
+        Self(JoinSet::new())
+    }
+}
+
+impl<T: 'static> std::ops::Deref for DetachingJoinSet<T> {
+    type Target = JoinSet<T>;
+
+    fn deref(&self) -> &JoinSet<T> {
+        &self.0
+    }
+}
+
+impl<T: 'static> std::ops::DerefMut for DetachingJoinSet<T> {
+    fn deref_mut(&mut self) -> &mut JoinSet<T> {
+        &mut self.0
+    }
+}
+
+impl<T: 'static> Drop for DetachingJoinSet<T> {
+    fn drop(&mut self) {
+        self.0.detach_all();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Spawn macros — propagate LORE_CONTEXT to spawned tasks
 // ---------------------------------------------------------------------------
@@ -145,51 +251,31 @@ macro_rules! lore_spawn {
     ($joinset:ident, $name:literal, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $joinset.spawn_on(
-                    $crate::runtime::LORE_CONTEXT.scope(__ctx, __task),
-                    &$crate::runtime::runtime(),
-                )
-            } else {
-                $joinset.spawn_on(__task, &$crate::runtime::runtime())
-            }
+            $joinset.spawn_on(
+                $crate::runtime::spawned_task($expression),
+                &$crate::runtime::runtime(),
+            )
         }
     }};
     ($joinset:ident, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $joinset.spawn_on(
-                    $crate::runtime::LORE_CONTEXT.scope(__ctx, __task),
-                    &$crate::runtime::runtime(),
-                )
-            } else {
-                $joinset.spawn_on(__task, &$crate::runtime::runtime())
-            }
+            $joinset.spawn_on(
+                $crate::runtime::spawned_task($expression),
+                &$crate::runtime::runtime(),
+            )
         }
     }};
     ($name:literal, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $crate::runtime::runtime().spawn($crate::runtime::LORE_CONTEXT.scope(__ctx, __task))
-            } else {
-                $crate::runtime::runtime().spawn(__task)
-            }
+            $crate::runtime::runtime().spawn($crate::runtime::spawned_task($expression))
         }
     }};
     ($expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $crate::runtime::runtime().spawn($crate::runtime::LORE_CONTEXT.scope(__ctx, __task))
-            } else {
-                $crate::runtime::runtime().spawn(__task)
-            }
+            $crate::runtime::runtime().spawn($crate::runtime::spawned_task($expression))
         }
     }};
     // Trailing-comma forms, so a multi-line call formats like any other.
@@ -216,27 +302,16 @@ macro_rules! lore_spawn_net {
     ($joinset:ident, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $joinset.spawn_on(
-                    $crate::runtime::LORE_CONTEXT.scope(__ctx, __task),
-                    &$crate::runtime::net_runtime(),
-                )
-            } else {
-                $joinset.spawn_on(__task, &$crate::runtime::net_runtime())
-            }
+            $joinset.spawn_on(
+                $crate::runtime::spawned_task($expression),
+                &$crate::runtime::net_runtime(),
+            )
         }
     }};
     ($expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $crate::runtime::net_runtime()
-                    .spawn($crate::runtime::LORE_CONTEXT.scope(__ctx, __task))
-            } else {
-                $crate::runtime::net_runtime().spawn(__task)
-            }
+            $crate::runtime::net_runtime().spawn($crate::runtime::spawned_task($expression))
         }
     }};
     // Trailing-comma forms, so a multi-line call formats like any other.
@@ -282,53 +357,31 @@ macro_rules! lore_spawn_core {
     ($joinset:ident, $name:literal, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $joinset.spawn_on(
-                    $crate::runtime::LORE_CONTEXT.scope(__ctx, __task),
-                    &$crate::runtime::core_runtime(),
-                )
-            } else {
-                $joinset.spawn_on(__task, &$crate::runtime::core_runtime())
-            }
+            $joinset.spawn_on(
+                $crate::runtime::spawned_task($expression),
+                &$crate::runtime::core_runtime(),
+            )
         }
     }};
     ($joinset:ident, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $joinset.spawn_on(
-                    $crate::runtime::LORE_CONTEXT.scope(__ctx, __task),
-                    &$crate::runtime::core_runtime(),
-                )
-            } else {
-                $joinset.spawn_on(__task, &$crate::runtime::core_runtime())
-            }
+            $joinset.spawn_on(
+                $crate::runtime::spawned_task($expression),
+                &$crate::runtime::core_runtime(),
+            )
         }
     }};
     ($name:literal, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $crate::runtime::core_runtime()
-                    .spawn($crate::runtime::LORE_CONTEXT.scope(__ctx, __task))
-            } else {
-                $crate::runtime::core_runtime().spawn(__task)
-            }
+            $crate::runtime::core_runtime().spawn($crate::runtime::spawned_task($expression))
         }
     }};
     ($expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            let __task = $crate::runtime::ObservedTask::new($expression);
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $crate::runtime::core_runtime()
-                    .spawn($crate::runtime::LORE_CONTEXT.scope(__ctx, __task))
-            } else {
-                $crate::runtime::core_runtime().spawn(__task)
-            }
+            $crate::runtime::core_runtime().spawn($crate::runtime::spawned_task($expression))
         }
     }};
     // Trailing-comma forms, so a multi-line call formats like any other.
@@ -354,51 +407,33 @@ macro_rules! lore_spawn_blocking {
     ($joinset:ident, $name:literal, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $joinset.spawn_blocking_on(
-                    move || $crate::runtime::LORE_CONTEXT.sync_scope(__ctx, $expression),
-                    &$crate::runtime::core_runtime(),
-                )
-            } else {
-                $joinset.spawn_blocking_on($expression, &$crate::runtime::core_runtime())
-            }
+            $joinset.spawn_blocking_on(
+                $crate::runtime::spawned_blocking_task($expression),
+                &$crate::runtime::core_runtime(),
+            )
         }
     }};
     ($joinset:ident, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $joinset.spawn_blocking_on(
-                    move || $crate::runtime::LORE_CONTEXT.sync_scope(__ctx, $expression),
-                    &$crate::runtime::core_runtime(),
-                )
-            } else {
-                $joinset.spawn_blocking_on($expression, &$crate::runtime::core_runtime())
-            }
+            $joinset.spawn_blocking_on(
+                $crate::runtime::spawned_blocking_task($expression),
+                &$crate::runtime::core_runtime(),
+            )
         }
     }};
     ($name:literal, $expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $crate::runtime::core_runtime().spawn_blocking(move || {
-                    $crate::runtime::LORE_CONTEXT.sync_scope(__ctx, $expression)
-                })
-            } else {
-                $crate::runtime::core_runtime().spawn_blocking($expression)
-            }
+            $crate::runtime::core_runtime()
+                .spawn_blocking($crate::runtime::spawned_blocking_task($expression))
         }
     }};
     ($expression:expr) => {{
         #[allow(clippy::disallowed_methods)]
         {
-            if let Some(__ctx) = $crate::runtime::try_lore_context() {
-                $crate::runtime::core_runtime().spawn_blocking(move || {
-                    $crate::runtime::LORE_CONTEXT.sync_scope(__ctx, $expression)
-                })
-            } else {
-                $crate::runtime::core_runtime().spawn_blocking($expression)
-            }
+            $crate::runtime::core_runtime()
+                .spawn_blocking($crate::runtime::spawned_blocking_task($expression))
         }
     }};
 }
@@ -547,25 +582,55 @@ static NET_THREADS_DEFAULT: OnceLock<usize> = OnceLock::new();
 
 /// Net runtime worker threads when nothing configures it: one user's worth
 /// of QUIC streams and gRPC channels.
+#[lore_macro::test_pub]
 const DEFAULT_NET_THREADS: usize = 2;
 
-/// Requests a process-default net-runtime thread count — the server asks for one
-/// per processor, since serving thousands of concurrent client connections is its
-/// normal case. A thread limit still bounds the count granted. Must run before
-/// the net runtime is first used; returns false if a default was already set.
+/// Requests a process-default net-runtime thread count, as [`serving_runtime`] does
+/// for one per processor. A thread limit still bounds the count granted. Must run before
+/// either runtime is built, since both are sized from it; returns false if a
+/// default was already set.
 pub fn set_net_threads_default(count: usize) -> bool {
     NET_THREADS_DEFAULT.set(count.max(1)).is_ok()
 }
 
+/// The storage connections a process sizes its runtimes for — see [`threads_for_connections`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetConnections {
+    /// A process that opens this many storage connections to a remote.
+    Opened(usize),
+    /// A process that serves commands which each open up to this many.
+    Served(usize),
+}
+
+/// The storage connections the process sized its runtimes for — see
+/// [`set_net_connections`]. `None` for a process that set none.
+static NET_CONNECTIONS: OnceLock<Option<NetConnections>> = OnceLock::new();
+
+/// Sizes the core and net runtimes for `connections`, as [`threads_for_connections`] divides
+/// them. An explicit net request (`LORE_NET_THREADS`, the `net_threads` setting or
+/// [`set_net_threads_default`]) takes precedence, and a thread limit bounds the total. A process
+/// that sets none keeps one core thread per processor and [`DEFAULT_NET_THREADS`]. Returns false,
+/// and changes nothing, once a runtime is built or the connections are set, so both runtimes are
+/// sized for the same ones.
+pub fn set_net_connections(connections: NetConnections) -> bool {
+    NET_CONNECTIONS.set(Some(connections)).is_ok()
+}
+
+/// Settles the connections the runtimes are sized for, as none when none were set.
+fn settle_net_connections() {
+    NET_CONNECTIONS.get_or_init(|| None);
+}
+
 /// An explicit net-thread request: `LORE_NET_THREADS` if set, else the
 /// process-configured default (e.g. the server's one-per-processor). `None`
-/// leaves the net pool at [`DEFAULT_NET_THREADS`].
+/// leaves the net pool at [`DEFAULT_NET_THREADS`], or sized for the process's
+/// storage connections.
 fn requested_net_threads() -> Option<usize> {
     env_thread_override("LORE_NET_THREADS").or_else(|| NET_THREADS_DEFAULT.get().copied())
 }
 
 /// Net runtime worker threads: the net share of the thread budget, which an
-/// explicit request raises (see [`thread_counts`]).
+/// explicit request or the storage connections raise (see [`thread_counts`]).
 pub fn default_net_threads() -> usize {
     budget_thread_counts().net
 }
@@ -591,10 +656,13 @@ pub fn net_runtime() -> Handle {
 }
 
 fn build_net_runtime() -> tokio::runtime::Runtime {
+    settle_net_connections();
+    let threads = default_net_threads();
+    crate::lore_debug!("Net runtime: {threads} workers");
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
         .enable_all()
-        .worker_threads(default_net_threads())
+        .worker_threads(threads)
         .max_blocking_threads(NET_BLOCKING_THREADS)
         .thread_keep_alive(Duration::from_secs(default_thread_keep_alive()))
         .thread_name_fn(|| {
@@ -615,20 +683,28 @@ fn platform_processor_count() -> usize {
     unsafe { GetActiveProcessorCount(0xFFFF) as usize }
 }
 
-/// Returns the number of available processors.
+/// Returns the number of available processors, kept from the first read that succeeds; after a
+/// failed read the next call reads again. On Linux each read of
+/// `std::thread::available_parallelism` parses the cgroup files.
 ///
 /// On Windows, takes the maximum of `std::thread::available_parallelism` and the Win32
 /// `GetActiveProcessorCount` API, since the former underestimates on large machines.
 /// On other platforms, returns `std::thread::available_parallelism` (falling back to 1).
 pub fn processor_count() -> usize {
-    let std_count = std::thread::available_parallelism().map_or(1, |c| c.get());
-    #[cfg(target_os = "windows")]
-    {
-        std::cmp::max(std_count, platform_processor_count())
+    static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    if let Some(&count) = COUNT.get() {
+        return count;
     }
+    let read = std::thread::available_parallelism();
+    let std_count = read.as_ref().map_or(1, |c| c.get());
+    #[cfg(target_os = "windows")]
+    let count = std::cmp::max(std_count, platform_processor_count());
     #[cfg(not(target_os = "windows"))]
-    {
-        std_count
+    let count = std_count;
+    if read.is_ok() {
+        *COUNT.get_or_init(|| count)
+    } else {
+        count
     }
 }
 
@@ -670,8 +746,9 @@ pub struct ThreadCounts {
     /// runtime's pool plus the net runtime's [`NET_BLOCKING_THREADS`].
     pub blocking: usize,
     /// Net runtime worker threads. [`set_net_threads_default`] and
-    /// `LORE_NET_THREADS` raise this pool's ideal — the server asks for one per
-    /// processor — but a thread limit still bounds what it is granted.
+    /// `LORE_NET_THREADS` set this pool's ideal — the server asks for one per
+    /// processor — and [`set_net_connections`] raises it, but a thread limit
+    /// bounds what it is granted.
     pub net: usize,
     /// The lore-io syscall pool, which every file operation dispatches through.
     /// `LORE_IO_POOL_THREADS` raises its ideal.
@@ -679,6 +756,7 @@ pub struct ThreadCounts {
 }
 
 /// Pools the budget divides between.
+#[lore_macro::test_pub]
 const POOL_COUNT: usize = 4;
 
 impl ThreadCounts {
@@ -688,6 +766,7 @@ impl ThreadCounts {
     }
 
     /// The pools in apportionment order.
+    #[lore_macro::test_pub]
     fn as_array(&self) -> [usize; POOL_COUNT] {
         [self.worker, self.blocking, self.net, self.io]
     }
@@ -706,6 +785,7 @@ impl ThreadCounts {
 /// deadlock work another pool blocks on (e.g. blocking calls awaited by
 /// workers). Takes precedence over the limit, so the smallest achievable
 /// total is `POOL_COUNT * MIN`.
+#[lore_macro::test_pub]
 const MIN_THREADS_PER_POOL: usize = 2;
 
 /// The core runtime's blocking pool: file I/O runs on the lore-io driver, so
@@ -713,17 +793,20 @@ const MIN_THREADS_PER_POOL: usize = 2;
 /// access, AWS SDK initialization, service IPC pipe reads). Fixed and
 /// processor-count-independent by design — see the async file I/O enhancement
 /// proposal's thread budget.
+#[lore_macro::test_pub]
 const CORE_BLOCKING_THREADS: usize = 2;
 
 /// The net runtime's blocking pool, pinned to one thread so that a stray
 /// `spawn_blocking` there cannot grow it and starve the protocol timers.
 /// Budgeted with the core runtime's pool rather than beside it, since both
 /// hold threads for the same reason.
+#[lore_macro::test_pub]
 const NET_BLOCKING_THREADS: usize = 1;
 
 /// Lore's unconstrained per-pool counts, used when no thread limit is set. `io`
 /// is the syscall pool's own request, which `lore-io` derives from the core count
 /// and `LORE_IO_POOL_THREADS`.
+#[lore_macro::test_pub]
 fn default_thread_counts(cores: usize, io: usize) -> ThreadCounts {
     ThreadCounts {
         worker: cores.max(MIN_THREADS_PER_POOL),
@@ -737,6 +820,7 @@ fn default_thread_counts(cores: usize, io: usize) -> ThreadCounts {
 /// relative shape via the largest-remainder method. Each pool keeps at least
 /// [`MIN_THREADS_PER_POOL`], so a `limit` below `POOL_COUNT * MIN_THREADS_PER_POOL`
 /// floors there. Defaults that already fit are returned unchanged.
+#[lore_macro::test_pub]
 fn apportion_thread_counts(defaults: ThreadCounts, limit: usize) -> ThreadCounts {
     let total = defaults.total();
     if total <= limit {
@@ -797,28 +881,73 @@ fn apply_thread_limit(requested: ThreadCounts) -> ThreadCounts {
     }
 }
 
-/// Per-pool sizes before any limit: the core-count defaults with an explicit net
-/// request substituted.
-fn requested_thread_counts() -> ThreadCounts {
-    let mut counts = default_thread_counts(processor_count(), lore_io::requested_max_threads());
-    if let Some(net) = requested_net_threads() {
-        counts.net = net;
+/// The core and net pools for a process sized for `connections`, from the `defaults` for its
+/// processor count.
+///
+/// The core runtime runs one thread fewer than `defaults`, which leaves a processor for the net
+/// runtime, and never fewer than [`MIN_THREADS_PER_POOL`]. The net runtime takes one thread for
+/// each connection, since each connection's QUIC endpoint receives and decrypts on a task of its
+/// own, and never fewer than its default. It takes at most half of the core and net threads
+/// together, rounded down. A process that opens the connections takes these threads from the core
+/// runtime, so it runs as many CPU-bound threads as with one connection: 10 connections on 8
+/// processors run 5 core and 4 net threads. A process that serves them adds them to the core
+/// runtime, since the commands it serves may open fewer: 7 core and 4 net threads.
+#[lore_macro::test_pub]
+fn threads_for_connections(defaults: ThreadCounts, connections: NetConnections) -> ThreadCounts {
+    let worker = defaults.worker.saturating_sub(1).max(MIN_THREADS_PER_POOL);
+    let shared = worker + defaults.net;
+    let (NetConnections::Opened(count) | NetConnections::Served(count)) = connections;
+    let net = count.clamp(defaults.net, (shared / 2).max(defaults.net));
+    ThreadCounts {
+        worker: match connections {
+            NetConnections::Opened(_) => shared - net,
+            NetConnections::Served(_) => worker,
+        },
+        net,
+        ..defaults
     }
-    counts
 }
 
-/// Per-pool counts from the core count, an explicit net request, and the limit.
+/// Per-pool sizes before any limit: `defaults`, with an explicit `net_request`
+/// substituted, or else sized for the process's storage `connections` where it set any.
+#[lore_macro::test_pub]
+fn requested_counts(
+    defaults: ThreadCounts,
+    net_request: Option<usize>,
+    connections: Option<NetConnections>,
+) -> ThreadCounts {
+    match (net_request, connections) {
+        (Some(net), _) => ThreadCounts { net, ..defaults },
+        (None, Some(connections)) => threads_for_connections(defaults, connections),
+        (None, None) => defaults,
+    }
+}
+
+/// Per-pool sizes before any limit, for this process (see [`requested_counts`]).
+fn requested_thread_counts() -> ThreadCounts {
+    requested_counts(
+        default_thread_counts(processor_count(), lore_io::requested_max_threads()),
+        requested_net_threads(),
+        NET_CONNECTIONS.get().copied().flatten(),
+    )
+}
+
+/// Per-pool counts from the core count, an explicit net request or the storage
+/// connections, and the limit.
 fn budget_thread_counts() -> ThreadCounts {
     apply_thread_limit(requested_thread_counts())
 }
 
 /// Per-pool thread counts Lore sizes its runtime for.
 ///
-/// `LORE_NET_THREADS` and [`set_net_threads_default`] raise the net pool's ideal,
-/// and `LORE_IO_POOL_THREADS` the syscall pool's; worker follows the core count
-/// and blocking is a small fixed count. Whatever the ideals, a thread limit is a
-/// ceiling on their total rather than a starting point to negotiate from: the
-/// pools are scaled to fit it, down to [`MIN_THREADS_PER_POOL`] each.
+/// `LORE_NET_THREADS` and [`set_net_threads_default`] set the net pool's ideal,
+/// with worker at the core count; otherwise the connections [`set_net_connections`]
+/// sets size both, as [`threads_for_connections`] divides them, and a process that
+/// sets none keeps the defaults. `LORE_IO_POOL_THREADS` raises the
+/// syscall pool's ideal, and blocking is a small fixed count. Whatever the ideals,
+/// a thread limit is a ceiling on their total rather than a starting point to
+/// negotiate from: the pools are scaled to fit it, down to [`MIN_THREADS_PER_POOL`]
+/// each.
 pub fn thread_counts() -> ThreadCounts {
     budget_thread_counts()
 }
@@ -829,6 +958,7 @@ pub fn default_blocking_threads() -> usize {
     budget_thread_counts().blocking
 }
 
+#[lore_macro::test_pub]
 fn default_thread_keep_alive() -> u64 {
     DEFAULT_THREAD_KEEP_ALIVE_SECONDS
 }
@@ -857,8 +987,9 @@ pub struct TokioSettings {
     #[serde(default = "default_thread_keep_alive")]
     pub thread_keep_alive_seconds: u64,
     pub worker_threads: Option<usize>,
-    /// Net runtime worker threads; `None` keeps the process default (2 on
-    /// clients, one per processor where the server sets it).
+    /// Net runtime worker threads; `None` keeps the process default: 2, or one per
+    /// storage connection [`set_net_connections`] sets, up to half the core and net
+    /// threads together, or one per processor in a [`serving_runtime`].
     #[serde(default)]
     pub net_threads: Option<usize>,
 }
@@ -872,6 +1003,42 @@ impl Default for TokioSettings {
             net_threads: None,
         }
     }
+}
+
+impl TokioSettings {
+    /// Settings for a process that relays its calls to the Lore service.
+    ///
+    /// A relaying process writes a request to a socket and reads events back,
+    /// and the service does the work. Sizing its pools for work it will not do
+    /// costs threads a whole machine's worth of clients pays for. Both pools sit
+    /// at [`MIN_THREADS_PER_POOL`], which every pool keeps regardless, so none
+    /// can starve another. The net pool is left at the process default: a
+    /// relaying process makes no remote calls of its own, and that default is
+    /// already small.
+    pub fn relay_only() -> Self {
+        TokioSettings {
+            max_blocking_threads: MIN_THREADS_PER_POOL,
+            thread_keep_alive_seconds: default_thread_keep_alive(),
+            worker_threads: Some(MIN_THREADS_PER_POOL),
+            net_threads: None,
+        }
+    }
+}
+
+/// Returns a handle to the core runtime of a process that serves, building it with `settings`
+/// if none exists: one core thread and one net thread per processor, since serving thousands of
+/// concurrent client connections is its normal case. `settings.net_threads` and
+/// `LORE_NET_THREADS` set the net threads instead, and a thread limit bounds the total. The net
+/// threads are set before the runtime is built, since both runtimes are sized from them once.
+pub fn serving_runtime(settings: Option<TokioSettings>) -> Handle {
+    let _ = set_net_threads_default(
+        settings
+            .as_ref()
+            .and_then(|settings| settings.net_threads)
+            .filter(|&count| count > 0)
+            .unwrap_or_else(processor_count),
+    );
+    runtime_with_settings(settings)
 }
 
 /// Returns a handle to the shared tokio runtime, creating it lazily with default settings.
@@ -934,7 +1101,14 @@ fn build_core_runtime(settings: Option<TokioSettings>) -> tokio::runtime::Runtim
     if let Some(net_threads) = settings.net_threads.filter(|&count| count > 0) {
         let _ = NET_THREADS_DEFAULT.set(net_threads);
     }
+    settle_net_connections();
     let counts = core_thread_counts(&settings);
+    crate::lore_debug!(
+        "Core runtime: {} workers, {} blocking; syscall pool: {}",
+        counts.worker,
+        core_blocking_threads(counts),
+        counts.io
+    );
     // The syscall pool builds itself on the first file operation, which in every Lore process
     // happens on this runtime and so after this point.
     lore_io::set_max_threads(counts.io);
@@ -1116,273 +1290,5 @@ pub fn runtime_shutdown_timeout(wait_timeout: Duration) {
 
     if let Err(panic) = shutdown.join() {
         std::panic::resume_unwind(panic);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The net runtime has `max_blocking_threads(1)`, so blocking work dispatched there
-    /// starves every later net-side blocking call. Thread names distinguish the pools:
-    /// core spawns `lore-tokio-*`, net spawns `lore-net-*`.
-    #[test]
-    fn blocking_macros_target_core_even_from_a_net_task() {
-        let thread_name = net_runtime().block_on(async {
-            crate::lore_spawn_net!(async {
-                crate::lore_spawn_blocking!(|| std::thread::current()
-                    .name()
-                    .unwrap_or_default()
-                    .to_string())
-                .await
-                .expect("blocking task joins")
-            })
-            .await
-            .expect("net task joins")
-        });
-
-        assert!(
-            thread_name.starts_with("lore-tokio-"),
-            "blocking work issued from a net task ran on {thread_name:?}, \
-             which is not a core blocking thread"
-        );
-    }
-
-    /// The accessors sit on request paths, so they must resolve to the one
-    /// runtime built for the process — never rebuild, never serialise.
-    #[test]
-    fn accessors_resolve_to_one_runtime_per_process() {
-        let expected = (core_runtime().id(), net_runtime().id());
-        assert_ne!(expected.0, expected.1, "core and net share a runtime");
-
-        let threads: Vec<_> = (0..8)
-            .map(|_| std::thread::spawn(|| (core_runtime().id(), net_runtime().id())))
-            .collect();
-        for thread in threads {
-            assert_eq!(thread.join().expect("thread joins"), expected);
-        }
-    }
-
-    /// Driving the work on a `current_thread` caller's own handle from a foreign thread
-    /// cannot work — `Handle::block_on` does not drive a `current_thread` runtime's tasks,
-    /// and the thread that would have is parked waiting for this one — so it hangs. The
-    /// spawned task completing is the proof that the work runs on core instead: it is what
-    /// the storage close does.
-    #[tokio::test(flavor = "current_thread")]
-    async fn shutdown_block_on_runs_spawns_from_a_current_thread_caller() {
-        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = Arc::clone(&ran);
-
-        let completed = shutdown_block_on(
-            async move {
-                crate::lore_spawn!(async move { flag.store(true, Ordering::SeqCst) })
-                    .await
-                    .expect("spawned task joins");
-            },
-            Duration::from_secs(10),
-        );
-
-        assert!(completed, "shutdown work timed out instead of completing");
-        assert!(
-            ran.load(Ordering::SeqCst),
-            "the task the shutdown work spawned never ran"
-        );
-    }
-
-    /// The same from a multi-thread caller, which takes the `block_in_place` path — the one
-    /// that panics outright on a `current_thread` runtime.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_block_on_runs_spawns_from_a_multi_thread_caller() {
-        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = Arc::clone(&ran);
-
-        let completed = shutdown_block_on(
-            async move {
-                crate::lore_spawn!(async move { flag.store(true, Ordering::SeqCst) })
-                    .await
-                    .expect("spawned task joins");
-            },
-            Duration::from_secs(10),
-        );
-
-        assert!(completed, "shutdown work timed out instead of completing");
-        assert!(ran.load(Ordering::SeqCst), "the spawned task never ran");
-    }
-
-    #[test]
-    fn shutdown_block_on_runs_without_a_runtime() {
-        let completed = shutdown_block_on(
-            async {
-                tokio::task::yield_now().await;
-            },
-            Duration::from_secs(10),
-        );
-
-        assert!(completed, "shutdown work timed out instead of completing");
-    }
-
-    /// Bounded, not best-effort: a `current_thread` caller may hold the only thread that
-    /// could drive part of the work, so shutdown has to be able to give up on it.
-    #[tokio::test(flavor = "current_thread")]
-    async fn shutdown_block_on_gives_up_instead_of_hanging() {
-        let completed = shutdown_block_on(std::future::pending::<()>(), Duration::from_millis(50));
-
-        assert!(
-            !completed,
-            "a future that cannot finish must report timeout"
-        );
-    }
-
-    #[test]
-    fn runtime_returns_valid_handle() {
-        let handle = runtime();
-        handle.block_on(async {
-            tokio::task::yield_now().await;
-        });
-    }
-
-    #[test]
-    fn runtime_with_settings_returns_valid_handle() {
-        let settings = TokioSettings {
-            max_blocking_threads: 4,
-            thread_keep_alive_seconds: 5,
-            worker_threads: Some(2),
-            net_threads: None,
-        };
-        let handle = runtime_with_settings(Some(settings));
-        handle.block_on(async {
-            tokio::task::yield_now().await;
-        });
-    }
-
-    /// The syscall pool's request on a host with this many cores, so the cases
-    /// below do not depend on the machine running them.
-    const IO_REQUEST: usize = 16;
-
-    #[test]
-    fn default_thread_counts_match_design_formulas() {
-        let counts = default_thread_counts(8, IO_REQUEST);
-        assert_eq!(counts.worker, 8);
-        assert_eq!(
-            counts.blocking,
-            CORE_BLOCKING_THREADS + NET_BLOCKING_THREADS
-        );
-        assert_eq!(counts.net, DEFAULT_NET_THREADS);
-        assert_eq!(counts.io, IO_REQUEST);
-    }
-
-    #[test]
-    fn apportion_returns_defaults_when_within_limit() {
-        let defaults = default_thread_counts(8, IO_REQUEST);
-        let total = defaults.total();
-        assert_eq!(apportion_thread_counts(defaults, total), defaults);
-        assert_eq!(apportion_thread_counts(defaults, total + 100), defaults);
-    }
-
-    #[test]
-    fn apportion_fills_budget_exactly_above_the_floor() {
-        let defaults = default_thread_counts(64, IO_REQUEST);
-        for limit in (POOL_COUNT * MIN_THREADS_PER_POOL)..=defaults.total() {
-            let counts = apportion_thread_counts(defaults, limit);
-            assert_eq!(counts.total(), limit, "limit {limit} not used exactly");
-            for pool in counts.as_array() {
-                assert!(pool >= MIN_THREADS_PER_POOL);
-            }
-        }
-    }
-
-    #[test]
-    fn apportion_floors_below_min_total() {
-        let counts = apportion_thread_counts(default_thread_counts(64, IO_REQUEST), 1);
-        assert_eq!(counts.as_array(), [MIN_THREADS_PER_POOL; POOL_COUNT]);
-    }
-
-    #[test]
-    fn apportion_at_limit_64_on_64_core_host() {
-        let defaults = default_thread_counts(64, IO_REQUEST);
-        assert_eq!(defaults.total(), 85);
-        let counts = apportion_thread_counts(defaults, 64);
-        assert_eq!(counts.worker, 48);
-        assert_eq!(counts.blocking, MIN_THREADS_PER_POOL);
-        assert_eq!(counts.net, MIN_THREADS_PER_POOL);
-        assert_eq!(counts.io, 12);
-        assert_eq!(counts.total(), 64);
-    }
-
-    /// A net request raises the pool's ideal, and the limit still binds the total —
-    /// asking for 64 net threads under a 64-thread ceiling cannot buy 64 of them
-    /// on top of the worker and blocking pools.
-    #[test]
-    fn a_net_request_is_scaled_by_the_limit() {
-        let requested = ThreadCounts {
-            worker: 20,
-            blocking: CORE_BLOCKING_THREADS + NET_BLOCKING_THREADS,
-            net: 64,
-            io: IO_REQUEST,
-        };
-        let counts = apportion_thread_counts(requested, 64);
-        assert_eq!(counts.total(), 64);
-        assert!(counts.net < requested.net);
-        assert!(
-            counts.net > counts.worker,
-            "the largest request keeps the largest share"
-        );
-    }
-
-    /// The limit is a ceiling on the total whatever the per-pool requests are, so
-    /// no knob can raise the process above what an embedder asked for. The
-    /// per-pool floor is a property of scaling down rather than of every result:
-    /// a request that already fits is honoured as written, including one below it.
-    #[test]
-    fn the_limit_bounds_the_total_for_any_request() {
-        for worker in [2, 8, 64, 256] {
-            for blocking in [1, 2, 128] {
-                for net in [1, 2, 64, 512] {
-                    for io in [1, 16, 128] {
-                        let requested = ThreadCounts {
-                            worker,
-                            blocking,
-                            net,
-                            io,
-                        };
-                        for limit in [POOL_COUNT * MIN_THREADS_PER_POOL, 16, 64, 1024] {
-                            let counts = apportion_thread_counts(requested, limit);
-                            assert!(
-                                counts.total() <= limit,
-                                "{requested:?} at limit {limit} gave {counts:?}"
-                            );
-                            if requested.total() <= limit {
-                                assert_eq!(counts, requested, "a request that fits is untouched");
-                                continue;
-                            }
-                            for pool in counts.as_array() {
-                                assert!(
-                                    pool >= MIN_THREADS_PER_POOL,
-                                    "{requested:?} at limit {limit} starved a pool: {counts:?}"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn guarded_task_completes() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
-        use std::sync::atomic::Ordering;
-
-        let completed = Arc::new(AtomicBool::new(false));
-        let completed_clone = completed.clone();
-
-        runtime_spawn_guarded(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            completed_clone.store(true, Ordering::Release);
-        });
-
-        runtime_flush_guarded().await;
-        assert!(completed.load(Ordering::Acquire));
     }
 }

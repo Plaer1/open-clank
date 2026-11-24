@@ -9,7 +9,7 @@ import type {
   SessionTaskResponse,
   Message,
   Part,
-  Provider,
+  PublicProvider as Provider,
   PermissionRequest,
   QuestionRequest,
   SessionStatus,
@@ -277,6 +277,7 @@ export type TuiState = {
   session: {
     count: () => number
     diff: (sessionID: string) => ReadonlyArray<TuiSidebarFileItem>
+    diffCoverage: (sessionID: string) => "complete" | "partial" | "unavailable"
     todo: (sessionID: string) => ReadonlyArray<TuiSidebarTodoItem>
     task: (sessionID: string) => ReadonlyArray<TuiSidebarTaskItem>
     messages: (sessionID: string) => ReadonlyArray<Message>
@@ -370,7 +371,6 @@ export type TuiHostSlotMap = {
   sidebar_title: {
     session_id: string
     title: string
-    share_url?: string
   }
   sidebar_content: {
     session_id: string

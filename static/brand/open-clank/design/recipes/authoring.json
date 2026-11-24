@@ -1,0 +1,58 @@
+{
+  "id": "open-clank.deliverable-authoring",
+  "version": "1.1.0",
+  "status": "reference-data",
+  "purpose": "Data-only index to first-party built-in skill recipes; the skill catalog is the invocation owner.",
+  "designStandard": {
+    "id": "open-clank.deliverable-design",
+    "version": "1.0.0",
+    "sha256": "21708f3285fd26c50100db6b4467e08b58461ca60ae835ac6f3ea006bdf36675"
+  },
+  "shared": {
+    "appearance": "Capture the originating user's normalized selected appearance synchronously at generation start; persist the captured standard and appearance with the output. Honor explicit design instructions and output reduced-motion choice. If the owner is not ready, report appearance unavailable rather than use another account's state.",
+    "source": "Create an editable semantic source with stable object identities and retain its resource revision; preserve unrelated user edits.",
+    "checkpoints": "Save progressively usable revisions through the existing resource/job owner and label incomplete work honestly.",
+    "missingFacts": "Ask for essential missing facts when needed; otherwise mark unknown facts as explicit placeholders, never invent them.",
+    "provenance": "Retain source, asset and factual provenance and the captured appearance revision; do not embed credentials, account IDs or private host paths.",
+    "verification": "Perform one bounded check appropriate to the requested output and disclose what remains unverified.",
+    "authority": "The user chooses the existing model and workflow; this record does not activate models, tools, external services or token-saving transforms."
+  },
+  "recipes": [
+    {
+      "id": "rich-document",
+      "editableSource": "Structured document or editable text resource",
+      "view": "Readable document or PDF",
+      "check": "Read back headings, text and one representative page.",
+      "skillReference": "references/rich-document.md"
+    },
+    {
+      "id": "workbook",
+      "editableSource": "Workbook model with stable cells, formulas and data relationships",
+      "view": "Workbook or exported table",
+      "check": "Read back a representative formula, value and source cell.",
+      "skillReference": "references/workbook.md"
+    },
+    {
+      "id": "presentation",
+      "editableSource": "Deck source with stable slide and object identities",
+      "view": "Slide deck or PDF",
+      "check": "Read back representative slide content and object placement.",
+      "skillReference": "references/presentation.md"
+    },
+    {
+      "id": "html-widget",
+      "editableSource": "Original HTML, CSS and semantic data",
+      "view": "Local HTML preview",
+      "check": "Inspect one relevant interaction and the captured appearance.",
+      "skillReference": "references/html-widget.md"
+    },
+    {
+      "id": "image-vector",
+      "editableSource": "Editable vector source or original image and source provenance",
+      "view": "Local image preview",
+      "check": "Inspect the requested subject and one representative detail.",
+      "skillReference": "references/image-vector.md"
+    }
+  ],
+  "catalogSkill": "open-clank-deliverable"
+}

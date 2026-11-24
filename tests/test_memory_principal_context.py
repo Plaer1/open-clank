@@ -11,7 +11,7 @@ from services.memory.principal_context import (
     ensure_principal_context,
     render_identity_template,
 )
-from src.frankenmemory_v2 import V2Repository
+from src.memery_v2 import V2Repository
 
 
 def _db(path):
@@ -30,6 +30,7 @@ def _db(path):
     CREATE TABLE fm_v2_evidence(owner_id TEXT, evidence_id TEXT, source_id TEXT, source_revision INTEGER, locator_type TEXT, locator_json TEXT, quote TEXT, extraction_contract TEXT, parser_version TEXT, raw_value_json TEXT, normalized_value_json TEXT, created_at TEXT);
     CREATE TABLE curated(id TEXT PRIMARY KEY, content TEXT NOT NULL, kind TEXT NOT NULL, owner TEXT, workspace_id TEXT NOT NULL DEFAULT 'global', archived INTEGER NOT NULL DEFAULT 0, metadata TEXT NOT NULL DEFAULT 'null', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');
     """)
+    conn.execute("PRAGMA user_version=16")
     conn.commit(); conn.close()
 
 
@@ -363,7 +364,7 @@ def test_persona_alias_candidate_rejects_ambiguous_or_untrusted_matches(
 def test_ensure_fails_open_when_v2_bootstrap_raises_operation_error(
     monkeypatch, tmp_path
 ):
-    from src.frankenmemory_v2 import V2OperationError
+    from src.memery_v2 import V2OperationError
 
     db = tmp_path / "fm.sqlite"
     _db(str(db))
@@ -550,3 +551,53 @@ def test_untrusted_or_misattributed_name_does_not_rename_handler(tmp_path, mutat
         conn.commit()
 
     assert resolve_handler_display_label("allie", db_path=str(db)) == "Handler"
+
+
+def test_unsupported_epoch_does_not_create_principals_or_binding_table(tmp_path):
+    db = tmp_path / "unsupported.sqlite"
+    _db(str(db))
+    with sqlite3.connect(db) as conn:
+        conn.execute("PRAGMA user_version=17")
+    assert ensure_principal_context(owner="allie", workspace_id="ws", db_path=str(db)) is None
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT count(*) FROM fm_v2_entities").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='fm_v2_principal_bindings'").fetchone()[0] == 0
+
+
+def test_supported_epoch_writes_binding_with_entity_repository(tmp_path, monkeypatch):
+    db = tmp_path / "supported.sqlite"
+    _db(str(db))
+    created = []
+
+    class FakeRepository:
+        def __init__(self, path):
+            pass
+
+        def get_entity(self, **kwargs):
+            return None
+
+        def create_entity(self, **kwargs):
+            created.append(kwargs["entity_id"])
+
+    monkeypatch.setattr("src.memery_v2.V2Repository", FakeRepository)
+    result = ensure_principal_context(owner="allie", workspace_id="ws", db_path=str(db))
+    assert result is not None and len(created) == 2
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT count(*) FROM fm_v2_principal_bindings").fetchone()[0] == 1
+
+
+def test_principal_context_applies_only_on_the_v16_epoch_and_creates_nothing(tmp_path):
+    import sqlite3
+    from services.memory.principal_context import principal_context_applies
+
+    for version, expected in ((16, True), (17, False), (18, False)):
+        db = tmp_path / f"v{version}.db"
+        conn = sqlite3.connect(db)
+        conn.execute(f"PRAGMA user_version={version}")
+        conn.commit()
+        conn.close()
+        assert principal_context_applies(str(db)) is expected
+        check = sqlite3.connect(db)
+        assert check.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+        check.close()
+    assert principal_context_applies(str(tmp_path / "missing" / "x.db")) is True  # unreadable: keep the failure path

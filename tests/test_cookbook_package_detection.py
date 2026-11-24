@@ -9,7 +9,6 @@ package was marked missing. The fix derives the distribution name from the
 package's declared pip spec instead.
 """
 
-from pathlib import Path
 
 from routes.shell_routes import _pip_dist_name
 
@@ -40,20 +39,3 @@ def test_falls_back_to_import_name_when_no_pip_spec():
     # System rows (tmux/docker) declare no pip spec; fall back to the munged name.
     assert _pip_dist_name({"name": "some_mod", "pip": ""}) == "some-mod"
     assert _pip_dist_name({"name": "tmux"}) == "tmux"
-
-
-def test_route_uses_dist_name_helper_not_munged_import_name():
-    """Lock the wiring: the local package check must look up metadata by the
-    derived distribution name, not the old `name.replace('_','-')` (the exact
-    bug that hid llama-cpp-python)."""
-    src = (Path(__file__).resolve().parents[1] / "routes" / "shell_routes.py").read_text(encoding="utf-8")
-    assert "importlib_metadata.version(_pip_dist_name(pkg))" in src
-    assert 'importlib_metadata.version(pkg["name"].replace("_", "-"))' not in src
-
-
-def test_transformers_is_listed_as_image_dependency():
-    src = (Path(__file__).resolve().parents[1] / "routes" / "shell_routes.py").read_text(encoding="utf-8")
-
-    assert '"name": "transformers"' in src
-    assert '"pip": "transformers"' in src
-    assert '"transformers",' in src

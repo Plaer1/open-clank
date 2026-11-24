@@ -103,7 +103,7 @@ describe("session prefix snapshot", () => {
     })
   })
 
-  test("profile and tool hashes are stable across key order", () => {
+  test("profile hashes are stable across key order and tool order is retained", async () => {
     const permission = [{ permission: "*", pattern: "*", action: "allow" as const }]
     const key = SessionPrefixSnapshot.profileKey({
       providerID: "p",
@@ -157,9 +157,9 @@ describe("session prefix snapshot", () => {
       alpha: tool({ description: "a", inputSchema: jsonSchema({ type: "object", properties: {} }) }),
     }
     const second = { alpha: first.alpha, beta: first.beta }
-    expect(SessionPrefixSnapshot.toolsHash(first, ["beta", "alpha"])).toBe(
-      SessionPrefixSnapshot.toolsHash(second, ["alpha", "beta"]),
-    )
+    const ordered = await SessionPrefixSnapshot.snapshotTools(first, ["beta", "alpha"])
+    expect(SessionPrefixSnapshot.toolsHash(ordered)).toBe(SessionPrefixSnapshot.toolsHash(await SessionPrefixSnapshot.snapshotTools(second, ["beta", "alpha"])))
+    expect(SessionPrefixSnapshot.toolsHash(ordered)).not.toBe(SessionPrefixSnapshot.toolsHash(await SessionPrefixSnapshot.snapshotTools(second, ["alpha", "beta"])))
   })
 
   test("a snapshot is current only when both the system and tools match", () => {

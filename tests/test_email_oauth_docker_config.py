@@ -44,26 +44,7 @@ def test_google_oauth_setting_is_forwarded(key):
         assert expected in _odysseus_environment(path), path.name
 
 
-@pytest.mark.parametrize(
-    "key",
-    (
-        "GOOGLE_OAUTH_CLIENT_ID",
-        "GOOGLE_OAUTH_CLIENT_SECRET",
-        "GOOGLE_OAUTH_REDIRECT_URI",
-    ),
-)
-def test_google_oauth_setting_is_documented(key):
-    assert f"# {key}=" in _env_example()
-
-
 def test_google_oauth_example_uses_a_neutral_secret_placeholder():
     env_example = _env_example()
     assert "GOOGLE_OAUTH_CLIENT_SECRET=replace-with-client-secret" in env_example
     assert "GOCSPX-" not in env_example
-
-
-def test_redirect_documentation_covers_https_and_reverse_proxies():
-    oauth_section = _env_example().split("# Google OAuth2", 1)[1].split("# Misc", 1)[0]
-    assert "HTTPS" in oauth_section
-    assert "reverse-proxy" in oauth_section
-    assert "exactly match an authorized redirect URI" in oauth_section

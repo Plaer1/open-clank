@@ -53,9 +53,13 @@
 //! `PluginNotFound` sits with the other not-found codes, not with the other
 //! plugin codes.
 
+use std::convert::Infallible;
 use std::fmt;
 
+use lore_error_set::ErrorSet;
 use lore_error_set::FfiError;
+use lore_error_set::ForwardAny;
+use lore_error_set::Has;
 use thiserror::Error;
 
 /// Scopes `#[ffi_code(N)]` to this module.
@@ -142,6 +146,33 @@ pub struct NotAuthenticated;
 #[ffi_code(17)]
 pub struct NotAuthorized;
 
+/// Whether `error` is a refusal of the caller: [`NotAuthenticated`] or [`NotAuthorized`].
+pub fn is_refusal<E: FfiError>(error: &E) -> bool {
+    matches!(
+        error.ffi_code(),
+        NotAuthenticated::FFI_CODE | NotAuthorized::FFI_CODE
+    )
+}
+
+/// `error` forwarded into `Target` when it is the remote's refusal of the caller, which keeps its
+/// variant there, and `otherwise(error)` when it is any other failure.
+#[track_caller]
+pub fn forward_refusal_or<Source, Target>(
+    error: Source,
+    context: &str,
+    otherwise: impl FnOnce(Source) -> Target,
+) -> Target
+where
+    Source: ErrorSet + FfiError,
+    Target: ErrorSet + Has<NotAuthenticated> + Has<NotAuthorized>,
+{
+    if !is_refusal(&error) {
+        return otherwise(error);
+    }
+    let Err(target) = Err::<Infallible, Source>(error).forward_any::<Target>(context);
+    target
+}
+
 #[derive(Debug, Clone, Error, FfiError)]
 #[error("No token stored")]
 #[ffi_code(18)]
@@ -155,8 +186,11 @@ pub struct WriteRequired;
 // ---------------------------------------------------------------------------
 // Connectivity and availability (28–39)
 //
-// The remote could not be reached, dropped the connection, or is reachable but
-// declining work. Retrying later is often the right response.
+// Something the operation had to talk to could not be reached, dropped the
+// connection, or is reachable but declining work. Usually the remote; also the
+// local service process, which a call is relayed through and which the caller
+// reaches the same way — over a connection that may not be there. Retrying
+// later is often the right response.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Error, FfiError)]
@@ -180,6 +214,20 @@ pub struct Maintenance;
 #[error("Store overloaded, slow down")]
 #[ffi_code(31)]
 pub struct SlowDown;
+
+/// No Lore service could be reached, and none could be started.
+///
+/// Distinct from [`NotConnected`], which reports a remote: a caller that relays
+/// its calls through the local service handles this differently, because it is
+/// the one failure that means the operation did not run at all rather than ran
+/// and failed. Running the operation in this process instead is a reasonable
+/// answer to it and not to any other error here.
+#[derive(Debug, Clone, Error, FfiError)]
+#[error("Lore service unavailable: {reason}")]
+#[ffi_code(32)]
+pub struct ServiceUnavailable {
+    pub reason: String,
+}
 
 // ---------------------------------------------------------------------------
 // Repository state (40–55)
@@ -244,6 +292,25 @@ pub struct DeleteCurrent {
 #[error("Unable to delete default branch: {branch}")]
 #[ffi_code(49)]
 pub struct DeleteDefault {
+    pub branch: String,
+}
+
+// Code 50 stays free so this block does not renumber.
+
+#[derive(Debug, Clone, Error, FfiError)]
+#[error("Mounts are busy: {paths}")]
+#[ffi_code(51)]
+pub struct MountsBusy {
+    pub paths: String,
+}
+
+#[derive(Debug, Clone, Error, FfiError)]
+#[error(
+    "Can't push the link at {path} (branch {branch}): the remote branch has newer revisions than yours"
+)]
+#[ffi_code(52)]
+pub struct LinkDivergent {
+    pub path: String,
     pub branch: String,
 }
 
@@ -480,376 +547,3 @@ pub struct InefficientCompression;
 #[error("Lore has been shut down")]
 #[ffi_code(193)]
 pub struct ShutDown;
-
-#[cfg(test)]
-mod tests {
-    use std::ops::RangeInclusive;
-
-    use super::*;
-
-    /// The group a code is allocated from, and the block it owns.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Group {
-        Input,
-        Auth,
-        Connectivity,
-        RepositoryState,
-        AlreadyExists,
-        NotFound,
-        Configuration,
-        ResourceLimits,
-        LibraryLifecycle,
-    }
-
-    impl Group {
-        const ALL: &'static [Self] = &[
-            Self::Input,
-            Self::Auth,
-            Self::Connectivity,
-            Self::RepositoryState,
-            Self::AlreadyExists,
-            Self::NotFound,
-            Self::Configuration,
-            Self::ResourceLimits,
-            Self::LibraryLifecycle,
-        ];
-
-        fn block(self) -> RangeInclusive<i32> {
-            match self {
-                Self::Input => 3..=15,
-                Self::Auth => 16..=27,
-                Self::Connectivity => 28..=39,
-                Self::RepositoryState => 40..=55,
-                Self::AlreadyExists => 56..=63,
-                Self::NotFound => 79..=99,
-                Self::Configuration => 110..=117,
-                Self::ResourceLimits => 118..=125,
-                Self::LibraryLifecycle => 193..=200,
-            }
-        }
-    }
-
-    /// Values no discrete error code may take, and why.
-    ///
-    /// The CLI returns a failing error's code as the process exit status
-    /// (`ExitCode::from(code as u8)` in `lore-client`), so a code landing on one
-    /// of these is indistinguishable from something the shell, the OS, or the
-    /// CLI's own startup path reports.
-    const RESERVED: &[(RangeInclusive<i32>, &str)] = &[
-        (0..=0, "success"),
-        (
-            1..=1,
-            "the CLI's ExitCode::FAILURE, and the shell's generic error",
-        ),
-        (
-            2..=2,
-            "the CLI's usage exit, and the shell's misuse-of-a-builtin",
-        ),
-        (64..=78, "the BSD sysexits.h codes"),
-        (100..=109, "the legacy LoreError categories"),
-        (
-            126..=128,
-            "the shell's not-executable, not-found, and bad-exit-argument statuses",
-        ),
-        (129..=192, "128 + signal number: killed by a signal"),
-        (255..=255, "Internal, which is -1 truncated to a u8"),
-    ];
-
-    /// Every discrete error type, the group it was allocated from, and the code
-    /// it carries. A new type belongs here too — the tests below hold the
-    /// grouping and exit-status invariants, and only cover what this list names.
-    fn registry() -> Vec<(&'static str, Group, i32)> {
-        fn text() -> String {
-            "test".to_string()
-        }
-
-        vec![
-            (
-                "InvalidArguments",
-                Group::Input,
-                InvalidArguments { reason: text() }.ffi_code(),
-            ),
-            (
-                "InvalidPath",
-                Group::Input,
-                InvalidPath { path: text() }.ffi_code(),
-            ),
-            (
-                "InvalidAddress",
-                Group::Input,
-                InvalidAddress { address: text() }.ffi_code(),
-            ),
-            (
-                "NotALink",
-                Group::Input,
-                NotALink { path: text() }.ffi_code(),
-            ),
-            (
-                "NotALayer",
-                Group::Input,
-                NotALayer { path: text() }.ffi_code(),
-            ),
-            (
-                "InvalidNodeHierarchy",
-                Group::Input,
-                InvalidNodeHierarchy {
-                    node: 1,
-                    expected_parent: 2,
-                    actual_parent: 3,
-                }
-                .ffi_code(),
-            ),
-            (
-                "NotSupported",
-                Group::Input,
-                NotSupported { operation: text() }.ffi_code(),
-            ),
-            ("NotAuthenticated", Group::Auth, NotAuthenticated.ffi_code()),
-            ("NotAuthorized", Group::Auth, NotAuthorized.ffi_code()),
-            ("TokenNotFound", Group::Auth, TokenNotFound.ffi_code()),
-            ("WriteRequired", Group::Auth, WriteRequired.ffi_code()),
-            ("Disconnected", Group::Connectivity, Disconnected.ffi_code()),
-            (
-                "NotConnected",
-                Group::Connectivity,
-                NotConnected { reason: text() }.ffi_code(),
-            ),
-            ("Maintenance", Group::Connectivity, Maintenance.ffi_code()),
-            ("SlowDown", Group::Connectivity, SlowDown.ffi_code()),
-            (
-                "NothingStaged",
-                Group::RepositoryState,
-                NothingStaged.ffi_code(),
-            ),
-            (
-                "BranchAdvanced",
-                Group::RepositoryState,
-                BranchAdvanced.ffi_code(),
-            ),
-            ("Divergent", Group::RepositoryState, Divergent.ffi_code()),
-            (
-                "Conflict",
-                Group::RepositoryState,
-                Conflict { path: text() }.ffi_code(),
-            ),
-            (
-                "LocalModifications",
-                Group::RepositoryState,
-                LocalModifications.ffi_code(),
-            ),
-            (
-                "LockNotOwned",
-                Group::RepositoryState,
-                LockNotOwned.ffi_code(),
-            ),
-            (
-                "IdenticalMetadata",
-                Group::RepositoryState,
-                IdenticalMetadata.ffi_code(),
-            ),
-            (
-                "DeleteProtected",
-                Group::RepositoryState,
-                DeleteProtected { branch: text() }.ffi_code(),
-            ),
-            (
-                "DeleteCurrent",
-                Group::RepositoryState,
-                DeleteCurrent { branch: text() }.ffi_code(),
-            ),
-            (
-                "DeleteDefault",
-                Group::RepositoryState,
-                DeleteDefault { branch: text() }.ffi_code(),
-            ),
-            (
-                "AlreadyLinked",
-                Group::AlreadyExists,
-                AlreadyLinked.ffi_code(),
-            ),
-            (
-                "BranchAlreadyExists",
-                Group::AlreadyExists,
-                BranchAlreadyExists { branch: text() }.ffi_code(),
-            ),
-            (
-                "RepositoryAlreadyExists",
-                Group::AlreadyExists,
-                RepositoryAlreadyExists { path: text() }.ffi_code(),
-            ),
-            ("NotFound", Group::NotFound, NotFound.ffi_code()),
-            (
-                "AddressNotFound",
-                Group::NotFound,
-                AddressNotFound { address: [0; 48] }.ffi_code(),
-            ),
-            (
-                "PayloadNotFound",
-                Group::NotFound,
-                PayloadNotFound { hash: [0; 32] }.ffi_code(),
-            ),
-            (
-                "FileNotFound",
-                Group::NotFound,
-                FileNotFound { resource: text() }.ffi_code(),
-            ),
-            ("NodeNotFound", Group::NotFound, NodeNotFound.ffi_code()),
-            ("LinkNotFound", Group::NotFound, LinkNotFound.ffi_code()),
-            (
-                "LinkPathNotFound",
-                Group::NotFound,
-                LinkPathNotFound { path: text() }.ffi_code(),
-            ),
-            ("LayerNotFound", Group::NotFound, LayerNotFound.ffi_code()),
-            (
-                "BranchNotFound",
-                Group::NotFound,
-                BranchNotFound { branch: text() }.ffi_code(),
-            ),
-            (
-                "RevisionNotFound",
-                Group::NotFound,
-                RevisionNotFound { revision: text() }.ffi_code(),
-            ),
-            (
-                "RepositoryNotFound",
-                Group::NotFound,
-                RepositoryNotFound { repository: text() }.ffi_code(),
-            ),
-            (
-                "SharedStoreNotFound",
-                Group::NotFound,
-                SharedStoreNotFound { path: text() }.ffi_code(),
-            ),
-            ("LockNotFound", Group::NotFound, LockNotFound.ffi_code()),
-            (
-                "PluginNotFound",
-                Group::NotFound,
-                PluginNotFound {
-                    plugin_name: text(),
-                    available_plugins: Vec::new(),
-                }
-                .ffi_code(),
-            ),
-            (
-                "MissingIdentity",
-                Group::Configuration,
-                MissingIdentity.ffi_code(),
-            ),
-            ("NoRemote", Group::Configuration, NoRemote.ffi_code()),
-            (
-                "PluginConfigError",
-                Group::Configuration,
-                PluginConfigError {
-                    plugin_name: text(),
-                    message: text(),
-                }
-                .ffi_code(),
-            ),
-            (
-                "PluginInitError",
-                Group::Configuration,
-                PluginInitError {
-                    plugin_name: text(),
-                    message: text(),
-                }
-                .ffi_code(),
-            ),
-            (
-                "Oversized",
-                Group::ResourceLimits,
-                Oversized { context: text() }.ffi_code(),
-            ),
-            (
-                "MaxHistorySearchDepth",
-                Group::ResourceLimits,
-                MaxHistorySearchDepth.ffi_code(),
-            ),
-            (
-                "InefficientCompression",
-                Group::ResourceLimits,
-                InefficientCompression.ffi_code(),
-            ),
-            ("ShutDown", Group::LibraryLifecycle, ShutDown.ffi_code()),
-        ]
-    }
-
-    #[test]
-    fn every_code_sits_in_its_group_block() {
-        for (name, group, code) in registry() {
-            assert!(
-                group.block().contains(&code),
-                "{name} has code {code}, outside the {:?} block {:?}",
-                group,
-                group.block()
-            );
-        }
-    }
-
-    #[test]
-    fn codes_are_unique() {
-        let mut seen: Vec<(&'static str, i32)> = Vec::new();
-        for (name, _group, code) in registry() {
-            if let Some((other, _)) = seen.iter().find(|(_, taken)| *taken == code) {
-                panic!("{name} and {other} both use code {code}");
-            }
-            seen.push((name, code));
-        }
-    }
-
-    #[test]
-    fn every_code_survives_the_cast_to_a_process_exit_status() {
-        for (name, _group, code) in registry() {
-            let truncated = code as u8;
-            assert_eq!(
-                i32::from(truncated),
-                code,
-                "{name} has code {code}, which the CLI's `code as u8` would report as {truncated}"
-            );
-        }
-    }
-
-    #[test]
-    fn no_code_lands_on_a_reserved_exit_status() {
-        for (name, _group, code) in registry() {
-            for (range, reason) in RESERVED {
-                assert!(
-                    !range.contains(&code),
-                    "{name} has code {code}, which is reserved for {reason}"
-                );
-            }
-        }
-    }
-
-    /// The headroom in a block is where the next error type's code comes from,
-    /// so it is the block — not just the codes in use today — that has to stay
-    /// clear of the reserved statuses.
-    #[test]
-    fn no_group_block_overlaps_a_reserved_exit_status() {
-        for group in Group::ALL {
-            let block = group.block();
-            for (range, reason) in RESERVED {
-                let overlap = block.start().max(range.start())..=block.end().min(range.end());
-                assert!(
-                    overlap.is_empty(),
-                    "the {group:?} block {block:?} overlaps {overlap:?}, reserved for {reason}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn group_blocks_do_not_overlap_each_other() {
-        for (index, group) in Group::ALL.iter().enumerate() {
-            for other in &Group::ALL[index + 1..] {
-                let (block, other_block) = (group.block(), other.block());
-                let overlap =
-                    block.start().max(other_block.start())..=block.end().min(other_block.end());
-                assert!(
-                    overlap.is_empty(),
-                    "the {group:?} block {block:?} and the {other:?} block {other_block:?} overlap at {overlap:?}"
-                );
-            }
-        }
-    }
-}

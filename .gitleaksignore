@@ -92,4 +92,13 @@ d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/ur.json:generic-api-key:354
 086632d80513358b5c6f172caa6699035766d657:static/i18n/zh-Hant.json:generic-api-key:4042
 
 # Immutable header-only no-store classifier fixture; no private key body.
-086632d80513358b5c6f172caa6699035766d657:mcp_servers/frankenmemory/crates/fm-core/src/privacy.rs:private-key:266
+086632d80513358b5c6f172caa6699035766d657:native/memery/crates/memery-core/src/privacy.rs:private-key:266
+384cf96c6c59d5c6e91406b29e9905223b21b827:packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:83
+384cf96c6c59d5c6e91406b29e9905223b21b827:packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:116
+8e5cc8a84b91af38eefde2d2bf054216d880d82f:packages/console/app/package.json:generic-api-key:9
+8e5cc8a84b91af38eefde2d2bf054216d880d82f:packages/app/src/pages/layout.tsx:generic-api-key:1082
+8e5cc8a84b91af38eefde2d2bf054216d880d82f:packages/app/src/pages/layout.tsx:generic-api-key:1089
+8e4fcbc1e6d27b5b87d53a38e98ad234bc7ff7b7:mcp_servers/frankenmemory/crates/fm-core/src/privacy.rs:private-key:266
+c380a2f4d85f482346fdea89c4f28d8e5a3c293f:static/i18n/id.json:generic-api-key:3654
+2b294974a7c3ab984222e2347eeee118376a0ecc:packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:83
+2b294974a7c3ab984222e2347eeee118376a0ecc:packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:116

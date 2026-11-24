@@ -32,6 +32,7 @@ import { createCopalWindow } from './windows.js';
 import { copalStorageKey } from './storage.js';
 import { activateInputContext, canHandleInput, hasInputContexts, isComposingEvent, isEditableTarget, registerInputContext, resolveInputContext } from './inputContext.js';
 import { styledConfirm, styledPrompt } from '../dialogPrimitives.js';
+import { registerAdapter } from '../custom-context-menu.js';
 
 export { MIN_DAY_WIDTH, DEFAULT_DAY_WIDTH, MAX_DAY_WIDTH, MIN_LANE_HEIGHT, MAX_LANE_HEIGHT, RANGE_CHUNK_DAYS, WARM_HISTORY_DAYS, addDays, daysBetween, dragPatch, effectiveTrackState, eventLayout, flattenTrackPreorder, formatLocalDate, glyphFor, manipulationGate, normalizeTrackHierarchy, parseLocalDate, reparentTrackSubtree, timelineEventHandle, timelineEventResourceKey, timelineSemanticCommand, timelineSourceClassification, trackBreadcrumb, trackDescendantIds } from './planningModel.js';
 const MAX_WINDOW_DAYS = 1460;
@@ -48,6 +49,46 @@ function uniqueEvents(data) {
   for (const event of data.floatingTodos || []) values.set(event.id, event);
   return [...values.values()];
 }
+function initialRange(timeline, events) {
+  const today = parseLocalDate(formatLocalDate(new Date()));
+  const dates = events.flatMap((event) => [parseLocalDate(event.startDate), parseLocalDate(event.dueDate), parseLocalDate(event.fuzzy?.anchorStart), parseLocalDate(event.fuzzy?.anchorEnd)]).filter(Boolean);
+  const earliest = dates.length ? dates.reduce((a, b) => a < b ? a : b) : today;
+  const latest = dates.length ? dates.reduce((a, b) => a > b ? a : b) : today;
+  if (!timeline.rangeStart || !timeline.rangeEnd || timeline.rangeEnd <= timeline.rangeStart) {
+    timeline.rangeStart = addDays(today, -INITIAL_HISTORY_DAYS);
+    timeline.rangeEnd = new Date(Math.max(Number(addDays(latest, 60)), Number(addDays(today, 240))));
+  }
+  return { today, earliest, latest };
+}
+
+// Use Timeline's authorized event list, inherited track visibility and date
+// geometry. Keep unassigned events available without inventing a track.
+export function galaxyPlanningPopulation(data, timeline) {
+  const tracks = data.tracks || [];
+  const hierarchy = trackHierarchyView(tracks, timeline);
+  const visibleTracks = tracks.filter(track => hierarchy.states.get(track.id)?.visible);
+  const visibleIds = new Set(visibleTracks.map(track => track.id));
+  const all = uniqueEvents(data);
+  if (!timeline.rangeStart || !timeline.rangeEnd || timeline.rangeEnd <= timeline.rangeStart) initialRange(timeline, all);
+  const { rangeStart, rangeEnd } = timeline;
+  let autoStart = null;
+  if (rangeStart && rangeEnd) {
+    for (const event of all) {
+      const end = parseLocalDate(event.dueDate) || parseLocalDate(event.fuzzy?.anchorEnd) || parseLocalDate(event.startDate) || parseLocalDate(event.fuzzy?.anchorStart);
+      if (end && (!autoStart || end > autoStart)) autoStart = end;
+    }
+    autoStart = autoStart ? addDays(autoStart, 1) : parseLocalDate(formatLocalDate(new Date()));
+  }
+  const events = all.filter(event => {
+    const assigned = [event.trackId, ...(event.sharedTrackIds || [])].filter(Boolean);
+    if (assigned.some(id => hierarchy.byId.has(id)) && !assigned.some(id => visibleIds.has(id))) return false;
+    if (!rangeStart || !rangeEnd) return true;
+    const { start, end } = eventLayout(event, rangeStart, autoStart);
+    return start <= rangeEnd && end >= rangeStart;
+  });
+  return { tracks:visibleTracks, events, registryHead:data.trackRegistry?.head };
+}
+
 function eventAttachments(event) {
   return Array.isArray(event?.attachments) ? event.attachments : Array.isArray(event?.copal_extra?.attachments) ? event.copal_extra.attachments : [];
 }
@@ -311,7 +352,7 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
     trackState = { trackId:null, draft:null, dirty:false, trigger:null };
   }
 
-  function storageKey() { return copalStorageKey('odysseus-copal-timeline-v2', workspace); }
+  function storageKey() { return copalStorageKey('openclank-copal-timeline-v2', workspace); }
   function loadState(nextWorkspace) {
     workspace = nextWorkspace || 'default';
     try {
@@ -364,7 +405,7 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
     { id:'tags', label:'Tags', visible:false, order:6 },
     { id:'stages', label:'Stages', visible:false, order:7 },
   ];
-  function taskStorageKey() { return copalStorageKey('odysseus-copal-taskview-v1', workspace); }
+  function taskStorageKey() { return copalStorageKey('openclank-copal-taskview-v1', workspace); }
   function loadTaskSettings() {
     try {
       const saved = JSON.parse(localStorage.getItem(taskStorageKey()) || '{}');
@@ -423,7 +464,7 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
     if (eventEditor) return eventEditor;
     eventEditor = createCopalWindow({
       id: 'copal-event-editor-modal', label: 'Edit event', subtitle: 'Canonical Redb note', minWidth: 430, minHeight: 520,
-      sizeKey: copalStorageKey('odysseus-copal-event-editor-size'), className: 'copal-event-editor-window',
+      sizeKey: copalStorageKey('openclank-copal-event-editor-size'), className: 'copal-event-editor-window',
       onBeforeClose: async () => {
         if (editorState.firstTrack?.saving) return false;
         if (editorState.firstTrack?.submission) return await styledConfirm('A track or event may already be saved. Closing leaves those records in Timeline and ends this retry form.', { title:'Close pending creation', confirmText:'Close form', cancelText:'Keep retry form' });
@@ -694,16 +735,18 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
     win.setStatus(editorState.dirty ? 'Unsaved' : `Revision ${String(source.head || '').slice(0, 8)}`);
   }
 
-  async function openEventEditor(eventId, trigger = document.activeElement) {
+  async function openEventEditor(eventId, trigger = document.activeElement, isCurrent = () => true) {
     if (editorState.firstTrack) { ensureEventEditor().show(); return; }
     if (editorState.dirty && editorState.eventId !== eventId && !await styledConfirm('Discard unsaved event changes?', {
       title: 'Discard event changes', confirmText: 'Discard changes', cancelText: 'Keep editing', danger: true,
     })) return;
+    if (!isCurrent()) return;
     // Timeline rows can be painted from the latest SSE payload while the
     // feature's planning snapshot is still one refresh behind. Refresh before
     // building the editor so newly-created nested tracks are present in the
     // Main track/shared-track controls as soon as the event is opened.
     try { await refresh(); } catch (_) { /* keep the locally rendered event usable */ }
+    if (!isCurrent()) return;
     const source = uniqueEvents(getPlanning()).find((event) => event.id === eventId);
     if (!source) return;
     editorState = { eventId, draft:structuredClone(source), dirty:false, trigger };
@@ -714,7 +757,7 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
     if (trackEditor) return trackEditor;
     trackEditor = createCopalWindow({
       id:'copal-track-editor-modal', label:'Edit track', subtitle:'Canonical track registry', minWidth:390, minHeight:430,
-      sizeKey:copalStorageKey('odysseus-copal-track-editor-size'), className:'copal-track-editor-window',
+      sizeKey:copalStorageKey('openclank-copal-track-editor-size'), className:'copal-track-editor-window',
       onBeforeClose: async () => !trackState.dirty || await styledConfirm('Discard unsaved track changes?', {
         title: 'Discard track changes', confirmText: 'Discard changes', cancelText: 'Keep editing', danger: true,
       }),
@@ -790,25 +833,15 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
     win.body.replaceChildren(form); win.setStatus(trackState.dirty ? 'Unsaved' : 'Name, color, emoji, and enabled state');
   }
 
-  async function openTrackEditor(trackId = null, trigger = document.activeElement) {
-    const current = (getPlanning().tracks || []).find((track) => track.id === trackId);
+  async function openTrackEditor(trackId = null, trigger = document.activeElement, isCurrent = () => true) {
     if (trackState.dirty && !await styledConfirm('Discard unsaved track changes?', {
       title: 'Discard track changes', confirmText: 'Discard changes', cancelText: 'Keep editing', danger: true,
     })) return;
+    if (!isCurrent()) return;
+    const current = (getPlanning().tracks || []).find((track) => track.id === trackId);
+    if (trackId !== null && !current) return;
     trackState = { trackId, draft:structuredClone(current || { id:randomId('track'), name:'', color:COLORS[Math.floor(Math.random() * COLORS.length)], icon:'📦', enabled:true, parentTrackId:null }), dirty:false, trigger };
     renderTrackEditor(); ensureTrackEditor().show(trigger);
-  }
-
-  function initialRange(data, events) {
-    const today = parseLocalDate(formatLocalDate(new Date()));
-    const dates = events.flatMap((event) => [parseLocalDate(event.startDate), parseLocalDate(event.dueDate), parseLocalDate(event.fuzzy?.anchorStart), parseLocalDate(event.fuzzy?.anchorEnd)]).filter(Boolean);
-    const earliest = dates.length ? new Date(Math.min(...dates.map(Number))) : today;
-    const latest = dates.length ? new Date(Math.max(...dates.map(Number))) : today;
-    if (!timeline.rangeStart || !timeline.rangeEnd || timeline.rangeEnd <= timeline.rangeStart) {
-      timeline.rangeStart = addDays(today, -INITIAL_HISTORY_DAYS);
-      timeline.rangeEnd = new Date(Math.max(Number(addDays(latest, 60)), Number(addDays(today, 240))));
-    }
-    return { today, earliest, latest };
   }
 
   function ensureTimelineClock(body) {
@@ -887,6 +920,7 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
       node.setAttribute('aria-label', `${event.title}: ${formatLocalDate(addDays(start, s))} to ${formatLocalDate(addDays(start, e - 1))}`);
     });
     const finish = async (pointer) => {
+      if (pointer.defaultPrevented) { cancel(); return; }
       if (!drag) return; const current = drag; drag = null; window.removeEventListener('blur', cancel); window.removeEventListener('keydown', escape, true); guide.hidden = true; node.classList.remove('dragging');
       try { if (node.hasPointerCapture(pointer.pointerId)) node.releasePointerCapture(pointer.pointerId); } catch (_) {}
       if (!current.moved || !current.preview) { suppressClick = true; openEventEditor(event.id, node); rerender(); return; }
@@ -915,13 +949,14 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
       else setStatus(gate.reason || 'That event cannot be adjusted directly.', true);
     });
     node.title = [event.title, `${event.startDate || '?'} → ${event.dueDate || '∞'}`, gate.reason || 'Drag to move · drag edges to resize · Alt+Arrow adjusts by one day'].join('\n');
+    return () => drag?.moved === true;
   }
 
   function renderTimeline(body, options = {}) {
     const data = getPlanning();
     const allEvents = uniqueEvents(data);
     const byTrack = trackMap(data);
-    const { today } = initialRange(data, allEvents);
+    const { today } = initialRange(timeline, allEvents);
     const contentSignature = allEvents.map(timelineEventSignature).join('\u001e');
     const trackSignature = (data.tracks || []).map((track) => [track.id, track.name, track.color, track.icon, track.enabled, track.parentTrackId, track.special].join('\u001f')).join('\u001e');
     const staticRenderSignature = [
@@ -1081,7 +1116,8 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
       label.append(h('span', { class:'copal-track-dot', style:`--track-color:${track.color || THEME_TRACK_COLOR}` }), h('span', { class:'copal-track-glyph', text:glyphFor(track.icon) }), h('span', { class:'copal-track-name', text:track.name }));
       if (!track.condensed) label.append(h('button', { class:'copal-track-edit', type:'button', text:'✎', title:`Edit ${track.name}`, 'aria-label':`Edit ${track.name}`, onclick:(event) => openTrackEditor(track.id, event.currentTarget) }));
       if (lanes.laneCount > 1 && !track.condensed) label.append(h('button', { class:'copal-track-overlap', type:'button', text:`${expanded ? '▾' : '▸'} ${lanes.laneCount}`, 'aria-expanded':String(expanded), 'aria-label':`${expanded ? 'Collapse' : 'Expand'} ${track.name}: ${lanes.laneCount} overlapping lanes`, onclick:() => { expanded ? timeline.expandedTracks.delete(track.id) : timeline.expandedTracks.add(track.id); persist(); rerender({ left:scroll.scrollLeft }); } }));
-      const row = h('section', { class:`copal-track${expanded ? ' expanded' : ''}${track.condensed ? ` condensed ${timeline.condensedStyle}` : ''}`, style:`height:${rowHeight}px`, 'data-track-id':track.id, 'data-copal-context-object':'track', 'data-track-depth':String(depth), 'data-track-path':path, 'data-has-children':String(hasChildren), 'data-lanes':String(lanes.laneCount), 'aria-label':`${path}, ${candidates.length} events, ${lanes.laneCount} lanes` }, label);
+      const row = h('section', { class:`copal-track${expanded ? ' expanded' : ''}${track.condensed ? ` condensed ${timeline.condensedStyle}` : ''}`, style:`height:${rowHeight}px`, 'data-track-id':track.id, 'data-track-depth':String(depth), 'data-track-path':path, 'data-has-children':String(hasChildren), 'data-lanes':String(lanes.laneCount), 'aria-label':`${path}, ${candidates.length} events, ${lanes.laneCount} lanes` }, label);
+      if (!track.condensed) registerPlanningMenu(label, [{ id:'edit-track', label:'Edit track', dialog:true, run:(_, current) => openTrackEditor(track.id, label, current) }]);
       for (const item of lanes.items) {
         const event = item.event; const eventTrack = byTrack.get(event.trackId) || track; const top = track.condensed ? 16 + (item.lane % 3) * 14 : expanded ? 7 + item.lane * (timeline.laneHeight - 12) : 8 + Math.min(item.lane, 5) * 3;
         const left = LABEL_WIDTH + item.startDay * dayWidth; const width = Math.max(dayWidth, (item.endDay - item.startDay + 1) * dayWidth);
@@ -1093,11 +1129,13 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
         const eventSurface = h('span', { class:'copal-event-surface' }, ...eventChildren);
         const node = h('div', {
           class:`copal-event${event.startDate === 'FUZZY' || event.fuzzy ? ' fuzzy' : ''}${event.status === 'done' ? ' done' : ''}`,
-          role:'button', tabindex:'0', 'data-task-id':event.id, 'data-timeline-event-id':event.id, 'data-copal-context-object':'event', 'data-lane':String(item.lane), style:`left:${left}px;top:${top}px;width:${width}px;--event-color:${eventTrack.color || THEME_TRACK_COLOR};--stack-index:${item.lane}`,
+          role:'button', tabindex:'0', 'data-task-id':event.id, 'data-timeline-event-id':event.id, 'data-lane':String(item.lane), style:`left:${left}px;top:${top}px;width:${width}px;--event-color:${eventTrack.color || THEME_TRACK_COLOR};--stack-index:${item.lane}`,
           'aria-label':`${event.title}, ${event.startDate || 'unscheduled'} to ${event.dueDate || 'open end'}`,
         }, eventSurface, ...resizeHandles);
         if ((event.stages || []).length) eventSurface.append(h('span', { class:'copal-event-progress', style:`--progress:${Math.round((event.stages.filter((stage) => stage.done).length / event.stages.length) * 100)}%` }));
-        eventGesture(node, event, eventTrack, scroll, guide, start, dayWidth, rerender, gate); row.append(node);
+        const dragMoved = eventGesture(node, event, eventTrack, scroll, guide, start, dayWidth, rerender, gate);
+        registerPlanningMenu(node, [{ id:'edit-event', label:'Edit event', dialog:true, run:(_, current) => openEventEditor(event.id, node, current) }], '.copal-resize-handle', dragMoved);
+        row.append(node);
       }
       canvas.append(row);
     }
@@ -1152,7 +1190,7 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
       try { if (scroll.hasPointerCapture(current.id)) scroll.releasePointerCapture(current.id); } catch (_) {}
     };
     scroll.addEventListener('pointerdown', (event) => {
-      if (!timelineInputAllowed(event) || event.pointerType === 'touch' || event.target.closest('button,[role="button"],input,select,textarea,a')) return;
+      if (event.button === 2 || event.ctrlKey || !timelineInputAllowed(event) || event.pointerType === 'touch' || event.target.closest('button,[role="button"],input,select,textarea,a')) return;
       const renderedWidth = scroll.getBoundingClientRect().width; const logicalWidth = scroll.clientWidth; const scale = renderedWidth > 0 && logicalWidth > 0 ? renderedWidth / logicalWidth : 1;
       pan = { x:event.clientX, left:scroll.scrollLeft, id:event.pointerId, scale }; scroll.setPointerCapture(event.pointerId); scroll.classList.add('dragging');
       window.addEventListener('blur', cancelPan); document.addEventListener('visibilitychange', cancelPan);
@@ -1290,7 +1328,7 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
     // ── Controls row 2: source / date / learning / group ──
     const controls2 = h('div', { class:'copal-tasks-controls' });
     const sourceSel = h('select', { 'aria-label':'Source filter' },
-      h('option', { value:'all', text:'All sources' }), h('option', { value:'vault', text:'Vault' }), h('option', { value:'timeline', text:'Timeline' }));
+      h('option', { value:'all', text:'All sources' }), h('option', { value:'vault', text:'Journal' }), h('option', { value:'timeline', text:'Timeline' }));
     const dateSel = h('select', { 'aria-label':'Date filter' },
       h('option', { value:'all', text:'All dates' }), h('option', { value:'due', text:'Due' }), h('option', { value:'scheduled', text:'Scheduled' }), h('option', { value:'undated', text:'Undated' }), h('option', { value:'overdue', text:'Overdue' }));
     const learningSel = h('select', { 'aria-label':'Learning filter' },
@@ -1386,11 +1424,12 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
       const visibleCols = columns.filter((c) => c.visible).sort((a, b) => a.order - b.order);
       const checkbox = control('input', { type:'checkbox', 'aria-label':`Complete ${item.title}`, tabindex:'-1' });
       checkbox.checked = item.status === 'done';
+      const setChecked = (checked) => isEvent ? patchEvent(item.event, { status:checked ? 'done' : 'pending' }) : patchMarkdownTask?.(item.mdItem, checked);
+      const openTask = (trigger, current) => isEvent ? openEventEditor(item.event.id, trigger, current) : openMarkdownTask ? openMarkdownTask(item.mdItem) : item.mdItem?.doc && openDocument(item.mdItem.doc.id, 'notes');
       checkbox.addEventListener('change', async() => {
         checkbox.disabled = true;
         try {
-          if (isEvent) await patchEvent(item.event, { status:checkbox.checked ? 'done' : 'pending' });
-          else if (patchMarkdownTask) await patchMarkdownTask(item.mdItem, checkbox.checked);
+          await setChecked(checkbox.checked);
         }
         catch (_) { checkbox.checked = !checkbox.checked; }
         checkbox.disabled = false;
@@ -1400,7 +1439,7 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
       const startLabel = item.startDate ? (item.startDate === 'FUZZY' ? '?' : item.startDate) : '';
       const dueLabel = item.dueDate || '';
       const cellMap = {
-        title: h('button', { class:'copal-task-title', tabindex:'-1', text:item.title || 'Untitled', onclick:() => isEvent ? openEventEditor(item.event.id) : openMarkdownTask ? openMarkdownTask(item.mdItem) : item.mdItem?.doc && openDocument(item.mdItem.doc.id, 'notes') }),
+        title: h('button', { class:'copal-task-title', tabindex:'-1', text:item.title || 'Untitled', onclick:(event) => openTask(event.currentTarget) }),
         status: h('span', { class:`copal-task-status status-${item.status}`, text:item.status }),
         priority: item.priority && item.priority !== 'medium' ? h('span', { class:`copal-badge priority-${item.priority}`, text:item.priority }) : h('span', { class:'copal-task-status', text:'medium' }),
         start: h('small', { class:'copal-task-dates', text:startLabel || '—' }),
@@ -1411,10 +1450,14 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
       };
       const cells = [h('div', { class:'copal-task-cell copal-task-cell-check' }, checkbox)];
       for (const col of visibleCols) cells.push(h('div', { class:`copal-task-cell copal-task-cell-${col.id}` }, cellMap[col.id] || h('span', { text:'' })));
-      const row = h('div', { class:`copal-task-row${checkbox.checked ? ' done' : ''}`, role:'row', tabindex:'-1', 'data-copal-context-object':'task' }, ...cells);
+      const row = h('div', { class:`copal-task-row${checkbox.checked ? ' done' : ''}`, role:'row', tabindex:'-1' }, ...cells);
       row.dataset.taskId = String(item.mdItem?.id || item.event?.id || '');
       row.setAttribute('aria-selected', String(selectedTaskId != null && row.dataset.taskId === selectedTaskId));
       row._taskItem = item;
+      registerPlanningMenu(row, [
+        ...(isEvent || patchMarkdownTask ? [{ id:'toggle-task', label:'Toggle task', run:() => setChecked(item.status !== 'done') }] : []),
+        ...(isEvent || item.mdItem?.doc ? [{ id:'open-task', label:isEvent ? 'Open task' : 'Open task note', dialog:isEvent, run:(_, current) => openTask(row, current) }] : []),
+      ], 'input, .copal-task-cell-check');
       return row;
     };
 
@@ -1591,34 +1634,20 @@ export function createPlanningFeature({ h: makeElement, api, getPlanning, refres
     body.replaceChildren(root);
   }
 
-  async function handleContextCommand(command, target) {
-    const row = target?.closest?.('.copal-task-row') || target;
-    const item = row?._taskItem;
-    if (command === 'edit-track') {
-      const trackId = target?.dataset?.trackId || target?.closest?.('[data-track-id]')?.dataset?.trackId;
-      if (!trackId) return false;
-      openTrackEditor(trackId, target);
-      return true;
-    }
-    if (command === 'edit-event') {
-      const eventId = target?.dataset?.taskId || target?.closest?.('[data-task-id]')?.dataset?.taskId;
-      if (!eventId) return false;
-      await openEventEditor(eventId, target);
-      return true;
-    }
-    if (command !== 'toggle-task' && command !== 'open-task') return false;
-    if (!item) return false;
-    if (command === 'open-task') {
-      if (item.type === 'event') await openEventEditor(item.event.id, target);
-      else if (openMarkdownTask) openMarkdownTask(item.mdItem);
-      else if (item.mdItem?.doc) openDocument(item.mdItem.doc.id, 'notes');
-      return true;
-    }
-    const nextChecked = item.type === 'event' ? item.status !== 'done' : !item.mdItem?.task?.done;
-    if (item.type === 'event') await patchEvent(item.event, { status:nextChecked ? 'done' : 'pending' });
-    else if (patchMarkdownTask) await patchMarkdownTask(item.mdItem, nextChecked);
-    return true;
+  function registerPlanningMenu(node, commands, reserved = '.copal-track-disclosure, .copal-track-overlap', gestureActive = () => false) {
+    if (!commands.length) return;
+    const scopeKey = () => { const { accountId, workspace:currentWorkspace, generation } = planningScope(); return JSON.stringify([accountId, currentWorkspace, generation]); };
+    const scope = scopeKey();
+    const isCurrent = () => scope === scopeKey();
+    registerAdapter(node, {
+      editingCommands:false,
+      hitTest:target => target.closest(reserved) || gestureActive() ? 'native' : true,
+      capture:() => isCurrent() ? { node } : null,
+      isCurrent:request => isCurrent() && node.isConnected && request.adapterContext?.node === node,
+      commands:() => commands.map(({ run, ...item }) => item),
+      execute:(id, request) => isCurrent() ? commands.find(command => command.id === id)?.run(request, isCurrent) : false,
+    });
   }
 
-  return { loadState, renderTimeline, renderTodo, openEventEditor, openTrackEditor, createEvent, patchEvent, attachTimelineResource, handleContextCommand, suspendScope, glyphFor, get timelineState() { return timeline; } };
+  return { loadState, renderTimeline, renderTodo, openEventEditor, openTrackEditor, createEvent, patchEvent, attachTimelineResource, suspendScope, glyphFor, get timelineState() { return timeline; } };
 }

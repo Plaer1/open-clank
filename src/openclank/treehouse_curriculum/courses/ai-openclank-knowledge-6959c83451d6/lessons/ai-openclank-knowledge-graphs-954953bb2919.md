@@ -7,4 +7,4 @@
 
 A drawn edge needs a source relationship. Nearness on screen alone is not a documented connection.
 
-For saved source code, continue to **Check the index revision**, the existing Code Graph (Alpha) unit in this course. Document links and heading outlines have different evidence from static import/call relationships.
+For saved source code, continue to **Check the index revision**, the existing Code Graph unit in this course. Document links and heading outlines have different evidence from static import/call relationships.

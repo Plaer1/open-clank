@@ -534,32 +534,20 @@ impl UringDriver {
         PsyncDriver.write_file_bytes(path, data, durable).await
     }
 
-    pub(crate) async fn write_file_segments<B: StableBufList>(
-        &self,
-        options: std::fs::OpenOptions,
-        path: PathBuf,
-        buffers: B,
-        durable: bool,
-    ) -> std::io::Result<()> {
-        PsyncDriver
-            .write_file_segments(options, path, buffers, durable)
-            .await
-    }
-
-    pub(crate) async fn write_file_segments_atomic<B: StableBufList>(
-        &self,
-        options: std::fs::OpenOptions,
-        temporary_path: PathBuf,
-        final_path: PathBuf,
-        buffers: B,
-    ) -> std::io::Result<()> {
-        PsyncDriver
-            .write_file_segments_atomic(options, temporary_path, final_path, buffers)
-            .await
-    }
-
     pub(crate) async fn metadata(&self, path: PathBuf) -> std::io::Result<std::fs::Metadata> {
         PsyncDriver.metadata(path).await
+    }
+
+    pub(crate) async fn stat(&self, path: PathBuf) -> std::io::Result<crate::Stat> {
+        PsyncDriver.stat(path).await
+    }
+
+    pub(crate) async fn symlink_stat(&self, path: PathBuf) -> std::io::Result<crate::Stat> {
+        PsyncDriver.symlink_stat(path).await
+    }
+
+    pub(crate) async fn make_owner_writable(&self, path: PathBuf) -> std::io::Result<()> {
+        PsyncDriver.make_owner_writable(path).await
     }
 
     pub(crate) async fn holds_name_exactly(&self, path: PathBuf) -> Option<bool> {
@@ -571,10 +559,6 @@ impl UringDriver {
         file: Arc<File>,
     ) -> std::io::Result<std::fs::Metadata> {
         PsyncDriver.file_metadata(file).await
-    }
-
-    pub(crate) async fn set_len(&self, file: Arc<File>, len: u64) -> std::io::Result<()> {
-        PsyncDriver.set_len(file, len).await
     }
 
     pub(crate) async fn rename(&self, from: PathBuf, to: PathBuf) -> std::io::Result<()> {

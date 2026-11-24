@@ -1,0 +1,668 @@
+{
+  "id": "open-clank.deliverable-design",
+  "version": "1.0.0",
+  "purpose": "Portable first-party visual grammar for editable Open Clank deliverables",
+  "sourceRevision": "e1ddee317b67d85306cbf5b09e5042501311f49e",
+  "sourceHashes": {
+    "static/js/theme.js": "8fad256c3e36f2b337719e22a26b8e5733784b90dec4466e00c5f215b1a31974",
+    "static/js/themeDefaults.js": "1f8ca2e6f36379823e5e75d2ecca5ec0b07619241644075db54822538d55c606",
+    "static/style.css": "44b1ea26ef93a8504aca88dbe463f4ec47c95395c880c88772673d14211a9b8c",
+    "static/js/uiIcons.js": "54a719c5379dfbd68015bc7756842f9b8bc196d7d85abd38e267a7df1540fa8d",
+    "static/css/appletFrame.css": "3dafcc3c0bee8d3b08c02461d20d73e373a115ced72c7b19b83d0d679eb987da",
+    "static/brand/open-clank/SVG/clanker-eye-gold.svg": "ae8d6b2002cf0315bd77cd9b6c5f5acbb25ef179f4de10390297252d6be6cd85"
+  },
+  "authority": "The active normalized theme and effective semantic CSS roles are authoritative; saved baselines are provenance, not a writable theme store.",
+  "baselinePalettes": {
+    "dark": {
+      "bg": "#191A1E",
+      "fg": "#FFF4D6",
+      "panel": "#25272C",
+      "border": "#555A62",
+      "accent": "#F6BE48",
+      "raised": "#34373E",
+      "well": "#15161A",
+      "outline": "#0E0F12",
+      "success": "#8DD85D",
+      "warning": "#F6BE48",
+      "error": "#FF776E",
+      "sky": "#62C7E8"
+    },
+    "light": {
+      "bg": "#F3EEDB",
+      "fg": "#17202A",
+      "panel": "#FFF9E7",
+      "border": "#26323D",
+      "accent": "#F4B827",
+      "raised": "#DCEAF0",
+      "well": "#E8EEF0",
+      "outline": "#20262D",
+      "success": "#4F9F38",
+      "warning": "#D88B05",
+      "error": "#C73D46",
+      "sky": "#55BDEA"
+    }
+  },
+  "paletteRoleSources": {
+    "bg": "bg",
+    "fg": "fg",
+    "panel": "panel",
+    "border": "border",
+    "accent": "red / --accent-primary",
+    "raised": "--clanker-raised",
+    "well": "--clanker-well",
+    "outline": "--clanker-outline",
+    "success": "--color-success",
+    "warning": "--color-warning",
+    "error": "--color-error",
+    "sky": "--clanker-sky"
+  },
+  "grammar": {
+    "composition": "Readable planes, firm outlines, shallow elevation, attached headers and restrained accent bands.",
+    "geometry": "Honor selected theme hardness/radius; page to section to focused control.",
+    "typography": "Use selected theme typography; built-in fallback: Liga Comic Mono, Fira Code, monospace. Logo lettering is separate.",
+    "motion": "Do not copy app background animation loops; respect output reduced-motion preference.",
+    "provenance": "Capture selected theme identity, sanitized resolved appearance, standard ID/version/hash and exact local asset hashes."
+  },
+  "studies": [
+    {
+      "id": "GI01",
+      "family": "glyph-icon",
+      "name": "Original Clank eye/mark",
+      "meaning": "Brand identification",
+      "intendedUse": "Brand identification",
+      "avoid": "Do not use as a generic visibility toggle",
+      "roleBindings": [
+        "accent",
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI01.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI01.png",
+        "dark": "thumbnails/dark/GI01.png"
+      },
+      "provenance": "Adapted from first-party clanker-eye-gold.svg",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI02",
+      "family": "glyph-icon",
+      "name": "Document/page",
+      "meaning": "Identify a document",
+      "intendedUse": "Identify a document",
+      "avoid": "Do not imply a specific file format",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI02.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI02.png",
+        "dark": "thumbnails/dark/GI02.png"
+      },
+      "provenance": "Original study informed by first-party uiIcons.js geometry",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI03",
+      "family": "glyph-icon",
+      "name": "Open folder",
+      "meaning": "Identify a folder",
+      "intendedUse": "Identify a folder",
+      "avoid": "Do not use as a generic container",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI03.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI03.png",
+        "dark": "thumbnails/dark/GI03.png"
+      },
+      "provenance": "Original study informed by first-party uiIcons.js geometry",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI04",
+      "family": "glyph-icon",
+      "name": "Image/media",
+      "meaning": "Identify visual media",
+      "intendedUse": "Identify visual media",
+      "avoid": "Do not use as a photo placeholder",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI04.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI04.png",
+        "dark": "thumbnails/dark/GI04.png"
+      },
+      "provenance": "Original study informed by first-party uiIcons.js geometry",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI05",
+      "family": "glyph-icon",
+      "name": "Graph/network",
+      "meaning": "Identify connected nodes",
+      "intendedUse": "Identify connected nodes",
+      "avoid": "Do not imply chart data",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI05.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI05.png",
+        "dark": "thumbnails/dark/GI05.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI06",
+      "family": "glyph-icon",
+      "name": "Terminal/code",
+      "meaning": "Identify a code surface",
+      "intendedUse": "Identify a code surface",
+      "avoid": "Do not fill with simulated text",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI06.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI06.png",
+        "dark": "thumbnails/dark/GI06.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI07",
+      "family": "glyph-icon",
+      "name": "Search",
+      "meaning": "Find content",
+      "intendedUse": "Find content",
+      "avoid": "Do not use for zoom without a label",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI07.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI07.png",
+        "dark": "thumbnails/dark/GI07.png"
+      },
+      "provenance": "Original study informed by first-party uiIcons.js geometry",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI08",
+      "family": "glyph-icon",
+      "name": "Settings",
+      "meaning": "Open configuration",
+      "intendedUse": "Open configuration",
+      "avoid": "Do not imply repair",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI08.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI08.png",
+        "dark": "thumbnails/dark/GI08.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI09",
+      "family": "glyph-icon",
+      "name": "Save/export",
+      "meaning": "Identify persistence or output with a label",
+      "intendedUse": "Identify persistence or output with a label",
+      "avoid": "Do not rely on icon alone to distinguish save and export",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI09.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI09.png",
+        "dark": "thumbnails/dark/GI09.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI10",
+      "family": "glyph-icon",
+      "name": "Undo/history",
+      "meaning": "Identify recovery or history",
+      "intendedUse": "Identify recovery or history",
+      "avoid": "Do not use as ordinary back navigation",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI10.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI10.png",
+        "dark": "thumbnails/dark/GI10.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI11",
+      "family": "glyph-icon",
+      "name": "Add/create",
+      "meaning": "Start a new item",
+      "intendedUse": "Start a new item",
+      "avoid": "Do not use as a decorative cross",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI11.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI11.png",
+        "dark": "thumbnails/dark/GI11.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI12",
+      "family": "glyph-icon",
+      "name": "Selected/complete",
+      "meaning": "Indicate selection or completion",
+      "intendedUse": "Indicate selection or completion",
+      "avoid": "Do not rely on green alone",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI12.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI12.png",
+        "dark": "thumbnails/dark/GI12.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "GI13",
+      "family": "glyph-icon",
+      "name": "Warning/error",
+      "meaning": "Indicate attention with a label",
+      "intendedUse": "Indicate attention with a label",
+      "avoid": "Do not treat an accent triangle as decoration",
+      "roleBindings": [
+        "bg",
+        "fg"
+      ],
+      "source": "studies/GI13.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/GI13.png",
+        "dark": "thumbnails/dark/GI13.png"
+      },
+      "provenance": "Original study informed by first-party uiIcons.js geometry",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT01",
+      "family": "form-shape-texture",
+      "name": "Panel chassis",
+      "meaning": "Frame a readable working plane",
+      "intendedUse": "Frame a readable working plane",
+      "avoid": "Avoid stacking decorative frames",
+      "roleBindings": [
+        "bg",
+        "fg",
+        "panel"
+      ],
+      "source": "studies/FT01.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT01.png",
+        "dark": "thumbnails/dark/FT01.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT02",
+      "family": "form-shape-texture",
+      "name": "Attached title/accent band",
+      "meaning": "Attach hierarchy to its content",
+      "intendedUse": "Attach hierarchy to its content",
+      "avoid": "Do not imply progress",
+      "roleBindings": [
+        "accent",
+        "bg",
+        "fg",
+        "panel"
+      ],
+      "source": "studies/FT02.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT02.png",
+        "dark": "thumbnails/dark/FT02.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT03",
+      "family": "form-shape-texture",
+      "name": "Raised control face",
+      "meaning": "Show an actionable plane",
+      "intendedUse": "Show an actionable plane",
+      "avoid": "Avoid deep glossy bevels",
+      "roleBindings": [
+        "bg",
+        "fg",
+        "outline",
+        "raised"
+      ],
+      "source": "studies/FT03.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT03.png",
+        "dark": "thumbnails/dark/FT03.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT04",
+      "family": "form-shape-texture",
+      "name": "Inset field/well",
+      "meaning": "Bound an entry surface",
+      "intendedUse": "Bound an entry surface",
+      "avoid": "Do not texture editable text",
+      "roleBindings": [
+        "bg",
+        "fg",
+        "panel",
+        "well"
+      ],
+      "source": "studies/FT04.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT04.png",
+        "dark": "thumbnails/dark/FT04.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT05",
+      "family": "form-shape-texture",
+      "name": "Menu/dropdown sheet",
+      "meaning": "Group compact options",
+      "intendedUse": "Group compact options",
+      "avoid": "Avoid oversized ornamental menu rows",
+      "roleBindings": [
+        "bg",
+        "fg",
+        "outline",
+        "panel"
+      ],
+      "source": "studies/FT05.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT05.png",
+        "dark": "thumbnails/dark/FT05.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT06",
+      "family": "form-shape-texture",
+      "name": "Selected row",
+      "meaning": "Identify a selected item",
+      "intendedUse": "Identify a selected item",
+      "avoid": "Preserve legibility and non-color cues",
+      "roleBindings": [
+        "accent",
+        "bg",
+        "fg",
+        "panel",
+        "raised"
+      ],
+      "source": "studies/FT06.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT06.png",
+        "dark": "thumbnails/dark/FT06.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT07",
+      "family": "form-shape-texture",
+      "name": "Attached tab",
+      "meaning": "Show content ownership",
+      "intendedUse": "Show content ownership",
+      "avoid": "Do not make inactive tabs look selected",
+      "roleBindings": [
+        "accent",
+        "bg",
+        "fg",
+        "panel",
+        "raised"
+      ],
+      "source": "studies/FT07.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT07.png",
+        "dark": "thumbnails/dark/FT07.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT08",
+      "family": "form-shape-texture",
+      "name": "Corner/junction",
+      "meaning": "Demonstrate aligned nested edges",
+      "intendedUse": "Demonstrate aligned nested edges",
+      "avoid": "Do not force one radius across themes",
+      "roleBindings": [
+        "accent",
+        "bg",
+        "fg"
+      ],
+      "source": "studies/FT08.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT08.png",
+        "dark": "thumbnails/dark/FT08.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT09",
+      "family": "form-shape-texture",
+      "name": "Border/bevel anatomy",
+      "meaning": "Distinguish outline, light edge and face",
+      "intendedUse": "Distinguish outline, light edge and face",
+      "avoid": "Do not confuse highlight with focus",
+      "roleBindings": [
+        "bg",
+        "fg",
+        "outline",
+        "raised"
+      ],
+      "source": "studies/FT09.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT09.png",
+        "dark": "thumbnails/dark/FT09.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT10",
+      "family": "form-shape-texture",
+      "name": "Offset shadow/layer",
+      "meaning": "Show shallow surface depth",
+      "intendedUse": "Show shallow surface depth",
+      "avoid": "Avoid diffuse floating shadows",
+      "roleBindings": [
+        "bg",
+        "fg",
+        "outline",
+        "panel"
+      ],
+      "source": "studies/FT10.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT10.png",
+        "dark": "thumbnails/dark/FT10.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT11",
+      "family": "form-shape-texture",
+      "name": "Quiet material texture",
+      "meaning": "Use sparse texture in framing",
+      "intendedUse": "Use sparse texture in framing",
+      "avoid": "Keep reading planes clear",
+      "roleBindings": [
+        "bg",
+        "fg",
+        "panel",
+        "raised"
+      ],
+      "source": "studies/FT11.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT11.png",
+        "dark": "thumbnails/dark/FT11.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT12",
+      "family": "form-shape-texture",
+      "name": "Layered content card",
+      "meaning": "Group related content",
+      "intendedUse": "Group related content",
+      "avoid": "Keep the reading plane dominant",
+      "roleBindings": [
+        "bg",
+        "fg",
+        "panel",
+        "raised"
+      ],
+      "source": "studies/FT12.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT12.png",
+        "dark": "thumbnails/dark/FT12.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    },
+    {
+      "id": "FT13",
+      "family": "form-shape-texture",
+      "name": "Divider/grid/connector",
+      "meaning": "Organize tables or diagrams",
+      "intendedUse": "Organize tables or diagrams",
+      "avoid": "Do not use structural lines as decoration",
+      "roleBindings": [
+        "accent",
+        "bg",
+        "fg"
+      ],
+      "source": "studies/FT13.svg",
+      "thumbnails": {
+        "light": "thumbnails/light/FT13.png",
+        "dark": "thumbnails/dark/FT13.png"
+      },
+      "provenance": "Original Open Clank study",
+      "revision": "1.0.0"
+    }
+  ],
+  "assetSha256": {
+    "studies/GI01.svg": "6710eee991f6ea8eb43b3a0d5ca4380c37cf2c1e4195ecd54d3f67f7fba49f59",
+    "thumbnails/light/GI01.png": "5d3a6b41eb59aeebc39c88f4d66613c49c36818741e5a54966ae7bfe7eb45381",
+    "thumbnails/dark/GI01.png": "0e942b8b330d68c33dc2b8bc40b500d3baf325278468e417f5ba723c84ba1b58",
+    "studies/GI02.svg": "345b421e6ae9bf202b1abba493e3fdbd194fb367b64a035fe7346dcacb5f0bb7",
+    "thumbnails/light/GI02.png": "0402d192a1d3fe0b20be0c52ccd7c8a79e910b1cb23d799c27183544c90965b3",
+    "thumbnails/dark/GI02.png": "f8ec468b408f00ddbfc73d7f7c98b08135032210de8469cd099108a582afac13",
+    "studies/GI03.svg": "d4986bcb7517a5a2c6231f9434f0b1d2ce9164d91d4c1d9f349f6ee42b706867",
+    "thumbnails/light/GI03.png": "7edbbaeda4ba8d3716917253e14787b76ba24967b3ad6c5d686043b4828101c5",
+    "thumbnails/dark/GI03.png": "e5707c52cd22e79946e1c2644ed023c36e17dd03b6590e059cceed391b88b376",
+    "studies/GI04.svg": "5f6f61f3d4c0cf3b3c407890609c67b0782b906af13b86d6846cf8cce24df5bf",
+    "thumbnails/light/GI04.png": "4b75ed32ca5c83258e09ce57a464e8c74a030a16c8c80bb12899448ae5d706da",
+    "thumbnails/dark/GI04.png": "ea1a65be42720a0ae206be2c77d9d4706a12569f37f7586255ca7ed88da91ef3",
+    "studies/GI05.svg": "112e2ffc2e0df5590599818f978f0b0a5a657c0670ebcf39c934191f03df86a8",
+    "thumbnails/light/GI05.png": "60ac465930c08fbeacea673974e999f91592ebbf14e387f62bea29dd20ec7990",
+    "thumbnails/dark/GI05.png": "7e2dab4f38e187ec36e17c6ee0ad5dab92a4cf2f8adca1408457b7134bb80e77",
+    "studies/GI06.svg": "94f722be68a889e46c958e0844acfe84eb6baf0fc082272647f074bd146a8807",
+    "thumbnails/light/GI06.png": "f81c827979ddcf394030436014e8855c7e9f149a9f0f0e48925bf02a699d05d5",
+    "thumbnails/dark/GI06.png": "12134981e57d59efaf7eb3c7d9b785e784a21c1f5b28a1c3fbad9990b19610bd",
+    "studies/GI07.svg": "49705f3c3d62ac04077270f7c1067ac9f5da7d49144c9e29b3a22e817e68689d",
+    "thumbnails/light/GI07.png": "28049af23513a18aa5cafa1488080916e414f5e5111de058b08ec3b1f06e6597",
+    "thumbnails/dark/GI07.png": "b2e5c001a500ba1e572666d01a4b3d1e96b7747204eeab3bb4508672b9e88f86",
+    "studies/GI08.svg": "6681d617bc60c1eb353b33fb52545407074381fb2abce63b0d03d023a83feb6b",
+    "thumbnails/light/GI08.png": "491c55fb1da278e1ea2374b5090586d5c5ced73a78a6110036ee58e4d3562539",
+    "thumbnails/dark/GI08.png": "3c3b28da8b059c77f465e263a02ba26ba0cb75890bf06c10c324ec318a6b4116",
+    "studies/GI09.svg": "316c381a9f206a4be600a56c84f232c98134e97fb296d8f846573f65bc8966b9",
+    "thumbnails/light/GI09.png": "0c3a3da80930a8b4d261277e2c9f02f756c7718a0d8c72514e72e710c0d99848",
+    "thumbnails/dark/GI09.png": "437561509eac94cccda2a853cdcf84f801cbf8c6d8338f5e0c7132d5d591a14e",
+    "studies/GI10.svg": "c0baaad049595a381aede2d0397d152558c29376166f0d20160ffe4ba254f59c",
+    "thumbnails/light/GI10.png": "dc0a8e52e8359f402032b9d9db4233023811eb8ad9ad612adcd33c0068fc5a2b",
+    "thumbnails/dark/GI10.png": "6c2b763a6f9b219c2905607d818e0bd732db3ccc42b6e0bcc53498ab1dea2ec9",
+    "studies/GI11.svg": "7ac9ee011e663bf8f585867fd53a63435fa3b8621b79cfdfbebd0d7f99f29693",
+    "thumbnails/light/GI11.png": "ee71543fbdcea3773a36974d38f0f2bf1f8e972f266006db234ba11dddde7685",
+    "thumbnails/dark/GI11.png": "707e7a31395c77e26225bde1f4c8fc6c3d32a77cad367270f229f8d92102441c",
+    "studies/GI12.svg": "7358c70fcdb8dcff61dcc15b5ec3c9094d6e82bc64367e266c213ef4ac176a21",
+    "thumbnails/light/GI12.png": "1f4dcfc401709d7dc4094c23e12c74c3766cbe81cc8b4d13acf131a9f282eed4",
+    "thumbnails/dark/GI12.png": "db6d45044e5174c6856b9ca1f4f911067e39b93d9ee24042496d238aeb6b175a",
+    "studies/GI13.svg": "e4ade090acbbac72e90a4283b872f7fb1ade469c1f63c01bbf565a8c7aa631a1",
+    "thumbnails/light/GI13.png": "a2c44931b065cd920f19c48cfccdf4da28d2157c4dcf976778a6c84c2f29977b",
+    "thumbnails/dark/GI13.png": "a30d7ffce0ffe336439d2e7b5348c379ba5fc694c8520150c8ab713551c5fecb",
+    "studies/FT01.svg": "22c43e3ecd2125fdf2813e2b01332cd499e190d29dc58e2043a3471490b03efd",
+    "thumbnails/light/FT01.png": "7b6ff506c67ec2aa51a8837bf067ff6996ca5406007f8f6eacae3c8c54b5ece7",
+    "thumbnails/dark/FT01.png": "e375ac6f2d7208f4a282a26e10f7b66e97b8e1e9d3d00ec1dc48eca3b09a4205",
+    "studies/FT02.svg": "1e5bd05228f17f1d9b5ce0da07a5bb75272c7071a3dddc424f6b03aeb598aa31",
+    "thumbnails/light/FT02.png": "920d5c2f6bf63b9cbd7efc09a288854fcadecc5b341ff25a799445bea77aada3",
+    "thumbnails/dark/FT02.png": "b6c322c548eaf96d37592dce4d6161f411b618d089944a53f5f67e2efab523fe",
+    "studies/FT03.svg": "37d1054980d7264650d860f39117d70ebdebacaaf203d1799f3413c0cc8ac61d",
+    "thumbnails/light/FT03.png": "748e903bf0e775b65a8997d2abb0cb48fe7b457bb57ff0f9d387a9e4572137c6",
+    "thumbnails/dark/FT03.png": "f34e4351d9d4ddaac850440a435d11071f48e6d304d0d7b360e49d67775ddb85",
+    "studies/FT04.svg": "0fa895719d9231e08acedba7901813e0fdfcea705b655e5a11011adf41da7f79",
+    "thumbnails/light/FT04.png": "c7e2449493fae261db2d9547a07e5e4a6b67e8ce80e8820976256c4362d3b746",
+    "thumbnails/dark/FT04.png": "6ced8f4b317c44c2b0d3c42ff56f44bc6ec3d0b63c7ed63c93d70fecff23d4c7",
+    "studies/FT05.svg": "103bd56b01e4914ee3e70df1416cad9148641b10ee304f9a5e0adba6e81df0a6",
+    "thumbnails/light/FT05.png": "48f2939034c2eb96add6da41020473322d8f4c521078ac7568c1b41f447b6de8",
+    "thumbnails/dark/FT05.png": "7dd2670b5b2fe6289684f745804fd79f17e4271eb36346ce9563c6a144124f7c",
+    "studies/FT06.svg": "145a7c147b5a275f102ff0104205ceb0649b9725c51933cd047f85176d9599d7",
+    "thumbnails/light/FT06.png": "1f781c3394bc3efd9f15af6b401c0a6fadc16ae69e030d746a3b941a07c38986",
+    "thumbnails/dark/FT06.png": "ff98593598751d176663b4492d3511c25ec2019235a3645948a1bccc13212817",
+    "studies/FT07.svg": "13acf9fce314bb28466c507301885c87ce559a7d5b04bfcb8d111f4fdd6148ca",
+    "thumbnails/light/FT07.png": "003a026937a319c76a924b23bc58a5f766fb4b39f7174e16f7ec6a2e45643cbc",
+    "thumbnails/dark/FT07.png": "8fe824e092e2191c918c532e3100fb8d4ed86fe3d32e214c4c2827d7d7f4d150",
+    "studies/FT08.svg": "1b42025181c594ab25eb0e996ca16b3bd3ae29a8aa9f0b705d1b74789284d6a0",
+    "thumbnails/light/FT08.png": "120daf160b4a8cba99a226ff49540cca51fe9593d34d5f47122c0368b5bb62d5",
+    "thumbnails/dark/FT08.png": "4861445276cb6c9bec5bd60470bf6027dcea9d317e25a98fc738fcca73f922dd",
+    "studies/FT09.svg": "14f75f873ae467a19404fcce42ed5bead18a6db77b0ef5f10ad0780b7ba204ac",
+    "thumbnails/light/FT09.png": "6652a428cc455a556ee14ac7bcd5211f4cc73a0e986af22b0427648ae2fc50a5",
+    "thumbnails/dark/FT09.png": "588dbf02ac7b6bf471c6393046ab67641760753243a4209766a65a1d4bb8ad3e",
+    "studies/FT10.svg": "245d33350180fce317c07ff39863e4707fdb4216d6eb43944cb5f9d517a27f85",
+    "thumbnails/light/FT10.png": "4a8e05a701f8cd455b6189ebecda05392c49670530a85cdd59f567ff367114e8",
+    "thumbnails/dark/FT10.png": "58997076d07958dda5d257de126296e6b19cbfdb8c314db0b210dc5cf42a9bdd",
+    "studies/FT11.svg": "d7db255a9f6f847754331cac9187d1cccb0284f9bbb240e7a5da39a6c908342d",
+    "thumbnails/light/FT11.png": "416f50a143babdf81157aa0cae51ad47dbe4a3b4870469c098d0c86ff2a64746",
+    "thumbnails/dark/FT11.png": "b1e4866bc3b5522e9bac06ea43db46926f640c643dcffda2380f3084776f3cd3",
+    "studies/FT12.svg": "c271e69bcffb690891dd1c84a5e8b4a7c3c39c49d4506738216310a8f692c2cb",
+    "thumbnails/light/FT12.png": "b34d1c87204fb2fd09815dde299d9fb1e6313012cd7264fe85f45528646536f0",
+    "thumbnails/dark/FT12.png": "49a4e5304111c067e02b667d13e020eb7a86e3b7224e292ef3e02c44c9ef4b74",
+    "studies/FT13.svg": "266882edbc2bc6e79f5c4913d9a92c4f783001182223137b0c97d031ab76289c",
+    "thumbnails/light/FT13.png": "93f74b8b27f78bcbe0b96fbb91b0521b2bb1e098b2c3db35ed234f38d7fe4176",
+    "thumbnails/dark/FT13.png": "ac1f4ea80e468e2f9065880516627da963b01e89791aa1895cf90374b0764313"
+  }
+}

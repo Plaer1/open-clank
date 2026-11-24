@@ -1,31 +1,31 @@
-"""Compatibility facade for the canonical Frankenmemory document index."""
+"""Compatibility facade for the canonical Memery document index."""
 
 import hashlib
 import json
 import logging
 from typing import List, Dict, Any, Optional
 
-from src.frankenmemory_rag import FrankenmemoryRAG
+from src.memery_rag import MemeryRAG
 
 # Import-compatible name retained for callers and old tests. It always names
 # the canonical backend; the environment can no longer select Chroma.
-VectorRAG = FrankenmemoryRAG
+VectorRAG = MemeryRAG
 
 logger = logging.getLogger(__name__)
 
 class RAGManager:
     """
-    A manager class that wraps the canonical Frankenmemory RAG projection.
+    A manager class that wraps the canonical Memery RAG projection.
     """
     
     def __init__(self, persist_directory: Optional[str] = None):
         """Initialize the sole canonical RAG backend.
 
         ``persist_directory`` remains accepted only for import compatibility;
-        Frankenmemory owns its database path.
+        Memery owns its database path.
         """
         self.vector_rag = VectorRAG()
-        logger.info("RAGManager initialized with canonical Frankenmemory backend")
+        logger.info("RAGManager initialized with canonical Memery backend")
     
     # Delegate all methods to VectorRAG
     def search(
@@ -157,14 +157,14 @@ class RAGManager:
             project_id=project_id,
         )
 
-    def _canonical_lifecycle_backend(self) -> FrankenmemoryRAG:
+    def _canonical_lifecycle_backend(self) -> MemeryRAG:
         backend = self.vector_rag
-        if getattr(backend, "backend", None) != "frankenmemory":
-            raise RuntimeError("owner lifecycle requires the canonical Frankenmemory RAG backend")
+        if getattr(backend, "backend", None) != "memery":
+            raise RuntimeError("owner lifecycle requires the canonical Memery RAG backend")
         if not getattr(backend, "healthy", False):
-            raise RuntimeError("canonical Frankenmemory RAG backend is unavailable")
+            raise RuntimeError("canonical Memery RAG backend is unavailable")
         if not callable(getattr(backend, "_connect", None)):
-            raise RuntimeError("canonical Frankenmemory RAG lifecycle connection is unavailable")
+            raise RuntimeError("canonical Memery RAG lifecycle connection is unavailable")
         return backend
 
     def owner_inventory(self, owner: str) -> Dict[str, Any]:

@@ -43,6 +43,7 @@ references/
 **/history-credentials*.json
 **/.history-credentials*.tmp
 **/.clankers/robonotes/
+.openclank/
 .mimocode/
 .mimocode-test-fixtures-*/
 /bin/

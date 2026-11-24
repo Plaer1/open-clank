@@ -21,10 +21,13 @@ loads while a user migrates them to disk.
 from __future__ import annotations
 
 import json
+import base64
 import hashlib
 import logging
 import os
+import re
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -37,10 +40,14 @@ from core.atomic_io import (
     AtomicFileChange,
     atomic_write_batch,
     file_fingerprint,
+    fingerprint_bytes,
 )
 from .skill_format import Skill, slugify
 from .skill_lifecycle import (
     PROMOTIONS_FILE,
+    PreparedReadBudget,
+    PreparedReadUnavailable,
+    prepared_existing_lock,
     append_usage_event,
     current_bundle_sha256,
     ensure_revision,
@@ -54,9 +61,18 @@ from .skill_lifecycle import (
     save_state,
     snapshot_bundle,
     _safe_bundle_path,
+    _SkillMetadataAuthority,
+    SKILL_METADATA_WRITER_VERSION,
+    revision_path,
+    state_path,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class SkillProtectedDeleteError(ValueError):
+    """Generic deletion cannot remove protected or unverifiable lifecycle data."""
+
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +87,40 @@ def _jaccard(a: set, b: set) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+def _find_creation_duplicate(skills, *, owner, source, name, description, title, when_to_use, problem, procedure, steps):
+    """Return the existing same-owner near match without mutating it."""
+    if source == 'user':
+        return None
+    candidate = _tokenize(' '.join([name, (description or title or ''),
+        (when_to_use if when_to_use is not None else (problem or '')),
+        ' '.join(procedure if procedure is not None else (steps or []))]))
+    if not candidate:
+        return None
+    for skill in skills:
+        if owner is not None and skill.get('owner') != owner:
+            continue
+        existing = _tokenize(' '.join([skill.get('name', ''), skill.get('description', ''),
+            skill.get('when_to_use', ''), ' '.join(skill.get('procedure', []) or [])]))
+        if _jaccard(candidate, existing) >= 0.82:
+            return skill
+    return None
+
+
+def _build_creation_skill(*, name, skill_id, owner, description, title, version, category, tags,
+                          platforms, requires_toolsets, fallback_for_toolsets, confidence, source,
+                          source_uri, source_revision, source_memory_ids, teacher_model, when_to_use,
+                          problem, procedure, steps, pitfalls, verification, solution):
+    """Build the existing normalized draft without writing or assigning authority."""
+    return Skill(name=name, skill_id=skill_id, revision=1, description=(description or title or '').strip(),
+        version=version, category=category or 'general', tags=list(tags or []), platforms=list(platforms or []),
+        requires_toolsets=list(requires_toolsets or []), fallback_for_toolsets=list(fallback_for_toolsets or []),
+        status='draft', confidence=float(confidence), source=source, source_uri=source_uri,
+        source_revision=source_revision, source_memory_ids=list(source_memory_ids or []), teacher_model=teacher_model,
+        owner=owner, when_to_use=(when_to_use if when_to_use is not None else (problem or '')),
+        procedure=list(procedure if procedure is not None else (steps or [])), pitfalls=list(pitfalls or []),
+        verification=list(verification or []), body_extra=(solution if solution and not procedure else ''))
 
 
 def _to_float(x, default: float = 0.0) -> float:
@@ -97,6 +147,7 @@ class SkillsManager:
         self.usage_file = os.path.join(self.skills_root, "_usage.json")
         self.promotions_file = os.path.join(self.skills_root, PROMOTIONS_FILE)
         self.legacy_file = os.path.join(data_dir, "skills.json")  # back-compat
+        self._metadata_authority = None  # no production issuer until child capability is joined
         os.makedirs(self.skills_root, exist_ok=True)
 
     def _assert_memory_sources_available(
@@ -318,7 +369,7 @@ class SkillsManager:
     def set_audit(self, name: str, verdict: str, by_teacher: bool = False,
                   worker_model: str = "", teacher_model: str = "",
                   owner: Optional[str] = None,
-                  results: Optional[Dict] = None) -> None:
+                  results: Optional[Dict] = None, *, _metadata_authority=None) -> None:
         """Record the last test/audit result for a skill in the usage sidecar
         (so it surfaces in load() without touching SKILL.md). Drives the
         'verified' check + teacher mark on the card."""
@@ -333,7 +384,8 @@ class SkillsManager:
             sk = self._read_skill(path)
             if sk is None or (sk.owner or "") != (owner or ""):
                 return
-            state = ensure_revision(sk, path, load_state(path))
+            state = load_state(path)
+            state = self._qualified_metadata_state(path,sk,state,_metadata_authority) if sk.resource_metadata is not None else ensure_revision(sk,path,state)
             row = next(
                 (
                     item
@@ -411,6 +463,7 @@ class SkillsManager:
                 "test_results": result_summary,
                 **bundle,
             }
+            if sk.resource_metadata is not None:self._qualified_metadata_state(path,sk,state,_metadata_authority)
             save_state(path, state)
 
         usage = self._load_usage()
@@ -496,6 +549,7 @@ class SkillsManager:
                 (
                     entry for entry in categories
                     if entry.is_dir(follow_symlinks=False)
+                    and not entry.name.startswith(".owner-purge-")
                 ),
                 key=lambda entry: entry.name,
             )
@@ -505,6 +559,7 @@ class SkillsManager:
                     (
                         entry for entry in skills
                         if entry.is_dir(follow_symlinks=False)
+                        and not entry.name.startswith(".owner-purge-")
                     ),
                     key=lambda entry: entry.name,
                 )
@@ -513,19 +568,26 @@ class SkillsManager:
                 if os.path.isfile(path) and not os.path.islink(path):
                     yield path
 
-    def _read_skill(self, path: str) -> Optional[Skill]:
+    def _read_skill(self, path: str, *, budget=None) -> Optional[Skill]:
         try:
-            with open(path, encoding="utf-8") as f:
-                text = f.read()
+            if budget is None:
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+            else:
+                text = budget.read(path, text=True)
             skill = Skill.from_markdown(text, path=path)
             hydrate_identity(skill, path)
             return skill
+        except PreparedReadUnavailable:
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse {path}: {e}")
             return None
 
 
     def _write_skill(self, sk: Skill) -> str:
+        if sk.resource_metadata is not None:
+            raise ValueError("metadata-aware skill writing requires a qualified profile")
         from src.openclank.attachment_admission import admit_references, settle_references
         admitted = admit_references(sk.owner, "skills", sk.to_markdown())
         path = self._skill_file(sk.category or "general", sk.name)
@@ -542,16 +604,19 @@ class SkillsManager:
         path: str,
         head: Skill,
         state: Optional[Dict] = None,
+        *, budget=None, metadata_authority=None,
     ) -> tuple[Optional[Skill], Optional[Dict]]:
         """Resolve one exact activation pointer, failing closed on corruption.
 
         A lifecycle file with an explicit null pointer is an intentional
         demotion and must never fall back to legacy frontmatter.
         """
-        state = load_state(path) if state is None else state
+        state = load_state(path, budget=budget) if state is None else state
+        if state.get('metadata_pending') is not None:
+            return None, None
         pointer = state.get("published")
         if isinstance(pointer, dict):
-            text = read_snapshot(path, pointer)
+            text = read_snapshot(path, pointer, budget=budget)
             if not text:
                 logger.warning("Published skill snapshot is unavailable: %s", path)
                 return None, pointer
@@ -571,7 +636,7 @@ class SkillsManager:
             if hashlib.sha256(text.encode("utf-8")).hexdigest() != snapshot_sha256:
                 logger.warning("Published skill snapshot bytes changed: %s", path)
                 return None, pointer
-            bundle_text = read_bundle_file(path, pointer, "SKILL.md")
+            bundle_text = read_bundle_file(path, pointer, "SKILL.md", budget=budget)
             if bundle_text is None:
                 logger.warning("Published skill bundle snapshot is invalid: %s", path)
                 return None, pointer
@@ -601,6 +666,9 @@ class SkillsManager:
             if not valid:
                 logger.warning("Published skill pointer does not match snapshot: %s", path)
                 return None, pointer
+            if active.resource_metadata is not None:
+                try:self._qualified_metadata_state(path,active,state,metadata_authority or self._metadata_authority,budget=budget,active_pointer=pointer)
+                except (ValueError,TypeError):return None,pointer
             active.status = "published"
             active.hidden = False
             return active, pointer
@@ -832,6 +900,21 @@ class SkillsManager:
     # CRUD — disk-backed
     # ----------------------------------------------------------------------
 
+    def add_recording_draft(self, *, authority, request_key, fields) -> Dict:
+        """Create an explicitly qualified human recording draft once."""
+        from .skill_recording_draft import add_recording_draft
+        return add_recording_draft(self, authority=authority, request_key=request_key, fields=fields)
+
+    def add_marketplace_draft(self, *, authority, request_key, review, files) -> Dict:
+        """Create one explicitly reviewed marketplace draft."""
+        from .skill_marketplace_draft import add_marketplace_draft
+        return add_marketplace_draft(self, authority=authority, request_key=request_key, review=review, files=files)
+
+    def add_skill_snapshot_draft(self, *, authority, request_key, package, review) -> Dict:
+        """Create one explicitly reviewed recipient-owned skill draft."""
+        from .skill_snapshot_draft import add_skill_snapshot_draft
+        return add_skill_snapshot_draft(self, authority=authority, request_key=request_key, package=package, review=review)
+
     def add_skill(self, *args, **kwargs) -> Dict:
         """Create a skill while holding the global memory/skill lifecycle lock."""
         lock_target = os.path.join(self.skills_root, "PROMOTIONS")
@@ -882,24 +965,11 @@ class SkillsManager:
         # never auto-skipped — a human asked for it. The every-X AI audit
         # handles the fuzzier near-duplicates this cheap check won't catch.
         _all = self.load_all()
-        _dedup_pool = _all if owner is None else [s for s in _all if s.get("owner") == owner]
-        if source != "user":
-            cand = _tokenize(" ".join([
-                nm, (description or title or ""),
-                (when_to_use if when_to_use is not None else (problem or "")),
-                " ".join(procedure if procedure is not None else (steps or [])),
-            ]))
-            if cand:
-                for s in _dedup_pool:
-                    ex = _tokenize(" ".join([
-                        s.get("name", ""), s.get("description", ""),
-                        s.get("when_to_use", ""),
-                        " ".join(s.get("procedure", []) or []),
-                    ]))
-                    if _jaccard(cand, ex) >= 0.82:
-                        # Discovery is not execution: do not inflate "uses"
-                        # merely because the authoring deduper found a match.
-                        return {**s, "_deduped": True, "_duplicate_of": s.get("name")}
+        duplicate = _find_creation_duplicate(_all, owner=owner, source=source, name=nm,
+            description=description, title=title, when_to_use=when_to_use, problem=problem,
+            procedure=procedure, steps=steps)
+        if duplicate is not None:
+            return {**duplicate, "_deduped": True, "_duplicate_of": duplicate.get("name")}
 
         # Avoid clobbering an existing skill with the same name
         existing = {s["name"] for s in _all} | self._reserved_skill_names()
@@ -909,31 +979,13 @@ class SkillsManager:
             nm = f"{base}-{i}"
             i += 1
 
-        sk = Skill(
-            name=nm,
-            skill_id=str(uuid.uuid4()),
-            revision=1,
-            description=(description or title or "").strip(),
-            version=version,
-            category=category or "general",
-            tags=list(tags or []),
-            platforms=list(platforms or []),
-            requires_toolsets=list(requires_toolsets or []),
-            fallback_for_toolsets=list(fallback_for_toolsets or []),
-            status="draft",
-            confidence=float(confidence),
-            source=source,
-            source_uri=source_uri,
-            source_revision=source_revision,
-            source_memory_ids=list(source_memory_ids or []),
-            teacher_model=teacher_model,
-            owner=owner,
-            when_to_use=(when_to_use if when_to_use is not None else (problem or "")),
-            procedure=list(procedure if procedure is not None else (steps or [])),
-            pitfalls=list(pitfalls or []),
-            verification=list(verification or []),
-            body_extra=(solution if solution and not procedure else ""),
-        )
+        sk = _build_creation_skill(name=nm, skill_id=str(uuid.uuid4()), owner=owner,
+            description=description, title=title, version=version, category=category, tags=tags,
+            platforms=platforms, requires_toolsets=requires_toolsets, fallback_for_toolsets=fallback_for_toolsets,
+            confidence=confidence, source=source, source_uri=source_uri, source_revision=source_revision,
+            source_memory_ids=source_memory_ids, teacher_model=teacher_model, when_to_use=when_to_use,
+            problem=problem, procedure=procedure, steps=steps, pitfalls=pitfalls, verification=verification,
+            solution=solution)
         path = self._write_skill(sk)
         ensure_revision(sk, path)
 
@@ -1069,6 +1121,356 @@ class SkillsManager:
         with locked(lock_target):
             return self._update_skill_unlocked(*args, **kwargs)
 
+    def _current_published_source(self, skill_id, owner, *, authority=None):
+        """Bounded exact-ID lookup; never resolve a historical name or path."""
+        if type(skill_id) is not str or not skill_id or len(skill_id.encode('utf-8'))>512: return None
+        budget=PreparedReadBudget(); matches=[]
+        with prepared_existing_lock(os.path.join(self.skills_root,'PROMOTIONS')):
+            with os.scandir(self.skills_root) as categories:
+                category_paths=[]
+                for category in categories:
+                    budget.entry()
+                    if category.is_dir(follow_symlinks=False) and not category.name.startswith('.'):category_paths.append(category.path)
+            paths=[]
+            for category in sorted(category_paths):
+                with os.scandir(category) as entries:
+                    for entry in entries:
+                        budget.entry()
+                        if entry.is_dir(follow_symlinks=False) and not entry.name.startswith('.'):
+                            path=os.path.join(entry.path,'SKILL.md')
+                            if os.path.isfile(path) and not os.path.islink(path):paths.append(path)
+                            if len(paths)>128:raise PreparedReadUnavailable('skill source unavailable')
+            for path in sorted(paths):
+                with prepared_existing_lock(path):
+                    head=self._read_skill(path,budget=budget)
+                    if head is None:raise PreparedReadUnavailable('skill source unavailable')
+                    if head.skill_id!=skill_id or head.owner!=owner:continue
+                    state=load_state(path,budget=budget);active,pointer=self._active_skill(path,head,state,budget=budget,metadata_authority=authority)
+                    if active is None or type(pointer) is not dict or not str(pointer.get('publisher','')).startswith(('user:','admin:')):raise PreparedReadUnavailable('skill source unavailable')
+                    text=read_snapshot(path,pointer,budget=budget)
+                    if type(text) is not str:raise PreparedReadUnavailable('skill source unavailable')
+                    pointer_bytes=json.dumps(pointer,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode('utf-8')
+                    if len(pointer_bytes)>16384 or len(text.encode('utf-8'))>262144:raise PreparedReadUnavailable('skill source unavailable')
+                    matches.append({'skill_id':skill_id,'revision':active.revision,'content_hash':active.content_hash,'snapshot_sha256':pointer.get('snapshot_sha256'),'pointer_sha256':hashlib.sha256(pointer_bytes).hexdigest(),'source':text,'comparison':'unavailable'})
+            return matches[0] if len(matches)==1 else None
+
+    def _metadata_review_snapshot(self, skill_id, owner, *, authority=None):
+        """Current head and published pointer for a later guarded host CAS."""
+        with locked(os.path.join(self.skills_root,'PROMOTIONS')):
+            found=self._find_skill(skill_id,owner)
+            if not found:return None
+            path,_=found
+            with locked(path):
+                sk=self._read_skill(path);state=load_state(path)
+                if not sk or sk.skill_id!=skill_id or sk.owner!=owner or state.get('metadata_pending') is not None:return None
+                active,pointer=self._active_skill(path,sk,state,metadata_authority=authority)
+                if active is None or type(pointer) is not dict:return None
+                metadata={}
+                if sk.resource_metadata is not None:
+                    self._qualified_metadata_state(path,sk,state,authority)
+                    metadata=sk.resource_metadata['metadata']
+                return {'skill_id':sk.skill_id,'revision':sk.revision,'content_hash':sk.content_hash,'published':dict(pointer),'metadata':{key:metadata[key] for key in ('name','aliases','domain_refs') if key in metadata}}
+
+    def _metadata_audit_commit(self, skill_id, *, owner, authority, expected_revision, expected_hash, expected_published, verdict, worker_model, results, necessity, precision):
+        """Commit an actual audit only while its reviewed head and authority remain current."""
+        if type(authority) is not _SkillMetadataAuthority or verdict not in ('pass','fail','inconclusive'):
+            raise ValueError('skill audit unavailable')
+        if type(necessity) is not dict or type(necessity.get('necessary')) is not bool or type(precision) is not dict or type(precision.get('ok')) is not bool:
+            raise ValueError('skill audit unavailable')
+        with locked(os.path.join(self.skills_root, 'PROMOTIONS')):
+            found=self._find_skill(skill_id,owner)
+            if not found:raise ValueError('skill unavailable')
+            path,_=found
+            with locked(path):
+                sk=self._read_skill(path);state=load_state(path)
+                if (not sk or sk.skill_id!=skill_id or sk.owner!=owner or sk.resource_metadata is None
+                    or state.get('metadata_audit_pending') is not None or state.get('metadata_recovery_pending') is not None
+                    or sk.revision!=expected_revision or sk.content_hash!=expected_hash
+                    or state.get('head_revision')!=expected_revision or state.get('head_hash')!=expected_hash
+                    or state.get('published')!=expected_published):raise ValueError('skill audit head changed')
+                self._qualified_metadata_state(path,sk,state,authority)
+                intent={'version':1,'skill_id':skill_id,'owner':owner,'account_id':authority.account_id,'revision':expected_revision,'content_hash':expected_hash,'published':expected_published}
+                state['metadata_audit_pending']=intent
+                save_state(path,state)
+                self.set_audit(skill_id,verdict,worker_model=worker_model,owner=owner,results=results,_metadata_authority=authority)
+                self._qualified_metadata_state(path,sk,load_state(path),authority)
+                self.set_necessity(skill_id,necessity['necessary'],necessity.get('redundant_with'),necessity.get('reason',''),owner=owner)
+                self.set_retrieval_precision(skill_id,precision['ok'],precision.get('reason',''),owner=owner)
+                state=self._qualified_metadata_state(path,sk,load_state(path),authority)
+                if state.get('metadata_audit_pending')!=intent:raise ValueError('skill audit intent changed')
+                receipt={**intent,'verdict':verdict,'necessity':necessity,'precision':precision}
+                receipt['sha256']=hashlib.sha256(json.dumps(receipt,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()
+                state['metadata_audit_receipt']=receipt;state.pop('metadata_audit_pending',None);save_state(path,state)
+
+    def _metadata_audit_input(self, skill_id, owner, *, authority):
+        with locked(os.path.join(self.skills_root,'PROMOTIONS')):
+            snapshot=self._metadata_review_snapshot(skill_id,owner,authority=authority)
+            found=self._find_skill(skill_id,owner)
+            if not snapshot or not found:raise ValueError('skill unavailable')
+            path,sk=found
+            with locked(path):
+                current=self._read_skill(path);state=load_state(path)
+                if not current or current.revision!=snapshot['revision'] or current.content_hash!=snapshot['content_hash'] or current.resource_metadata is None:raise ValueError('skill changed')
+                self._qualified_metadata_state(path,current,state,authority)
+                with open(path,encoding='utf-8') as handle:text=handle.read(4*1024*1024+1)
+                if len(text.encode('utf-8'))>4*1024*1024:raise ValueError('skill too large')
+                return snapshot,text,current.to_dict()
+
+    def _stage_reviewed_metadata(self, skill_id, *, owner, authority, expected_revision, expected_hash, expected_published, request_key, metadata):
+        """Stage a reviewed metadata revision; never advance the published pointer.
+
+        This private source seam has no production issuer until the host/child
+        capability and current-domain read join are installed.
+        """
+        from copy import deepcopy
+        from src.openclank.resource_metadata import validate_metadata
+        from src.openclank.attachment_admission import admit_references, settle_references
+        from core.atomic_io import atomic_write_text
+        from .skill_history_capture import capture_stage
+        if (type(authority) is not _SkillMetadataAuthority or type(expected_revision) is not int or expected_revision<1
+                or type(expected_hash) is not str or re.fullmatch(r'[0-9a-f]{64}',expected_hash) is None
+                or type(expected_published) is not dict or type(request_key) is not str or not request_key or request_key!=request_key.strip() or len(request_key.encode())>512):
+            raise ValueError('skill metadata request unavailable')
+        clean=validate_metadata(metadata)
+        if set(clean)-{'name','aliases','domain_refs'}:raise ValueError('skill metadata request unavailable')
+        intent={'version':1,'owner':owner,'account_id':authority.account_id,'actor':authority.actor,'skill_id':skill_id,'expected_revision':expected_revision,'expected_hash':expected_hash,'published':expected_published,'request_key':request_key,'metadata':clean}
+        intent_hash=hashlib.sha256(json.dumps(intent,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()
+        with locked(os.path.join(self.skills_root,'PROMOTIONS')):
+            found=self._find_skill(skill_id,owner)
+            if not found:raise ValueError('skill unavailable')
+            path,_=found
+            with locked(path):
+                budget=PreparedReadBudget(max_file=8*1024*1024,max_bytes=24*1024*1024,seconds=4)
+                sk=self._read_skill(path,budget=budget);state=load_state(path,budget=budget)
+                if not sk or (sk.owner or '')!=owner or sk.skill_id!=skill_id or any(state.get(k) is not None for k in ('metadata_pending','metadata_audit_pending','metadata_recovery_pending')):raise ValueError('skill metadata unavailable')
+                receipts=state.get('metadata_receipts',{})
+                if type(receipts) is not dict:raise ValueError('skill metadata unavailable')
+                old=receipts.get(request_key)
+                if old is not None:
+                    if type(old) is not dict or old.get('intent_sha256')!=intent_hash or old.get('owner')!=owner or old.get('account_id')!=authority.account_id:raise ValueError('skill metadata request conflict')
+                    unsigned={k:v for k,v in old.items() if k!='receipt_sha256'}
+                    if old.get('version')!=SKILL_METADATA_WRITER_VERSION or old.get('receipt_sha256')!=hashlib.sha256(json.dumps(unsigned,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest():raise ValueError('skill metadata receipt unavailable')
+                    authority.assert_current(owner,old.get('domain_refs'))
+                    return {'state':'already_staged','revision':old['revision'],'content_hash':old['content_hash']}
+                if sk.revision!=expected_revision or sk.content_hash!=expected_hash or state.get('head_revision')!=expected_revision or state.get('head_hash')!=expected_hash or state.get('published')!=expected_published:
+                    raise ValueError('skill metadata head changed')
+                active,pointer=self._active_skill(path,sk,state,metadata_authority=authority)
+                if active is None or pointer!=expected_published or read_snapshot(path,pointer) is None or read_bundle_snapshot(path,pointer) is None:raise ValueError('skill publication unavailable')
+                if sk.resource_metadata is not None:
+                    self._qualified_metadata_state(path,sk,state,authority)
+                    existing=sk.resource_metadata.get('metadata') if type(sk.resource_metadata) is dict else None
+                else:existing={}
+                combined=dict(existing);combined.update(clean);combined=validate_metadata(combined);refs=combined.get('domain_refs',[])
+                authority.assert_current(owner,refs)
+                if combined==existing:return {'state':'unchanged','revision':sk.revision,'content_hash':sk.content_hash}
+                new=deepcopy(sk);new.parent_revision=sk.revision;new.revision=sk.revision+1;new.status='draft'
+                new.resource_metadata={'version':1,'metadata':combined,'provenance':{'origin':'manual','actor':authority.actor}}
+                new.content_hash=new.compute_content_hash();text=new.to_markdown();snapshot=revision_path(path,new.revision,new.content_hash)
+                snapshot_sha=hashlib.sha256(text.encode()).hexdigest();metadata_sha=hashlib.sha256(json.dumps(combined,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+                receipt={'version':SKILL_METADATA_WRITER_VERSION,'request_key':request_key,'intent_sha256':intent_hash,'owner':owner,'account_id':authority.account_id,'actor':authority.actor,'skill_id':skill_id,'revision':new.revision,'content_hash':new.content_hash,'metadata_sha256':metadata_sha,'snapshot_sha256':snapshot_sha,'predecessor_revision':sk.revision,'predecessor_hash':sk.content_hash,'published':deepcopy(pointer),'domain_refs':deepcopy(refs)}
+                with capture_stage(authority,owner,skill_id,path,sk,state,refs) as history_preimage:
+                    authority.assert_current(owner,refs)
+                    receipt['history_preimage']=history_preimage
+                    receipt['receipt_sha256']=hashlib.sha256(json.dumps(receipt,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+                    admitted=admit_references(owner,'skills',text)
+                    state['metadata_profile']=SKILL_METADATA_WRITER_VERSION;state['metadata_pending']=receipt;save_state(path,state)
+                    if os.path.islink(os.path.dirname(snapshot)) or os.path.islink(snapshot):raise ValueError('skill metadata snapshot unavailable')
+                    os.makedirs(os.path.dirname(snapshot),exist_ok=True)
+                    if os.path.exists(snapshot):
+                        with open(snapshot,encoding='utf-8') as f:
+                            if f.read()!=text:raise ValueError('skill metadata snapshot conflict')
+                    else:atomic_write_text(snapshot,text)
+                    atomic_write_text(path,text)
+                    authority.assert_current(owner,refs)
+                    history=state.setdefault('history',[])
+                    if type(history) is not list:raise ValueError('skill history unavailable')
+                    history.append({'skill_id':skill_id,'owner':owner,'revision':new.revision,'parent_revision':sk.revision,'content_hash':new.content_hash,'snapshot':os.path.relpath(snapshot,os.path.dirname(path)),'snapshot_sha256':snapshot_sha,'created_at':time.time()})
+                    state['head_revision']=new.revision;state['head_hash']=new.content_hash
+                    receipts[request_key]=receipt;state['metadata_receipts']=receipts;state.pop('metadata_pending',None)
+                    save_state(path,state);settle_references(admitted)
+                    return {'state':'staged','revision':new.revision,'content_hash':new.content_hash}
+
+    @staticmethod
+    def _metadata_recovery_digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+    def _metadata_recovery(self, skill_id, *, owner, authority, action=None, request_key=None, receipt_sha256=None, recovery_key=None):
+        """Inspect or recover one retained metadata intent; never reconstruct its source."""
+        from copy import deepcopy
+        from core.atomic_io import atomic_write_text
+        from src.openclank.attachment_admission import admit_references, settle_references
+        from src.openclank.resource_metadata import validate_envelope
+        from .skill_history_capture import capture_stage, read_stage_preimage
+        from .skill_lifecycle import _prepared_unique_pairs
+        if type(authority) is not _SkillMetadataAuthority:
+            raise ValueError('skill recovery unavailable')
+        if action not in (None, 'resume', 'rollback', 'abort_audit'):
+            raise ValueError('skill recovery unavailable')
+        if action is not None and any(type(x) is not str or not x or x != x.strip() or len(x.encode()) > 512 for x in (request_key, receipt_sha256, recovery_key)):
+            raise ValueError('skill recovery unavailable')
+        with locked(os.path.join(self.skills_root, 'PROMOTIONS')):
+            found = self._find_skill(skill_id, owner)
+            if not found: raise ValueError('skill recovery unavailable')
+            path, _ = found
+            with locked(path):
+                budget = PreparedReadBudget(max_file=8*1024*1024, max_bytes=24*1024*1024, seconds=4.0)
+                state = load_state(path, budget=budget)
+                head_text = budget.read(path, text=True)
+                head = Skill.from_markdown(head_text, path=path)
+                declared = head.content_hash
+                hydrate_identity(head, path)
+                if head.skill_id != skill_id or head.owner != owner or head.content_hash != declared:
+                    raise ValueError('skill recovery head unavailable')
+                authority.assert_current(owner, [])
+                receipts = state.get('metadata_recovery_receipts', {})
+                if type(receipts) is not dict: raise ValueError('skill recovery unavailable')
+                in_flight = state.get('metadata_recovery_pending')
+                if in_flight is not None:
+                    if type(in_flight) is not dict or in_flight.get('owner') != owner or in_flight.get('account_id') != authority.account_id or in_flight.get('skill_id') != skill_id:
+                        raise ValueError('skill recovery unavailable')
+                    if action is not None: raise ValueError('skill recovery already issued; inspect status')
+                    return {'state':'recovery_unknown', 'recovery_key':in_flight.get('recovery_key')}
+                if action is None and recovery_key:
+                    fact = receipts.get(recovery_key)
+                    if type(fact) is not dict or fact.get('owner') != owner or fact.get('account_id') != authority.account_id or fact.get('skill_id') != skill_id:
+                        raise ValueError('skill recovery unavailable')
+                    unsigned = {k:v for k,v in fact.items() if k != 'sha256'}
+                    if fact.get('sha256') != self._metadata_recovery_digest(unsigned): raise ValueError('skill recovery unavailable')
+                    return {'state':'recovered', 'fact':fact}
+                if action is not None and recovery_key in receipts:
+                    raise ValueError('skill recovery already issued; inspect status')
+                pending = state.get('metadata_pending')
+                audit = state.get('metadata_audit_pending')
+                if pending is not None and audit is not None: raise ValueError('skill recovery unavailable')
+                if audit is not None:
+                    if type(audit) is not dict or set(audit) != {'version','skill_id','owner','account_id','revision','content_hash','published'} or audit.get('version') != 1 or audit.get('skill_id') != skill_id or audit.get('owner') != owner or audit.get('account_id') != authority.account_id:
+                        raise ValueError('skill audit recovery unavailable')
+                    digest = self._metadata_recovery_digest(audit)
+                    self._qualified_metadata_state(path, head, state, authority, budget=budget)
+                    if (state.get('head_revision') != audit['revision'] or state.get('head_hash') != audit['content_hash'] or state.get('published') != audit['published'] or head.revision != audit['revision'] or head.content_hash != audit['content_hash']): raise ValueError('skill audit head changed')
+                    if action is None: return {'state':'audit_pending', 'request_key':'audit', 'receipt_sha256':digest, 'actions':['abort_audit']}
+                    if action != 'abort_audit' or request_key != 'audit' or receipt_sha256 != digest: raise ValueError('skill audit intent changed')
+                else:
+                    if type(pending) is not dict: return {'state':'none'} if action is None else (_ for _ in ()).throw(ValueError('skill recovery unavailable'))
+                    required = {'version','request_key','intent_sha256','owner','account_id','actor','skill_id','revision','content_hash','metadata_sha256','snapshot_sha256','predecessor_revision','predecessor_hash','published','domain_refs','receipt_sha256'}
+                    unsigned = {k:v for k,v in pending.items() if k != 'receipt_sha256'}
+                    if (set(pending) not in (required, required | {'history_preimage'}) or pending.get('version') != SKILL_METADATA_WRITER_VERSION or pending.get('owner') != owner or pending.get('account_id') != authority.account_id or pending.get('skill_id') != skill_id or pending.get('receipt_sha256') != self._metadata_recovery_digest(unsigned) or type(pending.get('revision')) is not int or type(pending.get('predecessor_revision')) is not int or pending['revision'] != pending['predecessor_revision'] + 1 or type(pending.get('published')) is not dict or type(pending.get('domain_refs')) is not list or any(type(pending.get(k)) is not str or re.fullmatch(r'[0-9a-f]{64}', pending[k]) is None for k in ('intent_sha256','content_hash','metadata_sha256','snapshot_sha256','predecessor_hash'))):
+                        raise ValueError('skill recovery intent unavailable')
+                    if (state.get('head_revision') != pending['predecessor_revision'] or state.get('head_hash') != pending['predecessor_hash'] or state.get('published') != pending['published'] or state.get('skill_id') != skill_id or state.get('owner') != owner): raise ValueError('skill recovery head changed')
+                    history = state.get('history')
+                    if type(history) is not list: raise ValueError('skill recovery history unavailable')
+                    predecessors = [v for v in history if type(v) is dict and v.get('revision') == pending['predecessor_revision'] and v.get('content_hash') == pending['predecessor_hash'] and v.get('skill_id') == skill_id and v.get('owner') == owner]
+                    if len(predecessors) != 1: raise ValueError('skill recovery predecessor unavailable')
+                    row = predecessors[0]; previous_text = read_snapshot(path, row, budget=budget)
+                    if previous_text is None or row.get('snapshot_sha256') != hashlib.sha256(previous_text.encode()).hexdigest(): raise ValueError('skill recovery predecessor unavailable')
+                    previous = Skill.from_markdown(previous_text, path=path); previous_hash = previous.content_hash; hydrate_identity(previous, path)
+                    if previous.skill_id != skill_id or previous.owner != owner or previous.revision != pending['predecessor_revision'] or previous.content_hash != pending['predecessor_hash'] or previous_hash != previous.content_hash: raise ValueError('skill recovery predecessor unavailable')
+                    original_head_text = None
+                    original_head = None
+                    if 'history_preimage' in pending:
+                        raw_head, raw_state = read_stage_preimage(authority, owner, pending['history_preimage'])
+                        original_head_text = raw_head.decode('utf-8')
+                        original_head = Skill.from_markdown(original_head_text, path=path)
+                        original_declared = original_head.content_hash; hydrate_identity(original_head, path)
+                        original_state = json.loads(raw_state.decode('utf-8'), object_pairs_hook=_prepared_unique_pairs)
+                        if (original_head.skill_id != skill_id or original_head.owner != owner
+                            or original_head.revision != pending['predecessor_revision']
+                            or original_declared != pending['predecessor_hash'] or original_head.content_hash != pending['predecessor_hash']
+                            or type(original_state) is not dict or original_state.get('skill_id') != skill_id
+                            or original_state.get('owner') != owner or original_state.get('head_revision') != pending['predecessor_revision']
+                            or original_state.get('head_hash') != pending['predecessor_hash'] or original_state.get('published') != pending['published']
+                            or original_state.get('metadata_pending') is not None or original_state.get('metadata_recovery_pending') is not None):
+                            raise ValueError('skill History predecessor unavailable')
+                    check_state = dict(state); check_state.pop('metadata_pending', None)
+                    active, pointer = self._active_skill(path, previous, check_state, budget=budget, metadata_authority=authority)
+                    if active is None or pointer != pending['published']: raise ValueError('skill recovery publication unavailable')
+                    candidate_path = revision_path(path, pending['revision'], pending['content_hash'])
+                    candidate_row = {'snapshot':os.path.relpath(candidate_path, os.path.dirname(path))}
+                    candidate_text = read_snapshot(path, candidate_row, budget=budget)
+                    candidate = None
+                    if candidate_text is None and (os.path.islink(os.path.dirname(candidate_path)) or os.path.lexists(candidate_path)):
+                        raise ValueError('skill recovery candidate unavailable')
+                    if candidate_text is not None:
+                        if hashlib.sha256(candidate_text.encode()).hexdigest() != pending['snapshot_sha256']: raise ValueError('skill recovery candidate changed')
+                        candidate = Skill.from_markdown(candidate_text, path=path); declared_candidate = candidate.content_hash; hydrate_identity(candidate, path)
+                        if candidate.skill_id != skill_id or candidate.owner != owner or candidate.revision != pending['revision'] or candidate.parent_revision != previous.revision or candidate.content_hash != pending['content_hash'] or declared_candidate != candidate.content_hash or candidate.status != 'draft': raise ValueError('skill recovery candidate unavailable')
+                        envelope = validate_envelope(candidate.resource_metadata)
+                        if envelope['provenance'] != {'origin':'manual','actor':pending['actor']} or self._metadata_recovery_digest(envelope['metadata']) != pending['metadata_sha256'] or envelope['metadata'].get('domain_refs',[]) != pending['domain_refs']: raise ValueError('skill recovery metadata changed')
+                        expected = deepcopy(original_head if original_head is not None else previous); expected.revision = candidate.revision; expected.parent_revision = previous.revision; expected.status = 'draft'; expected.resource_metadata = deepcopy(candidate.resource_metadata)
+                        if expected.to_markdown() != candidate_text: raise ValueError('skill recovery candidate differs from predecessor')
+                    head_comparison = deepcopy(head); head_comparison.status = previous.status
+                    is_previous = head.revision == previous.revision and head.content_hash == previous.content_hash and head_comparison.to_markdown() == previous.to_markdown()
+                    is_candidate = candidate is not None and head_text == candidate_text
+                    if not is_previous and not is_candidate: raise ValueError('skill recovery head unavailable')
+                    choices = (['resume'] if candidate is not None else []) + (['rollback'] if is_previous or (is_candidate and original_head_text is not None) else [])
+                    if action is None: return {'state':'stage_pending','request_key':pending['request_key'],'receipt_sha256':pending['receipt_sha256'],'actions':choices}
+                    if action not in choices or request_key != pending['request_key'] or receipt_sha256 != pending['receipt_sha256']: raise ValueError('skill recovery intent changed')
+                    if action == 'resume':
+                        if any(type(v) is dict and v.get('revision') == candidate.revision for v in history): raise ValueError('skill recovery history conflict')
+                        stage_receipts = state.get('metadata_receipts', {})
+                        if type(stage_receipts) is not dict or pending['request_key'] in stage_receipts: raise ValueError('skill recovery receipt conflict')
+                        authority.assert_current(owner, pending['domain_refs'])
+                        self._assert_memory_sources_available(owner, candidate.source_memory_ids, candidate.source_uri)
+                recovery_refs = pending['domain_refs'] if action == 'resume' else []
+                with capture_stage(authority, owner, skill_id, path, head, state, recovery_refs) as recovery_preimage:
+                    authority.assert_current(owner, recovery_refs)
+                    if action == 'resume': admitted = admit_references(owner, 'skills', candidate_text)
+                    intent = {'version':1,'owner':owner,'account_id':authority.account_id,'skill_id':skill_id,'request_key':request_key,'receipt_sha256':receipt_sha256,'recovery_key':recovery_key,'action':action,'history_preimage':recovery_preimage}
+                    state['metadata_recovery_pending'] = intent; save_state(path, state)
+                    if action == 'resume':
+                        authority.assert_current(owner, pending['domain_refs'])
+                        if is_previous: atomic_write_text(path, candidate_text)
+                        authority.assert_current(owner, pending['domain_refs'])
+                        history.append({'skill_id':skill_id,'owner':owner,'revision':candidate.revision,'parent_revision':previous.revision,'content_hash':candidate.content_hash,'snapshot':candidate_row['snapshot'],'snapshot_sha256':pending['snapshot_sha256'],'created_at':time.time()})
+                        state['head_revision'] = candidate.revision; state['head_hash'] = candidate.content_hash
+                        stage_receipts[pending['request_key']] = pending; state['metadata_receipts'] = stage_receipts
+                        state.pop('metadata_pending', None)
+                    elif action == 'rollback':
+                        if is_candidate:
+                            authority.assert_current(owner, [])
+                            atomic_write_text(path, original_head_text)
+                        state.pop('metadata_pending', None)
+                    else:
+                        state.pop('metadata_audit_pending', None); state.pop('metadata_audit_receipt', None)
+                    fact = {**intent, 'head_revision':state['head_revision'], 'head_hash':state['head_hash'], 'published':deepcopy(state['published'])}
+                    fact['sha256'] = self._metadata_recovery_digest(fact); receipts[recovery_key] = fact; state['metadata_recovery_receipts'] = receipts
+                    state.pop('metadata_recovery_pending', None); save_state(path, state)
+                    if action == 'resume': settle_references(admitted)
+                    return {'state':'recovered','fact':fact}
+
+    def _protected_delete_preview(self, skill_id, owner, *, authority):
+        from .skill_delete_review import preview
+        return preview(self, skill_id, owner, authority)
+
+    def _protected_delete_action(self, skill_id, owner, *, authority, review, request_key):
+        from .skill_delete_review import remove
+        return remove(self, skill_id, owner, authority, review, request_key)
+
+    def _protected_delete_status(self, skill_id, owner, *, authority, review, request_key):
+        from .skill_delete_review import status
+        return status(skill_id, owner, authority, request_key, review)
+
+    def _qualified_metadata_state(self,path,sk,state,authority,*,budget=None,active_pointer=None):
+        from src.openclank.resource_metadata import validate_envelope
+        if type(authority) is not _SkillMetadataAuthority or state.get('metadata_profile')!=SKILL_METADATA_WRITER_VERSION or state.get('metadata_pending') is not None or type(sk.resource_metadata) is not dict:
+            raise ValueError('skill metadata authority unavailable')
+        receipts=state.get('metadata_receipts');rows=[v for v in receipts.values() if type(v) is dict and v.get('content_hash')==sk.content_hash and v.get('revision')==sk.revision] if type(receipts) is dict else []
+        if len(rows)!=1:raise ValueError('skill metadata receipt unavailable')
+        receipt=rows[0]; unsigned={k:v for k,v in receipt.items() if k!='receipt_sha256'}
+        if (receipt.get('version')!=SKILL_METADATA_WRITER_VERSION or receipt.get('receipt_sha256')!=hashlib.sha256(json.dumps(unsigned,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+            or receipt.get('owner')!=sk.owner or receipt.get('account_id')!=authority.account_id or receipt.get('skill_id')!=sk.skill_id
+            or (active_pointer is None and (state.get('head_revision')!=sk.revision or state.get('head_hash')!=sk.content_hash))
+            or (active_pointer is not None and (state.get('published')!=active_pointer or active_pointer.get('revision')!=sk.revision or active_pointer.get('content_hash')!=sk.content_hash))):
+            raise ValueError('skill metadata receipt unavailable')
+        envelope=validate_envelope(sk.resource_metadata)
+        if envelope['provenance']!={'origin':'manual','actor':receipt.get('actor')}:raise ValueError('skill metadata receipt unavailable')
+        metadata=envelope['metadata'];metadata_sha=hashlib.sha256(json.dumps(metadata,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+        if receipt.get('metadata_sha256')!=metadata_sha or receipt.get('domain_refs')!=(metadata or {}).get('domain_refs',[]):raise ValueError('skill metadata receipt unavailable')
+        row=next((v for v in state.get('history',[]) if type(v) is dict and v.get('revision')==sk.revision and v.get('content_hash')==sk.content_hash),None)
+        text=read_snapshot(path,row,budget=budget) if row else None
+        if not row or row.get('snapshot_sha256')!=receipt.get('snapshot_sha256') or text is None or hashlib.sha256(text.encode()).hexdigest()!=receipt['snapshot_sha256']:raise ValueError('skill metadata snapshot unavailable')
+        authority.assert_current(sk.owner,receipt['domain_refs']);return state
+
     def _update_skill_unlocked(
         self,
         skill_id: str,
@@ -1117,6 +1519,8 @@ class SkillsManager:
                 return False
             if sk.name != skill_id and sk.skill_id != skill_id:
                 return False
+            if sk.resource_metadata is not None:
+                return False  # No generic update may discard protected metadata.
 
             state = ensure_revision(sk, path, load_state(path))
             old_hash = sk.content_hash
@@ -1237,6 +1641,13 @@ class SkillsManager:
         ):
             blockers.append("retrieval precision is for different content")
         state = load_state(path)
+        if sk.resource_metadata is not None:
+            receipt=state.get('metadata_audit_receipt');unsigned={k:v for k,v in receipt.items() if k!='sha256'} if type(receipt) is dict else None
+            if (state.get('metadata_audit_pending') is not None or unsigned is None or receipt.get('sha256')!=hashlib.sha256(json.dumps(unsigned,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()
+                or receipt.get('skill_id')!=sk.skill_id or receipt.get('owner')!=owner or receipt.get('revision')!=sk.revision or receipt.get('content_hash')!=sk.content_hash or receipt.get('verdict')!='pass'
+                or type(receipt.get('necessity')) is not dict or receipt['necessity'].get('necessary') is not True
+                or type(receipt.get('precision')) is not dict or receipt['precision'].get('ok') is not True):
+                blockers.append('a complete exact metadata audit is required')
         attestation = (
             state.get("attestations", {}).get(sk.content_hash, {})
             if isinstance(state.get("attestations"), dict)
@@ -1285,6 +1696,7 @@ class SkillsManager:
         publisher: str = "",
         waiver_reason: str = "",
         allow_waiver: bool = False,
+        _metadata_authority=None,
     ) -> bool:
         """CAS-publish only the exact audited revision (or a visible waiver)."""
         found = self._find_skill(skill_id, owner)
@@ -1301,6 +1713,12 @@ class SkillsManager:
                 return False
             if sk.revision != int(expected_revision) or sk.content_hash != expected_hash:
                 return False
+            state=load_state(path)
+            if sk.resource_metadata is not None:
+                try:self._qualified_metadata_state(path,sk,state,_metadata_authority)
+                except (ValueError,TypeError):return False
+                receipt=state.get('metadata_audit_receipt')
+                if type(receipt) is not dict or receipt.get('account_id')!=_metadata_authority.account_id:return False
             readiness = self.publish_readiness(sk.skill_id, owner)
             if waiver_reason.strip() and (
                 not allow_waiver or not publisher.startswith("admin:")
@@ -1308,7 +1726,7 @@ class SkillsManager:
                 return False
             if not readiness["ready"] and not waiver_reason.strip():
                 return False
-            state = ensure_revision(sk, path, load_state(path))
+            state = self._qualified_metadata_state(path,sk,state,_metadata_authority) if sk.resource_metadata is not None else ensure_revision(sk,path,state)
             row = next(
                 (
                     item for item in state.get("history", [])
@@ -1350,8 +1768,15 @@ class SkillsManager:
                 int(state.get("metrics", {}).get("publishes", 0)) + 1
             )
             sk.status = "published"
-            save_state(path, state)
-            self._write_skill(sk)
+            if sk.resource_metadata is not None:
+                from core.atomic_io import atomic_write_text
+                self._qualified_metadata_state(path,sk,state,_metadata_authority)
+                atomic_write_text(path,sk.to_markdown())
+                self._qualified_metadata_state(path,sk,state,_metadata_authority)
+                save_state(path,state)
+            else:
+                save_state(path, state)
+                self._write_skill(sk)
             return True
 
     def rollback_skill(
@@ -1899,6 +2324,8 @@ class SkillsManager:
                     raise ValueError("skill lifecycle markdown is unreadable") from exc
                 if self._account_owner(skill.owner) != source:
                     continue
+                if skill.resource_metadata is not None:
+                    raise ValueError("metadata-aware skill owner transition unavailable")
                 declared = str(skill.content_hash or "")
                 skill.owner = target
                 rendered = skill.to_markdown().encode("utf-8")
@@ -2444,13 +2871,163 @@ class SkillsManager:
             preview, _plan = self._owner_purge_snapshot(str(owner or ""))
             return preview
 
+    @staticmethod
+    def _reset_tree_members(root: str) -> list[dict]:
+        """Capture exact ordinary directory members for bounded reset cleanup."""
+        if os.path.islink(root) or not os.path.isdir(root):
+            raise ValueError("skill reset tree is unsafe")
+        result = []
+        for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+            dirs.sort(); files.sort()
+            for path in [current, *(os.path.join(current, name) for name in files)]:
+                info = os.lstat(path)
+                if os.path.islink(path) or not (os.path.isdir(path) or os.path.isfile(path)):
+                    raise ValueError("skill reset tree contains an unsafe member")
+                relative = os.path.relpath(path, root).replace(os.sep, "/")
+                item = {"path":relative, "kind":"dir" if os.path.isdir(path) else "file",
+                        "device":info.st_dev, "inode":info.st_ino}
+                if item["kind"] == "file":
+                    with open(path, "rb") as handle:
+                        item["sha256"] = hashlib.sha256(handle.read()).hexdigest()
+                result.append(item)
+            for name in dirs:
+                if os.path.islink(os.path.join(current, name)):
+                    raise ValueError("skill reset tree contains a symlink")
+        return result
+
+    def _resume_reset_manifest(self, owner: str, operation_id: str, expected: Dict[str, object], manifest_path: str) -> Dict[str, object]:
+        """Resume a frozen owner operation while PROMOTIONS lock is held."""
+        from core.atomic_io import atomic_write_json
+        manifest, raw = self._purge_read_json(manifest_path, dict, {})
+        if (raw is None or set(manifest) != {"version", "owner", "operation_id", "expected", "phase", "trees", "sidecars"}
+                or manifest["version"] != 2 or manifest["owner"] != owner or manifest["operation_id"] != operation_id
+                or manifest["expected"] != expected or manifest["phase"] not in {"prepared", "live_cleared"}
+                or not isinstance(manifest["trees"], list) or not isinstance(manifest["sidecars"], list)):
+            raise ValueError("skill reset manifest unavailable")
+        roots = (os.path.abspath(self.skills_root), os.path.join(os.path.abspath(self.data_dir), ".memory-forget-skills"))
+        prepared = manifest["phase"] == "prepared"
+        # Preflight every object before moving, rewriting, or removing any.
+        for tree in manifest["trees"]:
+            if not isinstance(tree, dict) or set(tree) != {"source", "quarantine", "members"}:
+                raise ValueError("skill reset manifest unavailable")
+            source, quarantine, members = tree["source"], tree["quarantine"], tree["members"]
+            if (not isinstance(source, str) or not isinstance(quarantine, str) or source != os.path.abspath(source)
+                    or quarantine != os.path.abspath(quarantine) or os.path.realpath(os.path.dirname(source)) != os.path.dirname(source)
+                    or not any(os.path.commonpath((root, source)) == root for root in roots)
+                    or os.path.dirname(source) != os.path.dirname(quarantine)
+                    or not os.path.basename(quarantine).startswith(".owner-purge-") or not isinstance(members, list) or not members):
+                raise ValueError("skill reset quarantine changed")
+            source_exists, quarantine_exists = os.path.lexists(source), os.path.lexists(quarantine)
+            if source_exists and quarantine_exists or (prepared and not source_exists and not quarantine_exists):
+                raise ValueError("skill reset quarantine changed")
+            existing = source if source_exists else quarantine if quarantine_exists else None
+            if existing is not None:
+                observed = self._reset_tree_members(existing)
+                expected_members = {item.get("path"):item for item in members if isinstance(item, dict)}
+                if (len(expected_members) != len(members) or any(expected_members.get(item["path"]) != item for item in observed)
+                        or (prepared and len(observed) != len(members))):
+                    raise ValueError("skill reset tree changed")
+            if not prepared and source_exists:
+                raise ValueError("skill reset source unexpectedly returned")
+        allowed = {os.path.abspath(self.usage_file), os.path.abspath(self.promotions_file), os.path.abspath(self.legacy_file),
+                   os.path.abspath(os.path.join(self.skills_root, "_usage_events.jsonl")),
+                   os.path.abspath(os.path.join(os.path.abspath(self.data_dir), "skill-audit-jobs.json"))}
+        changes = []
+        for sidecar in manifest["sidecars"]:
+            if not isinstance(sidecar, dict) or set(sidecar) != {"path", "before", "after", "postimage"}:
+                raise ValueError("skill reset sidecar unavailable")
+            path = sidecar["path"]
+            if (not isinstance(path, str) or path not in allowed or os.path.islink(path)
+                    or os.path.realpath(os.path.dirname(path)) != os.path.dirname(path)):
+                raise ValueError("skill reset sidecar unavailable")
+            data = base64.b64decode(sidecar["postimage"], validate=True) if sidecar["postimage"] is not None else None
+            if (fingerprint_bytes(data) if data is not None else None) != sidecar["after"]:
+                raise ValueError("skill reset sidecar unavailable")
+            current = file_fingerprint(path)
+            if current not in (sidecar["before"], sidecar["after"]):
+                raise ValueError("skill reset sidecar changed")
+            if prepared and current != sidecar["after"]:
+                changes.append(AtomicFileChange(path=path, data=data, expected_fingerprint=sidecar["before"]))
+            elif not prepared and current != sidecar["after"]:
+                raise ValueError("skill reset sidecar changed")
+        if prepared:
+            for tree in manifest["trees"]:
+                if os.path.lexists(tree["source"]):
+                    os.replace(tree["source"], tree["quarantine"])
+            if changes:
+                atomic_write_batch(changes)
+            preview, _ = self._owner_purge_snapshot(owner)
+            counts = preview.get("counts")
+            if (not isinstance(counts, dict) or set(counts) != {"skills", "legacy", "usage", "promotions", "events", "audit_jobs", "recovery_manifests"}
+                    or any(type(value) is not int or value != 0 for value in counts.values())):
+                raise ValueError("skill reset live state requires reconciliation")
+            manifest["phase"] = "live_cleared"
+            atomic_write_json(manifest_path, manifest, indent=2)
+        # Revalidate again on reentry; only recorded remaining members may be removed.
+        for tree in manifest["trees"]:
+            root = tree["quarantine"]
+            if not os.path.lexists(root):
+                continue
+            observed = self._reset_tree_members(root)
+            expected_members = {item["path"]:item for item in tree["members"]}
+            if any(expected_members.get(item["path"]) != item for item in observed):
+                raise ValueError("skill reset quarantine changed")
+            for item in sorted(observed, key=lambda entry: (entry["path"].count("/"), entry["path"] != "."), reverse=True):
+                path = root if item["path"] == "." else os.path.join(root, *item["path"].split("/"))
+                os.rmdir(path) if item["kind"] == "dir" else os.unlink(path)
+        return {"complete":True, "count":0, "count_unavailable":True, "reconciled":True}
+
+    def _purge_owner_guarded(self, owner: str, expected: Dict[str, object], operation_id: str) -> Dict[str, object]:
+        from core.atomic_io import atomic_write_json
+        if not isinstance(operation_id, str) or not operation_id or len(operation_id) > 192:
+            raise ValueError("skill reset operation unavailable")
+        recovery_root = os.path.join(os.path.abspath(self.data_dir), ".memory-forget-skills")
+        if os.path.islink(recovery_root):
+            raise ValueError("skill recovery root cannot be a symlink")
+        os.makedirs(recovery_root, mode=0o700, exist_ok=True)
+        manifest_path = os.path.join(recovery_root, "reset-" + hashlib.sha256(operation_id.encode()).hexdigest() + ".json")
+        with locked(os.path.join(self.skills_root, "PROMOTIONS")):
+            fresh = not os.path.lexists(manifest_path)
+            if os.path.islink(manifest_path):
+                raise ValueError("skill reset manifest unavailable")
+            if fresh:
+                preview, plan = self._owner_purge_snapshot(owner)
+                if preview != expected:
+                    raise ValueError("skill owner purge preview is stale")
+                trees = []
+                for source in plan["skill_dirs"] + plan["recovery_dirs"]:
+                    source = os.path.abspath(source)
+                    trees.append({"source":source, "quarantine":os.path.join(os.path.dirname(source), ".owner-purge-" + uuid.uuid4().hex),
+                                  "members":self._reset_tree_members(source)})
+                sidecars = []
+                for change in plan["changes"]:
+                    data = change.data
+                    sidecars.append({"path":os.path.abspath(change.path), "before":change.expected_fingerprint,
+                        "after":fingerprint_bytes(data) if data is not None else None,
+                        "postimage":base64.b64encode(data).decode("ascii") if data is not None else None})
+                manifest = {"version":2, "owner":owner, "operation_id":operation_id, "expected":expected,
+                            "phase":"prepared", "trees":trees, "sidecars":sidecars}
+                if len(json.dumps(manifest, ensure_ascii=False).encode("utf-8")) > 16 * 1024 * 1024:
+                    raise ValueError("skill reset manifest exceeds bound")
+                atomic_write_json(manifest_path, manifest, indent=2)
+            result = self._resume_reset_manifest(owner, operation_id, expected, manifest_path)
+        from src.openclank.attachment_admission import refresh_domain_references
+        from src.openclank.attachment_inventory import skills_inventory
+        refresh_domain_references("skills", lambda: skills_inventory(self))
+        if fresh:
+            return {"complete":True, "count":int(expected["count"])}
+        return result
+
     def purge_owner(
         self,
         owner: Optional[str],
         *,
         expected: Dict[str, object],
+        operation_id: Optional[str] = None,
     ) -> Dict[str, object]:
         """CAS-purge one owner's skill trees and owner-indexed sidecars."""
+        if operation_id is not None:
+            return self._purge_owner_guarded(str(owner or ""), expected, operation_id)
         lock_target = os.path.join(self.skills_root, "PROMOTIONS")
         with locked(lock_target):
             preview, plan = self._owner_purge_snapshot(str(owner or ""))
@@ -2464,10 +3041,7 @@ class SkillsManager:
             moved: list[tuple[str, str]] = []
             try:
                 for source in plan["skill_dirs"] + plan["recovery_dirs"]:
-                    tombstone = os.path.join(
-                        os.path.dirname(source),
-                        f".owner-purge-{uuid.uuid4().hex}",
-                    )
+                    tombstone = os.path.join(os.path.dirname(source), f".owner-purge-{uuid.uuid4().hex}")
                     os.replace(source, tombstone)
                     moved.append((source, tombstone))
                 if plan["changes"]:
@@ -2500,11 +3074,21 @@ class SkillsManager:
                 "counts": preview["counts"],
                 "failures": failures,
             }
-        if result["complete"]:
+        if result["complete"] and any(preview["counts"].values()):
             from src.openclank.attachment_admission import refresh_domain_references
             from src.openclank.attachment_inventory import skills_inventory
             refresh_domain_references("skills", lambda: skills_inventory(self))
         return result
+
+    def reconcile_owner_purge(self, owner: str, *, operation_id: str, expected: Dict[str, object]) -> Dict[str, object]:
+        """Finish only this operation's recorded quarantine after live state is empty."""
+        recovery_root = os.path.join(os.path.abspath(self.data_dir), ".memory-forget-skills")
+        manifest_path = os.path.join(recovery_root, "reset-" + hashlib.sha256(operation_id.encode()).hexdigest() + ".json")
+        if os.path.isfile(manifest_path) and not os.path.islink(manifest_path):
+            manifest, raw = self._purge_read_json(manifest_path, dict, {})
+            if raw is not None and manifest.get("version") == 2:
+                return self._purge_owner_guarded(owner, expected, operation_id)
+        raise ValueError("skill reset manifest version is unsupported")
 
     def delete_skill(self, *args, **kwargs) -> bool:
         """Delete a skill under the global memory/skill lifecycle lock."""
@@ -2538,7 +3122,51 @@ class SkillsManager:
                         current, sk, skill_id, owner
                     ):
                         return False
+                    if current.resource_metadata is not None or os.path.islink(skill_dir):
+                        raise SkillProtectedDeleteError('Protected skill deletion is unavailable through this action.')
+                    # Do not use load_state: it intentionally maps unreadable
+                    # or malformed lifecycle JSON to {} for legacy readers.
+                    lifecycle = state_path(path)
+                    try:
+                        named = os.lstat(lifecycle)
+                        if not stat.S_ISREG(named.st_mode): raise SkillProtectedDeleteError('Skill lifecycle is unavailable.')
+                        fd = os.open(lifecycle, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+                    except FileNotFoundError:
+                        if os.path.lexists(lifecycle): raise SkillProtectedDeleteError('Skill lifecycle is unavailable.')
+                        state = {}
+                    except OSError as exc:
+                        raise SkillProtectedDeleteError('Skill lifecycle is unavailable.') from exc
+                    else:
+                        try:
+                            info = os.fstat(fd)
+                            if not stat.S_ISREG(info.st_mode) or (info.st_dev,info.st_ino) != (named.st_dev,named.st_ino) or info.st_size > 8 * 1024 * 1024:
+                                raise SkillProtectedDeleteError('Skill lifecycle is unavailable.')
+                            with os.fdopen(fd, 'rb', closefd=False) as handle:
+                                raw = handle.read(8 * 1024 * 1024 + 1)
+                            after = os.fstat(fd); named_after = os.lstat(lifecycle)
+                            if len(raw) != info.st_size or (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns) != (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) or (named_after.st_dev,named_after.st_ino) != (info.st_dev,info.st_ino):
+                                raise SkillProtectedDeleteError('Skill lifecycle changed.')
+                            def unique(pairs):
+                                result = {}
+                                for key, value in pairs:
+                                    if key in result: raise ValueError('duplicate lifecycle key')
+                                    result[key] = value
+                                return result
+                            state = json.loads(raw.decode('utf-8'),object_pairs_hook=unique)
+                            if type(state) is not dict: raise ValueError('invalid lifecycle')
+                        except (OSError,UnicodeError,ValueError,RecursionError) as exc:
+                            raise SkillProtectedDeleteError('Skill lifecycle is unavailable.') from exc
+                        finally:
+                            os.close(fd)
+                    if (any(key in state for key in ('metadata_profile','metadata_pending','metadata_receipts','metadata_audit_pending','metadata_audit_receipt'))
+                        or ('skill_id' in state and state['skill_id'] != current.skill_id)
+                        or ('owner' in state and str(state['owner'] or '') != str(current.owner or ''))
+                        or ('head_revision' in state and state['head_revision'] != current.revision)
+                        or ('head_hash' in state and state['head_hash'] != current.content_hash)):
+                        raise SkillProtectedDeleteError('Protected skill deletion is unavailable through this action.')
                     os.replace(skill_dir, tombstone)
+            except SkillProtectedDeleteError:
+                raise
             except Exception as e:
                 logger.warning(f"Failed to remove skill dir {skill_dir}: {e}")
                 return False
@@ -2821,6 +3449,191 @@ class SkillsManager:
                     return None
                 return self._read_skill_reference_path(path, ref_path)
         return None
+
+    def _prepared_metadata_proof(self, *, owner, authority, expected):
+        """Bounded existing-lock read of one exact published metadata receipt."""
+        if type(expected) is not dict or set(expected)!={'skillID','revision','contentHash','snapshotSHA256','metadataReceiptSHA256'}:raise PreparedReadUnavailable('skill metadata unavailable')
+        budget=PreparedReadBudget();paths=[]
+        with prepared_existing_lock(os.path.join(self.skills_root,'PROMOTIONS')):
+            with os.scandir(self.skills_root) as categories:
+                category_paths=[]
+                for category in categories:
+                    budget.entry()
+                    if category.is_dir(follow_symlinks=False) and not category.name.startswith('.'):category_paths.append(category.path)
+            for category in sorted(category_paths):
+                with os.scandir(category) as entries:
+                    for entry in entries:
+                        budget.entry()
+                        if entry.is_dir(follow_symlinks=False) and not entry.name.startswith('.'):
+                            path=os.path.join(entry.path,'SKILL.md')
+                            if os.path.isfile(path) and not os.path.islink(path):paths.append(path)
+                            if len(paths)>128:raise PreparedReadUnavailable('skill metadata snapshot too large')
+            found=None
+            for path in sorted(paths):
+                with prepared_existing_lock(path):
+                    head=self._read_skill(path,budget=budget)
+                    if head is None:raise PreparedReadUnavailable('skill metadata head unavailable')
+                    if head.owner!=owner or head.skill_id!=expected['skillID']:continue
+                    state=load_state(path,budget=budget);active,pointer=self._active_skill(path,head,state,budget=budget,metadata_authority=authority)
+                    if active is None or type(pointer) is not dict or found is not None:raise PreparedReadUnavailable('skill metadata unavailable')
+                    receipts=state.get('metadata_receipts',{});rows=[v for v in receipts.values() if type(v) is dict and v.get('content_hash')==active.content_hash and v.get('revision')==active.revision] if type(receipts) is dict else []
+                    if len(rows)!=1 or active.revision!=expected['revision'] or active.content_hash!=expected['contentHash'] or pointer.get('snapshot_sha256')!=expected['snapshotSHA256'] or rows[0].get('receipt_sha256')!=expected['metadataReceiptSHA256']:
+                        raise PreparedReadUnavailable('skill metadata changed')
+                    found={'domain_refs':rows[0]['domain_refs'],'skill_id':active.skill_id,'revision':active.revision,'content_hash':active.content_hash,'snapshot_sha256':pointer['snapshot_sha256'],'receipt_sha256':rows[0]['receipt_sha256']}
+            if found is None:raise PreparedReadUnavailable('skill metadata unavailable')
+            return found
+
+    def _prepared_skill_snapshot(self, *, owner: str, account_id: str, actor_key: str, platform_name: str, metadata_authority=None, metadata_generation=None):
+        """Bounded published-pointer snapshot; authorization is supplied by the host adapter."""
+        from contextlib import ExitStack
+        if (any(type(v) is not str or not v or v != v.strip() or len(v.encode('utf-8')) > 512
+                for v in (owner, account_id, actor_key, platform_name)) or not os.path.isdir(self.skills_root)):
+            raise PreparedReadUnavailable('prepared skill authority unavailable')
+        budget=PreparedReadBudget()
+        with ExitStack() as locks:
+            locks.enter_context(prepared_existing_lock(os.path.join(self.skills_root, 'PROMOTIONS')))
+            categories=[]
+            with os.scandir(self.skills_root) as entries:
+                for entry in entries:
+                    budget.entry()
+                    if entry.is_dir(follow_symlinks=False) and not entry.name.startswith('.owner-purge-'):
+                        categories.append(entry.path)
+            paths=[]
+            for category in sorted(categories):
+                with os.scandir(category) as entries:
+                    for entry in entries:
+                        budget.entry()
+                        if entry.is_dir(follow_symlinks=False) and not entry.name.startswith('.owner-purge-'):
+                            path=os.path.join(entry.path,'SKILL.md')
+                            if os.path.isfile(path) and not os.path.islink(path):
+                                paths.append(path)
+                                if len(paths)>128: raise PreparedReadUnavailable('prepared skill snapshot too large')
+            paths.sort()
+            for path in paths:
+                locks.enter_context(prepared_existing_lock(path))
+            rows=[]; bodies={}; deferred=False; seen=set()
+            for path in paths:
+                head=self._read_skill(path,budget=budget)
+                if head is None: raise PreparedReadUnavailable('prepared skill head unavailable')
+                if (head.owner or '')!=owner: continue
+                state=load_state(path,budget=budget)
+                pointer=state.get('published')
+                if pointer is None: continue
+                if type(pointer) is not dict: raise PreparedReadUnavailable('prepared publication unavailable')
+                if type(pointer.get('publisher')) is not str or not pointer['publisher'].startswith(('user:', 'admin:')):
+                    raise PreparedReadUnavailable('prepared publisher unavailable')
+                active, pointer=self._active_skill(path,head,state,budget=budget,metadata_authority=metadata_authority)
+                if active is None or type(pointer) is not dict:
+                    text=read_snapshot(path,pointer,budget=budget) if type(pointer) is dict else None
+                    try: unsupported=Skill.from_markdown(text,path=path) if text else None
+                    except Exception: unsupported=None
+                    if unsupported is not None and unsupported.resource_metadata is not None:
+                        deferred=True;continue
+                    raise PreparedReadUnavailable('prepared publication unavailable')
+                if (type(active.skill_id) is not str or not active.skill_id or len(active.skill_id.encode('utf-8'))>512
+                    or active.skill_id in seen or type(active.name) is not str or not active.name or len(active.name.encode('utf-8'))>512
+                    or type(active.revision) is not int or active.revision<1
+                    or not re.fullmatch(r'[0-9a-f]{64}',active.content_hash or '')
+                    or not re.fullmatch(r'[0-9a-f]{64}',str(pointer.get('snapshot_sha256') or ''))):
+                    raise PreparedReadUnavailable('prepared skill identity unavailable')
+                seen.add(active.skill_id)
+                if (type(active.platforms) is not list or type(active.requires_toolsets) is not list or type(active.fallback_for_toolsets) is not list
+                    or any(type(x) is not str or not x for x in active.platforms+active.requires_toolsets+active.fallback_for_toolsets)):
+                    raise PreparedReadUnavailable('prepared skill capabilities unavailable')
+                if active.platforms and platform_name not in active.platforms: continue
+                if active.requires_toolsets or active.fallback_for_toolsets:
+                    deferred=True; continue
+                if active.source_uri or active.source_revision or active.source_memory_ids:
+                    deferred=True; continue
+                if active.source_status:
+                    deferred=True; continue
+                attestation=state.get('attestations',{}).get(active.content_hash,{}) if type(state.get('attestations')) is dict else {}
+                exact_attestation=(type(attestation) is dict and attestation.get('verdict')=='pass'
+                    and attestation.get('compatible') is True and attestation.get('skill_id')==active.skill_id
+                    and attestation.get('revision')==active.revision and attestation.get('content_hash')==active.content_hash)
+                trust='waived' if type(pointer.get('waiver')) is dict and pointer['waiver'] else ('verified' if exact_attestation else 'legacy')
+                metadata_claim=active.resource_metadata
+                receipt=None
+                if metadata_claim:
+                    receipts=state.get('metadata_receipts',{})
+                    matching=[v for v in receipts.values() if type(v) is dict and v.get('revision')==active.revision and v.get('content_hash')==active.content_hash] if type(receipts) is dict else []
+                    if len(matching)!=1:deferred=True;continue
+                    receipt=matching[0]
+                body=read_snapshot(path,pointer,budget=budget)
+                if body is None or hashlib.sha256(body.encode('utf-8')).hexdigest()!=pointer['snapshot_sha256']:
+                    raise PreparedReadUnavailable('prepared skill snapshot changed')
+                descriptor={'version':'s10.prepared.v1','kind':'skill',
+                    'scope':{'account_id':account_id,'owner':owner,'kind':'owner','workspace_id':None,'project_id':None},
+                    'actor_key':actor_key,'reference':{'type':'published_skill','skill_id':active.skill_id,'revision':active.revision,
+                        'content_hash':active.content_hash,'snapshot_sha256':pointer['snapshot_sha256']},
+                    'publication':{'state':'published','authority':'published_pointer'},'trust':trust,
+                    'name':metadata_claim['metadata'].get('name',active.name) if metadata_claim else active.name,'aliases':list(metadata_claim['metadata'].get('aliases',[])) if metadata_claim else None,'domains':list(receipt['domain_refs']) if receipt else None}
+                if receipt:
+                    descriptor['reference']['metadata_receipt_sha256']=receipt['receipt_sha256']
+                    descriptor['reference']['metadata_generation']=metadata_generation
+                rows.append(descriptor); bodies[active.skill_id]=body
+            rows.sort(key=lambda row:row['reference']['skill_id'])
+            generation=hashlib.sha256(json.dumps({'version':1,'owner':owner,'account_id':account_id,'actor_key':actor_key,
+                'platform':platform_name,'capabilities':'unconstrained-only','metadata_generation':metadata_generation,'deferred':deferred,'items':rows},
+                sort_keys=True,separators=(',',':'),ensure_ascii=False).encode('utf-8')).hexdigest()
+            return rows,bodies,generation,deferred
+
+    def _prepared_skill_page(self, *, owner, account_id, actor_key, platform_name, limit, cursor=None, metadata_authority=None, metadata_generation=None):
+        if type(limit) is not int or not 1<=limit<=32:
+            raise PreparedReadUnavailable('prepared page unavailable')
+        rows,_,generation,deferred=self._prepared_skill_snapshot(owner=owner,account_id=account_id,actor_key=actor_key,platform_name=platform_name,metadata_authority=metadata_authority,metadata_generation=metadata_generation)
+        start=0
+        if cursor is not None:
+            if (type(cursor) is not dict or set(cursor)!={'version','generation','last_key'} or type(cursor.get('version')) is not int or cursor.get('version')!=1
+                or cursor.get('generation')!=generation or type(cursor.get('last_key')) is not str):
+                raise PreparedReadUnavailable('prepared snapshot stale')
+            keys=[row['reference']['skill_id'] for row in rows]
+            if cursor['last_key'] not in keys: raise PreparedReadUnavailable('prepared cursor unavailable')
+            start=keys.index(cursor['last_key'])+1
+        page=rows[start:start+limit]
+        more=start+len(page)<len(rows)
+        next_cursor={'version':1,'generation':generation,'last_key':page[-1]['reference']['skill_id']} if more else None
+        return {'version':1,'state':'partial' if deferred else 'ready','items':page,'next':next_cursor,'complete':not more and not deferred}
+
+    def _prepared_skill_hydrate(self, *, owner, account_id, actor_key, platform_name, descriptor, metadata_authority=None, metadata_generation=None):
+        if type(descriptor) is not dict:
+            raise PreparedReadUnavailable('prepared skill unavailable')
+        rows,bodies,_,_=self._prepared_skill_snapshot(owner=owner,account_id=account_id,actor_key=actor_key,platform_name=platform_name,metadata_authority=metadata_authority,metadata_generation=metadata_generation)
+        matches=[row for row in rows if row==descriptor]
+        if len(matches)!=1: raise PreparedReadUnavailable('prepared skill changed or revoked')
+        return {'version':1,'state':'ready','descriptor':matches[0],'body':bodies[matches[0]['reference']['skill_id']]}
+
+    def prepare_skill_snapshot_export(self, *, owner, account, skill_id, current):
+        from .skill_snapshot_export import prepare_skill_snapshot_export
+        return prepare_skill_snapshot_export(self, owner=owner, account=account, skill_id=skill_id, current=current)
+
+    def confirm_skill_snapshot_export(self, *, owner, account, skill_id, review_sha256, current):
+        from .skill_snapshot_export import confirm_skill_snapshot_export
+        return confirm_skill_snapshot_export(self, owner=owner, account=account, skill_id=skill_id, review_sha256=review_sha256, current=current)
+
+    def read_published_external_skill_source(self, *, name: str, owner: str, skill_id: str,
+                                             revision: int, content_hash: str, source_sha256: str) -> Optional[str]:
+        """Read only the fixed, hash-bound source of this exact published skill."""
+        import hashlib, re
+        if (type(revision) is not int or revision < 1 or type(source_sha256) is not str
+                or re.fullmatch(r'[0-9a-f]{64}', source_sha256) is None): return None
+        found = self._find_skill(name, owner)
+        if not found: return None
+        path, expected = found
+        with locked(path):
+            head = self._read_skill(path)
+            if not self._matches_locked_head(head, expected, name, owner): return None
+            active, pointer = self._active_skill(path, head)
+            if (active is None or type(pointer) is not dict or active.name != name or active.owner != owner
+                    or active.skill_id != skill_id or active.revision != revision or active.content_hash != content_hash
+                    or active.source_status != 'imported_unverified'
+                    or active.source_uri != 'external-skill-sha256:' + source_sha256): return None
+            text = read_bundle_file(path, pointer, 'references/source-SKILL.md')
+            if type(text) is not str: return None
+            try: encoded = text.encode('utf-8','strict')
+            except UnicodeError: return None
+            if len(encoded)>256*1024 or hashlib.sha256(encoded).hexdigest()!=source_sha256: return None
+            return text
 
     def read_published_skill_reference(
         self,

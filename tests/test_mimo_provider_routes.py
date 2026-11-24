@@ -99,8 +99,8 @@ def test_supervisor_target_must_be_loopback(monkeypatch):
 async def test_each_worker_gets_unique_child_only_http_credentials(monkeypatch):
     from src.openclank.mimo_supervisor import MimoSupervisor
 
-    monkeypatch.delenv("MIMOCODE_SERVER_PASSWORD", raising=False)
-    monkeypatch.delenv("MIMOCODE_SERVER_USERNAME", raising=False)
+    monkeypatch.delenv("OPENCLANK_SERVER_PASSWORD", raising=False)
+    monkeypatch.delenv("OPENCLANK_SERVER_USERNAME", raising=False)
     first = MimoSupervisor("alice", partitioned=True)
     second = MimoSupervisor("bob", partitioned=True)
     first_env: dict[str, str] = {}
@@ -114,16 +114,16 @@ async def test_each_worker_gets_unique_child_only_http_credentials(monkeypatch):
         os.close(first_fd)
         os.close(second_fd)
 
-    assert first_env["MIMOCODE_SERVER_USERNAME"] == "open-clank"
-    assert second_env["MIMOCODE_SERVER_USERNAME"] == "open-clank"
+    assert first_env["OPENCLANK_SERVER_USERNAME"] == "open-clank"
+    assert second_env["OPENCLANK_SERVER_USERNAME"] == "open-clank"
     assert first_password
     assert first_password != second_password
-    assert "MIMOCODE_SERVER_PASSWORD" not in first_env
-    assert "MIMOCODE_SERVER_PASSWORD" not in second_env
+    assert "OPENCLANK_SERVER_PASSWORD" not in first_env
+    assert "OPENCLANK_SERVER_PASSWORD" not in second_env
     assert first_env["OPEN_CLANK_WORKER_AUTH_FD"] == str(first_fd)
     assert second_env["OPEN_CLANK_WORKER_AUTH_FD"] == str(second_fd)
-    assert "MIMOCODE_SERVER_PASSWORD" not in os.environ
-    assert "MIMOCODE_SERVER_USERNAME" not in os.environ
+    assert "OPENCLANK_SERVER_PASSWORD" not in os.environ
+    assert "OPENCLANK_SERVER_USERNAME" not in os.environ
     assert "OPEN_CLANK_WORKER_AUTH_FD" not in os.environ
 
     first_client = first.internal_http_client()
@@ -507,7 +507,7 @@ async def test_internal_mimo_provider_is_merged_into_xiaomi_language(monkeypatch
     assert result["providers"][0]["models"] == ["xiaomi/mimo-auto"]
     assert result["providers"][0]["connection_id"] == "mimo:xiaomi"
     assert result["providers"][0]["included_free_models"] == 1
-    assert "MIMOCODE_HOME" not in result["storage"]
+    assert "OPENCLANK_HOME" not in result["storage"]
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,10 @@ class ProviderEngineControlError(RuntimeError):
     """Secret-free engine-control failure safe for an HTTP error boundary."""
 
 
+class ProviderEngineTimeoutError(ProviderEngineControlError):
+    """The bounded host call exceeded its deadline; safe to retry once."""
+
+
 class ProviderOAuthFlowError(ProviderEngineControlError):
     pass
 
@@ -45,6 +49,12 @@ class BoundProviderEngine:
     def __init__(self, lease: Any):
         self._lease = lease
         self._released = False
+
+    def require_method_policy_contract(self) -> None:
+        """Revalidate the exact initialized worker, not model-provided metadata."""
+        supports_policy = getattr(self._lease.worker, "supports_provider_method_policy", None)
+        if self._released or supports_policy is None or supports_policy() is not True:
+            raise ProviderEngineControlError("managed provider method policy capability is unavailable")
 
     async def call(self, method: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._released:
@@ -124,10 +134,21 @@ class OAuthHostFlow:
     code_verifier: str = field(repr=False)
     target_account_id: Optional[str] = None
     expected_revision: Optional[int] = None
+    expected_credential_kinds: tuple[str, ...] = ("oauth",)
+    acquisition_method: str = "browser"
+    method_policy_revision: Optional[int] = None
     status: str = "pending"
     public_start: Optional[dict[str, Any]] = field(default=None, repr=False)
     account_public: Optional[dict[str, Any]] = None
     error_code: Optional[str] = None
+    retry_after_ms: Optional[int] = None
+    cancel_requested: bool = field(default=False, repr=False)
+    transient_failures: int = field(default=0, repr=False)
+    transient_started_at: Optional[datetime] = field(default=None, repr=False)
+    next_attempt_at: Optional[datetime] = field(default=None, repr=False)
+    expiry_task: Any = field(default=None, repr=False)
+    retention_task: Any = field(default=None, repr=False)
+    released: bool = field(default=False, repr=False)
 
     @classmethod
     def create(
@@ -143,6 +164,9 @@ class OAuthHostFlow:
         engine: BoundProviderEngine,
         target_account_id: Optional[str] = None,
         expected_revision: Optional[int] = None,
+        expected_credential_kinds: tuple[str, ...] = ("oauth",),
+        acquisition_method: str = "browser",
+        method_policy_revision: Optional[int] = None,
         now: Optional[datetime] = None,
     ) -> "OAuthHostFlow":
         timestamp = now or datetime.now(timezone.utc)
@@ -165,6 +189,9 @@ class OAuthHostFlow:
             code_verifier=secrets.token_urlsafe(64),
             target_account_id=target_account_id,
             expected_revision=expected_revision,
+            expected_credential_kinds=tuple(expected_credential_kinds),
+            acquisition_method=_required(acquisition_method, "provider acquisition method"),
+            method_policy_revision=method_policy_revision,
         )
 
     def _identity(self) -> dict[str, Any]:
@@ -227,10 +254,14 @@ class OAuthHostFlow:
             )
             if visible_start.get("userCode") is not None:
                 result["user_code"] = visible_start["userCode"]
+            if visible_start.get("method") == "code":
+                result["state"] = self.state
         if self.account_public is not None:
             result["account"] = dict(self.account_public)
         if self.error_code:
             result["error_code"] = self.error_code
+        if self.retry_after_ms is not None:
+            result["retry_after_ms"] = self.retry_after_ms
         return result
 
     def state_matches(self, value: str) -> bool:
@@ -276,6 +307,10 @@ class OAuthHostFlowStore:
                 self._flows.pop(flow.flow_id, None)
             return rows
 
+    def snapshot(self) -> list[OAuthHostFlow]:
+        with self._lock:
+            return list(self._flows.values())
+
     def expired(self, *, now: Optional[datetime] = None) -> list[OAuthHostFlow]:
         timestamp = now or datetime.now(timezone.utc)
         if timestamp.tzinfo is None:
@@ -301,6 +336,7 @@ __all__ = [
     "OAuthHostFlow",
     "OAuthHostFlowStore",
     "ProviderEngineControlError",
+    "ProviderEngineTimeoutError",
     "ProviderEngineValidationError",
     "ProviderOAuthFlowError",
     "oauth_verifier_challenge",

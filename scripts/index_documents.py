@@ -4,11 +4,11 @@ index_documents.py
 A standalone script to index documents from the personal_docs directory
 into the vector database using RAGManager. This script scans for text files,
 processes them with proper chunking, and adds them to the canonical
-Frankenmemory RAG database
+Memery RAG database
 with progress reporting and final statistics.
 
 Features:
-1. Imports the canonical Frankenmemory RAG singleton
+1. Imports the canonical Memery RAG singleton
 2. Scans personal_docs directory for .txt, .md, .json files
 3. Reads each file, chunks it (1000 chars with 200 overlap), and adds to vector database
 4. Shows progress during processing and final statistics
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 def main(argv=None) -> int:
     """Main function to index documents from personal_docs directory."""
-    parser = argparse.ArgumentParser(description="Index documents into Frankenmemory RAG")
+    parser = argparse.ArgumentParser(description="Index documents into Memery RAG")
     parser.add_argument("--owner", required=True, help="Open Clank owner to receive the index")
     parser.add_argument("--workspace-id", help="Optional workspace scope")
     parser.add_argument("--project-id", help="Optional project scope (requires --workspace-id)")
@@ -51,14 +51,14 @@ def main(argv=None) -> int:
     # Import the canonical RAG singleton
     try:
         from src.rag_singleton import get_rag_manager
-        logger.info("Successfully imported Frankenmemory RAG")
+        logger.info("Successfully imported Memery RAG")
     except ImportError as e:
-        logger.error(f"Failed to import Frankenmemory RAG: {e}")
+        logger.error(f"Failed to import Memery RAG: {e}")
         return 1
     
     rag_manager = get_rag_manager()
     if rag_manager is None:
-        logger.error("Frankenmemory RAG is unavailable")
+        logger.error("Memery RAG is unavailable")
         return 1
     
     # Directory to scan

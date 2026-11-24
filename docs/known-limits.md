@@ -22,9 +22,9 @@ Files uses cross-platform framed transport. Opt-in Tonic transport is
 macOS-specific. Native previews depend on installed handlers; an unavailable
 handler can produce a fallback rather than document-content pixels.
 
-## Code Graph Alpha
+## Code Graph
 
-Code Graph is Alpha in Beta 2. Grammar-backed symbols and static relationship
+Grammar-backed symbols and static relationship
 rules cover supported syntax; this is not a language server, complete type
 system, runtime execution trace or full framework detector. Unresolved or
 inferred relationships keep their evidence state. Large or unsupported inputs

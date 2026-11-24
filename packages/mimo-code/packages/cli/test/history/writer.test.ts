@@ -1,0 +1,215 @@
+import { afterEach, describe, expect } from "bun:test"
+import { Effect, Layer } from "effect"
+import { Database, eq } from "../../src/storage"
+import { HistoryFtsTable } from "../../src/history/fts.sql"
+import { MessageTable, PartTable, SessionTable } from "../../src/session/session.sql"
+import { ProjectTable } from "../../src/project/project.sql"
+import { Bus } from "../../src/bus"
+import { MessageV2 } from "../../src/session/message-v2"
+import { SessionID } from "../../src/session/schema"
+import { History } from "../../src/history"
+import * as Writer from "../../src/history/writer"
+import { Instance } from "../../src/project/instance"
+import { provideTmpdirInstance } from "../fixture/fixture"
+import { testEffect } from "../lib/effect"
+import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
+import { ManagedProvider } from "../../src/acp/managed-provider"
+import { installManagedSessionBinding } from "../../src/memory/session-scope"
+
+afterEach(async () => {
+  Database.use((db) => {
+    db.delete(HistoryFtsTable).run()
+    db.delete(PartTable).run()
+    db.delete(MessageTable).run()
+    db.delete(SessionTable).run()
+    db.delete(ProjectTable).run()
+  })
+  await Instance.disposeAll()
+  ManagedProvider.resetForTest()
+  delete process.env.OPEN_CLANK_MANAGED
+})
+
+const it = testEffect(Layer.mergeAll(History.defaultLayer, Bus.defaultLayer, CrossSpawnSpawner.defaultLayer))
+
+function seedSession() {
+  const sessionID = SessionID.descending()
+  const now = Date.now()
+  Database.use((db) => {
+    db.insert(ProjectTable)
+      .values({
+        id: "proj_t" as any,
+        worktree: "/tmp",
+        sandboxes: [] as any,
+        time_created: now,
+        time_updated: now,
+      } as any)
+      .run()
+    db.insert(SessionTable)
+      .values({
+        id: sessionID as any,
+        project_id: "proj_t" as any,
+        slug: "x",
+        directory: "/tmp",
+        title: "t",
+        version: "1",
+        time_created: now,
+        time_updated: now,
+      })
+      .run()
+    db.insert(MessageTable)
+      .values({
+        id: "msg_t" as any,
+        session_id: sessionID as any,
+        agent_id: "main",
+        data: { role: "user" } as any,
+        time_created: now,
+        time_updated: now,
+      })
+      .run()
+  })
+  return sessionID
+}
+
+describe("History.Writer", () => {
+  it.live("managed updates and removals use host mutation callbacks without native FTS writes", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        process.env.OPEN_CLANK_MANAGED = "1"
+        installManagedSessionBinding("ses_t", {
+          owner: "alice",
+          stableChatID: "chat-t",
+          engineSessionID: "ses_t",
+          engineAliases: [],
+          memoryWorkspaceID: "global",
+          authorityWorkspaceID: "authority",
+          copalWorkspace: "copal",
+          physicalCwd: "/work",
+          bindingRevision: 1,
+          mapRevision: 1,
+          mappingRevision: 1,
+          memoryEnabled: true,
+          transition: null,
+        })
+        const calls: Array<{ operation: unknown; events: unknown }> = []
+        ManagedProvider.installHostConnection({
+          async extMethod(method: string, params: Record<string, unknown>) {
+            expect(method).toBe("_openclank/history/v1/mutate")
+            calls.push({ operation: params.operation, events: params.events })
+            return { ok: true, operation: params.operation, accepted: 1, duplicate: 0, enqueued: 1 }
+          },
+        } as any)
+        seedSession()
+        const writer = yield* Writer.Service
+        yield* writer.init()
+        const bus = yield* Bus.Service
+        yield* bus.publish(MessageV2.Event.PartUpdated, {
+          sessionID: "ses_t" as any,
+          part: { id: "prt_managed", sessionID: "ses_t", messageID: "msg_t", type: "file", filename: "capture.png", mime: "image/png", url: "https://example.test/capture.png" } as any,
+          time: Date.now(),
+        })
+        yield* bus.publish(MessageV2.Event.PartRemoved, { sessionID: "ses_t" as any, messageID: "msg_t" as any, partID: "prt_managed" as any })
+        yield* Effect.sleep("200 millis")
+        expect(calls.map((call) => call.operation)).toEqual(["upsert", "tombstone"])
+        expect((calls[0]!.events as Array<{ content: { type: string; filename: string; mime: string; url: string } }>)[0]!.content).toMatchObject({ type: "file", filename: "capture.png", mime: "image/png", url: "https://example.test/capture.png" })
+        expect(Database.use((db) => db.select().from(HistoryFtsTable).where(eq(HistoryFtsTable.part_id, "prt_managed")).get())).toBeUndefined()
+      }),
+    ),
+  )
+
+  it.live("PartUpdated for text part → writes one history_fts row", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessionID = seedSession()
+        const writer = yield* Writer.Service
+        yield* writer.init()
+        const bus = yield* Bus.Service
+        yield* bus.publish(MessageV2.Event.PartUpdated, {
+          sessionID: sessionID as any,
+          part: {
+            id: "prt_w1",
+            sessionID: sessionID,
+            messageID: "msg_t",
+            type: "text",
+            text: "hello data:image/png;base64,YWJj world",
+          } as any,
+          time: Date.now(),
+        })
+
+        yield* Effect.sleep("200 millis")
+
+        const row = Database.use((db) =>
+          db.select().from(HistoryFtsTable).where(eq(HistoryFtsTable.part_id, "prt_w1")).get(),
+        )
+        expect(row).toBeTruthy()
+        expect(row?.body).toBe("hello [media image/png] world")
+        expect(row?.body).not.toContain("YWJj")
+        expect(row?.session_id).toBe(sessionID)
+        expect(row?.project_id).toBe("proj_t")
+      }),
+    ),
+  )
+
+  it.live("PartRemoved deletes the row", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessionID = seedSession()
+        const writer = yield* Writer.Service
+        yield* writer.init()
+        const bus = yield* Bus.Service
+        yield* bus.publish(MessageV2.Event.PartUpdated, {
+          sessionID: sessionID as any,
+          part: {
+            id: "prt_w2",
+            sessionID: sessionID,
+            messageID: "msg_t",
+            type: "text",
+            text: "will be removed",
+          } as any,
+          time: Date.now(),
+        })
+        yield* Effect.sleep("200 millis")
+
+        yield* bus.publish(MessageV2.Event.PartRemoved, {
+          sessionID: sessionID as any,
+          messageID: "msg_t" as any,
+          partID: "prt_w2" as any,
+        })
+        yield* Effect.sleep("200 millis")
+
+        const row = Database.use((db) =>
+          db.select().from(HistoryFtsTable).where(eq(HistoryFtsTable.part_id, "prt_w2")).get(),
+        )
+        expect(row).toBeUndefined()
+      }),
+    ),
+  )
+
+  it.live("tool pending/running parts are NOT written", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessionID = seedSession()
+        const writer = yield* Writer.Service
+        yield* writer.init()
+        const bus = yield* Bus.Service
+        yield* bus.publish(MessageV2.Event.PartUpdated, {
+          sessionID: sessionID as any,
+          part: {
+            id: "prt_w3",
+            sessionID: sessionID,
+            messageID: "msg_t",
+            type: "tool",
+            tool: "Bash",
+            state: { status: "running", input: { command: "ls" } },
+          } as any,
+          time: Date.now(),
+        })
+        yield* Effect.sleep("200 millis")
+
+        const row = Database.use((db) =>
+          db.select().from(HistoryFtsTable).where(eq(HistoryFtsTable.part_id, "prt_w3")).get(),
+        )
+        expect(row).toBeUndefined()
+      }),
+    ),
+  )
+})

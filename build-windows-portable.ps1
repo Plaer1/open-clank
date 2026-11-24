@@ -109,7 +109,9 @@ if (-not $sourceArtifactRelative -or [System.IO.Path]::IsPathRooted($sourceArtif
 }
 $sourceArtifact = Join-Path $sourceEngineRoot $sourceArtifactRelative.Replace("/", "\")
 if (-not (Test-Path $sourceArtifact -PathType Container)) { Fail "Verified engine artifact is missing." }
-$stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("openclank-windows-portable-" + [guid]::NewGuid().ToString("N"))
+# Leave room beneath TEMP for CPython's temporary bytecode files on Windows
+# installations that still enforce MAX_PATH.
+$stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Path $stageRoot | Out-Null
 & $pyExe -B scripts/windows_portable_build.py dependencies --output (Join-Path $stageRoot 'build-dependencies.json')
 if ($LASTEXITCODE -ne 0) { Fail 'Complete matching-target installed dependency verification failed.' }
@@ -133,8 +135,9 @@ $cargoTargetDir = Join-Path $PSScriptRoot ('build\helpers\' + $Target)
 $helperCrates = @(
     @{ manifest='packages/odysseus-files/Cargo.toml'; bins=@('odysseus-files-service','odysseus-shell-thumbnail-helper') },
     @{ manifest='packages/openclank-history/Cargo.toml'; bins=@('openclank-history-service') },
-    @{ manifest='mcp_servers/frankenmemory/Cargo.toml'; bins=@('fm-mcp') }
+    @{ manifest='native/memery/Cargo.toml'; bins=@('memery-worker') }
 )
+if ($Target -eq 'windows-x64') { $helperCrates[-1].bins += 'memery-migrate' }
 if ($IncludeCopalRedb) { Fail 'Copal redb packaging requires its verified build-identity metadata; use the loose-file release lane until that inventory is implemented.' }
 if ($VerifiedRustArtifacts) {
     & $pyExe -B scripts/windows_helper_artifacts.py --target $Target --source-root $PSScriptRoot --bin-dir $stageBin --reuse-rust-manifest $VerifiedRustArtifacts --reuse-rust-sha256 $VerifiedRustArtifactsSha256 --output (Join-Path $stageRoot 'rust-reuse-receipt.json')

@@ -15,7 +15,8 @@ HELPERS = {
     'odysseus-files-service.exe': ('packages/odysseus-files', 'required'),
     'odysseus-shell-thumbnail-helper.exe': ('packages/odysseus-files', 'required'),
     'openclank-history-service.exe': ('packages/openclank-history', 'required'),
-    'fm-mcp.exe': ('mcp_servers/frankenmemory', 'required'),
+    'memery-worker.exe': ('native/memery', 'required'),
+    'memery-migrate.exe': ('native/memery', 'required'),
     'openclank-windows-host-apps.exe': ('src/openclank/windows_host_apps.py', 'required'),
     'openclank-windows-desktop-capture.exe': ('src/windows_desktop_capture.py', 'required'),
 }
@@ -30,7 +31,7 @@ def source_inputs(root, relative):
     for path in candidates:
         rel=path.relative_to(root)
         if any(part in {'target','node_modules','.git','__pycache__','cache','data'} for part in rel.parts): continue
-        admitted=path.suffix in {'.rs','.toml','.lock','.proto','.py'}
+        admitted=path.suffix in {'.rs','.toml','.lock','.proto','.py','.sql'}
         if (path.is_symlink() or getattr(path.lstat(),'st_file_attributes',0)&0x400) and (admitted or path.is_dir()):
             raise ValueError('Helper source symlink/reparse input refused: '+rel.as_posix())
         if not path.is_file() or not admitted: continue
@@ -44,7 +45,11 @@ def source_inputs(root, relative):
     if not files: raise ValueError('Helper source provenance is empty')
     return sorted(files,key=lambda item:item['path'])
 
-RUST_NAMES = tuple(list(HELPERS)[:4])
+def helpers_for(target):
+    return {name:value for name,value in HELPERS.items() if target == 'windows-x64' or name != 'memery-migrate.exe'}
+
+def rust_names(target):
+    return tuple(name for name, (source, _) in helpers_for(target).items() if source in ('packages/odysseus-files','packages/openclank-history','native/memery'))
 
 def require_hash(path, expected):
     if not expected or len(expected) != 64 or sha(path) != expected.lower():
@@ -69,13 +74,13 @@ def rust_adoption(args):
             if '--locked' not in argv or '--release' not in argv or argv[argv.index('--target')+1]!=rust_target:
                 raise ValueError('Locked release/target receipt mismatch')
             crate=argv[argv.index('--manifest-path')+1].replace('\\','/')
-            for name in RUST_NAMES:
+            for name in rust_names(args.target):
                 if crate==HELPERS[name][0]+'/Cargo.toml' and any(argv[i+1]==name[:-4] for i,x in enumerate(argv[:-1]) if x=='--bin'):
                     covered.add(name)
         receipts.append({'path':str(receipt_path),'sha256':sha(receipt_path),'runId':record['runId']})
-    if covered!=set(RUST_NAMES): raise ValueError('Successful target build receipts must cover all four Rust bins')
+    if covered!=set(rust_names(args.target)): raise ValueError('Successful target build receipts must cover all required Rust bins')
     artifacts=[]
-    for name in RUST_NAMES:
+    for name in rust_names(args.target):
         binary=args.bin_dir/name
         if binary.is_symlink() or not binary.is_file():raise ValueError('Ordinary adopted Rust artifact required: '+name)
         _verify_pe_target(binary,args.target)
@@ -84,7 +89,7 @@ def rust_adoption(args):
         historical=[]
         for item in state['files']:
             relative=Path(item['path'])
-            if not item['path'].startswith(prefix) or relative.suffix not in {'.rs','.toml','.lock','.proto','.py'}:continue
+            if not item['path'].startswith(prefix) or relative.suffix not in {'.rs','.toml','.lock','.proto','.py','.sql'}:continue
             if any(part in {'target','node_modules','.git','__pycache__','cache','data'} for part in relative.parts):continue
             if item['kind']!='file':raise ValueError('Historical helper symlink input refused')
             historical.append({'path':item['path'],'sha256':item['sha256']})
@@ -105,7 +110,7 @@ def rust_reuse(args):
     if manifest.get('schema_version')!=1 or manifest.get('target')!=args.target or not manifest.get('qualification','').startswith('adopted-current-binary-PE/hash'):
         raise ValueError('Reviewed target Rust adoption manifest required')
     records=manifest['artifacts']
-    if len(records)!=4 or {x['name'] for x in records}!=set(RUST_NAMES):raise ValueError('Exact four Rust helpers required')
+    if len(records)!=len(rust_names(args.target)) or {x['name'] for x in records}!=set(rust_names(args.target)):raise ValueError('Exact target Rust helpers required')
     origin=Path(manifest['bin_directory']).resolve()
     for record in records:
         name=record['name'];binary=origin/name;destination=args.bin_dir/name
@@ -144,7 +149,7 @@ def main():
         rust_reuse(args);return
     from src.openclank.engine_build import _verify_pe_target
 
-    for name,(source,requirement) in HELPERS.items():
+    for name,(source,requirement) in helpers_for(args.target).items():
         binary=args.bin_dir/name
         if not binary.is_file():
             if requirement=='required': raise ValueError('Required helper missing: '+name)

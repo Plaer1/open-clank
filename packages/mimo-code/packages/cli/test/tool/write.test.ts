@@ -1,0 +1,447 @@
+import { afterEach, describe, expect, spyOn } from "bun:test"
+import { createServer } from "node:net"
+import { Effect, Layer } from "effect"
+import path from "path"
+import fs from "fs/promises"
+import { WriteTool } from "../../src/tool/write"
+import { Instance } from "../../src/project/instance"
+import { LSP } from "../../src/lsp"
+import { AppFileSystem } from "@mimo-ai/shared/filesystem"
+import { Bus } from "../../src/bus"
+import { Format } from "../../src/format"
+import { Truncate } from "../../src/tool"
+import { Tool } from "../../src/tool"
+import { Agent } from "../../src/agent/agent"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
+import type { MessageV2 } from "../../src/session/message-v2"
+import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
+import { provideTmpdirInstance } from "../fixture/fixture"
+import { testEffect } from "../lib/effect"
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import {
+  bindMemorySessionClient,
+  closeSharedMcpClient,
+  registerManagedMcpClient,
+  unregisterManagedMcpClient,
+} from "../../src/memory/mcp-client"
+
+const ctx = {
+  sessionID: SessionID.make("ses_test-write-session"),
+  messageID: MessageID.make(""),
+  callID: "",
+  agent: "build",
+  abort: AbortSignal.any([]),
+  messages: [] as MessageV2.WithParts[],
+  metadata: () => Effect.void,
+  ask: () => Effect.void,
+}
+
+function withRead(filePath: string, fingerprint?: string) {
+  const messageID = MessageID.make("msg_read")
+  return {
+    ...ctx,
+    messages: [
+      {
+        info: {
+          id: messageID,
+          sessionID: ctx.sessionID,
+          role: "assistant",
+        },
+        parts: [
+          {
+            id: PartID.make("part_read"),
+            messageID,
+            sessionID: ctx.sessionID,
+            type: "tool",
+            tool: "read",
+            callID: "call_read",
+            state: {
+              status: "completed",
+              input: { file_path: filePath },
+              output: "",
+              title: `Read ${filePath}`,
+              metadata: fingerprint ? { fingerprint } : {},
+              time: { start: 0, end: 0 },
+            },
+          },
+        ],
+      },
+    ] as unknown as MessageV2.WithParts[],
+  }
+}
+
+afterEach(async () => {
+  await Instance.disposeAll()
+  await closeSharedMcpClient()
+  unregisterManagedMcpClient("lifetools_policy_test")
+  delete process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE
+})
+
+const it = testEffect(
+  Layer.mergeAll(
+    LSP.defaultLayer,
+    AppFileSystem.defaultLayer,
+    Bus.layer,
+    Format.defaultLayer,
+    CrossSpawnSpawner.defaultLayer,
+    Truncate.defaultLayer,
+    Agent.defaultLayer,
+  ),
+)
+
+const init = Effect.fn("WriteToolTest.init")(function* () {
+  const info = yield* WriteTool
+  return yield* info.init()
+})
+
+const run = Effect.fn("WriteToolTest.run")(function* (
+  args: Tool.InferParameters<typeof WriteTool>,
+  next: Tool.Context = ctx,
+) {
+  const tool = yield* init()
+  return yield* tool.execute(args, next)
+})
+
+describe("tool.write", () => {
+  describe("new file creation", () => {
+    it.live("captures the final formatted bytes in the same history action", () =>
+    provideTmpdirInstance((dir) => Effect.gen(function* () {
+      const target = path.join(dir, "staged-format.txt")
+      const socketPath = path.join(dir, "history.sock")
+      yield* Effect.promise(() => fs.writeFile(target, "before"))
+      const frames: any[] = []
+      const server = createServer({ allowHalfOpen: true }, (socket) => {
+        let body = ""
+        socket.on("data", (chunk) => { body += chunk.toString() })
+        socket.on("end", () => {
+          const frame = JSON.parse(body); frames.push(frame)
+          const reply = frame.RegisterResource
+            ? { Resource: { handle: { resource_id: "r1", account_id: "acct", workspace_id: "ws" } } }
+            : frame.CompleteBatch ? { Action: { state: "Complete", action_id: frame.CompleteBatch.envelope.action_id } } : {}
+          socket.end(JSON.stringify(reply))
+        })
+      })
+      yield* Effect.acquireRelease(
+        Effect.promise(() => new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve) })),
+        () => Effect.promise(() => new Promise<void>((resolve) => server.close(() => resolve()))),
+      )
+      const formatter = yield* Format.Service
+      let formattedPath = ""
+      const spy = spyOn(formatter, "file").mockImplementation((file) => Effect.promise(async () => {
+        formattedPath = file
+        await fs.writeFile(file, "formatted")
+      }))
+      yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()))
+      const info = yield* WriteTool
+      const tool = yield* info.init()
+      const result = yield* tool.execute({ file_path: target, content: "candidate" }, {
+        ...ctx, actorID: "actor", callID: "call", extra: { historyCapture: {
+          accountId: "acct", workspaceId: "ws", workspaceRoot: dir, socketPath, token: "fixture",
+        } },
+      } as any)
+      expect(formattedPath).not.toBe(target)
+      expect(path.basename(formattedPath)).toBe(path.basename(target))
+      expect(path.dirname(path.dirname(formattedPath))).toBe(path.dirname(target))
+      expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("formatted")
+      expect(result.metadata.format_status).toBe("completed")
+      const before = frames.find((frame) => frame.PrepareBatch)?.PrepareBatch.entries[0]
+      const after = frames.find((frame) => frame.CompleteBatch)?.CompleteBatch.entries[0]
+      expect(Buffer.from(before.content, "base64").toString()).toBe("before")
+      expect(Buffer.from(after.content, "base64").toString()).toBe("formatted")
+      expect(result.metadata.history.durable).toBe(true)
+    })),
+  )
+
+  it.live("writes content to new file", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "newfile.txt")
+          const result = yield* run({ file_path: filepath, content: "Hello, World!" })
+
+          expect(result.output).toContain("Wrote file successfully")
+          expect(result.metadata.exists).toBe(false)
+          expect(result.metadata.file.contract).toBe("open-clank.file-result/v1")
+          expect(result.metadata.file.operation).toBe("write")
+          expect(result.metadata.file.page).toEqual({
+            unit: "byte",
+            cursor: 0,
+            next_cursor: null,
+            has_more: false,
+            returned: 13,
+            total: 13,
+          })
+          expect(result.metadata.file.fingerprint).toBe(result.metadata.fingerprint)
+
+          const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
+          expect(content).toBe("Hello, World!")
+        }),
+      ),
+    )
+
+    it.live("creates parent directories if needed", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "nested", "deep", "file.txt")
+          yield* run({ file_path: filepath, content: "nested content" })
+
+          const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
+          expect(content).toBe("nested content")
+        }),
+      ),
+    )
+
+    it.live("handles relative paths by resolving to instance directory", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          yield* run({ file_path: "relative.txt", content: "relative content" })
+
+          const content = yield* Effect.promise(() => fs.readFile(path.join(dir, "relative.txt"), "utf-8"))
+          expect(content).toBe("relative content")
+        }),
+      ),
+    )
+  })
+
+  describe("existing file overwrite", () => {
+    it.live("overwrites existing file content", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "existing.txt")
+          yield* Effect.promise(() => fs.writeFile(filepath, "old content", "utf-8"))
+          const result = yield* run({ file_path: filepath, content: "new content" }, withRead(filepath))
+
+          expect(result.output).toContain("Wrote file successfully")
+          expect(result.metadata.exists).toBe(true)
+
+          const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
+          expect(content).toBe("new content")
+        }),
+      ),
+    )
+
+    it.live("returns diff in metadata for existing files", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "file.txt")
+          yield* Effect.promise(() => fs.writeFile(filepath, "old", "utf-8"))
+          const result = yield* run({ file_path: filepath, content: "new" }, withRead(filepath))
+
+          expect(result.metadata).toHaveProperty("filepath", filepath)
+          expect(result.metadata).toHaveProperty("exists", true)
+        }),
+      ),
+    )
+
+    it.live("requires a prior read before overwriting an existing file", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "prior-read.txt")
+          yield* Effect.promise(() => fs.writeFile(filepath, "original", "utf-8"))
+
+          const exit = yield* run({ file_path: filepath, content: "replacement" }).pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+          const msg = exit._tag === "Failure" ? String(exit.cause) : ""
+          expect(msg).toContain("has not been read")
+          expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("original")
+
+          const ok = yield* run({ file_path: filepath, content: "replacement" }, withRead(filepath))
+          expect(ok.output).toContain("Wrote file successfully")
+        }),
+      ),
+    )
+  })
+
+  describe("file permissions", () => {
+    it.live("sets file permissions when writing sensitive data", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "sensitive.json")
+          yield* run({ file_path: filepath, content: JSON.stringify({ secret: "data" }) })
+
+          if (process.platform !== "win32") {
+            const stats = yield* Effect.promise(() => fs.stat(filepath))
+            expect(stats.mode & 0o777).toBe(0o644)
+          }
+        }),
+      ),
+    )
+  })
+
+  describe("content types", () => {
+    it.live("writes JSON content", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "data.json")
+          const data = { key: "value", nested: { array: [1, 2, 3] } }
+          yield* run({ file_path: filepath, content: JSON.stringify(data, null, 2) })
+
+          const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
+          expect(JSON.parse(content)).toEqual(data)
+        }),
+      ),
+    )
+
+    it.live("writes binary-safe content", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "binary.bin")
+          const content = "Hello\x00World\x01\x02\x03"
+          yield* run({ file_path: filepath, content })
+
+          const buf = yield* Effect.promise(() => fs.readFile(filepath))
+          expect(buf.toString()).toBe(content)
+        }),
+      ),
+    )
+
+    it.live("writes empty content", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "empty.txt")
+          yield* run({ file_path: filepath, content: "" })
+
+          const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
+          expect(content).toBe("")
+
+          const stats = yield* Effect.promise(() => fs.stat(filepath))
+          expect(stats.size).toBe(0)
+        }),
+      ),
+    )
+
+    it.live("writes multi-line content", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "multiline.txt")
+          const lines = ["Line 1", "Line 2", "Line 3", ""].join("\n")
+          yield* run({ file_path: filepath, content: lines })
+
+          const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
+          expect(content).toBe(lines)
+        }),
+      ),
+    )
+
+    it.live("handles different line endings", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "crlf.txt")
+          const content = "Line 1\r\nLine 2\r\nLine 3"
+          yield* run({ file_path: filepath, content })
+
+          const buf = yield* Effect.promise(() => fs.readFile(filepath))
+          expect(buf.toString()).toBe(content)
+        }),
+      ),
+    )
+  })
+
+  describe("error handling", () => {
+    it.live("leaves the file untouched when shared project policy rejects it", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "blocked.txt")
+          const client = {
+            callTool: async () => ({
+              content: [{ type: "text", text: JSON.stringify({ enforced: true, allowed: false }) }],
+            }),
+          } as unknown as Client
+          process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE = "required"
+          registerManagedMcpClient("lifetools_policy_test", client)
+          bindMemorySessionClient(
+            ctx.sessionID,
+            "lifetools_policy_test",
+            "alice",
+            "global",
+          )
+
+          const exit = yield* run({ file_path: filepath, content: "blocked" }).pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+          expect(yield* Effect.promise(() => Bun.file(filepath).exists())).toBeFalse()
+        }),
+      ),
+    )
+
+    it.live("refuses to overwrite an existing binary file", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const binaryPath = path.join(dir, "binary.txt")
+          const original = Buffer.from([0x61, 0x00, 0x62])
+          yield* Effect.promise(() => fs.writeFile(binaryPath, original))
+
+          const exit = yield* run({ file_path: binaryPath, content: "replacement" }, withRead(binaryPath)).pipe(
+            Effect.exit,
+          )
+
+          expect(exit._tag).toBe("Failure")
+          expect(yield* Effect.promise(() => fs.readFile(binaryPath))).toEqual(original)
+        }),
+      ),
+    )
+
+    it.live("rejects an expected_fingerprint mismatch and leaves the file untouched", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "guarded.txt")
+          yield* Effect.promise(() => fs.writeFile(filepath, "original", "utf-8"))
+          const staleFingerprint = "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+          const exit = yield* run(
+            {
+              file_path: filepath,
+              content: "replacement",
+              expected_fingerprint: staleFingerprint,
+            },
+            withRead(filepath, staleFingerprint),
+          ).pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+          expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("original")
+        }),
+      ),
+    )
+
+    it.live("reports Lore history status honestly and does not claim recoverability", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "history-status.txt")
+          const result = yield* run({ file_path: filepath, content: "body" })
+          expect(result.metadata.history.durable).toBe(false)
+          expect(result.metadata.history.coverage).not.toBe("ExactBatch")
+          expect(["unconfigured", "paused", "failed"]).toContain(result.metadata.history.status ?? "unconfigured")
+        }),
+      ),
+    )
+
+    // Skip: root bypasses file permissions, chmod 0o444 has no effect when running as root
+    it.live.skip("throws error when OS denies write access", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const readonlyPath = path.join(dir, "readonly.txt")
+          yield* Effect.promise(() => fs.writeFile(readonlyPath, "test", "utf-8"))
+          yield* Effect.promise(() => fs.chmod(readonlyPath, 0o444))
+          const exit = yield* run({ file_path: readonlyPath, content: "new content" }, withRead(readonlyPath)).pipe(
+            Effect.exit,
+          )
+          expect(exit._tag).toBe("Failure")
+        }),
+      ),
+    )
+  })
+
+  describe("title generation", () => {
+    it.live("returns relative path as title", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "src", "components", "Button.tsx")
+          yield* Effect.promise(() => fs.mkdir(path.dirname(filepath), { recursive: true }))
+
+          const result = yield* run({ file_path: filepath, content: "export const Button = () => {}" })
+          expect(result.title).toEndWith(path.join("src", "components", "Button.tsx"))
+        }),
+      ),
+    )
+  })
+})

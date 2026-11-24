@@ -120,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     hook.set_defaults(func=command_hook)
 
     serve = subcommands.add_parser("serve", help="run the independent owner-local worker")
-    serve.add_argument("--db", help="Frankenmemory policy-store path")
+    serve.add_argument("--db", help="Memery policy-store path")
     serve.add_argument("--state-dir", help="owner-private policy profile directory")
     serve.set_defaults(func=command_serve)
     return parser

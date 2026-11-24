@@ -799,6 +799,30 @@ class AccountOwnerLifecycle:
             finally:
                 db.close()
 
+    def _host_intent_inventory(self, account_id: str | None) -> dict[str, Any]:
+        from src.openclank.chat_source_bridge import intent_inventory
+        db = self._session_factory()
+        try:
+            return intent_inventory(db, account_id)
+        finally:
+            db.close()
+
+    def _purge_host_intents(self, owner: str) -> dict[str, Any]:
+        from src.openclank.chat_source_bridge import purge_intents
+        from src.openclank.chat_ratings import purge_account
+        account_id = self.conversation_archive.owner_inventory(owner).get("owner_account_id")
+        db = self._session_factory()
+        try:
+            ratings=purge_account(db,account=account_id)
+            result=purge_intents(db, account_id)
+            db.commit()
+            return {**result,'ratings_erased':ratings}
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def owner_inventory(self, owner: str) -> dict[str, Any]:
         """Inventory every coordinated store without returning user content."""
         owner = _owner(owner)
@@ -811,6 +835,7 @@ class AccountOwnerLifecycle:
             "artifacts": self.artifact_store.owner_inventory(owner),
             "default_persona": {"count": int(persona_present)},
         }
+        stores["host_source_intents"] = self._host_intent_inventory(stores["conversation_archive"].get("owner_account_id"))
         material = json.dumps(stores, sort_keys=True, separators=(",", ":"))
         return {
             "owner": owner,
@@ -831,6 +856,7 @@ class AccountOwnerLifecycle:
         # Immutable archive rows are visible under both the renamed aliases;
         # source/target row counts must not be mistaken for a collision.
         stores["conversation_archive"] = self.conversation_archive.rename_owner(source_owner, target_owner)
+        stores["host_source_intents"] = {**self._host_intent_inventory(stores["conversation_archive"].get("owner_account_id")), "unchanged_owner": True}
         definitions = (
             (
                 "operation_journal",
@@ -892,6 +918,10 @@ class AccountOwnerLifecycle:
             result = self.conversation_archive.rename_owner(old_owner, new_owner)
             stores[current_store] = result
             completed.append((current_store, result, lambda: self.conversation_archive.rename_owner(new_owner, old_owner)))
+            stores["host_source_intents"] = {**self._host_intent_inventory(result.get("owner_account_id")), "unchanged_owner": True}
+            from src.openclank.chat_ratings import inventory_account
+            with self._session_factory() as rating_db:
+                stores['chat_ratings']={**inventory_account(rating_db,account=result.get('owner_account_id')),'unchanged_account':True}
             current_store = "operation_journal"
             result = self.operation_journal.rename_owner(old_owner, new_owner)
             stores[current_store] = result
@@ -969,12 +999,25 @@ class AccountOwnerLifecycle:
 
         return AccountOwnerLifecycleReceipt(old_owner, new_owner, dict(stores))
 
-    def purge_owner(self, owner: str) -> AccountOwnerLifecycleReceipt:
+    def media_artifact_inventory(self, subject_id: str) -> dict[str, Any]:
+        from src.openclank.artifacts import media_artifact_owner
+        return self.artifact_store.owner_inventory(media_artifact_owner(subject_id))
+
+    def purge_owner(self, owner: str, *, subject_id: str | None = None,
+                    expected_media_inventory: dict[str, Any] | None = None) -> AccountOwnerLifecycleReceipt:
         """Idempotently purge one exact owner, reporting any partial closure."""
 
         owner = _owner(owner)
         stores: dict[str, Any] = {}
+        def purge_media_artifacts():
+            from src.openclank.artifacts import media_artifact_owner
+            current = self.media_artifact_inventory(subject_id)
+            if (expected_media_inventory is not None and current['count']
+                and current != expected_media_inventory):
+                raise AccountOwnerLifecycleError('media artifact inventory changed')
+            return self.artifact_store.purge_owner(media_artifact_owner(subject_id))
         steps = (
+            ("host_source_intents", lambda: self._purge_host_intents(owner)),
             ("conversation_archive", lambda: self.conversation_archive.purge_owner(owner)),
             ("provider", lambda: self.provider_store.purge_owner(owner)),
             ("operation_journal", lambda: self.operation_journal.purge_owner(owner)),
@@ -988,7 +1031,7 @@ class AccountOwnerLifecycle:
                     )
                 ),
             ),
-        )
+        ) + ((('media_artifacts', purge_media_artifacts),) if subject_id else ())
         for label, purge in steps:
             try:
                 stores[label] = purge()

@@ -255,6 +255,8 @@ fn stable_file_handle_reads_the_opened_object_and_rejects_forgery() {
         ),
     );
 
+    let identity = service.dispatch(request(Operation::Stat, Target::path(file.to_string_lossy()), json!({"object_identity":true}))).unwrap();
+    assert!(identity["data"]["fingerprint"].is_null());
     let opened = service
         .dispatch(request(
             Operation::OpenHandle,
@@ -262,6 +264,7 @@ fn stable_file_handle_reads_the_opened_object_and_rejects_forgery() {
             json!({}),
         ))
         .unwrap();
+    assert_eq!(identity["data"]["object_tag"], opened["data"]["object_tag"]);
     let handle: ResourceHandle = serde_json::from_value(opened["data"]["handle"].clone()).unwrap();
     assert_eq!(handle.token.len(), 64);
     assert_eq!(handle.generation, 7);

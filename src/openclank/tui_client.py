@@ -8,6 +8,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import quote
 
 import httpx
 
@@ -90,8 +91,9 @@ class OpenClankTuiClient:
         *,
         json_body: dict[str, Any] | None = None,
         authenticated: bool = True,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        headers: dict[str, str] = {"Accept": "application/json"}
+        headers: dict[str, str] = {"Accept": "application/json", **(extra_headers or {})}
         if authenticated:
             if not self.token:
                 raise TuiClientError("this profile is not logged in", status_code=401)
@@ -111,8 +113,9 @@ class OpenClankTuiClient:
             payload = {}
         if response.status_code >= 400:
             detail = payload.get("detail") if isinstance(payload, dict) else None
-            message = str(detail or f"Open Clank returned HTTP {response.status_code}")
-            raise TuiClientError(message, status_code=response.status_code)
+            reason = detail.get("code") if isinstance(detail, dict) and isinstance(detail.get("code"), str) else None
+            message = str(detail.get("message") or detail) if isinstance(detail, dict) else str(detail or f"Open Clank returned HTTP {response.status_code}")
+            raise TuiClientError(message, status_code=response.status_code, reason=reason)
         if not isinstance(payload, dict):
             raise TuiClientError("Open Clank returned a malformed response")
         return payload
@@ -198,7 +201,7 @@ class OpenClankTuiClient:
     def messages(self, session_id: str, *, limit: int = 100) -> dict[str, Any]:
         return self._request(
             "GET",
-            f"/api/tui/v1/sessions/{session_id}/messages?limit={limit}",
+            f"/api/tui/v1/sessions/{quote(session_id, safe='')}/messages?limit={limit}",
         )
 
     def stream_turn(
@@ -207,20 +210,27 @@ class OpenClankTuiClient:
         message: str,
         *,
         idempotency_key: str | None = None,
+        attachments: list[str] | None = None,
+        allow_bash: bool = False,
+        allow_web_search: bool = False,
     ):
+        if not isinstance(allow_bash, bool) or not isinstance(allow_web_search, bool):
+            raise ValueError("tool choices must be explicit booleans")
+        if attachments is not None and (not isinstance(attachments, list) or not all(isinstance(item, str) for item in attachments)):
+            raise ValueError("attachments must be a list of upload IDs")
         if not self.token:
             raise TuiClientError("this profile is not logged in", status_code=401)
         body = {
             "message": message,
             "idempotency_key": idempotency_key or uuid.uuid4().hex,
-            "attachments": [],
-            "allow_bash": False,
-            "allow_web_search": False,
+            "attachments": list(attachments or []),
+            "allow_bash": allow_bash,
+            "allow_web_search": allow_web_search,
         }
         try:
             with self._http.stream(
                 "POST",
-                f"api/tui/v1/sessions/{session_id}/turns",
+                f"api/tui/v1/sessions/{quote(session_id, safe='')}/turns",
                 json=body,
                 headers={
                     "Accept": "text/event-stream",
@@ -247,6 +257,128 @@ class OpenClankTuiClient:
                         yield json.loads(value)
                     except ValueError:
                         continue
+        except httpx.HTTPError as exc:
+            raise TuiClientError(f"Open Clank turn stream failed: {exc}") from exc
+
+    def start_turn_events(self, session_id: str, message: str, *, idempotency_key: str):
+        """Submit once and expose only identities actually supplied by the host."""
+        if not self.token:
+            raise TuiClientError("this profile is not logged in", status_code=401)
+        body = {"message": message, "idempotency_key": idempotency_key,
+                "attachments": [], "allow_bash": False, "allow_web_search": False}
+        try:
+            with self._http.stream("POST", f"api/tui/v1/sessions/{quote(session_id, safe='')}/turns",
+                    json=body, timeout=httpx.Timeout(30.0, read=None), headers={"Accept": "text/event-stream", "Authorization": f"Bearer {self.token}"}) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    try: detail = response.json().get("detail")
+                    except (ValueError, AttributeError): detail = None
+                    raise TuiClientError(str(detail or f"turn failed ({response.status_code})"), status_code=response.status_code)
+                yield {"event": "started", "run_id": response.headers.get("X-Agent-Run-ID")}
+                event, sequence, data = "message", None, []
+                for line in response.iter_lines():
+                    if not line:
+                        if data:
+                            raw = "\n".join(data)
+                            if raw == "[DONE]":
+                                yield {"event": "done", "id": sequence, "data": None}
+                            else:
+                                try: value = json.loads(raw)
+                                except ValueError: value = raw
+                                yield {"event": event, "id": sequence, "data": value}
+                        event, sequence, data = "message", None, []
+                    elif line.startswith("event:"): event = line[6:].strip()
+                    elif line.startswith("id:"):
+                        value = line[3:].strip()
+                        sequence = int(value) if value.isdecimal() else None
+                    elif line.startswith("data:"):
+                        value = line[5:]
+                        data.append(value[1:] if value.startswith(" ") else value)
+        except httpx.HTTPError as exc:
+            raise TuiClientError(f"Open Clank turn stream failed: {exc}") from exc
+
+    def original_turn_status(self, session_id: str, idempotency_key: str) -> dict[str, Any]:
+        return self._request("POST", f"/api/tui/v1/sessions/{quote(session_id, safe='')}/turns/status",
+                             json_body={"idempotency_key": idempotency_key})
+
+    def interactions(self, session_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/tui/v1/sessions/{quote(session_id, safe='')}/interactions")
+
+    def reply_interaction(self, session_id: str, reply: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", f"/api/tui/v1/sessions/{quote(session_id, safe='')}/interactions/reply", json_body=reply)
+
+    def optional_questions(self, session_id: str, actor_id: str, map_revision: int) -> dict[str, Any]:
+        return self._request("GET", f"/api/tui/v1/sessions/{quote(session_id, safe='')}/actors/{quote(actor_id, safe='')}/questions?map_revision={map_revision}")
+
+    def answer_optional_question(self, session_id: str, actor_id: str, map_revision: int, answer: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", f"/api/tui/v1/sessions/{quote(session_id, safe='')}/actors/{quote(actor_id, safe='')}/question-answer?map_revision={map_revision}", json_body=answer)
+
+    def background_shells(self, session_id: str) -> dict[str, Any]:
+        return self._request('GET', f"/api/tui/v1/sessions/{quote(session_id, safe='')}/background-shells")
+
+    def background_shell(self, session_id: str, job_id: str, actor_id: str, actor_session_id: str,
+                         execution_revision: int, map_revision: int, *, cursor: int = 0) -> dict[str, Any]:
+        from urllib.parse import urlencode
+        params = urlencode({'actor_id': actor_id, 'actor_session_id': actor_session_id,
+                            'execution_revision': execution_revision, 'map_revision': map_revision, 'cursor': cursor})
+        return self._request('GET', f"/api/tui/v1/sessions/{quote(session_id, safe='')}/background-shell/{quote(job_id, safe='')}?{params}")
+
+    def session_capabilities(self, session_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/tui/v1/sessions/{quote(session_id, safe='')}/capabilities")
+
+    def existing_chat_handoff(self, session_id: str, *, expected_map_revision: int | None = None) -> dict[str, Any]:
+        path = f"/api/tui/v1/sessions/{quote(session_id, safe='')}/handoff"
+        if expected_map_revision is not None:
+            if isinstance(expected_map_revision, bool) or not isinstance(expected_map_revision, int) or expected_map_revision < 0:
+                raise ValueError("map revision must be a nonnegative integer")
+            path += f"?map_revision={expected_map_revision}"
+        return self._request("GET", path)
+
+    def active_turn(self, session_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/tui/v1/sessions/{quote(session_id, safe='')}/turns/active")
+
+    def actors(self, session_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/tui/v1/sessions/{quote(session_id, safe='')}/actors")
+
+    def stop_active_turn(self, session_id: str, *, run_id: str) -> dict[str, Any]:
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("an observed run ID is required")
+        return self._request("POST", f"/api/tui/v1/sessions/{quote(session_id, safe='')}/turns/active/stop",
+                             extra_headers={"X-Agent-Run-ID": run_id})
+
+    def stream_active_turn(self, session_id: str, *, run_id: str, after: int = 0):
+        if not self.token:
+            raise TuiClientError("this profile is not logged in", status_code=401)
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("an observed run ID is required")
+        if isinstance(after, bool) or not isinstance(after, int) or after < 0:
+            raise ValueError("stream position must be a nonnegative integer")
+        try:
+            with self._http.stream("GET", f"api/tui/v1/sessions/{quote(session_id, safe='')}/turns/active/stream?after={after}",
+                headers={"Accept":"text/event-stream", "Authorization":f"Bearer {self.token}", "X-Agent-Run-ID":run_id}) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    try: detail = response.json().get("detail")
+                    except (ValueError, AttributeError): detail = None
+                    raise TuiClientError(str(detail or f"stream failed ({response.status_code})"), status_code=response.status_code)
+                if response.headers.get("X-Agent-Run-ID") != run_id:
+                    raise TuiClientError("The selected run changed; refresh the active turn", status_code=409)
+                event, sequence, data = 'message', None, []
+                for line in response.iter_lines():
+                    if not line:
+                        if data:
+                            raw = "\n".join(data)
+                            if raw == '[DONE]': yield {'event':'done', 'id':sequence, 'data':None}
+                            else:
+                                try: value = json.loads(raw)
+                                except ValueError: value = raw
+                                yield {'event':event, 'id':sequence, 'data':value}
+                        event, sequence, data = 'message', None, []
+                    elif line.startswith('event:'): event = line[6:].lstrip()
+                    elif line.startswith('id:'):
+                        value = line[3:].strip()
+                        sequence = int(value) if value.isdecimal() else None
+                    elif line.startswith('data:'): data.append(line[5:].lstrip())
         except httpx.HTTPError as exc:
             raise TuiClientError(f"Open Clank turn stream failed: {exc}") from exc
 

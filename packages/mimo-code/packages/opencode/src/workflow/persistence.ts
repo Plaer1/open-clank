@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import path from "path"
 import { createHash } from "node:crypto"
-import { appendFileSync, mkdirSync } from "node:fs"
+import { appendFileSync, mkdirSync, openSync, closeSync, writeFileSync, fsyncSync, readFileSync, readSync } from "node:fs"
 import { Database, eq, desc } from "../storage"
 import { WorkflowRunTable } from "./workflow.sql"
 import { Global } from "../global"
@@ -260,6 +260,66 @@ const appendJournalSync = (runID: string, events: JournalEvent[]) =>
     appendFileSync(journalPath(runID), events.map((e) => JSON.stringify(e) + "\n").join(""))
   })
 
+// Strict council/advisor calls use the same journal, with durable per-slot intent.
+// fsync requests filesystem persistence; hardware/power-loss guarantees remain platform-dependent.
+type StrictEvent =
+  | { t: "strict-header"; v: 1; binding: string; budget: number }
+  | { t: "strict-intent"; key: string }
+  | { t: "strict-actor"; key: string; actorID: string }
+  | { t: "strict-outcome"; key: string; result: unknown }
+type StrictSlot = { actorID?: string; settled: boolean; result?: unknown }
+const strictWrite = (runID: string, event: StrictEvent, create = false) => {
+  mkdirSync(scriptDir(), { recursive: true })
+  const fd = openSync(journalPath(runID), create ? "wx" : "a", 0o600)
+  try { writeFileSync(fd, JSON.stringify(event) + "\n"); fsyncSync(fd) } finally { closeSync(fd) }
+  if (create && process.platform !== "win32") {
+    const dir = openSync(scriptDir(), "r")
+    try { fsyncSync(dir) } finally { closeSync(dir) }
+  }
+}
+// Classify only an existing first journal record; absence or an incomplete first
+// record is ambiguous and cannot prove that a same-name run was legacy.
+const strictJournalKind = (runID: string): "strict" | "legacy" | "unknown" => {
+  let fd: number | undefined
+  try {
+    fd = openSync(journalPath(runID), "r")
+    const bytes = Buffer.alloc(4096)
+    const count = readSync(fd, bytes, 0, bytes.length, 0)
+    const first = bytes.subarray(0, count).toString("utf8")
+    const newline = first.indexOf("\n")
+    if (newline < 0) return "unknown"
+    const event = JSON.parse(first.slice(0, newline))
+    if (event && event.t === "strict-header") return "strict"
+    if (event && ((event.t === "agent" && typeof event.key === "string" && "result" in event)
+      || (event.t === "phase" && typeof event.title === "string")
+      || (event.t === "log" && typeof event.msg === "string"))) return "legacy"
+    return "unknown"
+  } catch { return "unknown" }
+  finally { if (fd !== undefined) closeSync(fd) }
+}
+const strictJournal = (runID: string, binding: string, resume: boolean, budget: number) => {
+  if (!resume) {
+    strictWrite(runID, { t: "strict-header", v: 1, binding, budget }, true)
+    return {slots: new Map<string, StrictSlot>(), budget}
+  }
+  const text = readFileSync(journalPath(runID), "utf8")
+  if (!text.endsWith("\n")) throw new Error("strict workflow journal is incomplete")
+  const lines = text.slice(0, -1).split("\n")
+  const header = JSON.parse(lines.shift() ?? "null")
+  if (!header || header.t !== "strict-header" || header.v !== 1 || header.binding !== binding || Object.keys(header).length !== 4 || !Number.isInteger(header.budget) || header.budget < 1 || header.budget > 900_000)
+    throw new Error("strict workflow journal identity changed")
+  const slots = new Map<string, StrictSlot>()
+  for (const line of lines) {
+    const event = JSON.parse(line)
+    if (!event || typeof event.key !== "string" || !/^[a-f0-9]{64}:[0-9]+$/.test(event.key)) throw new Error("invalid strict journal event")
+    if (event.t === "strict-intent" && Object.keys(event).length === 2 && !slots.has(event.key)) slots.set(event.key, { settled: false })
+    else if (event.t === "strict-actor" && Object.keys(event).length === 3 && typeof event.actorID === "string" && event.actorID && slots.has(event.key) && !slots.get(event.key)!.actorID && !slots.get(event.key)!.settled) slots.get(event.key)!.actorID = event.actorID
+    else if (event.t === "strict-outcome" && Object.keys(event).length === 3 && slots.has(event.key) && !slots.get(event.key)!.settled) { slots.get(event.key)!.settled = true; slots.get(event.key)!.result = event.result }
+    else throw new Error("invalid strict journal sequence")
+  }
+  return {slots, budget: Math.min(budget, header.budget as number)}
+}
+
 const loadJournal = (runID: string): Effect.Effect<JournalLoad> =>
   Effect.promise(async () => {
     const file = Bun.file(journalPath(runID))
@@ -307,6 +367,9 @@ export const WorkflowPersistence = {
   readScript,
   appendJournal,
   appendJournalSync,
+  strictWrite,
+  strictJournalKind,
+  strictJournal,
   loadJournal,
   clearJournal,
 }

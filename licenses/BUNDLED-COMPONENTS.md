@@ -7,9 +7,9 @@ Reviewed October 4, 2026. [Acknowledgments](../ACKNOWLEDGMENTS.md) is the reader
 | Root | Source and acquisition | Included scope / modifications | Retained notice |
 | --- | --- | --- | --- |
 | Odysseus | [odysseus-dev/odysseus](https://github.com/odysseus-dev/odysseus), incorporated base `d96c7af3df769508de01900b2264520b649caa4c` per canonical upstream-sync receipt | Inherited Python/web workspace across app.py, src/, routes/, services/, static/; Open Clank branding, native/editor/agent integrations and later changes. Pin is an incorporated base, not a claim of full later upstream parity. | AGPLv3 root [LICENSE](../LICENSE); original source notices preserved. No separate author name invented. |
-| MiMo Code / opencode | [XiaomiMiMo/mimo-code](https://github.com/XiaomiMiMo/mimo-code); declared upstream `2bda17944b346ab85c8ee3cf0a0d4ab24819d37c`, import `f53c8a3e86f258164ff47eae00a03559a38895cf`, per [vendor manifest](../packages/mimo-code/openclank-vendor.json) | packages/mimo-code/, including packages/opencode/; managed engine, credentials/provider/IPC/history adaptations. The manifest pin is recorded provenance, not a claim every current modified byte equals upstream. | [MiMo/opencode MIT](../packages/mimo-code/LICENSE): Xiaomi Corporation / MiMo Code 2026 and opencode 2025; [historical opencode notice](opencode-MIT-LICENSE.txt). |
+| MiMo Code / opencode | [XiaomiMiMo/mimo-code](https://github.com/XiaomiMiMo/mimo-code); declared upstream `c9c91d7b6fff20164629475218fa0a58e16d14b8`, import `f53c8a3e86f258164ff47eae00a03559a38895cf`, per [vendor manifest](../packages/mimo-code/openclank-vendor.json) | packages/mimo-code/, including packages/opencode/; managed engine, credentials/provider/IPC/history adaptations. The manifest pin is recorded provenance, not a claim every current modified byte equals upstream. | [MiMo/opencode MIT](../packages/mimo-code/LICENSE): Xiaomi Corporation / MiMo Code 2026 and opencode 2025; [historical opencode notice](opencode-MIT-LICENSE.txt). |
 | Copal | Local integrated package; package version 0.2.0. No verified public upstream/author or separate package-root license in the inspected source/ledger. | packages/Copal/, src/openclank/copal_*.py, routes/copal_*.py, static/js/copal*; Editor/Wiki/database/native-shell integration. First-party root terms apply where appropriate; no inferred third-party Copal license is assigned. | Existing per-file/dependency notices preserved. Unknown public origin/package-license disposition is explicit. |
-| Lore | [EpicGames/lore](https://github.com/EpicGames/lore/tree/fa606b08781705e24807cfc05e1518c79e1f688b), `fa606b08781705e24807cfc05e1518c79e1f688b`, 0.9.1-nightly | packages/openclank-history/vendor/lore/ storage dependency closure; Open Clank history service wrapper and explicit durability/compaction repairs. This is not the complete Lore desktop product. | [Epic Games Inc.2026 MIT](../packages/openclank-history/vendor/lore/LICENSE); nested [glob-match MIT](../packages/openclank-history/vendor/lore/vendor/glob-match/LICENSE), [quinn-proto MIT](../packages/openclank-history/vendor/lore/vendor/quinn-proto/LICENSE-MIT)/[Apache](../packages/openclank-history/vendor/lore/vendor/quinn-proto/LICENSE-APACHE), [rpmalloc](../packages/openclank-history/vendor/lore/lore-base/native/thirdparty/rpmalloc/LICENSE). |
+| Lore | [EpicGames/lore](https://github.com/EpicGames/lore/tree/317f48b918f0b4d43de104d99e80ac4a57b697df), `317f48b918f0b4d43de104d99e80ac4a57b697df`, v0.14.0 (workspace 0.13.1-nightly) | packages/openclank-history/vendor/lore/ storage dependency closure; Open Clank history service wrapper and explicit durability/compaction repairs. This is not the complete Lore desktop product. | [Epic Games Inc.2026 MIT](../packages/openclank-history/vendor/lore/LICENSE); nested [glob-match MIT](../packages/openclank-history/vendor/lore/vendor/glob-match/LICENSE), [quinn-proto MIT](../packages/openclank-history/vendor/lore/vendor/quinn-proto/LICENSE-MIT)/[Apache](../packages/openclank-history/vendor/lore/vendor/quinn-proto/LICENSE-APACHE), [rpmalloc](../packages/openclank-history/vendor/lore/lore-base/native/thirdparty/rpmalloc/LICENSE). |
 
 ## Adapted code and design studies
 
@@ -35,6 +35,7 @@ Google [Noto Emoji SVG artwork](https://github.com/googlefonts/noto-emoji/tree/e
 
 | Actual artifact / runtime load | Version authority / purpose | Component license and source |
 | --- | --- | --- |
+| static/js/vendor/pretext-matrix.js | `@chenglou/pretext` 1.0.0, local browser bundle for Matrix Rain glyph preparation | MIT and upstream third-party notices. [Full notices](../static/js/vendor/pretext-LICENSE.txt) · [Build provenance](../static/js/vendor/pretext-PROVENANCE.md) |
 | static/lib/shiki.bundle.js | Shiki 3.23.0 selected 39-grammar build; installed build inputs/receipt; custom Open Clank CSS theme, JavaScript regex engine | MIT Shiki; separate Microsoft vscode-textmate and regex dependency notices in [frontend texts](FRONTEND-LICENSES.md). Individual grammar provenance beyond supplied package notices is not fully reconstructed. [Shiki](https://github.com/shikijs/shiki) |
 | static/lib/mermaid.min.js |11.16.1 bundle version and build receipt; local, not CDN | MIT Mermaid with retained nested bundle notices (including DOMPurify, D3 and KaTeX); [texts](FRONTEND-LICENSES.md), [upstream](https://github.com/mermaid-js/mermaid) |
 | static/lib/xlsx.full.min.js | Embedded SheetJS version 0.20.3; spreadsheet read/write | Apache-2.0 SheetJS; retained SheetJS header; [source](https://github.com/SheetJS/sheetjs). Exact original acquisition URL/companion notices not reconstructed; [upstream notice](FRONTEND-LICENSES.md) retained. |
@@ -57,6 +58,27 @@ SHA256 values identify the inspected bytes, not a new license grant or a rebuild
 
 | Artifact | SHA256 |
 | --- | --- |
+| static/fonts/ComicClank-Bold.woff2 | `b3e7d5b53162f3370192fb8a6d57bbfa5c823ff60859abaaea6568e507f711c2` |
+| static/fonts/ComicClank-BoldItalic.woff2 | `b9f86542b1eb57a5e5906c3d9ac880db8fb4dd1462e4da8a15b128c399e45564` |
+| static/fonts/ComicClank-Italic.woff2 | `dd24062c080fbb8132aea2c13246243082540569a65bf86e14b7e73b3f531464` |
+| static/fonts/ComicClank-Light.woff2 | `9562aaedaaaab156b6047c17551f499192eddf92f37f558243a7f5ab11125ca9` |
+| static/fonts/ComicClank-LightItalic.woff2 | `a0ce9764990956ec15538d5b9e15062a4bae22011af858155127c82d1cd7d69a` |
+| static/fonts/ComicClank-Medium.woff2 | `0097d13f404fc100739ec61a2f9ed9b19fc2ab3f169fc1a88ba766b477c1d1e0` |
+| static/fonts/ComicClank-MediumItalic.woff2 | `fb568d20af05941b22e66a882f07fff5e79a6f3c6b76acbca9459880ee2aee87` |
+| static/fonts/ComicClank-Regular.woff2 | `1abdf18c0e312917c1619b3583ff31636cedce7a70add58058522fa0a0e006c6` |
+| static/fonts/ComicClank-SemiBold.woff2 | `3095699c1cc068da11df87fe7b5634760faf9b101fce903d45dc7dc70b11c724` |
+| static/fonts/ComicClank-SemiBoldItalic.woff2 | `9e45882d25494c47b10e7ddedf7cfcba26c65e1142042535de7f2b0f4ade167f` |
+| static/fonts/ComicClankMono-Bold.woff2 | `73a4863ef41c912c18f6f29d1e9b027c45125333de8c202555d6dcd6e08ef487` |
+| static/fonts/ComicClankMono-BoldItalic.woff2 | `8539f1ac97c83d720343e5aa210e3ed0384acd802ce0ce41d3f7ea0282b3d063` |
+| static/fonts/ComicClankMono-Italic.woff2 | `c9422d541c2800e0f5959c54075ae8e74e03cb8b123c52317c0ec1fd0612b369` |
+| static/fonts/ComicClankMono-Light.woff2 | `e19890a9a61a9d46403c10f71ce5db748c6de4fc2735b63b66c20d428fb3f635` |
+| static/fonts/ComicClankMono-LightItalic.woff2 | `aa683b03765e94a8cf2a5f22dc59e14e6062df0855c245593b414dd3feaa44b5` |
+| static/fonts/ComicClankMono-Medium.woff2 | `ee0d14d69299c6d3be1e5bed32dd2b5791185d923560f0e479dde2059cca9a55` |
+| static/fonts/ComicClankMono-MediumItalic.woff2 | `a8174cf8792eb3cac8d6fe3b1d096db89c132b225d4b6f3e98c2c4f0eb3a1e45` |
+| static/fonts/ComicClankMono-Regular.woff2 | `8477c7565cd3f7e749a35e1614666751120b8c9ed6f4067a5da512f110a34231` |
+| static/fonts/ComicClankMono-SemiBold.woff2 | `4b83d255a6bf8457eae0063b23f91ca95bdb7546594a4f353cf9fc167969a030` |
+| static/fonts/ComicClankMono-SemiBoldItalic.woff2 | `be634cded5ef9f84e167d5da68a982e7915ac5a3e770e73d1ce036aa85daa28b` |
+| static/fonts/ComicClankMono-Bold-Wordmark.woff2 | `0a2ee83a6b916659f052b598e4dbc6646c0fc6ff5519c2d6769bf608b0d9ab2e` |
 | static/fonts/ComicNeue-Regular.woff2 | `dc603c8b97ea803cc1377f15a8cd952ca2fb7408e322b8025099ad1cbf6eaf4f` |
 | static/fonts/FiraCode-Light.woff2 | `e3aa3db06cfb19dfc0b0f1f38355add3e8d1ef45d3af39ce95d9ca7d96114e6c` |
 | static/fonts/FiraCode-Regular.woff2 | `a6ce59520b90e15d7062ffef214f94c8add5a4085c0bbb1683602ef227a4d1fe` |

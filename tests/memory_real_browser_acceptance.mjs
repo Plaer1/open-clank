@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const fmDir = path.join(repo, 'mcp_servers', 'frankenmemory');
+const fmDir = path.join(repo, 'native', 'memery');
 const bootstrap = path.join(repo, 'scripts', 'openclank_bootstrap.py');
 
 function resolveRuntime() {
@@ -44,19 +44,19 @@ function resolveRuntime() {
 }
 
 const runtime = resolveRuntime();
-const fmBinary = runtime.fm_mcp.path;
+const fmBinary = runtime.memery_worker.path;
 const python = runtime.python.path;
 const chromium = runtime.browser.path;
 
 if (process.env.OPEN_CLANK_ACCEPTANCE_BUILD === '1') {
-  const build = spawnSync('cargo', ['build', '--release', '-p', 'fm-mcp'], {
+  const build = spawnSync('cargo', ['build', '--release', '-p', 'memery-worker'], {
     cwd: fmDir,
     encoding: 'utf8',
     timeout: 300_000,
   });
-  assert.equal(build.status, 0, `current-source fm-mcp build failed:\n${build.stdout}\n${build.stderr}`);
+  assert.equal(build.status, 0, `current-source memery-worker build failed:\n${build.stdout}\n${build.stderr}`);
 }
-assert.ok(fs.existsSync(fmBinary), `fm-mcp was not built at ${fmBinary}`);
+assert.ok(fs.existsSync(fmBinary), `memery-worker was not built at ${fmBinary}`);
 
 const freePort = () => new Promise((resolve, reject) => {
   const server = net.createServer();
@@ -164,7 +164,7 @@ const descendantRows = rootPid => {
 
 const signalRows = (rows, signal) => {
   for (const row of [...rows].reverse()) {
-    if (!/real_memory_browser_server|fm-mcp/.test(row.command)) continue;
+    if (!/real_memory_browser_server|memery-worker/.test(row.command)) continue;
     try { process.kill(row.pid, signal); } catch (error) {
       if (error.code !== 'ESRCH') throw error;
     }
@@ -650,7 +650,7 @@ try {
   process.stdout.write(JSON.stringify({
     lifecycle: 'pass',
     browser: 'chromium-cdp',
-    provider: 'release-path fm-mcp',
+    provider: 'release-path memery-worker',
     persistence: 'hard-refresh',
     import: 'multipart-production-route',
     graph: graphCounts,

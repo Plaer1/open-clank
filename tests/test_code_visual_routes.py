@@ -15,9 +15,9 @@ def mounted(monkeypatch):
     # Refuse an unisolated startup BEFORE importing route/application owners.
     root = Path(os.environ["OPEN_CLANK_DATA_DIR"]).resolve()
     assert root.name.startswith("openclank-s02-visual.")
-    for key in ("ODYSSEUS_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "OPENCLANK_CONVERSATION_ARCHIVE_DB"):
+    for key in ("OPEN_CLANK_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "OPENCLANK_CONVERSATION_ARCHIVE_DB"):
         assert Path(os.environ[key]).resolve().is_relative_to(root)
-    assert os.environ["ODYSSEUS_INPROCESS_POLLERS"] == "0"
+    assert os.environ["OPEN_CLANK_INPROCESS_POLLERS"] == "0"
     assert os.environ["PYTHONDONTWRITEBYTECODE"] == "1"
     assert os.environ["DATABASE_URL"] == "sqlite:///:memory:"
     assert "OPEN_CLANK_AGENT_HOME" not in os.environ and "THESIUS_AGENT_HOME" not in os.environ
@@ -28,7 +28,7 @@ def mounted(monkeypatch):
         assert kwargs["purpose"] == "app_folder" and kwargs["session"] is None
         return dict(workspace_id="fixture-workspace", workspace_revision=1, policy_generation=1, origin="app"), (state["changed"],)
     monkeypatch.setattr(cv, "resolve_query_binding", resolve)
-    result = json.loads((Path(__file__).resolve().parents[1] / "mcp_servers/frankenmemory/crates/fm-core/tests/fixtures/code_map_preview.json").read_text())
+    result = json.loads((Path(__file__).resolve().parents[1] / "native/memery/crates/memery-core/tests/fixtures/code_map_preview.json").read_text())
     async def invoke(**kwargs):
         calls.append(kwargs)
         return result
@@ -129,7 +129,7 @@ def test_backend_error_is_not_success_and_native_message_is_private(mounted):
 
 def test_same_route_handles_published_selection_without_agent_query_or_geometry_evidence(mounted):
     app, calls, result, _ = mounted
-    selected = json.loads((Path(__file__).resolve().parents[1] / "mcp_servers/frankenmemory/crates/fm-core/tests/fixtures/code_map_selection.json").read_text())
+    selected = json.loads((Path(__file__).resolve().parents[1] / "native/memery/crates/memery-core/tests/fixtures/code_map_selection.json").read_text())
     result.clear()
     result.update(selected)
     value = {"workspace_id":"fixture-workspace", "visual_request":{"mode":"selection", "request":{

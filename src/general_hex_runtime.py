@@ -1,4 +1,4 @@
-"""Resolve the active pinned Frankenmemory authority for Hex operations."""
+"""Resolve the active pinned Memery authority for Hex operations."""
 from pathlib import Path
 import sqlite3
 from src.general_hex_library import GeneralHexError, ensure_general_hex_schema
@@ -14,7 +14,7 @@ def active_hex_db_path(provider):
 
 def prepare_hex_authority(db_path):
     if not db_path or not Path(db_path).is_file():
-        raise GeneralHexError('General Hex authority is unavailable; a pinned local Frankenmemory store is required')
+        raise GeneralHexError('General Hex authority is unavailable; a pinned local Memery store is required')
     try:
         ensure_general_hex_schema(db_path)
         ensure_general_hex_snapshot_schema(db_path)

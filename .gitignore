@@ -1,6 +1,9 @@
 .archive/
 .references/
 references/
+# Bundled runtime skill references are shipped source inputs.
+!packages/mimo-code/packages/cli/src/skill/builtin/.bundle/**/references/
+!packages/mimo-code/packages/cli/src/skill/builtin/.bundle/**/references/**
 # Personal root working notes stay local, including filename case variants.
 /[Mm][Ee][Aa][Tt][Bb][Aa][Gg][Ss]
 /[Mm][Ee][Aa][Tt][Bb][Aa][Gg][Ss].[Mm][Dd]
@@ -13,7 +16,8 @@ references/
 apps/mimo/node_modules/
 apps/mimo/packages/opencode/node_modules/
 apps/mimo/packages/opencode/dist/
-mcp_servers/frankenmemory/target/
+native/memery/target/
+/native/capture/target/
 
 # Python
 __pycache__/
@@ -98,6 +102,11 @@ output.txt.txt
 *.jpg
 *.jpeg
 *.png
+# Declared vendored source assets and focused fixture remain portable build inputs.
+!packages/mimo-code/assets/readme/mimo-desktop-cn.jpg
+!packages/mimo-code/assets/readme/mimo-desktop-en.jpg
+!packages/mimo-code/packages/cli/src/skill/builtin/.bundle/playwright/assets/playwright.png
+!packages/mimo-code/packages/cli/test/tool/fixtures/large-image.png
 *.gif
 *.bmp
 *.webp
@@ -106,6 +115,9 @@ output.txt.txt
 
 # …except shipped static assets
 !static/icons/*.png
+# Public assets referenced by the design standard manifest.
+!static/brand/open-clank/design/thumbnails/dark/*.png
+!static/brand/open-clank/design/thumbnails/light/*.png
 !static/themes/
 !static/themes/clanker/
 !static/themes/clanker/*.png
@@ -115,9 +127,7 @@ output.txt.txt
 !static/docs/media/
 !static/docs/media/**/*.png
 !static/docs/media/**/*.webp
-!/static/treehouse/fixtures/openclank/code-graph-web-alpha-20261019.png
-!/static/treehouse/fixtures/openclank/code-graph-gravity-alpha-20261019.png
-!/static/treehouse/fixtures/openclank/code-graph-menus-alpha-20261019.png
+!static/treehouse/fixtures/openclank/code-graph-symbol-relationship-20261119.png
 
 # …except shipped demo assets in docs/ that the README links to.
 !docs/*.jpg
@@ -175,5 +185,6 @@ _scratch/
 .mimocode/.cron-lock
 
 # Local scheduler plans and native engine coordination locks.
+.openclank/
 .mimocode/
 libexec/openclank/.engine.build.lock

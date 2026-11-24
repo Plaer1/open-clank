@@ -33,7 +33,6 @@ OPENTHESIUS_BRIDGE_EXCLUDED_TOOLS = {
 
 _REQUIRED_NATIVE_TOOL_ARGS = {
     "web_search": ("query", "queries"),
-    "web_fetch": ("url",),
     "read_file": ("path",),
     "write_file": ("path",),
     "edit_file": ("path",),
@@ -49,6 +48,80 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
 # public schema names may be exposed through the private Rust-backed lifetools
 # namespace when the server projects a current AgentScope.
 FUNCTION_TOOL_SCHEMAS = [
+    {'type': 'function',
+     'function': {'name': 'media_job',
+                  'description': 'List configured compatible media profiles, submit an operation with '
+                                 'owned inputs and destination, or inspect and collect an existing '
+                                 'job. material.pack bundles supplied PNG maps into a ZIP archive; material.bake bakes material channels from a supported mesh, and image.render renders a front view. A queued job is not completed output.',
+                  'parameters': {'description': 'For material.pack use exactly {} and one each baseColor, roughness and metallic map, plus optional normal; references must be distinct. For material.bake use one mesh and resolution 256, 512, 1024 or 2048. For image.render use one mesh and {} for front, {variant:four_heading}, or {variant:rig_clip,source_sha256,joint_ordinal}. Inspect a rig first with action inspect, image.render, one mesh and {variant:rig_clip}. Audio uses one workflow recipe and scalar slots. Sprite pack uses four ordered images and annotations; crop pack uses one image with annotations and four explicit rectangles.', 'type': 'object',
+                                 'additionalProperties': False,
+                                 'properties': {'action': {'enum': ['profiles',
+                                                                    'submit',
+                                                                    'inspect',
+                                                                    'status',
+                                                                    'collect']},
+                                                'operation': {'enum': ['image.generate',
+                                                                       'mesh.generate',
+                                                                       'mesh.rig',
+                                                                       'material.pack',
+                                                                       'material.bake',
+                                                                       'material.generate',
+                                                                       'image.render',
+                                                                       'audio.generate',
+                                                                       'image.pack',
+                                                                       'image.pack-crops']},
+                                                'profile_id': {'type': 'string',
+                                                               'minLength': 1,
+                                                               'maxLength': 256},
+                                                'inputs': {'type': 'array',
+                                                           'minItems': 1,
+                                                           'maxItems': 8,
+                                                           'items': {'oneOf': [{'type': 'object',
+                                                                                'properties': {'kind': {'const': 'workflow_recipe'},
+                                                                                               'resource_ref': {'type': 'string',
+                                                                                                                'minLength': 1,
+                                                                                                                'maxLength': 8192}},
+                                                                                'required': ['kind',
+                                                                                             'resource_ref'],
+                                                                                'additionalProperties': False},
+                                                                               {'type': 'object',
+                                                                                'properties': {'kind': {'const': 'image'}, 'resource_ref': {'type': 'string', 'minLength': 1, 'maxLength': 8192}},
+                                                                                'required': ['kind', 'resource_ref'], 'additionalProperties': False},
+                                                                               {'type': 'object',
+                                                                                'properties': {'kind': {'const': 'mesh'}, 'resource_ref': {'type': 'string', 'minLength': 1, 'maxLength': 8192}},
+                                                                                'required': ['kind', 'resource_ref'], 'additionalProperties': False},
+                                                                               {'type': 'object',
+                                                                                'properties': {'kind': {'const': 'texture_map'}, 'role': {'enum': ['baseColor', 'roughness', 'metallic', 'normal']}, 'resource_ref': {'type': 'string', 'minLength': 1, 'maxLength': 8192}},
+                                                                                'required': ['kind', 'role', 'resource_ref'], 'additionalProperties': False},
+                                                                               {'type': 'object',
+                                                                                'properties': {'kind': {'const': 'text'},
+                                                                                               'text': {'type': 'string',
+                                                                                                        'minLength': 1,
+                                                                                                        'maxLength': 16384}},
+                                                                                'required': ['kind',
+                                                                                             'text'],
+                                                                                'additionalProperties': False}]}},
+                                                'parameters': {'oneOf': [{'type': 'object', 'maxProperties': 32, 'propertyNames': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'additionalProperties': {'type': ['string', 'number', 'boolean'], 'maxLength': 16384}}, {'type': 'object', 'properties': {'fps': {'type': 'integer', 'minimum': 1, 'maximum': 60}, 'facing': {'type': ['string', 'null'], 'maxLength': 128}, 'pivots': {'type': 'array', 'minItems': 4, 'maxItems': 4, 'items': {'type': 'object', 'properties': {'x': {'type': 'integer', 'minimum': 0, 'maximum': 512}, 'y': {'type': 'integer', 'minimum': 0, 'maximum': 512}}, 'required': ['x', 'y'], 'additionalProperties': False}}, 'palette': {'type': ['string', 'null'], 'maxLength': 128}, 'style': {'type': ['string', 'null'], 'maxLength': 128}}, 'required': ['fps', 'facing', 'pivots', 'palette', 'style'], 'additionalProperties': False}, {'type': 'object', 'properties': {'annotations': {'type': 'object', 'properties': {'fps': {'type': 'integer', 'minimum': 1, 'maximum': 60}, 'facing': {'type': ['string', 'null'], 'maxLength': 128}, 'pivots': {'type': 'array', 'minItems': 4, 'maxItems': 4, 'items': {'type': 'object', 'properties': {'x': {'type': 'integer', 'minimum': 0, 'maximum': 512}, 'y': {'type': 'integer', 'minimum': 0, 'maximum': 512}}, 'required': ['x', 'y'], 'additionalProperties': False}}, 'palette': {'type': ['string', 'null'], 'maxLength': 128}, 'style': {'type': ['string', 'null'], 'maxLength': 128}}, 'required': ['fps', 'facing', 'pivots', 'palette', 'style'], 'additionalProperties': False}, 'rectangles': {'type': 'array', 'minItems': 4, 'maxItems': 4, 'items': {'type': 'object', 'properties': {'x': {'type': 'integer', 'minimum': 0, 'maximum': 4095}, 'y': {'type': 'integer', 'minimum': 0, 'maximum': 4095}, 'width': {'type': 'integer', 'minimum': 1, 'maximum': 512}, 'height': {'type': 'integer', 'minimum': 1, 'maximum': 512}}, 'required': ['x', 'y', 'width', 'height'], 'additionalProperties': False}}}, 'required': ['annotations', 'rectangles'], 'additionalProperties': False}]},
+                                                'destination': {'type': 'object',
+                                                                'properties': {'resource_ref': {'type': 'string',
+                                                                                                'minLength': 1,
+                                                                                                'maxLength': 8192},
+                                                                               'name': {'type': 'string',
+                                                                                        'minLength': 1,
+                                                                                        'maxLength': 255}},
+                                                                'required': ['resource_ref', 'name'],
+                                                                'additionalProperties': False},
+                                                'job_id': {'type': 'string',
+                                                           'minLength': 1,
+                                                           'maxLength': 256}},
+                                 'required': ['action']}}},
+    {"type":"function", "function": {
+        "name":"theme_emoji_assets",
+        "description":"Inspect emoji artwork status through a managed app connection. Discovery and downloads require prior human consent in Theme Settings and are currently unavailable; this tool cannot grant consent.",
+        "parameters":{"type":"object", "additionalProperties":False,
+            "properties":{"operation":{"type":"string", "enum":["status", "discover", "download", "cancel"]}},
+            "required":["operation"]},
+    }},
     __import__("src.openclank.code_query", fromlist=["search_code_schema"]).search_code_schema(),
     {
         "type": "function",
@@ -100,14 +173,15 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "web_fetch",
-            "description": "Fetch and read the text content of a specific URL the user names (e.g. 'check example.com', 'what's on this page <url>'). Use when you already have a concrete URL/domain. NOT for open-ended searches (use web_search) or 'research X' jobs (use trigger_research). Downloads are size-budgeted; a '[partial content: ...]' notice in the result means the body was cut short and you can re-call with full=true for the rest.",
+            "description": "Fetch a public URL and return a bounded first page. Use the returned continuation for more of that same response.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "The URL or domain to fetch (http/https; a bare domain like example.com is fine)"},
-                    "full": {"type": "boolean", "description": "Raise the download budget to the hard cap for large pages/files. Use only after a result reported partial content."}
+                    "full": {"type": "boolean", "description": "Use the hard download cap for a new URL fetch"},
+                    "continuation": {"type": "string", "description": "Read the next page of the exact previously captured response"}
                 },
-                "required": ["url"]
+                "anyOf": [{"required": ["url"]}, {"required": ["continuation"]}]
             }
         }
     },
@@ -148,7 +222,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Search literal file contents through the authenticated Files service. Returns matching file paths, not line occurrences. Case-sensitive by default. Scans are bounded and nonresumable; incomplete results have unknown totals. Regex is unsupported. Hidden files are excluded by default; .gitignore is not applied.",
+            "description": "Search literal file contents through the authenticated Files service. Returns matching file paths and known captured line locations. Case-sensitive by default. Scans are bounded and nonresumable; incomplete results have unknown totals. Regex is unsupported. Hidden files are excluded by default; .gitignore is not applied.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -158,6 +232,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "ignore_case": {"type": "boolean", "description": "Case-insensitive match (optional)"},
                     "mode": {"type": "string", "enum": ["literal"], "description": "Literal search (default); regex is unsupported"},
                     "literal": {"type": "boolean", "description": "Compatibility flag for literal matching"},
+                    "max_depth": {"type": "integer", "minimum": 0, "maximum": 32, "description": "Bound the search depth"},
+                    "exclude": {"type": "array", "maxItems": 8, "items": {"type": "string", "maxLength": 512}, "description": "Exclude matching relative glob paths"},
                     "include_hidden": {"type": "boolean", "description": "Include hidden files and folders (default false)"},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Backward-compatible alias for limit"},
                     "cursor": {"type": "integer", "enum": [0], "description": "Only 0 is supported; bounded search cannot resume"},
@@ -178,6 +254,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.ts' or 'src/**/test_*.py'"},
                     "path": {"type": "string", "description": "Base directory (optional; defaults to the project root)"},
                     "ignore_case": {"type": "boolean", "description": "Case-insensitive filename matching (default false)"},
+                    "max_depth": {"type": "integer", "minimum": 0, "maximum": 32, "description": "Bound the search depth"},
+                    "exclude": {"type": "array", "maxItems": 8, "items": {"type": "string", "maxLength": 512}, "description": "Exclude matching relative glob paths"},
                     "include_hidden": {"type": "boolean", "description": "Include hidden files and folders (default false)"},
                     "cursor": {"type": "integer", "enum": [0], "description": "Only 0 is supported; bounded search cannot resume"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Maximum returned file paths"}
@@ -240,7 +318,11 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "path": {"type": "string", "description": "File path to write to"},
                     "content": {"type": "string", "description": "File content to write"},
-                    "expected_fingerprint": {"type": "string", "description": "Optional fingerprint returned by read_file; rejects a stale overwrite"}
+                    "expected_fingerprint": {"type": "string", "description": "Optional fingerprint returned by read_file; rejects a stale overwrite"},
+                    "create_only": {"type": "boolean", "description": "Create without overwriting; requires operation_id and parent_revision"},
+                    "operation_id": {"type": "string", "description": "Original idempotency label for create-only; repeat only to inspect its outcome"},
+                    "parent_revision": {"type": "string", "description": "Exact current directory revision for create-only"},
+                    "status_only": {"type": "boolean", "description": "Read the original create outcome without issuing"}
                 },
                 "required": ["path", "content"]
             }
@@ -507,6 +589,22 @@ FUNCTION_TOOL_SCHEMAS = [
                 "required": ["action", "session_id"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_rag",
+            "description": "Administer the authenticated owner's Memery document index and embedding generations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "status", "add_directory", "remove_directory", "rebuild_embeddings", "rollback_embedding"]},
+                    "directory": {"type": "string", "description": "Directory to index or remove"},
+                    "generation_id": {"type": "string", "description": "Embedding generation to restore"},
+                },
+                "required": ["action"],
+            },
+        },
     },
     {
         "type": "function",
@@ -1358,14 +1456,14 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_bg_jobs",
-            "description": "Start and control durable, workspace-contained shell sessions scoped to this owner/chat/workspace. Use list, poll, tail, write, wait, or terminate with a session id; tail is cursor-based and bounded.",
+            "description": "Start and control durable, workspace-contained shell sessions scoped to this owner/chat/workspace. Use list, poll, tail, write, wait, terminate, or retire with a session id; retire hides a settled job without deleting its retained data.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["start", "poll", "write", "wait", "terminate", "list", "tail"]},
+                    "action": {"type": "string", "enum": ["start", "poll", "write", "wait", "terminate", "list", "tail", "retire"]},
                     "job_id": {"type": "string", "description": "Shell session id from list/start"},
                     "command": {"type": "string", "description": "Command for start"},
-                    "data": {"type": "string", "description": "Input bytes for write"},
+                    "data": {"type": "string", "description": "Non-secret UTF-8 input for write; at most 16384 bytes. Acceptance is not command completion."},
                     "timeout_s": {"type": "number", "minimum": 0, "maximum": 30, "description": "Bounded wait duration"},
                     "max_runtime_s": {"type": "integer", "minimum": 1, "maximum": 86400, "description": "Maximum session runtime"},
                     "cursor": {"type": "integer", "minimum": 0, "description": "Byte cursor for tail/list"},
@@ -1379,20 +1477,98 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "capture_desktop",
-            "description": "Capture one opted-in display, visible window, or bounded region on macOS or Windows for the current task. The result is retained through Files and never exposes a host path.",
+            "description": "Capture one opted-in display, visible window, or bounded region on macOS or Windows, or use the one-shot OS portal chooser on Linux. When a current authenticated Linux control stream supports a full-frame observation, capture uses that same stream; otherwise an independent portal screenshot is a capture only and does not prove a control target. Linux portal behavior remains unverified until actual use. The result is retained through Files and never exposes a host path.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target": {"type": "string", "enum": ["display", "window", "region"]},
-                    "action": {"type": "string", "enum": ["capture", "correct"]},
+                    "target": {"type": "string", "enum": ["display", "window", "region", "portal"]},
+                    "action": {"type": "string", "enum": ["capture", "correct", "readiness", "frame"]},
+                    "destination_ref": {"type": "string", "maxLength": 8192, "description": "Authorized Files folder for a managed frame."},
+                    "name": {"type": "string", "maxLength": 240, "description": "PNG output name for a managed frame."},
                     "original": {"type": "object", "description": "Immutable Files resource returned by an earlier capture"},
                     "text": {"type": "string", "maxLength": 100000},
                     "boxes": {"type": "array", "maxItems": 10000},
+                    "crop": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 16384}, "minItems": 4, "maxItems": 4, "description": "Linux portal source pixels: [x, y, width, height]"},
+                    "scale": {"type": "number", "minimum": 0.05, "maximum": 1, "description": "Linux portal output scale"},
+                    "ocr": {"type": "boolean", "description": "Linux only: request optional installed local OCR; default false"},
+                    "ocr_language": {"type": "string", "pattern": "^[A-Za-z0-9_]{1,32}$", "description": "Linux Tesseract language code; default eng"},
                     "display": {"type": "integer", "minimum": 1, "maximum": 32},
                     "window_id": {"type": "integer", "minimum": 1},
                     "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4, "description": "[x, y, width, height]; x/y may be negative, width/height must be positive"}
                 },
                 "required": ["target"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_desktop",
+            "description": "Read the accessibility tree of an application window on the user's REAL Linux desktop (element names, roles, actions and values; secret-looking values are hidden, but that filter is not a guarantee). Only when the user asked, and only if they switched on 'accessibility tree reading' in Settings. Each read (list_apps, list_windows, app_state) needs the user's approval, shown as plain text; handshake needs none and tells whether it can work. app_state returns a snapshot_id and element ids ('root' or dotted child numbers) that control_desktop element actions use. A field_purpose=file_location marks the unique source-backed GTK3.24 C/C.UTF-8 chooser location candidate; the user may need to reveal the location field first, and other profiles are unavailable. Password managers are never listed. A snapshot expires after two minutes or when the window changes; read again instead of guessing.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "action": {"type": "string", "enum": ["handshake", "list_apps", "list_windows", "app_state"]},
+                    "app": {"type": "object", "additionalProperties": False, "description": "Exactly one of pid or name.",
+                            "properties": {"pid": {"type": "integer", "minimum": 1}, "name": {"type": "string", "minLength": 1, "maxLength": 128}}},
+                    "window_index": {"type": "integer", "minimum": 0, "maximum": 63, "description": "app_state only; default is the active window."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "control_desktop",
+            "description": "This controls the user's REAL desktop. Use it only when the user asked for it. Every call needs the user's approval, shown to them as plain text, and a rejected or unanswered call does nothing. Three paths. FILE actions: open_resource opens a Files resource the person chose in an application they approve (never a path); hand_over_file can enter one selected Files resource into a currently observed GTK3.24 file chooser in C or C.UTF-8 locale. The user may need to reveal its location field first; take a fresh app_state and use the unique node marked field_purpose=file_location. Provide direction=upload, resource_ref, its exact expected_revision, snapshot_id, element and target. Other fields, toolkits and locales are unavailable; the marker is a source-backed heuristic, not widget-class proof. An entered result proves field readback only, not selection or opening. A sandboxed chooser may not access the temporary snapshot. Download and other platforms are unavailable. ELEMENT actions (click_element, secondary, set_value, type_element, select_text) act on one element of a snapshot from inspect_desktop app_state through the application's accessibility interface; pass snapshot_id, the element id and a target {app, window, role, name} copied exactly from that snapshot; a stale element or changed window is refused, never retargeted. PIXEL actions need begin first (the system then asks the user to share a screen), then capture_desktop and look at a FRESH same-control-stream frame; an independent screenshot does not establish the control target. Pass that frame's width and height and the capture's observation_id (an old or reused observation is refused: capture again); move only moves the pointer; coordinates are pixels inside the frame: click, key/hotkey (key NAMES: printable ASCII, Return, Tab, Escape, BackSpace, Delete, arrows, Home, End, Page_Up, Page_Down, F1-F12, with optional Control, Shift, Alt; not Control+Alt, Alt+F4, Alt+Tab, Super), type (1-256 characters), scroll (up/down/left/right, 1-20 steps), drag (from, to) and paste (requires clipboard=replace at begin and paste; the previous clipboard is replaced and not restored; availability is session-scoped). A result of 'sent' or 'performed' means the input was handed over, not that it had the effect you wanted: look again to check. An action is never repeated automatically; never retry one whose outcome is unknown without looking first. Use control_desktop_status stop to end the session.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "action": {"type": "string", "enum": ["begin", "click", "move", "key", "hotkey", "type", "scroll", "drag", "paste", "click_element", "secondary", "set_value", "type_element", "select_text", "open_resource", "hand_over_file"]},
+                    "clipboard": {"type": "string", "enum": ["replace"], "description": "Optional for begin to request clipboard replacement; required for paste. Previous clipboard is not restored."},
+                    "observation": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "Pixel actions (everything except begin and the element/file actions) must name the observation_id of the capture_desktop result they were planned from; it is valid for about 30 seconds, backs one action, and must be newer than the last Stop."},
+                    "start": {"type": "integer", "minimum": 0, "description": "select_text: first character"},
+                    "end": {"type": "integer", "minimum": 0, "description": "select_text: end (exclusive)"},
+                    "resource_ref": {"type": "string", "maxLength": 1024, "description": "open_resource / hand_over_file: an opaque Files resource token the person chose; a path is refused."},
+                    "expected_revision": {"type": "object", "additionalProperties": False, "required": ["kind", "value"], "properties": {"kind": {"type": "string", "enum": ["hostFingerprint"]}, "value": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}:[0-9]{1,8}$"}}, "description": "hand_over_file upload: exact current revision from the selected Files resource."},
+                    "app_id": {"type": "string", "maxLength": 128, "description": "open_resource: an application id from the Files app list"},
+                    "x": {"type": "integer", "minimum": 0, "maximum": 1048575},
+                    "y": {"type": "integer", "minimum": 0, "maximum": 1048575},
+                    "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "click only; default left"},
+                    "frame": {"type": "object", "additionalProperties": False, "required": ["width", "height"],
+                              "properties": {"width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}},
+                              "description": "Width and height of the frame the coordinates come from; must equal the shared screen size."},
+                    "keys": {"type": "array", "items": {"type": "string", "maxLength": 16}, "minItems": 1, "maxItems": 4, "description": "Key names: up to 3 modifiers plus one key, e.g. [\"Control\", \"s\"]"},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "type/paste: 1-256 characters; type_element: 1-4096"},
+                    "direction": {"type": "string", "enum": ["up", "down", "left", "right", "upload", "download"], "description": "scroll: up/down/left/right; hand_over_file: upload/download"},
+                    "amount": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "from": {"type": "object", "additionalProperties": False, "required": ["x", "y"], "properties": {"x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0}}},
+                    "to": {"type": "object", "additionalProperties": False, "required": ["x", "y"], "properties": {"x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0}}},
+                    "snapshot_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+                    "element": {"type": "string", "maxLength": 400, "description": "Element id from the snapshot: 'root' or dotted child numbers"},
+                    "target": {"type": "object", "additionalProperties": False, "required": ["app", "window", "role", "name"],
+                               "properties": {"app": {"type": "string", "maxLength": 200}, "window": {"type": "string", "maxLength": 200}, "role": {"type": "string", "maxLength": 200}, "name": {"type": "string", "maxLength": 200}},
+                               "description": "What the element is, copied exactly from the snapshot; shown to the user and checked."},
+                    "action_name": {"type": "string", "minLength": 1, "maxLength": 64, "description": "secondary: the element's action name"},
+                    "value": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "set_value"}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "control_desktop_status",
+            "description": "Desktop control readiness per capability (readiness), ask the system portal what it offers without any dialog (probe), or end the control session immediately (stop). Never needs approval.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"action": {"type": "string", "enum": ["readiness", "probe", "stop"]}},
+                "required": ["action"]
             }
         }
     },
@@ -1428,6 +1604,8 @@ _COPAL_BASE_PROPERTIES = {
     "action": {"type": "string", "enum": sorted(_COPAL_READ_ACTION_FIELDS)},
     "workspace": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$", "default": "default"},
 }
+FUNCTION_TOOL_SCHEMAS.append({'type': 'function', 'function': {'name': 'shared_text', 'description': 'Read or edit an explicitly shared text, workbook or slides publication. Workbook and slides require an explicit format and stable IDs; status only observes an existing operation. In plan or compare mode this mixed write-capable tool is unavailable.', 'parameters': {'oneOf': [{'type': 'object', 'properties': {'action': {'const': 'read'}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}}, 'required': ['action', 'publication_id'], 'additionalProperties': False}, {'type': 'object', 'properties': {'action': {'const': 'commit'}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'base_text': {'type': 'string', 'maxLength': 65536}, 'base_sha256': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}, 'edits': {'type': 'array', 'minItems': 1, 'maxItems': 64, 'items': {'type': 'object', 'properties': {'start': {'type': 'integer', 'minimum': 0}, 'end': {'type': 'integer', 'minimum': 0}, 'text': {'type': 'string', 'maxLength': 32768}}, 'required': ['start', 'end', 'text'], 'additionalProperties': False}}}, 'required': ['action', 'publication_id', 'base_text', 'base_sha256', 'edits'], 'additionalProperties': False}, {'type': 'object', 'properties': {'action': {'const': 'status'}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'operation_id': {'type': 'string', 'minLength': 1, 'maxLength': 256}, 'client_digest': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}}, 'required': ['action', 'publication_id', 'operation_id', 'client_digest'], 'additionalProperties': False}, {'type': 'object', 'properties': {'format': {'const': 'workbook'}, 'action': {'const': 'read'}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}}, 'required': ['format', 'action', 'publication_id'], 'additionalProperties': False}, {'type': 'object', 'properties': {'format': {'const': 'workbook'}, 'action': {'const': 'status'}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'operation_id': {'type': 'string', 'minLength': 1, 'maxLength': 256}, 'client_digest': {'type': 'string', 'pattern': '^[a-f0-9]{64}$'}}, 'required': ['format', 'action', 'publication_id', 'operation_id', 'client_digest'], 'additionalProperties': False}, {'type': 'object', 'properties': {'format': {'const': 'workbook'}, 'action': {'const': 'commit'}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'base_text': {'type': 'string', 'maxLength': 65536}, 'base_sha256': {'type': 'string', 'pattern': '^[a-f0-9]{64}$'}, 'cells': {'type': 'array', 'minItems': 1, 'maxItems': 64, 'items': {'type': 'object', 'properties': {'sheet_id': {'type': 'string', 'pattern': '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'}, 'cell_id': {'type': 'string', 'pattern': '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'}, 'raw': {'type': 'string', 'maxLength': 65536}}, 'required': ['sheet_id', 'cell_id', 'raw'], 'additionalProperties': False}}}, 'required': ['format', 'action', 'publication_id', 'base_text', 'base_sha256', 'cells'], 'additionalProperties': False}, {'type': 'object', 'properties': {'format': {'const': 'slides'}, 'action': {'const': 'read'}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}}, 'required': ['format', 'action', 'publication_id'], 'additionalProperties': False}, {'type': 'object', 'properties': {'format': {'const': 'slides'}, 'action': {'const': 'status'}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'operation_id': {'type': 'string', 'minLength': 1, 'maxLength': 256}, 'client_digest': {'type': 'string', 'pattern': '^[a-f0-9]{64}$'}}, 'required': ['format', 'action', 'publication_id', 'operation_id', 'client_digest'], 'additionalProperties': False}, {'type': 'object', 'properties': {'format': {'const': 'slides'}, 'action': {'const': 'commit'}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'base_text': {'type': 'string', 'maxLength': 65536}, 'base_sha256': {'type': 'string', 'pattern': '^[a-f0-9]{64}$'}, 'objects': {'type': 'array', 'minItems': 1, 'maxItems': 64, 'items': {'type': 'object', 'properties': {'slide_id': {'type': 'string', 'pattern': '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'}, 'object_id': {'type': 'string', 'pattern': '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'}, 'text': {'type': 'string', 'maxLength': 65536}}, 'required': ['slide_id', 'object_id', 'text'], 'additionalProperties': False}}}, 'required': ['format', 'action', 'publication_id', 'base_text', 'base_sha256', 'objects'], 'additionalProperties': False}], 'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['read', 'commit', 'status']}, 'publication_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'base_text': {'type': 'string', 'maxLength': 65536}, 'base_sha256': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}, 'edits': {'type': 'array', 'minItems': 1, 'maxItems': 64, 'items': {'type': 'object', 'properties': {'start': {'type': 'integer', 'minimum': 0}, 'end': {'type': 'integer', 'minimum': 0}, 'text': {'type': 'string', 'maxLength': 32768}}, 'required': ['start', 'end', 'text'], 'additionalProperties': False}}, 'operation_id': {'type': 'string', 'minLength': 1, 'maxLength': 256}, 'client_digest': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}, 'format': {'type': 'string', 'enum': ['workbook', 'slides']}, 'cells': {'type': 'array', 'minItems': 1, 'maxItems': 64, 'items': {'type': 'object', 'properties': {'sheet_id': {'type': 'string', 'pattern': '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'}, 'cell_id': {'type': 'string', 'pattern': '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'}, 'raw': {'type': 'string', 'maxLength': 65536}}, 'required': ['sheet_id', 'cell_id', 'raw'], 'additionalProperties': False}}, 'objects': {'type': 'array', 'minItems': 1, 'maxItems': 64, 'items': {'type': 'object', 'properties': {'slide_id': {'type': 'string', 'pattern': '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'}, 'object_id': {'type': 'string', 'pattern': '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'}, 'text': {'type': 'string', 'maxLength': 65536}}, 'required': ['slide_id', 'object_id', 'text'], 'additionalProperties': False}}}, 'additionalProperties': False}}})
+
 FUNCTION_TOOL_SCHEMAS.append({
     "type": "function",
     "function": {
@@ -1451,6 +1629,53 @@ FUNCTION_TOOL_SCHEMAS.append({
         },
     },
 })
+
+from src.openclank.browser_control_service import (
+    BROWSER_ACTION_ARGUMENTS as _BROWSER_ACTION_ARGUMENTS,
+    BROWSER_REQUIRED_ARGUMENTS as _BROWSER_REQUIRED_ARGUMENTS,
+)
+
+FUNCTION_TOOL_SCHEMAS.append({
+    "type": "function",
+    "function": {
+        "name": "browser_status",
+        "description": "Read the explicitly selected managed Browser tab and refresh its short-lived target generation. Call before other Browser tools.",
+        "parameters": {"type": "object", "additionalProperties": False, "properties": {}},
+    },
+})
+
+for _browser_tool_name, _browser_tool_description, _browser_actions in (
+    ("browser_observe", "Read an explicitly selected Browser tab. Snapshot and screenshot are separate observations. Console reports counts, and network reports bounded same-origin request methods and statuses.", ["snapshot", "screenshot", "console", "network"]),
+    ("browser_control", "Interact with the explicitly selected Browser tab using a bounded supported action.", ["navigate", "back", "click", "hover", "drag", "type", "fill", "select", "press"]),
+):
+    FUNCTION_TOOL_SCHEMAS.append({
+        "type": "function",
+        "function": {
+            "name": _browser_tool_name,
+            "description": _browser_tool_description,
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "oneOf": [
+                    {
+                        "type": "object", "additionalProperties": False,
+                        "properties": {
+                            "target_id": {"type": "string", "minLength": 1},
+                            "connection_generation": {"type": "string", "minLength": 1},
+                            "navigation_generation": {"type": "integer", "minimum": 0},
+                            "observation_generation": {"type": "integer", "minimum": 0},
+                            "action": {"const": _action},
+                            "arguments": {"type": "object", "additionalProperties": False,
+                                          "properties": _BROWSER_ACTION_ARGUMENTS[_action],
+                                          "required": _BROWSER_REQUIRED_ARGUMENTS.get(_action, [])},
+                        },
+                        "required": ["target_id", "connection_generation", "navigation_generation", "observation_generation", "action", "arguments"],
+                    }
+                    for _action in _browser_actions
+                ],
+            },
+        },
+    })
 
 _COPAL_MANAGE_ACTIONS = (
     "notes.create", "notes.edit", "notes.patch_metadata", "notes.rename", "notes.checkpoint", "notes.restore_version.preview", "notes.restore_version.apply", "notes.trash", "notes.restore_trash",
@@ -1670,6 +1895,10 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             if args.get("intent") in ("web", "image"):
                 payload["intent"] = args["intent"]
             content = json.dumps(payload)
+    elif tool_type == "web_fetch":
+        if not args.get("url") and not args.get("continuation"):
+            return None
+        content = json.dumps(args)
     elif tool_type == "read_file":
         # Plain path (back-compat) unless a line range is requested → JSON.
         if args.get("offset") or args.get("limit"):
@@ -1748,6 +1977,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = action + "\n" + sid
             if value:
                 content += "\n" + value
+    elif tool_type == "manage_rag":
+        content = json.dumps(args)
     elif tool_type == "manage_memory":
         action = args.get("action", "")
         if action == "add":

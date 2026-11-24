@@ -26,10 +26,10 @@ logger = logging.getLogger(__name__)
 class _Run:
     __slots__ = (
         "buffer", "subscribers", "status", "task", "evict_task", "next_seq",
-        "owner", "run_id",
+        "owner", "run_id", "admission_barrier", "drain_started", "admission", "cleanup_unresolved", "tui_origin",
     )
 
-    def __init__(self, owner: str = "") -> None:
+    def __init__(self, owner: str = "", run_id: str | None = None) -> None:
         self.buffer: list[tuple[int, str]] = []  # monotonic id + SSE frame
         self.subscribers: set = set()   # one asyncio.Queue per connected client
         self.status: str = "running"    # running | done | error | stopped
@@ -37,12 +37,43 @@ class _Run:
         self.evict_task: Optional[asyncio.Task] = None
         self.next_seq: int = 1
         self.owner: str = str(owner or "").strip().lower()
-        self.run_id: str = uuid.uuid4().hex
+        self.run_id: str = run_id or uuid.uuid4().hex
+        self.admission_barrier = _ACCOUNT_REQUEST_BARRIER
+        self.drain_started = False
+        self.admission = None
+        self.cleanup_unresolved = False
+        self.tui_origin = None
 
 
 _RUNS: Dict[str, _Run] = {}
 _DRAIN_TASKS: set[asyncio.Task] = set()
 _DRAIN_TASK_OWNERS: dict[asyncio.Task, str] = {}
+
+_ACCOUNT_REQUEST_BARRIER = None
+
+
+def configure_request_barrier(barrier) -> None:
+    """Install the app-owned admission authority for subsequently created runs."""
+    global _ACCOUNT_REQUEST_BARRIER
+    _ACCOUNT_REQUEST_BARRIER = barrier
+
+
+async def _settle_cleanup(awaitable) -> bool:
+    """Drain one cleanup despite repeated cancellation; errors remain unknown."""
+    task = asyncio.create_task(awaitable)
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    try:
+        task.result()
+        return True
+    except BaseException:
+        return False
+
 
 # How long a FINISHED run (and its full replay buffer) is retained after the
 # last subscriber disconnects, so a reconnect within the window can still
@@ -71,7 +102,7 @@ def _schedule_evict(session_id: str, expected_run: _Run) -> None:
     Only the current mapping may alter its eviction timer; a replaced run must
     not cancel, arm, or shorten the replacement's replay grace.
     """
-    if _RUNS.get(session_id) is not expected_run:
+    if _RUNS.get(session_id) is not expected_run or expected_run.cleanup_unresolved:
         return
     run = expected_run
     if run.evict_task and not run.evict_task.done():
@@ -83,7 +114,7 @@ def _schedule_evict(session_id: str, expected_run: _Run) -> None:
         except asyncio.CancelledError:
             return
         cur = _RUNS.get(session_id)
-        if cur is run_ref and cur.status != "running" and not cur.subscribers:
+        if cur is run_ref and cur.status != "running" and not cur.subscribers and not cur.cleanup_unresolved:
             _RUNS.pop(session_id, None)
 
     run.evict_task = asyncio.create_task(_evict(run))
@@ -116,10 +147,21 @@ def get_run(session_id: str) -> Optional[_Run]:
 
 
 async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
-                 prev_task: Optional[asyncio.Task] = None) -> None:
+                 prev_task: Optional[asyncio.Task] = None, *, bind_admission: bool = False) -> None:
     """Pull every event from the wrapped generator into the run buffer, fanning
     each out to live subscribers. Runs to completion regardless of subscribers."""
+    run.drain_started = True
+    admission = None
+    admission_token = None
     try:
+        if run.owner and run.admission_barrier is not None:
+            admission = await run.admission_barrier.acquire(run.owner)
+            run.admission = admission
+        if bind_admission:
+            if admission is None:
+                raise RuntimeError('Connector run admission unavailable')
+            from src.openclank.account_request_barrier import _current_admission
+            admission_token = _current_admission.set(admission)
         # If this run replaced an in-flight one (rapid double-send), wait for
         # that one to fully finish first. Keep this wait inside the cancellation
         # boundary: an owner quiesce may cancel the replacement before it ever
@@ -135,12 +177,6 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
             run.status = "done"
     except asyncio.CancelledError:
         run.status = "stopped"
-        # Let the wrapped generator's own CancelledError handler run (it saves
-        # the partial response to the session).
-        try:
-            await agen.aclose()
-        except Exception:
-            pass
     except Exception as e:
         logger.error("[agent-run] %s failed: %s", session_id, e, exc_info=True)
         run.status = "error"
@@ -151,6 +187,24 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         )
         _publish(run, "data: [DONE]\n\n")
     finally:
+        # A closed subscriber is not a closed producer. Keep the exact
+        # admission until generator cleanup is positively complete.
+        try:
+            closed = await _settle_cleanup(agen.aclose())
+        except BaseException:
+            closed = False
+        if admission_token is not None:
+            from src.openclank.account_request_barrier import _current_admission
+            _current_admission.reset(admission_token)
+        if closed and admission is not None:
+            if await _settle_cleanup(run.admission_barrier.release(admission)):
+                run.admission = None
+            else:
+                run.cleanup_unresolved = True
+                logger.warning("agent run admission settlement unavailable")
+        elif not closed:
+            run.cleanup_unresolved = True
+            logger.warning("agent run cleanup unavailable; owner admission retained")
         # Wake every subscriber with the end sentinel so their SSE closes.
         for q in list(run.subscribers):
             try:
@@ -168,6 +222,10 @@ def start(
     agen: AsyncGenerator[str, None],
     *,
     owner: str = "",
+    run_id: str | None = None,
+    replace_existing: bool = True,
+    bind_admission: bool = False,
+    tui_origin=None,
 ) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
@@ -175,20 +233,46 @@ def start(
     prev_task: Optional[asyncio.Task] = None
     if prev:
         if prev.task and not prev.task.done():
+            if not replace_existing: raise RuntimeError('Session already has an active run')
             prev.task.cancel()
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
-    run = _Run(owner)
+    run = _Run(owner, run_id=run_id)
+    run.tui_origin = tui_origin
     _RUNS[session_id] = run
-    run.task = asyncio.create_task(_drain(session_id, run, agen, prev_task))
+    run.task = asyncio.create_task(_drain(session_id, run, agen, prev_task, bind_admission=bind_admission))
+    run.task._openclank_run = run
     _DRAIN_TASKS.add(run.task)
     if run.owner:
         _DRAIN_TASK_OWNERS[run.task] = run.owner
 
     def _done(done: asyncio.Task) -> None:
-        _DRAIN_TASKS.discard(done)
-        _DRAIN_TASK_OWNERS.pop(done, None)
+        if not run.cleanup_unresolved:
+            _DRAIN_TASKS.discard(done)
+            _DRAIN_TASK_OWNERS.pop(done, None)
+        if not run.drain_started:
+            # Cancellation before the coroutine's first instruction skips its
+            # finally. Keep the existing task inventory until close finishes.
+            run.status = "stopped"
+            async def close_unstarted():
+                try:
+                    run.cleanup_unresolved = not await _settle_cleanup(agen.aclose())
+                except BaseException:
+                    run.cleanup_unresolved = True
+                for q in list(run.subscribers):
+                    q.put_nowait((None, None))
+                _schedule_evict(session_id, run)
+            cleanup = asyncio.create_task(close_unstarted())
+            cleanup._openclank_run = run
+            _DRAIN_TASKS.add(cleanup)
+            if run.owner:
+                _DRAIN_TASK_OWNERS[cleanup] = run.owner
+            def cleanup_done(task):
+                if not run.cleanup_unresolved:
+                    _DRAIN_TASKS.discard(task)
+                    _DRAIN_TASK_OWNERS.pop(task, None)
+            cleanup.add_done_callback(cleanup_done)
 
     run.task.add_done_callback(_done)
     return run
@@ -200,6 +284,10 @@ async def quiesce_owner(owner: str) -> dict[str, object]:
     owner_key = str(owner or "").strip().lower()
     drained: set[asyncio.Task] = set()
     while True:
+        if any(task_owner == owner_key and task.done()
+               and getattr(getattr(task, '_openclank_run', None), 'cleanup_unresolved', False)
+               for task, task_owner in list(_DRAIN_TASK_OWNERS.items())):
+            raise RuntimeError("agent run cleanup unavailable")
         tasks = {
             task
             for task, task_owner in list(_DRAIN_TASK_OWNERS.items())

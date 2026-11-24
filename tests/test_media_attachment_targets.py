@@ -1,8 +1,8 @@
-"""Focused S14 tests: Host media attachment target and Loose Copal digest fix.
+"""Focused media tests: Host media attachment target and Loose Copal digest fix.
 
 Covers the typed prepare/commit/status receipt for ``host_document`` targets,
-the ``media/<stem>/<name>`` allocation, provenance persistence, and the binary
-digest consistency fix in Loose Copal's ``put_asset_scoped``.
+versioned media allocation, provenance persistence, and the binary digest
+consistency fix in Loose Copal's ``put_asset_scoped``.
 """
 
 from __future__ import annotations
@@ -14,8 +14,20 @@ import pytest
 
 from src.openclank.copal_loose import LooseCopalBridge
 from src.openclank.files_facade import FilesFacadeError, ProviderContent, ProviderContext, ProviderResource
-from src.openclank.media_attachment_targets import HostDocumentAttachmentTarget
+from src.openclank.media_attachment_targets import HostDocumentAttachmentTarget, _assert_workspace_media_path
 from src.openclank.media_ownership import binary_digest, MediaProvenance, WorkspaceRootRecord
+
+
+def test_v2_host_media_path_rejects_symlinked_media_root(tmp_path):
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (root / ".media").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(FilesFacadeError, match="symlink|outside"):
+        _assert_workspace_media_path(str(root), str(root / ".media" / "note" / "image.png"))
+    assert list(outside.iterdir()) == []
 
 
 def _context(owner="alice", generation=1, *, workspace_id="default"):
@@ -105,7 +117,7 @@ def _png_entry(origin_id="host:/src/image.png", name="image.png"):
 
 
 # ---------------------------------------------------------------------------
-# Layout: media/<stem>/<collision-safe name>
+# Layout: versioned media/<stem> or .media/<stem> placement
 # ---------------------------------------------------------------------------
 
 
@@ -136,13 +148,14 @@ async def test_host_target_writes_media_into_the_workspace_stem_layout(tmp_path)
         target_origin_id=f"host:{document}",
     )
     assert result["target_identity"] == {"resource_ref": f"host:{document}", "kind": "host_document"}
-    assert result["insertion"]["link_target"] == "media/projects/design/image.png"
-    expected = root / "media" / "projects" / "design" / "image.png"
+    assert result["insertion"]["link_target"] == "../.media/projects/design/image.png"
+    expected = root / ".media" / "projects" / "design" / "image.png"
     assert expected.is_file()
     assert expected.read_bytes() == b"\x89PNG-bytes"
     assert result["provenance"]["origin"] == "workspace"
     assert result["provenance"]["canonical_root"] == str(root)
     assert result["provenance"]["asset_digest"] == binary_digest(b"\x89PNG-bytes")
+    assert result["layout_version"] == result["provenance"]["layout_version"] == 2
     # Internal storage paths never reach the typed DTO.
     assert "asset_path" not in result
     assert "digest_hex" not in result
@@ -177,6 +190,7 @@ async def test_host_target_loose_document_uses_its_containing_folder(tmp_path):
     assert (stuff / "media" / "note" / "image.png").is_file()
     assert result["provenance"]["origin"] == "loose"
     assert result["provenance"]["canonical_root"] == str(stuff)
+    assert result["layout_version"] == result["provenance"]["layout_version"] == 1
 
 
 @pytest.mark.asyncio
@@ -185,7 +199,7 @@ async def test_host_target_allocates_collision_safe_names_for_clipboard_filename
     root.mkdir()
     document = root / "bar.md"
     document.write_text("bar\n", encoding="utf-8")
-    media_dir = root / "media" / "bar"
+    media_dir = root / ".media" / "bar"
     media_dir.mkdir(parents=True)
     (media_dir / "image.png").write_bytes(b"first")
 
@@ -209,7 +223,7 @@ async def test_host_target_allocates_collision_safe_names_for_clipboard_filename
         target_origin_id=f"host:{document}",
     )
     assert result["asset"]["name"] == "image-1.png"
-    assert result["insertion"]["link_target"] == "media/bar/image-1.png"
+    assert result["insertion"]["link_target"] == ".media/bar/image-1.png"
     assert (media_dir / "image.png").read_bytes() == b"first"
     assert (media_dir / "image-1.png").read_bytes() == b"second"
 
@@ -246,10 +260,10 @@ async def test_same_stem_markdown_and_rust_share_a_directory_with_separate_owner
             source_entry=entry,
             target_origin_id=f"host:{document}",
         )
-        assert result["insertion"]["link_target"].startswith("media/foo/")
+        assert result["insertion"]["link_target"].startswith(".media/foo/")
         assert result["provenance"]["document_id"] == f"host:{document}"
 
-    media_dir = root / "media" / "foo"
+    media_dir = root / ".media" / "foo"
     assert (media_dir / "image.png").is_file()
     assert (media_dir / "image-1.png").is_file()
     documents = {row["receipt"]["provenance"]["document_id"] for row in store.rows.values() if "provenance" in row["receipt"]}
@@ -299,7 +313,7 @@ async def test_host_target_persists_provenance_and_recovers_after_crash(tmp_path
     assert recovered["provenance"]["asset_digest"] == binary_digest(b"recover-bytes")
     # Recovery keeps the provenance-backed digest check honest: tampering the
     # asset invalidates the preparation instead of replaying a stale receipt.
-    asset = root / "media" / "bar" / "image.png"
+    asset = root / ".media" / "bar" / "image.png"
     asset.write_bytes(b"tampered")
     assert await target.operation_status(_context(), operation_id="attach-recover") is None
 

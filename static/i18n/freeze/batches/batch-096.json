@@ -1,0 +1,35 @@
+{
+  "id": "batch-096",
+  "group": "docs.openclank-docs-source-editing",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 2158,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-source-editing.title",
+      "source": "Source Editing",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-source-editing.body",
+      "source": "# Source Editing\n\nA comment can carry its own diagram. In a supported source language, Open Clank renders Markdown inside native comments: `![alt](target)` or `![[target]]` can display an accessible image next to the code it describes.\n\n![A Python source pane shows a formatted module comment with a local image, a function docstring, and an inline comment. The Save control is visible.](/static/docs/media/manual-editor-rich-comments/preview.webp)\n\n*Editor example. Click into a supported rich comment to edit it, then Save the source file.*\n\n## Local spelling and comments\n\nClick the rendered comment to edit it. To edit the raw comment, open its context menu and choose **See source**. Leaving the inset puts the edit in your draft. **Save** writes the file. If the range became stale while you were typing, return to raw source before applying changes. **Tools → Check spelling locally** checks prose using the signed-in account’s dictionary.\n\n## Identify the language\n\nFor an ambiguous extension, use **Language mode** on the status bar. Check the selected grammar if you see raw comment syntax where you expected formatted prose.\n\n## Edit several places\n\n**Selection → Select next match** adds another occurrence to your selection. **Keep primary selection** returns to one. For a replacement across the active file, preview the next match in **Edit → Find and replace…**.\n\n![Editor’s Find and replace dialog searches for tint and offers accent as the replacement. The controls are Find next, Replace, Replace all, and Close.](/static/docs/media/manual-editor-find-and-replace/preview.webp)\n\n*Editor example. Use Find next to inspect a match before you choose Replace or Replace all.*\n\n## Outside edits\n\nA clean host tab can pick up a saved change from another program or agent. With an unsaved draft, **File → Refresh from disk** checks what changed; inspect the conflict before choosing **Reload latest from disk**. [[Graph]] follows saved code, so save first if you want it to see your edit.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

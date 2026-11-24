@@ -1,7 +1,7 @@
 import { sqliteTable, text, integer, primaryKey } from "drizzle-orm/sqlite-core"
 import type { SessionID, MessageID } from "./schema"
 
-export type ExternalSource = "cc" | "codex" | "opencode"
+export type ExternalSource = "cc" | "codex" | "opencode" | "codex-projection"
 
 export const ExternalImportTable = sqliteTable(
   "external_import",

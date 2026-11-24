@@ -1,12 +1,12 @@
 // Canonical catalog adapter. Legacy endpoints without `catalog` keep working.
 
 export const MODEL_STATE_KEYS = Object.freeze([
-  'odysseus-model-recent',
-  'odysseus-model-favorites',
-  'odysseus-model-collapsed',
-  'odysseus-models-collapsed',
-  'odysseus-model-usage',
-  'odysseus-model-sort',
+  'openclank-model-recent',
+  'openclank-model-favorites',
+  'openclank-model-collapsed',
+  'openclank-models-collapsed',
+  'openclank-model-usage',
+  'openclank-model-sort',
   'models-order',
 ]);
 
@@ -48,6 +48,8 @@ export function catalogEntries(item) {
         capabilities: entry.capabilities || {},
         operations: entry.operations || [],
         providerModelId: entry.provider_model_id || null,
+        optionRouteId: entry.option_route_id || entry.provider_model_route_id || null,
+        catalogRevision: entry.catalog_revision ?? null,
       }));
   }
   const models = item?.models || [];
@@ -67,16 +69,25 @@ export function catalogHasModelChoice(items, modelId, endpointId = '', url = '')
   const targetEndpointId = String(endpointId || '');
   const targetIsMimoSelector = targetEndpointId === 'mimo' || targetEndpointId === 'mimo:auto';
   const targetUrl = String(url || '').replace(/\/+$/, '');
-  return (Array.isArray(items) ? items : []).some(item => {
-    if (!item || item.offline || !catalogModelIds(item).includes(modelId)) return false;
+  const matches = new Map();
+  for (const item of (Array.isArray(items) ? items : [])) {
+    if (!item || item.offline) continue;
+    const itemEndpointId = String(item.endpoint_id || '');
+    const itemUrl = String(item.url || '').replace(/\/+$/, '');
     if (targetEndpointId) {
-      const itemEndpointId = String(item.endpoint_id || '');
-      if (targetIsMimoSelector) return itemEndpointId === 'mimo' || itemEndpointId.startsWith('mimo:');
-      return itemEndpointId === targetEndpointId;
+      if (targetIsMimoSelector ? !(itemEndpointId === 'mimo' || itemEndpointId.startsWith('mimo:')) : itemEndpointId !== targetEndpointId) continue;
+    } else if (targetUrl && itemUrl !== targetUrl) continue;
+    if (!itemEndpointId && !itemUrl) continue;
+    for (const entry of catalogEntries(item)) {
+      if (entry.mid !== modelId) continue;
+      const key = modelChoiceKey(modelId, itemEndpointId, itemUrl);
+      const route = JSON.stringify([entry.providerModelId || null, entry.optionRouteId || null]);
+      if (!matches.has(key)) matches.set(key, new Set());
+      matches.get(key).add(route);
     }
-    if (targetUrl) return String(item.url || '').replace(/\/+$/, '') === targetUrl;
-    return true;
-  });
+  }
+  if ([...matches.values()].some(routes => routes.size !== 1)) return false;
+  return targetIsMimoSelector ? matches.size > 0 : matches.size === 1;
 }
 
 export function modelChoiceKey(model, endpointId, url) {
@@ -86,17 +97,25 @@ export function modelChoiceKey(model, endpointId, url) {
   return `endpoint:${encodeURIComponent(route)}:${encodeURIComponent(mid)}`;
 }
 
-export function resolveStoredModelChoices(stored, models) {
+export function resolveStoredModelChoice(stored, models) {
   const choices = Array.isArray(models) ? models : [];
-  const byKey = new Map(choices.map(model => [modelChoiceKey(model), model]));
-  const byLegacyId = new Map();
-  choices.forEach(model => {
-    if (!byLegacyId.has(model.mid)) byLegacyId.set(model.mid, model);
-  });
+  const keys = new Map();
+  for (const model of choices) {
+    if (!model || !model.mid || (!model.endpointId && !model.url)) continue;
+    const key = modelChoiceKey(model);
+    if (stored !== key && (String(stored).startsWith('endpoint:') || stored !== model.mid)) continue;
+    const route = JSON.stringify([model.providerModelId || null, model.optionRouteId || null]);
+    if (!keys.has(key)) keys.set(key, new Map());
+    keys.get(key).set(route, model);
+  }
+  if (keys.size !== 1) return null;
+  const routes = keys.values().next().value;
+  return routes.size === 1 ? routes.values().next().value : null;
+}
+
+export function resolveStoredModelChoices(stored, models) {
   return [...new Set((Array.isArray(stored) ? stored : []).map(value => {
-    if (byKey.has(value)) return value;
-    if (String(value).startsWith('endpoint:')) return null;
-    const match = byLegacyId.get(value);
+    const match = resolveStoredModelChoice(value, models);
     return match ? modelChoiceKey(match) : null;
   }).filter(Boolean))];
 }

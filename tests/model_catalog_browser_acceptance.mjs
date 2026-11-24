@@ -19,7 +19,7 @@ const port = await new Promise((resolve, reject) => {
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openclank-models-'));
 const browserExecutable = process.env.OPENCLANK_CHROME_BIN
   || process.env.CHROME_BIN
-  || process.env.ODYSSEUS_BROWSER_EXECUTABLE
+  || process.env.OPEN_CLANK_BROWSER_EXECUTABLE
   || ['/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
     .find(candidate => fs.existsSync(candidate));
 assert(browserExecutable, 'Chromium or Google Chrome is required for this browser acceptance test');
@@ -194,7 +194,7 @@ try {
   await evaluate(`(async () => {
     document.body.innerHTML = '<main><div id="models"></div></main>';
     globalThis.__openClankAuthenticatedUser = 'browser-test';
-    const favoriteKey = 'odysseus-model-favorites:scope:browser-test';
+    const favoriteKey = 'openclank-model-favorites:scope:browser-test';
     localStorage.setItem(favoriteKey, JSON.stringify(['shared-model']));
     window.__catalogItems = [
       { endpoint_id:'endpoint-a', endpoint_name:'Same name', url:'https://a.invalid/v1/chat/completions', category:'api', models:['shared-model','only-a'] },
@@ -235,7 +235,7 @@ try {
     mids: [...document.querySelectorAll('.models-row')].map(row => row.dataset.modelMid),
     endpointLabels: [...document.querySelectorAll('.models-endpoint-label span:nth-child(2)')].map(node => node.textContent),
     favoriteRows: document.querySelectorAll('.models-category-header + .models-group-content .models-row').length,
-    storedFavorites: JSON.parse(localStorage.getItem('odysseus-model-favorites:scope:browser-test') || '[]'),
+    storedFavorites: JSON.parse(localStorage.getItem('openclank-model-favorites:scope:browser-test') || '[]'),
   }))()`));
   assert.equal(new Set(state.rowKeys).size, 4, 'one row per endpoint + model identity');
   assert.equal(state.mids.filter(mid => mid === 'shared-model').length, 2, 'distinct routes remain selectable');
@@ -411,7 +411,7 @@ try {
   assert.equal(routeSeparatedFamilies, 2, 'personal and shared routes never merge into one model family');
 
   const validFavoriteState = JSON.parse(await evaluate(`(async () => {
-    const key = 'odysseus-model-favorites:scope:browser-test';
+    const key = 'openclank-model-favorites:scope:browser-test';
     localStorage.setItem(key, JSON.stringify([
       'endpoint:' + encodeURIComponent('mimo:openai') + ':' + encodeURIComponent('openai/gpt-5.6-luna'),
     ]));
@@ -566,7 +566,7 @@ try {
 
   const pendingState = await evaluate(`(async () => {
     const mid = 'xiaomi/mimo-v2.5-pro/high';
-    localStorage.setItem('odysseus-workspace-id', 'workspace-pending');
+    localStorage.setItem('openclank-workspace-id', 'workspace-pending');
     window.__pendingSessionBody = null;
     window.fetch = async (input, options = {}) => {
       const url = String(input);

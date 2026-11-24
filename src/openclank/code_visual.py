@@ -9,6 +9,7 @@ import asyncio
 import copy
 import json
 import re
+from time import perf_counter_ns
 
 from src.openclank.code_query import resolve_query_binding
 
@@ -18,11 +19,11 @@ MAX_BYTES = 256 * 1024
 SELECTION_BYTES = 64 * 1024
 MAX_INT = (1 << 53) - 1  # Public counters must remain exact in the browser.
 CANONICAL_ID = re.compile(r"(file|decl|occ):[0-9a-fA-F]{1,128}\Z")
-RELATIONS = ("containment", "import", "call", "value_reference", "type_reference", "inherits", "implements", "render", "route", "overrides")
+RELATIONS = ("containment", "import", "call", "value_reference", "type_reference", "inherits", "implements", "render", "route", "overrides", "manifest_dependency", "sql_table_reference", "callback_registration", "event_publish", "event_consume")
 LIMITS = dict(bytes=MAX_BYTES, nodes=200, edges=800, groups=50, work=4_000_000)
 COST_FIELDS = {"inspected_entries", "sql_vm_steps", "metadata_bytes", "retained_summary_bytes",
     "serialized_bytes", "source_bytes_read", "policy_bytes_read", "summary_cache_hit",
-    "native_rpc_calls_completed"}
+    "native_rpc_calls_completed", "native_work_us"}
 RECEIPT_FIELDS = {"workspace_id", "registration_id", "source_snapshot_id", "checkout_id",
     "head_generation", "admission_epoch", "policy_generation", "config_fingerprint"}
 ERROR_CODES = {"invalid", "invalid_schema", "denied", "erased", "missing", "stale_cursor",
@@ -209,7 +210,8 @@ def parse_body(raw):
 
 
 def _cost(value):
-    _obj(value, COST_FIELDS - {"native_rpc_calls_completed"}, {"native_rpc_calls_completed"})
+    optional = {"native_rpc_calls_completed", "native_work_us"}
+    _obj(value, COST_FIELDS - optional, optional)
     for key, item in value.items():
         (_bool if key == "summary_cache_hit" else _int)(item)
     _require(value["source_bytes_read"] == 0)
@@ -245,13 +247,28 @@ def _coverage(value, preview):
 
 def _map_result(value, request):
     _obj(value, {"schema", "operation", "authority", "root", "direction", "relations", "nodes", "edges",
-        "coverage", "page", "selection", "cost"})
+        "coverage", "page", "selection", "cost"}, {"representative", "territories"})
     _require(value["schema"] == SCHEMA and value["operation"] == request["operation"]
         and value["direction"] == request["direction"] and value["relations"] == request["relations"])
     authority = _authority(value["authority"])
     _require(request["expected_authority"] is None or authority == request["expected_authority"])
     preview = authority["variant"] == "structure_preview"
     _coverage(value["coverage"], preview)
+    if "representative" in value:
+        _require(not preview and request["operation"] != "neighbors" and request["cursor"] is None)
+        sample = _obj(value["representative"], {"declaration_id", "selection_id", "relation",
+            "direction", "omitted_declarations", "omitted_references"})
+        _int(sample["omitted_declarations"])
+        _int(sample["omitted_references"])
+        if sample["declaration_id"] is not None:
+            _canonical(sample["declaration_id"], ("decl",))
+        if sample["selection_id"] is None:
+            _require(sample["relation"] is None and sample["direction"] is None)
+        else:
+            _text(sample["selection_id"])
+            _require(re.fullmatch(r"vw2:occ:[0-9a-f]{1,128}:[0-9a-f]{64}", sample["selection_id"])
+                and sample["declaration_id"] is not None
+                and sample["relation"] in RELATIONS[1:] and sample["direction"] == "incoming")
     nodes = _array(value["nodes"], request["limits"]["nodes"])
     ids, parents = set(), {}
     for node in nodes:
@@ -287,6 +304,17 @@ def _map_result(value, request):
             seen_languages.add(language["language"])
         _require(sum(language["count"] for language in languages) <= node["source_files"])
     _require(sum(node["kind"] in ("repository", "folder") for node in nodes) <= request["limits"]["groups"])
+    if "territories" in value:
+        _require(not preview and request["operation"] != "neighbors" and request["cursor"] is None)
+        group_ids = {node["id"] for node in nodes if node["kind"] in ("repository", "folder")}
+        territories = _array(value["territories"], 12)
+        for record in territories:
+            _obj(record, {"visual_id", "source_files", "declarations", "observed_references"})
+            _text(record["visual_id"])
+            _require(record["visual_id"] in group_ids)
+            group_ids.remove(record["visual_id"])
+            for key in ("source_files", "declarations", "observed_references"):
+                _int(record[key])
     # Parents may be in a previous hierarchy page. Local cycles are never valid.
     for node_id in ids:
         seen = set()
@@ -364,7 +392,7 @@ def _selection_result(value, request):
         _canonical(ref["target_id"], ("decl",))
         if ref["caller_id"] is not None:
             _canonical(ref["caller_id"], ("decl",))
-        _require(ref["occurrence_id"] not in seen and ref["relation"] in ("import", "call")
+        _require(ref["occurrence_id"] not in seen and ref["relation"] in RELATIONS[1:]
             and ref["state"] in ("exact", "inferred"))
         seen.add(ref["occurrence_id"])
     _int(value["remaining"])
@@ -374,18 +402,19 @@ def _selection_result(value, request):
     _require(value["complete"] or (bool(references) and value["next_cursor"] is not None and value["remaining"] > 0))
 
 
-def _measure(value, maximum):
+def _measure(value, maximum, *, as_bytes=False):
     # Fixed point: serialized_bytes includes its own decimal digits.
     for _ in range(8):
-        size = len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        size = len(encoded)
         _require(size <= maximum, "budget_exceeded")
         if value["cost"]["serialized_bytes"] == size:
-            return value
+            return encoded if as_bytes else value
         value["cost"]["serialized_bytes"] = size
     raise CodeVisualError("invalid_evidence")
 
 
-def project_visual_result(value, visual_request, binding):
+def project_visual_result(value, visual_request, binding, *, as_bytes=False):
     """Whitelist entire result, preserve receipts, then measure provider additions."""
     try:
         _tree(value, max_bytes=MAX_BYTES, max_items=30000)
@@ -398,32 +427,35 @@ def project_visual_result(value, visual_request, binding):
             maximum = SELECTION_BYTES
         _scope(value["authority"], binding)
         _cost(value["cost"])
-        return _measure(copy.deepcopy(value), maximum)
+        # The wire path owns immutable bytes. Only the cost counter is mutated.
+        projected = {**value, "cost": dict(value["cost"])} if as_bytes else copy.deepcopy(value)
+        return _measure(projected, maximum, as_bytes=as_bytes)
     except CodeVisualError as exc:
         raise CodeVisualError("budget_exceeded" if exc.code == "budget_exceeded" else "invalid_evidence") from None
     except (TypeError, KeyError, ValueError, OverflowError, RecursionError):
         raise CodeVisualError("invalid_evidence") from None
 
 
-def failure(code="unavailable", *, mode=None, observed_cost=None):
+def failure(code="unavailable", *, mode=None, observed_cost=None, as_bytes=False):
     """Errors have no success arrays, authority, receipt or opaque native text."""
     code = code if type(code) is str and code in ERROR_CODES else "unavailable"
-    cost = {key: False if key == "summary_cache_hit" else 0 for key in COST_FIELDS}
+    cost = {key: False if key == "summary_cache_hit" else 0 for key in COST_FIELDS - {"native_work_us"}}
     if type(observed_cost) is dict:
         for key, item in observed_cost.items():
-            if key in COST_FIELDS and key != "serialized_bytes" and (
+            if key in COST_FIELDS and key not in ("serialized_bytes", "native_work_us") and (
                 (key == "summary_cache_hit" and type(item) is bool) or
                 (key != "summary_cache_hit" and type(item) is int and 0 <= item <= MAX_INT)):
                 cost[key] = item
     value = dict(schema=SCHEMA, mode=mode if mode in ("map", "selection") else None,
         error={"code": code, "message": "Code map unavailable"}, cost=cost)
-    return _measure(value, 2048)
+    return _measure(value, 2048, as_bytes=as_bytes)
 
 
-async def query_visual(*, repository, provider, auth_manager, owner, workspace_id, visual_request):
+async def query_visual(*, repository, provider, auth_manager, owner, workspace_id, visual_request, as_bytes=False, timings=None):
     from src.memory_provider import MemoryRequestRejectedError
 
     captured, binding, result, prepared, error = None, None, None, None, None
+    provider_ms = None
     try:
         _text(workspace_id)
         prepared = validate_visual_request(visual_request)
@@ -435,7 +467,10 @@ async def query_visual(*, repository, provider, auth_manager, owner, workspace_i
         invoke = getattr(provider, "code_visual", None)
         _require(callable(invoke), "unavailable")
         # Give provider its own copy; retain immutable expected request/binding.
+        started = perf_counter_ns() if timings is not None else None
         result = await invoke(binding=copy.deepcopy(binding), visual_request=copy.deepcopy(prepared))
+        if started is not None:
+            provider_ms = (perf_counter_ns() - started) / 1_000_000
     except asyncio.CancelledError:
         raise
     except CodeVisualError as exc:
@@ -454,12 +489,17 @@ async def query_visual(*, repository, provider, auth_manager, owner, workspace_i
     mode = prepared["mode"] if prepared else None
     observed = result.get("cost") if type(result) is dict else None
     if error is not None:
-        return failure(error, mode=mode, observed_cost=observed)
+        return failure(error, mode=mode, observed_cost=observed, as_bytes=as_bytes)
     if type(result) is dict and result.get("error") is not None:
         native_error = result["error"]
         code = native_error.get("code") if type(native_error) is dict else "unavailable"
-        return failure(code, mode=mode, observed_cost=observed)
+        return failure(code, mode=mode, observed_cost=observed, as_bytes=as_bytes)
     try:
-        return project_visual_result(result, prepared, binding)
+        started = perf_counter_ns() if timings is not None else None
+        projected = project_visual_result(result, prepared, binding, as_bytes=as_bytes)
+        if started is not None:
+            timings["host-envelope"] = (perf_counter_ns() - started) / 1_000_000
+            timings["provider-wait"] = provider_ms
+        return projected
     except CodeVisualError as exc:
-        return failure(exc.code, mode=mode, observed_cost=observed)
+        return failure(exc.code, mode=mode, observed_cost=observed, as_bytes=as_bytes)

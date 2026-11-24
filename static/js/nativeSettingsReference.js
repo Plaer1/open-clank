@@ -1947,7 +1947,7 @@ export const NATIVE_SETTINGS_REFERENCE = Object.freeze([
     "destination": {
       "panel": "added-models"
     },
-    "reason": "Configure model and provider options in Added Models. Named profile options are read-only here.",
+    "reason": "Configure model and provider options in Model Management. Named profile options are read-only here.",
     "dynamic": true,
     "availability": "reference",
     "writable": false,
@@ -2047,7 +2047,7 @@ export const NATIVE_SETTINGS_REFERENCE = Object.freeze([
     "destination": {
       "panel": "added-models"
     },
-    "reason": "Configure model and provider options in Added Models. Named profile options are read-only here.",
+    "reason": "Configure model and provider options in Model Management. Named profile options are read-only here.",
     "dynamic": true,
     "availability": "reference",
     "writable": false,
@@ -2634,18 +2634,18 @@ export const NATIVE_SETTINGS_REFERENCE = Object.freeze([
     "identity": "native-setting:checkpoint.max_writer_failures",
     "path": "checkpoint.max_writer_failures",
     "category": "Context and memory",
-    "description": "Maximum checkpoint writer failures",
+    "description": "Legacy checkpoint writer failure limit",
     "disposition": "incomplete",
     "scope": "session / account",
     "destination": {
       "panel": "ai",
       "field": "checkpoint.max_writer_failures"
     },
-    "reason": "No Open Clank control is available for this native setting yet.",
+    "reason": "CLASS_PROGRESS_RETRY_OWNER: retries use failure class and context progress; this legacy value is not admitted.",
     "dynamic": false,
     "availability": "reference",
     "writable": false,
-    "origin": "native configuration"
+    "origin": "legacy compatibility"
   },
   {
     "identity": "native-setting:checkpoint.fork",
@@ -3331,18 +3331,18 @@ export const NATIVE_SETTINGS_REFERENCE = Object.freeze([
     "identity": "native-setting:snapshot",
     "path": "snapshot",
     "category": "Workspace and extensions",
-    "description": "Native file snapshots used by undo and redo",
+    "description": "Legacy Git snapshot option",
     "disposition": "incomplete",
     "scope": "workspace",
     "destination": {
       "panel": "ai",
       "field": "snapshot"
     },
-    "reason": "No Open Clank control is available for this native setting yet.",
+    "reason": "LORE_RECOVERY_OWNER: legacy Git snapshot capture is unavailable; file recovery uses Lore.",
     "dynamic": false,
     "availability": "reference",
     "writable": false,
-    "origin": "native configuration"
+    "origin": "legacy compatibility"
   },
   {
     "identity": "native-setting:plugin",
@@ -4792,7 +4792,6 @@ export const NATIVE_SETTINGS_SOURCE_DECLARATIONS = {
     "InfoSchema.autoupdate",
     "InfoSchema.checkpoint",
     "InfoSchema.checkpoint.fork",
-    "InfoSchema.checkpoint.max_writer_failures",
     "InfoSchema.checkpoint.memory_reconcile_on_search",
     "InfoSchema.checkpoint.memory_search_score_floor",
     "InfoSchema.checkpoint.push_caps",

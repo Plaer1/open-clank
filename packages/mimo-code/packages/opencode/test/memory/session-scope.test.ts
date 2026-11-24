@@ -48,6 +48,7 @@ describe("memory session scope", () => {
     const sessionID = "session-scope-marker"
     registerMemorySessionScope(sessionID, [descriptor("alice")], "/workspace")
     const binding = managedSessionBinding(sessionID)!
+    if (binding.authority) throw new Error("expected durable binding")
     expect(markerMatches(sessionID, binding)).toBe(true)
     const forged = {
       ...binding,
@@ -105,11 +106,11 @@ describe("memory session scope", () => {
     await expect(getSharedMcpClient(sessionID)).rejects.toThrow("not bound to session")
   })
 
-  test("a raw Frankenmemory descriptor cannot become the session carrier", async () => {
-    const sessionID = "session-scope-raw-frankenmemory"
+  test("a raw Memery descriptor cannot become the session carrier", async () => {
+    const sessionID = "session-scope-raw-memery"
     const raw = {
       ...descriptor("alice"),
-      name: "frankenmemory_test",
+      name: "memery_test",
     } as McpServer
 
     registerMemorySessionScope(sessionID, [raw], "/workspace")

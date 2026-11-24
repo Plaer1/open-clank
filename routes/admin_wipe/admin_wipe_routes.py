@@ -55,6 +55,11 @@ def setup_admin_wipe_routes(session_manager, memory_provider=None):
         require_admin(request)
         kind = (kind or "").strip().lower()
 
+        if kind == "chats":
+            from src.openclank.chat_source_bridge import canonical_source_provider
+            if canonical_source_provider(request.app.state) is not None:
+                raise HTTPException(503, "Chat wipe is unavailable for guarded memory sources")
+
         if kind == "memory":
             raise HTTPException(
                 410,
@@ -90,18 +95,28 @@ def setup_admin_wipe_routes(session_manager, memory_provider=None):
                 bridge = getattr(supervisor, "bridge", None) if supervisor else None
                 if bridge is not None:
                     session_ids.update(bridge.mapped_sessions())
+                from src import bg_jobs
+
+                try:
+                    for session_id, session_owner in session_owners.items():
+                        bg_jobs.assert_session_owner_purge_ready(
+                            session_id=session_id, owner=session_owner,
+                        )
+                except bg_jobs.JobStoreError as exc:
+                    raise HTTPException(503, "Chat wipe is incomplete: background job settlement is unavailable") from exc
                 for session_id in session_ids:
                     try:
                         await purge_execution_projection(supervisor, session_id)
                     except RuntimeError as exc:
                         raise HTTPException(503, str(exc)) from exc
-                from src import bg_jobs
-
-                for session_id, session_owner in session_owners.items():
-                    bg_jobs.delete_for_session_owner(
-                        session_id=session_id,
-                        owner=session_owner,
-                    )
+                try:
+                    for session_id, session_owner in session_owners.items():
+                        bg_jobs.delete_for_session_owner(
+                            session_id=session_id,
+                            owner=session_owner,
+                        )
+                except bg_jobs.JobStoreError as exc:
+                    raise HTTPException(503, "Chat wipe is incomplete: background job settlement is unavailable; earlier cleanup may have completed") from exc
                 count = db.query(DbSession).count()
                 db.query(DbChatMessage).delete()
                 db.query(DbSession).delete()

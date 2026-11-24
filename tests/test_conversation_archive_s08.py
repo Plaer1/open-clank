@@ -1363,3 +1363,23 @@ async def test_manual_compact_route_preserves_system_prefix_before_short_history
     assert len(completion_inputs) == 2
     assert "old summary" in completion_inputs[-1][1]["content"]
     assert sum(1 for item in manager.saved if "[Conversation summary" in item.content) == 1
+
+
+
+def test_merge_projection_requires_exact_selected_source(manager_db):
+    import hashlib
+    manager, SessionLocal, _engine, _archive_path = manager_db
+    session_id = _seed_session(SessionLocal)
+    _seed_messages(SessionLocal,session_id,[('merge-left','assistant','first',{}),('merge-right','assistant','second',{})])
+    sources = [('merge-left','assistant',hashlib.sha256(b'first').hexdigest()),
+               ('merge-right','assistant',hashlib.sha256(b'second').hexdigest())]
+    derived = ChatMessage(role='assistant',content='first\nsecond',persistence_id='merged-fresh',
+        metadata={'presentation_provenance':{'kind':'continue_merge','sources':[{'id':item[0],'sha256':item[2]} for item in sources]}})
+    with SessionLocal() as db:
+        initial = manager._projection_fingerprint(db,session_id,[derived],sources)
+        assert len(initial) == 64
+        db.query(cdb.ChatMessage).filter_by(id='merge-left').update({cdb.ChatMessage.content:'changed'})
+        db.commit()
+    with SessionLocal() as db:
+        with pytest.raises(ValueError,match='projection source changed'):
+            manager._projection_fingerprint(db,session_id,[derived],sources)

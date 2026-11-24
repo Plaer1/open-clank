@@ -1,4 +1,5 @@
 use crate::MutationCaptureHook;
+use crate::engine::{OrdinaryWriteCapture, OrdinaryCreateCapture, SearchDetails};
 use crate::{
     ActiveAgentFolder, AgentScope, AppScope, Capability, ClientRequest, EngineError, FileEngine,
     Fingerprint, Operation, PolicyGeneration, ProtocolError, ProtocolErrorCode, RequestContext,
@@ -28,11 +29,32 @@ const THUMBNAIL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_STAGE_CHUNK_BYTES: usize = 512 * 1024;
 const MAX_ACTIVE_STAGES: usize = 32;
 const MAX_ACTIVE_STAGE_BYTES: u64 = 64 * 1024 * 1024;
+// Kept unavailable until native History/registry recovery and Host consumer
+// receive joint source review and focused qualification.
+const MANAGED_FILE_MOVE_READY: bool = cfg!(target_os = "linux");
+// The bounded folder coordinator is available only in the reviewed Linux App lane.
+const MANAGED_FOLDER_MOVE_READY: bool = cfg!(target_os = "linux");
 const STAGE_TTL: Duration = Duration::from_secs(15 * 60);
 const STAGE_ROOT_NAME: &str = ".openclank-files-staging-v1";
 const MAX_STAGE_REAP_ENTRIES: usize = 256;
 const MAX_STAGE_MARKER_BYTES: usize = 4096;
 static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+// A path authorized as a regular file may be substituted before either open.
+// Nonblocking open prevents a substituted FIFO from waiting for a peer; the
+// descriptor check rejects it, and NOFOLLOW rejects a substituted final link.
+fn open_identity_file(path: &Path) -> std::io::Result<File> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let file = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
+        }
+        Ok(file)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { File::open(path) }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StageMarker {
@@ -46,6 +68,11 @@ struct StageMarker {
     created_unix_ms: u64,
 }
 
+#[cfg(target_os="linux")]
+struct WorktreeSlot { binding:crate::engine::worktree_stage::Binding, target:PathBuf, state:Mutex<WorktreeSlotState> }
+#[cfg(target_os="linux")]
+enum WorktreeSlotState { Starting, Active{writer:crate::engine::worktree_stage::WorktreeStageWriter,sealed_digest:Option<String>,private:Option<crate::engine::worktree_stage::PrivateWorktreeDirectory>}, Inverse{writer:crate::engine::worktree_stage::WorktreeInverse,unknown:bool}, Redo{writer:crate::engine::worktree_stage::WorktreeRedo,unknown:bool}, Unknown }
+
 struct StagedUpload {
     owner_id: String,
     principal_id: String,
@@ -57,6 +84,14 @@ struct StagedUpload {
     length: u64,
     digest: Sha256,
     created: Instant,
+    #[cfg(target_os="linux")]
+    worktree: Option<Arc<WorktreeSlot>>,
+}
+impl StagedUpload {
+    fn is_worktree(&self)->bool {
+        #[cfg(target_os="linux")] {return self.worktree.is_some();}
+        #[cfg(not(target_os="linux"))] {false}
+    }
 }
 
 #[derive(Clone)]
@@ -72,6 +107,7 @@ impl Drop for StageStore {
         }
         if let Ok(mut stages) = self.0.lock() {
             for (_, stage) in stages.drain() {
+                if stage.is_worktree(){continue;}
                 let _ = fs::remove_file(stage.path);
                 if let Some(marker) = stage.marker_path {
                     let _ = fs::remove_file(marker);
@@ -111,6 +147,7 @@ impl StageStore {
     }
 
     fn remove_stage_files(stage: &StagedUpload) {
+        if stage.is_worktree(){return;}
         let _ = fs::remove_file(&stage.path);
         if let Some(marker) = &stage.marker_path {
             let _ = fs::remove_file(marker);
@@ -198,7 +235,7 @@ impl StageStore {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ObjectIdentity {
+pub(crate) struct ObjectIdentity {
     #[cfg(windows)]
     native: crate::windows_fs::OpenedIdentity,
     size: u64,
@@ -214,7 +251,7 @@ struct ObjectIdentity {
 }
 
 impl ObjectIdentity {
-    fn from_file(file: &File) -> std::io::Result<Self> {
+    pub(crate) fn from_file(file: &File) -> std::io::Result<Self> {
         let metadata = file.metadata()?;
         Ok(Self {
             #[cfg(windows)]
@@ -237,10 +274,10 @@ impl ObjectIdentity {
     }
 
     fn from_path(path: &Path) -> std::io::Result<Self> {
-        Self::from_file(&File::open(path)?)
+        Self::from_file(&open_identity_file(path)?)
     }
 
-    fn opaque_tag(&self) -> String {
+    pub(crate) fn opaque_tag(&self) -> String {
         let mut digest = Sha256::new();
         digest.update(format!("odysseus-file-object-v1:{self:?}").as_bytes());
         format!("{:x}", digest.finalize())
@@ -448,7 +485,31 @@ pub struct FileService {
     thumbnail_cache: Mutex<ThumbnailCache>,
     staged_uploads: StageStore,
     mutation_receipt_lock: Mutex<()>,
+    checkpoint_prepared: Mutex<Option<PreparedCheckpoint>>,
 }
+
+struct PreparedCheckpoint {
+    selector: String,
+    ticket: Box<dyn crate::CheckpointTicket>,
+    files: Vec<CheckpointPinned>,
+    deadline: Instant,
+    started_millis: u64,
+    finished_millis: u64,
+}
+struct CheckpointPinned { path: PathBuf, binding: crate::CheckpointBinding, file: File, identity: ObjectIdentity, root_identity: (u64,u64) }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointRegistrationArgs { root_id:String, expected_fingerprint:String }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointInput { path: String, resource_id: String, expected_fingerprint: String }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointPrepareArgs { request_id: String, root_id: String, items: Vec<CheckpointInput> }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointFinalizeArgs { selector: String }
 
 /// Internal authorization result for the private watch transport. The
 /// canonical path never crosses the Rust/Python trust boundary; browser-facing
@@ -471,6 +532,7 @@ impl FileService {
         Self {
             engine,
             mutation_receipt_lock: Mutex::new(()),            identity,
+            checkpoint_prepared: Mutex::new(None),
             handles: Mutex::new(HandleTable::default()),
             thumbnail_broker: None,
             native_icon_broker: None,
@@ -583,7 +645,45 @@ impl FileService {
         )
     }
 
-    fn open_handle(&self, path: &Path, audit_id: &str) -> Result<Value, ProtocolError> {
+    // One bounded, lossless directory observation; no cursor or retained handle.
+    #[cfg(target_os = "linux")]
+    fn strict_snapshot_directory(&self, path: &Path, limit: usize, audit_id: &str) -> Result<Value, ProtocolError> {
+        use std::os::fd::AsRawFd;
+        let stat = match self.identity.lane {
+            TrustLane::App => self.engine.stat_scoped(&self.identity.app_scope, path, false),
+            TrustLane::Agent => self.engine.stat(self.identity.owner_id(), &self.identity.scope(), path, false),
+        }.map_err(|e| engine_protocol(e, audit_id))?;
+        if stat.kind != crate::engine::FileKind::Directory || limit == 0 || limit > 1024 { return Err(self.stale_handle(audit_id)); }
+        let canonical=fs::canonicalize(path).map_err(|_| self.stale_handle(audit_id))?;
+        if canonical!=stat.path || fs::symlink_metadata(path).map_err(|_| self.stale_handle(audit_id))?.file_type().is_symlink() {return Err(self.stale_handle(audit_id));}
+        let dir=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(path).map_err(|_| self.stale_handle(audit_id))?;
+        let before=ObjectIdentity::from_file(&dir).map_err(|_| self.stale_handle(audit_id))?;
+        let pinned=PathBuf::from(format!("/proc/self/fd/{}",dir.as_raw_fd()));
+        let mut entries=Vec::new();let mut reasons=BTreeSet::new();let mut omitted=0usize;
+        let mut iter=fs::read_dir(&pinned).map_err(|_| self.stale_handle(audit_id))?;
+        for index in 0..=limit {
+            let Some(item)=iter.next() else {break};
+            if index==limit {omitted+=1;reasons.insert("overflow");break;}
+            let item=item.map_err(|_| self.stale_handle(audit_id))?;
+            let name=item.file_name();let Some(name)=name.to_str() else {omitted+=1;reasons.insert("invalid_name");continue};
+            if name.is_empty() || name=="." || name==".." || name.contains('\\') || name.chars().any(|c|c.is_control()) || name.len()>255 {omitted+=1;reasons.insert("invalid_name");continue;}
+            let metadata=fs::symlink_metadata(item.path()).map_err(|_| self.stale_handle(audit_id))?;
+            let kind=if metadata.file_type().is_symlink(){omitted+=1;reasons.insert("symlink");continue}else if metadata.is_dir(){"directory"}else if metadata.is_file(){"file"}else{omitted+=1;reasons.insert("special");continue};
+            let child=path.join(name);
+            let authorized=match self.identity.lane {TrustLane::App=>self.engine.stat_scoped(&self.identity.app_scope,&child,false),TrustLane::Agent=>self.engine.stat(self.identity.owner_id(),&self.identity.scope(),&child,false)};
+            if authorized.is_err(){omitted+=1;reasons.insert("denied");continue;}
+            entries.push(json!({"name":name,"kind":kind,"size":metadata.len()}));
+        }
+        entries.sort_by(|a,b|a["name"].as_str().unwrap_or("").as_bytes().cmp(b["name"].as_str().unwrap_or("").as_bytes()));
+        let after=ObjectIdentity::from_file(&dir).map_err(|_| self.stale_handle(audit_id))?;
+        let path_dir=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(path).map_err(|_| self.stale_handle(audit_id))?;
+        if before!=after || before!=ObjectIdentity::from_file(&path_dir).map_err(|_| self.stale_handle(audit_id))? {return Err(self.stale_handle(audit_id));}
+        let metadata=dir.metadata().map_err(|_| self.stale_handle(audit_id))?;
+        let directory_id=format!("{:x}",Sha256::digest(format!("odysseus-directory-identity-v1:{}:{}",metadata.dev(),metadata.ino()).as_bytes()));
+        Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"path":canonical,"entries":entries,"object_tag":before.opaque_tag(),"directory_id":directory_id,"complete":reasons.is_empty(),"omitted_count":omitted,"reasons":reasons},"audit_id":audit_id}))
+    }
+
+    fn authorized_open_identity(&self, path: &Path, audit_id: &str) -> Result<(PathBuf, File, ObjectIdentity), ProtocolError> {
         let authorized = match self.identity.lane {
             TrustLane::App => self
                 .engine
@@ -605,12 +705,20 @@ impl FileService {
         }
         let canonical = fs::canonicalize(path)
             .map_err(|error| engine_protocol(EngineError::Io(error), audit_id))?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if canonical != authorized.path {
+            return Err(self.stale_handle(audit_id));
+        }
         let link = fs::symlink_metadata(&canonical)
             .map_err(|error| engine_protocol(EngineError::Io(error), audit_id))?;
         if link.file_type().is_symlink() {
             return Err(self.stale_handle(audit_id));
         }
-        let file = File::open(&canonical)
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let open_path = path;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let open_path = canonical.as_path();
+        let file = open_identity_file(open_path)
             .map_err(|error| engine_protocol(EngineError::Io(error), audit_id))?;
         let descriptor_metadata = file
             .metadata()
@@ -621,6 +729,12 @@ impl FileService {
         if !descriptor_metadata.is_file()
             || identity != ObjectIdentity::from_path(&canonical).map_err(|_| self.stale_handle(audit_id))?
         { return Err(self.stale_handle(audit_id)); }
+        Ok((canonical, file, identity))
+    }
+
+    fn open_handle(&self, path: &Path, audit_id: &str) -> Result<Value, ProtocolError> {
+        let (canonical, file, identity) = self.authorized_open_identity(path, audit_id)?;
+        let descriptor_metadata = file.metadata().map_err(|_| self.stale_handle(audit_id))?;
         let object_tag = identity.opaque_tag();
         let mut random = [0_u8; 32];
         getrandom::fill(&mut random).map_err(|_| {
@@ -669,10 +783,10 @@ impl FileService {
             "protocol": crate::PROTOCOL_VERSION,
             "data": {
                 "handle": handle,
-                "kind": authorized.kind,
-                "size": authorized.size,
-                "modified_unix_ms": authorized.modified_unix_ms,
-                "mode": authorized.mode,
+                "kind": crate::engine::FileKind::File,
+                "size": descriptor_metadata.len(),
+                "modified_unix_ms": metadata_modified_ms(&descriptor_metadata),
+                "mode": metadata_mode(&descriptor_metadata),
                 "object_tag": object_tag,
             },
             "audit_id": audit_id,
@@ -680,7 +794,7 @@ impl FileService {
     }
 
     fn stage_matches(&self, stage: &StagedUpload) -> bool {
-        stage.owner_id == self.identity.owner_id
+        !stage.is_worktree() && stage.owner_id == self.identity.owner_id
             && stage.principal_id == self.identity.principal_id
             && stage.lane == self.identity.lane
             && stage.session_id == self.identity.session_id
@@ -697,7 +811,7 @@ impl FileService {
             let ids: Vec<String> = stages
                 .iter()
                 .filter_map(|(id, stage)| {
-                    (stage.owner_id == self.identity.owner_id
+                    (!stage.is_worktree() && stage.owner_id == self.identity.owner_id
                         && stage.principal_id == self.identity.principal_id
                         && stage.lane == self.identity.lane
                         && stage.session_id == self.identity.session_id
@@ -719,6 +833,272 @@ impl FileService {
         }
     }
 
+    #[cfg(target_os="linux")]
+    fn worktree_stage_begin(&self, target:PathBuf, args:crate::engine::worktree_stage::Begin, audit_id:&str) -> Result<Value,ProtocolError> {
+        use crate::engine::worktree_stage::Binding;
+        if self.identity.lane!=TrustLane::App || args.root_path!=target {return Err(Self::stage_error("worktree stage unavailable",audit_id));}
+        let binding=Binding{operation_id:args.operation_id.clone(),request_digest:args.request_digest.clone(),git_plan_digest:args.git_plan_digest.clone(),root_id:args.root_id.clone(),root_object_tag:args.root_object_tag.clone()};
+        let slot=Arc::new(WorktreeSlot{binding,target:target.clone(),state:Mutex::new(WorktreeSlotState::Starting)});
+        // Reserve the only worktree slot under the existing registry lock. Do
+        // not hold that lock while validating, allocating or writing the file.
+        let placeholder=File::open("/dev/null").map_err(|_|Self::stage_error("worktree stage unavailable",audit_id))?;
+        let existing={let mut stages=self.staged_uploads.0.lock().map_err(|_|Self::stage_error("worktree stage unavailable",audit_id))?;
+            if let Some(entry)=stages.values().find(|entry|entry.is_worktree()) {
+                let same=entry.owner_id==self.identity.owner_id && entry.principal_id==self.identity.principal_id && entry.lane==self.identity.lane && entry.session_id==self.identity.session_id;
+                Some((same,entry.worktree.clone()))
+            } else {
+                stages.insert("__worktree_stage__".into(),StagedUpload{owner_id:self.identity.owner_id.clone(),principal_id:self.identity.principal_id.clone(),lane:self.identity.lane,session_id:self.identity.session_id.clone(),path:PathBuf::new(),marker_path:None,file:placeholder,length:0,digest:Sha256::new(),created:Instant::now(),worktree:Some(slot.clone())});None
+            }};
+        if let Some((same,Some(original)))=existing {
+            if same && original.binding==slot.binding && original.target==slot.target {if let Ok(mut state)=original.state.lock(){*state=WorktreeSlotState::Unknown;}}
+            return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"unknown"},"audit_id":audit_id}));
+        }
+        if existing.is_some(){return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"unknown"},"audit_id":audit_id}));}
+        let result=self.engine.worktree_stage_begin(&self.identity.app_scope,self.identity.owner_id(),&args);
+        let mut state=slot.state.lock().map_err(|_|Self::stage_error("worktree stage unavailable",audit_id))?;
+        let data=match result {Ok(writer) if matches!(*state,WorktreeSlotState::Starting)=>{*state=WorktreeSlotState::Active{writer,sealed_digest:None,private:None};json!({"state":"accepted","next_ordinal":0,"next_offset":0})},_=>{*state=WorktreeSlotState::Unknown;json!({"state":"unknown"})}};
+        Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":data,"audit_id":audit_id}))
+    }
+
+    #[cfg(target_os="linux")]
+    fn worktree_inverse_begin(&self,target:PathBuf,args:crate::engine::worktree_stage::InverseBegin,audit_id:&str)->Result<Value,ProtocolError>{
+        use crate::engine::worktree_stage::Binding;
+        if self.identity.lane!=TrustLane::App || args.root_path!=target {return Err(Self::stage_error("worktree inverse unavailable",audit_id));}
+        let binding=Binding{operation_id:args.operation_id.clone(),request_digest:args.request_digest.clone(),git_plan_digest:args.git_plan_digest.clone(),root_id:args.root_id.clone(),root_object_tag:args.root_object_tag.clone()};
+        let slot=Arc::new(WorktreeSlot{binding,target:target.clone(),state:Mutex::new(WorktreeSlotState::Starting)});
+        let placeholder=File::open("/dev/null").map_err(|_|Self::stage_error("worktree inverse unavailable",audit_id))?;
+        let existing={let mut stages=self.staged_uploads.0.lock().map_err(|_|Self::stage_error("worktree inverse unavailable",audit_id))?;
+            if let Some(entry)=stages.values().find(|entry|entry.is_worktree()) {
+                let same=entry.owner_id==self.identity.owner_id && entry.principal_id==self.identity.principal_id && entry.lane==self.identity.lane && entry.session_id==self.identity.session_id;
+                Some((same,entry.worktree.clone()))
+            } else {stages.insert("__worktree_stage__".into(),StagedUpload{owner_id:self.identity.owner_id.clone(),principal_id:self.identity.principal_id.clone(),lane:self.identity.lane,session_id:self.identity.session_id.clone(),path:PathBuf::new(),marker_path:None,file:placeholder,length:0,digest:Sha256::new(),created:Instant::now(),worktree:Some(slot.clone())});None}};
+        if let Some((same,Some(original)))=existing {
+            if same && original.binding==slot.binding && original.target==slot.target {if let Ok(mut state)=original.state.lock(){if let WorktreeSlotState::Inverse{unknown,..}=&mut *state {*unknown=true;}}}
+            return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"unknown"},"audit_id":audit_id}));
+        }
+        if existing.is_some(){return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"unknown"},"audit_id":audit_id}));}
+        let result=self.engine.worktree_inverse_begin(&self.identity.app_scope,self.identity.owner_id(),&args);
+        let mut state=slot.state.lock().map_err(|_|Self::stage_error("worktree inverse unavailable",audit_id))?;
+        let data=match result {Ok(writer) if matches!(*state,WorktreeSlotState::Starting)=>match writer.original_evidence(){Ok(original)=>{*state=WorktreeSlotState::Inverse{writer,unknown:false};json!({"state":"accepted","original":original})},Err(_)=>{*state=WorktreeSlotState::Inverse{writer,unknown:true};json!({"state":"unknown"})}},_=>{*state=WorktreeSlotState::Unknown;json!({"state":"unknown"})}};
+        Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":data,"audit_id":audit_id}))
+    }
+    #[cfg(target_os="linux")]
+    fn worktree_redo_begin(&self,target:PathBuf,args:crate::engine::worktree_stage::RedoBegin,audit_id:&str)->Result<Value,ProtocolError>{
+        use crate::engine::worktree_stage::Binding;
+        if self.identity.lane!=TrustLane::App || args.root_path!=target {return Err(Self::stage_error("worktree redo unavailable",audit_id));}
+        let binding=Binding{operation_id:args.operation_id.clone(),request_digest:args.request_digest.clone(),git_plan_digest:args.git_plan_digest.clone(),root_id:args.root_id.clone(),root_object_tag:args.root_object_tag.clone()};
+        let slot=Arc::new(WorktreeSlot{binding,target:target.clone(),state:Mutex::new(WorktreeSlotState::Starting)});
+        let placeholder=File::open("/dev/null").map_err(|_|Self::stage_error("worktree redo unavailable",audit_id))?;
+        let existing={let mut stages=self.staged_uploads.0.lock().map_err(|_|Self::stage_error("worktree redo unavailable",audit_id))?;
+            if let Some(entry)=stages.values().find(|entry|entry.is_worktree()) {
+                let same=entry.owner_id==self.identity.owner_id && entry.principal_id==self.identity.principal_id && entry.lane==self.identity.lane && entry.session_id==self.identity.session_id;
+                Some((same,entry.worktree.clone()))
+            } else {stages.insert("__worktree_stage__".into(),StagedUpload{owner_id:self.identity.owner_id.clone(),principal_id:self.identity.principal_id.clone(),lane:self.identity.lane,session_id:self.identity.session_id.clone(),path:PathBuf::new(),marker_path:None,file:placeholder,length:0,digest:Sha256::new(),created:Instant::now(),worktree:Some(slot.clone())});None}};
+        if let Some((same,Some(original)))=existing {
+            if same && original.binding==slot.binding && original.target==slot.target {if let Ok(mut state)=original.state.lock(){if let WorktreeSlotState::Redo{unknown,..}=&mut *state {*unknown=true;}}}
+            return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"unknown"},"audit_id":audit_id}));
+        }
+        if existing.is_some(){return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"unknown"},"audit_id":audit_id}));}
+        let result=self.engine.worktree_redo_begin(&self.identity.app_scope,self.identity.owner_id(),&args);
+        let mut state=slot.state.lock().map_err(|_|Self::stage_error("worktree redo unavailable",audit_id))?;
+        let data=match result {Ok(writer) if matches!(*state,WorktreeSlotState::Starting)=>match writer.source_evidence(){Ok(original)=>{*state=WorktreeSlotState::Redo{writer,unknown:false};json!({"state":"accepted","original":original})},Err(_)=>{*state=WorktreeSlotState::Redo{writer,unknown:true};json!({"state":"unknown"})}},_=>{*state=WorktreeSlotState::Unknown;json!({"state":"unknown"})}};
+        Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":data,"audit_id":audit_id}))
+    }
+    #[cfg(target_os="linux")]
+    fn worktree_inverse_phase(&self,operation:Operation,target:PathBuf,payload:Value,audit_id:&str)->Result<Value,ProtocolError>{
+        use crate::engine::worktree_stage::Binding;
+        if self.identity.lane!=TrustLane::App{return Err(Self::stage_error("worktree inverse unavailable",audit_id));}
+        let mut object=payload.as_object().cloned().ok_or_else(||Self::stage_error("worktree inverse unavailable",audit_id))?;
+        let timeout=object.remove("timeout_ms").and_then(|v|v.as_u64()).filter(|v|*v>0 && *v<=300000).ok_or_else(||Self::stage_error("worktree inverse unavailable",audit_id))?;
+        let witness=if matches!(operation,Operation::WorktreeInverseRelocateAdmin|Operation::WorktreeInverseFinish) {
+            Some(serde_json::from_value::<crate::engine::worktree_stage::InverseGitAdminWitness>(object.remove("witness").ok_or_else(||Self::stage_error("worktree inverse unavailable",audit_id))?).map_err(|_|Self::stage_error("worktree inverse unavailable",audit_id))?)
+        }else{None};
+        let binding:Binding=serde_json::from_value(Value::Object(object)).map_err(|_|Self::stage_error("worktree inverse unavailable",audit_id))?;
+        let slot={let stages=self.staged_uploads.0.lock().map_err(|_|Self::stage_error("worktree inverse unavailable",audit_id))?;
+            let entry=stages.get("__worktree_stage__").ok_or_else(||Self::stage_error("worktree inverse unavailable",audit_id))?;
+            if entry.owner_id!=self.identity.owner_id || entry.principal_id!=self.identity.principal_id || entry.lane!=self.identity.lane || entry.session_id!=self.identity.session_id{return Err(Self::stage_error("worktree inverse unavailable",audit_id));}
+            entry.worktree.clone().ok_or_else(||Self::stage_error("worktree inverse unavailable",audit_id))?};
+        if slot.binding!=binding || slot.target!=target {return Err(Self::stage_error("worktree inverse unavailable",audit_id));}
+        let mut state=slot.state.lock().map_err(|_|Self::stage_error("worktree inverse unavailable",audit_id))?;
+        let data=match &mut *state {
+            WorktreeSlotState::Inverse{writer,unknown} if !*unknown=>{
+                let expected=match operation {Operation::WorktreeInversePrepareHistory=>"pending",Operation::WorktreeInverseStageHistory|Operation::WorktreeInverseVerify|Operation::WorktreeInverseQuarantine=>"history_prepared",Operation::WorktreeInverseRelocateAdmin=>"quarantined",Operation::WorktreeInverseFinish=>"admin_relocated",_=>"unknown"};
+                if writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_err() || writer.history_state()!=expected {*unknown=true;json!({"state":"unknown"})}
+                else {let deadline=Instant::now().checked_add(Duration::from_millis(timeout)).ok_or_else(||Self::stage_error("worktree inverse unavailable",audit_id))?;
+                    let outcome=match operation {Operation::WorktreeInversePrepareHistory=>writer.prepare_history(&self.engine,&self.identity.app_scope,deadline),Operation::WorktreeInverseStageHistory=>writer.stage_history(&self.engine,&self.identity.app_scope,deadline),Operation::WorktreeInverseVerify=>writer.verify_target(&self.engine,&self.identity.app_scope,deadline),Operation::WorktreeInverseQuarantine=>writer.quarantine_target(&self.engine,&self.identity.app_scope,deadline),Operation::WorktreeInverseRelocateAdmin=>writer.relocate_git_admin(witness.as_ref().ok_or_else(||Self::stage_error("worktree inverse unavailable",audit_id))?,deadline),Operation::WorktreeInverseFinish=>writer.finish_inverse(&self.engine,&self.identity.app_scope,witness.as_ref().ok_or_else(||Self::stage_error("worktree inverse unavailable",audit_id))?,deadline),_=>Err(EngineError::Conflict)};
+                    if outcome.is_ok(){json!({"state":match operation {Operation::WorktreeInverseVerify=>"verified",Operation::WorktreeInverseQuarantine=>"quarantined",Operation::WorktreeInverseRelocateAdmin=>"admin_relocated",Operation::WorktreeInverseFinish=>"completed",_=>"history_prepared"}})}else{*unknown=true;json!({"state":"unknown"})}}
+            }, _=>json!({"state":"unknown"})};
+        Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":data,"audit_id":audit_id}))
+    }
+
+    #[cfg(target_os="linux")]
+    fn worktree_redo_phase(&self,operation:Operation,target:PathBuf,payload:Value,audit_id:&str)->Result<Value,ProtocolError>{
+        use crate::engine::worktree_stage::Binding;
+        if self.identity.lane!=TrustLane::App{return Err(Self::stage_error("worktree redo unavailable",audit_id));}
+        let mut object=payload.as_object().cloned().ok_or_else(||Self::stage_error("worktree redo unavailable",audit_id))?;
+        let timeout=object.remove("timeout_ms").and_then(|v|v.as_u64()).filter(|v|*v>0 && *v<=300000).ok_or_else(||Self::stage_error("worktree redo unavailable",audit_id))?;
+        let witness=if matches!(operation,Operation::WorktreeRedoRestoreAdmin|Operation::WorktreeRedoRestoreTree|Operation::WorktreeRedoFinish) {
+            Some(serde_json::from_value::<crate::engine::worktree_stage::InverseGitAdminWitness>(object.remove("witness").ok_or_else(||Self::stage_error("worktree redo unavailable",audit_id))?).map_err(|_|Self::stage_error("worktree redo unavailable",audit_id))?)
+        }else{None};
+        let binding:Binding=serde_json::from_value(Value::Object(object)).map_err(|_|Self::stage_error("worktree redo unavailable",audit_id))?;
+        let slot={let stages=self.staged_uploads.0.lock().map_err(|_|Self::stage_error("worktree redo unavailable",audit_id))?;
+            let entry=stages.get("__worktree_stage__").ok_or_else(||Self::stage_error("worktree redo unavailable",audit_id))?;
+            if entry.owner_id!=self.identity.owner_id || entry.principal_id!=self.identity.principal_id || entry.lane!=self.identity.lane || entry.session_id!=self.identity.session_id{return Err(Self::stage_error("worktree redo unavailable",audit_id));}
+            entry.worktree.clone().ok_or_else(||Self::stage_error("worktree redo unavailable",audit_id))?};
+        if slot.binding!=binding || slot.target!=target {return Err(Self::stage_error("worktree redo unavailable",audit_id));}
+        let mut state=slot.state.lock().map_err(|_|Self::stage_error("worktree redo unavailable",audit_id))?;
+        let data=match &mut *state {
+            WorktreeSlotState::Redo{writer,unknown} if !*unknown=>{
+                let expected=match operation {Operation::WorktreeRedoPrepareHistory=>"pending",Operation::WorktreeRedoRestoreAdmin=>"history_prepared",Operation::WorktreeRedoRestoreTree=>"admin_restored",Operation::WorktreeRedoFinish=>"tree_restored",_=>"unknown"};
+                if writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_err() || writer.history_state()!=expected {*unknown=true;json!({"state":"unknown"})}
+                else {let deadline=Instant::now().checked_add(Duration::from_millis(timeout)).ok_or_else(||Self::stage_error("worktree redo unavailable",audit_id))?;
+                    let outcome=match operation {Operation::WorktreeRedoPrepareHistory=>writer.prepare_history(&self.engine,&self.identity.app_scope,deadline),Operation::WorktreeRedoRestoreAdmin=>writer.restore_admin(&self.engine,&self.identity.app_scope,witness.as_ref().ok_or_else(||Self::stage_error("worktree redo unavailable",audit_id))?,deadline),Operation::WorktreeRedoRestoreTree=>writer.restore_tree(&self.engine,&self.identity.app_scope,witness.as_ref().ok_or_else(||Self::stage_error("worktree redo unavailable",audit_id))?,deadline),Operation::WorktreeRedoFinish=>writer.finish_redo(&self.engine,&self.identity.app_scope,witness.as_ref().ok_or_else(||Self::stage_error("worktree redo unavailable",audit_id))?,deadline),_=>Err(EngineError::Conflict)};
+                    if outcome.is_ok(){json!({"state":match operation {Operation::WorktreeRedoRestoreAdmin=>"admin_restored",Operation::WorktreeRedoRestoreTree=>"tree_restored",Operation::WorktreeRedoFinish=>"completed",_=>"history_prepared"}})}else{*unknown=true;json!({"state":"unknown"})}}
+            }, _=>json!({"state":"unknown"})};
+        Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":data,"audit_id":audit_id}))
+    }
+
+    #[cfg(target_os="linux")]
+    fn worktree_release_completed(&self,target:PathBuf,payload:Value,audit_id:&str)->Result<Value,ProtocolError>{
+        use crate::engine::worktree_stage::Binding;
+        if self.identity.lane!=TrustLane::App{return Err(Self::stage_error("worktree release unavailable",audit_id))}
+        let binding:Binding=serde_json::from_value(payload).map_err(|_|Self::stage_error("worktree release unavailable",audit_id))?;
+        let slot={let stages=self.staged_uploads.0.lock().map_err(|_|Self::stage_error("worktree release unavailable",audit_id))?;
+            let entry=stages.get("__worktree_stage__").ok_or_else(||Self::stage_error("worktree release unavailable",audit_id))?;
+            if entry.owner_id!=self.identity.owner_id || entry.principal_id!=self.identity.principal_id || entry.lane!=self.identity.lane || entry.session_id!=self.identity.session_id {return Err(Self::stage_error("worktree release unavailable",audit_id))}
+            entry.worktree.clone().ok_or_else(||Self::stage_error("worktree release unavailable",audit_id))?};
+        if slot.binding!=binding || slot.target!=target{return Err(Self::stage_error("worktree release unavailable",audit_id))}
+        let state=slot.state.lock().map_err(|_|Self::stage_error("worktree release unavailable",audit_id))?;
+        let complete=match &*state {
+            WorktreeSlotState::Active{writer,..}=>writer.is_complete() && writer.check_binding_after_publication(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_ok(),
+            WorktreeSlotState::Inverse{writer,unknown}=>!*unknown && writer.history_state()=="completed" && writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_ok(),
+            WorktreeSlotState::Redo{writer,unknown}=>!*unknown && writer.history_state()=="completed" && writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_ok(),_=>false};
+        if !complete{return Err(Self::stage_error("worktree release unavailable",audit_id))}
+        let mut stages=self.staged_uploads.0.lock().map_err(|_|Self::stage_error("worktree release unavailable",audit_id))?;
+        if !stages.get("__worktree_stage__").and_then(|v|v.worktree.as_ref()).is_some_and(|current|Arc::ptr_eq(current,&slot)) {return Err(Self::stage_error("worktree release unavailable",audit_id))}
+        stages.remove("__worktree_stage__");drop(stages);drop(state);
+        Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"released"},"audit_id":audit_id}))
+    }
+
+    #[cfg(target_os="linux")]
+    fn worktree_stage_phase(&self, operation:Operation, target:PathBuf, payload:Value, audit_id:&str) -> Result<Value,ProtocolError> {
+        use base64::Engine as _;
+        use crate::engine::worktree_stage::Binding;
+        if self.identity.lane!=TrustLane::App {return Err(Self::stage_error("worktree stage unavailable",audit_id));}
+        let object=payload.as_object().ok_or_else(||Self::stage_error("worktree stage unavailable",audit_id))?;
+        let mut required=vec!["operation_id","request_digest","git_plan_digest","root_id","root_object_tag"];
+        match operation {Operation::WorktreeStageChunk=>required.extend(["ordinal","offset","content_base64"]),Operation::WorktreeStageEnd=>required.extend(["ordinal","git_oid","sha256"]),Operation::WorktreeStageSeal|Operation::WorktreeStageStatus=>{},_=>return Err(Self::stage_error("worktree stage unavailable",audit_id))}
+        if object.len()!=required.len() || required.iter().any(|k|!object.contains_key(*k)) {return Err(Self::stage_error("worktree stage unavailable",audit_id));}
+        let get=|name:&str|object.get(name).and_then(Value::as_str).map(str::to_owned).ok_or_else(||Self::stage_error("worktree stage unavailable",audit_id));
+        let binding=Binding{operation_id:get("operation_id")?,request_digest:get("request_digest")?,git_plan_digest:get("git_plan_digest")?,root_id:get("root_id")?,root_object_tag:get("root_object_tag")?};
+        let slot={let stages=self.staged_uploads.0.lock().map_err(|_|Self::stage_error("worktree stage unavailable",audit_id))?;
+            let Some(entry)=stages.get("__worktree_stage__") else{return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"unknown"},"audit_id":audit_id}));};
+            if entry.owner_id!=self.identity.owner_id || entry.principal_id!=self.identity.principal_id || entry.lane!=self.identity.lane || entry.session_id!=self.identity.session_id {return Err(Self::stage_error("worktree stage unavailable",audit_id));}
+            entry.worktree.clone().ok_or_else(||Self::stage_error("worktree stage unavailable",audit_id))?};
+        if slot.binding!=binding || slot.target!=target {return Err(Self::stage_error("worktree stage unavailable",audit_id));}
+        let mut state=slot.state.lock().map_err(|_|Self::stage_error("worktree stage unavailable",audit_id))?;
+        if operation==Operation::WorktreeStageStatus {
+            let invalid=matches!(&*state,WorktreeSlotState::Starting) || matches!(&*state,WorktreeSlotState::Active{writer,..} if (if writer.has_published(){writer.check_binding_after_publication(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target)}else{writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target)}).is_err());
+            if invalid {*state=WorktreeSlotState::Unknown;}
+            if let WorktreeSlotState::Inverse{writer,unknown}=&mut *state {if writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_err(){*unknown=true;}}
+            if let WorktreeSlotState::Redo{writer,unknown}=&mut *state {if writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_err(){*unknown=true;}}
+            let data=match &*state {WorktreeSlotState::Starting=>json!({"state":"status","stage":"pending"}),WorktreeSlotState::Unknown=>json!({"state":"status","stage":"unknown"}),WorktreeSlotState::Inverse{writer,unknown}=>{
+                let stage=if *unknown || writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_err(){"unknown"}else{writer.history_state()};json!({"state":"status","stage":stage})},WorktreeSlotState::Redo{writer,unknown}=>{
+                let stage=if *unknown || writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_err(){"unknown"}else{writer.history_state()};json!({"state":"status","stage":stage})},WorktreeSlotState::Active{sealed_digest,..}=>{
+                if let Some(digest)=sealed_digest {json!({"state":"status","stage":"sealed","target_manifest_sha256":digest})}else{json!({"state":"status","stage":"pending"})}}};
+            return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":data,"audit_id":audit_id}));
+        }
+        let data=(|| -> Result<Value,()> {
+            let WorktreeSlotState::Active{writer,sealed_digest,..}=&mut *state else{return Err(())};
+            if sealed_digest.is_some() || writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&target).is_err(){return Err(())}
+            match operation {
+                Operation::WorktreeStageChunk=>{let ordinal=object.get("ordinal").and_then(Value::as_u64).and_then(|n|usize::try_from(n).ok()).ok_or(())?;let offset=object.get("offset").and_then(Value::as_u64).ok_or(())?;let text=object.get("content_base64").and_then(Value::as_str).ok_or(())?;
+                    if text.len()>174764{return Err(())}let bytes=base64::engine::general_purpose::STANDARD.decode(text).map_err(|_|())?;
+                    if bytes.is_empty() || bytes.len()>128*1024 || base64::engine::general_purpose::STANDARD.encode(&bytes)!=text{return Err(())}
+                    writer.write_chunk(ordinal,offset,&bytes).map_err(|_|())?;let (next_ordinal,next_offset,_)=writer.cursor();Ok(json!({"state":"accepted","next_ordinal":next_ordinal,"next_offset":next_offset}))},
+                Operation::WorktreeStageEnd=>{let ordinal=object.get("ordinal").and_then(Value::as_u64).and_then(|n|usize::try_from(n).ok()).ok_or(())?;let oid=object.get("git_oid").and_then(Value::as_str).ok_or(())?;let sha=object.get("sha256").and_then(Value::as_str).ok_or(())?;
+                    writer.finish_blob(ordinal,oid,sha).map_err(|_|())?;let (next_ordinal,next_offset,_)=writer.cursor();Ok(json!({"state":"accepted","next_ordinal":next_ordinal,"next_offset":next_offset}))},
+                Operation::WorktreeStageSeal=>{let digest=writer.seal_target().map_err(|_|())?;*sealed_digest=Some(digest.clone());Ok(json!({"state":"sealed","target_manifest_sha256":digest}))},
+                _=>Err(())
+            }
+        })();
+        let data=match data {Ok(data)=>data,Err(())=>{*state=WorktreeSlotState::Unknown;json!({"state":"unknown"})}};
+        Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":data,"audit_id":audit_id}))
+    }
+
+    #[cfg(target_os="linux")]
+    fn worktree_private_phase(&self,operation:Operation,target:PathBuf,payload:Value,audit_id:&str)->Result<Value,ProtocolError> {
+        use crate::engine::worktree_stage::{Binding,RegistrationWitness,PublicationLockWitness,BacklinkCommittedWitness,PrivateFileWitness};
+        if self.identity.lane!=TrustLane::App {return Err(Self::stage_error("worktree stage unavailable",audit_id));}
+        let object=payload.as_object().ok_or_else(||Self::stage_error("worktree stage unavailable",audit_id))?;
+        let mut required=vec!["operation_id","request_digest","git_plan_digest","root_id","root_object_tag"];
+        match operation {Operation::WorktreePrivatePrepare=>required.extend(["destination_parent_object_tag","destination_name"]),Operation::WorktreePrivateAccept=>{required.push("phase");match object.get("phase").and_then(Value::as_str){Some("registered")=>required.push("witness"),Some("before_index")=>required.push("target_oid"),Some("index_ready")=>required.push("index"),_=>{}}},Operation::WorktreePrivateMaterialize|Operation::WorktreePrivatePrepareHistory|Operation::WorktreePrivateBeginPublication|Operation::WorktreePrivateCheckPublished=>required.push("timeout_ms"),Operation::WorktreePrivatePublish|Operation::WorktreePrivateFinishPublication=>required.extend(["timeout_ms","witness"]),_=>return Err(Self::stage_error("worktree stage unavailable",audit_id))}
+        if object.len()!=required.len() || required.iter().any(|key|!object.contains_key(*key)){return Err(Self::stage_error("worktree stage unavailable",audit_id));}
+        let get=|name:&str|object.get(name).and_then(Value::as_str).map(str::to_owned).ok_or_else(||Self::stage_error("worktree stage unavailable",audit_id));
+        let binding=Binding{operation_id:get("operation_id")?,request_digest:get("request_digest")?,git_plan_digest:get("git_plan_digest")?,root_id:get("root_id")?,root_object_tag:get("root_object_tag")?};
+        let slot={let stages=self.staged_uploads.0.lock().map_err(|_|Self::stage_error("worktree stage unavailable",audit_id))?;
+            let Some(entry)=stages.get("__worktree_stage__") else{return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"unknown"},"audit_id":audit_id}));};
+            if entry.owner_id!=self.identity.owner_id || entry.principal_id!=self.identity.principal_id || entry.lane!=self.identity.lane || entry.session_id!=self.identity.session_id{return Err(Self::stage_error("worktree stage unavailable",audit_id));}
+            entry.worktree.clone().ok_or_else(||Self::stage_error("worktree stage unavailable",audit_id))?};
+        if slot.binding!=binding || (matches!(operation,Operation::WorktreePrivateAccept|Operation::WorktreePrivateMaterialize|Operation::WorktreePrivatePrepareHistory|Operation::WorktreePrivateBeginPublication|Operation::WorktreePrivatePublish|Operation::WorktreePrivateCheckPublished|Operation::WorktreePrivateFinishPublication) && slot.target!=target){return Err(Self::stage_error("worktree stage unavailable",audit_id));}
+        let mut state=slot.state.lock().map_err(|_|Self::stage_error("worktree stage unavailable",audit_id))?;
+        let data=(||->Result<Value,()> {
+            let WorktreeSlotState::Active{writer,sealed_digest,private}=&mut *state else{return Err(())};
+            let bound=if matches!(operation,Operation::WorktreePrivateCheckPublished|Operation::WorktreePrivateFinishPublication){writer.check_binding_after_publication(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&slot.target)}else{writer.check_binding(&self.engine,&self.identity.app_scope,self.identity.owner_id(),&binding,&slot.target)};
+            if sealed_digest.is_none() || bound.is_err(){return Err(())}
+            match operation {
+                Operation::WorktreePrivatePrepare=>{
+                    if private.is_some(){return Err(())}
+                    let parent=writer.private_destination_parent(&self.engine,&self.identity.app_scope,&target,object.get("destination_parent_object_tag").and_then(Value::as_str).ok_or(())?).map_err(|_|())?;
+                    let directory=writer.create_private_directory(&parent,&target,object.get("destination_name").and_then(Value::as_str).ok_or(())?).map_err(|_|())?;
+                    let meta=directory.file.metadata().map_err(|_|())?;let path=directory.path.to_str().ok_or(())?.to_owned();let journal=directory.path.parent().and_then(Path::to_str).ok_or(())?.to_owned();
+                    if path.len()>4096 || journal.len()>4096{return Err(())}
+                    let data=json!({"state":"ready","private_path":path,"journal_directory":journal,"private_identity":{"device":meta.dev().to_string(),"inode":meta.ino().to_string()}});*private=Some(directory);Ok(data)
+                },
+                Operation::WorktreePrivateBeginPublication=>{
+                    let directory=private.as_ref().ok_or(())?;let timeout=object.get("timeout_ms").and_then(Value::as_u64).filter(|v|*v>0 && *v<=300000).ok_or(())?;
+                    writer.begin_publication_lock(directory,&self.engine,&self.identity.app_scope,Instant::now()+Duration::from_millis(timeout)).map_err(|_|())?;Ok(json!({"state":"proceed"}))
+                },
+                Operation::WorktreePrivatePublish=>{
+                    let directory=private.as_ref().ok_or(())?;let timeout=object.get("timeout_ms").and_then(Value::as_u64).filter(|v|*v>0 && *v<=300000).ok_or(())?;
+                    let witness:PublicationLockWitness=serde_json::from_value(object.get("witness").cloned().ok_or(())?).map_err(|_|())?;
+                    writer.publication_lock_ready(directory,&witness).map_err(|_|())?;writer.publish_private(directory,&self.engine,&self.identity.app_scope,Instant::now()+Duration::from_millis(timeout)).map_err(|_|())?;Ok(json!({"state":"published"}))
+                },
+                Operation::WorktreePrivateCheckPublished=>{
+                    let directory=private.as_ref().ok_or(())?;let timeout=object.get("timeout_ms").and_then(Value::as_u64).filter(|v|*v>0 && *v<=300000).ok_or(())?;
+                    writer.check_published(directory,&self.engine,&self.identity.app_scope,Instant::now()+Duration::from_millis(timeout)).map_err(|_|())?;Ok(json!({"state":"proceed"}))
+                },
+                Operation::WorktreePrivateFinishPublication=>{
+                    let directory=private.as_ref().ok_or(())?;let timeout=object.get("timeout_ms").and_then(Value::as_u64).filter(|v|*v>0 && *v<=300000).ok_or(())?;
+                    let witness:BacklinkCommittedWitness=serde_json::from_value(object.get("witness").cloned().ok_or(())?).map_err(|_|())?;
+                    writer.finish_published_history(directory,&self.engine,&self.identity.app_scope,&witness,Instant::now()+Duration::from_millis(timeout)).map_err(|_|())?;Ok(json!({"state":"completed"}))
+                },
+                Operation::WorktreePrivatePrepareHistory=>{
+                    let directory=private.as_ref().ok_or(())?;let timeout=object.get("timeout_ms").and_then(Value::as_u64).filter(|v|*v>0 && *v<=300000).ok_or(())?;
+                    writer.prepare_history(directory,&self.engine,&self.identity.app_scope,Instant::now()+Duration::from_millis(timeout)).map_err(|_|())?;
+                    Ok(json!({"state":"history_prepared"}))
+                },
+                Operation::WorktreePrivateMaterialize=>{
+                    let directory=private.as_ref().ok_or(())?;let timeout=object.get("timeout_ms").and_then(Value::as_u64).filter(|v|*v>0 && *v<=300000).ok_or(())?;
+                    let digest=writer.materialize_private(directory,Instant::now()+Duration::from_millis(timeout)).map_err(|_|())?;
+                    if sealed_digest.as_ref()!=Some(&digest){return Err(())}Ok(json!({"state":"materialized","target_manifest_sha256":digest}))
+                },
+                Operation::WorktreePrivateAccept=>{
+                    let directory=private.as_ref().ok_or(())?;
+                    match object.get("phase").and_then(Value::as_str) {
+                        Some("before_registration")=>{writer.registration_issued(directory).map_err(|_|())?;Ok(json!({"state":"proceed"}))},
+                        Some("registered")=>{let witness:RegistrationWitness=serde_json::from_value(object.get("witness").cloned().ok_or(())?).map_err(|_|())?;writer.accept_registration(directory,&witness).map_err(|_|())?;Ok(json!({"state":"registered"}))},
+                        Some("before_index")=>{writer.index_issued(directory,object.get("target_oid").and_then(Value::as_str).ok_or(())?).map_err(|_|())?;Ok(json!({"state":"proceed"}))},
+                        Some("index_ready")=>{let index:PrivateFileWitness=serde_json::from_value(object.get("index").cloned().ok_or(())?).map_err(|_|())?;writer.accept_index(directory,&index).map_err(|_|())?;Ok(json!({"state":"registered"}))},
+                        _=>Err(())
+                    }
+                },_=>Err(())
+            }
+        })();
+        let data=match data {Ok(data)=>data,Err(())=>{*state=WorktreeSlotState::Unknown;json!({"state":"unknown"})}};
+        Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":data,"audit_id":audit_id}))
+    }
+
     fn stage_begin(&self, target: PathBuf, audit_id: &str) -> Result<Value, ProtocolError> {
         let target_result = match self.identity.lane {
             TrustLane::App => self.engine.authorize_stage_directory_scoped(&self.identity.app_scope, &target),
@@ -729,8 +1109,8 @@ impl FileService {
         }
         self.prune_stages();
         let mut stages = self.staged_uploads.0.lock().map_err(|_| Self::stage_error("staging is unavailable", audit_id))?;
-        let active_bytes: u64 = stages.values().map(|stage| stage.length).sum();
-        if stages.len() >= MAX_ACTIVE_STAGES || active_bytes >= MAX_ACTIVE_STAGE_BYTES {
+        let active_bytes: u64 = stages.values().filter(|stage|!stage.is_worktree()).map(|stage| stage.length).sum();
+        if stages.values().filter(|stage|!stage.is_worktree()).count() >= MAX_ACTIVE_STAGES || active_bytes >= MAX_ACTIVE_STAGE_BYTES {
             return Err(Self::stage_error("staging capacity is exhausted", audit_id));
         }
         let root = StageStore::ensure_root().map_err(|_| Self::stage_error("staging is unavailable", audit_id))?;
@@ -784,6 +1164,7 @@ impl FileService {
             return Err(Self::stage_error("staging is unavailable", audit_id));
         }
         let stage = StagedUpload {
+            #[cfg(target_os="linux")] worktree:None,
             owner_id: self.identity.owner_id.clone(),
             principal_id: self.identity.principal_id.clone(),
             lane: self.identity.lane,
@@ -809,7 +1190,7 @@ impl FileService {
         use base64::Engine as _;
         self.prune_stages();
         let mut stages = self.staged_uploads.0.lock().map_err(|_| Self::stage_error("staging is unavailable", audit_id))?;
-        let active_bytes: u64 = stages.values().map(|entry| entry.length).sum();
+        let active_bytes: u64 = stages.values().filter(|entry|!entry.is_worktree()).map(|entry| entry.length).sum();
         let stage = stages.get_mut(&args.stage_id).ok_or_else(|| Self::stage_error("staging handle is unavailable", audit_id))?;
         if !self.stage_matches(stage) {
             return Err(Self::stage_error("staging handle is invalid", audit_id));
@@ -854,9 +1235,31 @@ impl FileService {
             StageStore::remove_stage_files(&stage);
             return Err(Self::stage_error("staging digest or length is invalid", audit_id));
         }
+        if let Err(error)=self.engine.validate_graph_stage(&PathBuf::from(&args.target), &args.digest, args.length) {
+            StageStore::remove_stage_files(&stage);
+            return serialize_engine::<crate::engine::ReplaceOutcome>(Err(error), audit_id);
+        }
         if stage.file.sync_all().is_err() {
             StageStore::remove_stage_files(&stage);
             return Err(Self::stage_error("staging write failed", audit_id));
+        }
+        if let Some(wire) = args.expected_fingerprint {
+            let result = (|| {
+                if self.identity.lane != TrustLane::App || self.engine.graph_capture_active() {
+                    return Err(Self::stage_error("staged replacement unavailable for this lane", audit_id));
+                }
+                let expected = wire.into_fingerprint().map_err(|_| Self::stage_error("invalid replacement fingerprint", audit_id))?;
+                let mut bytes = Vec::with_capacity(stage.length as usize);
+                stage.file.rewind().and_then(|_| (&mut stage.file).take(stage.length + 1).read_to_end(&mut bytes))
+                    .map_err(|_| Self::stage_error("staged replacement unavailable", audit_id))?;
+                if bytes.len() as u64 != stage.length || format!("sha256:{:x}", Sha256::digest(&bytes)) != args.digest {
+                    return Err(Self::stage_error("staged replacement changed", audit_id));
+                }
+                serialize_engine(self.engine.replace_if_fingerprint_scoped(&self.identity.app_scope,
+                    Path::new(&args.target), Some(&expected), &bytes), audit_id)
+            })();
+            StageStore::remove_stage_files(&stage);
+            return result;
         }
         let result = match self.identity.lane {
             TrustLane::App => self.engine.create_file_from_staging_scoped(&self.identity.app_scope, &PathBuf::from(args.target), &mut stage.file, stage.length),
@@ -1167,11 +1570,51 @@ impl FileService {
         Ok(png)
     }
 
+    #[cfg(target_os = "linux")]
+    fn checkpoint_open(&self, binding: &crate::CheckpointBinding, path: &Path, audit_id: &str) -> Result<(File,ObjectIdentity,(u64,u64)), ProtocolError> {
+        use std::os::unix::fs::MetadataExt;
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Component;
+        let relative=Path::new(&binding.relative_path);
+        let parts:Vec<_>=relative.components().collect();
+        if parts.is_empty() || parts.iter().any(|part|!matches!(part,Component::Normal(_)))
+            || binding.canonical_root.join(relative)!=path {return Err(self.stale_handle(audit_id));}
+        let (_,_,authorized)=self.authorized_open_identity(path,audit_id)?;
+        let mut parent=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK)
+            .open(&binding.canonical_root).map_err(|_|self.stale_handle(audit_id))?;
+        let root_metadata=parent.metadata().map_err(|_|self.stale_handle(audit_id))?;
+        let root_identity=(root_metadata.dev(),root_metadata.ino());
+        for (index,part) in parts.iter().enumerate() {
+            let Component::Normal(name)=part else {return Err(self.stale_handle(audit_id));};
+            let name=CString::new(name.as_bytes()).map_err(|_|self.stale_handle(audit_id))?;
+            let flags=libc::O_RDONLY|libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK
+                | if index+1==parts.len(){0}else{libc::O_DIRECTORY};
+            // SAFETY: parent and NUL-terminated name remain live during openat.
+            let fd=unsafe {libc::openat(parent.as_raw_fd(),name.as_ptr(),flags)};
+            if fd<0{return Err(self.stale_handle(audit_id));}
+            // SAFETY: openat returned a fresh owned descriptor.
+            let opened=unsafe {File::from_raw_fd(fd)};
+            if index+1==parts.len() {
+                let metadata=opened.metadata().map_err(|_|self.stale_handle(audit_id))?;
+                let identity=ObjectIdentity::from_file(&opened).map_err(|_|self.stale_handle(audit_id))?;
+                if !metadata.is_file() || identity!=authorized {return Err(self.stale_handle(audit_id));}
+                return Ok((opened,identity,root_identity));
+            }
+            parent=opened;
+        }
+        Err(self.stale_handle(audit_id))
+    }
+
     pub fn dispatch(&self, request: ClientRequest) -> Result<Value, ProtocolError> {
         let (operation, envelope, audit_id) = self.bind_request(request)?;
-        let mutation = matches!(operation, Operation::Create | Operation::Replace | Operation::Patch
-            | Operation::Copy | Operation::Move | Operation::Rename | Operation::Mkdir
-            | Operation::Trash | Operation::Restore | Operation::StageFinish);
+        let mutation = matches!(operation, Operation::Create | Operation::Replace | Operation::OrdinaryReplace | Operation::OrdinaryCreate | Operation::Patch
+            | Operation::Copy | Operation::Move | Operation::ManagedFileMove | Operation::ManagedFileCleanup | Operation::ManagedFolderMove | Operation::ManagedFolderCleanup | Operation::Rename | Operation::Mkdir
+            | Operation::Trash | Operation::Restore | Operation::StageFinish | Operation::CheckoutPrepare | Operation::CheckoutStep | Operation::CheckoutRollback | Operation::CheckoutFinalize);
+        if self.engine.graph_capture_active() && mutation && !matches!(operation, Operation::StageFinish) {
+            return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "graph capture requires staged create", Some(audit_id)));
+        }
         // A hook's last action belongs to this operation only while mutations
         // are serialized. Read-only requests never attach stale recovery status.
         let _receipt_guard = if mutation {
@@ -1187,10 +1630,11 @@ impl FileService {
                 "service_session_id": self.identity.session_id,
                 "ready": true,
             })),
-            Operation::Capabilities => Ok(json!({
+            Operation::Capabilities => {
+                let mut capabilities = json!({
                 "protocol": crate::PROTOCOL_VERSION,
                 "lane": self.identity.lane,
-                "operations": ["health", "capabilities", "list_directory", "stat", "open_handle", "read_range", "read_lines", "read_text_preview", "create", "stage_begin", "stage_chunk", "stage_finish", "stage_abort", "replace", "patch", "copy", "move", "rename", "mkdir", "trash", "restore", "filename_search", "content_search"],
+                "operations": ["health", "capabilities", "list_directory", "stat", "stat_object_identity", "open_handle", "read_range", "read_lines", "read_text_preview", "create", "stage_begin", "stage_chunk", "stage_finish", "stage_abort", "replace", "patch", "copy", "move", "rename", "mkdir", "trash", "restore", "filename_search", "content_search"],
                 "native_thumbnails": self.native_thumbnails_available(),
                 "native_icons": self.native_icon_broker.is_some(),
                 "max_page_size": self.engine.config().directory_page_size,
@@ -1199,7 +1643,36 @@ impl FileService {
                     "filename_modes": ["filename", "glob"], "glob_syntax": ["*", "**", "?"],
                     "resumable": false, "max_results": 200, "max_entries": 10000,
                     "max_depth": 32, "max_bytes_per_file": 1048576},
-            })),
+                });
+                if cfg!(target_os = "linux") {
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("strict_snapshot_directory_v1"));
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("snapshot_file_hash"));
+                }
+                if MANAGED_FILE_MOVE_READY && self.engine.managed_file_move_ready() && self.identity.lane == TrustLane::App {
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("managed_file_move"));
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("managed_file_move_status"));
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("managed_file_cleanup"));
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("managed_folder_inspect"));
+                }
+                if MANAGED_FOLDER_MOVE_READY && self.engine.managed_file_move_ready() && self.identity.lane == TrustLane::App {
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("managed_folder_move"));
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("managed_folder_move_status"));
+                }
+                if ORDINARY_CREATE_READY && self.engine.ordinary_write_ready() {
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("ordinary_create"));
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("ordinary_create_status"));
+                }
+                if self.engine.ordinary_write_ready() {
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("ordinary_replace"));
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("ordinary_replace_status"));
+                }
+                if cfg!(target_os="linux") && self.engine.checkpoint_ready() {
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("register_checkpoint_file"));
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("checkpoint_prepare"));
+                    capabilities["operations"].as_array_mut().expect("static operations array").push(json!("checkpoint_finalize"));
+                }
+                Ok(capabilities)
+            },
             Operation::ListDirectory => {
                 let path = target_path(&envelope.target, &audit_id)?;
                 let args: ListDirectoryArgs = serde_json::from_value(envelope.payload.clone())
@@ -1211,6 +1684,13 @@ impl FileService {
                         )
                     })?;
                 let cursor = args.cursor;
+                if args.strict_snapshot {
+                    if cursor.is_some() || args.sort.is_some() {return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest,"strict snapshot has no cursor or sort",Some(audit_id)));}
+                    #[cfg(target_os = "linux")]
+                    {return self.strict_snapshot_directory(&path,args.limit.unwrap_or(1024),&audit_id);}
+                    #[cfg(not(target_os = "linux"))]
+                    {return Err(ProtocolError::new(ProtocolErrorCode::Unsupported,"strict snapshot listing unavailable",Some(audit_id)));}
+                }
                 let max_page_size = self.engine.config().directory_page_size;
                 let limit = args.limit.unwrap_or(max_page_size);
                 if limit == 0 || limit > max_page_size {
@@ -1260,6 +1740,123 @@ impl FileService {
                 let path = target_path(&envelope.target, &audit_id)?;
                 self.open_handle(&path, &audit_id)
             }
+            Operation::RegisterCheckpointFile => {
+                #[cfg(target_os="linux")]
+                {
+                    let args:CheckpointRegistrationArgs=serde_json::from_value(envelope.payload).map_err(|_|self.stale_handle(&audit_id))?;
+                    let path=target_path(&envelope.target,&audit_id)?;
+                    let root=self.engine.checkpoint_root(&args.root_id).map_err(|_|self.stale_handle(&audit_id))?;
+                    let relative=path.strip_prefix(&root).map_err(|_|self.stale_handle(&audit_id))?;
+                    let relative=relative.to_str().filter(|value|!value.is_empty()).ok_or_else(||self.stale_handle(&audit_id))?;
+                    let binding=crate::CheckpointBinding {resource_id:String::new(),root_id:args.root_id.clone(),workspace_id:String::new(),registry_generation:0,relative_path:relative.into(),staged_upload_id:String::new(),canonical_root:root};
+                    let (mut file,identity,root_identity)=self.checkpoint_open(&binding,&path,&audit_id)?;
+                    if identity.size>16*1024*1024 {return Err(self.stale_handle(&audit_id));}
+                    let deadline=Instant::now()+std::time::Duration::from_secs(30);
+                    let mut digest=Sha256::new();let mut size=0u64;let mut buf=[0u8;65536];
+                    loop {if Instant::now()>=deadline{return Err(self.stale_handle(&audit_id));}
+                        let n=file.read(&mut buf).map_err(|_|self.stale_handle(&audit_id))?;if n==0{break;}
+                        size=size.checked_add(n as u64).ok_or_else(||self.stale_handle(&audit_id))?;
+                        if size>identity.size{return Err(self.stale_handle(&audit_id));}digest.update(&buf[..n]);}
+                    if size!=identity.size || format!("sha256:{:x}:{}",digest.finalize(),size)!=args.expected_fingerprint
+                        || ObjectIdentity::from_file(&file).map_err(|_|self.stale_handle(&audit_id))?!=identity {return Err(self.stale_handle(&audit_id));}
+                    let (_,before,before_root)=self.checkpoint_open(&binding,&path,&audit_id)?;
+                    if before!=identity || before_root!=root_identity {return Err(self.stale_handle(&audit_id));}
+                    let result=self.engine.register_checkpoint_file(&path,&args.root_id).map_err(|_|self.stale_handle(&audit_id))?;
+                    let (_,after,after_root)=self.checkpoint_open(&binding,&path,&audit_id)?;
+                    if after!=identity || after_root!=root_identity || ObjectIdentity::from_file(&file).map_err(|_|self.stale_handle(&audit_id))?!=identity {return Err(self.stale_handle(&audit_id));}
+                    return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":result,"audit_id":audit_id}));
+                }
+                #[cfg(not(target_os="linux"))]
+                {return Err(ProtocolError::new(ProtocolErrorCode::Unsupported,"registration unavailable",Some(audit_id)));}
+            }
+            Operation::CheckpointPrepare => {
+                #[cfg(target_os = "linux")]
+                {
+                    let args:CheckpointPrepareArgs=serde_json::from_value(envelope.payload).map_err(|_|self.stale_handle(&audit_id))?;
+                    if args.items.is_empty() || args.items.len()>16 || args.request_id.len()<16 || args.request_id.len()>80
+                        || !args.request_id.bytes().all(|c|c.is_ascii_alphanumeric() || c==b'-' || c==b'_') {return Err(self.stale_handle(&audit_id));}
+                    let mut slot=self.checkpoint_prepared.lock().map_err(|_|self.stale_handle(&audit_id))?;
+                    if slot.as_ref().is_some_and(|value|Instant::now()>=value.deadline) {if let Some(old)=slot.take(){old.ticket.fail();}}
+                    if slot.is_some() {return Err(self.stale_handle(&audit_id));}
+                    let deadline=Instant::now()+Duration::from_secs(30);
+                    let selection:Vec<_>=args.items.iter().map(|item|crate::CheckpointSelection {resource_id:item.resource_id.clone(),expected_fingerprint:item.expected_fingerprint.clone()}).collect();
+                    let mut ticket=self.engine.claim_checkpoint(&args.request_id,&args.root_id,&selection,deadline).map_err(|_|self.stale_handle(&audit_id))?;
+                    let started=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|self.stale_handle(&audit_id))?.as_millis() as u64;
+                    let build=(|| -> Result<(Vec<CheckpointPinned>,u64),ProtocolError> {
+                        let bindings=ticket.bindings().to_vec();
+                        if bindings.len()!=args.items.len(){return Err(self.stale_handle(&audit_id));}
+                        let mut files=Vec::with_capacity(bindings.len());let mut total=0u64;
+                        for (index,(input,binding)) in args.items.iter().zip(bindings).enumerate() {
+                            if Instant::now()>=deadline || input.resource_id!=binding.resource_id || input.path.len()>4096 {return Err(self.stale_handle(&audit_id));}
+                            let path=PathBuf::from(&input.path);let (mut file,identity,root_identity)=self.checkpoint_open(&binding,&path,&audit_id)?;
+                            if files.first().is_some_and(|first: &CheckpointPinned|first.root_identity!=root_identity) {return Err(self.stale_handle(&audit_id));}
+                            if identity.size>16*1024*1024 {return Err(self.stale_handle(&audit_id));}
+                            total=total.checked_add(identity.size).ok_or_else(||self.stale_handle(&audit_id))?;
+                            if total>64*1024*1024 {return Err(self.stale_handle(&audit_id));}
+                            let mut bytes=Vec::with_capacity(identity.size as usize);let mut buffer=[0u8;65536];
+                            loop {if Instant::now()>=deadline{return Err(self.stale_handle(&audit_id));}
+                                let count=file.read(&mut buffer).map_err(|_|self.stale_handle(&audit_id))?;if count==0{break;}
+                                if bytes.len().saturating_add(count)>identity.size as usize{return Err(self.stale_handle(&audit_id));}bytes.extend_from_slice(&buffer[..count]);}
+                            let fingerprint=format!("sha256:{:x}:{}",Sha256::digest(&bytes),bytes.len());
+                            if bytes.len() as u64!=identity.size || fingerprint!=input.expected_fingerprint
+                                || ObjectIdentity::from_file(&file).map_err(|_|self.stale_handle(&audit_id))?!=identity {return Err(self.stale_handle(&audit_id));}
+                            ticket.stage(index,&bytes,deadline).map_err(|_|self.stale_handle(&audit_id))?;
+                            let (_,current,current_root)=self.checkpoint_open(&binding,&path,&audit_id)?;
+                            if current!=identity || current_root!=root_identity{return Err(self.stale_handle(&audit_id));}
+                            files.push(CheckpointPinned {path,binding,file,identity,root_identity});
+                        }
+                        for item in &files {let (_,current,current_root)=self.checkpoint_open(&item.binding,&item.path,&audit_id)?;
+                            if current!=item.identity || current_root!=item.root_identity || ObjectIdentity::from_file(&item.file).map_err(|_|self.stale_handle(&audit_id))?!=item.identity {return Err(self.stale_handle(&audit_id));}}
+                        let finished=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|self.stale_handle(&audit_id))?.as_millis() as u64;
+                        if Instant::now()>=deadline{return Err(self.stale_handle(&audit_id));} Ok((files,finished))
+                    })();
+                    let (files,finished)=match build {Ok(value)=>value,Err(error)=>{ticket.fail();return Err(error);}};
+                    let mut random=[0u8;32];if getrandom::fill(&mut random).is_err(){ticket.fail();return Err(self.stale_handle(&audit_id));}
+                    let selector:String=random.iter().map(|byte|format!("{byte:02x}")).collect();
+                    *slot=Some(PreparedCheckpoint {selector:selector.clone(),ticket,files,deadline,started_millis:started,finished_millis:finished});
+                    return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"state":"prepared","selector":selector},"audit_id":audit_id}));
+                }
+                #[cfg(not(target_os = "linux"))]
+                {return Err(ProtocolError::new(ProtocolErrorCode::Unsupported,"checkpoint unavailable",Some(audit_id)));}
+            }
+            Operation::CheckpointFinalize => {
+                #[cfg(target_os = "linux")]
+                {
+                    let args:CheckpointFinalizeArgs=serde_json::from_value(envelope.payload).map_err(|_|self.stale_handle(&audit_id))?;
+                    let mut slot=self.checkpoint_prepared.lock().map_err(|_|self.stale_handle(&audit_id))?;
+                    if slot.as_ref().is_none_or(|value|value.selector!=args.selector) {return Err(self.stale_handle(&audit_id));}
+                    let prepared=slot.take().ok_or_else(||self.stale_handle(&audit_id))?;
+                    if Instant::now()>=prepared.deadline {prepared.ticket.fail();return Err(self.stale_handle(&audit_id));}
+                    for item in &prepared.files {
+                        let current=self.checkpoint_open(&item.binding,&item.path,&audit_id);
+                        if current.as_ref().is_err() || current.ok().is_none_or(|(_,identity,root_identity)|identity!=item.identity || root_identity!=item.root_identity)
+                            || ObjectIdentity::from_file(&item.file).map_or(true,|identity|identity!=item.identity) {
+                            prepared.ticket.fail();return Err(self.stale_handle(&audit_id));
+                        }
+                    }
+                    let result=prepared.ticket.finalize(prepared.started_millis,prepared.finished_millis,prepared.deadline).map_err(|_|self.stale_handle(&audit_id))?;
+                    return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":result,"audit_id":audit_id}));
+                }
+                #[cfg(not(target_os = "linux"))]
+                {return Err(ProtocolError::new(ProtocolErrorCode::Unsupported,"checkpoint unavailable",Some(audit_id)));}
+            }
+            Operation::SnapshotFileHash => {
+                #[cfg(target_os = "linux")]
+                {
+                    let path=target_path(&envelope.target,&audit_id)?;
+                    let args:SnapshotHashArgs=serde_json::from_value(envelope.payload).map_err(|_| ProtocolError::new(ProtocolErrorCode::MalformedRequest,"snapshot hash payload invalid",Some(audit_id.clone())))?;
+                    if args.max_bytes==0 || args.max_bytes>1024*1024*1024 || args.max_ms==0 || args.max_ms>30000 {return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest,"snapshot hash bounds invalid",Some(audit_id)));}
+                    let (canonical,mut file,before)=self.authorized_open_identity(&path,&audit_id)?;
+                    if before.size>args.max_bytes {return Err(ProtocolError::new(ProtocolErrorCode::Unsupported,"snapshot file exceeds bound",Some(audit_id)));}
+                    let deadline=Instant::now()+Duration::from_millis(args.max_ms);let mut total=0u64;let mut digest=Sha256::new();let mut buffer=[0u8;65536];
+                    loop {if Instant::now()>=deadline{return Err(self.stale_handle(&audit_id));}let n=file.read(&mut buffer).map_err(|_| self.stale_handle(&audit_id))?;if n==0{break;}total=total.checked_add(n as u64).ok_or_else(||self.stale_handle(&audit_id))?;if total>before.size || total>args.max_bytes{return Err(self.stale_handle(&audit_id));}digest.update(&buffer[..n]);}
+                    let (_,_,current)=self.authorized_open_identity(&path,&audit_id)?;
+                    if Instant::now()>=deadline || total!=before.size || ObjectIdentity::from_file(&file).map_err(|_| self.stale_handle(&audit_id))?!=before || current!=before{return Err(self.stale_handle(&audit_id));}
+                    return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":{"path":canonical,"size":total,"sha256":format!("{:x}",digest.finalize()),"object_tag":before.opaque_tag()},"audit_id":audit_id}));
+                }
+                #[cfg(not(target_os = "linux"))]
+                {return Err(ProtocolError::new(ProtocolErrorCode::Unsupported,"snapshot hash unavailable",Some(audit_id)));}
+            }
             Operation::Thumbnail => Err(ProtocolError::new(
                 ProtocolErrorCode::Unsupported,
                 "native thumbnails require the bounded Tonic thumbnail RPC",
@@ -1275,7 +1872,16 @@ impl FileService {
                 })?;
                 match &envelope.target {
                     Target::Handle(handle) => {
+                        if args.object_identity { return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "identity stat requires a path", Some(audit_id))); }
                         self.stat_handle(handle, args.include_fingerprint, &audit_id)
+                    }
+                    Target::Path(path) if args.object_identity => {
+                        if args.include_fingerprint {
+                            return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "identity stat cannot request a fingerprint", Some(audit_id)));
+                        }
+                        let (canonical, file, identity) = self.authorized_open_identity(Path::new(path), &audit_id)?;
+                        let metadata = file.metadata().map_err(|_| self.stale_handle(&audit_id))?;
+                        Ok(json!({"protocol": crate::PROTOCOL_VERSION, "data": {"path":canonical, "kind":crate::engine::FileKind::File, "size":metadata.len(), "modified_unix_ms":metadata_modified_ms(&metadata), "object_tag":identity.opaque_tag()}, "audit_id":audit_id}))
                     }
                     Target::Path(path) => {
                         let path = PathBuf::from(path);
@@ -1452,6 +2058,50 @@ impl FileService {
                 };
                 serialize_engine(result, &audit_id)
             }
+            Operation::OrdinaryCreate | Operation::OrdinaryCreateStatus => {
+                if !ORDINARY_CREATE_READY || !self.engine.ordinary_write_ready() { return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable,"ordinary create unavailable",Some(audit_id))); }
+                #[cfg(not(target_os="linux"))]
+                { return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable,"ordinary create unavailable",Some(audit_id))); }
+                #[cfg(target_os="linux")]
+                {
+                    let path=target_path(&envelope.target,&audit_id)?;
+                    let args:OrdinaryCreateArgs=serde_json::from_value(envelope.payload).map_err(|_|ProtocolError::new(ProtocolErrorCode::MalformedRequest,"ordinary create identity invalid",Some(audit_id.clone())))?;
+                    if args.binding.operation_id!=envelope.context.root_operation_id() {return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest,"ordinary create identity changed",Some(audit_id)));}
+                    let status=operation==Operation::OrdinaryCreateStatus;
+                    if status && args.bytes.is_some() {return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest,"status must not include content",Some(audit_id)));}
+                    if status {match self.identity.lane {
+                        TrustLane::App=>serialize_engine(self.engine.ordinary_create_status_scoped(&self.identity.app_scope,&path,&args.binding),&audit_id),
+                        TrustLane::Agent=>serialize_engine(self.engine.ordinary_create_status_agent(self.identity.owner_id(),&self.identity.scope(),&path,&args.binding),&audit_id),
+                    }} else {
+                        let bytes=args.bytes.ok_or_else(||ProtocolError::new(ProtocolErrorCode::MalformedRequest,"ordinary create content unavailable",Some(audit_id.clone())))?;
+                        match self.identity.lane {
+                            TrustLane::App=>serialize_engine(self.engine.ordinary_create_scoped(&self.identity.app_scope,&path,&args.binding,&bytes),&audit_id),
+                            TrustLane::Agent=>serialize_engine(self.engine.ordinary_create_agent(self.identity.owner_id(),&self.identity.scope(),&path,&args.binding,&bytes),&audit_id),
+                        }
+                    }
+                }
+            }
+            Operation::OrdinaryReplace | Operation::OrdinaryReplaceStatus => {
+                let path = target_path(&envelope.target, &audit_id)?;
+                let args: OrdinaryReplaceArgs = serde_json::from_value(envelope.payload).map_err(|_| ProtocolError::new(
+                    ProtocolErrorCode::MalformedRequest, "ordinary write identity invalid", Some(audit_id.clone())))?;
+                if args.binding.operation_id != envelope.context.root_operation_id() {
+                    return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "ordinary write identity changed", Some(audit_id)));
+                }
+                if operation == Operation::OrdinaryReplaceStatus {
+                    if args.bytes.is_some() { return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "status must not include content", Some(audit_id))); }
+                    match self.identity.lane {
+                        TrustLane::App=>serialize_engine(self.engine.ordinary_replace_status_scoped(&self.identity.app_scope,&path,&args.binding),&audit_id),
+                        TrustLane::Agent=>serialize_engine(self.engine.ordinary_replace_status_agent(self.identity.owner_id(),&self.identity.scope(),&path,&args.binding),&audit_id),
+                    }
+                } else {
+                    let bytes = args.bytes.ok_or_else(|| ProtocolError::new(ProtocolErrorCode::MalformedRequest, "ordinary write content unavailable", Some(audit_id.clone())))?;
+                    match self.identity.lane {
+                        TrustLane::App=>serialize_engine(self.engine.ordinary_replace_scoped(&self.identity.app_scope,&path,&args.binding,&bytes),&audit_id),
+                        TrustLane::Agent=>serialize_engine(self.engine.ordinary_replace_agent(self.identity.owner_id(),&self.identity.scope(),&path,&args.binding,&bytes),&audit_id),
+                    }
+                }
+            }
             Operation::Patch => {
                 let path = target_path(&envelope.target, &audit_id)?;
                 let args: PatchArgs = serde_json::from_value(envelope.payload).map_err(|_| {
@@ -1513,6 +2163,176 @@ impl FileService {
                     ),
                 };
                 serialize_engine(result, &audit_id)
+            }
+            Operation::WorktreeLookup | Operation::WorktreeReleaseCompleted | Operation::WorktreeRedoBegin | Operation::WorktreeRedoPrepareHistory | Operation::WorktreeRedoRestoreAdmin | Operation::WorktreeRedoRestoreTree | Operation::WorktreeRedoFinish | Operation::WorktreeInverseBegin | Operation::WorktreeInversePrepareHistory | Operation::WorktreeInverseStageHistory | Operation::WorktreeInverseVerify | Operation::WorktreeInverseQuarantine | Operation::WorktreeInverseRelocateAdmin | Operation::WorktreeInverseFinish | Operation::WorktreeStageBegin | Operation::WorktreeStageChunk | Operation::WorktreeStageEnd | Operation::WorktreeStageSeal | Operation::WorktreeStageStatus | Operation::WorktreePrivatePrepare | Operation::WorktreePrivateAccept | Operation::WorktreePrivateMaterialize | Operation::WorktreePrivatePrepareHistory | Operation::WorktreePrivateBeginPublication | Operation::WorktreePrivatePublish | Operation::WorktreePrivateCheckPublished | Operation::WorktreePrivateFinishPublication => {
+                #[cfg(target_os="linux")]
+                {
+                    let target=target_path(&envelope.target,&audit_id)?;
+                    if operation==Operation::WorktreeLookup {
+                        if self.identity.lane!=TrustLane::App{return Err(Self::stage_error("worktree lookup unavailable",&audit_id))}
+                        let args:crate::engine::worktree_stage::WorktreeLookup=serde_json::from_value(envelope.payload).map_err(|_|Self::stage_error("worktree lookup unavailable",&audit_id))?;
+                        if args.operation_id!=envelope.context.root_operation_id() || args.root_path!=target{return Err(Self::stage_error("worktree lookup unavailable",&audit_id))}
+                        let data=self.engine.worktree_lookup(&self.identity.app_scope,self.identity.owner_id(),&args,Instant::now()+Duration::from_secs(10)).map_err(|_|Self::stage_error("worktree lookup unavailable",&audit_id))?;
+                        return Ok(json!({"protocol":crate::PROTOCOL_VERSION,"data":data,"audit_id":audit_id}));
+                    }
+                    if operation==Operation::WorktreeReleaseCompleted {
+                        if envelope.payload.get("operation_id").and_then(Value::as_str)!=Some(envelope.context.root_operation_id()){return Err(Self::stage_error("worktree release unavailable",&audit_id))}
+                        return self.worktree_release_completed(target,envelope.payload,&audit_id);
+                    }
+                    if operation==Operation::WorktreeRedoBegin {
+                        let args:crate::engine::worktree_stage::RedoBegin=serde_json::from_value(envelope.payload).map_err(|_|Self::stage_error("worktree redo unavailable",&audit_id))?;
+                        if args.operation_id!=envelope.context.root_operation_id(){return Err(Self::stage_error("worktree redo unavailable",&audit_id));}
+                        return self.worktree_redo_begin(target,args,&audit_id);
+                    }
+                    if matches!(operation,Operation::WorktreeRedoPrepareHistory|Operation::WorktreeRedoRestoreAdmin|Operation::WorktreeRedoRestoreTree|Operation::WorktreeRedoFinish) {
+                        if envelope.payload.get("operation_id").and_then(Value::as_str)!=Some(envelope.context.root_operation_id()){return Err(Self::stage_error("worktree redo unavailable",&audit_id));}
+                        return self.worktree_redo_phase(operation,target,envelope.payload,&audit_id);
+                    }
+                    if operation==Operation::WorktreeInverseBegin {
+                        let args:crate::engine::worktree_stage::InverseBegin=serde_json::from_value(envelope.payload).map_err(|_|Self::stage_error("worktree inverse unavailable",&audit_id))?;
+                        if args.operation_id!=envelope.context.root_operation_id(){return Err(Self::stage_error("worktree inverse unavailable",&audit_id));}
+                        return self.worktree_inverse_begin(target,args,&audit_id);
+                    }
+                    if matches!(operation,Operation::WorktreeInversePrepareHistory|Operation::WorktreeInverseStageHistory|Operation::WorktreeInverseVerify|Operation::WorktreeInverseQuarantine|Operation::WorktreeInverseRelocateAdmin|Operation::WorktreeInverseFinish) {
+                        if envelope.payload.get("operation_id").and_then(Value::as_str)!=Some(envelope.context.root_operation_id()){return Err(Self::stage_error("worktree inverse unavailable",&audit_id));}
+                        return self.worktree_inverse_phase(operation,target,envelope.payload,&audit_id);
+                    }
+                    if operation==Operation::WorktreeStageBegin {
+                        let args:crate::engine::worktree_stage::Begin=serde_json::from_value(envelope.payload).map_err(|_|Self::stage_error("worktree stage unavailable",&audit_id))?;
+                        if args.operation_id!=envelope.context.root_operation_id(){return Err(Self::stage_error("worktree stage unavailable",&audit_id));}
+                        return self.worktree_stage_begin(target,args,&audit_id);
+                    }
+                    if envelope.payload.get("operation_id").and_then(Value::as_str)!=Some(envelope.context.root_operation_id()){return Err(Self::stage_error("worktree stage unavailable",&audit_id));}
+                    if matches!(operation,Operation::WorktreePrivatePrepare|Operation::WorktreePrivateAccept|Operation::WorktreePrivateMaterialize|Operation::WorktreePrivatePrepareHistory|Operation::WorktreePrivateBeginPublication|Operation::WorktreePrivatePublish|Operation::WorktreePrivateCheckPublished|Operation::WorktreePrivateFinishPublication) {self.worktree_private_phase(operation,target,envelope.payload,&audit_id)} else {self.worktree_stage_phase(operation,target,envelope.payload,&audit_id)}
+                }
+                #[cfg(not(target_os="linux"))] {Err(ProtocolError::new(ProtocolErrorCode::Unsupported,"worktree stage unavailable",Some(audit_id)))}
+            }
+            Operation::CheckoutPrepare | Operation::CheckoutStep | Operation::CheckoutStatus | Operation::CheckoutRollback | Operation::CheckoutFinalize | Operation::CheckoutProbeChild => {
+                if self.identity.lane != TrustLane::App || !self.engine.managed_file_move_ready() {
+                    return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable,"checkout owner unavailable",Some(audit_id)));
+                }
+                #[cfg(target_os="linux")]
+                {
+                    let target=target_path(&envelope.target,&audit_id)?;
+                    if operation==Operation::CheckoutProbeChild {
+                        let args:crate::engine::checkout::Probe=serde_json::from_value(envelope.payload).map_err(|_|ProtocolError::new(ProtocolErrorCode::MalformedRequest,"checkout probe payload invalid",Some(audit_id.clone())))?;
+                        return serialize_engine(self.engine.checkout_probe(&self.identity.app_scope,&target,&args),&audit_id);
+                    }
+                    if operation==Operation::CheckoutPrepare {
+                        let args:crate::engine::checkout::Prepare=serde_json::from_value(envelope.payload).map_err(|_|ProtocolError::new(ProtocolErrorCode::MalformedRequest,"checkout payload invalid",Some(audit_id.clone())))?;
+                        if args.operation_id!=envelope.context.root_operation_id() || args.root_path!=target {return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest,"checkout identity mismatch",Some(audit_id)))}
+                        return serialize_engine(self.engine.checkout_prepare(&self.identity.app_scope,self.identity.owner_id(),&args),&audit_id);
+                    }
+                    let args:crate::engine::checkout::Phase=serde_json::from_value(envelope.payload).map_err(|_|ProtocolError::new(ProtocolErrorCode::MalformedRequest,"checkout phase invalid",Some(audit_id.clone())))?;
+                    if args.operation_id!=envelope.context.root_operation_id(){return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest,"checkout identity mismatch",Some(audit_id)))}
+                    self.engine.checkout_target_matches(&self.identity.app_scope,self.identity.owner_id(),&args,&target).map_err(|error|engine_protocol(error,&audit_id))?;
+                    let result=match operation {
+                        Operation::CheckoutStep=>self.engine.checkout_step(&self.identity.app_scope,self.identity.owner_id(),&args),
+                        Operation::CheckoutStatus=>self.engine.checkout_status(&self.identity.app_scope,self.identity.owner_id(),&args),
+                        Operation::CheckoutRollback=>self.engine.checkout_rollback(&self.identity.app_scope,self.identity.owner_id(),&args),
+                        Operation::CheckoutFinalize=>self.engine.checkout_finalize(&self.identity.app_scope,self.identity.owner_id(),&args),
+                        _=>unreachable!(),
+                    };
+                    serialize_engine(result,&audit_id)
+                }
+                #[cfg(not(target_os="linux"))]
+                { Err(ProtocolError::new(ProtocolErrorCode::Unsupported,"checkout owner unavailable on this platform",Some(audit_id))) }
+            }
+            Operation::ManagedFolderInspect => {
+                if !MANAGED_FILE_MOVE_READY || !self.engine.managed_file_move_ready() || self.identity.lane != TrustLane::App {
+                    return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "managed folder inspection is unavailable", Some(audit_id)));
+                }
+                let path = target_path(&envelope.target, &audit_id)?;
+                match self.engine.inspect_managed_folder_app(&self.identity.app_scope, &path) {
+                    Err(EngineError::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported => Err(ProtocolError::new(ProtocolErrorCode::Unsupported, "folder contains unsupported entries", Some(audit_id))),
+                    Err(EngineError::LimitExceeded) => Err(ProtocolError::new(ProtocolErrorCode::Backpressure, "folder exceeds the supported move bound", Some(audit_id))),
+                    result => serialize_engine(result, &audit_id),
+                }
+            }
+            Operation::ManagedFolderMoveStatus => {
+                if !MANAGED_FOLDER_MOVE_READY || !self.engine.managed_file_move_ready() || self.identity.lane != TrustLane::App {
+                    return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "managed folder status is unavailable", Some(audit_id)));
+                }
+                let args: crate::engine::ManagedFolderRequest = serde_json::from_value(envelope.payload).map_err(|_| ProtocolError::new(
+                    ProtocolErrorCode::MalformedRequest, "managed folder payload is invalid", Some(audit_id.clone())))?;
+                let path = target_path(&envelope.target, &audit_id)?;
+                if args.operation_id != envelope.context.root_operation_id() || args.source != path {
+                    return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "managed folder identity does not match the authenticated request", Some(audit_id)));
+                }
+                serialize_engine(self.engine.observe_managed_folder_app(&self.identity.app_scope, self.identity.owner_id(), &args), &audit_id)
+            }
+            Operation::ManagedFolderMove => {
+                if !MANAGED_FOLDER_MOVE_READY || !self.engine.managed_file_move_ready() || self.identity.lane != TrustLane::App {
+                    return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "managed folder moves are unavailable", Some(audit_id)));
+                }
+                let args: crate::engine::ManagedFolderRequest = serde_json::from_value(envelope.payload).map_err(|_| ProtocolError::new(
+                    ProtocolErrorCode::MalformedRequest, "managed folder payload is invalid", Some(audit_id.clone())))?;
+                let path = target_path(&envelope.target, &audit_id)?;
+                if args.operation_id != envelope.context.root_operation_id() || args.source != path {
+                    return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "managed folder identity does not match the authenticated request", Some(audit_id)));
+                }
+                match self.engine.run_managed_folder_app(&self.identity.app_scope, self.identity.owner_id(), &args) {
+                    Err(EngineError::HistoryCapture(_)) => Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable,
+                        "managed folder outcome requires reconciliation", Some(audit_id))),
+                    result => serialize_engine(result, &audit_id),
+                }
+            }
+            Operation::ManagedFileCleanup => {
+                if !MANAGED_FILE_MOVE_READY || !self.engine.managed_file_move_ready() || self.identity.lane != TrustLane::App {
+                    return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "managed file cleanup is unavailable", Some(audit_id)));
+                }
+                let mut args: ManagedFileMoveArgs = serde_json::from_value(envelope.payload).map_err(|_| ProtocolError::new(
+                    ProtocolErrorCode::MalformedRequest, "managed file cleanup payload is invalid", Some(audit_id.clone())))?;
+                resolve_managed_undo(&self.engine, self.identity.owner_id(), &mut args, &audit_id)?;
+                let root = target_path(&envelope.target, &audit_id)?;
+                if args.operation_id != envelope.context.root_operation_id() || args.participants.iter().filter(|item| matches!(item.kind, crate::engine::ManagedParticipantKind::Document)).count() != 1 {
+                    return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "managed cleanup identity is invalid", Some(audit_id)));
+                }
+                match self.engine.cleanup_managed_file_app(&self.identity.app_scope, self.identity.owner_id(), &args.operation_id, &root, &args.participants, &args.guards, args.directory_guard.as_ref()) {
+                    Err(_) => Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "managed file cleanup requires reconciliation", Some(audit_id))),
+                    result => serialize_engine(result, &audit_id),
+                }
+            }
+            Operation::ManagedFolderCleanup => {
+                if !MANAGED_FOLDER_MOVE_READY || !self.engine.managed_file_move_ready() || self.identity.lane != TrustLane::App {
+                    return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "managed folder cleanup is unavailable", Some(audit_id)));
+                }
+                if !envelope.payload.as_object().is_some_and(|payload| payload.is_empty()) {
+                    return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "managed folder cleanup payload is invalid", Some(audit_id)));
+                }
+                let root = target_path(&envelope.target, &audit_id)?;
+                match self.engine.cleanup_managed_folder_app(&self.identity.app_scope, self.identity.owner_id(), envelope.context.root_operation_id(), &root) {
+                    Err(_) => Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "managed folder cleanup requires reconciliation", Some(audit_id))),
+                    result => serialize_engine(result, &audit_id),
+                }
+            }
+            Operation::ManagedFileMoveStatus => {
+                if !MANAGED_FILE_MOVE_READY || !self.engine.managed_file_move_ready() || self.identity.lane != TrustLane::App {
+                    return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "managed move status is unavailable", Some(audit_id)));
+                }
+                let mut args: ManagedFileMoveArgs = serde_json::from_value(envelope.payload).map_err(|_| ProtocolError::new(
+                    ProtocolErrorCode::MalformedRequest, "managed move payload is invalid", Some(audit_id.clone())))?;
+                resolve_managed_undo(&self.engine, self.identity.owner_id(), &mut args, &audit_id)?;
+                let path = target_path(&envelope.target, &audit_id)?;
+                let documents: Vec<_> = args.participants.iter().filter(|item| matches!(item.kind, crate::engine::ManagedParticipantKind::Document)).collect();
+                if args.operation_id != envelope.context.root_operation_id() || documents.len() != 1 || documents[0].source != path {
+                    return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "managed move identity does not match the authenticated request", Some(audit_id)));
+                }
+                serialize_engine(self.engine.observe_managed_files_app(&self.identity.app_scope, self.identity.owner_id(), &args.operation_id, &args.participants, &args.guards, args.directory_guard.as_ref()), &audit_id)
+            }
+            Operation::ManagedFileMove => {
+                if !MANAGED_FILE_MOVE_READY || !self.engine.managed_file_move_ready() || self.identity.lane != TrustLane::App {
+                    return Err(ProtocolError::new(ProtocolErrorCode::RootUnavailable, "managed file moves are unavailable", Some(audit_id)));
+                }
+                let mut args: ManagedFileMoveArgs = serde_json::from_value(envelope.payload).map_err(|_| ProtocolError::new(
+                    ProtocolErrorCode::MalformedRequest, "managed move payload is invalid", Some(audit_id.clone())))?;
+                resolve_managed_undo(&self.engine, self.identity.owner_id(), &mut args, &audit_id)?;
+                let path = target_path(&envelope.target, &audit_id)?;
+                let documents: Vec<_> = args.participants.iter().filter(|item| matches!(item.kind, crate::engine::ManagedParticipantKind::Document)).collect();
+                if args.operation_id != envelope.context.root_operation_id() || documents.len() != 1 || documents[0].source != path {
+                    return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "managed move identity does not match the authenticated request", Some(audit_id)));
+                }
+                serialize_engine(self.engine.run_managed_files_app(&self.identity.app_scope, self.identity.owner_id(), &args.operation_id, &args.participants, &args.guards, args.directory_guard.as_ref(), args.inverse_of.as_deref()), &audit_id)
             }
             Operation::Move => {
                 let path = target_path(&envelope.target, &audit_id)?;
@@ -1670,40 +2490,15 @@ impl FileService {
                     return Err(ProtocolError::new(ProtocolErrorCode::Unsupported,
                         "search mode is unsupported", Some(audit_id.clone())));
                 }
-                let options = args.into_options();
-                let cancelled = AtomicBool::new(false);
-                let result = match (self.identity.lane, operation) {
-                    (TrustLane::App, Operation::FilenameSearch) => {
-                        self.engine.filename_search_scoped(
-                            &self.identity.app_scope,
-                            &path,
-                            &options,
-                            Some(&cancelled),
-                        )
-                    }
-                    (TrustLane::Agent, Operation::FilenameSearch) => self.engine.filename_search(
-                        self.identity.owner_id(),
-                        &self.identity.scope(),
-                        &path,
-                        &options,
-                        Some(&cancelled),
+                let (options, details) = args.into_options();
+                let content = operation == Operation::ContentSearch;
+                let result = match self.identity.lane {
+                    TrustLane::App => self.engine.app_search_with_details(
+                        &self.identity.app_scope, &path, &options, &details, content,
                     ),
-                    (TrustLane::Agent, Operation::ContentSearch) => self.engine.content_search(
-                        self.identity.owner_id(),
-                        &self.identity.scope(),
-                        &path,
-                        &options,
-                        Some(&cancelled),
+                    TrustLane::Agent => self.engine.agent_search_with_details(
+                        self.identity.owner_id(), &self.identity.scope(), &path, &options, &details, content,
                     ),
-                    (TrustLane::App, Operation::ContentSearch) => {
-                        self.engine.content_search_scoped(
-                            &self.identity.app_scope,
-                            &path,
-                            &options,
-                            Some(&cancelled),
-                        )
-                    }
-                    _ => unreachable!(),
                 };
                 serialize_engine(result, &audit_id)
             }
@@ -1724,7 +2519,7 @@ impl FileService {
                         response["history"] = json!({"action_id": status.action_id,
                             "status": status.status, "phase": status.phase, "error": status.error,
                             "durable": status.status == "complete",
-                            "message": if status.status == "complete" { "Saved" } else { "Saved; recovery copy unavailable" }});
+                            "message": match status.status.as_str() { "complete" => "Saved", "skipped" => "Saved. Backup skipped by History settings.", _ => "Saved; recovery copy unavailable" }});
                     }
                 }
             }
@@ -1735,6 +2530,9 @@ impl FileService {
 
 impl Drop for FileService {
     fn drop(&mut self) {
+        if let Ok(slot)=self.checkpoint_prepared.get_mut() {
+            if let Some(prepared)=slot.take() { prepared.ticket.fail(); }
+        }
         self.staged_uploads.remove_session(&self.identity);
     }
 }
@@ -1742,12 +2540,18 @@ impl Drop for FileService {
 #[derive(Debug, Default, Deserialize)]
 struct ListDirectoryArgs {
     #[serde(default)]
+    strict_snapshot: bool,
+    #[serde(default)]
     cursor: Option<crate::Cursor>,
     #[serde(default)]
     sort: Option<crate::DirectorySort>,
     #[serde(default)]
     limit: Option<usize>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotHashArgs { max_bytes:u64, max_ms:u64 }
 
 #[derive(Debug, Deserialize)]
 struct ReadRangeArgs {
@@ -1767,6 +2571,8 @@ struct ReadTextPreviewArgs {
 struct StatArgs {
     #[serde(default)]
     include_fingerprint: bool,
+    #[serde(default)]
+    object_identity: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1792,6 +2598,21 @@ fn default_thumbnail_deadline_ms() -> u64 {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedFileMoveArgs {
+    operation_id: String,
+    #[serde(default)]
+    participants: Vec<crate::engine::ManagedParticipant>,
+    #[serde(default)]
+    guards: Vec<crate::engine::ManagedGuard>,
+    #[serde(default)]
+    directory_guard: Option<crate::engine::ManagedDirectoryGuard>,
+    /// The forward operation this one undoes. The participants are then derived from that operation's journal and must not be sent.
+    #[serde(default)]
+    inverse_of: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct DestinationArgs {
     destination: String,
     #[serde(default)]
@@ -1812,7 +2633,7 @@ struct StageChunkArgs { stage_id: String, chunk: String, offset: u64 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StageFinishArgs { stage_id: String, target: String, length: u64, digest: String }
+struct StageFinishArgs { stage_id: String, target: String, length: u64, digest: String, expected_fingerprint: Option<FingerprintWire> }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1880,6 +2701,20 @@ impl MutationFingerprintArgs {
     }
 }
 
+const ORDINARY_CREATE_READY: bool = cfg!(target_os="linux");
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrdinaryCreateArgs { binding: OrdinaryCreateCapture, #[serde(default)] bytes: Option<Vec<u8>> }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrdinaryReplaceArgs {
+    binding: OrdinaryWriteCapture,
+    #[serde(default)]
+    bytes: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ReplaceArgs {
     #[serde(default)]
@@ -1920,6 +2755,12 @@ struct SearchOptionsWire {
     #[serde(default)]
     file_glob: Option<String>,
     #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default)]
+    deadline_ms: Option<u64>,
+    #[serde(default)]
+    locations: bool,
+    #[serde(default)]
     cursor: Option<Value>,
     #[serde(default = "default_max_results")]
     max_results: usize,
@@ -1936,8 +2777,8 @@ struct SearchOptionsWire {
 }
 
 impl SearchOptionsWire {
-    fn into_options(self) -> SearchOptions {
-        SearchOptions {
+    fn into_options(self) -> (SearchOptions, SearchDetails) {
+        let options = SearchOptions {
             query: self.query,
             glob: self.mode == "glob",
             file_glob: self.file_glob,
@@ -1947,7 +2788,13 @@ impl SearchOptionsWire {
             max_bytes_per_file: self.max_bytes_per_file.min(1024 * 1024),
             include_hidden: self.include_hidden,
             case_sensitive: self.case_sensitive,
-        }
+        };
+        let details = SearchDetails {
+            excludes: self.exclude,
+            deadline: self.deadline_ms.map(|ms| Instant::now() + Duration::from_millis(ms.clamp(1, 5000))),
+            locations: self.locations,
+        };
+        (options, details)
     }
 }
 
@@ -2012,6 +2859,16 @@ fn target_path(target: &Target, audit_id: &str) -> Result<std::path::PathBuf, Pr
     }
 }
 
+/// An undo names only the forward operation; its participants come from that operation's own journal (never from the request).
+fn resolve_managed_undo(engine: &FileEngine, owner_id: &str, args: &mut ManagedFileMoveArgs, audit_id: &str) -> Result<(), ProtocolError> {
+    let Some(forward) = args.inverse_of.clone() else { return Ok(()) };
+    if !args.participants.is_empty() || !args.guards.is_empty() || args.directory_guard.is_some() || forward == args.operation_id {
+        return Err(ProtocolError::new(ProtocolErrorCode::MalformedRequest, "managed undo payload is invalid", Some(audit_id.into())));
+    }
+    args.participants = engine.managed_undo_participants(owner_id, &forward).map_err(|error| engine_protocol(error, audit_id))?;
+    Ok(())
+}
+
 fn serialize_engine<T: serde::Serialize>(
     result: Result<T, EngineError>,
     audit_id: &str,
@@ -2024,6 +2881,17 @@ fn serialize_engine<T: serde::Serialize>(
 fn engine_protocol(error: EngineError, audit_id: &str) -> ProtocolError {
     if matches!(&error, EngineError::HistoryCapture(_)) {
         return ProtocolError::new(ProtocolErrorCode::RootUnavailable, "required recovery preimage unavailable; original preserved", Some(audit_id.into()));
+    }
+    if let EngineError::ManagedUndoUnavailable(code) = &error {
+        let mut refusal = ProtocolError::new(ProtocolErrorCode::Unsupported, *code, Some(audit_id.into()));
+        refusal.details.insert("code".into(), (*code).into());
+        return refusal;
+    }
+    if matches!(&error, EngineError::ManagedCrossFilesystem) {
+        // Distinct from Conflict so the Host can say why the move was refused.
+        let mut refusal = ProtocolError::new(ProtocolErrorCode::Unsupported, "managed_cross_filesystem_unsupported", Some(audit_id.into()));
+        refusal.details.insert("code".into(), "managed_cross_filesystem_unsupported".into());
+        return refusal;
     }
     let code = match &error {
         EngineError::Conflict
@@ -2073,6 +2941,41 @@ fn thumbnail_protocol(error: ThumbnailError, audit_id: &str) -> ProtocolError {
 }
 
 use crate::RegistryError;
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod identity_open_tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn regular_open_refuses_fifo_and_link_substitutions() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let other = temp.path().join("other");
+        fs::write(&target, b"source").unwrap();
+        fs::write(&other, b"other").unwrap();
+        assert!(fs::metadata(&target).unwrap().is_file());
+        let opened = open_identity_file(&target).unwrap();
+        assert!(opened.metadata().unwrap().is_file());
+        assert_eq!(ObjectIdentity::from_file(&opened).unwrap(), ObjectIdentity::from_path(&target).unwrap());
+
+        // Simulate replacement after the preceding regular-file authorization.
+        fs::remove_file(&target).unwrap();
+        let c_path = CString::new(target.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let started = Instant::now();
+        assert!(open_identity_file(&target).is_err());
+        assert!(ObjectIdentity::from_path(&target).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        fs::remove_file(&target).unwrap();
+        symlink(&other, &target).unwrap();
+        assert!(open_identity_file(&target).is_err());
+        assert!(ObjectIdentity::from_path(&target).is_err());
+    }
+}
 
 #[cfg(test)]
 mod thumbnail_cache_tests {
@@ -2184,6 +3087,7 @@ mod thumbnail_cache_tests {
         let path = std::env::temp_dir().join(format!(".openclank-files-service-test-{}", STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
         let file = File::create(&path).unwrap();
         let store = StageStore(Arc::new(Mutex::new(HashMap::from([(String::from("stage"), StagedUpload {
+            #[cfg(target_os="linux")] worktree:None,
             owner_id: String::from("owner"), principal_id: String::from("principal"), lane: TrustLane::Agent,
             session_id: String::from("session"), path: path.clone(), marker_path: None, file, length: 0, digest: Sha256::new(), created: Instant::now(),
         })]))));
@@ -2225,7 +3129,7 @@ mod thumbnail_cache_tests {
             std::os::unix::fs::symlink(&decoy, &stage_path).unwrap();
             decoy
         };
-        let finished = service.stage_finish(StageFinishArgs { stage_id: id, target: root.join("finished").display().to_string(), length: 5, digest: format!("sha256:{:x}", Sha256::digest(b"hello")) }, "audit-2");
+        let finished = service.stage_finish(StageFinishArgs { expected_fingerprint: None, stage_id: id, target: root.join("finished").display().to_string(), length: 5, digest: format!("sha256:{:x}", Sha256::digest(b"hello")) }, "audit-2");
         assert!(finished.is_ok(), "{finished:?}");
         assert_eq!(fs::read(root.join("finished")).unwrap(), b"hello");
         #[cfg(unix)]
@@ -2244,6 +3148,7 @@ mod thumbnail_cache_tests {
         let path = std::env::temp_dir().join(format!(".openclank-files-service-test-{}", STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
         let file = File::create(&path).unwrap();
         service.staged_uploads.0.lock().unwrap().insert("old".into(), StagedUpload {
+            #[cfg(target_os="linux")] worktree:None,
             owner_id: "owner".into(), principal_id: "principal".into(), lane: TrustLane::App, session_id: "session".into(), path: path.clone(), marker_path: None, file, length: MAX_ACTIVE_STAGE_BYTES - 1, digest: Sha256::new(), created: Instant::now(),
         });
         let root = std::env::temp_dir();
@@ -2253,6 +3158,7 @@ mod thumbnail_cache_tests {
         let expired_path = std::env::temp_dir().join(format!(".openclank-files-service-test-{}", STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
         let expired_file = File::create(&expired_path).unwrap();
         service.staged_uploads.0.lock().unwrap().insert("expired".into(), StagedUpload {
+            #[cfg(target_os="linux")] worktree:None,
             owner_id: "owner".into(), principal_id: "principal".into(), lane: TrustLane::App, session_id: "session".into(), path: expired_path.clone(), marker_path: None, file: expired_file, length: 0, digest: Sha256::new(), created: Instant::now() - STAGE_TTL - Duration::from_secs(1),
         });
         let _ = service.stage_begin(std::env::temp_dir(), "prune").unwrap();
@@ -2283,7 +3189,7 @@ mod thumbnail_cache_tests {
         assert!(other_owner.stage_chunk(StageChunkArgs { stage_id: id.clone(), chunk: chunk.clone(), offset: 0 }, "audit").is_err());
         assert!(other_lane.stage_chunk(StageChunkArgs { stage_id: id.clone(), chunk: base64::engine::general_purpose::STANDARD.encode(b"x"), offset: 0 }, "audit").is_err());
         owner.stage_chunk(StageChunkArgs { stage_id: id.clone(), chunk, offset: 0 }, "audit").unwrap();
-        assert!(owner.stage_finish(StageFinishArgs { stage_id: id.clone(), target: "/tmp/never-used".into(), length: 1, digest: "sha256:bad".into() }, "audit").is_err());
+        assert!(owner.stage_finish(StageFinishArgs { expected_fingerprint: None, stage_id: id.clone(), target: "/tmp/never-used".into(), length: 1, digest: "sha256:bad".into() }, "audit").is_err());
         assert!(owner.stage_abort(StageAbortArgs { stage_id: id }, "audit").is_ok());
         assert!(owner.stage_abort(StageAbortArgs { stage_id: "missing".into() }, "audit").is_ok());
         fs::remove_dir_all(root).unwrap();
@@ -2301,6 +3207,7 @@ mod thumbnail_cache_tests {
         let foreign_path = std::env::temp_dir().join(format!(".openclank-foreign-stage-{}", STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
         let foreign_file = File::create(&foreign_path).unwrap();
         shared.0.lock().unwrap().insert("foreign-expired".into(), StagedUpload {
+            #[cfg(target_os="linux")] worktree:None,
             owner_id: "owner-a".into(),
             principal_id: "principal-a".into(),
             lane: TrustLane::App,

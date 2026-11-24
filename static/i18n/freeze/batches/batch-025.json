@@ -2,34 +2,54 @@
   "id": "batch-025",
   "group": "docs.openclank-docs-files-imps",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 1695,
+  "entry_count": 4,
+  "character_count": 3812,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-files-imps.body",
-      "source": "# Files and Imps\n\nFiles is the file tree for your account: documents, folders, media and the\nmanaged image projects that Imps produces.\n\n## The file tree\n\nOpen [Files](clank://files) to browse. Files and Editor share one resource\nidentity: a document opened from Files is the same document, with the same\ndraft and history. Moving a document keeps its links and attachments.\n\nFiles exposes capabilities explicitly — read, edit, write — so a read-only\nresource says so instead of failing later on save.\n\n## Imps managed projects\n\nImps is the image editor. Its projects are managed records: every save\ncaptures a recovery preimage first, and the save is refused if that capture\nfails. You can undo a save by restoring the captured preimage.\n\nProject endpoints live under `/api/imps/projects/*`. A project binds to a\nprovider image resource and keeps its own revision counter so concurrent\nsaves cannot silently clobber each other.\n\n## Gallery\n\nThe separate Gallery applet is retired. Provisioned image content now lives\nin the **Photos** folder under Files. Legacy `gallery:` links resolve to\nFiles, and image editing opens the Imps editor. Album management is gone with\nthe applet; the folder is an ordinary folder you can move and rename.\n\nOpen [Files](clank://files) to see Photos.\n\n## Media in documents\n\nMedia attached to documents is stored with the document and moves with it.\nEmbedding an image in Markdown renders it inline; a PDF embed shows a viewer;\naudio and video embed their player.\n\nSee [[Editor]] for attaching media to a document.",
+      "source": "# Files and image editing\n\nOpen an image from [Files](clank://files) to work on it alongside your text tabs in [[Editor]]. Files keeps its own location while Editor’s file sidebar follows the workspace you opened.\n\n## Image projects in Editor\n\nCrop or paint on the canvas, or choose **+ Import** to add another image as a layer. Layers and History belong to the active image. Pick the output by what you’ll need later:\n\n| What you want | File menu |\n| --- | --- |\n| Reopen the layers for another edit | **Export layered project…**; reopen with **Import image project…** |\n| Give someone the finished picture | **Download PNG** |\n| Save a second image in Files | **Save as copy…** |\n| Update the writable original | **Save file** |\n\n**Open image draft…** resumes a retained edit. If the original has changed, keep your working copy and see [[Recovery]].\n\n## Browse and open\n\nSelect saved HTML and choose **Open in Browser** for its preview. On a source folder, **Open in Code Graph** follows the saved files; on a file it starts with the containing folder. Missing host folders can be registered under [File access](clank://settings/file-access).\n\n**Invite / manage access…** grants access inside the app. **Share download…** creates a download link. Choose a snapshot for a fixed version or a current-file link for subsequent changes. Revoke a link under **Manage shared downloads…**.\n\n## Windows, split panes and views\n\nSplit a Files window right or below to keep the source and destination visible. Each pane has independent navigation. In a drag between panes, hold Option on macOS or Control on Windows/Linux to copy instead of moving. **Keep Both** retries a name collision with a new name.\n\n## Create a file in Files\n\n**File → New file…** creates the file in a writable destination. Choose **Open** in the receipt to go straight to Editor. For a personal [[Journal|journal page]], start in the journal workspace.\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:391"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
       "key": "docs.openclank-docs-files-imps.title",
-      "source": "Files and Imps",
+      "source": "Files and image editing",
       "placeholders": [],
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:391"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
       "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-files-imps.title.compat-ba963ad7d9be",
+      "source": "Files and Imps",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-files-imps.body.compat-dc5792d9e5bd",
+      "source": "# Files and Imps\n\nFiles is the file tree for your account: documents, folders, media and the\nmanaged image projects that Imps produces.\n\n## The file tree\n\nOpen [Files](clank://files) to browse. Files and Editor share one resource\nidentity: a document opened from Files is the same document, with the same\ndraft and history. Moving a document keeps its links and attachments.\n\nFiles exposes capabilities explicitly — read, edit, write — so a read-only\nresource says so instead of failing later on save.\n\n## Imps managed projects\n\nImps is the image editor. Its projects are managed records: every save\ncaptures a recovery preimage first, and the save is refused if that capture\nfails. You can undo a save by restoring the captured preimage.\n\nProject endpoints live under `/api/imps/projects/*`. A project binds to a\nprovider image resource and keeps its own revision counter so concurrent\nsaves cannot silently clobber each other.\n\n## Gallery\n\nThe separate Gallery applet is retired. Provisioned image content now lives\nin the **Photos** folder under Files. Legacy `gallery:` links resolve to\nFiles, and image editing opens the Imps editor. Album management is gone with\nthe applet; the folder is an ordinary folder you can move and rename.\n\nOpen [Files](clank://files) to see Photos.\n\n## Media in documents\n\nMedia attached to documents is stored with the document and moves with it.\nEmbedding an image in Markdown renders it inline; a PDF embed shows a viewer;\naudio and video embed their player.\n\nSee [[Editor]] for attaching media to a document.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
     }
   ]
 }

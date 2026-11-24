@@ -60,7 +60,7 @@ export function initSidebarLayout(Storage, opts) {
   // ── Icon rail + sidebar toggle ──
   const iconRail = document.getElementById('icon-rail');
   const hamburgerBtn = document.getElementById('hamburger-btn');
-  const SIDEBAR_MODE_KEY = 'odysseus-sidebar-mode';
+  const SIDEBAR_MODE_KEY = 'openclank-sidebar-mode';
   let mobileControlSide = 'system';
 
   function _legacySidebarSide() {

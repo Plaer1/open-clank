@@ -7,6 +7,7 @@ without spawning ``screencapture`` or taking pixels.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import json
 import os
@@ -27,6 +28,7 @@ from src.settings import get_user_setting
 MAX_CAPTURE_BYTES = 64 * 1024 * 1024
 CAPTURE_TIMEOUT_SECONDS = 15
 CAPTURE_PREF = "desktop_capture_enabled"
+CONTROL_FRAME_CAPTURE = contextvars.ContextVar("control_frame_capture", default=None)
 _NATIVE_CACHE = Path(os.environ.get("OPEN_CLANK_DATA_DIR", "/tmp/openclank-data")) / "cache" / "native" / "desktop-capture"
 
 
@@ -202,7 +204,7 @@ def _persist_capture_metadata_event(database: str, *, owner: str, resource_key: 
         connection.commit()
 
 
-def host_files_importer(*, owner: str, account_id: str, workspace: str, repository: Any = None) -> Callable[..., Any]:
+def host_files_importer(*, owner: str, account_id: str, workspace: str, repository: Any = None, current: Any = None) -> Callable[..., Any]:
     """Build the trusted owner/account-bound Files host importer for captures."""
     authorized_owner = str(owner).strip()
     if not authorized_owner or not str(account_id).strip() or not str(workspace).strip():
@@ -217,7 +219,7 @@ def host_files_importer(*, owner: str, account_id: str, workspace: str, reposito
 
     repo = repository or FilePolicyRepository(str(os.environ.get("OPEN_CLANK_AUTHORITY_DB_PATH") or APP_DB))
     provider = HostFilesProvider(
-        registry=FilesystemRootRegistry(os.environ.get("ODYSSEUS_FILES_REGISTRY") or None),
+        registry=FilesystemRootRegistry(os.environ.get("OPEN_CLANK_FILES_REGISTRY") or None),
         client_factory=client_for_owner,
         operation_store=repo,
     )
@@ -230,12 +232,18 @@ def host_files_importer(*, owner: str, account_id: str, workspace: str, reposito
         metadata_owner = str(metadata.get("owner") or "").strip()
         if request_owner != authorized_owner or metadata_owner != authorized_owner:
             raise DesktopCaptureError("Files owner binding changed", code="files_unavailable")
+        async def current_guard():
+            if current is None: return True
+            try: return (await current()) is True
+            except Exception: return False
+        if not await current_guard(): raise DesktopCaptureError("capture scope changed", code="files_unavailable")
         context = ProviderContext(
             owner_subject_id=str(account_id), owner_username=authorized_owner,
             policy_generation=repo.generation(), workspace_id=str(workspace),
         )
         parent = _origin(workspace)
         parent_entry = await provider.stat(context, origin_id=parent)
+        if not await current_guard(): raise DesktopCaptureError("capture scope changed", code="files_unavailable")
         if parent_entry.kind not in {"folder", "directory"} or "children" not in parent_entry.capabilities or "write" not in parent_entry.capabilities:
             raise DesktopCaptureError("authorized workspace root is not writable", code="files_unavailable")
         parent_ref = issue_resource_ref(
@@ -249,6 +257,7 @@ def host_files_importer(*, owner: str, account_id: str, workspace: str, reposito
                 context, parent_ref=parent_ref, name="Captures",
                 operation_id=f"desktop-captures-{digest[:32]}", generation=context.policy_generation, collision="reuse",
             )
+            if not await current_guard(): raise DesktopCaptureError("capture scope changed", code="files_unavailable")
             directory = directory_receipt.get("resource") if isinstance(directory_receipt, Mapping) else None
             if not isinstance(directory, Mapping) or not directory.get("ref"):
                 raise DesktopCaptureError("Captures destination has no sealed identity", code="files_unavailable")
@@ -263,7 +272,7 @@ def host_files_importer(*, owner: str, account_id: str, workspace: str, reposito
         upload = _PathUpload(path)
         try:
             receipt = await facade.import_file(
-                context, upload=upload,
+                context, upload=upload, before_commit=current_guard if current is not None else None,
                 metadata={
                     "generation": context.policy_generation,
                     "operation_id": f"desktop-capture-{item_digest[:32]}",
@@ -275,9 +284,10 @@ def host_files_importer(*, owner: str, account_id: str, workspace: str, reposito
             )
         finally:
             upload._file.close()
+        if not await current_guard(): raise DesktopCaptureError("capture scope changed", code="files_unavailable")
         items = receipt.get("items") if isinstance(receipt, Mapping) else None
         item = items[0] if isinstance(items, list) and items and isinstance(items[0], Mapping) else None
-        if not item or not item.get("resource_ref"):
+        if not item or not item.get("resource_ref") or (current is not None and (receipt.get("state") != "complete" or item.get("outcome") != "committed" or not item.get("revision"))):
             raise DesktopCaptureError("Files import returned no durable identity", code="files_unavailable")
         resource_key = item["resource_ref"]
         resource_revision = item.get("revision")
@@ -313,6 +323,39 @@ def host_files_importer(*, owner: str, account_id: str, workspace: str, reposito
     _import.validate_resource = _validate_resource
 
     return _import
+
+
+async def publish_actor_frame(*, frame, facade, context, destination, name, operation_id, current):
+    """Publish one bounded captured frame through the existing original Files receipt."""
+    import struct
+    from src.openclank.files_facade import FilesFacadeError
+    dispatched=False
+    try:
+        if not await current():return {'state':'unavailable','operation_id':operation_id}
+        data=frame.get('png');size=frame.get('pixel_size');digest=frame.get('sha256')
+        if (not isinstance(data,bytes) or not 24<=len(data)<=64*1024*1024 or not isinstance(size,list) or len(size)!=2
+            or any(type(n) is not int or not 1<=n<=4096 for n in size) or size[0]*size[1]>16_000_000
+            or data[:8]!=b'\x89PNG\r\n\x1a\n' or data[12:16]!=b'IHDR' or list(struct.unpack('>II',data[16:24]))!=size
+            or not isinstance(digest,str) or hashlib.sha256(data).hexdigest()!=digest):raise ValueError('frame unavailable')
+        class Upload:
+            filename=name;content_type='image/png'
+            def __init__(self):self.offset=0
+            async def read(self,length):
+                part=data[self.offset:self.offset+length];self.offset+=len(part);return part
+        if not await current():return {'state':'unavailable','operation_id':operation_id}
+        dispatched=True
+        receipt=await facade.import_file(context,upload=Upload(),before_commit=current,expected_destination_revision=destination['destination_revision'],
+            source_evidence={'frame_operation_id':operation_id,'frame_sha256':digest},metadata={'operation_id':operation_id,'item_id':'output',
+            'generation':context.policy_generation,'destination_ref':destination['destination_ref'],'name':name,'collision':'fail'})
+        items=receipt.get('items') if isinstance(receipt,Mapping) else None
+        if (receipt.get('state')!='complete' or not isinstance(items,list) or len(items)!=1 or items[0].get('item_id')!='output'
+            or items[0].get('outcome')!='committed' or not isinstance(items[0].get('resource_ref'),str) or not await current()):
+            return {'state':'unknown','operation_id':operation_id}
+        return {'state':'captured','operation_id':operation_id,'resource_ref':items[0]['resource_ref'],'sha256':digest,'pixel_size':size}
+    except FilesFacadeError as error:
+        return {'state':'unknown' if dispatched else 'unavailable','operation_id':operation_id}
+    except Exception:
+        return {'state':'unknown' if dispatched else 'unavailable','operation_id':operation_id}
 
 
 def _argv(request: Mapping[str, Any], output: str, metadata: Mapping[str, Any] | None = None) -> list[str]:
@@ -358,6 +401,7 @@ async def capture_desktop(
         raise DesktopCaptureError("desktop capture is disabled for this owner", code="opt_in_required")
     if cancel_event and cancel_event.is_set():
         raise DesktopCaptureError("desktop capture was cancelled", code="cancelled")
+    linux_native = sys.platform.startswith("linux") and runner is None
     runner = runner or _run_capture
     target_metadata = None
     if metadata_reader is not None:
@@ -369,29 +413,48 @@ async def capture_desktop(
             raise DesktopCaptureError("capture target bounds are invalid", code="target_unavailable")
     with tempfile.TemporaryDirectory(prefix="openclank-capture-") as temp_dir:
         output = str(Path(temp_dir) / "capture.png")
-        argv = _argv(request, output, target_metadata)
-        try:
-            result = runner(argv, timeout=CAPTURE_TIMEOUT_SECONDS)
-            result = await _await_capture_job(result, cancel_event)
-        except (subprocess.TimeoutExpired, asyncio.TimeoutError) as exc:
-            raise DesktopCaptureError("desktop capture timed out", code="timeout") from exc
-        except asyncio.CancelledError as exc:
-            raise DesktopCaptureError("desktop capture was cancelled", code="cancelled") from exc
-        except PermissionError as exc:
-            raise DesktopCaptureError("screen recording permission is unavailable", code="permission_required") from exc
-        except OSError as exc:
-            raise DesktopCaptureError("desktop capture is unavailable on this host", code="unavailable") from exc
-        if cancel_event and cancel_event.is_set():
-            raise DesktopCaptureError("desktop capture was cancelled", code="cancelled")
-        if isinstance(result, Mapping) and int(result.get("returncode", 0)) != 0:
-            code = str(result.get("value", {}).get("error", "permission_required")) if isinstance(result.get("value"), Mapping) else "permission_required"
-            raise DesktopCaptureError("desktop capture failed", code=code)
+        if linux_native:
+            from src.openclank.native_capture_linux import run as linux_capture, NativeCaptureError
+            try:
+                target_metadata = await _await_capture_job(linux_capture("screenshot", request, owner, Path(output)), cancel_event)
+            except NativeCaptureError as exc:
+                raise DesktopCaptureError("Linux desktop capture is unavailable", code=exc.code) from exc
+            except asyncio.CancelledError as exc:
+                raise DesktopCaptureError("desktop capture was cancelled", code="cancelled") from exc
+        else:
+            argv = _argv(request, output, target_metadata)
+            try:
+                result = runner(argv, timeout=CAPTURE_TIMEOUT_SECONDS)
+                result = await _await_capture_job(result, cancel_event)
+            except (subprocess.TimeoutExpired, asyncio.TimeoutError) as exc:
+                raise DesktopCaptureError("desktop capture timed out", code="timeout") from exc
+            except asyncio.CancelledError as exc:
+                raise DesktopCaptureError("desktop capture was cancelled", code="cancelled") from exc
+            except PermissionError as exc:
+                raise DesktopCaptureError("screen recording permission is unavailable", code="permission_required") from exc
+            except OSError as exc:
+                raise DesktopCaptureError("desktop capture is unavailable on this host", code="unavailable") from exc
+            if cancel_event and cancel_event.is_set():
+                raise DesktopCaptureError("desktop capture was cancelled", code="cancelled")
+            if isinstance(result, Mapping) and int(result.get("returncode", 0)) != 0:
+                code = str(result.get("value", {}).get("error", "permission_required")) if isinstance(result.get("value"), Mapping) else "permission_required"
+                raise DesktopCaptureError("desktop capture failed", code=code)
         path = Path(output)
         if not path.is_file():
             raise DesktopCaptureError("desktop capture produced no image", code="unavailable")
         size = path.stat().st_size
         if size <= 0 or size > MAX_CAPTURE_BYTES or not _valid_png(path):
             raise DesktopCaptureError("desktop capture size is invalid", code="size_limit")
+        pixel_size = None
+        if sys.platform == "darwin":
+            with path.open("rb") as stream:
+                stream.seek(16)
+                pixel_size = list(struct.unpack(">II", stream.read(8)))
+            if metadata_reader is not None and str(request.get("target") or "display") == "display":
+                after_target = metadata_reader(request)
+                fields = ("id", "index", "bounds", "scale")
+                if not isinstance(after_target, Mapping) or any(after_target.get(k) != target_metadata.get(k) for k in fields):
+                    raise DesktopCaptureError("display changed during capture", code="target_unavailable")
         ocr = None
         if ocr_runner is not None:
             ocr = ocr_runner(path)
@@ -405,13 +468,15 @@ async def capture_desktop(
             raise DesktopCaptureError("desktop capture was cancelled", code="cancelled")
         if importer is None:
             raise DesktopCaptureError("Files import is unavailable", code="files_unavailable")
-        metadata = {"kind": "desktop_capture", "owner": owner, "source": request.get("target", "display"), "target": target_metadata, "ocr": ocr}
+        metadata = {"kind": "desktop_capture", "owner": owner, "source": request.get("target", "portal" if linux_native else "display"), "target": target_metadata, "ocr": ocr}
         imported = importer(path, owner=owner, metadata=metadata)
         if inspect.isawaitable(imported):
             imported = await imported
         if not isinstance(imported, Mapping) or not imported.get("resource_key"):
             raise DesktopCaptureError("Files import returned no durable identity", code="files_unavailable")
-        return {"state": "captured", "resource": dict(imported), "source": str(request.get("target") or "display"), "target": target_metadata, "ocr": ocr}
+        result = {"state": "captured", "resource": dict(imported), "source": str(request.get("target") or ("portal" if linux_native else "display")), "target": target_metadata, "ocr": ocr}
+        if pixel_size is not None: result["pixel_size"] = pixel_size
+        return result
 
 
 async def correct_capture(
@@ -520,6 +585,17 @@ async def capture_tool(content: str, ctx: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise DesktopCaptureError("capture request must be an object", code="invalid_request")
     owner = str(ctx.get("owner") or "")
+    if request.get("action") == "readiness" and sys.platform.startswith("linux"):
+        if not owner:
+            raise DesktopCaptureError("desktop capture requires an owner", code="owner_required")
+        from src.openclank.native_capture_linux import run as linux_capture, NativeCaptureError
+        from src.openclank.native_capture_ocr_linux import readiness as ocr_readiness
+        try:
+            result = await linux_capture("readiness", request, owner)
+        except NativeCaptureError as exc:
+            result = {"version": 1, "state": "unavailable", "error": exc.code, "backend": "xdg-desktop-portal-screenshot/1", "stream": False, "retained_target": False}
+        result["ocr"] = await ocr_readiness()
+        return result
     importer = ctx.get("files_importer")
     caller_supplied_importer = importer is not None
     if importer is None:
@@ -537,6 +613,14 @@ async def capture_tool(content: str, ctx: Mapping[str, Any]) -> dict[str, Any]:
             raise
         except Exception as exc:
             raise DesktopCaptureError("Files importer is unavailable", code="files_unavailable") from exc
+    if (sys.platform.startswith("linux") and request.get("action", "capture") == "capture"
+        and request.get("target", "portal") == "portal" and request.get("crop") is None
+        and request.get("scale", 1) == 1 and request.get("ocr", False) is False):
+        observer = CONTROL_FRAME_CAPTURE.get()
+        if observer is not None:
+            if not capture_enabled(owner): raise DesktopCaptureError("desktop capture is disabled for this owner", code="opt_in_required")
+            observed = await observer()
+            if observed is not None: return observed
     metadata_reader = None
     ocr_runner = None
     if sys.platform == "darwin" and not caller_supplied_importer:
@@ -547,6 +631,18 @@ async def capture_tool(content: str, ctx: Mapping[str, Any]) -> dict[str, Any]:
         helpers = _WindowsDesktopHelpers()
         metadata_reader = helpers.metadata
         ocr_runner = helpers.ocr
+    if sys.platform.startswith("linux") and request.get("action") != "correct":
+        if type(request.get("ocr", False)) is not bool:
+            raise DesktopCaptureError("OCR option is invalid", code="invalid_request")
+        if request.get("ocr", False):
+            from src.openclank.native_capture_ocr_linux import recognize, LinuxOCRError
+            language = request.get("ocr_language", "eng")
+            async def linux_ocr(path):
+                try:
+                    return {"state": "recognized", **await recognize(path, language)}
+                except LinuxOCRError as exc:
+                    return {"state": "unavailable", "code": exc.code}
+            ocr_runner = linux_ocr
     if request.get("action") == "correct":
         original = request.get("original")
         if not isinstance(original, Mapping) or not isinstance(request.get("text"), str) or not isinstance(request.get("boxes", []), list):

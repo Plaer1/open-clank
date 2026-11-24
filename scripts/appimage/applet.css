@@ -1,0 +1,14 @@
+html, body, main, .oc-setup { width: 100%; height: 100%; margin: 0; }
+body { display: block; min-height: 0; background: var(--oc-panel); }
+.oc-setup { display: flex; flex-direction: column; border: 1px solid var(--oc-border); border-radius: 0; box-shadow: none; }
+.oc-bar { height: 40px; flex: none; flex-wrap: nowrap; gap: 8px; padding: 0 4px 3px 10px; user-select: none; }
+.oc-bar img { width: 23px; height: 23px; }
+.oc-bar > span:first-of-type { color: var(--oc-gold); }
+.oc-platform { white-space: nowrap; }
+.window-actions { display: flex; gap: 0; width: 96px; }
+.window-actions button { width: 32px; height: 30px; padding: 0; font: bold 18px/1 sans-serif; color: var(--oc-muted); background: transparent; border: 0; box-shadow: none; }
+.window-actions button:hover { color: var(--oc-fg); background: var(--oc-panel); }
+.window-actions button:last-child:hover { color: var(--oc-coral); }
+.oc-layout { flex: 1; min-height: 0; overflow: auto; }
+.oc-content { min-height: 0; }
+.oc-actions { flex: none; }

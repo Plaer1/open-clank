@@ -1,0 +1,35 @@
+{
+  "id": "batch-097",
+  "group": "docs.openclank-docs-treehouse",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 2949,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-treehouse.title",
+      "source": "TreeHouse",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-treehouse.body",
+      "source": "# TreeHouse\n\nOpen [TreeHouse](clank://treehouse) to continue a Main Quest in Programming, Games, AI or Open Clank. Your resume point follows your account across workspaces.\n\n## Explore a Quest\n\nChoose **Explore Quests** and open a Quest. **Connected lessons** shows where the idea is used again. A prerequisite for practice still leaves the lesson and conceptual response open.\n\n![The Recursive calls lesson links to Induction and recursive data under Related and labels Calls, parameters, scope as needed for practice.](/static/docs/media/manual-treehouse-linked-lesson/preview.webp)\n\n*TreeHouse example. Open Related to follow a connected topic. Needed for practice identifies a prerequisite for practical work.*\n\nUse **Your work** to check the task and its evidence. **Save draft** lets you resume. **Submit response** records your answer. For practical work, choose the outcome and **Save attempt**. A blocked or failed attempt stays pending. To record success, confirm **I achieved the stated outcome** and attach the required evidence. Self-reported work keeps that status until reviewed or verified.\n\n![A filled TreeHouse form shows Practical outcome, I achieved the stated outcome, Actual evidence or failure details, Save draft, and Save attempt.](/static/docs/media/manual-treehouse-practice-evidence/preview.webp)\n\n*TreeHouse example. Record what reopened, then choose Save attempt. The example shows an unsubmitted self-report.*\n\n## Progress and resets\n\n**Skills** shows required-work progress. **Library → Search learning** finds a lesson. After an update, review **Previous answer** before copying it into a new response.\n\nChoose the narrowest reset scope you want. A Main Quest reset includes its electives. Resets clear work, drafts and resume points in that scope. Historical awards and private courses are separate.\n\n## Achievements\n\nOpen **Copal → Achievements** and select an award. **How to earn it** gives its requirement. For earned awards, **Completion evidence** shows saved evidence counts and references where available. For a learning award, use **Library → Search learning** to find the lesson and check its submissions. **Settings → Advanced → Achievements** manages notifications and account-wide award reset.\n\n## Private courses and authoring\n\nOpen **Private courses** for your own courses and those shared with you. Eligible courses offer completion records under **Records**. **Author → Open source** uses your Files grant. Save in Editor and reload the lesson. Course sharing uses separate grants from sharing the source files.\n\nIf shared quests need activation, private learning stays available. Ask the operator to back up the store and follow the [upgrade guide](https://github.com/Plaer1/open-clank/blob/main/docs/upgrading.md). Then choose **Recheck shared quests**.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

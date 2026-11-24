@@ -180,7 +180,7 @@ def _processor(provider):
 
 
 class _DigestProvider:
-    provider_id = "frankenmemory"
+    provider_id = "memery"
 
     def __init__(self, digest):
         self._digest = digest

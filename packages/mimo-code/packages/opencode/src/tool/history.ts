@@ -7,6 +7,9 @@ import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
 import { SessionCwd } from "./session-cwd"
 import { ManagedProvider } from "@/acp/managed-provider"
+import { isAdmittedToolTimingTurn } from "@/session/tool-timing"
+import type { ActorExecutionIdentity } from "@/actor/turn"
+import { queryHistoryOutput } from "./history-output-query"
 
 const KIND = z.enum([
   "user_text",
@@ -25,18 +28,18 @@ const KIND = z.enum([
 const AROUND_MAX_BYTES = 20 * 1024
 
 const parameters = z.object({
-  operation: z.enum(["search", "around", "get", "media"]).describe(
-    "search: FTS BM25; around: pull message context; get: full part body; media: attachment locators",
+  operation: z.enum(["search", "around", "get", "media", "exact_output", "exact_output_query"]).describe(
+    "search: FTS BM25; around: pull message context; get: full part body; media: attachment locators; exact_output: recover an eligible exact tool output page; exact_output_query: literal matches in an eligible exact output",
   ),
   // search params
-  query: z.string().optional().describe("FTS query (BM25 over text/tool bodies). Required for operation=search."),
+  query: z.string().optional().describe("FTS query for search, or a literal up to 256 UTF-8 bytes for exact_output_query."),
   scope: z.enum(["project", "global"]).optional().describe("Standalone: project (default) or global. Managed: omit for the bound chat, or use global; project is unavailable."),
   session_id: z.string().optional().describe("Target chat id from a history search result. In managed mode, callback admission still uses the current engine session."),
   kind: z.array(KIND).optional(),
   tool_name: z.string().optional().describe("Filter to a specific tool (e.g. Bash, Read)"),
   time_after: z.number().optional().describe("Unix ms"),
   time_before: z.number().optional(),
-  limit: z.number().optional().describe("Max 50, default 10"),
+  limit: z.number().optional().describe("Max 50, default 10 for search; integer 1–50, default 20 for exact_output_query"),
   // around params
   message_id: z.string().optional().describe("Anchor message id. Required for operation=around/get/media."),
   before: z.number().optional().describe("Default 5"),
@@ -45,6 +48,10 @@ const parameters = z.object({
   part_id: z.string().optional().describe("Part id. Required for operation=get/media."),
   length: z.number().optional().describe("Max 8000 UTF-16 units for get."),
   offset: z.number().optional().describe("UTF-16 cursor into the part body."),
+  revision: z.number().int().positive().optional().describe("Exact canonical part revision for exact_output."),
+  content_hash: z.string().regex(/^[a-f0-9]{64}$/).optional().describe("Exact canonical part SHA-256 for exact_output."),
+  byte_offset: z.number().int().min(0).max(51200).optional().describe("Exact-output byte offset; for a query, begin on a UTF-8 boundary."),
+  byte_limit: z.number().int().min(1).max(8192).optional(),
 })
 
 export const HistoryTool = Tool.define(
@@ -58,6 +65,79 @@ export const HistoryTool = Tool.define(
       parameters,
       execute: (args: z.infer<typeof parameters>, ctx) =>
         Effect.gen(function* () {
+          if (args.operation === "exact_output_query") {
+            const unavailable = () => ({title:"Exact output query unavailable", output:"Exact output unavailable.", metadata:{count:0}})
+            const allowed = new Set(["operation","message_id","part_id","revision","content_hash","query","byte_offset","limit"])
+            if (Object.keys(args).some(key => !allowed.has(key)) || !ManagedProvider.enabled() || ctx.abort.aborted ||
+                !args.message_id || !args.part_id || !args.revision || !args.content_hash || typeof args.query !== "string" ||
+                !args.query.isWellFormed() || Buffer.byteLength(args.query,"utf8") < 1 || Buffer.byteLength(args.query,"utf8") > 256 ||
+                (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 50))) return unavailable()
+            const actor = ctx.extra?.actorExecution as ActorExecutionIdentity | undefined
+            if (!actor || actor.sessionID !== ctx.sessionID || !actor.rootOperationID || !actor.actorID ||
+                !Number.isSafeInteger(actor.executionRevision) || actor.executionRevision < 0 || !actor.innerTurnID) return unavailable()
+            const turn = {sessionID:actor.sessionID,rootOperationID:actor.rootOperationID,actorID:actor.actorID,
+              executionRevision:actor.executionRevision,innerTurnID:actor.innerTurnID}
+            const issuer=ManagedProvider.currentActorToolTimingIssuer(actor.sessionID,actor.actorID,actor.executionRevision,actor.rootOperationID)
+            const scope=ManagedProvider.currentScope(actor.sessionID,actor.actorID,actor.executionRevision)
+            const host=ManagedProvider.currentActorHostContext(actor.sessionID,actor.actorID,actor.executionRevision)
+            const original=ManagedProvider.currentOriginalPromptHostContext(actor.sessionID,actor.rootOperationID)
+            // Host context is intentionally returned as a shallow copy by ManagedProvider.
+            const sameHost=(value:typeof host, expected:typeof host)=> {
+              if (!value || !expected) return false
+              return Object.keys(value).length===Object.keys(expected).length &&
+                Object.keys(expected).every(key=>value[key as keyof typeof expected]===expected[key as keyof typeof expected])
+            }
+            const sameOriginal=()=> {
+              const value=ManagedProvider.currentOriginalPromptHostContext(actor.sessionID,actor.rootOperationID!)
+              return original === null ? value === null : original !== undefined && sameHost(value ?? undefined,original)
+            }
+            const current=()=> !ctx.abort.aborted && ManagedProvider.enabled() && !!scope && !!host && !!issuer?.isAlive() &&
+              isAdmittedToolTimingTurn(actor,turn) && ManagedProvider.currentScope(actor.sessionID,actor.actorID,actor.executionRevision)===scope &&
+              sameHost(ManagedProvider.currentActorHostContext(actor.sessionID,actor.actorID,actor.executionRevision),host) && sameOriginal() &&
+              ManagedProvider.currentActorToolTimingIssuer(actor.sessionID,actor.actorID,actor.executionRevision,actor.rootOperationID!)===issuer
+            if (!current()) return unavailable()
+            const result = yield* Effect.tryPromise(() => queryHistoryOutput({revision:args.revision!,contentHash:args.content_hash!,
+              literal:args.query!,start:args.byte_offset ?? 0,limit:args.limit ?? 20,current,
+              readPage:(offset,limit)=>ManagedProvider.historyCall(ctx.sessionID,"exact_output",{
+                rootOperationID:turn.rootOperationID,actorID:turn.actorID,executionRevision:turn.executionRevision,innerTurnID:turn.innerTurnID,
+                messageID:args.message_id,partID:args.part_id,revision:args.revision,contentHash:args.content_hash,offset,limit,
+              })})).pipe(Effect.catch(() => Effect.succeed(undefined)))
+            if (!result || !current()) return unavailable()
+            const output=JSON.stringify({revision:args.revision,contentHash:args.content_hash,outputSHA256:result.outputSHA256,
+              outputBytes:result.outputBytes,query:args.query,start:args.byte_offset ?? 0,matches:result.matches,next_offset:result.nextOffset,
+              original:{operation:"exact_output",message_id:args.message_id,part_id:args.part_id,revision:args.revision,content_hash:args.content_hash}})
+            if (Buffer.byteLength(output,"utf8") > 50000) return unavailable()
+            return {title:"Exact output query",output,metadata:{count:result.matches.length,truncated:false} as {count:number}}
+          }
+          if (args.operation === "exact_output") {
+            const actor = ctx.extra?.actorExecution as {sessionID?:unknown; rootOperationID?:unknown; actorID?:unknown; executionRevision?:unknown; innerTurnID?:unknown} | undefined
+            if (!ManagedProvider.enabled() || ctx.abort.aborted || !args.message_id || !args.part_id || !args.revision || !args.content_hash ||
+                actor?.sessionID !== ctx.sessionID || typeof actor.rootOperationID !== "string" || typeof actor.actorID !== "string" ||
+                typeof actor.executionRevision !== "number" || !Number.isSafeInteger(actor.executionRevision) || actor.executionRevision < 0 ||
+                typeof actor.innerTurnID !== "string")
+              return {title:"Exact output unavailable", output:"Exact output unavailable.", metadata:{count:0}}
+            const result = yield* Effect.tryPromise(() => ManagedProvider.historyCall(ctx.sessionID, "exact_output", {
+              rootOperationID:actor.rootOperationID, actorID:actor.actorID, executionRevision:actor.executionRevision,
+              innerTurnID:actor.innerTurnID, messageID:args.message_id, partID:args.part_id, revision:args.revision,
+              contentHash:args.content_hash, offset:args.byte_offset ?? 0, limit:args.byte_limit ?? 8192,
+            })).pipe(Effect.catch(() => Effect.succeed(undefined)))
+            const value = result as {state?:string; page?:{text?:unknown; revision?:unknown; contentHash?:unknown; outputSHA256?:unknown; outputBytes?:unknown; offset?:unknown; nextOffset?:unknown}} | undefined
+            const page=value?.page, bytes=typeof page?.text==='string' ? Buffer.byteLength(page.text,'utf8') : -1
+            const offset=args.byte_offset ?? 0, limit=args.byte_limit ?? 8192
+            if (ctx.abort.aborted || value?.state !== "ready" || !page || typeof page.text !== "string" ||
+                [...page.text].some(char=>{const n=char.codePointAt(0)!;return n>=0xd800 && n<=0xdfff}) ||
+                page.revision!==args.revision || page.contentHash!==args.content_hash ||
+                typeof page.outputSHA256!=='string' || !/^[a-f0-9]{64}$/.test(page.outputSHA256) ||
+                !Number.isSafeInteger(page.outputBytes) || (page.outputBytes as number)<0 || (page.outputBytes as number)>51200 ||
+                page.offset!==offset || bytes<0 || bytes>limit || offset+bytes>(page.outputBytes as number) ||
+                page.nextOffset!==(offset+bytes < (page.outputBytes as number) ? offset+bytes : null))
+              return {title:"Exact output unavailable", output:"Exact output unavailable.", metadata:{count:0}}
+            const output=JSON.stringify({revision:page.revision,contentHash:page.contentHash,outputSHA256:page.outputSHA256,
+              outputBytes:page.outputBytes,offset:page.offset,nextOffset:page.nextOffset,text:page.text})
+            if (Buffer.byteLength(output,'utf8')>50000)
+              return {title:"Exact output unavailable", output:"Exact output unavailable.", metadata:{count:0}}
+            return {title:"Exact tool output", output, metadata:{count:1,truncated:false} as {count:number}}
+          }
           if (args.operation === "search") {
             if (!args.query) {
               return {

@@ -1,6 +1,11 @@
 import { BusEvent } from "@/bus/bus-event"
 import { SessionID, MessageID, PartID } from "./schema"
 import z from "zod"
+import { CaptureMembership } from "./capture-membership"
+import { validGcfReceipt } from "./gcf-source-proof"
+import { graphGcfView } from "./gcf-graph-view"
+import type { GcfArtifact } from "./gcf-native"
+import type { GcfFrameRecorder } from "./gcf-request-frames"
 import { NamedError } from "@mimo-ai/shared/util/error"
 import { APICallError, convertToModelMessages, LoadAPIKeyError, RetryError, type ModelMessage, type UIMessage } from "ai"
 import { LSP } from "../lsp"
@@ -23,6 +28,8 @@ import {
   toolAttachmentPlaceholder,
 } from "./tool-attachment"
 import { collapseCheckpointTail } from "./tail-digest"
+import { createHash } from 'node:crypto'
+import type { NativeMembershipCapture, NativeMembershipSource } from './context-inspection'
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -135,6 +142,7 @@ export const TextPart = PartBase.extend({
 export type TextPart = z.infer<typeof TextPart>
 
 export const ReasoningPart = PartBase.extend({
+  contextSelection: z.object({ version: z.literal(1), action: z.literal("omit") }).optional(),
   type: z.literal("reasoning"),
   text: z.string(),
   metadata: z.record(z.string(), z.any()).optional(),
@@ -189,6 +197,7 @@ export const FilePartSource = z.discriminatedUnion("type", [FileSource, SymbolSo
 })
 
 export const FilePart = PartBase.extend({
+  contextSelection: z.object({ version: z.literal(1), action: z.literal("omit") }).optional(),
   type: z.literal("file"),
   mime: z.string(),
   filename: z.string().optional(),
@@ -272,6 +281,7 @@ export type RetryPart = z.infer<typeof RetryPart>
 export const StepStartPart = PartBase.extend({
   type: z.literal("step-start"),
   snapshot: z.string().optional(),
+  captureMembership: CaptureMembership.optional(),
 }).meta({
   ref: "StepStartPart",
 })
@@ -369,6 +379,7 @@ export const ToolState = z
   })
 
 export const ToolPart = PartBase.extend({
+  contextSelection: z.object({ version: z.literal(1), action: z.literal("trim"), head: z.literal(1536), tail: z.literal(1536) }).optional(),
   type: z.literal("tool"),
   callID: z.string(),
   tool: z.string(),
@@ -416,6 +427,7 @@ export const User = Base.extend({
   }),
   system: z.string().optional(),
   tools: z.record(z.string(), z.boolean()).optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
   provenance: Provenance.optional(),
 }).meta({
   ref: "UserMessage",
@@ -489,6 +501,7 @@ export const Assistant = Base.extend({
     }),
   }),
   structured: z.any().optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
   variant: z.string().optional(),
   finish: z.string().optional(),
 }).meta({
@@ -627,13 +640,27 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean },
+  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean; gcfViewIdentity?: string; gcfArtifact?:GcfArtifact; gcfMemoScope?:string; toolViews?:ReadonlyMap<string,string>; nativeMembership?:NativeMembershipCapture; gcfFrameRecord?:GcfFrameRecorder },
 ) {
+  // Preference identity alone never qualifies an output; preserve original bytes.
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
   // Only the main rebuild request opts in. Writers and compaction require the
   // persisted transcript verbatim.
   const source = options?.collapseCheckpointTail ? collapseCheckpointTail(input) : input
+  const capture=options?.nativeMembership
+  if (capture) capture.sources=undefined
+  const emitted:NativeMembershipSource[]=[]
+  let membershipValid=!!capture && source.length===input.length && source.every((message,index)=>message===input[index] && message===capture.shapes[index]?.message && message.info.role===capture.shapes[index].role && message.parts.length===capture.shapes[index].parts.length && message.parts.every((item,n)=>item===capture.shapes[index].parts[n].ref && item.id===capture.shapes[index].parts[n].id && item.type===capture.shapes[index].parts[n].type && item.sessionID===capture.sessionID)) && capture.shapes.length===source.length
+  let emittingIndex=0
+  const recordMembership=(message:WithParts,part:WithParts['parts'][number])=>{
+    const index=emittingIndex++, original=capture?.entries.get(index)
+    if (!membershipValid) return
+    if (!original) return
+    if (original.part!==part || message.info.sessionID!==capture?.sessionID || part.sessionID!==capture?.sessionID ||
+        message.info.id!==original.messageID || message.info.role!==original.role || part.messageID!==original.messageID || part.id!==original.partID || part.type!=='text' || part.ignored || part.synthetic || createHash('sha256').update(part.text,'utf8').digest('hex')!==original.digest) {membershipValid=false;return}
+    emitted.push({messageID:original.messageID,partID:original.partID,role:original.role,digest:original.digest,sourceRevision:'unavailable',messageIndex:index,contentIndex:0})
+  }
 
   const toModelOutput = (options: { toolCallId: string; input: unknown; output: unknown }) => {
     const output = options.output
@@ -694,14 +721,18 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       }
       result.push(userMessage)
       for (const part of msg.parts) {
-        if (part.type === "text" && !part.ignored)
+        if (part.type === "text" && !part.ignored) {
+          recordMembership(msg,part)
           userMessage.parts.push({
             type: "text",
             text: part.text,
           })
+        }
         // text/plain and directory files are converted into text parts, ignore them
         if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory") {
-          if (options?.stripMedia && isMedia(part.mime)) {
+          if (part.contextSelection?.action === "omit") {
+            userMessage.parts.push({ type: "text", text: `[stripped: ${part.filename ?? part.mime}]` })
+          } else if (options?.stripMedia && isMedia(part.mime)) {
             userMessage.parts.push({
               type: "text",
               text: `[Attached ${part.mime}: ${part.filename ?? "file"}]`,
@@ -800,12 +831,14 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         parts: [],
       }
       for (const part of msg.parts) {
-        if (part.type === "text")
+        if (part.type === "text" && (part.metadata?.origin as { kind?: string } | undefined)?.kind !== "model_switch") {
+          recordMembership(msg,part)
           assistantMessage.parts.push({
             type: "text",
             text: part.text,
             ...(differentModel ? {} : { providerMetadata: part.metadata }),
           })
+        }
         if (part.type === "step-start")
           assistantMessage.parts.push({
             type: "step-start",
@@ -813,7 +846,36 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         if (part.type === "tool") {
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
-            const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
+            const trimmed = part.contextSelection?.action === "trim" && part.state.output.length > 4096
+            let outputText = part.state.time.compacted ? "[Old tool result content cleared]" : trimmed
+              ? part.state.output.slice(0, part.contextSelection!.head) +
+                "\n\n[... trimmed — kept first and last 1.5K of " + part.state.output.length + " chars ...]\n\n" +
+                part.state.output.slice(-part.contextSelection!.tail)
+              : options?.toolViews?.get(part.id) ?? part.state.output
+            let fullGcfFrame = false
+            let gcfEligible = false
+            // T04 owns a selected view first. GCF only derives a model-facing
+            // view from an authenticated complete original and never persists it.
+            if (!part.state.time.compacted && !trimmed && !options?.toolViews?.has(part.id) && options?.gcfViewIdentity &&
+                options.gcfArtifact?.availability() === "available" && validGcfReceipt(part)) {
+              gcfEligible = true
+              const primer = `[Experimental lossless GCF generic JSON. Decode the following value: the first line is the profile; '=' introduces a scalar, '-' is null, and booleans, integers and quoted strings use JSON spelling. Object keys are bare identifiers or JSON strings: key=value is a field; '## key' opens a nested object; key[N] or '## key [N]' opens an array. A root array starts '## [N]'. Array [N]: lists comma-separated scalars; [N]{keys} lists pipe-separated object rows in key order, with '~' meaning a missing field. Other arrays have @i =value, @i {} or @i [N] entries. Indentation is two spaces per nesting level. The canonical source remains unchanged.]`
+              const graph = graphGcfView(part.state.output, options.gcfArtifact, options.gcfMemoScope, primer)
+              if (graph.detected) {
+                if (graph.frame) { outputText = graph.frame; fullGcfFrame = true }
+              } else {
+                const input = Buffer.from(part.state.output, "utf8")
+                const result = options.gcfArtifact.encode(input, "gcf-generic-v3-safe-integers-v1", options.gcfMemoScope)
+                if (result.state === "encoded" && options.gcfArtifact.availability() === "available") {
+                  try {
+                    const body = new TextDecoder("utf-8", {fatal:true}).decode(result.output)
+                    if (!body.startsWith("GCF profile=generic\n") || !body.endsWith("\n")) throw new Error("Invalid GCF frame")
+                    const framed = `${primer}\n${body}`
+                    if (Buffer.byteLength(framed,"utf8") < input.byteLength) { outputText = framed; fullGcfFrame = true }
+                  } catch { /* Keep the canonical original. */ }
+                }
+              }
+            }
             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
             const finalAttachments = routeAttachments({
               tool: part.tool,
@@ -824,7 +886,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             })
 
             const output =
-              part.state.providerOutput !== undefined
+              !part.state.time.compacted && !trimmed && part.state.providerOutput !== undefined
                 ? part.state.providerOutput
                 : finalAttachments.length > 0
                   ? {
@@ -833,6 +895,9 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
                     }
                   : outputText
 
+            if (gcfEligible && (fullGcfFrame || outputText === part.state.output) && typeof output === "string" && output === outputText && part.state.providerOutput === undefined && !part.metadata?.providerExecuted) {
+              try { options?.gcfFrameRecord?.(part, output) } catch { /* Optional witness cannot alter the model view. */ }
+            }
             assistantMessage.parts.push({
               type: ("tool-" + part.tool) as `tool-${string}`,
               state: "output-available",
@@ -892,7 +957,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         if (part.type === "reasoning") {
           assistantMessage.parts.push({
             type: "reasoning",
-            text: part.text,
+            text: part.contextSelection?.action === "omit" ? "" : part.text,
             ...(differentModel ? {} : { providerMetadata: part.metadata }),
           })
         }
@@ -924,7 +989,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 
   const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
 
-  return yield* Effect.promise(() =>
+  const converted = yield* Effect.promise(() =>
     convertToModelMessages(
       result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
       {
@@ -933,12 +998,17 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       },
     ),
   )
+  if (capture && membershipValid && emittingIndex===capture.shapes.length && emitted.length===capture.entries.size && converted.length===capture.shapes.length && converted.every((item,index)=>item.role===capture.shapes[index].role) && emitted.every(source=>{
+      const item=converted[source.messageIndex],content=item.content, text=typeof content==='string' ? content : Array.isArray(content) && content.length===1 && content[0]?.type==='text' ? content[0].text : undefined
+      return item.role===source.role && typeof text==='string' && createHash('sha256').update(text,'utf8').digest('hex')===source.digest
+    })) capture.sources=emitted
+  return converted
 })
 
 export function toModelMessages(
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean },
+  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean; gcfViewIdentity?: string; gcfArtifact?:GcfArtifact; gcfMemoScope?:string; toolViews?:ReadonlyMap<string,string> },
 ): Promise<ModelMessage[]> {
   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
 }

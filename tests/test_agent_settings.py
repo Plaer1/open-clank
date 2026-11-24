@@ -6,6 +6,11 @@ def test_agent_settings_defaults_and_dynamic_effective_values():
     assert value["compaction"]["preserve_recent_tokens"] == 8000
     assert value["compaction"]["reserved"] is None
     assert value["checkpoint"]["reserved"] == 13000
+    assert value["dream"] == {"auto": False, "interval_days": 7}
+    assert value["distill"] == {"auto": False, "interval_days": 30}
+    changed = effective_agent_settings({"dream":{"auto":True,"interval_days":0}}, context_window=100000, max_output=16000)
+    assert changed["dream"] == {"auto": True, "interval_days": 0}
+    assert changed["distill"] == {"auto": False, "interval_days": 30}
 
 def test_agent_settings_validation_rejects_invalid_and_only_lowers_window():
     with pytest.raises(ValueError): validate_agent_settings({"compaction": {"tail_turns": -1}})

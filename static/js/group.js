@@ -1,3 +1,4 @@
+import { bindCardActionMenu } from './cardActionMenu.js';
 import { uiIcon } from './uiIcons.js';
 // static/js/group.js
 // Group Chat — multi-model conversations (parallel or round-robin)
@@ -10,7 +11,7 @@ import { providerLogo } from './providers.js';
 import { PROMPT_TEMPLATES, getUserTemplates } from './presets.js';
 import { sortModelObjects } from './modelSort.js';
 import Storage from './storage.js';
-import { catalogEntries } from './modelCatalog.js';
+import { catalogEntries, modelChoiceKey, resolveStoredModelChoice } from './modelCatalog.js';
 import {
   providerDisplayName,
   sharedProviderLabel,
@@ -26,7 +27,7 @@ let _abortControllers = [];
 let _mode = 'round-robin';    // 'parallel' or 'round-robin'
 let _roundRobinIdx = 0;
 let _parentSessionId = null;
-const GROUP_STATE_KEY = 'odysseus-group-state';
+const GROUP_STATE_KEY = 'openclank-group-state';
 
 export function init(apiBase) {
   API_BASE = apiBase;
@@ -43,38 +44,47 @@ function _initGroupTab() {
 
   // _groupParticipants is at module scope
   let _modelsCache = null;
+  let _intent = 0;
+  let _deletingGroup = false;
 
+  const _scope = () => {
+    const session = window.sessionModule, account = window.chatModule?.ratingAccountScope?.();
+    if (!session || !account?.owner || document.body?.dataset?.accountId !== account.owner) return null;
+    return { session, owner: account.owner, epoch: account.authEpoch, sid: session.getCurrentSessionId?.(), nav: session.getSessionNavigationToken?.(), draft: session.getPendingChat?.() };
+  };
+  const _sameScope = snap => {
+    const next = _scope();
+    return !!snap && !!next && next.session === snap.session && next.owner === snap.owner && next.epoch === snap.epoch
+      && next.sid === snap.sid && next.nav === snap.nav && next.draft === snap.draft;
+  };
   async function _getModels() {
-    if (_modelsCache) return _modelsCache;
-    let items = (window.modelsModule && window.modelsModule.getCachedItems) ? window.modelsModule.getCachedItems() : [];
-    if (!items || items.length === 0) {
-      try {
-        const res = await fetch(API_BASE + '/api/models', { credentials: 'same-origin' });
-        items = (await res.json()).items || [];
-      } catch (e) {}
-    }
-    const result = [];
-    const seen = new Set();
-    items.forEach(item => {
-      if (item.offline) return;
-      (item.models || []).concat(item.models_extra || []).forEach((mid, i) => {
-        if (seen.has(mid)) return;
-        seen.add(mid);
-        const display = ((item.models_display || []).concat(item.models_extra_display || []))[i] || mid;
-        result.push({ mid, display: display.split('/').pop(), url: item.url, endpointId: item.endpoint_id });
+    const snap = _scope(); if (!snap) return [];
+    try {
+      const res = await fetch(API_BASE + '/api/models', { credentials: 'same-origin' });
+      if (!res.ok) return [];
+      const items = (await res.json()).items || [];
+      if (!_sameScope(snap)) return [];
+      const result = [], seen = new Set();
+      items.forEach(item => {
+        if (!item || item.offline) return;
+        catalogEntries(item).forEach(entry => {
+          if (entry.stale) return;
+          const m = {mid:entry.mid, display:(entry.displayName || entry.mid).split('/').pop(), url:item.url || '', endpointId:item.endpoint_id || '', optionRouteId:entry.optionRouteId || '', providerModelId:entry.providerModelId || ''};
+          const key = JSON.stringify([modelChoiceKey(m), m.optionRouteId, m.providerModelId]); if (!seen.has(key)) { seen.add(key); result.push(m); }
+        });
       });
-    });
-    _modelsCache = sortModelObjects(result);
-    return _modelsCache;
+      _modelsCache = sortModelObjects(result); return _modelsCache;
+    } catch { return []; }
   }
 
   function _render() {
     participantsEl.innerHTML = '';
+    const renderScope = _scope();
     _groupParticipants.forEach((p, idx) => {
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 6px;background:color-mix(in srgb, var(--fg) 3%, transparent);border-radius:6px;';
-      const label = p.character ? p.character.name : (p.model ? p.model.display : '?');
-      const sublabel = p.model ? p.model.display : '';
+      const label = p.character ? p.character.name : (p.model ? p.model.display : (p.savedDisplay || 'Unresolved model'));
+      const sublabel = p.model ? p.model.display : (p.savedChoice ? 'Model unavailable — reselect' : 'Uses current model');
       row.innerHTML = `
         <span style="flex:1;min-width:0;">
           <span style="font-size:12px;font-weight:500;">${uiModule.esc(label)}</span>
@@ -82,14 +92,22 @@ function _initGroupTab() {
         </span>
         <button style="background:none;border:none;color:var(--fg);opacity:0.5;cursor:pointer;font-size:16px;padding:0 4px;line-height:1;position:relative;top:-4px;" data-idx="${idx}" title="Remove">&times;</button>
       `;
-      row.querySelector('button').addEventListener('click', () => { _groupParticipants.splice(idx, 1); _render(); });
+      if (p.savedChoice && !p.model) {
+        const select = document.createElement('select'); select.className = 'preset-input';
+        select.innerHTML = '<option value="">Reselect model…</option>' + (_modelsCache || []).map(m => '<option value="' + uiModule.esc(modelChoiceKey(m)) + '">' + uiModule.esc(m.display + (m.endpointId ? ' · ' + m.endpointId : '')) + '</option>').join('');
+        select.addEventListener('change', () => { const model = resolveStoredModelChoice(select.value, _modelsCache || []); if (model && _sameScope(renderScope)) { _intent++; p.model = model; p.savedChoice = modelChoiceKey(model); p.hasRouteQualifier = true; p.optionRouteId = model.optionRouteId || ''; p.providerModelId = model.providerModelId || ''; _render(); } });
+        row.insertBefore(select, row.querySelector('button'));
+      }
+      row.querySelector('button').addEventListener('click', () => { _intent++; _groupParticipants.splice(idx, 1); _render(); });
       participantsEl.appendChild(row);
     });
     // startBtn is shared — don't disable it
   }
 
   addBtn.addEventListener('click', async () => {
+    const snap = _scope(), intent = ++_intent;
     const [models, characters] = await Promise.all([_getModels(), _getCharacterList()]);
+    if (!_sameScope(snap) || intent !== _intent || document.querySelector('.preset-tab.active')?.dataset.chartab !== 'group') return;
 
     const picker = document.createElement('div');
     picker.style.cssText = 'display:flex;gap:4px;align-items:center;';
@@ -108,14 +126,17 @@ function _initGroupTab() {
     modelSel.dataset.selectionType = "model"
     modelSel.style.cssText = 'font-size:11px;flex:1;height:26px;';
     modelSel.innerHTML = '<option value="">Model…</option>' +
-      models.map(m => '<option value="' + m.mid + '">' + uiModule.esc(m.display) + '</option>').join('');
+      models.map(m => '<option value="' + uiModule.esc(modelChoiceKey(m)) + '">' + uiModule.esc(m.display + (m.endpointId ? ' · ' + m.endpointId : '')) + '</option>').join('');
 
     // Auto-add when model is selected
     modelSel.addEventListener('change', () => {
       if (!modelSel.value) return;
       if (_groupParticipants.length >= 8) { uiModule.showToast('Max 8'); return; }
       const entry = { character: null, model: null };
-      entry.model = models.find(m => m.mid === modelSel.value) || null;
+      entry.model = resolveStoredModelChoice(modelSel.value, models);
+      if (!entry.model || !_sameScope(snap) || intent !== _intent) return;
+      _intent++; entry.savedChoice = modelChoiceKey(entry.model);
+      entry.hasRouteQualifier = true; entry.optionRouteId = entry.model.optionRouteId || ''; entry.providerModelId = entry.model.providerModelId || '';
       if (charSel.value) entry.character = characters.find(c => c.id === charSel.value) || null;
       _groupParticipants.push(entry);
       picker.remove();
@@ -142,23 +163,27 @@ function _initGroupTab() {
   if (startBtn) startBtn.addEventListener('click', async () => {
     const activeTab = document.querySelector('.preset-tab.active');
     if (!activeTab || activeTab.dataset.chartab !== 'group') return;
-    // Get default model from current session as fallback
-    const _defaultModel = (window.sessionModule && window.sessionModule.getSessions) ?
-      (() => {
-        const s = window.sessionModule.getSessions().find(x => x.id === window.sessionModule.getCurrentSessionId());
-        if (s) return { mid: s.model, display: s.model.split('/').pop(), url: s.endpoint_url, endpointId: '' };
-        return null;
-      })() : null;
-
-    const picked = _groupParticipants.map(p => {
-      let m = p.model ? { ...p.model } : (_defaultModel ? { ..._defaultModel } : null);
-      if (!m || !m.url) {
-        console.warn('[group] Participant has no valid model:', p);
-        return null;
-      }
+    const snap = _scope(), intent = ++_intent, participants = _groupParticipants.slice();
+    const participantSnapshot = JSON.stringify(participants);
+    const models = await _getModels();
+    if (!_sameScope(snap) || intent !== _intent || participantSnapshot !== JSON.stringify(_groupParticipants) || document.querySelector('.preset-tab.active')?.dataset.chartab !== 'group'
+        || participants.length !== _groupParticipants.length || participants.some((p, i) => p !== _groupParticipants[i])) return;
+    const currentId = snap.session.getCurrentModel?.();
+    const route = snap.session.getCurrentRoute?.() || {};
+    const pending = snap.session.getPendingChat?.();
+    const endpointId = route.endpoint_id || pending?.endpointId || pending?.endpoint_id || '';
+    const url = route.endpoint_url || pending?.url || '';
+    const currentKey = currentId && (endpointId || url) ? modelChoiceKey(currentId, endpointId, url) : '';
+    const inherited = currentKey ? resolveStoredModelChoice(currentKey, models) : null;
+    const picked = participants.map(p => {
+      const selected = p.savedChoice ? resolveStoredModelChoice(p.savedChoice, models) : (p.model ? resolveStoredModelChoice(modelChoiceKey(p.model), models) : inherited);
+      if (selected && p.hasRouteQualifier && ((selected.optionRouteId || '') !== p.optionRouteId || (selected.providerModelId || '') !== p.providerModelId)) return null;
+      if (!selected || p.characterMissing) return null;
+      const m = { ...selected };
       if (p.character) m.character = { characterId: p.character.id, characterName: p.character.name, characterPrompt: p.character.prompt };
       return m;
-    }).filter(Boolean);
+    });
+    if (picked.some(m => !m)) { uiModule.showToast('Reselect or remove unavailable participants'); return; }
 
     if (picked.length < 2) { uiModule.showToast('Need at least 2 participants — add models or characters'); return; }
 
@@ -171,9 +196,12 @@ function _initGroupTab() {
     const box = document.getElementById('chat-history');
     if (box) box.innerHTML = '';
 
-    await startGroup(picked, 'group-' + Date.now());
+    const runScope = _scope();
+    if (!runScope || !await startGroup(picked, 'group-' + Date.now(), () => _sameScope(runScope))) return;
 
-    // Auto-save as preset if 2+ participants
+    // Auto-save only under the same account after the group is selected.
+    const savedScope = _scope();
+    if (!savedScope || savedScope.owner !== snap.owner || savedScope.epoch !== snap.epoch) return;
     if (picked.length >= 2) {
       const presetData = {
         id: 'grp-' + Date.now(),
@@ -181,6 +209,11 @@ function _initGroupTab() {
         mode: _mode,
         participants: picked.map(p => ({
           modelId: p.mid,
+          modelKey: modelChoiceKey(p),
+          modelEndpointId: p.endpointId || '',
+          modelEndpointUrl: p.url || '',
+          modelOptionRouteId: p.optionRouteId || '',
+          modelProviderId: p.providerModelId || '',
           modelDisplay: p.display,
           characterId: p.character?.characterId || null,
           characterName: p.character?.characterName || null,
@@ -188,10 +221,11 @@ function _initGroupTab() {
       };
       try {
         const existing = await fetch(API_BASE + '/api/presets/groups', { credentials: 'same-origin' }).then(r => r.json());
+        if (!_sameScope(savedScope)) return;
         const groups = existing.groups || [];
         // Don't duplicate if same participants
-        const sig = presetData.participants.map(p => p.modelId + ':' + (p.characterId || '')).sort().join(',');
-        const exists = groups.some(g => (g.participants || []).map(p => p.modelId + ':' + (p.characterId || '')).sort().join(',') === sig);
+        const sig = presetData.participants.map(p => (p.modelKey || p.modelId) + ':' + (p.characterId || '')).sort().join(',');
+        const exists = groups.some(g => (g.participants || []).map(p => (p.modelKey || p.modelId) + ':' + (p.characterId || '')).sort().join(',') === sig);
         if (!exists) {
           groups.push(presetData);
           await fetch(API_BASE + '/api/presets/groups', {
@@ -229,6 +263,7 @@ function _initGroupTab() {
   });
 
   async function repopulateExistingSelections() {
+    const snap = _scope();
     const EMPTY = "";
 
     const characterSelections = participantsEl.querySelectorAll("select.preset-input[data-selection-type=character]");
@@ -236,6 +271,7 @@ function _initGroupTab() {
 
     if (characterSelections.length !== 0) {
       const characters = await _getCharacterList();
+      if (!_sameScope(snap)) return;
 
       characterSelections.forEach((characterSelection) => {
 
@@ -253,14 +289,15 @@ function _initGroupTab() {
 
     if (modelSelections.length !== 0) {
       const models = await _getModels();
+      if (!_sameScope(snap)) return;
 
       modelSelections.forEach((modelSelection) => {
         const chosenModel = modelSelection.value;
         const isChosenModelExisting = chosenModel !== EMPTY
-          && models.findIndex((model) => model.mid === chosenModel) !== -1;
+          && !!resolveStoredModelChoice(chosenModel, models);
 
         modelSelection.innerHTML = '<option value="">Model…</option>' +
-          models.map(m => '<option value="' + m.mid + '">' + uiModule.esc(m.display) + '</option>').join('');
+          models.map(m => '<option value="' + uiModule.esc(modelChoiceKey(m)) + '">' + uiModule.esc(m.display + (m.endpointId ? ' · ' + m.endpointId : '')) + '</option>').join('');
         if (isChosenModelExisting) {
           modelSelection.value = chosenModel;
         }
@@ -271,8 +308,10 @@ function _initGroupTab() {
   // Load and render saved group presets
   async function _loadGroupPresets() {
     try {
+      const snap = _scope();
       const res = await fetch(API_BASE + '/api/presets/groups', { credentials: 'same-origin' });
       const data = await res.json();
+      if (!_sameScope(snap)) return;
       const groups = data.groups || [];
       // Render presets above participant list
       let presetsDiv = document.getElementById('group-presets-list');
@@ -294,43 +333,70 @@ function _initGroupTab() {
         const chipX = document.createElement('span');
         chipX.textContent = ' \u00d7';
         chipX.style.cssText = 'opacity:0.4;margin-left:4px;cursor:pointer;';
-        chipX.addEventListener('click', (ev) => {
+        const current = () => _sameScope(snap)
+          && chip.isConnected
+          && groups.includes(g)
+          && document.querySelector('.preset-tab.active')?.dataset.chartab === 'group';
+        const deletePreset = async () => {
+          if (!current() || _deletingGroup) return;
+          _deletingGroup = true;
+          try {
+            if (!await window.styledConfirm('Delete preset "' + (g.name || 'Group') + '"?', { confirmText: 'Delete', danger: true })) return;
+            if (!current()) return;
+            const latest = await fetch(API_BASE + '/api/presets/groups', { credentials: 'same-origin', cache: 'no-store' });
+            if (!latest.ok) throw new Error('Preset could not be deleted');
+            const { groups: fresh } = await latest.json();
+            if (!current() || !Array.isArray(fresh)) return;
+            const fingerprint = JSON.stringify(g);
+            const matches = fresh.flatMap((preset, index) => JSON.stringify(preset) === fingerprint ? [index] : []);
+            const index = matches.length === 1 ? matches[0]
+              : matches.length && JSON.stringify(fresh) === JSON.stringify(groups) ? groups.indexOf(g) : -1;
+            if (index < 0) {
+              await _loadGroupPresets();
+              return;
+            }
+            const response = await fetch(API_BASE + '/api/presets/groups', {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ groups: fresh.filter((_, i) => i !== index) }),
+            });
+            if (!response.ok) throw new Error('Preset could not be deleted');
+            if (current()) await _loadGroupPresets();
+          } catch (error) {
+            if (current()) uiModule.showError(error.message);
+          } finally {
+            _deletingGroup = false;
+          }
+        };
+        chipX.addEventListener('click', ev => {
           ev.stopPropagation();
-          groups.splice(idx, 1);
-          fetch(API_BASE + '/api/presets/groups', {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ groups }),
-          }).then(() => _loadGroupPresets());
+          void deletePreset();
         });
         chip.appendChild(chipX);
         chip.title = (g.participants || []).map(p => p.characterName || p.modelDisplay || '?').join(', ');
         chip.addEventListener('click', async () => {
-          // Load preset participants
+          const snap = _scope(), intent = ++_intent;
           const [models, chars] = await Promise.all([_getModels(), _getCharacterList()]);
+          if (!_sameScope(snap) || intent !== _intent || document.querySelector('.preset-tab.active')?.dataset.chartab !== 'group') return;
           _groupParticipants.length = 0;
           (g.participants || []).forEach(p => {
-            const model = models.find(m => m.mid === p.modelId) || models[0];
-            const entry = { model: model || null, character: null };
-            if (p.characterId) {
-              entry.character = chars.find(c => c.id === p.characterId) || null;
-            }
-            if (entry.model) _groupParticipants.push(entry);
+            const choice = p.modelKey || (p.modelId && (p.modelEndpointId || p.modelEndpointUrl)
+              ? modelChoiceKey(p.modelId, p.modelEndpointId, p.modelEndpointUrl) : p.modelId) || '';
+            const character = p.characterId ? chars.find(c => c.id === p.characterId) || null : null;
+            const candidate = choice ? resolveStoredModelChoice(choice, models) : null;
+            const qualified = Object.hasOwn(p,'modelOptionRouteId') || Object.hasOwn(p,'modelProviderId');
+            const model = candidate && (!qualified || ((candidate.optionRouteId || '') === (p.modelOptionRouteId || '') && (candidate.providerModelId || '') === (p.modelProviderId || ''))) ? candidate : null;
+            _groupParticipants.push({ model, savedChoice:choice,
+              savedDisplay:p.modelDisplay || p.modelId || '', character, characterMissing:!!p.characterId && !character,
+              hasRouteQualifier:Object.hasOwn(p,'modelOptionRouteId') || Object.hasOwn(p,'modelProviderId'),
+              optionRouteId:p.modelOptionRouteId || '', providerModelId:p.modelProviderId || '' });
           });
           _mode = g.mode || 'parallel';
           _render();
         });
-        // Long-press / right-click to delete
-        chip.addEventListener('contextmenu', async (e) => {
-          e.preventDefault();
-          if (await window.styledConfirm('Delete preset "' + (g.name || 'Group') + '"?', { confirmText: 'Delete', danger: true })) {
-            groups.splice(idx, 1);
-            fetch(API_BASE + '/api/presets/groups', {
-              method: 'POST', credentials: 'same-origin',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ groups }),
-            }).then(() => _loadGroupPresets());
-          }
+        bindCardActionMenu(chip, {
+          current,
+          items: () => [{ id: 'delete', label: 'Delete preset', icon: 'trash', destructive: true, dialog: true, run: deletePreset }],
         });
         presetsDiv.appendChild(chip);
       });
@@ -454,13 +520,14 @@ export async function showModelPicker() {
     document.body.appendChild(overlay);
 
     // Get all available models — try cached first, fetch if empty
-    const selected = new Set();
+    const selected = new Set(), selectedRoutes = new Map();
+    const routeFingerprint = m => JSON.stringify([m.optionRouteId || '', m.providerModelId || '']);
+    const pickerSession = window.sessionModule, pickerAccount = window.chatModule?.ratingAccountScope?.(), pickerNav = pickerSession?.getSessionNavigationToken?.(), pickerSid = pickerSession?.getCurrentSessionId?.();
+    const pickerCurrent = () => { const a=window.chatModule?.ratingAccountScope?.(); return !!pickerAccount?.owner && a?.owner===pickerAccount.owner && a.authEpoch===pickerAccount.authEpoch && document.body?.dataset?.accountId===a.owner && window.sessionModule===pickerSession && pickerSession?.getSessionNavigationToken?.()===pickerNav && pickerSession?.getCurrentSessionId?.()===pickerSid; };
     let _cachedModels = null;
     async function getAllModels() {
-      if (_cachedModels) return _cachedModels;
-      let items = (window.modelsModule && window.modelsModule.getCachedItems) ? window.modelsModule.getCachedItems() : [];
-      // Fallback: fetch from API if cache is empty
-      if (!items || items.length === 0) {
+      let items = [];
+      {
         try {
           const res = await fetch(API_BASE + '/api/models', { credentials: 'same-origin' });
           const data = await res.json();
@@ -472,9 +539,11 @@ export async function showModelPicker() {
       items.forEach(item => {
         if (item.offline) return;
         catalogEntries(item).forEach(entry => {
+          if (entry.stale) return;
           const mid = entry.mid;
-          if (seen.has(mid)) return;
-          seen.add(mid);
+          const key = JSON.stringify([modelChoiceKey(mid, item.endpoint_id, item.url), entry.optionRouteId || '', entry.providerModelId || '']);
+          if (seen.has(key)) return;
+          seen.add(key);
           const provider = providerDisplayName(
             entry.providerDisplayName || item.provider_display_name || entry.family,
           );
@@ -490,6 +559,7 @@ export async function showModelPicker() {
             display: (entry.displayName || mid).split('/').pop(),
             url: item.url,
             endpointId: item.endpoint_id,
+            optionRouteId: entry.optionRouteId || '', providerModelId: entry.providerModelId || '',
             epName,
           });
         });
@@ -501,15 +571,16 @@ export async function showModelPicker() {
     async function render(filter) {
       list.innerHTML = '<div style="opacity:0.4;padding:8px;font-size:12px;">Loading models…</div>';
       const all = await getAllModels();
+      if (!pickerCurrent()) { overlay.remove(); resolve(null); return; }
       const q = (filter || '').toLowerCase();
       all.forEach(m => {
         if (q && !m.mid.toLowerCase().includes(q) && !m.display.toLowerCase().includes(q) && !m.epName.toLowerCase().includes(q)) return;
         const row = document.createElement('div');
         row.className = 'memory-item';
-        row.style.cssText = 'padding:6px 8px;cursor:pointer;' + (selected.has(m.mid) ? 'background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);' : '');
+        row.style.cssText = 'padding:6px 8px;cursor:pointer;' + (selected.has(modelChoiceKey(m)) ? 'background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);' : '');
         const logo = providerLogo(m.mid);
         row.innerHTML = `
-          <input type="checkbox" ${selected.has(m.mid) ? 'checked' : ''} style="margin-right:6px;">
+          <input type="checkbox" ${selected.has(modelChoiceKey(m)) ? 'checked' : ''} style="margin-right:6px;">
           ${logo ? '<span style="opacity:0.5;margin-right:4px;">' + logo + '</span>' : ''}
           <span style="flex:1;font-size:12px;">${uiModule.esc(m.display)}</span>
           <span style="font-size:10px;opacity:0.3;">${uiModule.esc(m.epName)}</span>
@@ -523,13 +594,13 @@ export async function showModelPicker() {
         row.querySelector('input').addEventListener('change', (e) => {
           if (e.target.checked) {
             if (selected.size >= 8) { e.target.checked = false; uiModule.showToast('Max 8 models'); return; }
-            selected.add(m.mid);
+            selected.add(modelChoiceKey(m)); selectedRoutes.set(modelChoiceKey(m), routeFingerprint(m));
           } else {
-            selected.delete(m.mid);
+            selected.delete(modelChoiceKey(m)); selectedRoutes.delete(modelChoiceKey(m));
           }
           document.getElementById('group-selected-count').textContent = selected.size + ' selected';
           document.getElementById('group-start-btn').disabled = selected.size < 2;
-          row.style.background = selected.has(m.mid) ? 'color-mix(in srgb, var(--accent, var(--red)) 12%, transparent)' : '';
+          row.style.background = selected.has(modelChoiceKey(m)) ? 'color-mix(in srgb, var(--accent, var(--red)) 12%, transparent)' : '';
         });
         list.appendChild(row);
       });
@@ -546,7 +617,9 @@ export async function showModelPicker() {
     // Start button
     document.getElementById('group-start-btn').addEventListener('click', async () => {
       const all = await getAllModels();
-      const picked = all.filter(m => selected.has(m.mid));
+      if (!pickerCurrent()) { overlay.remove(); resolve(null); return; }
+      const picked = [...selected].map(key => resolveStoredModelChoice(key, all));
+      if (picked.some(m => !m || selectedRoutes.get(modelChoiceKey(m)) !== routeFingerprint(m))) { uiModule.showToast('Reselect unavailable or ambiguous models'); return; }
 
       // Step 2: Character assignment
       body.innerHTML = '';
@@ -557,6 +630,7 @@ export async function showModelPicker() {
 
       // Build character options
       const characters = await _getCharacterList();
+      if (!pickerCurrent()) { overlay.remove(); resolve(null); return; }
       const assignments = {}; // mid -> {characterId, characterName, characterPrompt}
 
       for (const m of picked) {
@@ -577,9 +651,9 @@ export async function showModelPicker() {
         sel.addEventListener('change', () => {
           if (sel.value) {
             const ch = characters.find(c => c.id === sel.value);
-            assignments[m.mid] = { characterId: ch.id, characterName: ch.name, characterPrompt: ch.prompt };
+            assignments[modelChoiceKey(m)] = { characterId: ch.id, characterName: ch.name, characterPrompt: ch.prompt };
           } else {
-            delete assignments[m.mid];
+            delete assignments[modelChoiceKey(m)];
           }
         });
         row.appendChild(sel);
@@ -591,15 +665,19 @@ export async function showModelPicker() {
       goBtn.className = 'btn-primary';
       goBtn.style.cssText = 'margin-top:10px;padding:6px 16px;font-size:12px;width:100%;';
       goBtn.textContent = 'Start Group Chat';
-      goBtn.addEventListener('click', () => {
-        // Attach character info to picked models
-        picked.forEach(m => {
-          if (assignments[m.mid]) {
-            m.character = assignments[m.mid];
+      goBtn.addEventListener('click', async () => {
+        const latest = await getAllModels();
+        if (!pickerCurrent()) { overlay.remove(); resolve(null); return; }
+        const finalPicked = [...selected].map(key => resolveStoredModelChoice(key, latest));
+        if (finalPicked.some(m => !m || selectedRoutes.get(modelChoiceKey(m)) !== routeFingerprint(m))) { uiModule.showToast('Reselect unavailable or ambiguous models'); return; }
+        // Attach character info to the revalidated choices.
+        finalPicked.forEach(m => {
+          if (assignments[modelChoiceKey(m)]) {
+            m.character = assignments[modelChoiceKey(m)];
           }
         });
         overlay.remove();
-        resolve(picked);
+        resolve(finalPicked);
       });
       body.appendChild(goBtn);
     });
@@ -612,7 +690,8 @@ export async function showModelPicker() {
 
 // ── Start / Stop ─────────────────────────────────────
 
-export async function startGroup(models, parentSessionId) {
+export async function startGroup(models, parentSessionId, current = () => true) {
+  if (!current()) return false;
   _models = models;
   _active = true;
   _roundRobinIdx = 0;
@@ -629,20 +708,23 @@ export async function startGroup(models, parentSessionId) {
     if (models[0].endpointId) pfd.append('endpoint_id', models[0].endpointId);
     const pres = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: pfd, credentials: 'same-origin' });
     const pdata = await pres.json();
+    if (!current()) return false;
     _parentSessionId = pdata.id;
     // Register as group session for sidebar icon
     try {
-      const storedGroupSessions = Storage.getJSON('odysseus-group-sessions', []);
+      const storedGroupSessions = Storage.getJSON('openclank-group-sessions', []);
       const gids = Array.isArray(storedGroupSessions) ? storedGroupSessions : [];
-      if (!gids.includes(_parentSessionId)) { gids.push(_parentSessionId); localStorage.setItem('odysseus-group-sessions', JSON.stringify(gids)); }
+      if (!gids.includes(_parentSessionId)) { gids.push(_parentSessionId); localStorage.setItem('openclank-group-sessions', JSON.stringify(gids)); }
     } catch (e) {}
   } catch (e) {
+    if (!current()) return false;
     console.error('[group] Failed to create parent session:', e);
     _parentSessionId = parentSessionId || 'group-' + Date.now();
   }
 
   // Create a hidden session per model
   for (const m of models) {
+    if (!current()) return false;
     try {
       const fd = new FormData();
       fd.append('name', `[GRP] ${m.display}`);
@@ -657,6 +739,7 @@ export async function startGroup(models, parentSessionId) {
         continue;
       }
       const data = await res.json();
+      if (!current()) return false;
       if (!data.id) {
         console.error(`[group] Session creation returned no ID for ${m.display}:`, data);
         _participantSessions.push(null);
@@ -666,7 +749,7 @@ export async function startGroup(models, parentSessionId) {
       // Inject group chat system prompt — use character if assigned
       const displayName = m.character ? m.character.characterName : m.display;
       m._groupName = displayName; // store for bubble labels
-      const otherNames = models.filter(x => x.mid !== m.mid).map(x =>
+      const otherNames = models.filter(x => x !== m).map(x =>
         x.character ? x.character.characterName : x.display
       ).join(', ');
 
@@ -691,12 +774,15 @@ export async function startGroup(models, parentSessionId) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: [{ role: 'system', content: sysPrompt }]}),
       }).catch(() => {});
+      if (!current()) return false;
     } catch (e) {
+      if (!current()) return false;
       console.error('[group] Failed to create participant session:', m.display, e);
       _participantSessions.push(null);
     }
   }
 
+  if (!current()) return false;
   _saveState();
 
   // Now select the session so the UI switches to it.
@@ -712,9 +798,13 @@ export async function startGroup(models, parentSessionId) {
     // wasn't enough — the stale hash outranks it.)
     try { history.replaceState(null, '', '#' + _parentSessionId); } catch (e) {}
     window.sessionModule.setCurrentSessionId(_parentSessionId);
+    const account = window.chatModule?.ratingAccountScope?.();
     await window.sessionModule.loadSessions();
+    const after = window.chatModule?.ratingAccountScope?.();
+    if (!account?.owner || after?.owner !== account.owner || after.authEpoch !== account.authEpoch || window.sessionModule.getCurrentSessionId() !== _parentSessionId) return false;
     await window.sessionModule.selectSession(_parentSessionId);
   }
+  return true;
 }
 
 export function stopGroup() {

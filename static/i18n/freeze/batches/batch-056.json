@@ -2,8 +2,8 @@
   "id": "batch-056",
   "group": "settings",
   "surface": "settings",
-  "entry_count": 40,
-  "character_count": 5017,
+  "entry_count": 43,
+  "character_count": 5482,
   "complexity": "mixed",
   "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
   "entries": [
@@ -547,6 +547,48 @@
       "status": "live",
       "locations": [
         "static/js/admin.js:451"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.navigation.is.unavailable.reopen.appearance.to.retry",
+      "source": "Copal navigation is unavailable. Reopen Appearance to retry.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2686",
+        "static/js/settings.js:2720",
+        "static/js/copal.js:4621",
+        "static/js/copal.js:4628",
+        "static/js/copal.js:4640",
+        "static/js/copal.js:4645"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.journal.settings.are.unavailable.select.manage.journals",
+      "source": "Journal settings are unavailable. Select Manage journals to retry.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2711",
+        "static/js/copal.js:4706"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.editor.panel.settings.are.unavailable.reopen.appearance",
+      "source": "Editor panel settings are unavailable. Reopen Appearance to retry.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2738"
       ],
       "context": "",
       "complexity": "label"

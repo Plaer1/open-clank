@@ -17,6 +17,32 @@ sys.path.insert(0, str(ROOT))
 from scripts.linux_package import digest, child, write_json, PYTHON_FULL_SHA256
 
 
+def native_metadata_command(manifest):
+    command = ['cargo', 'metadata', '--locked', '--format-version', '1', '--filter-platform', 'x86_64-unknown-linux-gnu', '--manifest-path', str(ROOT / manifest)]
+    if manifest == 'native/capture/Cargo.toml': command += ['--features', 'frames,audio-foundation']
+    return command
+
+
+def capture_feature_records():
+    return [
+        {'kind':'rust-feature', 'manifest':'native/capture/Cargo.toml', 'features':['frames'],
+         'lock_sha256':digest(ROOT / 'native/capture/Cargo.lock')},
+        {'kind':'rust-feature', 'manifest':'native/capture/Cargo.toml', 'features':['frames','audio-foundation'],
+         'lock_sha256':digest(ROOT / 'native/capture/Cargo.lock')},
+        {'kind':'system-runtime', 'name':'libpipewire', 'license':'MIT', 'provision':'system'},
+        {'kind':'system-runtime', 'name':'gstreamer-base-audio-opus', 'license':'LGPL-2.1-or-later', 'provision':'system'},
+        {'kind':'system-runtime', 'name':'libopus', 'license':'BSD-3-Clause', 'provision':'system',
+         'additional_notice_url':'https://github.com/xiph/opus/blob/main/COPYING'},
+        {'kind':'system-runtime', 'name':'gstreamer', 'license':'LGPL-2.1-or-later', 'provision':'system'},
+        {'kind':'system-runtime', 'name':'pipewire-gstreamer-plugin', 'license':'MIT', 'provision':'system'},
+        {'kind':'system-runtime', 'name':'gstreamer-core-elements', 'license':'LGPL-2.1-or-later', 'provision':'system'},
+        {'kind':'system-runtime', 'name':'gstreamer-good-matroska', 'license':'LGPL-2.1-or-later', 'provision':'system'},
+        {'kind':'system-runtime', 'name':'gstreamer-good-vpx', 'license':'LGPL-2.1-or-later', 'provision':'system'},
+        {'kind':'system-runtime', 'name':'libvpx', 'license':'BSD-3-Clause', 'provision':'system',
+         'additional_notice_url':'https://chromium.googlesource.com/webm/libvpx/+/master/PATENTS'},
+    ]
+
+
 def collect(output, archive):
     if output.exists(): raise RuntimeError('Notice output exists; preserve it')
     output.mkdir(parents=True)
@@ -36,10 +62,10 @@ def collect(output, archive):
                 if source.is_file():
                     record['notices'].append(copy(source, 'python-packages/' + record['name'] + '/' + Path(name).name + '-' + digest(source)[:12]))
         records.append(record)
-    crates = ['mcp_servers/frankenmemory/Cargo.toml', 'packages/openclank-history/Cargo.toml', 'packages/odysseus-files/Cargo.toml']
+    crates = ['native/memery/Cargo.toml', 'packages/openclank-history/Cargo.toml', 'packages/odysseus-files/Cargo.toml', 'native/capture/Cargo.toml']
     packages = {}
     for manifest in crates:
-        metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--format-version', '1', '--filter-platform', 'x86_64-unknown-linux-gnu', '--manifest-path', str(ROOT / manifest)]))
+        metadata = json.loads(subprocess.check_output(native_metadata_command(manifest)))
         resolved = {node['id'] for node in metadata['resolve']['nodes']}
         for package in metadata['packages']:
             if package['id'] in resolved: packages[(package['name'], package['version'])] = package
@@ -58,6 +84,8 @@ def collect(output, archive):
         if expression: expressions.update(re.findall(r'[A-Za-z0-9.+-]+', expression))
         records.append({'kind': 'rust', 'name': name, 'version': version, 'license': expression,
                         'notices': [copy(p, 'rust/' + name + '-' + version + '/' + str(i) + '-' + p.name) for i, p in enumerate(sorted(set(notices)))]})
+    records.extend(capture_feature_records())
+    expressions.update({'LGPL-2.1-or-later', 'MIT', 'BSD-3-Clause'})
     # Copy source-distributed notice texts for the exact Engine dependency tree.
     engine = ROOT / 'packages/mimo-code'
     for directory, children, files in os.walk(engine):

@@ -1,0 +1,525 @@
+import { createStore } from "solid-js/store"
+import { createSimpleContext } from "./helper"
+import { batch, createEffect, createMemo, createSignal } from "solid-js"
+import { useSync } from "@tui/context/sync"
+import { useTheme } from "@tui/context/theme"
+import { uniqueBy } from "remeda"
+import path from "path"
+import { Global } from "@/global"
+import { iife } from "@/util/iife"
+import { useToast } from "../ui/toast"
+import { useArgs } from "./args"
+import { useSDK } from "./sdk"
+import { RGBA } from "@opentui/core"
+import { Filesystem } from "@/util"
+import * as Model from "../util/model"
+import { useLanguage } from "@tui/context/language"
+
+export { parse as parseModel } from "../util/model"
+
+export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+  name: "Local",
+  init: () => {
+    const sync = useSync()
+    const sdk = useSDK()
+    const toast = useToast()
+    const t = useLanguage().t
+
+    function isModelValid(model: { providerID: string; modelID: string }) {
+      const provider = sync.data.provider.find((x) => x.id === model.providerID)
+      return !!provider?.models[model.modelID]
+    }
+
+    function getFirstValidModel(...modelFns: (() => { providerID: string; modelID: string } | undefined)[]) {
+      for (const modelFn of modelFns) {
+        const model = modelFn()
+        if (!model) continue
+        if (isModelValid(model)) return model
+      }
+    }
+
+    const agent = iife(() => {
+      const agents = createMemo(() => sync.data.agent.filter((x) => x.mode !== "subagent" && !x.hidden))
+      const visibleAgents = createMemo(() => sync.data.agent.filter((x) => !x.hidden))
+      const [agentStore, setAgentStore] = createStore({
+        current: undefined as string | undefined,
+        sessionHasMessages: false,
+      })
+      const FREE_SWITCH_GROUP = ["build", "plan"]
+      const canSwitchTo = (target: string) => {
+        if (!agentStore.sessionHasMessages) return true
+        const current = agentStore.current
+        if (!current) return true
+        if (current === target) return true
+        const currentInGroup = FREE_SWITCH_GROUP.includes(current)
+        const targetInGroup = FREE_SWITCH_GROUP.includes(target)
+        return currentInGroup && targetInGroup
+      }
+      const switchBlockedToast = () => {
+        const current = agentStore.current ?? ""
+        if (FREE_SWITCH_GROUP.includes(current)) {
+          toast.show({
+            variant: "warning",
+            message: t("tui.agent.locked.subset", { agents: FREE_SWITCH_GROUP.join(", ") }),
+            duration: 3000,
+          })
+        } else {
+          toast.show({
+            variant: "warning",
+            message: t("tui.agent.locked", { mode: current }),
+            duration: 3000,
+          })
+        }
+      }
+      const { theme } = useTheme()
+      const colors = createMemo(() => [
+        theme.secondary,
+        theme.accent,
+        theme.success,
+        theme.warning,
+        theme.primary,
+        theme.error,
+        theme.info,
+      ])
+      return {
+        list() {
+          return agents()
+        },
+        current() {
+          return agents().find((x) => x.name === agentStore.current) ?? agents().at(0)
+        },
+        set(name: string) {
+          if (!agents().some((x) => x.name === name))
+            return toast.show({
+              variant: "warning",
+              message: `Agent not found: ${name}`,
+              duration: 3000,
+            })
+          setAgentStore("current", name)
+        },
+        userSwitch(name: string) {
+          if (!canSwitchTo(name)) {
+            switchBlockedToast()
+            return
+          }
+          this.set(name)
+        },
+        // bypasses the mid-session canSwitchTo lock; set() still validates the name
+        forceSwitch(name: string) {
+          this.set(name)
+        },
+        move(direction: 1 | -1) {
+          const current = this.current()
+          if (!current) return
+          const list = agents()
+          const currentIdx = list.findIndex((x) => x.name === current.name)
+          for (let i = 1; i < list.length; i++) {
+            let idx = currentIdx + direction * i
+            idx = ((idx % list.length) + list.length) % list.length
+            const candidate = list[idx]
+            if (!candidate) continue
+            if (canSwitchTo(candidate.name)) {
+              setAgentStore("current", candidate.name)
+              return
+            }
+          }
+          switchBlockedToast()
+        },
+        setSessionHasMessages(value: boolean) {
+          setAgentStore("sessionHasMessages", value)
+        },
+        color(name: string) {
+          const index = visibleAgents().findIndex((x) => x.name === name)
+          if (index === -1) return colors()[0]
+          const agent = visibleAgents()[index]
+
+          if (agent?.color) {
+            const color = agent.color
+            if (color.startsWith("#")) return RGBA.fromHex(color)
+            // already validated by config, just satisfying TS here
+            return theme[color as keyof typeof theme] as RGBA
+          }
+          return colors()[index % colors().length]
+        },
+      }
+    })
+
+    const model = iife(() => {
+      const [modelStore, setModelStore] = createStore<{
+        ready: boolean
+        model: Record<
+          string,
+          {
+            providerID: string
+            modelID: string
+          }
+        >
+        recent: {
+          providerID: string
+          modelID: string
+        }[]
+        favorite: {
+          providerID: string
+          modelID: string
+        }[]
+        variant: Record<string, string | undefined>
+      }>({
+        ready: false,
+        model: {},
+        recent: [],
+        favorite: [],
+        variant: {},
+      })
+
+      const filePath = path.join(Global.Path.state, "model.json")
+      const state = {
+        pending: false,
+      }
+
+      function save() {
+        if (!modelStore.ready) {
+          state.pending = true
+          return
+        }
+        state.pending = false
+        void Filesystem.writeJson(filePath, {
+          recent: modelStore.recent,
+          favorite: modelStore.favorite,
+          variant: modelStore.variant,
+        })
+      }
+
+      Filesystem.readJson(filePath)
+        .then((x: any) => {
+          if (Array.isArray(x.recent)) setModelStore("recent", x.recent)
+          if (Array.isArray(x.favorite)) setModelStore("favorite", x.favorite)
+          if (typeof x.variant === "object" && x.variant !== null) setModelStore("variant", x.variant)
+        })
+        .catch(() => {})
+        .finally(() => {
+          setModelStore("ready", true)
+          if (state.pending) save()
+        })
+
+      const args = useArgs()
+      const fallbackModel = createMemo(() => {
+        const initial = Model.initial(sync.data.provider, {
+          argument: args.model,
+          ready: modelStore.ready,
+          recent: modelStore.recent,
+          configured: sync.data.config.model,
+        })
+        if (initial || !modelStore.ready) return initial
+        return Model.fallback(sync.data.provider, sync.data.provider_default, [...sync.data.provider_next.authenticated, ...sync.data.provider_next.connected])
+      })
+
+      const currentModel = createMemo(() => {
+        const a = agent.current()
+        return (
+          getFirstValidModel(
+            () => a && modelStore.model[a.name],
+            () => a && a.model,
+            fallbackModel,
+          ) ?? undefined
+        )
+      })
+
+      return {
+        current: currentModel,
+        get ready() {
+          return modelStore.ready
+        },
+        recent() {
+          return modelStore.recent
+        },
+        favorite() {
+          return modelStore.favorite
+        },
+        parsed: createMemo(() => {
+          const value = currentModel()
+          if (!value) {
+            return {
+              provider: "Connect a provider",
+              model: "No provider selected",
+              reasoning: false,
+            }
+          }
+          const provider = sync.data.provider.find((x) => x.id === value.providerID)
+          const info = provider?.models[value.modelID]
+          return {
+            provider: provider?.name || value.providerID,
+            model: Model.name(sync.data.provider, value.providerID, value.modelID),
+            reasoning: info?.capabilities?.reasoning ?? false,
+          }
+        }),
+        cycle(direction: 1 | -1) {
+          const current = currentModel()
+          if (!current) return
+          const recent = modelStore.recent
+          const index = recent.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
+          if (index === -1) return
+          let next = index + direction
+          if (next < 0) next = recent.length - 1
+          if (next >= recent.length) next = 0
+          const val = recent[next]
+          if (!val) return
+          const a = agent.current()
+          if (!a) return
+          setModelStore("model", a.name, { ...val })
+        },
+        cycleFavorite(direction: 1 | -1) {
+          const favorites = modelStore.favorite.filter((item) => isModelValid(item))
+          if (!favorites.length) {
+            toast.show({
+              variant: "info",
+              message: "Add a favorite model to use this shortcut",
+              duration: 3000,
+            })
+            return
+          }
+          const current = currentModel()
+          let index = -1
+          if (current) {
+            index = favorites.findIndex((x) => x.providerID === current.providerID && x.modelID === current.modelID)
+          }
+          if (index === -1) {
+            index = direction === 1 ? 0 : favorites.length - 1
+          } else {
+            index += direction
+            if (index < 0) index = favorites.length - 1
+            if (index >= favorites.length) index = 0
+          }
+          const next = favorites[index]
+          if (!next) return
+          const a = agent.current()
+          if (!a) return
+          setModelStore("model", a.name, { ...next })
+          const uniq = uniqueBy([next, ...modelStore.recent], (x) => `${x.providerID}/${x.modelID}`)
+          if (uniq.length > 10) uniq.pop()
+          setModelStore(
+            "recent",
+            uniq.map((x) => ({ providerID: x.providerID, modelID: x.modelID })),
+          )
+          save()
+        },
+        set(model: { providerID: string; modelID: string }, options?: { recent?: boolean }) {
+          batch(() => {
+            if (!isModelValid(model)) {
+              toast.show({
+                message: `Model ${model.providerID}/${model.modelID} is not valid`,
+                variant: "warning",
+                duration: 3000,
+              })
+              return
+            }
+            const a = agent.current()
+            if (!a) return
+            setModelStore("model", a.name, model)
+            if (options?.recent) {
+              const uniq = uniqueBy([model, ...modelStore.recent], (x) => `${x.providerID}/${x.modelID}`)
+              if (uniq.length > 10) uniq.pop()
+              setModelStore(
+                "recent",
+                uniq.map((x) => ({ providerID: x.providerID, modelID: x.modelID })),
+              )
+              save()
+            }
+          })
+        },
+        toggleFavorite(model: { providerID: string; modelID: string }) {
+          batch(() => {
+            if (!isModelValid(model)) {
+              toast.show({
+                message: `Model ${model.providerID}/${model.modelID} is not valid`,
+                variant: "warning",
+                duration: 3000,
+              })
+              return
+            }
+            const exists = modelStore.favorite.some(
+              (x) => x.providerID === model.providerID && x.modelID === model.modelID,
+            )
+            const next = exists
+              ? modelStore.favorite.filter((x) => x.providerID !== model.providerID || x.modelID !== model.modelID)
+              : [model, ...modelStore.favorite]
+            setModelStore(
+              "favorite",
+              next.map((x) => ({ providerID: x.providerID, modelID: x.modelID })),
+            )
+            save()
+          })
+        },
+        variant: {
+          selected() {
+            const m = currentModel()
+            if (!m) return undefined
+            const key = `${m.providerID}/${m.modelID}`
+            return modelStore.variant[key]
+          },
+          current() {
+            const v = this.selected()
+            if (!v) return undefined
+            if (!this.list().includes(v)) return undefined
+            return v
+          },
+          list() {
+            const m = currentModel()
+            if (!m) return []
+            const provider = sync.data.provider.find((x) => x.id === m.providerID)
+            const info = provider?.models[m.modelID]
+            if (!info?.variants) return []
+            return Object.keys(info.variants)
+          },
+          set(value: string | undefined) {
+            const m = currentModel()
+            if (!m) return
+            const key = `${m.providerID}/${m.modelID}`
+            setModelStore("variant", key, value ?? "default")
+            save()
+          },
+          cycle() {
+            const variants = this.list()
+            if (variants.length === 0) return
+            const current = this.current()
+            if (!current) {
+              this.set(variants[0])
+              return
+            }
+            const index = variants.indexOf(current)
+            if (index === -1 || index === variants.length - 1) {
+              this.set(undefined)
+              return
+            }
+            this.set(variants[index + 1])
+          },
+        },
+      }
+    })
+
+    const mcp = {
+      isEnabled(name: string) {
+        const status = sync.data.mcp[name]
+        return status?.status === "connected"
+      },
+      async toggle(name: string) {
+        const status = sync.data.mcp[name]
+        if (status?.status === "connected") {
+          // Disable: disconnect the MCP
+          await sdk.client.mcp.disconnect({ name })
+        } else {
+          // Enable/Retry: connect the MCP (handles disabled, failed, and other states)
+          await sdk.client.mcp.connect({ name })
+        }
+      },
+    }
+
+    // never-ask: when on, the question tool returns a [Never-Ask] directive
+    // instead of blocking, and the model resolves decisions itself. The local
+    // signal drives the footer indicator; set() mirrors it to the server.
+    const neverAsk = iife(() => {
+      const [enabled, setEnabled] = createSignal(false)
+      return {
+        current: enabled,
+        set(value: boolean) {
+          const previous = enabled()
+          setEnabled(value)
+          // Roll back the local signal if the server rejects the change, so the
+          // footer never claims a state the question tool isn't actually in.
+          void sdk.client.question.setNeverAsk({ enabled: value }).catch(() => {
+            setEnabled(previous)
+            toast.show({
+              variant: "error",
+              message: `Failed to ${value ? "enable" : "disable"} never-ask`,
+              duration: 4000,
+            })
+          })
+        },
+        toggle() {
+          this.set(!enabled())
+          return enabled()
+        },
+      }
+    })
+
+    // skip-permissions: when on, permission asks auto-allow at runtime
+    // (instance-wide — subagents inherit). Deny rules and forced-ask
+    // permissions still apply. Same optimistic-update pattern as neverAsk.
+    const skipPermissions = iife(() => {
+      const [enabled, setEnabled] = createSignal(false)
+      return {
+        current: enabled,
+        set(value: boolean) {
+          const previous = enabled()
+          setEnabled(value)
+          void sdk.client.permission.setSkipAll({ enabled: value }).catch(() => {
+            setEnabled(previous)
+            toast.show({
+              variant: "error",
+              message: `Failed to ${value ? "enable" : "disable"} skip-permissions`,
+              duration: 4000,
+            })
+          })
+        },
+        toggle() {
+          this.set(!enabled())
+          return enabled()
+        },
+      }
+    })
+
+    // permission ask timeout: null = no timeout (wait indefinitely), positive
+    // number = ms before auto-reject. Orthogonal to skipPermissions.
+    // Initialized from server so the TUI reflects the actual value (e.g. one
+    // set via OPENCLANK_SKIP_ALL_FORCED_ASK_TIMEOUT_MS env var).
+    const permissionAskTimeout = iife(() => {
+      const [ms, setMs] = createSignal<number | null>(null)
+      void sdk.client.permission.askTimeout().then((res) => {
+        if (res.data !== undefined) setMs(res.data)
+      })
+      return {
+        current: ms,
+        set(value: number | null) {
+          const previous = ms()
+          setMs(value)
+          void sdk.client.permission.setAskTimeout({ ms: value }).catch(() => {
+            setMs(previous)
+            toast.show({
+              variant: "error",
+              message: "Failed to update permission ask timeout",
+              duration: 4000,
+            })
+          })
+        },
+      }
+    })
+
+    // Automatically update model when agent changes
+    createEffect(() => {
+      const value = agent.current()
+      if (!value) return
+      if (value.model) {
+        if (isModelValid(value.model))
+          model.set({
+            providerID: value.model.providerID,
+            modelID: value.model.modelID,
+          })
+        else
+          toast.show({
+            variant: "warning",
+            message: `Agent ${value.name}'s configured model ${value.model.providerID}/${value.model.modelID} is not valid`,
+            duration: 3000,
+          })
+      }
+    })
+
+    const result = {
+      model,
+      agent,
+      mcp,
+      neverAsk,
+      skipPermissions,
+      permissionAskTimeout,
+    }
+    return result
+  },
+})

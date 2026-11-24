@@ -549,7 +549,7 @@ def test_app_folder_picker_includes_hidden_directories(monkeypatch, tmp_path):
 
     # Keep the same selection semantics when directory metadata comes from
     # the optional Rust adapter.
-    monkeypatch.setenv("ODYSSEUS_FILES_WORKSPACE_ADAPTER", "1")
+    monkeypatch.setenv("OPEN_CLANK_FILES_WORKSPACE_ADAPTER", "1")
     monkeypatch.setattr(files_client, "client_for_owner", lambda *args, **kwargs: object())
     monkeypatch.setattr(
         wr,
@@ -611,7 +611,7 @@ def test_non_admin_workspace_picker_starts_at_assigned_roots(monkeypatch, tmp_pa
     # The optional service adapter must not receive an unassigned path. Its
     # different error shape could otherwise reveal host-path existence.
     adapter_calls = []
-    monkeypatch.setenv("ODYSSEUS_FILES_WORKSPACE_ADAPTER", "1")
+    monkeypatch.setenv("OPEN_CLANK_FILES_WORKSPACE_ADAPTER", "1")
     monkeypatch.setattr(files_client, "client_for_owner", lambda *args, **kwargs: object())
     monkeypatch.setattr(
         wr,

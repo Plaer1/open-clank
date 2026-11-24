@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import hmac
 from dataclasses import dataclass
 from typing import Optional
 
@@ -14,6 +15,172 @@ from core.database import ChatMessage, MimoProjection, Session, SessionLocal
 
 
 _EXPECTED_UNSET = object()
+
+
+def make_current_input_owner_receipt(owner: str, account_id: str, chat_id: str, root_operation_id: str, *, theme_status_only: bool = False, code_activity_workspace_id: str | None = None) -> dict:
+    """Seal one authenticated host input; this is not a claim about chat history."""
+    from src.secret_storage import keyed_digest
+    payload = {'version': 1, 'owner': owner, 'accountID': account_id,
+               'chatID': chat_id, 'rootOperationID': root_operation_id, 'themeStatusOnly': theme_status_only}
+    if code_activity_workspace_id is not None:
+        if type(code_activity_workspace_id) is not str or not code_activity_workspace_id.strip() or len(code_activity_workspace_id)>512:
+            raise ValueError('code activity workspace unavailable')
+        payload['codeActivityWorkspaceID'] = code_activity_workspace_id
+    if type(theme_status_only) is not bool or any(type(payload[key]) is not str or not payload[key] or len(payload[key]) > 512
+           for key in ('owner', 'accountID', 'chatID', 'rootOperationID')):
+        raise ValueError('current input owner unavailable')
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return {'payload': payload, 'mac': keyed_digest(raw, context='openclank.c2.current-input-owner.v1')}
+
+
+def verify_current_input_owner_receipt(value: object, *, owner: str, chat_id: str, root_operation_id: str) -> str | None:
+    from src import secret_storage
+    if not secret_storage._KEY_PATH.is_file() or type(value) is not dict or set(value) != {'payload', 'mac'}:
+        return None
+    payload, mac = value['payload'], value['mac']
+    keys = {'version','owner','accountID','chatID','rootOperationID','themeStatusOnly'}
+    if (type(payload) is not dict or set(payload) not in (keys, keys | {'codeActivityWorkspaceID'})
+            or payload.get('version') != 1 or type(payload.get('themeStatusOnly')) is not bool or payload.get('owner') != owner or payload.get('chatID') != chat_id
+            or ('codeActivityWorkspaceID' in payload and (type(payload['codeActivityWorkspaceID']) is not str or not payload['codeActivityWorkspaceID'].strip() or len(payload['codeActivityWorkspaceID'])>512))
+            or payload.get('rootOperationID') != root_operation_id or type(payload.get('accountID')) is not str
+            or not payload['accountID'] or len(payload['accountID']) > 512 or type(mac) is not str):
+        return None
+    try:
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        expected = secret_storage.keyed_digest(raw, context='openclank.c2.current-input-owner.v1')
+        return payload['accountID'] if hmac.compare_digest(mac, expected) else None
+    except (ValueError, TypeError, OSError):
+        return None
+
+
+def verify_current_input_theme_status(value: object, *, owner: str, chat_id: str, root_operation_id: str) -> bool:
+    if not verify_current_input_owner_receipt(value, owner=owner, chat_id=chat_id, root_operation_id=root_operation_id):
+        return False
+    return value['payload']['themeStatusOnly'] is True
+
+
+def verify_current_input_code_activity(value: object, *, owner: str, chat_id: str, root_operation_id: str) -> str | None:
+    if not verify_current_input_owner_receipt(value, owner=owner, chat_id=chat_id, root_operation_id=root_operation_id):
+        return None
+    return value['payload'].get('codeActivityWorkspaceID')
+
+
+def _managed_receipt_key(identity: dict) -> str:
+    raw = json.dumps([identity['sessionID'], identity['actorID']], ensure_ascii=False, separators=(',', ':')).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _managed_receipt_binding(state: dict, receipt: dict) -> bool:
+    binding = state.get('managed_binding')
+    return (isinstance(binding, dict) and binding.get('owner') == receipt['owner']
+        and binding.get('stableChatID') == receipt['chatID'] and binding.get('engineSessionID') == receipt['rootSessionID']
+        and binding.get('workspaceRevision') == receipt['workspaceRevision']
+        and binding.get('mappingRevision') == receipt['mappingRevision']
+        and binding.get('authorityWorkspaceID') == receipt['authorityWorkspaceID'])
+
+
+def _managed_receipt_mac(receipt: dict, *, create_key: bool = False) -> str:
+    from src import secret_storage
+    if not create_key and not secret_storage._KEY_PATH.is_file():
+        raise ValueError('managed turn receipt key unavailable')
+    encoded = json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return secret_storage.keyed_digest(encoded, context='openclank.c2.managed-turn-receipt.v1')
+
+
+def record_managed_turn_receipt(receipt: dict) -> None:
+    """Commit a content-free host turn result against the exact current chat binding."""
+    fields = {'version','owner','accountID','chatID','holderID','rootSessionID','sessionID','rootOperationID',
+              'actorID','executionRevision','innerTurnID','outcome','workspaceRevision','mappingRevision','authorityWorkspaceID'}
+    text_fields = fields - {'version','executionRevision','workspaceRevision','mappingRevision','outcome','authorityWorkspaceID'}
+    if (type(receipt) is not dict or set(receipt) != fields or receipt['version'] != 1
+            or any(type(receipt[k]) is not str or not receipt[k] or len(receipt[k]) > 512 for k in text_fields)
+            or type(receipt['authorityWorkspaceID']) is not str or len(receipt['authorityWorkspaceID']) > 512
+            or any(type(receipt[k]) is not int or receipt[k] < 0 for k in ('executionRevision','workspaceRevision','mappingRevision'))
+            or receipt['outcome'] not in ('completed','cancelled','error')):
+        raise ValueError('managed turn receipt unavailable')
+    with SessionLocal() as db:
+        if db.get_bind().dialect.name == 'sqlite': db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+        row = db.query(Session).filter(Session.id == receipt['chatID'], Session.owner == receipt['owner']).with_for_update().first()
+        if row is None or row.archived:
+            raise ValueError('managed turn receipt chat unavailable')
+        state = dict(row.mimo_state or {})
+        if not _managed_receipt_binding(state, receipt): raise ValueError('managed turn receipt binding changed')
+        container = state.get('managed_turn_receipts', {'version':1,'items':{}})
+        if type(container) is not dict or set(container) != {'version','items'} or container['version'] != 1 or type(container['items']) is not dict:
+            raise ValueError('managed turn receipt state unavailable')
+        items = dict(container['items']); key = _managed_receipt_key(receipt); envelope = items.get(key)
+        old = envelope.get('payload') if type(envelope) is dict and set(envelope) == {'payload','mac'} else None
+        if envelope is not None and (type(old) is not dict or type(envelope['mac']) is not str
+                or not hmac.compare_digest(envelope['mac'], _managed_receipt_mac(old))):
+            raise ValueError('managed turn receipt authentication unavailable')
+        if old == receipt: return
+        if old is not None and (type(old.get('executionRevision')) is not int
+                or old['executionRevision'] > receipt['executionRevision']
+                or (old['executionRevision'] == receipt['executionRevision'] and old.get('innerTurnID') == receipt['innerTurnID'])):
+            raise ValueError('managed turn receipt conflicts')
+        if old is None and len(items) >= 4096: raise ValueError('managed turn receipt capacity unavailable')
+        # Never recreate a lost key while this chat already contains receipts,
+        # even when the new actor has no entry of its own.
+        items[key] = {'payload':dict(receipt), 'mac':_managed_receipt_mac(receipt, create_key=old is None and not items)}
+        state['managed_turn_receipts'] = {'version':1,'items':items}
+        state['revision'] = int(state.get('revision') or 0) + 1
+        row.mimo_state = state
+        db.commit()
+
+
+def read_managed_turn_receipt(chat_id: str, owner: str, identity: dict) -> dict | None:
+    """Read only an exact receipt from the still-current host chat binding."""
+    with SessionLocal() as db:
+        row = db.query(Session).filter(Session.id == chat_id, Session.owner == owner).first()
+        if row is None or row.archived: return None
+        state = dict(row.mimo_state or {}); container = state.get('managed_turn_receipts')
+        if type(container) is not dict or set(container) != {'version','items'} or container['version'] != 1 or type(container['items']) is not dict:
+            return None
+        envelope = container['items'].get(_managed_receipt_key(identity))
+        if type(envelope) is not dict or set(envelope) != {'payload','mac'} or type(envelope['payload']) is not dict or type(envelope['mac']) is not str:
+            return None
+        receipt = envelope['payload']
+        try:
+            if not hmac.compare_digest(envelope['mac'], _managed_receipt_mac(receipt)): return None
+        except (ValueError, TypeError, OSError): return None
+        fields = ('sessionID','rootOperationID','actorID','executionRevision','innerTurnID')
+        if (type(receipt) is not dict or any(receipt.get(k) != identity[k] for k in fields)
+                or receipt.get('owner') != owner or receipt.get('chatID') != chat_id): return None
+        try:
+            if not _managed_receipt_binding(state, receipt): return None
+        except (KeyError, TypeError): return None
+        return dict(receipt)
+
+
+def record_managed_execution_completion(chat_id: str, owner: str, account_id: str, identity: dict, outcome: str) -> None:
+    """Durably append exact execution acknowledgement to an authenticated turn receipt."""
+    if outcome not in ('success','failure','cancelled') or type(account_id) is not str or not account_id:
+        raise ValueError('managed execution completion unavailable')
+    with SessionLocal() as db:
+        if db.get_bind().dialect.name == 'sqlite': db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+        row = db.query(Session).filter(Session.id == chat_id, Session.owner == owner).with_for_update().first()
+        if row is None or row.archived: raise ValueError('managed execution chat unavailable')
+        state = dict(row.mimo_state or {}); container = state.get('managed_turn_receipts')
+        if type(container) is not dict or set(container) != {'version','items'} or container['version'] != 1 or type(container['items']) is not dict:
+            raise ValueError('managed execution receipt unavailable')
+        items = dict(container['items']); key = _managed_receipt_key(identity); envelope = items.get(key)
+        if (type(envelope) is not dict or set(envelope) != {'payload','mac'} or type(envelope['payload']) is not dict
+                or type(envelope['mac']) is not str or not hmac.compare_digest(envelope['mac'], _managed_receipt_mac(envelope['payload']))):
+            raise ValueError('managed execution receipt authentication unavailable')
+        receipt = dict(envelope['payload'])
+        if (any(receipt.get(k) != identity[k] for k in ('sessionID','rootOperationID','actorID','executionRevision','innerTurnID'))
+                or receipt.get('owner') != owner or receipt.get('accountID') != account_id
+                or receipt.get('chatID') != chat_id or not _managed_receipt_binding(state, receipt)):
+            raise ValueError('managed execution receipt changed')
+        previous = receipt.get('executionFinish')
+        if previous is not None:
+            if previous != {'outcome':outcome}: raise ValueError('managed execution completion conflicts')
+            return
+        receipt['executionFinish'] = {'outcome':outcome}
+        items[key] = {'payload':receipt,'mac':_managed_receipt_mac(receipt)}
+        state['managed_turn_receipts'] = {'version':1,'items':items}; state['revision'] = int(state.get('revision') or 0) + 1
+        row.mimo_state = state
+        db.commit()
 
 
 @dataclass(frozen=True)
@@ -213,6 +380,203 @@ def get_mimo_state(session_id: str, owner: Optional[str] = None) -> dict:
         db.close()
 
 
+def assert_directory_execution_active(session_id: str, owner: str) -> None:
+    """Refuse retired or malformed host execution scopes; history stays readable."""
+    state = get_mimo_state(session_id, owner=owner)
+    if "directory_retired_by" in state:
+        raise RuntimeError("host directory execution scope is retired or invalid")
+
+
+def retire_directory_execution_scope(session_id: str, owner: str, account: str,
+                                     expected_binding: dict, digest: str, *, current_authority) -> str:
+    """CAS the original host binding under the caller's retained account authority."""
+    import re
+    if (not owner or not account or not isinstance(expected_binding, dict)
+            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not callable(current_authority)):
+        raise ValueError("directory retirement authority unavailable")
+    cwd = expected_binding.get("physicalCwd")
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or os.path.realpath(cwd) != cwd:
+        raise ValueError("directory retirement binding unavailable")
+    db = SessionLocal()
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        row = db.query(Session).filter(Session.id == session_id, Session.owner == owner).first()
+        if row is None or current_authority(owner, account) is not True:
+            raise ValueError("directory retirement account unavailable")
+        state = dict(row.mimo_state or {})
+        if state.get("managed_binding") != expected_binding or expected_binding.get("owner") != owner or expected_binding.get("stableChatID") != session_id:
+            raise ValueError("directory retirement binding changed")
+        old = state.get("directory_retired_by")
+        if "directory_retired_by" in state:
+            if old != digest or not isinstance(old, str) or not re.fullmatch(r"[0-9a-f]{64}", old):
+                raise ValueError("directory retirement conflict")
+            return old
+        state["directory_retired_by"] = digest
+        state["revision"] = int(state.get("revision") or 0) + 1
+        row.mimo_state = state
+        if current_authority(owner, account) is not True:
+            raise ValueError("directory retirement account changed")
+        db.commit()
+        return digest
+    finally:
+        db.close()
+
+
+def _directory_scope_snapshot(db, directory: str, owner: str, digest: str) -> tuple:
+    """Bounded metadata only; unknown binding and foreign intersections refuse."""
+    import copy
+    import re
+    from sqlalchemy import LargeBinary, case, cast, exists, func
+    if (not owner or not isinstance(directory, str) or not os.path.isabs(directory)
+            or os.path.realpath(directory) != directory or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        raise ValueError("directory scope inventory unavailable")
+    bounded_state = case(
+        (func.length(cast(Session.mimo_state, LargeBinary)) <= 65536, Session.mimo_state),
+        else_=None,
+    )
+    has_projection = exists().where(MimoProjection.odysseus_session_id == Session.id)
+    rows = db.query(Session.id, Session.owner, bounded_state, Session.mimo_session_id, has_projection).order_by(Session.id).limit(513).all()
+    if len(rows) > 512:
+        raise ValueError("directory scope inventory exceeds its bound")
+    result = []
+    for chat_id, row_owner, raw_state, legacy_native_id, projected in rows:
+        if not isinstance(chat_id, str) or not chat_id or len(chat_id) > 512 or not isinstance(row_owner, str) or not row_owner or len(row_owner) > 512 or not isinstance(raw_state, dict):
+            raise ValueError("directory scope metadata unavailable")
+        marker = raw_state.get("directory_retired_by")
+        if "directory_retired_by" in raw_state:
+            if not isinstance(marker, str) or not re.fullmatch(r"[0-9a-f]{64}", marker):
+                raise ValueError("directory scope retirement invalid")
+            if marker != digest:
+                continue  # A previous operation already retired this scope.
+        binding = raw_state.get("managed_binding")
+        if binding is None and not raw_state and legacy_native_id is None and not projected:
+            continue  # A fresh canonical chat has no native execution evidence.
+        if not isinstance(binding, dict) or binding.get("owner") != row_owner or binding.get("stableChatID") != chat_id:
+            raise ValueError("directory scope binding unavailable")
+        cwd = binding.get("physicalCwd")
+        if not isinstance(cwd, str) or not os.path.isabs(cwd) or os.path.realpath(cwd) != cwd:
+            raise ValueError("directory scope cwd unavailable")
+        if os.path.commonpath((directory, cwd)) != directory:
+            continue
+        if row_owner != owner:
+            raise ValueError("foreign directory scope unavailable")
+        result.append((chat_id, copy.deepcopy(binding), marker))
+    return tuple(result)
+
+
+def snapshot_directory_execution_scopes(directory: str, owner: str, account: str,
+                                        digest: str, *, current_authority) -> tuple:
+    """Private candidate tied to the caller's original operation, never a grant."""
+    if not account or not callable(current_authority) or current_authority(owner, account, digest) is not True:
+        raise ValueError("directory scope operation unavailable")
+    db = SessionLocal()
+    try:
+        result = _directory_scope_snapshot(db, directory, owner, digest)
+        if current_authority(owner, account, digest) is not True:
+            raise ValueError("directory scope operation changed")
+        return result
+    finally:
+        db.close()
+
+
+def retire_directory_execution_scopes(directory: str, owner: str, account: str,
+                                      digest: str, snapshot: tuple, *, current_authority) -> tuple:
+    """CAS the complete original host set under the caller's held close."""
+    if not account or not callable(current_authority) or not isinstance(snapshot, tuple):
+        raise ValueError("directory scope authority unavailable")
+    db = SessionLocal()
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        if current_authority(owner, account, digest) is not True:
+            raise ValueError("directory scope account unavailable")
+        actual = _directory_scope_snapshot(db, directory, owner, digest)
+        if actual != snapshot:
+            raise ValueError("directory scope inventory changed")
+        for chat_id, binding, marker in actual:
+            if marker == digest:
+                continue
+            row = db.query(Session).filter(Session.id == chat_id, Session.owner == owner).first()
+            if row is None:
+                raise ValueError("directory scope disappeared")
+            state = dict(row.mimo_state or {})
+            if state.get("managed_binding") != binding or "directory_retired_by" in state:
+                raise ValueError("directory scope changed")
+            state["directory_retired_by"] = digest
+            state["revision"] = int(state.get("revision") or 0) + 1
+            row.mimo_state = state
+        if current_authority(owner, account, digest) is not True:
+            raise ValueError("directory scope account changed")
+        db.commit()
+        return tuple(item[0] for item in actual)
+    finally:
+        db.close()
+
+
+def mutate_plan_fields(session_id: str, owner: str, mutate, *, expected_binding=None, current_authority=None) -> dict:
+    """Atomically own only plan and feedback fields; never wait on SQLite writers."""
+    import copy
+    if not owner or current_authority is None:
+        raise ValueError("plan authority unavailable")
+    db = SessionLocal()
+    connection = None
+    timeout = None
+    begun = False
+    try:
+        connection = db.connection()
+        if connection.dialect.name != "sqlite":
+            raise RuntimeError("canonical plan transaction unavailable for this database")
+        timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+        connection.exec_driver_sql("PRAGMA busy_timeout=0")
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        begun = True
+        session = db.query(Session).filter(Session.id == session_id, Session.owner == owner).first()
+        if session is None: raise KeyError("canonical session unavailable")
+        state = dict(session.mimo_state or {})
+        if not current_authority(): raise ValueError("plan account authority changed")
+        if expected_binding is not None and state.get("managed_binding") != expected_binding:
+            raise ValueError("plan managed binding changed")
+        before = {key: copy.deepcopy(state.get(key)) for key in ("plan_state", "plan_feedback")}
+        fields = copy.deepcopy(before)
+        result = mutate(fields, copy.deepcopy(state.get("managed_binding")))
+        if set(fields) != set(before): raise ValueError("invalid plan fields")
+        if fields != before:
+            for key, value in fields.items():
+                if value is None: state.pop(key, None)
+                else: state[key] = value
+            state["revision"] = int(state.get("revision") or 0) + 1
+            session.mimo_state = state
+        if not current_authority(): raise ValueError("plan account authority changed")
+        db.flush()
+        connection.exec_driver_sql("COMMIT")
+        begun = False
+        return result
+    except BaseException as exc:
+        if connection is not None and begun:
+            try: connection.exec_driver_sql("ROLLBACK")
+            except Exception: connection.invalidate()
+        if isinstance(exc, OperationalError):
+            raise RuntimeError("canonical plan transaction unavailable") from exc
+        raise
+    finally:
+        if connection is not None and timeout is not None:
+            try: connection.exec_driver_sql("PRAGMA busy_timeout=" + str(int(timeout)))
+            except Exception: connection.invalidate()
+        try: db.rollback()
+        finally: db.close()
+
+
+def mutate_plan_state(session_id: str, owner: str, mutate, *, expected_binding=None, current_authority=None) -> dict:
+    def apply(fields, _binding):
+        old = fields["plan_state"]
+        plan = mutate(dict(old) if isinstance(old, dict) else {})
+        if not isinstance(plan, dict): raise ValueError("invalid canonical plan")
+        fields["plan_state"] = plan
+        return dict(plan)
+    return mutate_plan_fields(session_id, owner, apply, expected_binding=expected_binding, current_authority=current_authority)
+
+
 def save_mimo_state(
     session_id: str,
     state: dict,
@@ -231,6 +595,13 @@ def save_mimo_state(
         if session is None:
             raise KeyError(f"Canonical session {session_id!r} not found")
         previous = dict(session.mimo_state or {})
+        if "directory_retired_by" in previous:
+            import re
+            marker = previous["directory_retired_by"]
+            if not isinstance(marker, str) or not re.fullmatch(r"[0-9a-f]{64}", marker):
+                raise ValueError("invalid directory retirement marker")
+            if "directory_retired_by" in state and state["directory_retired_by"] != marker:
+                raise ValueError("directory retirement marker cannot change")
         if expected_workspace_revision is not None:
             binding = previous.get("managed_binding")
             actual_workspace_revision = int(binding.get("workspaceRevision") or 0) if isinstance(binding, dict) else 0
@@ -247,9 +618,23 @@ def save_mimo_state(
             after["managed_binding"] = previous_binding
         else:
             after.pop("managed_binding", None)
+        # Canonical plan and feedback have their own transaction owner.
+        for key in ("plan_state", "plan_feedback", "selected_history_import", "directory_retired_by"):
+            if key in previous: after[key] = previous[key]
+            else: after.pop(key, None)
         # Native snapshot writers never own the recoverable history boundary.
         if "history_operation" in previous: after["history_operation"] = previous["history_operation"]
         else: after.pop("history_operation", None)
+        # Native whole-state snapshots never own durable host turn receipts.
+        if "managed_turn_receipts" in previous: after["managed_turn_receipts"] = previous["managed_turn_receipts"]
+        else: after.pop("managed_turn_receipts", None)
+        # Provider request options are owned by the route-selection helper.
+        # ACP whole-state snapshots may be stale, so they cannot erase or
+        # resurrect a newer route-bound option selection.
+        if "model_request_options" in previous:
+            after["model_request_options"] = previous["model_request_options"]
+        else:
+            after.pop("model_request_options", None)
         revision = int(previous.get("revision") or 0)
         if before != after:
             revision += 1
@@ -342,6 +727,8 @@ def save_managed_binding(
         if not authority_workspace and str(session.workspace_id or "").strip():
             raise ValueError("managed binding cannot omit the selected workspace authority")
         state = dict(session.mimo_state or {})
+        if "directory_retired_by" in state:
+            raise RuntimeError("host directory execution scope is retired or invalid")
         previous = state.get("managed_binding")
         previous = dict(previous) if isinstance(previous, dict) else {}
         actual = int(previous.get("workspaceRevision") or 0)
@@ -409,6 +796,8 @@ def delete_managed_binding(
         if session is None:
             raise KeyError(f"Canonical session {session_id!r} not found")
         state = dict(session.mimo_state or {})
+        if "directory_retired_by" in state:
+            raise RuntimeError("host directory execution scope is retired or invalid")
         previous = state.get("managed_binding")
         actual = int(previous.get("workspaceRevision") or 0) if isinstance(previous, dict) else 0
         if expected_workspace_revision is not None and actual != int(expected_workspace_revision):
@@ -438,6 +827,7 @@ async def purge_execution_projection(
     session_id: str,
     *,
     owner: Optional[str] = None,
+    _chat_guard=None,
 ) -> bool:
     """Securely remove any Open Clank agent execution state for a canonical session."""
     if owner is None:
@@ -464,6 +854,9 @@ async def purge_execution_projection(
     if not alive:
         raise RuntimeError("Open Clank agent is unavailable; execution state was not deleted")
 
+    if _chat_guard is not None:
+        await supervisor.delete_session(session_id, owner=effective_owner, mimo_session_id=mimo_session_id, _chat_guard=_chat_guard)
+        return True
     try:
         await supervisor.delete_session(
             session_id,

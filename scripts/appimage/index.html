@@ -1,0 +1,39 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; style-src 'self'">
+<title>Open Clank Setup</title><link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="applet.css">
+<main><div id="setup" class="oc-setup"></div></main>
+<script src="notices.js"></script><script src="setup.js"></script><script>
+const send = intent => window.webkit.messageHandlers.setup.postMessage(JSON.stringify(intent));
+const wizard = OpenClankSetup(document.querySelector('#setup'), send);
+const bar = document.querySelector('.oc-bar');
+
+const controls = document.createElement('div');
+controls.className = 'window-actions';
+bar.append(controls);
+function control(label, glyph, type) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.textContent = glyph;
+  button.onclick = () => send({type});
+  controls.append(button);
+  return button;
+}
+control('Minimize', '−', 'minimize');
+const maximize = control('Maximize', '⤢', 'maximize');
+const closeButton = control('Close setup', '×', 'close');
+function setMaximized(active) {
+  maximize.title = active ? 'Restore' : 'Maximize';
+  maximize.setAttribute('aria-label', maximize.title);
+  maximize.textContent = active ? '❐' : '⤢';
+}
+const setup = {render(state) {
+  wizard.render(state);
+  bar.querySelector('.oc-platform').textContent = 'Beta 3 · Linux';
+  closeButton.disabled = state.phase === 'working';
+  const first = document.querySelector('.oc-actions button');
+  if (first?.textContent === 'Close') first.remove();
+}};
+</script></html>

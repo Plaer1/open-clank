@@ -41,12 +41,10 @@ type PendingRec = {
 
 type Rule = { permission: string; pattern: string; action: "allow" | "ask" | "deny" }
 
-// The parent's grant snapshot is kept as TWO ordered phases, never flattened.
-// The child mirrors the parent's own two-phase evaluation: a `ruleset` deny must
-// win outright, and only a non-denying ruleset lets an `approved` allow upgrade
-// an ask. Flattening into one array would let `findLast` pick a trailing
-// approved allow over a ruleset deny — inverting deny precedence.
-type ParentGrantSnapshot = { ruleset: Rule[]; approved: Rule[] }
+// The parent's grant snapshot keeps its independent current rulesets and the
+// separately accumulated approvals. Every ruleset must permit the request;
+// approvals can upgrade ask to allow but never escape any ruleset's deny.
+type ParentGrantSnapshot = { rulesets: Rule[][]; approved: Rule[] }
 
 const grants = new Map<string, Set<string>>()
 const pending = new Map<string, PendingRec>()
@@ -126,7 +124,10 @@ export const forwardRef = {
   // upgrade). Each phase is shallow-copied so later mutation of the parent's live
   // arrays can't retroactively widen a child grant.
   setParentGrants(parentSessionID: string, snapshot: ParentGrantSnapshot) {
-    parentGrants.set(parentSessionID, { ruleset: [...snapshot.ruleset], approved: [...snapshot.approved] })
+    parentGrants.set(parentSessionID, {
+      rulesets: snapshot.rulesets.map((ruleset) => [...ruleset]),
+      approved: [...snapshot.approved],
+    })
   },
   getParentGrants(parentSessionID: string): ParentGrantSnapshot | undefined {
     return parentGrants.get(parentSessionID)

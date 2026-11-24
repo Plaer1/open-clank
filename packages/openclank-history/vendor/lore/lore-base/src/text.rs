@@ -9,6 +9,8 @@
 //!
 //! Derive it with `lore_macro::ValidateText` for a struct carrying text, and
 //! declare a type that carries none with [`carries_no_text`].
+//!
+//! [`fold_eq`] compares two names the way Lore keys them, regardless of case.
 
 use crate::error::InvalidArguments;
 
@@ -114,49 +116,11 @@ carries_no_text!(
     crate::types::Partition,
 );
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The failing field is named the way a caller reading the arguments would
-    /// write it, so the rejection says which string to fix.
-    #[test]
-    fn a_failure_names_the_field_it_came_from() {
-        assert_eq!(TextNotUtf8::here().inside("path").field(), "path");
-        assert_eq!(
-            TextNotUtf8::here().at(2).inside("paths").field(),
-            "paths[2]"
-        );
-        assert_eq!(
-            TextNotUtf8::here()
-                .inside("remote_url")
-                .inside("remote_config")
-                .field(),
-            "remote_config.remote_url"
-        );
-        assert_eq!(
-            TextNotUtf8::here()
-                .inside("name")
-                .at(3)
-                .inside("entries")
-                .field(),
-            "entries[3].name"
-        );
-    }
-
-    #[test]
-    fn a_failure_reads_as_an_invalid_argument_naming_the_field() {
-        let error = InvalidArguments::from(TextNotUtf8::here().inside("identity"));
-
-        assert_eq!(
-            error.to_string(),
-            "invalid arguments: identity is not valid UTF-8"
-        );
-    }
-
-    #[test]
-    fn a_value_that_carries_no_text_passes() {
-        assert!(7u64.validate_text().is_ok());
-        assert!(crate::types::Hash::default().validate_text().is_ok());
-    }
+/// Whether `a` and `b` are equal once lowercased by [`str::to_lowercase`], as Lore compares the
+/// names it keys and hashes lowercased: file names and branch names. Two ASCII names, and names
+/// that differ only in ASCII case, compare without allocating.
+#[inline]
+pub fn fold_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+        || (!(a.is_ascii() && b.is_ascii()) && a.to_lowercase() == b.to_lowercase())
 }

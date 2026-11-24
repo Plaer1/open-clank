@@ -31,7 +31,7 @@ def _same_native(left, right, same):
 
 
 @contextmanager
-def pinned(path: str, *, directory: bool):
+def pinned(path: str, *, directory: bool, live_writer: bool = False):
     import msvcrt
     k = c.WinDLL("kernel32", use_last_error=True)
     k.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, c.c_void_p, w.DWORD, w.DWORD, w.HANDLE]
@@ -40,7 +40,9 @@ def pinned(path: str, *, directory: bool):
     k.CloseHandle.argtypes = [w.HANDLE]
     # Open reparse point itself. Omitting FILE_SHARE_DELETE pins the name;
     # regular snapshots also omit FILE_SHARE_WRITE to exclude concurrent writers.
-    handle = k.CreateFileW(path, 0x80000000, 3 if directory else 1, None, 3, 0x02200000, None)
+    if directory and live_writer:
+        raise ValueError("invalid live log handle")
+    handle = k.CreateFileW(path, 0x80000000, 3 if directory or live_writer else 1, None, 3, 0x02200000, None)
     if handle == c.c_void_p(-1).value:
         raise c.WinError(c.get_last_error())
     try:
@@ -84,6 +86,25 @@ def read_file(path, expected, same):
         if not _same_native(os.fstat(fd), opened, same) or not same(absolute.lstat(), expected):
             raise ValueError("file changed during History capture")
         return b"".join(chunks)
+
+
+def read_live_log_range(path, cursor: int, limit: int):
+    """Read a bounded snapshot through pinned names while its writer remains open."""
+    if type(cursor) is not int or cursor < 0 or type(limit) is not int or not 1 <= limit <= 65536:
+        raise ValueError("invalid live log range")
+    with ancestors(str(path)) as absolute, pinned(str(absolute), directory=False, live_writer=True) as fd:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError("live log unavailable")
+        size = opened.st_size
+        start = min(cursor, size)
+        os.lseek(fd, start, os.SEEK_SET)
+        raw = os.read(fd, min(limit, size - start))
+        after = os.fstat(fd)
+        if (not stat.S_ISREG(after.st_mode) or (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+                or after.st_size < size):
+            raise ValueError("live log changed during read")
+        return start, size, raw
 
 
 def directory_walk(root, *, expected, include_content, same, excluded):

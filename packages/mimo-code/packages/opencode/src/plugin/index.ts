@@ -19,8 +19,15 @@ import { createOpencodeClient } from "@mimo-ai/sdk"
 import { Flag } from "../flag/flag"
 import { CodexAuthPlugin } from "./codex"
 import { XaiAuthPlugin } from "./xai"
+import { GrokAuthPlugin } from "./grok"
+import { KimiCodeChinaAuthPlugin, KimiCodeGlobalAuthPlugin } from "./kimi-code"
+import { OpenRouterBrowserAuthPlugin } from "./openrouter-browser"
+import { KiloDeviceAuthPlugin } from "./kilo"
+import { LLMGatewayBrowserAuthPlugin, LLMGatewayDevPassAuthPlugin } from "./llmgateway-browser"
 import { MimoAuthPlugin, AnthropicProxyPlugin } from "./mimo"
+import { ClaudeAuthPlugin } from "./claude"
 import { Session } from "../session"
+import { Snapshot } from "../snapshot"
 import type { SessionID } from "../session/schema"
 import { NamedError } from "@mimo-ai/shared/util/error"
 import { CopilotAuthPlugin } from "./github-copilot/copilot"
@@ -29,7 +36,7 @@ import { PoeAuthPlugin } from "opencode-poe-auth"
 import { CloudflareAIGatewayAuthPlugin, CloudflareWorkersAuthPlugin } from "./cloudflare"
 import { CheckpointSplitoverPlugin } from "./checkpoint-splitover"
 import { SubagentProgressCheckerPlugin } from "./subagent-progress-checker"
-import { Effect, Layer, Context, Stream } from "effect"
+import { Effect, Layer, Context, Stream, Option } from "effect"
 import { EffectBridge } from "@/effect"
 import { InstanceState } from "@/effect"
 import { errorMessage } from "@/util/error"
@@ -40,9 +47,26 @@ import type { WorkspaceAdaptor } from "@/control-plane/types"
 import { Glob } from "@mimo-ai/shared/util/glob"
 import fs from "fs"
 import path from "path"
+import { randomUUID } from "node:crypto"
 import { pathToFileURL, fileURLToPath } from "url"
 
 const log = Log.create({ service: "plugin" })
+
+/** Keep one Anthropic auth hook: proxy loader plus native Claude methods. */
+export function composeAnthropicAuthHooks(proxy: Hooks, claude: Hooks): Hooks {
+  if (!proxy.auth || !claude.auth) return proxy
+  return {
+    ...proxy,
+    auth: {
+      ...proxy.auth,
+      methods: [...proxy.auth.methods, ...claude.auth.methods],
+    },
+  }
+}
+
+async function AnthropicAuthPlugin(input: PluginInput): Promise<Hooks> {
+  return composeAnthropicAuthHooks(await AnthropicProxyPlugin(input), await ClaudeAuthPlugin(input))
+}
 
 export const HookEvent = {
   Executed: BusEvent.define(
@@ -88,11 +112,13 @@ type HookEntry = {
 }
 
 type State = {
+  generation: string
   hooks: Hooks[]
   hooksWithMeta: HookEntry[]
 }
 
 type FileHookState = {
+  generation: string
   hooks: Hooks[]
   meta: HookEntry[]
   dirs: string[]
@@ -116,6 +142,8 @@ type TriggerName = {
 }[keyof Hooks]
 
 export interface Interface {
+  readonly provenanceGeneration?: () => Effect.Effect<{plugins:string; fileHooks:string}>
+  readonly recoveryWitness?: () => Effect.Effect<import("../session/recovery-profile").HookWitness>
   readonly trigger: <
     Name extends TriggerName,
     Input = Parameters<Required<Hooks>[Name]>[0],
@@ -125,6 +153,12 @@ export interface Interface {
     input: Input,
     output: Output,
   ) => Effect.Effect<Output>
+  readonly requestEmptyToolDefinition?: (output:{description:string;parameters:unknown}) => void
+  readonly readEmptyToolDefinition?: (output:{description:string;parameters:unknown},toolID:string) => boolean
+  readonly requestEmptyTextTransform?: (output:{text:string}) => void
+  readonly readEmptyTextTransform?: (output:{text:string},identity:{sessionID:string;messageID:string;partID:string}) => boolean
+  readonly requestEmptySystemTransform?: (output:{system:string[]}) => void
+  readonly readEmptySystemTransform?: (output:{system:string[]},sessionID:string) => boolean
   readonly list: () => Effect.Effect<Hooks[]>
   readonly init: () => Effect.Effect<void>
   readonly reloadFileHooks: () => Effect.Effect<void>
@@ -141,9 +175,16 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pl
 // Built-in plugins that are directly imported (not installed from npm)
 const INTERNAL_PLUGINS: PluginInstance[] = [
   MimoAuthPlugin,
-  AnthropicProxyPlugin,
+  AnthropicAuthPlugin,
   CodexAuthPlugin,
   XaiAuthPlugin,
+  GrokAuthPlugin,
+  KimiCodeChinaAuthPlugin,
+  KimiCodeGlobalAuthPlugin,
+  OpenRouterBrowserAuthPlugin,
+  KiloDeviceAuthPlugin,
+  LLMGatewayBrowserAuthPlugin,
+  LLMGatewayDevPassAuthPlugin,
   CopilotAuthPlugin,
   // gitlab/poe auth are external npm packages typed against the published
   // upstream plugin package, which carries a duplicate (nominal) copy of the
@@ -155,6 +196,26 @@ const INTERNAL_PLUGINS: PluginInstance[] = [
   CheckpointSplitoverPlugin,
   SubagentProgressCheckerPlugin,
 ]
+
+// These exact built-in functions only shape request headers/parameters. Their
+// identity is private so external/file plugins cannot inherit the exemption by
+// choosing the same name or event.
+const SNAPSHOT_SAFE_REQUEST_PLUGINS = new Set<PluginInstance>([
+  CodexAuthPlugin,
+  MimoAuthPlugin,
+  CopilotAuthPlugin,
+  CloudflareWorkersAuthPlugin,
+  CloudflareAIGatewayAuthPlugin,
+])
+const SNAPSHOT_SAFE_REQUEST_HANDLERS = new WeakSet<Function>()
+
+function registerSnapshotSafeRequestHandlers(plugin: PluginInstance, hooks: Hooks) {
+  if (!SNAPSHOT_SAFE_REQUEST_PLUGINS.has(plugin)) return
+  for (const name of ["chat.headers", "chat.params"] as const) {
+    const handler = hooks[name]
+    if (typeof handler === "function") SNAPSHOT_SAFE_REQUEST_HANDLERS.add(handler)
+  }
+}
 
 function isServerPlugin(value: unknown): value is PluginInstance {
   return typeof value === "function"
@@ -228,6 +289,11 @@ export const layer = Layer.effect(
     const bus = yield* Bus.Service
     const config = yield* Config.Service
 
+    const beforeHook = Effect.gen(function* () {
+      const barrier = Option.getOrUndefined(yield* Effect.serviceOption(Snapshot.CaptureBarrier))
+      if (barrier) yield* barrier().pipe(Effect.orDie)
+    })
+
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
         const hooks: Hooks[] = []
@@ -281,7 +347,10 @@ export const layer = Layer.effect(
               log.error("failed to load internal plugin", { name: plugin.name, error: err })
             },
           }).pipe(Effect.option)
-          if (init._tag === "Some") registerHook(hooks, hooksWithMeta, init.value, plugin.name || "internal")
+          if (init._tag === "Some") {
+            registerSnapshotSafeRequestHandlers(plugin, init.value)
+            registerHook(hooks, hooksWithMeta, init.value, plugin.name || "internal")
+          }
         }
 
         // Load optional local extensions under src/ext/. Prefers the generated
@@ -409,19 +478,21 @@ export const layer = Layer.effect(
         }
 
         // Subscribe to bus events, fiber interrupted when scope closes
-        yield* bus.subscribeAll().pipe(
-          Stream.runForEach((input) =>
-            Effect.sync(() => {
-              for (const hook of hooks) {
-                if (!isHookObject(hook)) continue
-                void hook["event"]?.({ event: input as any })
-              }
-            }),
-          ),
-          Effect.forkScoped,
-        )
+        if (hooks.some((hook) => isHookObject(hook) && typeof hook.event === "function")) {
+          yield* bus.subscribeAll().pipe(
+            Stream.runForEach((input) =>
+              Effect.sync(() => {
+                for (const hook of hooks) {
+                  if (!isHookObject(hook)) continue
+                  void hook["event"]?.({ event: input as any })
+                }
+              }),
+            ),
+            Effect.forkScoped,
+          )
+        }
 
-        return { hooks, hooksWithMeta }
+        return { generation:randomUUID(), hooks, hooksWithMeta }
       }),
     )
 
@@ -503,7 +574,7 @@ export const layer = Layer.effect(
           )
         }
 
-        return { hooks, meta, dirs, files, lastCheck: { value: Date.now() } }
+        return { generation:randomUUID(), hooks, meta, dirs, files, lastCheck: { value: Date.now() } }
       }),
     )
 
@@ -577,6 +648,8 @@ export const layer = Layer.effect(
             })
             continue
           }
+
+          yield* beforeHook
 
           const startedAt = Date.now()
           const o: ActorStopOutput = { continue: false }
@@ -652,6 +725,28 @@ export const layer = Layer.effect(
       return yield* aggregateDecision(input, "actor.postStop")
     })
 
+    const requestedToolDefinitions = new WeakSet<object>()
+    const emptyToolDefinitions = new WeakMap<object,{toolID:string;description:string;parameters:unknown}>()
+    const requestEmptyToolDefinition = (output:{description:string;parameters:unknown}) => { requestedToolDefinitions.add(output) }
+    const readEmptyToolDefinition = (output:{description:string;parameters:unknown},toolID:string):boolean => {
+      const item=emptyToolDefinitions.get(output)
+      return !!item && item.toolID===toolID && item.description===output.description && item.parameters===output.parameters
+    }
+    const requestedTextTransforms = new WeakSet<object>()
+    const emptyTextTransforms = new WeakMap<object,{sessionID:string;messageID:string;partID:string;text:string}>()
+    const requestEmptyTextTransform = (output:{text:string}) => { requestedTextTransforms.add(output) }
+    const readEmptyTextTransform = (output:{text:string},identity:{sessionID:string;messageID:string;partID:string}):boolean => {
+      const item=emptyTextTransforms.get(output)
+      return !!item && item.sessionID===identity.sessionID && item.messageID===identity.messageID && item.partID===identity.partID && item.text===output.text
+    }
+    const requestedSystemTransforms = new WeakSet<object>()
+    const requestEmptySystemTransform = (output:{system:string[]}) => { requestedSystemTransforms.add(output) }
+    const emptySystemTransforms = new WeakMap<object,{sessionID:string;system:string[];bytes:readonly string[]}>()
+    const readEmptySystemTransform = (output:{system:string[]},sessionID:string):boolean => {
+      const item=emptySystemTransforms.get(output)
+      return !!item && item.sessionID===sessionID && output.system===item.system && item.system.length===item.bytes.length && item.system.every((x,i)=>x===item.bytes[i])
+    }
+
     const HOOK_TIMEOUT_MS = 5000
     const CIRCUIT_BREAKER_THRESHOLD = 3
     const hookFailures = new Map<string, number>()
@@ -664,15 +759,55 @@ export const layer = Layer.effect(
       if (!name) return output
       const s = yield* InstanceState.get(state)
       const fh = yield* freshFileHooks
+      const systemOutput = name === "experimental.chat.system.transform" && output && typeof output === "object" && requestedSystemTransforms.has(output) ? output as {system?:unknown} : undefined
+      const textOutput = name === "experimental.text.complete" && output && typeof output === "object" && requestedTextTransforms.has(output) ? output as {text?:unknown} : undefined
+      const toolOutput = name === "tool.definition" && output && typeof output === "object" && requestedToolDefinitions.has(output) ? output as {description?:unknown;parameters?:unknown} : undefined
+      const systemInput = input as {sessionID?:unknown;messageID?:unknown;partID?:unknown;toolID?:unknown}
+      const originalToolDescription = toolOutput && typeof toolOutput.description === "string" ? toolOutput.description : undefined
+      const originalToolParameters = toolOutput?.parameters
+      if (toolOutput) emptyToolDefinitions.delete(toolOutput)
+      const originalText = textOutput && typeof textOutput.text === "string" ? textOutput.text : undefined
+      if (textOutput) emptyTextTransforms.delete(textOutput)
+      const original = systemOutput && Array.isArray(systemOutput.system) && systemOutput.system.every(x=>typeof x==="string") ? systemOutput.system as string[] : undefined
+      const originalBytes = original ? [...original] : undefined
+      let noHooks = (typeof systemInput?.sessionID === "string" && (!!original ||
+        (originalText !== undefined && typeof systemInput.messageID === "string" && typeof systemInput.partID === "string"))) ||
+        (!!toolOutput && typeof systemInput?.toolID === "string" && originalToolDescription !== undefined && originalToolParameters !== undefined)
+      if (systemOutput) emptySystemTransforms.delete(systemOutput)
 
       for (const entry of s.hooksWithMeta ?? []) {
+        if (systemOutput || textOutput || toolOutput) {
+          try {
+            const entryDescriptor=entry && Object.getOwnPropertyDescriptor(entry,"hook")
+            const hook=entryDescriptor && "value" in entryDescriptor ? entryDescriptor.value : undefined
+            const prototype=hook && Object.getPrototypeOf(hook)
+            const descriptor=hook && Object.getOwnPropertyDescriptor(hook,name)
+            if (!hook || (prototype !== Object.prototype && prototype !== null) ||
+                (prototype === Object.prototype && Object.getOwnPropertyDescriptor(Object.prototype,name)) ||
+                (descriptor && !("value" in descriptor))) noHooks=false
+          } catch { noHooks=false }
+        }
         const fn = entry?.hook?.[name] as ((input: Input, output: Output) => unknown) | undefined
+        if ((systemOutput || textOutput || toolOutput) && typeof fn === "function") noHooks=false
         if (typeof fn !== "function") continue
+        if (!SNAPSHOT_SAFE_REQUEST_HANDLERS.has(fn)) yield* beforeHook
         yield* Effect.promise(async () => fn(input, output))
       }
 
       for (const entry of fh.meta ?? []) {
+        if (systemOutput || textOutput || toolOutput) {
+          try {
+            const entryDescriptor=entry && Object.getOwnPropertyDescriptor(entry,"hook")
+            const hook=entryDescriptor && "value" in entryDescriptor ? entryDescriptor.value : undefined
+            const prototype=hook && Object.getPrototypeOf(hook)
+            const descriptor=hook && Object.getOwnPropertyDescriptor(hook,name)
+            if (!hook || (prototype !== Object.prototype && prototype !== null) ||
+                (prototype === Object.prototype && Object.getOwnPropertyDescriptor(Object.prototype,name)) ||
+                (descriptor && !("value" in descriptor))) noHooks=false
+          } catch { noHooks=false }
+        }
         const fn = entry?.hook?.[name] as ((input: Input, output: Output) => unknown) | undefined
+        if ((systemOutput || textOutput || toolOutput) && typeof fn === "function") noHooks=false
         if (typeof fn !== "function") continue
         const hookID = entry.hookIDFor(name)
 
@@ -680,6 +815,8 @@ export const layer = Layer.effect(
           log.warn("hook circuit-breaker open, skipping", { hook: hookID })
           continue
         }
+
+        yield* beforeHook
 
         const snapshot = structuredClone(output)
         const failed = yield* Effect.tryPromise({
@@ -710,6 +847,15 @@ export const layer = Layer.effect(
         )
         if (!failed) hookFailures.delete(hookID)
       }
+      if (noHooks && systemOutput && original && originalBytes && systemOutput.system === original &&
+          original.length === originalBytes.length && original.every((x,i)=>x===originalBytes[i]))
+        emptySystemTransforms.set(systemOutput,{sessionID:systemInput.sessionID as string,system:original,bytes:originalBytes})
+      if (noHooks && textOutput && originalText !== undefined && textOutput.text === originalText &&
+          typeof systemInput.sessionID === "string" && typeof systemInput.messageID === "string" && typeof systemInput.partID === "string")
+        emptyTextTransforms.set(textOutput,{sessionID:systemInput.sessionID,messageID:systemInput.messageID,partID:systemInput.partID,text:originalText})
+      if (noHooks && toolOutput && typeof systemInput.toolID === "string" && originalToolDescription !== undefined &&
+          toolOutput.description === originalToolDescription && toolOutput.parameters === originalToolParameters)
+        emptyToolDefinitions.set(toolOutput,{toolID:systemInput.toolID,description:originalToolDescription,parameters:originalToolParameters})
       return output
     })
 
@@ -727,7 +873,46 @@ export const layer = Layer.effect(
       yield* InstanceState.invalidate(fileHookState)
     })
 
-    return Service.of({ trigger, list, init, reloadFileHooks, triggerActorPreStop, triggerActorPostStop })
+    const provenanceGeneration: NonNullable<Interface["provenanceGeneration"]> = Effect.fn("Plugin.provenanceGeneration")(function* () {
+      const loaded = yield* InstanceState.get(state)
+      const hooks = yield* InstanceState.get(fileHookState)
+      return {plugins:loaded.generation, fileHooks:hooks.generation}
+    })
+    const recoveryWitness: NonNullable<Interface["recoveryWitness"]> = Effect.fn("Plugin.recoveryWitness")(function* () {
+      const loaded = yield* InstanceState.get(state)
+      const fileHooks = yield* freshFileHooks
+      const collect = (entries: readonly HookEntry[]) => {
+        const handlers: Function[] = []
+        let safe = true
+        for (const entry of entries) {
+          const prototype = Object.getPrototypeOf(entry.hook)
+          if ((prototype !== Object.prototype && prototype !== null) || Object.getOwnPropertySymbols(entry.hook).length) safe = false
+          for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(entry.hook))) {
+            if (!("value" in descriptor)) { safe = false; continue }
+            const value = descriptor.value
+            const nested = value && typeof value === "object" ? Object.getOwnPropertyDescriptor(value, "run") : undefined
+            if (value && typeof value === "object" && (!nested || !("value" in nested))) safe = false
+            const fn = typeof value === "function" ? value : typeof nested?.value === "function" ? nested.value : undefined
+            if (!fn) continue
+            handlers.push(fn)
+            if (!((name === "chat.headers" || name === "chat.params") && SNAPSHOT_SAFE_REQUEST_HANDLERS.has(fn))) safe = false
+          }
+        }
+        return { handlers, safe: safe && handlers.length <= 512 }
+      }
+      const captured = collect([...(loaded.hooksWithMeta ?? []), ...(fileHooks.meta ?? [])])
+      const current = () => Effect.gen(function* () {
+        const now = yield* InstanceState.get(state)
+        const files = yield* freshFileHooks
+        const observed = collect([...(now.hooksWithMeta ?? []), ...(files.meta ?? [])])
+        return now.generation === loaded.generation && files.generation === fileHooks.generation
+          && observed.handlers.length === captured.handlers.length
+          && observed.handlers.every((fn, index) => fn === captured.handlers[index]) && observed.safe === captured.safe
+      })
+      return Object.freeze({ plugins: loaded.generation, fileHooks: fileHooks.generation,
+        handlers: Object.freeze(captured.handlers), noUnclassifiedHandlers: captured.safe, current })
+    })
+    return Service.of({ trigger, requestEmptyToolDefinition, readEmptyToolDefinition, requestEmptyTextTransform, readEmptyTextTransform, requestEmptySystemTransform, readEmptySystemTransform, list, init, reloadFileHooks, provenanceGeneration, recoveryWitness, triggerActorPreStop, triggerActorPostStop })
   }),
 )
 

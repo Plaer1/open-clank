@@ -8,21 +8,21 @@ import time
 
 import pytest
 
-if not os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN"):
+if not os.environ.get("OPEN_CLANK_TEST_MEMERY_WORKER_BIN"):
     pytest.skip("Explicit matching native fixture binary required", allow_module_level=True)
 
 # Guard before application imports; never fall back to configured/live state.
 _root = Path(os.environ["OPEN_CLANK_DATA_DIR"]).resolve()
 assert _root.name.startswith("openclank-s03-")
-for _key in ("ODYSSEUS_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH",
+for _key in ("OPEN_CLANK_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH",
              "FM_DB_PATH", "OPENCLANK_CONVERSATION_ARCHIVE_DB"):
     assert Path(os.environ[_key]).resolve().is_relative_to(_root), _key
 assert os.environ["DATABASE_URL"] == "sqlite:///:memory:"
-assert os.environ["ODYSSEUS_INPROCESS_POLLERS"] == "0"
+assert os.environ["OPEN_CLANK_INPROCESS_POLLERS"] == "0"
 assert os.environ["PYTHONDONTWRITEBYTECODE"] == "1"
 assert "OPEN_CLANK_AGENT_HOME" not in os.environ and "THESIUS_AGENT_HOME" not in os.environ
-_binary = Path(os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"]).resolve()
-assert Path(os.environ["FM_MCP_COMMAND"]).resolve() == _binary
+_binary = Path(os.environ["OPEN_CLANK_TEST_MEMERY_WORKER_BIN"]).resolve()
+assert Path(os.environ["OPEN_CLANK_MEMERY_WORKER"]).resolve() == _binary
 assert hashlib.sha256(_binary.read_bytes()).hexdigest() == os.environ["OPEN_CLANK_TEST_FM_MCP_SHA256"]
 
 from tests import test_code_index_lifecycle as lifecycle  # noqa: E402

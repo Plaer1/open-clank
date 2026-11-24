@@ -172,15 +172,17 @@ export function makeWindowDraggable(modal, options = {}) {
     // Pin position so the drag follows the cursor instead of fighting a
     // centering transform / margin. Inline styles win unless CSS uses
     // !important (the fullscreen rules do, by design).
-    content.style.position = 'fixed';
-    content.style.left = startLeft + 'px';
-    content.style.top = startTop + 'px';
-    content.style.transform = 'none';
-    content.style.margin = '0';
+    if (content.dataset._tileZone !== 'full-workspace') {
+      content.style.position = 'fixed';
+      content.style.left = startLeft + 'px';
+      content.style.top = startTop + 'px';
+      content.style.transform = 'none';
+      content.style.margin = '0';
+    }
   };
 
   const _onMove = (cx, cy) => {
-    if (!dragging) return;
+    if (!dragging || content.dataset._tileZone === 'full-workspace') return;
     if (startedTiled && !content.dataset._tileZone) {
       const restored = content.getBoundingClientRect();
       startX = cx; startY = cy; startLeft = restored.left; startTop = restored.top;

@@ -1,0 +1,1981 @@
+import { encodeForkContext } from "@/actor/fork-context"
+import { createHash } from "node:crypto"
+import { isAdmittedToolTimingTurn } from "./tool-timing"
+import { Bus } from "@/bus"
+import { Config } from "@/config"
+import { Flag } from "@/flag/flag"
+import { managedSessionBinding, markerMatches } from "@/memory/session-scope"
+import { ManagedProvider } from "@/acp/managed-provider"
+import { RecoverableError } from "@/tool/recoverable"
+import { isMemoryWriteEnabled } from "@/memory/write-gate"
+import { TaskRegistry } from "@/task/registry"
+import { ActorRegistry } from "@/actor/registry"
+import type { AgentOutcome, FailureInfo, ForkContext } from "@/actor/spawn"
+import { spawnRef } from "@/actor/spawn-ref"
+import { prefixCaptureRef } from "./prefix-capture-ref"
+import { captureWorkflowSource, bindWorkflowChild, releaseWorkflowSource, workflowCheckpointCommitted, type WorkflowSource } from "./workflow-source"
+import { Database, and, eq, inArray, isNull, not, or } from "@/storage"
+import { InboxTable } from "@/inbox/inbox.sql"
+import { MessageTable, SessionTable } from "./session.sql"
+import * as Session from "./session"
+import { SessionStatus } from "./status"
+import { MessageV2 } from "./message-v2"
+import { SessionID, MessageID, PartID } from "./schema"
+import { Log, Token } from "../util"
+import { Cause, Effect, Exit, Layer, Deferred, Context, Scope } from "effect"
+import { makeRuntime } from "@/effect/run-service"
+import type { ActorPromptOps } from "@/tool/actor"
+import type { ProviderID, ModelID } from "../provider/schema"
+import type { Provider } from "@/provider"
+import PROMPT_CHECKPOINT_WRITER from "@/agent/prompt/checkpoint-writer.txt"
+import { WriterCachePerf } from "@/actor/events"
+import { budgetText, budgetTextSectionAware } from "./budgeted-read"
+import { computeLastMessageInfo, type LastMessageInfo } from "./last-message-info"
+import { CHECKPOINT_SECTION_BUDGETS } from "./checkpoint-templates"
+import { adjustBoundaryForApiInvariants } from "./boundary"
+import { alignToNonToolResultUser } from "./checkpoint-align"
+import { extractTitlesFromLearning } from "./checkpoint-validator"
+import * as CheckpointContext from "./checkpoint-context"
+import { isBoundaryUser, isRebuildBoundary, renderTailDigest } from "./tail-digest"
+
+const log = Log.create({ service: "session.checkpoint" })
+
+type OperationalOperation = { operationID: string; state: "committed" | "not_applied" | "unknown" }
+type OperationalSnapshotItem = ({ state: "found"; text: string; textSHA256: string; revision: { kind: "hostFingerprint"; value: string } } | { state: "not_found" | "unknown" | "unavailable" }) & { operation?: OperationalOperation }
+type OperationalProgress = OperationalSnapshotItem & { taskRef: { sessionID: string; taskID: string; assignmentEventID: number } }
+type OperationalSnapshot = { checkpoint: OperationalSnapshotItem; notes: OperationalSnapshotItem; progress: { items: OperationalProgress[]; complete: boolean } }
+async function readOperationalSnapshot(sessionID: SessionID, actor: import("@/actor/turn").ActorExecutionIdentity | undefined): Promise<OperationalSnapshot> {
+  const unavailable = () => new RecoverableError("Operational checkpoint context is unavailable for this turn")
+  if (!actor || actor.sessionID !== sessionID || !actor.rootOperationID || !actor.innerTurnID || !ManagedProvider.enabled() || Flag.OPEN_CLANK_PRIVATE_RUNTIME) throw unavailable()
+  const identity = { sessionID, rootOperationID: actor.rootOperationID, actorID: actor.actorID, executionRevision: actor.executionRevision, innerTurnID: actor.innerTurnID }
+  const binding = managedSessionBinding(sessionID), scope = ManagedProvider.currentScope(sessionID,actor.actorID,actor.executionRevision)
+  const issuer = ManagedProvider.currentActorToolTimingIssuer(sessionID,actor.actorID,actor.executionRevision,actor.rootOperationID)
+  const host = ManagedProvider.currentActorHostContext(sessionID,actor.actorID,actor.executionRevision)
+  const current = () => {
+    const now=managedSessionBinding(sessionID), currentHost=ManagedProvider.currentActorHostContext(sessionID,actor.actorID,actor.executionRevision)
+    return !!binding && !!now && markerMatches(sessionID,now) && now.registrationMarker.token===binding.registrationMarker.token &&
+      now.memoryEnabled && !now.authority && !now.transition && now.owner===binding.owner && now.stableChatID===binding.stableChatID &&
+      now.bindingRevision===binding.bindingRevision && now.mappingRevision===binding.mappingRevision && now.mapRevision===binding.mapRevision &&
+      !!scope && ManagedProvider.currentScope(sessionID,actor.actorID,actor.executionRevision)===scope && !!issuer?.isAlive() &&
+      ManagedProvider.currentActorToolTimingIssuer(sessionID,actor.actorID,actor.executionRevision,actor.rootOperationID!)===issuer &&
+      !!host?.ownerAccountID && currentHost?.ownerAccountID===host.ownerAccountID && currentHost.chatID===host.chatID && currentHost.workspaceID===host.workspaceID &&
+      isAdmittedToolTimingTurn(actor,identity)
+  }
+  if (!current()) throw unavailable()
+  const result = await ManagedProvider.managedHostCall("_openclank/session/v1/workflow/snapshot/read",identity).catch(() => { throw unavailable() })
+  if (!current() || !result || Object.keys(result).sort().join(",")!=="checkpoint,notes,progress") throw unavailable()
+  const verify = (item: unknown): item is OperationalSnapshotItem => {
+    if (!item || typeof item!=="object") return false
+    const value=item as Record<string,unknown>
+    const operation=value.operation
+    if (operation !== undefined) {
+      if (!operation || typeof operation!=="object") return false
+      const op=operation as Record<string,unknown>
+      if (Object.keys(op).sort().join(",")!=="operationID,state" || typeof op.operationID!=="string" || !/^workflowop_[a-f0-9]{64}$/.test(op.operationID) ||
+          !["committed","not_applied","unknown"].includes(String(op.state))) return false
+    }
+    const keys=Object.keys(value).filter((key)=>key!=="operation").sort().join(",")
+    if (value.state === "not_found" || value.state === "unknown" || value.state === "unavailable") return keys==="state"
+    if (value.state !== "found" || keys!=="revision,state,text,textSHA256" || typeof value.text!=="string" ||
+        !value.text.isWellFormed() || value.text.includes("\0") || Buffer.byteLength(value.text,"utf8")>262144 ||
+        typeof value.textSHA256!=="string" || createHash("sha256").update(value.text,"utf8").digest("hex")!==value.textSHA256 ||
+        !value.revision || typeof value.revision!=="object") return false
+    const revision=value.revision as Record<string,unknown>
+    return Object.keys(revision).sort().join(",")==="kind,value" && revision.kind==="hostFingerprint" && typeof revision.value==="string" &&
+      revision.value.length<=100 && /^sha256:[a-f0-9]{64}:(0|[1-9][0-9]*)$/.test(revision.value)
+  }
+  const progress=result.progress
+  if (!verify(result.checkpoint) || !verify(result.notes) || !progress || typeof progress!=="object" ||
+      Object.keys(progress).sort().join(",")!=="complete,items" || typeof progress.complete!=="boolean" || !Array.isArray(progress.items) || progress.items.length>32) throw unavailable()
+  let bytes=0; const seen=new Set<string>(); const items: OperationalProgress[]=[]
+  for (const raw of progress.items) {
+    if (!raw || typeof raw!=="object" || !raw.taskRef || typeof raw.taskRef!=="object") throw unavailable()
+    const ref=raw.taskRef
+    if (Object.keys(ref).sort().join(",")!=="assignmentEventID,sessionID,taskID" || typeof ref.sessionID!=="string" || !ref.sessionID ||
+        typeof ref.taskID!=="string" || !/^T[0-9]+(?:\.[0-9]+)*$/.test(ref.taskID) || !Number.isSafeInteger(ref.assignmentEventID) || ref.assignmentEventID<=0) throw unavailable()
+    const refKey=JSON.stringify([ref.sessionID,ref.taskID,ref.assignmentEventID]);if (seen.has(refKey)) throw unavailable();seen.add(refKey)
+    const {taskRef,...value}=raw
+    if (!verify(value) || (value.state!=="found" && progress.complete)) throw unavailable()
+    if (value.state==="found") { bytes+=Buffer.byteLength(value.text,"utf8");if (bytes>262144) throw unavailable() }
+    items.push({...value,taskRef:ref})
+  }
+  if (!current()) throw unavailable()
+  return {checkpoint:result.checkpoint,notes:result.notes,progress:{items,complete:progress.complete}}
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 60) + "\n... (truncated, full body at file)"
+}
+
+/**
+ * Drop every top-level `# ` heading (outside fenced code blocks) so the
+ * section H1 is the only file root. Stripping only the first leaves a
+ * surviving root that reparents every following section, and a `# ` line
+ * inside a fence would otherwise be stripped as if it were a heading.
+ */
+function stripTopLevelH1s(text: string): string {
+  let inFence = false
+  return text
+    .split("\n")
+    .filter((line) => {
+      if (/^(```|~~~)/.test(line)) {
+        inFence = !inFence
+        return true
+      }
+      if (!inFence && /^# [^#]/.test(line)) return false
+      return true
+    })
+    .join("\n")
+    .trim()
+}
+
+/**
+ * Push a top-level section. File-backed sections carry a single full `File:`
+ * path under the H1 — do not also put the basename in the H1; that repeats
+ * the last path segment. The file body's own top-level H1s are stripped so
+ * this section heading is the only root and every following ## belongs to it.
+ */
+function pushSection(lines: string[], heading: string, body?: string, filePath?: string) {
+  lines.push(`# ${heading}`)
+  if (filePath) lines.push(`File: ${filePath}`)
+  if (body !== undefined) {
+    const text = filePath ? stripTopLevelH1s(body) : body.trim()
+    if (text) lines.push(text)
+  }
+  lines.push("")
+}
+
+/**
+ * Truncate verbatim user input that exceeds per-message cap. Keeps head (~60%)
+ * + tail (~30%) with an elision marker pointing at messageID for full recall
+ * via history around then get(part_id); around returns summaries, not full text. ~4 chars/token approximation matches
+ * Token.estimate.
+ */
+function truncateVerbatimUserMsg(text: string, capTokens: number, messageID: string): string {
+  if (Token.estimate(text) <= capTokens) return text
+  // slice() cuts on UTF-16 code units, which can split a surrogate pair at the
+  // boundary; trim a dangling high surrogate off the head and a leading low
+  // surrogate off the tail so emoji / non-BMP chars don't render as garbage.
+  const head = text.slice(0, Math.floor(capTokens * 0.6) * 4).replace(/[\uD800-\uDBFF]$/, "")
+  const tail = text.slice(-Math.floor(capTokens * 0.3) * 4).replace(/^[\uDC00-\uDFFF]/, "")
+  const elidedTokens = Token.estimate(text) - Token.estimate(head) - Token.estimate(tail)
+  return [
+    head,
+    `[…elided ${elidedTokens} tokens; messageID=${messageID}; use the history tool with operation=around then get part_id to recover full content]`,
+    tail,
+  ].join("\n")
+}
+
+/**
+ * Concatenate text-typed parts of a user message into a single string. Skips
+ * tool/file/image/etc. parts and synthetic text (e.g. rebuild-boundary content
+ * injected by insertRebuildBoundary) — only true user prose contributes.
+ */
+function userMsgText(parts: Array<{ type: string; text?: string; synthetic?: boolean }>): string {
+  return parts
+    .filter((p) => p.type === "text" && !p.synthetic && typeof p.text === "string" && p.text.length > 0)
+    .map((p) => p.text!)
+    .join("\n")
+}
+
+// Link only references carried by the parent transcript's original actor tool part.
+function recentWorkerLinks(sessionID: SessionID, messages: MessageV2.WithParts[]): string[] {
+  const links: string[] = []
+  const identifier = (id: unknown): id is string => typeof id === "string" && /^[A-Za-z0-9_.:-]{1,120}$/.test(id)
+  for (const message of messages.slice(-32).reverse()) {
+    if (message.info.role !== "assistant" || message.info.agentID !== "main" || message.info.sessionID !== sessionID) continue
+    for (const part of message.parts.slice(-24).reverse()) {
+      if (part.type !== "tool" || part.tool !== "actor" || part.messageID !== message.info.id || part.state.status !== "completed") continue
+      const receipt = part.state.metadata
+      const brief = receipt?.workerBrief
+      if (brief?.version !== 1 || brief.source?.sessionId !== sessionID ||
+          brief.source?.assistantMessageId !== message.info.id || brief.source?.inputMessageId !== message.info.parentID ||
+          brief.source?.toolCallId !== part.callID || receipt?.sessionId !== sessionID ||
+          ![message.info.id, message.info.parentID, part.id, part.callID, receipt?.actorId].every(identifier)) continue
+      links.push(`- Session ${sessionID}, original input ${message.info.parentID}, assistant message ${message.info.id}, tool part ${part.id}, worker ${receipt.actorId}.`)
+      if (links.length === 3) return links
+    }
+  }
+  return links
+}
+
+function progressReference(item: OperationalProgress): string {
+  const ref = item.taskRef
+  if (ref.taskID.length > 48 || !/^[A-Za-z0-9_.:-]{1,120}$/.test(ref.sessionID)) return `Task ${ref.taskID}`
+  return `Task ${ref.taskID} in session ${ref.sessionID}, assignment event ${ref.assignmentEventID}`
+}
+
+function autonomousLoopReminder(): string {
+  return [
+    "<system-reminder>",
+    "You are mid-loop in an autonomous task. The outputs of your latest tool",
+    "calls are not in this context. Continue the work loop from where the",
+    "blocks above leave off, and re-run a call when you need its output.",
+    "</system-reminder>",
+  ].join("\n")
+}
+
+function toolResultContinueReminder(): string {
+  return [
+    "<system-reminder>",
+    "Tool results above are real history from the autonomous loop. Process",
+    "them and continue to the next iteration. Do not pause to summarize.",
+    "</system-reminder>",
+  ].join("\n")
+}
+
+
+
+// Tail preservation budget (token-budgeted boundary).
+// Session-memory compact: minimum guarantees the LLM has enough
+// recent-context anchor (avoids the agent-Read-loop failure mode from
+// v4 → v5 spec rationale); maximum is a SOFT ceiling on backward
+// expansion — i.e. when the natural tail is below the floor we expand
+// backward UP TO maxTokens, but if the natural tail already exceeds
+// maxTokens we leave it alone. Single-message-granularity cap would
+// break tool_use/result pairing.
+//
+// 20K is the empirical sweet spot — observed compact output is ~20K,
+// not the 40K nominal default. The 40K appears in source as fallback,
+// but the upstream config likely tunes it lower in production.
+const TAIL_MIN_TOKENS = 10_000
+const TAIL_MAX_TOKENS = 20_000
+const TAIL_MIN_TEXT_BLOCK_MESSAGES = 5
+
+// How long a context rebuild waits for an in-flight checkpoint writer to finish
+// before proceeding with whatever is currently on disk (the writer keeps
+// running in the background). Bounded so a slow writer can't make the main
+// agent appear hung — the failure mode that led to manual aborts + worker
+// teardown that killed the writer. Paired with a visible "Preparing
+// conversation context…" busy status during the wait.
+const REBUILD_WAIT_MS = "30 seconds"
+
+// Safety bound for awaiting the FIRST checkpoint writer when no usable
+// checkpoint exists yet (no watermark). Unlike REBUILD_WAIT_MS this is not a
+// "prefer-fresh" nicety — there is nothing else to rebuild from, so we wait for
+// the writer proper. The bound only guards the pathological case where the
+// writer's Deferred never resolves (e.g. its process died); on timeout we
+// defer to compaction. A normal writer settles well inside this.
+const FIRST_CHECKPOINT_WAIT_MS = "5 minutes"
+
+
+function estimateMessageTokens(m: { parts: Array<{ type: string; [k: string]: unknown }> }): number {
+  // Same estimator used elsewhere in checkpoint.ts (Token.estimate over JSON).
+  // Sum across all parts of the message.
+  let sum = 0
+  for (const p of m.parts) {
+    // JSON.stringify throws on circular structures. Parser-produced parts are
+    // plain POJOs, but a plugin-injected part could contain a cycle. Fall back
+    // to a conservative NON-ZERO estimate so a bad part is never counted as
+    // "free" — a 0 here would let the tail-boundary algorithm swallow the part
+    // for nothing and skew the budget. The constant overstates a typical part,
+    // which is the safe direction (boundary walks back, never forward).
+    try {
+      sum += Token.estimate(JSON.stringify(p))
+    } catch {
+      sum += 1000
+    }
+  }
+  return sum
+}
+
+function hasTextBlocks(m: { parts: Array<{ type: string }> }): boolean {
+  return m.parts.some((p) => p.type === "text" || p.type === "reasoning")
+}
+
+/**
+ * Token-budgeted, role-aware boundary choice for the preserved tail.
+ *
+ * Returns the ID of the FIRST message to preserve (boundary message ID;
+ * everything strictly before this ID is summarized into checkpoint.md and
+ * discarded from the rebuild context).
+ *
+ * Algorithm (token-budgeted boundary):
+ *
+ * 1. Start at the last finished assistant index minus 1, take it+successors
+ *    as the candidate tail (preserves spec 2 starting point so reasonable
+ *    tails are unchanged).
+ * 2. If tail tokens already >= TAIL_MAX_TOKENS: leave boundary as-is and
+ *    return. Do NOT pull boundary forward — message-granularity truncation
+ *    would split tool_use/tool_result pairs (downstream
+ *    adjustBoundaryForApiInvariants would just walk back, net no-op + risk
+ *    of thinking-block breaks). The cap is a SOFT ceiling on backward
+ *    expansion, not a hard upper bound on tail size. If a single
+ *    assistant turn legitimately produces 60K of tool_result, the tail
+ *    will be 60K and that's fine.
+ * 3. Else if tail tokens < TAIL_MIN_TOKENS or text-block messages < min:
+ *    walk backward (earlier) one message at a time until both minimums
+ *    met OR TAIL_MAX_TOKENS hit OR no more messages.
+ *
+ * The downstream adjustBoundaryForApiInvariants call (in
+ * tryStartCheckpointWriter) handles tool_use/tool_result pairing and
+ * thinking-block atomicity — this function does NOT need to.
+ *
+ * Edge cases:
+ * - msgs.length === 0: return "" (matches old behavior).
+ * - No finished assistant: return msgs[0].info.id (degenerate; caller should
+ *   not be invoking trim here, but stay safe).
+ * - lastAsstIdx === 0: return msgs[0].info.id (degenerate tail).
+ */
+export function computeBoundary(
+  msgs: ReadonlyArray<{ info: { id: string; role: "user" | "assistant"; finish?: string }; parts: Array<{ type: string; [k: string]: unknown }> }>,
+): string {
+  if (msgs.length === 0) return ""
+  const lastAsstIdx = msgs.findLastIndex(
+    (m) => m.info.role === "assistant" && m.info.finish !== undefined,
+  )
+  if (lastAsstIdx <= 0) return msgs[lastAsstIdx >= 0 ? lastAsstIdx : 0].info.id
+
+  // Token estimate per message (computed once).
+  const tokens = msgs.map((m) => estimateMessageTokens(m))
+
+  // Spec 2 starting point: lastAsstIdx - 1.
+  let startIdx = lastAsstIdx - 1
+  let tailSum = 0
+  let textBlockCount = 0
+  for (let i = startIdx; i < msgs.length; i++) {
+    tailSum += tokens[i]
+    if (hasTextBlocks(msgs[i])) textBlockCount += 1
+  }
+
+  // Natural tail already >= cap: leave it alone (soft ceiling; do NOT pull
+  // boundary forward — see jsdoc rationale).
+  if (tailSum >= TAIL_MAX_TOKENS) {
+    return msgs[startIdx].info.id
+  }
+
+  // Tail too small — pull boundary earlier (include more history)
+  // until both floors met, capped at TAIL_MAX_TOKENS.
+  while (
+    startIdx > 0 &&
+    tailSum < TAIL_MAX_TOKENS &&
+    (tailSum < TAIL_MIN_TOKENS || textBlockCount < TAIL_MIN_TEXT_BLOCK_MESSAGES)
+  ) {
+    startIdx -= 1
+    tailSum += tokens[startIdx]
+    if (hasTextBlocks(msgs[startIdx])) textBlockCount += 1
+  }
+  return msgs[startIdx].info.id
+}
+
+/**
+ * Main-slice user inputs the inbox has accepted or claimed but not yet
+ * delivered to a model step. They enter the conversation through the
+ * runLoop's pending-input path, so no rebuild may digest or copy them.
+ */
+function undeliveredInputs(sessionID: SessionID): Set<MessageID> {
+  const rows = Database.use((db) =>
+    db
+      .select({ id: InboxTable.input_message_id })
+      .from(InboxTable)
+      .where(
+        and(
+          eq(InboxTable.receiver_session_id, sessionID),
+          eq(InboxTable.receiver_actor_id, "main"),
+          isNull(InboxTable.delivery_message_id),
+          inArray(InboxTable.state, ["accepted", "claimed"]),
+        ),
+      )
+      .all(),
+  )
+  return new Set(rows.flatMap((row) => (row.id ? [row.id] : [])))
+}
+
+/**
+ * Main-slice messages after `after` (and before `before`, when given), oldest
+ * first, without earlier boundaries and without the `undelivered` inputs.
+ */
+function conversationAfter(
+  sessionID: SessionID,
+  undelivered: ReadonlySet<MessageID>,
+  after: MessageID,
+  before?: MessageID,
+): MessageV2.WithParts[] {
+  const messages: MessageV2.WithParts[] = []
+  for (const message of MessageV2.stream(sessionID, { agentID: "main" })) {
+    if (message.info.id === after) break
+    if (message.info.id <= after || (before && message.info.id >= before)) continue
+    if (isBoundaryUser(message) || undelivered.has(message.info.id)) continue
+    messages.push(message)
+  }
+  return messages.reverse()
+}
+
+export type RebuildTail = { boundary: MessageID; messages: MessageV2.WithParts[] }
+
+/**
+ * Everything the newest rebuild boundary of `window` stands for: the stored
+ * messages between its watermark and the boundary, including the unanswered
+ * user messages copied onto it. Undefined when the window has no rebuild
+ * boundary.
+ */
+export function readRebuildTail(sessionID: SessionID, window: MessageV2.WithParts[]): RebuildTail | undefined {
+  const boundary = window.findLast((m) => m.info.sessionID === sessionID && isBoundaryUser(m))
+  const part = boundary?.parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")
+  if (!boundary || !part) return undefined
+  return {
+    boundary: boundary.info.id,
+    messages: conversationAfter(sessionID, undeliveredInputs(sessionID), part.coveredUpTo, boundary.info.id),
+  }
+}
+
+/**
+ * The conversation as stored, for readers that need more than the model
+ * window: the checkpoint writer (full-fidelity history) and the runLoop's
+ * turn state. The boundary's tail is placed between the boundary and the
+ * messages after it. Tail messages the window already holds (a legacy
+ * boundary's tail, delivered inputs placed by the inbox) are not repeated.
+ */
+export function withRebuildTail(window: MessageV2.WithParts[], tail: RebuildTail | undefined): MessageV2.WithParts[] {
+  if (!tail) return window
+  const index = window.findIndex((m) => m.info.id === tail.boundary)
+  if (index < 0) return window
+  const present = new Set(window.map((m) => m.info.id))
+  const missing = tail.messages.filter((m) => !present.has(m.info.id))
+  if (missing.length === 0) return window
+  return [...window.slice(0, index + 1), ...missing, ...window.slice(index + 1)]
+}
+
+/**
+ * Inputs a rebuild left out of its tail while they were queued (its
+ * `deferredInputs`), and whose inbox receipt then ended without delivery
+ * (stop, restart sweep, rejection). Outside a rebuild such an input stays in
+ * the window, so it is placed right after the newest rebuild boundary of
+ * `window`.
+ */
+export function withEndedInputs(sessionID: SessionID, window: MessageV2.WithParts[]): MessageV2.WithParts[] {
+  const index = window.findLastIndex((m) => m.info.sessionID === sessionID && isRebuildBoundary(m))
+  if (index < 0) return window
+  const part = window[index].parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")!
+  const present = new Set(window.map((m) => m.info.id))
+  const deferred = (part.deferredInputs ?? []).filter((id) => !present.has(id))
+  if (deferred.length === 0) return window
+  const rows = Database.use((db) =>
+    db
+      .select({ id: MessageTable.id })
+      .from(InboxTable)
+      .innerJoin(MessageTable, eq(MessageTable.id, InboxTable.input_message_id))
+      .where(
+        and(
+          eq(InboxTable.receiver_session_id, sessionID),
+          inArray(InboxTable.input_message_id, deferred),
+          isNull(InboxTable.delivery_message_id),
+          not(inArray(InboxTable.state, ["accepted", "claimed"])),
+        ),
+      )
+      .all(),
+  )
+  const ended = [...new Set(rows.map((row) => row.id))]
+    .toSorted()
+    .map((messageID) => MessageV2.get({ sessionID, messageID }))
+  if (ended.length === 0) return window
+  return [...window.slice(0, index + 1), ...ended, ...window.slice(index + 1)]
+}
+
+function renderSectionBudgets(budgets: Record<string, number>): string {
+  const entries = Object.entries(budgets)
+  if (entries.length === 0) {
+    throw new Error("CHECKPOINT_SECTION_BUDGETS is empty — F43 substitution would produce an empty prompt block")
+  }
+  const cols = 3
+  const lines: string[] = ["Section budgets (~tokens):"]
+  for (let i = 0; i < entries.length; i += cols) {
+    const row = entries
+      .slice(i, i + cols)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join("    ")
+    lines.push(`   ${row}`)
+  }
+  return lines.join("\n")
+}
+
+/**
+ * Composes the full writer prompt for the checkpoint subagent.
+ *
+ * The body wraps PROMPT_CHECKPOINT_WRITER with an ABSOLUTE-PATHS preamble
+ * that pins CHECKPOINT_PATH/TASK_MEM_DIR to the current session's
+ * dirs — without this, the model frequently invents legacy `/data/checkpoints/`
+ * style paths from training-data lookalikes.
+ */
+function composeWriterPrompt(input: { rangeDesc: string; context: string }): string {
+  return [PROMPT_CHECKPOINT_WRITER.replace("{{SECTION_BUDGETS}}", renderSectionBudgets(CHECKPOINT_SECTION_BUDGETS)), input.rangeDesc, input.context].join("\n\n")
+}
+
+function aggregateWriterCacheMetrics(
+  sessions: Session.Interface,
+  sessionID: SessionID,
+  actorID: string,
+) {
+  return Effect.gen(function* () {
+    const msgs = yield* sessions.messages({ sessionID, agentID: "*" })
+    let totalInput = 0
+    let cacheRead = 0
+    let cacheWrite = 0
+    let assistantCount = 0
+    for (const m of msgs) {
+      if (m.info.role !== "assistant") continue
+      if (m.info.agentID !== actorID) continue
+      // Count every assistant LLM call in the slice, even ones without
+      // billing-token data (errors / mid-stream interrupts). Token sums
+      // skip the no-data rows; the call count includes them so downstream
+      // consumers can distinguish "low cache hit" from "few calls".
+      assistantCount += 1
+      const t = m.info.tokens
+      if (!t) continue
+      totalInput += (t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0)
+      cacheRead += t.cache?.read ?? 0
+      cacheWrite += t.cache?.write ?? 0
+    }
+    const billable = totalInput - cacheRead - cacheWrite
+    const denom = cacheRead + Math.max(billable, 0)
+    const hitRate = denom > 0 ? cacheRead / denom : 0
+    return {
+      total_input_tokens: totalInput,
+      cache_read_tokens: cacheRead,
+      cache_write_tokens: cacheWrite,
+      cache_hit_rate: hitRate,
+      num_llm_calls: assistantCount,
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Service interface
+// ---------------------------------------------------------------------------
+
+export type TryStartCheckpointWriterInput = {
+  sessionID: SessionID
+  model: { providerID: string; modelID: string }
+  admittedModel?: Provider.Model
+  promptOps: ActorPromptOps
+  toolViewContext?: import("./tool-view-assembly").ToolViewContext
+    actorExecution?: import("@/actor/turn").ActorExecutionIdentity
+}
+
+/**
+ * Outcome of a tryStartCheckpointWriter call:
+ * - "started": no writer was running for this session, a fresh one was forked.
+ * - "queued":  a writer is already running. The new request is held in the
+ *              1-slot pending queue and will fire once the current writer
+ *              settles. If a pending request already exists it's evicted —
+ *              newest wins because its range is a strict superset of the
+ *              older pending range, so the older one would just duplicate
+ *              work. (F40)
+ * - "skipped": the request was rejected outright — memory writing disabled,
+ *              empty session, system-spawned subagent, or Actor service
+ *              unavailable. No writer will fire for this request now or later.
+ */
+export type TryStartCheckpointWriterResult = "started" | "queued" | "skipped"
+
+export interface Interface {
+  readonly busyGuard?: (sessionID: SessionID) => () => boolean
+  readonly tryStartCheckpointWriter: (
+    input: TryStartCheckpointWriterInput,
+  ) => Effect.Effect<TryStartCheckpointWriterResult>
+
+  readonly waitForWriter: (sessionID: SessionID) => Effect.Effect<WriterOutcome | "no-writer">
+
+  /**
+   * The same bounded wait as `waitForWriter`, additionally surfacing the
+   * failure classification the writer's outcome already carries.
+   *
+   * `waitForWriter` is #1938's contract — three flat values, one of which
+   * ("timeout") means "still in flight". That contract is deliberately left
+   * alone; this is the shape a caller needs when the CLASS of a failure
+   * changes what it does next (prune's recovery gate). Both are one
+   * implementation: `waitForWriter` projects `.outcome` off this, so the two
+   * can never disagree about what a settled writer did.
+   */
+  readonly waitForWriterSettlement: (sessionID: SessionID) => Effect.Effect<WriterSettlement>
+
+
+  /**
+   * Await all in-flight writers across sessions up to `timeoutMs`. Used by
+   * the CLI shutdown path so headless `openclank-engine run` invocations don't exit
+   * while a forked checkpoint writer is still waiting on its LLM round-trip.
+   * Returns the count of writers that completed vs. still pending when the
+   * timeout fired.
+   */
+  readonly drainWriters: (input?: { timeoutMs?: number }) => Effect.Effect<{
+    drained: number
+    timedOut: number
+  }>
+
+  readonly hasMemoryOrTasks: (sessionID: SessionID) => Effect.Effect<boolean>
+  readonly hasCheckpoint: (sessionID: SessionID, actorExecution?: import("@/actor/turn").ActorExecutionIdentity) => Effect.Effect<boolean>
+
+  /** Returns the content of the latest checkpoint file, or undefined if none exists. */
+  readonly loadLatest: (sessionID: SessionID) => Effect.Effect<string | undefined>
+
+  /** Returns the content of the last N checkpoint files, ordered oldest to newest. */
+  readonly loadCheckpoints: (sessionID: SessionID, count: number) => Effect.Effect<string[]>
+
+  /** Returns a human-readable index overview for injection into rebuild context. */
+  readonly renderIndex: (sessionID: SessionID) => Effect.Effect<string>
+
+  /**
+   * Returns the rebuild-time context that should be injected after trim.
+   * Format:
+   *   <system-reminder>Verify-before-act note...</system-reminder>
+   *   ## Accumulated learnings (chronological)
+   *   ### From checkpoint #1 (<topic>)
+   *   <Learning body>
+   *   ...
+   *   ## Current snapshot (as of checkpoint #N)
+   *   <Snapshot body>
+   *
+   * Stale Snapshots from older checkpoints are intentionally dropped. Returns
+   * an empty string if no checkpoints exist. When checkpoints exist but all
+   * Learning sections are empty, emits "(no prior learnings)" placeholder;
+   * when the latest checkpoint has no Snapshot section, emits
+   * "(latest checkpoint has no Snapshot section)" placeholder — the full
+   * structure is always produced so the verify-before-act reminder is
+   * consistently visible.
+   */
+  readonly renderRebuildContext: (
+    sessionID: SessionID,
+    opts?: {
+      actorExecution?: import("@/actor/turn").ActorExecutionIdentity
+      modelContextLimit?: number
+      modelOutputMarginTokens?: number
+      lastMessageInfo?: LastMessageInfo
+      agentID?: string
+      digestUpTo?: MessageID
+      /**
+       * Watermark this rebuild is inserting against. When present, Recent
+       * activity is sliced from this boundary instead of re-reading
+       * last_checkpoint_message_id (which can race an in-flight writer).
+       */
+      boundary?: MessageID
+      /** User messages left out of Recent user input (sent in full elsewhere, or not delivered yet). */
+      exclude?: ReadonlySet<MessageID>
+    },
+  ) => Effect.Effect<{ text: string; hasActivity?: boolean }>
+
+  readonly lastBoundary: (sessionID: SessionID) => Effect.Effect<MessageID | undefined>
+
+  readonly isWriterRunning: (sessionID: SessionID) => Effect.Effect<boolean>
+
+  /**
+   * Append a synthetic checkpoint-boundary user message (boundary marker +
+   * index overview + rebuild context + active-actors text) after the newest
+   * main-agent message of the session, so the tail after `boundary` falls
+   * outside every later window. The tail is read at insert time; unanswered
+   * user messages at its end are copied onto the boundary in full, the rest
+   * is digested. Inserts nothing and returns false when rebuild context is
+   * empty. Never deletes DB messages.
+   */
+  readonly insertRebuildBoundary: (input: {
+    sessionID: SessionID
+    boundary: MessageID
+    actorExecution?: import("@/actor/turn").ActorExecutionIdentity
+    modelContextLimit?: number
+    modelOutputMarginTokens?: number
+    agentID?: string
+    agent: string
+    model: { providerID: string; modelID: string }
+  }) => Effect.Effect<boolean>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@opencode/SessionCheckpoint") {}
+
+// ---------------------------------------------------------------------------
+// Writer state per session
+// ---------------------------------------------------------------------------
+
+// "timeout" means the caller's bounded wait expired while the writer was STILL
+// IN FLIGHT — it is deliberately distinct from "failure" (the writer settled
+// unsuccessfully). See waitForWriter for why conflating the two silently
+// disables checkpointing for a session whose writers are merely slow.
+export type WriterOutcome = "success" | "failure" | "timeout"
+
+/**
+ * A settled (or bound-expired) writer, plus the classification its
+ * AgentOutcome already carried.
+ *
+ * `failure` is present only when `outcome === "failure"` AND the writer's
+ * error was classifiable at the construction site. It is absent for a
+ * cancelled writer and for a failure whose error never reached
+ * classifyAssistantError — so "absent" means "unknown class", never
+ * "retryable".
+ */
+export type WriterSettlement = {
+  outcome: WriterOutcome | "no-writer"
+  failure?: FailureInfo
+}
+
+
+interface WriterState {
+  // Holds the AgentOutcome Deferred returned by Actor.spawn so callers can
+  // await writer settlement (waitForWriter / drainWriters). The public
+  // WriterOutcome translation happens in waitForWriter.
+  phase: "preparing" | "running" | "draining"
+  preparing: Deferred.Deferred<{ status: "started"; writing: Deferred.Deferred<AgentOutcome> } | { status: "skipped" | "failed" }>
+  done: Deferred.Deferred<void>
+  writing?: Deferred.Deferred<AgentOutcome>
+  // F40: 1-slot pending queue. When set, holds the input for a writer that
+  // should fire as soon as `writing` settles. Newer requests evict older
+  // pending values — the newest range is always a strict superset of the
+  // older one, so older pending checkpoints would only duplicate work.
+  pending?: TryStartCheckpointWriterInput
+}
+
+// ---------------------------------------------------------------------------
+// Layer implementation
+// ---------------------------------------------------------------------------
+
+export const layer: Layer.Layer<
+  Service,
+  never,
+  Session.Service | Bus.Service | Config.Service | TaskRegistry.Service | ActorRegistry.Service
+> = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    const config = yield* Config.Service
+    const taskRegistry = yield* TaskRegistry.Service
+    const actorRegistry = yield* ActorRegistry.Service
+    const bus = yield* Bus.Service
+    const scope = yield* Scope.Scope
+
+    // Operational artifacts remain the existing checkpoint owner until M2.
+    // A private, memoryless, missing or transitioning managed binding cannot use them.
+    const artifactsAllowed = (sessionID: SessionID) => {
+      if (Flag.OPEN_CLANK_PRIVATE_RUNTIME) return false
+      if (!ManagedProvider.enabled()) return true
+      const binding = managedSessionBinding(sessionID)
+      return !!binding && markerMatches(sessionID, binding) && binding.memoryEnabled && !binding.authority && !binding.transition
+    }
+
+    // Plain Map in the layer closure — same approach as compaction.ts
+    const writers = new Map<SessionID, WriterState>()
+
+    const tryStartCheckpointWriter = Effect.fn("SessionCheckpoint.tryStartCheckpointWriter")(function* (input: TryStartCheckpointWriterInput) {
+      if (!artifactsAllowed(input.sessionID)) return "skipped" as const
+      const existing = writers.get(input.sessionID)
+      if (existing) { existing.pending = input; return "queued" as const }
+      const slot: WriterState = { phase: "preparing", preparing: Deferred.makeUnsafe(), done: Deferred.makeUnsafe() }
+      writers.set(input.sessionID, slot)
+      return yield* startReserved(input, slot)
+    })
+    const handoff = (sessionID: SessionID, slot: WriterState, generation: WriterState["preparing"]) => Effect.gen(function* () {
+      if (writers.get(sessionID) !== slot || slot.preparing !== generation) return
+      const pending = slot.pending
+      slot.pending = undefined
+      if (pending) {
+        slot.phase = "preparing"
+        slot.writing = undefined
+        slot.preparing = Deferred.makeUnsafe()
+        yield* startReserved(pending, slot).pipe(Effect.ignore)
+      } else {
+        writers.delete(sessionID)
+        Deferred.doneUnsafe(slot.done, Effect.void)
+      }
+    })
+    const startReserved = (input: TryStartCheckpointWriterInput, slot: WriterState): Effect.Effect<TryStartCheckpointWriterResult> => {
+      const generation = slot.preparing
+      let workflowSource: WorkflowSource | undefined
+      return Effect.gen(function* () {
+      if (!artifactsAllowed(input.sessionID)) return "skipped" as const
+      if (Flag.OPENCLANK_DISABLE_CHECKPOINT) {
+        log.info("checkpointing disabled, skipping checkpoint", { sessionID: input.sessionID })
+        return "skipped" as const
+      }
+
+      // The write switch also gates checkpoint and operational-note creation.
+      // Existing authorized checkpoint reads and the scoped search tool keep
+      // working. The reads inside this function (prior checkpoint, progressDiff)
+      // exist only to feed the writer prompt, so short-circuiting loses no
+      // read capability.
+      //
+      // Default is ENABLED: absent config → write. The field name and polarity
+      // live in exactly one place (memory/write-gate.ts).
+      if (!isMemoryWriteEnabled(yield* config.get())) {
+        log.info("memory writing disabled, skipping checkpoint", { sessionID: input.sessionID })
+        return "skipped" as const
+      }
+
+      // Defensive: skip if called for a system-spawned session. With Task 27's
+      // writer-as-subagent migration this becomes mostly impossible, but the
+      // guard stays so future paths that fold a system-spawn actor into the
+      // main loop don't accidentally re-enter the writer.
+      if (yield* actorRegistry.isSystemSpawned(input.sessionID, "main")) {
+        log.info("tryStartCheckpointWriter skipping system-spawned session")
+        return "skipped" as const
+      }
+
+      // Mirror parent runLoop's view (prompt.ts:2036-2040) so the writer's
+      // ForkContext is byte-equal at the watermark moment. Reading the
+      // unfiltered session stream would let computeBoundary land on a
+      // subagent/prior-writer assistant turn and misalign the prefix cache.
+      // The newest rebuild boundary's tail is added back from the database.
+      const sessionInfo = yield* session.get(input.sessionID)
+      const window = yield* MessageV2.filterCompactedEffect(input.sessionID, {
+        contextFrom: sessionInfo.contextFrom,
+        contextWatermark: sessionInfo.contextWatermark,
+        agentID: "main",
+      })
+      const msgs = withRebuildTail(window, readRebuildTail(input.sessionID, window))
+      if (msgs.length === 0) {
+        log.info("no messages, skipping checkpoint", { sessionID: input.sessionID })
+        return "skipped" as const
+      }
+
+      // Compute boundary for last_checkpoint_message_id bookkeeping. Layer 6
+      // (Task 16): role-aware adjustment to ensure tool_use/tool_result pairs
+      // and same-message.id thinking blocks aren't split. OpenCode's ToolPart
+      // carries both use (input) and result (output) on the SAME message, so
+      // we project each ToolPart to both a tool_use and a tool_result block —
+      // pairing is intrinsically satisfied today and the algorithm acts as a
+      // no-op. Wiring is in place so future tool_result extraction
+      // (separate user message) will walk the boundary correctly
+      // without further changes here.
+      const candidateID = computeBoundary(msgs)
+      const candidateIdx = msgs.findIndex((m) => m.info.id === candidateID)
+      const adjustedIdx = adjustBoundaryForApiInvariants(
+        msgs.map((m) => ({
+          role: m.info.role,
+          id: m.info.id,
+          content: m.parts.flatMap((p) =>
+            p.type === "tool"
+              ? [
+                  { type: "tool_use", id: p.callID },
+                  { type: "tool_result", tool_use_id: p.callID },
+                ]
+              : [],
+          ),
+        })),
+        Math.max(candidateIdx, 0),
+      )
+      const endMessageID = msgs[adjustedIdx]?.info.id ?? candidateID
+
+      if (!artifactsAllowed(input.sessionID)) return "skipped" as const
+      if (!input.actorExecution || !input.admittedModel || input.admittedModel.providerID !== input.model.providerID || input.admittedModel.id !== input.model.modelID) {
+        yield* bus.publish(SessionStatus.Event.Status, { sessionID: input.sessionID, status: {
+          type: "notice", message: "Checkpoint unavailable: the admitted writer source or model is missing."
+        } }).pipe(Effect.ignore)
+        return "skipped" as const
+      }
+      const cfg = yield* config.get()
+      const caps = cfg.checkpoint?.push_caps ?? {}
+      const operational = yield* Effect.promise(() => readOperationalSnapshot(input.sessionID, input.actorExecution).catch(() => undefined))
+      if (!operational || operational.checkpoint.state === "unknown" || operational.checkpoint.state === "unavailable" ||
+          operational.checkpoint.operation?.state === "unknown") {
+        yield* bus.publish(SessionStatus.Event.Status, { sessionID: input.sessionID, status: {
+          type: "notice", message: "Checkpoint unavailable: the authorized workflow or an original write outcome needs attention."
+        } }).pipe(Effect.ignore)
+        return "skipped" as const
+      }
+      const previousFull = operational.checkpoint.state === "found" ? operational.checkpoint.text : ""
+      const priorTitles = new Set(extractTitlesFromLearning(previousFull))
+      const expectedCheckpointRevision = operational.checkpoint.state === "found" ? operational.checkpoint.revision : null
+      const rangeDesc = previousFull ? "Retain still-current content from the previous checkpoint." : "This is the first checkpoint of this session."
+
+      // v6: spawn writer as subagent — shared sessionID, automatic
+      // ActorRegistry registration, automatic tool whitelist enforcement
+      // via permission system. Replaces the legacy session.create + manual
+      // forkDetach + WriterState tracking that lived here pre-Task-27.
+      //
+      // Resolved via spawnRef rather than `yield* Actor.Service` to break the
+      // (Actor → SessionPrompt → SessionCheckpoint → Actor) layer cycle.
+      const actor = spawnRef.current
+      if (!actor) {
+        log.warn("tryStartCheckpointWriter skipping — Actor service unavailable", { sessionID: input.sessionID })
+        return "skipped" as const
+      }
+
+      // Axis B: branch forkContext shape on config.checkpoint.fork.
+      // - true  → preserve existing prefix-cache parent-fork behavior
+      //          (parent agent's system + tools, full slice up to watermark).
+      // - false → cold-start: writer's own system + tools, delta slice since
+      //          last_checkpoint_message_id (aligned past tool_use/tool_result).
+      // See spec 2026-06-09-checkpoint-writer-child-session-and-no-fork-fallback-design.md §3.
+      //
+      // The writer forks the parent's full prefix by default for prefix-cache
+      // reuse. Users who need cold-start delta-only behavior can set
+      // `checkpoint.fork: false` in their config.
+      const forkMode = cfg.checkpoint?.fork ?? true
+
+      const parentRow = yield* Effect.sync(() =>
+        Database.use((d) =>
+          d.select({ last: SessionTable.last_checkpoint_message_id })
+            .from(SessionTable)
+            .where(eq(SessionTable.id, input.sessionID))
+            .get(),
+        ),
+      ).pipe(Effect.catch(() => Effect.succeed(undefined as { last: MessageID | null } | undefined)))
+      const lastCheckpointMessageID = parentRow?.last ?? undefined
+      if (lastCheckpointMessageID && operational.checkpoint.state === "not_found") {
+        yield* bus.publish(SessionStatus.Event.Status, { sessionID: input.sessionID, status: {
+          type: "notice", message: "Checkpoint unavailable: its recorded boundary has no authorized checkpoint."
+        } }).pipe(Effect.ignore)
+        return "skipped" as const
+      }
+
+      // Hoisted watermark + delta computation: must run BEFORE session.create
+      // so an empty-delta fork:false call short-circuits to "skipped" without
+      // creating a child session or invoking actor.spawn. Pre-fix, the
+      // empty-delta path fell through to spawn → runLoop's
+      // `isForkAgent && !forkCtx → break` → settle watcher resolved success →
+      // parent's last_checkpoint_message_id advanced silently (stale checkpoint).
+      const watermarkIdx = msgs.findIndex((m) => m.info.id === endMessageID)
+      if (watermarkIdx < 0) {
+        log.warn("tryStartCheckpointWriter: watermark message not found, skipping", {
+          sessionID: input.sessionID,
+          endMessageID,
+        })
+        return "skipped" as const
+      }
+
+      // For fork:false only: precompute the aligned delta and bail if empty.
+      // fork:true uses msgs.slice(0, watermarkIdx + 1) which is never empty
+      // given msgs.length > 0 and watermarkIdx >= 0.
+      const lastIdx = lastCheckpointMessageID
+        ? msgs.findIndex((m) => m.info.id === lastCheckpointMessageID)
+        : -1
+      const rawDeltaStart = lastIdx >= 0 ? lastIdx + 1 : 0
+      const alignedStart = alignToNonToolResultUser(
+        msgs.map((m) => ({ info: { role: m.info.role }, parts: m.parts })),
+        rawDeltaStart,
+      )
+      const delta = forkMode ? [] : msgs.slice(alignedStart, watermarkIdx + 1)
+      if (!forkMode && delta.length === 0) {
+        // Empty delta under fork:false signals either (a) a degenerate
+        // session, or (b) a bug elsewhere advanced last_checkpoint_message_id
+        // past the watermark. Either way, spawning a writer would be a
+        // silent no-op that would still advance the watermark on settle —
+        // skip visibly so it's observable in logs.
+        log.warn("tryStartCheckpointWriter: empty delta under fork:false, skipping", {
+          sessionID: input.sessionID,
+          endMessageID,
+          lastCheckpointMessageID,
+        })
+        return "skipped" as const
+      }
+
+      // Capture parent's view at the watermark for prefix-cache alignment.
+      // See docs/superpowers/specs/2026-05-26-fork-agent-prefix-cache-design.md
+      //
+      // prefixCaptureRef is populated by SessionPrompt.layer to break the
+      // (ToolRegistry → SessionCheckpoint → ToolRegistry) layer cycle.
+      const buildPrefix = prefixCaptureRef.current
+      if (!buildPrefix) {
+        log.warn("tryStartCheckpointWriter: prefixCaptureRef not set, spawning without forkContext", {
+          sessionID: input.sessionID,
+        })
+      }
+      const selectedPrefixAccounting: { value?: { modelContextLimit: number; selectedPrefixTokens: number; outputMarginTokens: number } } = {}
+      const forkCtx: ForkContext | undefined = yield* (buildPrefix
+        ? Effect.gen(function* () {
+            const watermarkMsg = msgs[watermarkIdx]
+            const parentAgentName = (watermarkMsg.info as { agent?: string }).agent
+            // NOTE: parentAgentName guard is scoped to the forkMode:true branch only —
+            // fork:false is agent-name-independent (always passes "checkpoint-writer"
+            // to buildPrefix), so a missing parent agent field must not gate it.
+
+            if (forkMode) {
+              if (!parentAgentName) {
+                log.warn(
+                  "tryStartCheckpointWriter: watermark has no agent, fork:true requires parent agent — falling back to no forkContext",
+                  { sessionID: input.sessionID, endMessageID },
+                )
+                return undefined as ForkContext | undefined
+              }
+              // fork:true — preserve existing prefix-cache parent-fork behavior.
+              // Build system + tools + inheritedMessages snapshot via capture ref
+              // using the parent agent's identity and the full slice up to watermark.
+              // The closure inside SessionPrompt.layer resolves Agent.Info and Provider.Model.
+              const msgsAtWatermark = msgs.slice(0, watermarkIdx + 1)
+              const prefix = yield* buildPrefix({
+                sessionID: input.sessionID,
+                agentName: parentAgentName,
+                providerID: input.model.providerID,
+                modelID: input.model.modelID,
+                admittedModel: input.admittedModel,
+                msgs: msgsAtWatermark,
+              toolViewContext: input.toolViewContext,
+              })
+              selectedPrefixAccounting.value = prefix
+              return {
+                system: prefix.system,
+                tools: prefix.tools,
+                inheritedMessages: prefix.inheritedMessages,
+                parentPermission: prefix.parentPermission,
+                watermarkMsgID: endMessageID as MessageID,
+                model: {
+                  providerID: input.model.providerID as ProviderID,
+                  modelID: input.model.modelID as ModelID,
+                },
+              } satisfies ForkContext
+            }
+
+            // fork:false — cold-start: use the writer's own system + tools and
+            // a delta slice since the last checkpoint. capture() resolves the
+            // checkpoint-writer agent's own definition when agentName is
+            // "checkpoint-writer", so a single call returns:
+            //   - system + tools = writer's (because agentName === "checkpoint-writer"),
+            //   - inheritedMessages = the delta we pass in, converted to ModelMessage[],
+            //   - parentPermission = writer's own permission (used for tool-availability filter).
+            // Earlier draft considered two buildPrefix calls (one with msgs:[] for
+            // system+tools, one with msgs:delta for messages); rejected because
+            // buildLLMRequestPrefix `Effect.die`s if msgs has no user message.
+            // Delta is precomputed (and the empty-delta case is short-circuited)
+            // above, before session.create.
+            const writerPrefix = yield* buildPrefix({
+              sessionID: input.sessionID,
+              agentName: "checkpoint-writer",
+              providerID: input.model.providerID,
+              modelID: input.model.modelID,
+              admittedModel: input.admittedModel,
+              msgs: delta,
+              toolViewContext: input.toolViewContext,
+            })
+
+            selectedPrefixAccounting.value = writerPrefix
+            return {
+              system: writerPrefix.system,
+              tools: writerPrefix.tools,
+              inheritedMessages: writerPrefix.inheritedMessages,
+              parentPermission: writerPrefix.parentPermission,
+              watermarkMsgID: endMessageID as MessageID,
+              model: {
+                providerID: input.model.providerID as ProviderID,
+                modelID: input.model.modelID as ModelID,
+              },
+            } satisfies ForkContext
+          })
+        : Effect.succeed(undefined as ForkContext | undefined)).pipe(
+        Effect.catchCause((cause) => Effect.sync(() => {
+          log.warn("checkpoint full-context capture unavailable", { sessionID: input.sessionID, error: String(Cause.squash(cause)) })
+        }).pipe(Effect.as(undefined as ForkContext | undefined))),
+      )
+      if (!forkCtx) return "skipped" as const
+      if (!("workflow_artifact" in forkCtx.tools)) {
+        yield* bus.publish(SessionStatus.Event.Status, { sessionID: input.sessionID, status: {
+          type: "notice", message: "Checkpoint unavailable: the selected prefix does not admit the workflow writer."
+        } }).pipe(Effect.ignore)
+        return "skipped" as const
+      }
+      const accounting = selectedPrefixAccounting.value
+      if (!accounting || !Number.isSafeInteger(accounting.modelContextLimit) || accounting.modelContextLimit <= 0 ||
+          !Number.isSafeInteger(accounting.selectedPrefixTokens) || accounting.selectedPrefixTokens < 0 ||
+          !Number.isSafeInteger(accounting.outputMarginTokens) || accounting.outputMarginTokens < 0) {
+        yield* bus.publish(SessionStatus.Event.Status, { sessionID: input.sessionID, status: {
+          type: "notice", message: "Checkpoint unavailable: the selected writer prefix cannot be budgeted."
+        } }).pipe(Effect.ignore)
+        return "skipped" as const
+      }
+      const available = Math.max(0, accounting.modelContextLimit - accounting.selectedPrefixTokens - accounting.outputMarginTokens)
+      const instructionText = composeWriterPrompt({ rangeDesc, context: `Required expectedRevision for this checkpoint write: ${JSON.stringify(expectedCheckpointRevision)}` })
+      let writerBudget = Math.min(cfg.checkpoint?.reserved ?? 13_000, 13_000, Math.max(0, available - Token.estimate(instructionText)))
+      if (writerBudget <= 0) {
+        yield* bus.publish(SessionStatus.Event.Status, { sessionID: input.sessionID, status: {
+          type: "notice", message: "Checkpoint unavailable: the selected writer prefix leaves no context budget."
+        } }).pipe(Effect.ignore)
+        return "skipped" as const
+      }
+      const boundedWriter = (text: string, cap: number, label: string, sectionAware = false) => {
+        if (writerBudget <= 0) return `[${label} omitted from this context]`
+        const limit = Math.min(cap, writerBudget)
+        const result = sectionAware ? budgetTextSectionAware(text, limit, label, `Use workflow_artifact to read ${label}`) :
+          budgetText(text, limit, label, () => `Use workflow_artifact to read ${label}`)
+        writerBudget = Math.max(0, writerBudget - Token.estimate(result.text))
+        return result.text
+      }
+      const previous = previousFull ? boundedWriter(previousFull, caps.checkpoint ?? 11_000, "checkpoint", true) : ""
+      const notes = (operational.notes.state === "found" ? boundedWriter(operational.notes.text, caps.notes ?? 6000, "notes") : `[Notes: ${operational.notes.state}]`) +
+        (operational.notes.operation ? `\nOriginal notes operation ${operational.notes.operation.operationID}: ${operational.notes.operation.state}.` : "")
+      const workerLinks = recentWorkerLinks(input.sessionID, msgs.slice(Math.max(0, adjustedIdx - 31), adjustedIdx + 1))
+      const handoffs = workerLinks.length && writerBudget > 0
+        ? boundedWriter(workerLinks.join("\n"), 420, "worker handoff references") : ""
+      let progressTruncated = false
+      const progress = operational.progress.items.map((item) => {
+        const ref = progressReference(item)
+        const status = item.operation ? ` Original operation ${item.operation.operationID}: ${item.operation.state}.` : ""
+        if (item.state !== "found") return `${ref}: ${item.state}.${status}`
+        const before = writerBudget
+        const text = boundedWriter(item.text, 2000, "task progress")
+        if (Token.estimate(item.text) > Math.min(2000,before)) progressTruncated = true
+        return `${ref}:${status}\n${text}`
+      }).join("\n\n")
+      const context = [previous && `Previous checkpoint:\n${previous}`, `Notes:\n${notes}`,
+        handoffs && `Recent worker handoff references (partial history):\n${handoffs}`,
+        progress && `Associated task progress:\n${progress}`,
+        (!operational.progress.complete || progressTruncated) && "Task progress coverage is partial or unavailable."].filter(Boolean).join("\n\n")
+      const promptText = composeWriterPrompt({ rangeDesc, context: `Required expectedRevision for this checkpoint write: ${JSON.stringify(expectedCheckpointRevision)}\n\n${context}` })
+      if (Token.estimate(promptText) > available) {
+        yield* bus.publish(SessionStatus.Event.Status, { sessionID: input.sessionID, status: {
+          type: "notice", message: "Checkpoint unavailable: the writer prompt exceeds its selected-prefix budget."
+        } }).pipe(Effect.ignore)
+        return "skipped" as const
+      }
+      const encodedForkContext = yield* Effect.tryPromise({
+        try: () => encodeForkContext(forkCtx, { sessionID: input.sessionID, actorID: "main" }),
+        catch: (error) => error instanceof Error ? error : new Error(String(error)),
+      }).pipe(Effect.tapError((error) => Effect.sync(() => log.warn("checkpoint fork snapshot unavailable", {
+        sessionID: input.sessionID, error: error.message,
+      }))), Effect.orElseSucceed(() => undefined))
+      if (!encodedForkContext) return "skipped" as const
+
+      // Axis A: writer always runs in a fresh child session. This isolates the
+      // writer's messages and actor registration from the parent so:
+      //   - parent's message table sees zero new rows,
+      //   - parent's `sync.data.actor[parent]` does not include the writer,
+      //   - Ctrl+X subagent cycle / SubagentFooter / DialogSubagent / etc. are
+      //     all naturally clean (they all key on sessionID).
+      // The writer's checkpoint.md / memory.md / progress paths are absolute and
+      // computed from input.sessionID (parent) above, so file writes still target
+      // the parent's artifacts. Settle watcher below also targets parent.
+      // See spec 2026-06-09-checkpoint-writer-child-session-and-no-fork-fallback-design.md §2.
+      const writerChildSession = yield* session.create({
+        parentID: input.sessionID,
+        title: `checkpoint-writer: ${rangeDesc}`,
+      })
+
+      // Estimate delta tokens for observability. forkCtx.inheritedMessages is
+      // ModelMessage[]; an exact count requires the tokenizer, but a rough
+      // length heuristic is sufficient for the log line.
+      const deltaApproxBytes = JSON.stringify(forkCtx?.inheritedMessages ?? []).length
+      log.info("tryStartCheckpointWriter spawning", {
+        sessionID: input.sessionID,
+        childSessionID: writerChildSession.id,
+        mode: forkMode ? "fork" : "no-fork",
+        deltaApproxBytes,
+        rangeDesc,
+      })
+
+      return yield* Effect.uninterruptible(Effect.gen(function* () {
+      if (!artifactsAllowed(input.sessionID)) return "skipped" as const
+      workflowSource = input.actorExecution ? captureWorkflowSource(input.actorExecution) : undefined
+      if (!workflowSource) {
+        yield* bus.publish(SessionStatus.Event.Status, { sessionID: input.sessionID, status: {
+          type: "notice", message: "Checkpoint unavailable: the admitted writer source has expired."
+        } }).pipe(Effect.ignore)
+        return "skipped" as const
+      }
+      const result = yield* actor.spawn({
+        mode: "subagent",
+        sessionID: writerChildSession.id,
+        // Axis A: writer runs under child session, but its checkpoint.md /
+        // memory.md / progress paths AND CheckpointContext entries are keyed
+        // on the PARENT. The splitover plugin reads these via actor.preStop
+        // and must see parentSessionID to re-derive the right paths — without
+        // it, checkpointPath(child) returns an empty file and the plugin
+        // emits a false topic-missing reflection that loops the writer up to
+        // MAX_PRE_REACT.
+        parentSessionID: input.sessionID,
+        ...(workflowSource && input.actorExecution ? { parentActorID: input.actorExecution.actorID,
+          onActorID: (id: string) => {
+            if (!workflowSource || !bindWorkflowChild(workflowSource, writerChildSession.id, id)) {
+              if (workflowSource) releaseWorkflowSource(workflowSource)
+              return
+            }
+            CheckpointContext.set(input.sessionID, id, { priorTitles, expectedRevisions: [], expectedCheckpointRevision })
+          } } : {}),
+        agentType: "checkpoint-writer",
+        description: `checkpoint writer for session ${input.sessionID} covering ${rangeDesc}`,
+        task: promptText,
+        context: "full",
+        tools: ["workflow_artifact", "task"],
+        model: {
+          providerID: input.model.providerID as ProviderID,
+          modelID: input.model.modelID as ModelID,
+        },
+        background: true,
+        forkContext: forkCtx,
+        forkContextSource: { sessionID: input.sessionID, actorID: workflowSource && input.actorExecution ? input.actorExecution.actorID : "main" },
+        encodedForkContext,
+      })
+
+      const actorID = result.actorID
+
+
+      slot.writing = result.outcome
+      slot.phase = "running"
+      Deferred.doneUnsafe(slot.preparing, Effect.succeed({ status: "started" as const, writing: result.outcome }))
+
+      // Bookkeeping: the parent's last_checkpoint_message_id (the delta
+      // watermark — the point future rebuilds compute the message tail from)
+      // advances ONLY when the writer SUCCEEDS. This is a transactional
+      // invariant: the on-disk checkpoint content and the watermark move
+      // together, or neither moves. If the writer failed/was cancelled (e.g.
+      // `Aborted process` from worker teardown), advancing the watermark would
+      // "consume" messages the failed checkpoint never actually captured —
+      // silently dropping that span of context from every subsequent rebuild.
+      // Leaving the watermark put means the next writer re-covers the same
+      // delta, so nothing is lost. Fork into the layer's scope so the watcher
+      // survives tryStartCheckpointWriter returning (background: true) but stays
+      // tied to the layer's lifetime — no orphan fiber on shutdown.
+      let settled = false
+      yield* Effect.gen(function* () {
+        const outcome = yield* Deferred.await(result.outcome)
+        settled = writers.get(input.sessionID) === slot && slot.preparing === generation && slot.writing === result.outcome
+        if (!settled) return
+        slot.phase = "draining"
+        if (outcome.status === "success" && workflowSource && workflowCheckpointCommitted(workflowSource)) {
+          yield* Effect.sync(() =>
+            Database.use((d) =>
+              d.update(SessionTable)
+                .set({ last_checkpoint_message_id: endMessageID as MessageID })
+                .where(eq(SessionTable.id, input.sessionID))
+                .run(),
+            ),
+          )
+        } else {
+          // Classify instead of count. This is the replacement for the failure
+          // accounting deleted earlier in this branch: the same "is this writer
+          // broken?" question, answered by reading the outcome the writer already
+          // carries instead of accumulating a tally across thresholds.
+          //
+          // A TRANSIENT failure needs nothing here — the writer's LLM calls run
+          // through SessionRetry's ladder (session/retry.ts), so it is already
+          // post-retry, and the next threshold crossing re-covers the delta with
+          // fresher context. A DETERMINISTIC one (overflow / auth / bad request)
+          // will recur identically at every future threshold, so it is reported
+          // as the distinct thing it is rather than as one more copy of an
+          // undifferentiated line.
+          //
+          // Deliberately STATELESS: no per-session memory of previous failures.
+          // Such memory is a trend detector, and the trend is the deferred
+          // user-facing-warning change's own state — accumulating it here under a
+          // new name is precisely what this branch removed.
+          // `failure` is optional and its source is nullable — truthiness, never
+          // `=== undefined` (AGENTS.md, "Reading a nullable column").
+          const failure = outcome.status === "failure" ? outcome.failure : undefined
+          const classified = failure ? { kind: failure.kind, cause: failure.name } : {}
+          if (failure && !failure.retryable) {
+            log.warn(
+              "checkpoint writer failed deterministically — this will recur at every threshold until the cause is fixed; leaving watermark unchanged so the delta is re-covered",
+              { sessionID: input.sessionID, status: outcome.status, ...classified },
+            )
+          } else {
+            log.warn("checkpoint writer did not succeed — leaving watermark unchanged so the delta is re-covered", {
+              sessionID: input.sessionID,
+              status: outcome.status,
+              ...classified,
+            })
+          }
+        }
+
+        // F44: aggregate writer slice tokens and emit cache-perf metric so
+        // prefix-cache reuse is empirically observable. Degrades to zeros if
+        // aggregation fails (e.g. session messages unavailable post-shutdown).
+        const stats = yield* aggregateWriterCacheMetrics(session, input.sessionID, result.actorID).pipe(
+          Effect.catch(() =>
+            Effect.succeed({
+              total_input_tokens: 0,
+              cache_read_tokens: 0,
+              cache_write_tokens: 0,
+              cache_hit_rate: 0,
+              num_llm_calls: 0,
+            }),
+          ),
+        )
+        yield* bus
+          .publish(WriterCachePerf, {
+            sessionID: input.sessionID,
+            writerActorID: result.actorID,
+            status: outcome.status === "success" ? ("completed" as const) : ("failed" as const),
+            ...stats,
+          })
+          .pipe(Effect.ignore)
+
+      }).pipe(
+        Effect.ensuring(Effect.gen(function* () {
+          CheckpointContext.remove(input.sessionID, actorID)
+          if (workflowSource) releaseWorkflowSource(workflowSource)
+          if (settled) yield* handoff(input.sessionID, slot, generation)
+        })),
+        Effect.forkIn(scope),
+      )
+      return "started" as const
+      }))
+      }).pipe(Effect.onExit((exit) => Effect.gen(function* () {
+        if (writers.get(input.sessionID) !== slot || slot.preparing !== generation || slot.phase !== "preparing") return
+        if (workflowSource) releaseWorkflowSource(workflowSource)
+        Deferred.doneUnsafe(slot.preparing, Effect.succeed({ status: Exit.isSuccess(exit) ? "skipped" as const : "failed" as const }))
+        slot.phase = "draining"
+        yield* handoff(input.sessionID, slot, generation)
+      })))
+    }
+
+    const waitForWriterSettlement = Effect.fn("SessionCheckpoint.waitForWriterSettlement")(function* (
+      sessionID: SessionID,
+    ) {
+      const state = writers.get(sessionID)
+      if (!state) return { outcome: "no-writer" as const }
+
+      // v2 writers manage 3 file types and frequently take 60-180s, so the
+      // wait is bounded at 5min rather than left unbounded. AgentOutcome →
+      // WriterOutcome translation: success → "success", failure / cancelled →
+      // "failure", bound expired with the writer still unsettled → "timeout".
+      //
+      // The bound expiring is NOT a writer failure — the padding is not what
+      // keeps the two apart, the distinct return value is. This timeout does
+      // not cancel the writer, and the settle watcher that owns the watermark
+      // advance (see tryStartCheckpointWriter) awaits the SAME Deferred with no
+      // bound — so a slow-but-successful writer still advances
+      // last_checkpoint_message_id after we stop waiting. Reporting "failure"
+      // here made a slow-but-working writer indistinguishable from a broken
+      // one, which is why the two outcomes stay distinct. Callers must be able
+      // to tell "still in flight" from "settled unsuccessfully": prune arms its
+      // recovery gate on a settled TRANSIENT failure only, and "timeout" must
+      // never reach that gate — the writer may still be about to succeed.
+      const outcome = yield* Effect.gen(function* () {
+        const prepared = yield* Deferred.await(state.preparing)
+        if (prepared.status === "failed") return "failure" as const
+        if (prepared.status !== "started") return "no-writer" as const
+        return yield* Deferred.await(prepared.writing)
+      }).pipe(
+        Effect.timeout(300_000),
+        Effect.catch(() => Effect.succeed("timeout" as const)),
+      )
+      if (outcome === "timeout") {
+        // Hitting the bound must stay observable: the caller reports neither a
+        // success nor a failure, so without this line a writer stuck past 5min
+        // produces no log at all until it finally settles.
+        log.info("checkpoint writer wait bound expired — writer still in flight", {
+          sessionID,
+          boundMs: 300_000,
+        })
+        return { outcome: "timeout" as const }
+      }
+      if (outcome === "failure" || outcome === "no-writer") return { outcome }
+      if (outcome.status === "success") return { outcome: "success" as const }
+      // `failure` is optional and its source is nullable — truthiness, never
+      // `=== undefined` (AGENTS.md, "Reading a nullable column"). A cancelled
+      // outcome has no failure arm at all, so it lands here unclassified.
+      const failure = outcome.status === "failure" ? outcome.failure : undefined
+      return failure ? { outcome: "failure" as const, failure } : { outcome: "failure" as const }
+    })
+
+    // #1938's contract, unchanged: three flat values, "timeout" distinct from
+    // "failure". Projected off waitForWriterSettlement rather than duplicated,
+    // so the classification-aware caller and this one can never disagree.
+    const waitForWriter: (sessionID: SessionID) => Effect.Effect<WriterOutcome | "no-writer"> = Effect.fn(
+      "SessionCheckpoint.waitForWriter",
+    )(function* (sessionID: SessionID) {
+      return (yield* waitForWriterSettlement(sessionID)).outcome
+    })
+
+
+    const drainWriters = Effect.fn("SessionCheckpoint.drainWriters")(function* (input?: { timeoutMs?: number }) {
+      const timeoutMs = input?.timeoutMs ?? 120_000
+      const inFlight = [...writers.values()].map((state) => state.done)
+      if (inFlight.length === 0) return { drained: 0, timedOut: 0 }
+      log.info("draining checkpoint writers before shutdown", {
+        count: inFlight.length,
+        timeoutMs,
+      })
+
+      // Deferred.await ignores fiber interruption during shutdown because
+      // it resolves via Deferred.succeed in the detached writer. We only
+      // need a collective upper bound so a stuck writer doesn't block exit.
+      yield* Effect.all(inFlight.map((writing) => Deferred.await(writing)), { concurrency: "unbounded" }).pipe(
+        Effect.timeout(timeoutMs),
+        Effect.catch(() => Effect.succeed(undefined)),
+      )
+
+      // Classify the snapshot, not the live map: the settle watcher removes its
+      // entry only after a DB write, and writers started during the wait would
+      // otherwise be counted as timed out.
+      const settled = yield* Effect.forEach(inFlight, (writing) => Deferred.isDone(writing))
+      const drained = settled.filter(Boolean).length
+      const timedOut = inFlight.length - drained
+      if (timedOut > 0) log.warn("drain timed out, writers still pending", { drained, timedOut })
+      else log.info("drain complete", { drained })
+      return { drained, timedOut }
+    })
+
+    const hasMemoryOrTasks = Effect.fn("SessionCheckpoint.hasMemoryOrTasks")(function* (sessionID: SessionID) {
+      if (!artifactsAllowed(sessionID)) return false
+      const tasks = yield* taskRegistry.list({ session_id: sessionID, include_terminal: true })
+      if (tasks.length > 0) return true
+      // There is no scoped memory-presence admission in this interface yet.
+      return yield* Effect.die(new RecoverableError("Scoped memory presence is unavailable"))
+    })
+
+    // These public readers require an actual admitted turn; absent authority is unavailable.
+    const readCheckpoint = (sessionID: SessionID, actorExecution?: import("@/actor/turn").ActorExecutionIdentity) =>
+      Effect.promise(() => readOperationalSnapshot(sessionID, actorExecution))
+    const hasCheckpoint = Effect.fn("SessionCheckpoint.hasCheckpoint")(function* (sessionID: SessionID, actorExecution?: import("@/actor/turn").ActorExecutionIdentity) {
+      const snapshot = yield* readCheckpoint(sessionID, actorExecution)
+      if (snapshot.checkpoint.state === "unknown" || snapshot.checkpoint.state === "unavailable" || snapshot.checkpoint.operation?.state === "unknown")
+        return yield* Effect.die(new RecoverableError("Checkpoint status is unavailable"))
+      if (snapshot.checkpoint.state === "not_found") {
+        const row = yield* Effect.sync(() => Database.use((d) => d.select({ last: SessionTable.last_checkpoint_message_id })
+          .from(SessionTable).where(eq(SessionTable.id, sessionID)).get()))
+        if (row?.last) return yield* Effect.die(new RecoverableError("Recorded checkpoint is unavailable"))
+      }
+      return snapshot.checkpoint.state === "found"
+    })
+    const loadLatest = Effect.fn("SessionCheckpoint.loadLatest")(function* (sessionID: SessionID) {
+      const snapshot = yield* readCheckpoint(sessionID)
+      if (snapshot.checkpoint.state === "unknown" || snapshot.checkpoint.state === "unavailable" || snapshot.checkpoint.operation?.state === "unknown")
+        return yield* Effect.die(new RecoverableError("Checkpoint status is unavailable"))
+      return snapshot.checkpoint.state === "found" ? snapshot.checkpoint.text : undefined
+    })
+    const loadCheckpoints = Effect.fn("SessionCheckpoint.loadCheckpoints")(function* (sessionID: SessionID, _count: number) {
+      const snapshot = yield* readCheckpoint(sessionID)
+      if (snapshot.checkpoint.state === "unknown" || snapshot.checkpoint.state === "unavailable" || snapshot.checkpoint.operation?.state === "unknown")
+        return yield* Effect.die(new RecoverableError("Checkpoint status is unavailable"))
+      return snapshot.checkpoint.state === "found" ? [snapshot.checkpoint.text] : []
+    })
+    const renderIndex = Effect.fn("SessionCheckpoint.renderIndex")(function* (sessionID: SessionID) {
+      const snapshot = yield* readCheckpoint(sessionID)
+      if (snapshot.checkpoint.state === "unknown" || snapshot.checkpoint.state === "unavailable" || snapshot.checkpoint.operation?.state === "unknown")
+        return yield* Effect.die(new RecoverableError("Checkpoint status is unavailable"))
+      return snapshot.checkpoint.state === "found" ? "## Checkpoint\nCurrent checkpoint is included below." : "No checkpoint exists."
+    })
+
+    const renderRebuildContext = Effect.fn("SessionCheckpoint.renderRebuildContext")(function* (
+      sessionID: SessionID,
+      opts?: {
+        actorExecution?: import("@/actor/turn").ActorExecutionIdentity
+        modelContextLimit?: number
+        modelOutputMarginTokens?: number
+        lastMessageInfo?: LastMessageInfo
+        agentID?: string
+        digestUpTo?: MessageID
+        boundary?: MessageID
+        exclude?: ReadonlySet<MessageID>
+      },
+    ) {
+      // renderRebuildContext is for the user-facing main agent's context rebuild.
+      // Subagent-mode actors (system-spawned writers, model-spawned subagents)
+      // share the parent's session but don't have their own checkpoint state to
+      // render — return empty so the rebuild path is a no-op for them.
+      // Note: agentID === "main" must pass through. After F49+F50 the main
+      // agent's lastUser.agentID is "main" (DB row→info reconstruction in
+      // message-v2.ts populates info.agentID from agent_id column), and the
+      // runLoop calls this with that value. Treating "main" as subagent here
+      // would skip rebuild → fall through to F39 compaction → context loss.
+      if (opts?.agentID && opts.agentID !== "main") return { text: "", hasActivity: false }
+
+      // Decide whether a usable checkpoint exists using the WATERMARK
+      // (last_checkpoint_message_id), not the on-disk file's text. The writer's
+      // final step advances the watermark, and — per the transactional fix — it
+      // advances ONLY on success. So the watermark is the authoritative "there
+      // is a usable checkpoint" signal, and it's immune to the bootstrap
+      // template (which exists on disk before any writer succeeds).
+      //
+      //   - watermark set  → a prior writer succeeded → a usable checkpoint
+      //                       exists. If a writer is in-flight, await it
+      //                       (bounded) to prefer the fresher version, then
+      //                       rebuild; on timeout use the existing one.
+      //   - watermark unset → no usable checkpoint ever produced (first
+      //                       checkpoint). If a writer is in-flight, AWAIT it
+      //                       (bounded by a large safety timeout so a writer
+      //                       whose Deferred never resolves can't hang forever)
+      //                       rather than rebuilding off the bootstrap template
+      //                       mid-write. Then fall through to normal rendering:
+      //                       if the writer succeeded, the fresh checkpoint is
+      //                       now on disk; if it failed, rendering falls back to
+      //                       whatever else exists (ledger / notes / memory) and,
+      //                       when there is genuinely nothing, returns "" so the
+      //                       caller compacts. We do NOT force "" on failure here
+      //                       — that would suppress valid non-checkpoint context.
+      const inFlight = writers.get(sessionID)
+      if (inFlight) {
+        const watermarkBefore = yield* lastBoundary(sessionID).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        // Visible busy status so the wait shows progress, never a silent hang
+        // (the historical trigger for a manual abort → worker teardown wedge).
+        yield* bus
+          .publish(SessionStatus.Event.Status, {
+            sessionID,
+            status: { type: "busy", message: "Preparing conversation context…" },
+          })
+          .pipe(Effect.ignore)
+
+        // Prefer the fresher checkpoint: wait for the in-flight writer. When a
+        // usable checkpoint already exists (watermark set) the wait is short
+        // (REBUILD_WAIT_MS) — we can proceed with the existing one on timeout.
+        // When none exists yet (first checkpoint) we wait longer
+        // (FIRST_CHECKPOINT_WAIT_MS) since there's nothing else to rebuild from,
+        // bounded only to survive a writer whose Deferred never resolves.
+        const bound = watermarkBefore ? REBUILD_WAIT_MS : FIRST_CHECKPOINT_WAIT_MS
+        const waited = yield* Effect.race(
+          Deferred.await(inFlight.done).pipe(Effect.as("settled" as const)),
+          Effect.sleep(bound).pipe(Effect.as("timeout" as const)),
+        ).pipe(Effect.catch(() => Effect.succeed("settled" as const)))
+        log.info("rebuild proceeding after writer wait", { sessionID, waited, hadCheckpoint: !!watermarkBefore })
+      }
+
+      const cfg = yield* config.get()
+      const caps = cfg.checkpoint?.push_caps ?? {}
+      const allowArtifacts = artifactsAllowed(sessionID)
+
+      const tasks = yield* taskRegistry.list({ session_id: sessionID, include_terminal: true })
+
+      if (!allowArtifacts) return yield* Effect.die(new RecoverableError("Operational checkpoint context is unavailable"))
+      const operational = yield* readCheckpoint(sessionID, opts?.actorExecution)
+      if (operational.checkpoint.state === "unknown" || operational.checkpoint.state === "unavailable" || operational.checkpoint.operation?.state === "unknown")
+        return yield* Effect.die(new RecoverableError("Checkpoint status is unavailable"))
+      if (!Number.isSafeInteger(opts?.modelContextLimit) || opts!.modelContextLimit! <= 0 ||
+          !Number.isSafeInteger(opts?.modelOutputMarginTokens) || opts!.modelOutputMarginTokens! < 0 ||
+          opts!.modelOutputMarginTokens! >= opts!.modelContextLimit!)
+        return yield* Effect.die(new RecoverableError("Admitted model context budget is unavailable"))
+      const renderCeiling = opts!.modelContextLimit! - opts!.modelOutputMarginTokens!
+      let operationalBudget = Math.min(cfg.checkpoint?.reserved ?? 13_000, 13_000, renderCeiling)
+      const boundedContext = (text: string, cap: number, label: string, sectionAware = false) => {
+        if (operationalBudget <= 0) return `[${label} omitted from this context]`
+        const limit = Math.min(cap,operationalBudget)
+        const result = sectionAware ? budgetTextSectionAware(text, limit, label, `Additional content is omitted`) :
+          budgetText(text, limit, label, () => `Additional content is omitted`)
+        operationalBudget = Math.max(0,operationalBudget - Token.estimate(result.text))
+        return result.text
+      }
+      const checkpointText = operational.checkpoint.state === "found" ? boundedContext(operational.checkpoint.text, caps.checkpoint ?? 11_000, "checkpoint", true) : ""
+      const notesText = operational.notes.state === "found" ? boundedContext(operational.notes.text, caps.notes ?? 6000, "notes") : ""
+
+      const actors = yield* actorRegistry.listActive()
+
+      // Pull recent user messages (verbatim, FIFO-bounded). Done before the
+      // early-bail check so a session whose only signal is "user typed N
+      // prompts" still emits the section.
+      const recentUserCap = caps.recent_user ?? 16_000
+      const recentUserPerMsg = caps.recent_user_per_msg ?? 2_000
+      const recentUserEntries: string[] = []
+      if (recentUserCap > 0) {
+        // Fixed page ceiling sized comfortably above the token budget: at the
+        // 2K per-msg cap, 200 msgs ≈ 400K tokens, far past any recent_user cap,
+        // so the token loop below — not this limit — is what bounds the section.
+        // The only way 200 msgs could underflow the budget is hundreds of sub-
+        // 80-token prompts ("ok"/"continue"), which carry no anchors worth
+        // paging deeper for. Keeping a constant avoids a magic tokens/msg
+        // heuristic and a larger fetch+hydrate on every checkpoint.
+        // Exclude rebuild/compaction boundary messages: insertRebuildBoundary
+        // writes a role:"user" row carrying a checkpoint part + synthetic text
+        // holding the *previous* rebuild context. Re-ingesting it would fold
+        // each prior rebuild back in recursively (fractal bloat). userMsgText
+        // also drops synthetic text parts as a second guard.
+        const userMsgs = MessageV2.page({ sessionID, agentID: "main", limit: 200 }).items.filter(
+          (m) =>
+            m.info.role === "user" &&
+            !opts?.exclude?.has(m.info.id) &&
+            !m.parts.some((p) => p.type === "tool" || p.type === "checkpoint" || p.type === "compaction"),
+        )
+        // Iterate most-recent backward so FIFO drops oldest when total cap hits.
+        let remaining = recentUserCap
+        for (let i = userMsgs.length - 1; i >= 0; i--) {
+          const rawText = userMsgText(userMsgs[i].parts)
+          if (!rawText.trim()) continue
+          const entry = truncateVerbatimUserMsg(rawText, recentUserPerMsg, userMsgs[i].info.id)
+          const cost = Token.estimate(entry)
+          if (remaining - cost < 0) break
+          recentUserEntries.unshift(entry)
+          remaining -= cost
+        }
+      }
+
+      // Bail early if absolutely nothing to push: no tasks, no memory content, no live actors,
+      // no user messages.
+      if (
+        tasks.length === 0 &&
+        !checkpointText.trim() &&
+        !notesText.trim() && operational.notes.state === "not_found" && !operational.notes.operation &&
+        operational.progress.complete && operational.progress.items.length === 0 &&
+        actors.length === 0 &&
+        recentUserEntries.length === 0
+      ) {
+        return { text: "", hasActivity: false }
+      }
+
+      const lines: string[] = []
+
+      // F17: Explicit "already loaded" header. Anchors the active recall
+      // protocol's "look for this header" instruction in buildMemoryInstructions.
+      // File-backed sections are H1 + `File:` path; their ## children belong
+      // to that file. Non-file sections are also H1 so nothing nests under
+      // the previous file by accident.
+      lines.push(
+        "The following sections are admitted operational context already loaded in this message. Coverage may be partial where stated.",
+      )
+      lines.push("")
+
+      // Section: tasks ledger (hierarchical with subtasks).
+      const taskLines: string[] = []
+      if (tasks.length === 0) {
+        taskLines.push("(none)")
+      } else {
+        const topLevel = tasks.filter((t) => !t.parent_task_id)
+        const byParent = new Map<string, typeof tasks>()
+        for (const t of tasks) {
+          if (!t.parent_task_id) continue
+          const bucket = byParent.get(t.parent_task_id) ?? []
+          bucket.push(t)
+          byParent.set(t.parent_task_id, bucket)
+        }
+        const statusIcon = (s: string) =>
+          ({ open: "🔵", in_progress: "🔄", blocked: "🟡", done: "✅", abandoned: "❌" })[s] ?? s
+        const ledgerLines: string[] = []
+        for (const t of topLevel) {
+          ledgerLines.push(`- ${t.id} ${t.status} — ${t.summary}`)
+          const subs = byParent.get(t.id) ?? []
+          if (subs.length === 0) continue
+          const sublist = subs
+            .map((s) => `${statusIcon(s.status)}${s.id}`)
+            .join(" / ")
+          ledgerLines.push(`  Subtasks: ${sublist}`)
+        }
+        taskLines.push(truncate(ledgerLines.join("\n"), caps.tasks_ledger ?? 2000))
+      }
+      pushSection(lines, "Tasks ledger", taskLines.join("\n"))
+
+      // File-backed: session checkpoint body.
+      if (checkpointText.trim()) {
+        pushSection(lines, "Session checkpoint", checkpointText)
+      }
+
+      // Active actors (DB/registry, not a file).
+      if (actors.length > 0) {
+        const actorLines: string[] = []
+        let actorBudget = caps.actor_ledger ?? 500
+        for (const a of actors) {
+          const line = `- ${a.actorID} — ${a.status}, "${a.description}" (agent=${a.agent})`
+          const cost = Token.estimate(line)
+          if (actorBudget - cost < 0) break
+          actorLines.push(line)
+          actorBudget -= cost
+        }
+        pushSection(lines, "Active actors", actorLines.join("\n"))
+      }
+
+      // Recent user input (verbatim, FIFO, budget-bounded).
+      if (recentUserEntries.length > 0) {
+        pushSection(lines, "Recent user input (verbatim)", recentUserEntries.join("\n"))
+      }
+
+      const notesStatus = operational.notes.operation ? `Original notes operation ${operational.notes.operation.operationID}: ${operational.notes.operation.state}.` : ""
+      if (notesText.trim() || notesStatus) pushSection(lines, "Session notes", [notesText, notesStatus].filter(Boolean).join("\n"))
+      else if (operational.notes.state === "unknown" || operational.notes.state === "unavailable") pushSection(lines, "Session notes", `Notes ${operational.notes.state}.`)
+      let rebuildProgressBudget = Math.min(6000,operationalBudget)
+      let rebuildProgressPartial = !operational.progress.complete
+      for (const item of operational.progress.items) {
+        const status = item.operation ? `Original operation ${item.operation.operationID}: ${item.operation.state}.` : ""
+        let text = `Progress ${item.state}.`
+        if (item.state === "found" && rebuildProgressBudget > 0) {
+          const bounded = budgetText(item.text, Math.min(2000,rebuildProgressBudget), "task progress", () => "Additional content is omitted")
+          text = bounded.text
+          rebuildProgressBudget -= Token.estimate(text)
+          rebuildProgressPartial ||= bounded.truncated
+        } else if (item.state === "found") { text = "Progress omitted from this context."; rebuildProgressPartial = true }
+        pushSection(lines, `Task progress ${item.taskRef.taskID}`, [progressReference(item),text,status].filter(Boolean).join("\n"))
+      }
+      if (rebuildProgressPartial) pushSection(lines, "Task progress coverage", "Progress coverage is partial or unavailable.")
+
+      // Section: Recent activity — messages that already exist after the
+      // watermark at insert time, as a compact name+args list. The boundary
+      // is appended after them, so this list is the only form in which they
+      // reach later windows.
+      // Slice from opts.boundary (the watermark this insert is using) —
+      // re-reading lastBoundary here can disagree with the insert if a
+      // concurrent writer advances the watermark between the two reads.
+      let hasActivity = false
+      if (opts?.digestUpTo) {
+        const digestUpTo = opts.digestUpTo
+        const boundaryID = opts.boundary
+        if (boundaryID) {
+          // Main slice only: subagent activity must not appear as if the
+          // main agent performed it.
+          const all = yield* session.messages({ sessionID })
+          const tail = all.filter((m) => m.info.id > boundaryID && m.info.id <= digestUpTo && !opts.exclude?.has(m.info.id))
+          const workerLinks = recentWorkerLinks(sessionID, tail)
+          if (workerLinks.length && operationalBudget > 0) {
+            pushSection(lines, "Recent worker handoff references (partial history)",
+              boundedContext(workerLinks.join("\n"), 420, "worker handoff references"))
+          }
+          const activity = renderTailDigest(tail)
+          if (activity) {
+            hasActivity = true
+            lines.push("")
+            lines.push(activity)
+          }
+        }
+      }
+
+      // Section 10: seam framing. Only claim a Recent activity list when one
+      // was actually rendered — a silent render bail would otherwise leave
+      // prose pointing at a section that does not exist.
+      lines.push("")
+      lines.push(
+        hasActivity
+          ? "This session is continued from a checkpoint. The blocks above cover earlier history and the recent activity list. Resume the last task from that list and any live messages after it. Do not recap this dump."
+          : "This session is continued from a checkpoint. The blocks above cover earlier history. Resume the last task from the most recent live messages. Do not recap this dump.",
+      )
+
+      // Section 11: tail-aware system reminder, chosen from how the tail ends:
+      // a tool step → continue the loop, a tool result → process it. A
+      // finished reply or a user message needs none; the next request is the
+      // user's.
+      const info = opts?.lastMessageInfo
+      if (info) {
+        const reminder = (() => {
+          switch (info.role) {
+            case "assistant":
+              return info.finish === "tool-calls" ? autonomousLoopReminder() : ""
+            case "tool":
+              return toolResultContinueReminder()
+            case "user":
+              return ""
+          }
+        })()
+        if (reminder) {
+          lines.push("")
+          lines.push(reminder)
+        }
+      }
+
+      const rendered = lines.join("\n")
+      if (Token.estimate(rendered) > renderCeiling)
+        return yield* Effect.die(new RecoverableError("Rebuild context exceeds the admitted model budget"))
+      return { text: rendered, hasActivity }
+    })
+
+    const lastBoundary = Effect.fn("SessionCheckpoint.lastBoundary")(function* (sessionID: SessionID) {
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db.select({ last_checkpoint_message_id: SessionTable.last_checkpoint_message_id })
+            .from(SessionTable)
+            .where(eq(SessionTable.id, sessionID))
+            .get(),
+        ),
+      )
+      // Two independent absences meet in this one expression, and only one of
+      // them is `undefined`:
+      //
+      //   row is undefined      -> no such session row. Drizzle normalises the
+      //                            driver's null to undefined here (measured:
+      //                            bun:sqlite's .get() returns null, Drizzle
+      //                            returns undefined), so this half is honest.
+      //   column is null        -> the session exists but no writer has set the
+      //                            watermark yet. SQL NULL, faithfully mapped to
+      //                            JS null, because the column is nullable
+      //                            (session.sql.ts: text().$type<MessageID>()
+      //                            with no .notNull()).
+      //
+      // So `row?.last_checkpoint_message_id` is `MessageID | null | undefined`.
+      // Callers only ever ask "is there a boundary to rebuild from", for which
+      // the last two are the same answer, so flattening to `undefined` is right
+      // — it also matches Drizzle's own row-level convention.
+      //
+      // The flattening is written as an ANNOTATION rather than an `as` cast on
+      // purpose. A cast would let the union be narrowed by assertion, which is
+      // how this went wrong before: the previous version claimed
+      // `as MessageID | undefined` while returning `null`, and a caller that
+      // then wrote `boundary !== undefined` got a condition that is always true
+      // — a guard that typechecks, reads correctly, and does nothing. Every
+      // other caller happened to test truthiness (`!boundary` at prompt.ts:413
+      // and `watermarkBefore ?` at :1131) and so never noticed. With an
+      // annotation, dropping the `?? undefined` is a
+      // compile error instead of a silent lie.
+      const boundary: MessageID | undefined = row?.last_checkpoint_message_id ?? undefined
+      return boundary
+    })
+
+    const isWriterRunning = Effect.fn("SessionCheckpoint.isWriterRunning")(function* (sessionID: SessionID) {
+      return writers.has(sessionID)
+    })
+
+    const insertRebuildBoundary = Effect.fn("SessionCheckpoint.insertRebuildBoundary")(function* (input: {
+      sessionID: SessionID
+      boundary: MessageID
+      actorExecution?: import("@/actor/turn").ActorExecutionIdentity
+      modelContextLimit?: number
+      modelOutputMarginTokens?: number
+      agentID?: string
+      agent: string
+      model: { providerID: string; modelID: string }
+    }) {
+      // The tail is everything after the watermark at insert time; callers
+      // hold a window read before their current step, so it is read here.
+      // Unanswered user messages at its end are copied onto the boundary in
+      // full and stay out of the digest. Every input the inbox still holds
+      // undelivered is recorded, including ones an earlier boundary deferred,
+      // so the newest boundary alone can bring back those that end unsent.
+      const undelivered = undeliveredInputs(input.sessionID)
+      const deferredInputs = [...undelivered].toSorted()
+      const tail = conversationAfter(input.sessionID, undelivered, input.boundary)
+      const answered = tail.findLastIndex((m) => m.info.role !== "user") + 1
+      const unanswered = tail.slice(answered)
+      const digestUpTo = tail[answered - 1]?.info.id
+      const newest = MessageV2.page({ sessionID: input.sessionID, limit: 1 }).items[0]
+      const ending = tail.at(-1) ?? newest
+      const rendered = yield* renderRebuildContext(input.sessionID, {
+        actorExecution: input.actorExecution,
+        modelContextLimit: input.modelContextLimit,
+        modelOutputMarginTokens: input.modelOutputMarginTokens,
+        lastMessageInfo: ending ? computeLastMessageInfo([ending.info]) : undefined,
+        agentID: input.agentID,
+        digestUpTo,
+        boundary: input.boundary,
+        exclude: new Set([...unanswered.map((m) => m.info.id), ...undelivered]),
+      })
+      if (!rendered.text || (digestUpTo && !rendered.hasActivity)) return false
+
+      const indexText = "## Checkpoint\nCurrent admitted checkpoint is included below."
+
+      const msg = yield* session.updateMessage({
+        id: MessageID.ascending(),
+        role: "user" as const,
+        model: { providerID: input.model.providerID as ProviderID, modelID: input.model.modelID as ModelID },
+        sessionID: input.sessionID,
+        agent: input.agent,
+        // Never earlier than the tail, even if the clock went back.
+        time: { created: Math.max(Date.now(), newest?.info.time.created ?? 0) },
+      })
+
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: msg.id,
+        sessionID: input.sessionID,
+        type: "checkpoint",
+        checkpointDir: "",
+        checkpointNumber: 0,
+        coveredUpTo: input.boundary,
+        ...(digestUpTo && rendered.hasActivity ? { digestUpTo } : {}),
+        ...(deferredInputs.length > 0 ? { deferredInputs } : {}),
+      })
+
+      if (indexText) {
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID: input.sessionID,
+          type: "text",
+          synthetic: true,
+          text: indexText,
+        })
+      }
+
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: msg.id,
+        sessionID: input.sessionID,
+        type: "text",
+        synthetic: true,
+        text: rendered.text,
+      })
+
+      const actorsText = yield* actorRegistry
+        .renderForAgent(input.sessionID)
+        .pipe(Effect.catch(() => Effect.succeed("")))
+      if (actorsText) {
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID: input.sessionID,
+          type: "text",
+          synthetic: true,
+          text: actorsText,
+        })
+      }
+
+      for (const message of unanswered) {
+        for (const part of message.parts) {
+          if (part.type === "text" && !part.ignored) {
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: msg.id,
+              sessionID: input.sessionID,
+              type: "text",
+              synthetic: true,
+              text: part.text,
+              ...(part.metadata ? { metadata: part.metadata } : {}),
+            })
+          }
+          if (part.type === "file") {
+            yield* session.updatePart({ ...part, id: PartID.ascending(), messageID: msg.id, sessionID: input.sessionID })
+          }
+        }
+      }
+
+      return true
+    })
+
+    return Service.of({
+      busyGuard: (sessionID: SessionID) => () => writers.has(sessionID),
+      tryStartCheckpointWriter,
+      waitForWriter,
+      waitForWriterSettlement,
+      drainWriters,
+      hasMemoryOrTasks,
+      hasCheckpoint,
+      loadLatest,
+      loadCheckpoints,
+      renderIndex,
+      renderRebuildContext,
+      lastBoundary,
+      isWriterRunning,
+      insertRebuildBoundary,
+    })
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// Default layer
+// ---------------------------------------------------------------------------
+
+// `defaultLayer` no longer requires `Actor.Service`: SessionCheckpoint reaches
+// the Actor implementation through the late-bound `spawnRef` (see
+// `actor/spawn-ref.ts`). This deliberately breaks the otherwise-unresolvable
+// layer cycle Actor → SessionPrompt → SessionCheckpoint → Actor. The AppLayer
+// constructs `Actor.appLayer` separately; that variant wraps the same
+// `Actor.layer`, whose initialiser populates `spawnRef` (see
+// `actor/spawn.ts`), and `tryStartCheckpointWriter` reads the ref at call time.
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(Session.defaultLayer),
+    Layer.provide(Bus.layer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(TaskRegistry.defaultLayer),
+    Layer.provide(ActorRegistry.defaultLayer),
+  ),
+)
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers
+// ---------------------------------------------------------------------------
+
+const { runPromise } = makeRuntime(Service, defaultLayer)
+
+export async function hasCheckpoint(input: { sessionID: SessionID }) {
+  return runPromise((svc) => svc.hasCheckpoint(input.sessionID))
+}
+
+export async function loadLatest(input: { sessionID: SessionID }) {
+  return runPromise((svc) => svc.loadLatest(input.sessionID))
+}
+
+export async function loadCheckpoints(input: { sessionID: SessionID; count: number }) {
+  return runPromise((svc) => svc.loadCheckpoints(input.sessionID, input.count))
+}
+
+export async function renderIndex(input: { sessionID: SessionID }) {
+  return runPromise((svc) => svc.renderIndex(input.sessionID))
+}
+
+export async function renderRebuildContext(input: {
+  sessionID: SessionID
+  lastMessageInfo?: LastMessageInfo
+  agentID?: string
+}) {
+  const rendered = await runPromise((svc) =>
+    svc.renderRebuildContext(input.sessionID, { lastMessageInfo: input.lastMessageInfo, agentID: input.agentID }),
+  )
+  return rendered.text
+}
+
+export async function lastBoundary(input: { sessionID: SessionID }) {
+  return runPromise((svc) => svc.lastBoundary(input.sessionID))
+}
+
+export async function isWriterRunning(input: { sessionID: SessionID }) {
+  return runPromise((svc) => svc.isWriterRunning(input.sessionID))
+}
+
+export * as SessionCheckpoint from "./checkpoint"
+
+// Test-only re-export so test code can call composeWriterPrompt without
+// triggering the full SessionCheckpoint Service stack.
+export { composeWriterPrompt as composeWriterPromptForTest }

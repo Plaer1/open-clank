@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import hmac
 import json
 import sqlite3
@@ -68,7 +69,16 @@ def _field(name):
             f"json_extract(p.content, '$.{name}')) END")
 
 
+def _field_type(name):
+    # json_extract serializes objects as strings. Preserve actual JSON type
+    # before treating a reported tool value as a name.
+    return ("CASE WHEN json_valid(p.content) THEN COALESCE("
+            f"NULLIF(json_type(p.content, '$.mimo.part.{name}'),'null'), "
+            f"NULLIF(json_type(p.content, '$.{name}'),'null')) END")
+
+
 TOOL = f"COALESCE({_field('tool')}, {_field('tool_name')}, {_field('function.name')}, {_field('name')})"
+TOOL_TYPE = f"COALESCE({_field_type('tool')}, {_field_type('tool_name')}, {_field_type('function.name')}, {_field_type('name')})"
 STATUS = f"COALESCE({_field('state.status')}, {_field('status')})"
 LATEST = """NOT EXISTS (SELECT 1 FROM conversation_parts newer
  WHERE newer.owner=p.owner AND newer.chat_id=p.chat_id AND newer.actor_id=p.actor_id
@@ -76,12 +86,20 @@ LATEST = """NOT EXISTS (SELECT 1 FROM conversation_parts newer
 COLUMNS = f"""p.seq,p.chat_id,p.actor_id,p.message_id,p.part_id,p.revision,
 p.runtime_generation,p.event_sequence,p.event_workspace,p.event_project,p.role,p.part_type,
 p.content_hash,p.time_created,p.time_updated,p.tombstone,
-{TOOL} AS tool_name, {STATUS} AS observed_status,
+{TOOL} AS tool_name, {TOOL_TYPE} AS tool_name_type, {STATUS} AS observed_status,
 {_field('state.time.start')} AS tool_start_ms, {_field('state.time.end')} AS tool_end_ms,
 {_field('skill')} AS skill_name, {_field('parentID')} AS parent_id,
 {_field('operation_id')} AS operation_id, {_field('attempt_id')} AS attempt_id,
 {_field('root_operation_id')} AS root_operation_id,
 length(p.content) AS content_chars"""
+
+
+def tool_usage_join_handle(owner, account, chat, holder, session, root, actor, execution):
+    """Content-free private join key; not an authorization credential."""
+    if (not all(isinstance(v, str) and 0 < len(v) <= 512 for v in (account,chat,holder,session,root,actor))
+            or type(execution) is not int or execution < 0):
+        return None
+    return identity_handle(owner, "operation_id", _json(["tool-usage.v1",account,chat,holder,session,root,actor,execution]))
 
 
 def normalize_filters(filters=None):
@@ -401,7 +419,7 @@ class LoggingProjection:
             # reader/cursor lifecycle or optional advanced capture dependency.
             from services.stats.tool_evidence import coalesce_facts, cohort
             tool_rows = conn.execute(f"SELECT {COLUMNS} FROM conversation_parts p WHERE {where} "
-                                    "AND p.part_type IN ('tool','tool_call','tool_result','tool_output') "
+                                    "AND p.part_type IN ('tool','tool_call','tool_result','tool_use','tool_output') "
                                     "ORDER BY p.seq LIMIT ?", [*args, MAX_FACTS + 1]).fetchall()
             tool_coverage = {"state": "partial" if len(tool_rows) > MAX_FACTS else "reported", "source_revision": revision}
             facts = coalesce_facts(owner, [self._fact(owner, r) for r in tool_rows[:MAX_FACTS]])
@@ -421,7 +439,8 @@ class LoggingProjection:
                         **metrics.get(r["chat_id"], {"tokens": {"value": None, "state": "unavailable", "unit": "tokens"},
                             "token_metrics": {}, "cost": {"value": None, "amount": None, "currency": None, "state": "unpriced"},
                             "provider_identities": [], "model_identities": [], "workspace_identity": None}),
-                        "tools": cohort(by_session.get(r["chat_id"], []), tool_coverage)}
+                        "tools": cohort(by_session.get(r["chat_id"], []), tool_coverage),
+                        "failure_tool_signatures": self._failure_tool_signatures(owner, by_session.get(r["chat_id"], []), tool_coverage)}
                 item['archive_message_count'] = dict(item['message_count'])
                 host_messages = host_sources.get(r['chat_id'], set())
                 item['host_conversation_available'] = bool(host_messages)
@@ -492,7 +511,12 @@ class LoggingProjection:
             if facts_only:
                 where += " AND p.part_type IN ('tool','tool_call','tool_result','tool_use','tool_output')"
             body = f",substr(p.content,1,{MAX_BODY_CHARS}) AS body" if include_bodies else ""
-            rows = conn.execute(f"SELECT {COLUMNS}{body} FROM conversation_parts p WHERE {where} "
+            timing = ""
+            if facts_only:
+                names = {column[1] for column in conn.execute("PRAGMA table_info(conversation_parts)")}
+                if "qualified_tool_json" in names:
+                    timing = ",p.qualified_tool_json AS qualified_tool_json,CASE WHEN length(CAST(p.content AS BLOB))<=1048576 THEN p.content END AS qualified_content"
+            rows = conn.execute(f"SELECT {COLUMNS}{body}{timing} FROM conversation_parts p WHERE {where} "
                                 "ORDER BY (SELECT MIN(m.seq) FROM conversation_parts m WHERE m.owner=p.owner AND m.chat_id=p.chat_id "
                                 "AND m.actor_id=p.actor_id AND m.message_id=p.message_id), p.event_sequence ASC, "
                                 "(SELECT MIN(a.seq) FROM conversation_parts a WHERE a.owner=p.owner AND a.chat_id=p.chat_id "
@@ -501,7 +525,7 @@ class LoggingProjection:
             items, size = [], 0
             for row in rows[:limit]:
                 _check(cancel_event, deadline)
-                item = self._fact(owner, row) if facts_only else self._part(owner, row, include_bodies)
+                item = self._fact(owner, row, self._archive_owner(owner)) if facts_only else self._part(owner, row, include_bodies)
                 amount = len(_json(item).encode())
                 if size + amount > MAX_RESPONSE_BYTES:
                     break
@@ -524,6 +548,125 @@ class LoggingProjection:
             reason = "body_truncated" if any(i.get("body_truncated") for i in items) else None
             return self._envelope(owner, items, revision, query, cursor, offset + len(items), limit, more, reason=reason)
 
+    def clankshop_activity(self, account, chat, workspace, session, map_revision, binding_revision,
+                           holder, generation, cursor=None, *, limit=64, cancel_event=None, deadline=None):
+        """Bounded body-free archive delta; an invalidated prefix requires a fresh baseline."""
+        if (not all(isinstance(v, str) and v and len(v) <= 512 for v in (account, chat, workspace, session, holder))
+                or any(type(v) is not int or v < 0 for v in (map_revision, binding_revision, generation))
+                or type(limit) is not int or not 1 <= limit <= 100):
+            raise ValueError("invalid activity scope")
+        stat = Path(self.archive_path).stat()
+        scope = _digest([account, chat, workspace, session, map_revision, binding_revision, holder, generation, stat.st_dev, stat.st_ino])
+        previous = None
+        if cursor is not None:
+            try:
+                if not isinstance(cursor, str) or len(cursor) > 2048: raise ValueError()
+                data, mac = cursor.split('.')
+                if not hmac.compare_digest(mac, hmac.new(self.cursor_secret, data.encode(), hashlib.sha256).hexdigest()): raise ValueError()
+                previous = json.loads(base64.urlsafe_b64decode(data + '=' * (-len(data) % 4)))
+                if (set(previous) != {'scope', 'seq', 'anchor'} or previous['scope'] != scope
+                    or type(previous['seq']) is not int or previous['seq'] < 0
+                    or (previous['anchor'] is not None and (not isinstance(previous['anchor'], str) or len(previous['anchor']) != 64))): raise ValueError()
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                return {'state': 'resync', 'reason': 'cursor_invalid_or_scope_changed', 'items': [], 'cursor': None}
+        with self._read(cancel_event, deadline) as conn:
+            if conn.execute('SELECT 1 FROM conversation_archive_deleted_chats WHERE owner=? AND chat_id=?', (account, chat)).fetchone():
+                return {'state': 'resync', 'reason': 'chat_erased', 'items': [], 'cursor': None}
+            def anchor(at):
+                if at == 0: return None
+                row = conn.execute('SELECT seq,actor_id,message_id,part_id,revision,content_hash,tombstone FROM conversation_parts WHERE owner=? AND chat_id=? AND seq=?', (account,chat,at)).fetchone()
+                return _digest(tuple(row)) if row else None
+            if previous is None:
+                latest = conn.execute('SELECT seq FROM conversation_parts WHERE owner=? AND chat_id=? ORDER BY seq DESC LIMIT 1', (account,chat)).fetchone()
+                seq = latest[0] if latest else 0
+                state = 'baseline'
+                rows = []
+            else:
+                seq = previous['seq']
+                if (seq and anchor(seq) is None) or anchor(seq) != previous['anchor']:
+                    return {'state': 'resync', 'reason': 'archive_prefix_changed', 'items': [], 'cursor': None}
+                names = {col[1] for col in conn.execute('PRAGMA table_info(conversation_parts)')}
+                if 'qualified_tool_json' not in names:
+                    return {'state': 'unavailable', 'reason': 'qualified_evidence_unavailable', 'items': [], 'cursor': None}
+                rows = conn.execute(f"SELECT {COLUMNS},p.qualified_tool_json,CASE WHEN length(CAST(p.content AS BLOB))<=1048576 THEN p.content END AS qualified_content FROM conversation_parts p WHERE p.owner=? AND p.chat_id=? AND p.seq>? ORDER BY p.seq LIMIT ?", (account,chat,seq,limit+1)).fetchall()
+                state = 'partial' if len(rows)>limit else 'delta'
+                rows = rows[:limit]
+                if rows: seq = rows[-1]['seq']
+            items = []
+            novelty_bounded = True
+            for row in rows:
+                _check(cancel_event, deadline)
+                if row['tombstone'] or row['event_workspace'] not in (None, workspace): continue
+                fact = self._fact(account, row, archive_owner=account)
+                try:
+                    proof = json.loads(row['qualified_tool_json'])
+                    evidence = proof['evidence']; content=row['qualified_content']
+                    if (type(proof) is not dict or set(proof)!={'version','account','chat','holder','evidence'}
+                            or proof['account']!=account or proof['chat']!=chat or proof['holder']!=holder
+                            or type(evidence) is not dict or evidence.get('sessionID')!=session
+                            or evidence.get('actorID')!=row['actor_id'] or evidence.get('messageID')!=row['message_id']
+                            or evidence.get('partID')!=row['part_id'] or evidence.get('contentSHA256')!=row['content_hash']
+                            or type(content) is not str or hashlib.sha256(content.encode('utf-8')).hexdigest()!=row['content_hash']):continue
+                    part=json.loads(content); part_state=part.get('state') if type(part) is dict else None
+                    if (type(part_state) is not dict or part.get('type')!='tool' or part.get('id')!=row['part_id']
+                            or part.get('sessionID')!=session or part.get('messageID')!=row['message_id']
+                            or part.get('callID')!=evidence.get('callID')):continue
+                    if proof['version']==1 and fact.get('qualified_tool'):
+                        phase='terminal'; coverage='qualified_terminal'
+                        outcome={'completed':'success','error':'failure'}.get(part_state.get('status'))
+                        if outcome is None:continue
+                    elif proof['version']==2:
+                        fields={'version','algorithm','clockID','sessionID','rootOperationID','actorID','executionRevision','innerTurnID','messageID','partID','callID','phase','sequence','observedUS','wallObservedMS','contentSHA256'}
+                        if (set(evidence)!=fields or type(evidence['version']) is not int or evidence['version']!=2
+                                or evidence['algorithm']!='ed25519' or evidence['phase'] not in ('started','progress')
+                                or type(evidence['sequence']) is not int or not 1<=evidence['sequence']<=9007199254740991
+                                or (evidence['phase']=='started')!=(evidence['sequence']==1)
+                                or any(type(evidence[k]) is not int or not 0<=evidence[k]<=9007199254740991 for k in ('executionRevision','observedUS','wallObservedMS'))
+                                or any(type(evidence[k]) is not str or not evidence[k] or len(evidence[k])>(128 if k=='actorID' else 256) for k in ('sessionID','rootOperationID','actorID','innerTurnID','messageID','partID','callID'))
+                                or type(evidence['clockID']) is not str or not re.fullmatch(r'[0-9a-f]{32}',evidence['clockID'])
+                                or part.get('execution')!='started' or part_state.get('status')!='running'):continue
+                        phase=evidence['phase']; coverage='qualified_activity'; outcome=None
+                    else:continue
+                    allowed={'read','write','edit','grep','glob','bash','skill','question','webfetch'}
+                    name=part.get('tool'); known=type(name) is str and name in allowed
+                    label=('Tool: '+name) if known else 'Tool action'
+                    label_basis='reported_tool_name' if known else 'generic'
+                    first_activity = first_terminal = False
+                    if phase in ('started', 'terminal'):
+                        # Inspect proof versions of bounded prior revisions for
+                        # this indexed Archive part without reading old content.
+                        prior_versions = conn.execute(
+                            """SELECT CASE WHEN length(CAST(qualified_tool_json AS BLOB)) <= 16384
+                                           AND json_valid(qualified_tool_json)
+                                    THEN json_extract(qualified_tool_json, '$.version') END AS proof_version
+                               FROM conversation_parts
+                               WHERE owner=? AND chat_id=? AND actor_id=? AND message_id=? AND part_id=? AND revision<?
+                               ORDER BY revision LIMIT 65""",
+                            (account, chat, row['actor_id'], row['message_id'], row['part_id'], row['revision']),
+                        ).fetchall()
+                        if len(prior_versions) <= 64:
+                            versions = [old['proof_version'] for old in prior_versions]
+                            first_activity = not any(version in (1, 2) for version in versions)
+                            first_terminal = phase == 'terminal' and 1 not in versions
+                        else:
+                            novelty_bounded = False
+                    items.append({'eventId': fact['event_id'], 'sourceRef': fact['source_ref'],
+                        'sourceSequence': row['event_sequence'], 'sourceRevision': row['revision'],
+                        'runtimeGeneration': row['runtime_generation'],
+                        'sessionId': session, 'actorId': row['actor_id'],
+                        'executionRevision': evidence['executionRevision'],'callId':evidence['callID'],
+                        'rootOperationId': evidence['rootOperationID'], 'state': phase, 'outcome':outcome,
+                        'label': label, 'labelBasis':label_basis, 'coverage': coverage,
+                        'firstActivity': first_activity, 'firstTerminal': first_terminal,
+                        **({'activitySequence':evidence['sequence']} if phase!='terminal' else {})})
+                except (ValueError, TypeError, KeyError, UnicodeError): continue
+            payload = {'scope':scope, 'seq':seq, 'anchor':anchor(seq)}
+            data = base64.urlsafe_b64encode(_json(payload).encode()).decode().rstrip('=')
+            token = data + '.' + hmac.new(self.cursor_secret,data.encode(),hashlib.sha256).hexdigest()
+            return {'state': state, 'items': items, 'cursor': token,
+                    'coverage': {'activity': 'qualified_activity_and_terminal', 'usage': 'unavailable', 'retention': 'gap_detection_partial',
+                                 'novelty': 'bounded_part_revisions' if novelty_bounded else 'older_revision_bound_reached'}}
+
     @staticmethod
     def _ref(owner, row):
         return {"authority": "conversation_archive", "session_handle": identity_handle(owner, "session_id", row["chat_id"]),
@@ -541,7 +684,32 @@ class LoggingProjection:
             item["body_truncated"] = (row["content_chars"] or 0) > MAX_BODY_CHARS
         return item
 
-    def _fact(self, owner, row):
+    def _fact(self, owner, row, archive_owner=None):
+        qualified = None
+        if archive_owner is not None and "qualified_tool_json" in row.keys():
+            try:
+                raw = row["qualified_tool_json"]
+                content = row["qualified_content"]
+                value = json.loads(raw) if isinstance(raw, str) and len(raw) <= 8192 else None
+                evidence = value.get("evidence") if isinstance(value, dict) else None
+                if (set(value) == {"version", "account", "chat", "holder", "evidence"} and value["version"] == 1
+                    and value["account"] == archive_owner and value["chat"] == row["chat_id"]
+                    and isinstance(value["holder"], str) and value["holder"]
+                    and isinstance(evidence, dict) and evidence.get("actorID") == row["actor_id"]
+                    and evidence.get("messageID") == row["message_id"] and evidence.get("partID") == row["part_id"]
+                    and evidence.get("contentSHA256") == row["content_hash"] and isinstance(content, str)
+                    and hashlib.sha256(content.encode("utf-8")).hexdigest() == row["content_hash"]
+                    and evidence.get("version") == 1 and evidence.get("algorithm") == "ed25519" and evidence.get("phase") == "terminal"
+                    and isinstance(evidence.get("clockID"), str) and re.fullmatch(r"[0-9a-f]{32}", evidence["clockID"])
+                    and isinstance(evidence.get("rootOperationID"), str) and evidence["rootOperationID"]
+                    and all(type(evidence.get(k)) is int and 0 <= evidence[k] <= 9007199254740991 for k in ("startUS", "endUS", "executionRevision"))
+                    and evidence["endUS"] >= evidence["startUS"]):
+                    qualified = {"root_handle": identity_handle(owner, "operation_id", evidence["rootOperationID"]),
+                        "clock_handle": identity_handle(owner, "operation_id", "tool-clock:" + evidence["clockID"]),
+                        "join_handle": tool_usage_join_handle(owner, value["account"], value["chat"], value["holder"], evidence.get("sessionID"), evidence["rootOperationID"], evidence["actorID"], evidence["executionRevision"]),
+                        "start_us": evidence["startUS"], "end_us": evidence["endUS"]}
+            except (ValueError, TypeError, KeyError):
+                pass
         status = row["observed_status"]
         event_kind = "tool_finished" if status in {"completed", "error", "failed", "cancelled"} or row["part_type"] in {"tool_result", "tool_output"} else "tool_started"
         ref = self._ref(owner, row)
@@ -552,11 +720,11 @@ class LoggingProjection:
                 "workspace_id": row["event_workspace"], "actor_id": row["actor_id"], "actor_kind": "foreground" if row["actor_id"] == "main" else "agent",
                 "parent_id": row["parent_id"], "operation_id": row["operation_id"], "attempt_id": row["attempt_id"],
                 "root_operation_id": row["root_operation_id"], "event_kind": event_kind, "status": status,
-                "tool_name": row["tool_name"], "skill_name": row["skill_name"],
+                "tool_name": row["tool_name"] if row["tool_name_type"] == "text" else None, "skill_name": row["skill_name"],
                 "started_ms": row["tool_start_ms"], "completed_ms": row["tool_end_ms"],
                 "duration_ms": (row["tool_end_ms"] - row["tool_start_ms"] if isinstance(row["tool_start_ms"], (int, float)) and
                                 isinstance(row["tool_end_ms"], (int, float)) and row["tool_end_ms"] >= row["tool_start_ms"] else None),
-                "terminal": event_kind == "tool_finished", "source_ref": ref,
+                "terminal": event_kind == "tool_finished", "source_ref": ref, "qualified_tool": qualified,
                 "coverage": "reported" if status else "partial", "reason": None if status else "tool_status_unavailable"}
 
     def get_part(self, owner, source_ref, *, offset=0, length=MAX_BODY_CHARS, cancel_event=None, deadline=None):
@@ -637,6 +805,84 @@ class LoggingProjection:
                               "formula_revision": PRODUCER_REVISION})
         return result
 
+    @staticmethod
+    def _failure_tool_signatures(owner, facts, coverage):
+        # Exact canonical metadata only, never parse error text or expose raw
+        # names. These owner-scoped signatures are comparison keys, not grants.
+        failed = [fact for fact in facts if fact.get("terminal") and fact.get("status") in {"failed", "error"}]
+        names = [fact.get("tool_name") for fact in failed]
+        valid = [name for name in names if isinstance(name, str) and 0 < len(name) <= 256
+                 and not any(ord(ch) < 32 for ch in name)]
+        partial = coverage.get("state") != "reported" or len(valid) != len(names)
+        return {"handles": sorted({_digest(["openclank.diagnostic-tool.v1", owner_scope(owner), name]) for name in valid}),
+                "state": "partial" if partial else "reported",
+                "observed_failures": len(failed), "unnamed_failures": len(names) - len(valid),
+                "source_revision": coverage.get("source_revision")}
+
+    SIMILAR_WINDOW = 50
+
+    def similar_sessions(self, owner, handle, *, cancel_event=None, deadline=None):
+        """Explicit, bounded comparison of ONE selected session with the same owner's
+        most recent sessions. Closed fields only; never returns transcript text."""
+        owner = self._owner(owner)
+        self.resolve_session(owner, handle, cancel_event=cancel_event, deadline=deadline)
+        found = self.sessions(owner, {"session_id": handle}, limit=1, cancel_event=cancel_event, deadline=deadline)["items"]
+        if not found:
+            raise LoggingError("not_found", "Session unavailable")
+        target = found[0]
+        window = self.sessions(owner, {}, limit=self.SIMILAR_WINDOW, sort="latest", direction="desc",
+                               cancel_event=cancel_event, deadline=deadline)
+
+        def signature(item):
+            tools = item.get("tools") or {}
+            return {"provider_route": {i["handle"] for i in item.get("provider_identities") or []},
+                    "model": {i["handle"] for i in item.get("model_identities") or []},
+                    "tool_failure": bool(tools.get("failures")), "tool_cancelled": bool(tools.get("cancelled")),
+                    "failing_tool_name": set((item.get("failure_tool_signatures") or {}).get("handles") or [])}
+        want = signature(target)
+        items = []
+        for candidate in window["items"]:
+            _check(cancel_event, deadline)
+            if candidate["handle"] == handle:
+                continue
+            have = signature(candidate)
+            matched = [f for f in ("provider_route", "model", "failing_tool_name") if want[f] and want[f] & have[f]]
+            matched += [f for f in ("tool_failure", "tool_cancelled") if want[f] and have[f]]
+            if matched:
+                items.append({"handle": candidate["handle"], "last_activity_ms": candidate.get("last_activity_ms"),
+                              "matched_fields": matched})
+        counts = {}
+        for item in items:
+            for field in item["matched_fields"]:
+                counts[field] = counts.get(field, 0) + 1
+        more = bool(window["page"].get("next_cursor"))
+        return {"schema": SCHEMA, "owner_scope": owner_scope(owner), "session_handle": handle, "items": items,
+                "counts": counts, "compared_sessions": len(window["items"]),
+                "bounds": {"max_sessions": self.SIMILAR_WINDOW, "pages": 1, "order": "most_recent_activity"},
+                "unavailable_fields": {f: "not_in_ordinary_session_rows" for f in ("error_class_stage", "context_outcome")},
+                "field_coverage": {"failing_tool_name": target.get("failure_tool_signatures") or {"state":"unavailable"}},
+                "stored": False, "coverage": {"state": "partial" if more else "reported", "reason": "recent_window" if more else None}}
+
+    def issue_draft(self, owner, handle, *, cancel_event=None, deadline=None):
+        """Local Markdown draft from the export skeleton scope (metadata only, no bodies).
+        Nothing is stored or sent; the caller edits, copies or downloads it."""
+        similar = self.similar_sessions(owner, handle, cancel_event=cancel_event, deadline=deadline)
+        item = self.sessions(self._owner(owner), {"session_id": handle}, limit=1, cancel_event=cancel_event, deadline=deadline)["items"][0]
+        tools = item.get("tools") or {}
+        labels = lambda key: ", ".join(i["label"] for i in item.get(key) or []) or "not observed"
+        lines = ["# Issue draft (review before sharing)", "",
+                 f"Session handle: `{handle}`", f"Producer revision: {PRODUCER_REVISION}", "",
+                 "## Observed facts", f"- Provider route: {labels('provider_identities')}", f"- Model: {labels('model_identities')}",
+                 f"- Messages: {item['message_count']['value']} · parts: {item['part_count']} · actors: {item['actor_count']}",
+                 f"- Tool calls: {tools.get('calls', 0)} · failures: {tools.get('failures', 0)} · cancelled: {tools.get('cancelled', 0)}", "",
+                 "## Similar recent sessions", f"- Compared {similar['compared_sessions']} of the most recent sessions; matches: {len(similar['items'])}"]
+        lines += [f"- {field}: {n}" for field, n in sorted(similar["counts"].items())]
+        lines += ["", "## Not included", "- Conversation text, tool inputs and outputs, and session names are omitted.",
+                  "- Failing-tool matches use opaque exact-name signatures from observed canonical failures; missing/partial names remain unknown.",
+                  "- Error class/stage and context outcome are unavailable in ordinary rows.", "",
+                  "## What happened", "(describe the problem here)", ""]
+        return {"schema": SCHEMA, "session_handle": handle, "draft_markdown": "\n".join(lines), "stored": False, "sent": False}
+
     def prune_preview(self, owner, payload=None, *, cancel_event=None, deadline=None):
         owner = self._owner(owner)
         payload = dict(payload or {})
@@ -688,7 +934,7 @@ def semantic_search_readiness(*, owner, payload, index=None, cancel_event=None, 
     return {"schema": SCHEMA, "owner_scope": owner_scope(owner), "items": [], "filters": filters,
             "page": {"next_cursor": None, "limit": payload.get("limit", 50)},
             "coverage": {"state": "unavailable", "reason": "canonical_archive_source_producer_required" if readiness["healthy"] else "semantic_index_unavailable",
-                         "authority": "frankenmemory_canonical_index", "readiness": readiness,
+                         "authority": "memery_canonical_index", "readiness": readiness,
                          "setup": {"label": "Review index and model setup", "settings_tab": "services",
                                    "message": "Semantic conversation search needs a canonical archive source binding in the existing owner-scoped index and an explicitly configured embedding model with a published generation. Review provider/index setup; keyword search remains available. Document and extracted-memory matches are not transcript evidence."}}}
 
@@ -707,3 +953,96 @@ def iter_tool_facts(owner, filters=None, *, cancel_event=None, deadline=None, pr
         from src.openclank.conversation_archive import default_db_path
         projection = LoggingProjection(default_db_path(), archive_owner_resolver=resolve_archive_owner)
     return projection.tool_facts(owner, filters, cancel_event=cancel_event, deadline=deadline)
+
+
+def clankshop_usage(owner, account, chat, workspace, session, holder, actor_runs, *, limit=500):
+    """Bounded replacement snapshot over the existing admitted Stats owner.
+
+    Native attribution requires current actor and provider-binding evidence;
+    legacy or ambiguous observations remain unassigned.
+    """
+    from core.database import SessionLocal
+    from core.stats_models import StatsEvent
+    from core.provider_models import ProviderOperationBinding
+    from services.stats.ledger import project_admitted_events
+    if not all(isinstance(v, str) and v for v in (owner, account, chat, workspace, session, holder)) or not isinstance(actor_runs, tuple) or not 1 <= limit <= 500:
+        raise ValueError('invalid usage scope')
+    db = SessionLocal()
+    try:
+        rows = (db.query(StatsEvent).filter(StatsEvent.owner == owner, StatsEvent.session_id == chat,
+                StatsEvent.workspace_id == workspace, StatsEvent.event_kind != 'context_receipt', StatsEvent.incognito.is_(False))
+                .order_by(StatsEvent.event_time.desc(), StatsEvent.id.desc()).limit(limit+1).all())
+        if len(rows) > limit:
+            return {'state':'unavailable','reason':'usage_bound_exceeded','items':[]}
+        projection = project_admitted_events(rows)
+        receipts = (db.query(StatsEvent).filter(StatsEvent.owner == owner, StatsEvent.session_id == chat,
+                    StatsEvent.event_kind == 'context_receipt', StatsEvent.incognito.is_(False)).limit(limit+1).all())
+        if len(receipts) > limit:
+            receipts = []  # attribution unavailable; metrics remain visible as unassigned
+        def attribution_from_receipt(receipt):
+            payload = (receipt.event_metadata or {}).get('context_receipt') or {}
+            attr = payload.get('tool_usage_attribution') if isinstance(payload, dict) else None
+            if not isinstance(attr, dict): return None
+            identity = {'sessionID':attr.get('session'),'rootOperationID':attr.get('root'),
+                        'actorID':attr.get('actor'),'executionRevision':attr.get('execution')}
+            if (payload.get('identity') != identity or payload.get('binding_id') != attr.get('binding')
+                or payload.get('binding_revision') != attr.get('binding_revision') or payload.get('instance_id') != attr.get('holder')): return None
+            return attr
+        receipt_attrs = [(receipt, attribution_from_receipt(receipt)) for receipt in receipts]
+        attrs = [(event.event_metadata or {}).get('tool_usage_attribution') for event in projection.events]
+        ids = {a.get('binding') for a in attrs + [a for _,a in receipt_attrs] if isinstance(a,dict) and isinstance(a.get('binding'),str) and a['binding']}
+        bindings = {b.id:b for b in db.query(ProviderOperationBinding).filter(ProviderOperationBinding.owner == owner,
+                    ProviderOperationBinding.id.in_(ids)).limit(limit+1).all()} if ids else {}
+        current = set(actor_runs)
+        def valid(attr, event):
+            fields = {'version','account','chat','holder','session','root','actor','execution','binding','binding_revision'}
+            if not isinstance(attr,dict) or set(attr) != fields or attr.get('version') != 1: return None
+            if (not all(isinstance(attr.get(k), str) and attr[k] for k in ('account','chat','holder','session','root','actor','binding'))
+                or type(attr.get('execution')) is not int or attr['execution'] < 0
+                or type(attr.get('binding_revision')) is not int or attr['binding_revision'] < 1): return None
+            if (attr['account'] != account or attr['chat'] != chat or attr['holder'] != holder or attr['session'] != session
+                or (attr['session'],attr['actor'],attr['execution']) not in current
+                or event.session_id != chat or event.root_operation_id != attr['root']
+                or (event.event_metadata or {}).get('instance_id') != holder): return None
+            b = bindings.get(attr['binding'])
+            if (b is None or b.state != 'committed' or b.revision != attr['binding_revision']
+                or b.root_operation_id != attr['root'] or b.engine_session_id != attr['session']
+                or b.actor_id != attr['actor'] or b.execution_revision != attr['execution']): return None
+            return {'sessionId':attr['session'],'actorId':attr['actor'],'executionRevision':attr['execution']}
+        items = []
+        for event in projection.events:
+            metadata = event.event_metadata or {}
+            provenance = metadata.get('metric_provenance') or {}
+            namespace = ('attempt' if event.attempt_id else 'operation' if event.observation_scope == 'operation'
+                         else 'root' if event.root_operation_id and event.observation_scope == 'root' else 'message')
+            identifier = (event.attempt_id if namespace == 'attempt' else event.operation_id if namespace == 'operation'
+                          else event.root_operation_id if namespace == 'root' else event.replay_key)
+            key = _digest([owner,chat,metadata.get('instance_id'),event.root_operation_id,event.operation_id,namespace,identifier])
+            metrics = {}
+            for name in ('input_tokens','output_tokens','cache_read_tokens','cache_write_tokens','reasoning_tokens'):
+                value, state = getattr(event,name,None), getattr(event,name+'_state','unavailable')
+                metrics[name] = {'value': value if type(value) is int and value >= 0 and state == 'reported' else None, 'state':state}
+            revision = _digest([metrics,provenance])
+            actor = None
+            attr = metadata.get('tool_usage_attribution')
+            if event.actor_kind == 'subagent' and isinstance(attr,dict) and event.operation_id == 'actor-binding:' + str(attr.get('binding') or ''):
+                actor = valid(attr,event)
+            elif event.actor_kind == 'foreground' and event.source == 'acp_final_usage':
+                matches = [valid(a,event) for receipt,a in receipt_attrs if a and a.get('actor') == 'main'
+                           and receipt.operation_id == event.operation_id and receipt.root_operation_id == event.root_operation_id]
+                matches = [match for match in matches if match]
+                if len(matches) == 1: actor = matches[0]
+            items.append({'identity':key,'revision':revision,'attribution':'actor' if actor else 'unassigned',
+                          **({'actorRef':actor} if actor else {}), 'metrics':metrics})
+        return {'state':'snapshot','coverage':projection.coverage,'items':items}
+    finally:
+        db.close()
+
+
+# One process-scoped signing authority; no archive or additional state is created.
+from functools import lru_cache as _lru_cache
+
+@_lru_cache(maxsize=1)
+def clankshop_logging_projection():
+    from src.openclank.conversation_archive import default_db_path
+    return LoggingProjection(default_db_path())

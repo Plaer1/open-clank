@@ -1,3 +1,4 @@
+import { bindCardActionMenu } from './cardActionMenu.js';
 import { uiIcon } from './uiIcons.js';
 // static/js/documentLibrary.js
 /**
@@ -159,34 +160,6 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     }
   }
 
-  // Long-press a list card to open its actions menu. `menuSelector` resolves
-  // the existing ••• button on the card; on hold we trigger its click so the
-  // dropdown opens in its usual spot. Moved finger >10px or release before
-  // 500ms cancels.
-  function _attachLongPressMenu(card, menuSelector) {
-    let hold = null;
-    let start = null;
-    const cancel = () => { if (hold) { clearTimeout(hold); hold = null; } start = null; };
-    card.addEventListener('pointerdown', (e) => {
-      if (e.target.closest(menuSelector + ', .memory-select-cb, button')) return;
-      start = { x: e.clientX, y: e.clientY };
-      hold = setTimeout(() => {
-        hold = null;
-        card._suppressNextClick = true;
-        setTimeout(() => { card._suppressNextClick = false; }, 400);
-        if (navigator.vibrate) try { navigator.vibrate(15); } catch {}
-        const btn = card.querySelector(menuSelector);
-        if (btn) btn.click();
-      }, 500);
-    });
-    card.addEventListener('pointermove', (e) => {
-      if (!start) return;
-      if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) cancel();
-    });
-    card.addEventListener('pointerup', cancel);
-    card.addEventListener('pointercancel', cancel);
-  }
-
   // Inline icons used by the chats/archive/research dropdown rows. Match the
   // ones used by the documents-tab card menu so the visual language stays
   // consistent across tabs.
@@ -298,6 +271,27 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
   }
 
   // ---- Document Library ----
+
+  function _bindLibraryActions(card, button, actions, options = {}) {
+    bindCardActionMenu(card, {
+      button,
+      current: options.current,
+      exclude: '.memory-select-cb, ._res-cb, .doclib-card-preview, .doclib-chat-preview',
+      items: valid => {
+        const icons = { open: 'external', archive: 'archive', restore: 'refresh', delete: 'trash', clone: 'copy', copy: 'copy' };
+        const items = actions(valid).map(({ id, label, icon, danger, action }) => ({
+          id: id || label.toLowerCase(),
+          label,
+          icon: icons[icon || label.toLowerCase()],
+          destructive: !!danger,
+          dialog: !!danger,
+          run: action,
+        }));
+        if (options.onSelect) items.push({ id: 'select', label: 'Select', icon: 'select', run: options.onSelect });
+        return items;
+      },
+    });
+  }
 
   function libraryRelativeTime(isoString) {
     if (!isoString) return '';
@@ -422,11 +416,11 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     menu.title = 'File actions';
     menu.setAttribute('aria-label', `Actions for ${file.filename || 'file'}`);
     menu.innerHTML = uiIcon("more", 14);
-    menu.addEventListener('click', (event) => {
-      event.stopPropagation();
+    _bindLibraryActions(card, menu, valid => {
       const copyGrant = async (audience) => {
         try {
           const grant = await _publishedFileAction(file, 'grants', { audience });
+          if (!valid()) return;
           const absolute = new URL(grant.download_url, window.location.origin).href;
           if (uiModule?.copyToClipboard) await uiModule.copyToClipboard(absolute);
           else await navigator.clipboard.writeText(absolute);
@@ -436,7 +430,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           if (uiModule) uiModule.showError(err.message);
         }
       };
-      _showLibDropdown(menu, [
+      return [
         { label: 'Download', icon: 'open', action: () => { window.location.href = `${API_BASE}/api/files/${encodeURIComponent(file.id)}/content`; } },
         { label: 'Copy owner link', icon: 'copy', action: () => copyGrant('owner') },
         { label: 'Copy public link', icon: 'copy', action: () => copyGrant('public') },
@@ -448,14 +442,14 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           } catch (err) { if (uiModule) uiModule.showError(err.message); }
         } },
         { label: 'Delete', icon: 'delete', danger: true, action: async () => {
-          if (!window.confirm(`Delete ${file.filename || 'this file'}?`)) return;
+          if (!window.confirm(`Delete ${file.filename || 'this file'}?`) || !valid()) return;
           try {
             await _publishedFileAction(file, 'delete');
             await libraryFetch(false);
             if (uiModule) uiModule.showToast('File deleted');
           } catch (err) { if (uiModule) uiModule.showError(err.message); }
         } },
-      ]);
+      ];
     });
     const actions = document.createElement('div');
     actions.className = 'memory-item-actions';
@@ -464,7 +458,6 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     card.addEventListener('click', () => {
       window.location.href = `${API_BASE}/api/files/${encodeURIComponent(file.id)}/content`;
     });
-    _attachLongPressMenu(card, '.memory-item-btn');
     return card;
   }
 
@@ -535,7 +528,6 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     // An open card menu is mounted on <body> (to escape overflow clipping), so
     // clearing the grid would orphan it; dismiss it first so its listener +
     // Escape-stack entry go too.
-    document.querySelectorAll('.doclib-card-dropdown').forEach(dismissOrRemove);
     grid.innerHTML = '';
     // Drop any previous inline load-more — regenerated below alongside the list.
     if (grid.parentElement) grid.parentElement.querySelectorAll(':scope > .doclib-inline-load-more').forEach(b => b.remove());
@@ -716,159 +708,47 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     menuBtn.className = 'memory-item-btn';
     menuBtn.title = 'Actions';
     menuBtn.innerHTML = uiIcon("more", 14);
-    menuBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      // Mobile: the custom 5-item dropdown is too crowded — route through the
-      // shared _showLibDropdown with a small set (Open, Clone) plus Select +
-      // Cancel. Heavier actions (Archive, Delete, Export) live in bulk mode.
-      if (window.innerWidth <= 768) {
-        const items = [];
-        if (doc.session_id) items.push({ label: 'Open', action: () => libraryOpenInSession(doc) });
-        items.push({ label: 'Clone', action: () => libraryImportDocument(doc) });
-        _showLibDropdown(menuBtn, items, { onSelect: () => {
-          libraryEnterSelectMode();
-          _librarySelectedIds.add(doc.id);
-          libraryUpdateBulkCount();
+    const archived = _libraryArchivedView;
+    _bindLibraryActions(card, menuBtn, valid => [
+      { label: 'Open', action: () => doc.session_id ? libraryOpenInSession(doc) : libraryOpenDocument(doc) },
+      { label: 'Clone', action: () => libraryImportDocument(doc) },
+      { id: 'export', label: 'Export', icon: 'open', action: async () => {
+        try {
+          const res = await fetch(`${API_BASE}/api/document/${doc.id}`);
+          if (!res.ok) throw new Error('Failed');
+          const full = await res.json();
+          if (!valid()) return;
+          const extMap = { javascript: '.js', python: '.py', html: '.html', css: '.css', markdown: '.md', json: '.json', yaml: '.yml', bash: '.sh', sql: '.sql', rust: '.rs', go: '.go', java: '.java', c: '.c', cpp: '.cpp', typescript: '.ts', ruby: '.rb', php: '.php', xml: '.xml', toml: '.toml', ini: '.ini' };
+          const ext = extMap[full.language] || '.txt';
+          const blob = new Blob([full.current_content || ''], { type: 'text/plain' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = (full.title || 'document') + ext;
+          a.click();
+          URL.revokeObjectURL(a.href);
+        } catch { if (uiModule) uiModule.showError('Failed to export document'); }
+      } },
+      { label: archived ? 'Restore' : 'Archive', action: async () => {
+        try {
+          const res = await fetch(`${API_BASE}/api/document/${doc.id}/archive?archived=${!archived}`, { method: 'POST', credentials: 'same-origin' });
+          if (!res.ok) throw new Error('failed');
+          if (!valid()) return;
+          libraryRemoveDocumentFromState(doc.id);
           libraryRenderGrid();
-        } });
-        return;
-      }
-      const dropdown = menuWrap.querySelector('.doclib-card-dropdown') || document.body.querySelector('.doclib-card-dropdown[data-owner="' + CSS.escape(doc.id) + '"]');
-      if (dropdown) {
-        const isOpen = dropdown.style.display !== 'none' && dropdown.parentElement === document.body;
-        if (isOpen) {
-          hideCardDropdown();
-        } else {
-          // Position fixed on body to escape overflow clipping
-          const rect = menuBtn.getBoundingClientRect();
-          document.body.appendChild(dropdown);
-          dropdown.dataset.owner = doc.id;
-          dropdown.style.cssText = `position:fixed;z-index:${topPortalZ()};min-width:0;width:max-content;padding:4px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3);backdrop-filter:blur(12px);font-size:12px;display:block;`;
-          dropdown.style.top = (rect.bottom + 4) + 'px';
-          dropdown.style.left = 'auto';
-          dropdown.style.right = (window.innerWidth - rect.right) + 'px';
-          // Clamp to viewport
-          requestAnimationFrame(() => {
-            const mr = dropdown.getBoundingClientRect();
-            if (mr.bottom > window.innerHeight - 8) dropdown.style.top = (rect.top - mr.height - 4) + 'px';
-            if (mr.left < 8) { dropdown.style.left = '8px'; dropdown.style.right = 'auto'; }
-          });
-          // Close on outside click or Escape (the latter via the registry).
-          _cardDocClick = (ev) => {
-            if (!dropdown.contains(ev.target) && !menuWrap.contains(ev.target)) hideCardDropdown();
-          };
-          setTimeout(() => document.addEventListener('click', _cardDocClick, true), 0);
-          _cardUnreg = registerMenuDismiss(hideCardDropdown);
-        }
-      }
+          if (uiModule) uiModule.showToast(archived ? 'Restored' : 'Archived');
+        } catch { if (uiModule) uiModule.showError('Failed to ' + (archived ? 'restore' : 'archive')); }
+      } },
+      { label: 'Delete', danger: true, action: () => libraryDeleteSingle(doc.id, card, valid) },
+    ], {
+      current: () => !_librarySelectMode && archived === _libraryArchivedView,
+      onSelect: () => {
+        libraryEnterSelectMode();
+        _librarySelectedIds.add(doc.id);
+        libraryUpdateBulkCount();
+        libraryRenderGrid();
+      },
     });
     menuWrap.appendChild(menuBtn);
-
-    // Dropdown menu
-    const dropdown = document.createElement('div');
-    dropdown.className = 'doclib-card-dropdown';
-    dropdown.style.cssText = 'display:none;position:absolute;top:100%;right:0;z-index:1000;min-width:0;width:max-content;padding:4px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3);backdrop-filter:blur(12px);font-size:12px;';
-
-    // Single close path for the card action dropdown, shared by the toggle
-    // button, the outside-click listener, every menu item, and the Escape
-    // arbiter (via registerMenuDismiss). Hides the menu, returns it to its
-    // wrapper, drops the outside-click listener, and unregisters from the
-    // Escape stack. Idempotent — safe to call from whichever path fires first.
-    let _cardUnreg = () => {};
-    let _cardDocClick = null;
-    function hideCardDropdown() {
-      _cardUnreg(); _cardUnreg = () => {};
-      if (_cardDocClick) { document.removeEventListener('click', _cardDocClick, true); _cardDocClick = null; }
-      dropdown.style.display = 'none';
-      if (dropdown.parentElement === document.body) menuWrap.appendChild(dropdown);
-    }
-    dropdown._dismiss = hideCardDropdown;   // bulk removers tear down through this
-
-    const _di = (svg) => `<span class="dropdown-icon">${svg}</span>`;
-    const _openIco = uiIcon("external", 14);
-
-    // Open
-    const openItem = document.createElement('button');
-    openItem.className = 'dropdown-item-compact';
-    openItem.style.cssText = 'background:none;border:none;width:100%;';
-    openItem.innerHTML = _di(_openIco) + '<span>Open</span>';
-    if (doc.session_id) {
-      openItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryOpenInSession(doc); });
-    } else {
-      // Orphaned doc (closed / session detached) is still openable in the editor
-      // by id — libraryOpenDocument handles the no-session case (#1602).
-      openItem.title = 'Open in the editor';
-      openItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryOpenDocument(doc); });
-    }
-    dropdown.appendChild(openItem);
-
-    // Clone
-    const _cloneIco = uiIcon("copy", 14);
-    const cloneItem = document.createElement('button');
-    cloneItem.className = 'dropdown-item-compact';
-    cloneItem.style.cssText = 'background:none;border:none;width:100%;';
-    cloneItem.innerHTML = _di(_cloneIco) + '<span>Clone</span>';
-    cloneItem.title = 'Clone to active session';
-    cloneItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryImportDocument(doc); });
-    dropdown.appendChild(cloneItem);
-
-    // Export
-    const _exportIco = uiIcon("download", 14);
-    const exportItem = document.createElement('button');
-    exportItem.className = 'dropdown-item-compact';
-    exportItem.style.cssText = 'background:none;border:none;width:100%;';
-    exportItem.innerHTML = _di(_exportIco) + '<span>Export</span>';
-    exportItem.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      hideCardDropdown();
-      try {
-        const res = await fetch(`${API_BASE}/api/document/${doc.id}`);
-        if (!res.ok) throw new Error('Failed');
-        const full = await res.json();
-        const extMap = { javascript: '.js', python: '.py', html: '.html', css: '.css', markdown: '.md', json: '.json', yaml: '.yml', bash: '.sh', sql: '.sql', rust: '.rs', go: '.go', java: '.java', c: '.c', cpp: '.cpp', typescript: '.ts', ruby: '.rb', php: '.php', xml: '.xml', toml: '.toml', ini: '.ini' };
-        const ext = extMap[full.language] || '.txt';
-        const blob = new Blob([full.current_content || ''], { type: 'text/plain' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = (full.title || 'document') + ext;
-        a.click();
-        URL.revokeObjectURL(a.href);
-      } catch { if (uiModule) uiModule.showError('Failed to export document'); }
-    });
-    dropdown.appendChild(exportItem);
-
-    // Archive / Restore — soft-archive a doc out of the main list, or bring it back.
-    const _archiveIco = uiIcon("archive", 14);
-    const archiveItem = document.createElement('button');
-    archiveItem.className = 'dropdown-item-compact';
-    archiveItem.style.cssText = 'background:none;border:none;width:100%;';
-    archiveItem.innerHTML = _di(_archiveIco) + `<span>${_libraryArchivedView ? 'Restore' : 'Archive'}</span>`;
-    archiveItem.title = _libraryArchivedView ? 'Restore to active documents' : 'Archive (hide from the main list)';
-    archiveItem.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      hideCardDropdown();
-      const toArchived = !_libraryArchivedView;
-      try {
-        const res = await fetch(`${API_BASE}/api/document/${doc.id}/archive?archived=${toArchived}`, { method: 'POST', credentials: 'same-origin' });
-        if (!res.ok) throw new Error('failed');
-        // Drop it from the current view (it no longer belongs here) and refresh.
-        libraryRemoveDocumentFromState(doc.id);
-        libraryRenderGrid();
-        if (uiModule) uiModule.showToast(toArchived ? 'Archived' : 'Restored');
-      } catch { if (uiModule) uiModule.showError('Failed to ' + (toArchived ? 'archive' : 'restore')); }
-    });
-    dropdown.appendChild(archiveItem);
-
-    // Delete
-    const _deleteIco = uiIcon("trash", 14);
-    const deleteItem = document.createElement('button');
-    deleteItem.className = 'dropdown-item-compact dropdown-item-danger';
-    deleteItem.style.cssText = 'background:none;border:none;width:100%;';
-    deleteItem.innerHTML = _di(_deleteIco) + '<span>Delete</span>';
-    deleteItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryDeleteSingle(doc.id, card); });
-    dropdown.appendChild(deleteItem);
-
-    menuWrap.appendChild(dropdown);
     actionsWrap.appendChild(menuWrap);
     card.appendChild(actionsWrap);
 
@@ -972,7 +852,6 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     card.appendChild(preview);
 
     card.addEventListener('click', () => {
-      if (card._suppressNextClick) { card._suppressNextClick = false; return; }
       if (_librarySelectMode) {
         const cb = card.querySelector('.memory-select-cb');
         if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
@@ -980,7 +859,6 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         libraryExpandCard(card, doc);
       }
     });
-    _attachLongPressMenu(card, '.memory-item-btn');
     return card;
   }
 
@@ -1296,13 +1174,14 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     }
   }
 
-  async function libraryDeleteSingle(docId, card) {
+  async function libraryDeleteSingle(docId, card, valid = () => true) {
     if (uiModule && uiModule.styledConfirm) {
       const ok = await uiModule.styledConfirm('Delete this document?', { confirmText: 'Delete', danger: true });
       if (!ok) return;
     } else if (!confirm('Delete this document?')) {
       return;
     }
+    if (!valid()) return;
     try {
       const res = await fetch(`${API_BASE}/api/document/${docId}`, { method: 'DELETE', credentials: 'same-origin' });
       if (!res.ok) {
@@ -2389,31 +2268,29 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           '<div class="doclib-chat-preview" style="display:none;"></div>';
         const cb = card.querySelector('.memory-select-cb');
         if (cb) { cb.addEventListener('click', e => e.stopPropagation()); cb.addEventListener('change', () => { if (cb.checked) _chatsSelected.add(s.id); else _chatsSelected.delete(s.id); _updateChatsCount(); }); }
-        card.querySelector('._chat-menu').addEventListener('click', (e) => { e.stopPropagation(); _showLibDropdown(e.currentTarget, [
+        _bindLibraryActions(card, card.querySelector('._chat-menu'), valid => [
           { label: 'Open', action: () => { if (window.sessionModule) window.sessionModule.selectSession(s.id); } },
           { label: 'Copy', action: () => _copyChatById(s.id) },
           { label: 'Archive', action: async () => { await fetch(API_BASE + '/api/session/' + s.id + '/archive', { method: 'POST', headers: {'Content-Type':'application/json'} }); _renderLibChats(); } },
           { label: 'Delete', action: async () => {
-            if (!await window.sessionModule.confirmChatDeletion([s.id])) return;
+            if (!await window.sessionModule.confirmChatDeletion([s.id]) || !valid()) return;
             await window.sessionModule.eraseChatById(s.id);
             card.style.maxHeight = `${Math.max(card.getBoundingClientRect().height, card.scrollHeight)}px`;
             card.classList.add('memory-tidy-removing');
             await new Promise(r => setTimeout(r, 520));
             _renderLibChats();
           }, danger: true },
-        ], { onSelect: () => {
+        ], { current: () => !_chatsSelectMode, onSelect: () => {
           _chatsSelectMode = true;
           _chatsSelected.add(s.id);
           document.getElementById('doclib-chats-bulk')?.classList.remove('hidden');
           _renderChatsGrid();
-        } }); });
+        } });
         card.addEventListener('click', (e) => {
-          if (card._suppressNextClick) { card._suppressNextClick = false; return; }
           if (_chatsSelectMode) { const c = card.querySelector('.memory-select-cb'); if (c) { c.checked = !c.checked; if (c.checked) _chatsSelected.add(s.id); else _chatsSelected.delete(s.id); _updateChatsCount(); } return; }
           if (e.target.closest('._chat-menu') || e.target.closest('.memory-select-cb') || e.target.closest('.doclib-chat-open-btn')) return;
           _toggleChatPreview(card, s);
         });
-        _attachLongPressMenu(card, '._chat-menu');
         grid.appendChild(card);
       }
       _appendInlineLoadMore(grid, total, _chatsVisibleLimit, () => {
@@ -2744,28 +2621,26 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           '<div class="doclib-chat-preview" style="display:none;"></div>';
         const cb = card.querySelector('.memory-select-cb');
         if (cb) { cb.addEventListener('click', e => e.stopPropagation()); cb.addEventListener('change', () => { if (cb.checked) _arcSelected.add('chats:' + s.id); else _arcSelected.delete('chats:' + s.id); _updateArcCount(); }); }
-        card.querySelector('._arc-menu').addEventListener('click', (e) => { e.stopPropagation(); _showLibDropdown(e.currentTarget, [
+        _bindLibraryActions(card, card.querySelector('._arc-menu'), valid => [
           { label: 'Open', action: () => { if (window.sessionModule) window.sessionModule.selectSession(s.id); } },
           { label: 'Copy', action: () => _copyChatById(s.id) },
           { label: 'Restore', action: async () => { await fetch(API_BASE + '/api/session/' + s.id + '/unarchive', { method: 'POST' }); _renderLibArchive(); } },
           { label: 'Delete', action: async () => {
-            if (!await window.sessionModule.confirmChatDeletion([s.id])) return;
+            if (!await window.sessionModule.confirmChatDeletion([s.id]) || !valid()) return;
             await window.sessionModule.eraseChatById(s.id);
             _renderLibArchive();
           }, danger: true },
-        ], { onSelect: () => {
+        ], { current: () => !_arcSelectMode, onSelect: () => {
           _arcSelectMode = true;
           _arcSelected.add('chats:' + s.id);
           document.getElementById('doclib-arc-bulk')?.classList.remove('hidden');
           _renderArcGrid();
-        } }); });
+        } });
         card.addEventListener('click', (e) => {
-          if (card._suppressNextClick) { card._suppressNextClick = false; return; }
           if (_arcSelectMode) { const c = card.querySelector('.memory-select-cb'); if (c) { c.checked = !c.checked; if (c.checked) _arcSelected.add('chats:' + s.id); else _arcSelected.delete('chats:' + s.id); _updateArcCount(); } return; }
           if (e.target.closest('._arc-menu') || e.target.closest('.memory-select-cb') || e.target.closest('.doclib-chat-open-btn')) return;
           _toggleChatPreview(card, s);
         });
-        _attachLongPressMenu(card, '._arc-menu');
         grid.appendChild(card);
       }
       // Archived DOCUMENTS — document icon, Restore / Delete.
@@ -2793,16 +2668,15 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           if (_arcSelectMode) { const c = card.querySelector('.memory-select-cb'); if (c) { c.checked = !c.checked; if (c.checked) _arcSelected.add('documents:' + d.id); else _arcSelected.delete('documents:' + d.id); _updateArcCount(); } return; }
           _toggleArcDocPreview(card, d);
         });
-        card.querySelector('._arc-doc-menu').addEventListener('click', (e) => { e.stopPropagation(); _showLibDropdown(e.currentTarget, [
+        _bindLibraryActions(card, card.querySelector('._arc-doc-menu'), valid => [
           { label: 'Restore', action: async () => { await fetch(API_BASE + '/api/document/' + d.id + '/archive?archived=false', { method: 'POST', credentials: 'same-origin' }); _renderLibArchive(); } },
-          { label: 'Delete', danger: true, action: async () => { if (!await window.styledConfirm('Delete this document?', { confirmText: 'Delete', danger: true })) return; await fetch(API_BASE + '/api/document/' + d.id, { method: 'DELETE', credentials: 'same-origin' }); _renderLibArchive(); } },
-        ], { onSelect: () => {
+          { label: 'Delete', danger: true, action: async () => { if (!await window.styledConfirm('Delete this document?', { confirmText: 'Delete', danger: true }) || !valid()) return; await fetch(API_BASE + '/api/document/' + d.id, { method: 'DELETE', credentials: 'same-origin' }); _renderLibArchive(); } },
+        ], { current: () => !_arcSelectMode, onSelect: () => {
           _arcSelectMode = true;
           _arcSelected.add('documents:' + d.id);
           document.getElementById('doclib-arc-bulk')?.classList.remove('hidden');
           _renderArcGrid();
-        } }); });
-        _attachLongPressMenu(card, '._arc-doc-menu');
+        } });
         grid.appendChild(card);
       }
       // Archived RESEARCH — magnifier icon, Open / Restore / Delete.
@@ -2830,17 +2704,16 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           if (_arcSelectMode) { const c = card.querySelector('.memory-select-cb'); if (c) { c.checked = !c.checked; if (c.checked) _arcSelected.add('research:' + r.id); else _arcSelected.delete('research:' + r.id); _updateArcCount(); } return; }
           _toggleResearchPreview(card, r);
         });
-        card.querySelector('._arc-res-menu').addEventListener('click', (e) => { e.stopPropagation(); _showLibDropdown(e.currentTarget, [
+        _bindLibraryActions(card, card.querySelector('._arc-res-menu'), valid => [
           { label: 'Open', action: () => { const a = document.createElement('a'); a.href = '/api/research/report/' + r.id; a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove(); } },
           { label: 'Restore', action: async () => { await fetch('/api/research/' + r.id + '/archive?archived=false', { method: 'POST', credentials: 'same-origin' }); _renderLibArchive(); } },
-          { label: 'Delete', danger: true, action: async () => { if (!await window.styledConfirm('Delete this research?', { confirmText: 'Delete', danger: true })) return; await fetch('/api/research/' + r.id, { method: 'DELETE', credentials: 'same-origin' }); _renderLibArchive(); } },
-        ], { onSelect: () => {
+          { label: 'Delete', danger: true, action: async () => { if (!await window.styledConfirm('Delete this research?', { confirmText: 'Delete', danger: true }) || !valid()) return; await fetch('/api/research/' + r.id, { method: 'DELETE', credentials: 'same-origin' }); _renderLibArchive(); } },
+        ], { current: () => !_arcSelectMode, onSelect: () => {
           _arcSelectMode = true;
           _arcSelected.add('research:' + r.id);
           document.getElementById('doclib-arc-bulk')?.classList.remove('hidden');
           _renderArcGrid();
-        } }); });
-        _attachLongPressMenu(card, '._arc-res-menu');
+        } });
         grid.appendChild(card);
       }
       _appendInlineLoadMore(grid, total, _arcVisibleLimit, () => {
@@ -3179,7 +3052,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         html += `<div class="memory-item-title">${uiIcon("research", 12, {"style":"vertical-align:-2px;margin-right:4px;opacity:0.4;flex-shrink:0;"})}${_esc(r.query || 'Untitled Research')}</div>`;
         html += `<div class="memory-item-meta" style="font-size:10px;opacity:0.4;margin-top:2px;">${metaText}</div>`;
         html += `</div>`;
-        if (!_researchSelectMode) html += `<div class="memory-item-actions"><button class="memory-item-btn doclib-research-delete" data-rid="${r.id}" title="Delete">${uiIcon("more", 14)}</button></div>`;
+        if (!_researchSelectMode) html += `<div class="memory-item-actions"><button class="memory-item-btn doclib-research-delete" data-rid="${r.id}" title="Actions">${uiIcon("more", 14)}</button></div>`;
         html += `</div>`;
         html += `<div class="doclib-chat-preview" style="display:none;"></div>`;
         html += `</div>`;
@@ -3200,7 +3073,6 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       // and Open-report button inside the preview are exempt.
       grid.querySelectorAll('.doclib-research-card').forEach(card => {
         card.addEventListener('click', (e) => {
-          if (card._suppressNextClick) { card._suppressNextClick = false; return; }
           if (e.target.closest('.doclib-research-delete') || e.target.closest('._res-cb') || e.target.closest('.doclib-chat-open-btn')) return;
           const rid = card.dataset.researchId;
           if (_researchSelectMode) {
@@ -3211,55 +3083,54 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           const item = _researchItems.find(r => r.id === rid);
           if (item) _toggleResearchPreview(card, item);
         });
-        _attachLongPressMenu(card, '.doclib-research-delete');
       });
 
       // The action button on each research row opens the actions menu
       // (Open report, Delete) — chat-style ••• menu.
       grid.querySelectorAll('.doclib-research-delete').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          const rid = btn.dataset.rid;
-          _showLibDropdown(btn, [
-            { label: 'Open', action: () => {
-                const a = document.createElement('a');
-                a.href = '/api/research/report/' + rid;
-                a.target = '_blank';
-                a.rel = 'noopener';
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-              } },
-            { label: _researchArchivedView ? 'Restore' : 'Archive', action: async () => {
-                const toArchived = !_researchArchivedView;
-                const card = btn.closest('.doclib-research-card');
-                if (card) { card.style.transition = 'opacity 0.25s, transform 0.25s'; card.style.opacity = '0'; card.style.transform = 'scale(0.95)'; }
-                try { await fetch('/api/research/' + rid + '/archive?archived=' + toArchived, { method: 'POST', credentials: 'same-origin' }); } catch {}
-                await new Promise(r => setTimeout(r, 200));
-                _researchItems = _researchItems.filter(r => r.id !== rid);
-                _renderResearchGrid();
-                if (uiModule) uiModule.showToast(toArchived ? 'Archived' : 'Restored');
-              } },
-            { label: 'Delete', danger: true, action: async () => {
-                if (!await window.styledConfirm('Delete this research?', { confirmText: 'Delete', danger: true })) return;
-                const card = btn.closest('.doclib-research-card');
-                if (card) {
-                  card.style.transition = 'opacity 0.25s, transform 0.25s';
-                  card.style.opacity = '0';
-                  card.style.transform = 'scale(0.95)';
-                }
-                await new Promise(r => setTimeout(r, 250));
-                await fetch('/api/research/' + rid, { method: 'DELETE', credentials: 'same-origin' });
-                _researchItems = _researchItems.filter(r => r.id !== rid);
-                _renderResearchGrid();
-              } },
-          ], { onSelect: () => {
-            _researchSelectMode = true;
-            _researchSelected.add(rid);
-            document.getElementById('doclib-research-bulk')?.classList.remove('hidden');
-            _renderResearchGrid();
-          } });
-        });
+        const card = btn.closest('.doclib-research-card');
+        const rid = btn.dataset.rid;
+        const archived = _researchArchivedView;
+        _bindLibraryActions(card, btn, valid => [
+          { label: 'Open', action: () => {
+              const a = document.createElement('a');
+              a.href = '/api/research/report/' + rid;
+              a.target = '_blank';
+              a.rel = 'noopener';
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+            } },
+          { label: archived ? 'Restore' : 'Archive', action: async () => {
+              const toArchived = !archived;
+              if (card) { card.style.transition = 'opacity 0.25s, transform 0.25s'; card.style.opacity = '0'; card.style.transform = 'scale(0.95)'; }
+              try { await fetch('/api/research/' + rid + '/archive?archived=' + toArchived, { method: 'POST', credentials: 'same-origin' }); } catch {}
+              await new Promise(r => setTimeout(r, 200));
+              if (!valid()) return;
+              _researchItems = _researchItems.filter(r => r.id !== rid);
+              _renderResearchGrid();
+              if (uiModule) uiModule.showToast(toArchived ? 'Archived' : 'Restored');
+            } },
+          { label: 'Delete', danger: true, action: async () => {
+              if (!await window.styledConfirm('Delete this research?', { confirmText: 'Delete', danger: true }) || !valid()) return;
+              if (card) {
+                card.style.transition = 'opacity 0.25s, transform 0.25s';
+                card.style.opacity = '0';
+                card.style.transform = 'scale(0.95)';
+              }
+              await new Promise(r => setTimeout(r, 250));
+              if (!valid()) return;
+              await fetch('/api/research/' + rid, { method: 'DELETE', credentials: 'same-origin' });
+              if (!valid()) return;
+              _researchItems = _researchItems.filter(r => r.id !== rid);
+              _renderResearchGrid();
+            } },
+        ], { current: () => !_researchSelectMode && _researchArchivedView === archived, onSelect: () => {
+          _researchSelectMode = true;
+          _researchSelected.add(rid);
+          document.getElementById('doclib-research-bulk')?.classList.remove('hidden');
+          _renderResearchGrid();
+        } });
       });
       _appendInlineLoadMore(grid, total, _researchVisibleLimit, () => {
         _researchVisibleLimit += _LIB_PAGE_SIZE;

@@ -73,7 +73,11 @@ def managed(fork_context, monkeypatch):
     monkeypatch.setattr(routes.prefs_routes, "_load_for_user", lambda owner: {"code_context_enabled": True})
     import src.tool_execution
     monkeypatch.setattr(src.tool_execution, "_read_only_auth_snapshot", lambda path: object())
-    request = dict(sessionID="ses_source", bindingRevision=0, requestID="b" * 32, requestFingerprint="a" * 64,
+    turn = dict(sessionID="ses_source", rootOperationID="root", actorID="main", executionRevision=1, innerTurnID="inner")
+    async def admit(_request):
+        return {"allowed": True}
+    monkeypatch.setattr(bridge, "_handle_managed_tool_admit", admit)
+    request = dict(sessionID="ses_source", turn=turn, bindingRevision=0, requestID="b" * 32, requestFingerprint="a" * 64,
         query="Explain function target", availableByteTokens=2048, retainedMessages=[{"role": "user", "content": "Explain function target"}])
     return bridge, session, request
 
@@ -182,4 +186,23 @@ async def test_normal_chatprocessor_media_guard_and_plain_tool_metadata(monkeypa
     assert calls == []
     metadata = [{"role": "tool", "content": [{"type": "tool-result", "output": {"type": "json", "value": {"type": "file", "filename": "image.png", "mime_type": "image/png"}}}]}, args["messages"][0]]
     assert len(await cc.append_code_context(**{**args, "messages": metadata})) == len(metadata) + 1
+    assert len(calls) == 2
+
+
+async def test_code_card_denies_nomemory_and_late_tuple_loss(managed, monkeypatch):
+    bridge, _, request = managed
+    calls = []
+    async def deny(admission):
+        calls.append(admission)
+        return {"allowed": False}
+    monkeypatch.setattr(bridge, "_handle_managed_tool_admit", deny)
+    assert (await bridge._handle_code_context_read(request))["card"] is None
+    assert calls == [{**request["turn"], "toolName": "recall_memory", "kind": "memory_read"}]
+    calls.clear()
+    async def revoked(admission):
+        calls.append(admission)
+        return {"allowed": len(calls) == 1}
+    monkeypatch.setattr(bridge, "_handle_managed_tool_admit", revoked)
+    fixture(monkeypatch)
+    assert (await bridge._handle_code_context_read({**request, "requestID": "c" * 32}))["card"] is None
     assert len(calls) == 2

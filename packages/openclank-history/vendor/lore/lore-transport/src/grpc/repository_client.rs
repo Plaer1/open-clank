@@ -7,9 +7,11 @@ use lore_base::types::RepositoryId;
 use lore_proto::lore::repository::v1 as repository_v1;
 use lore_proto::lore::repository::v1::repository_service_client::RepositoryServiceClient;
 use tokio_stream::StreamExt;
+use tonic::service::Interceptor;
+use tonic::service::interceptor::InterceptedService;
 
-use super::AuthenticatedService;
 use super::AuthnInterceptor;
+use super::AuthzInterceptor;
 use super::Channel;
 use super::GRPCAuthRef;
 use super::grpc_retry;
@@ -18,9 +20,11 @@ use crate::error::ProtocolError;
 use crate::types::MetadataSetResult;
 use crate::types::RepositoryData;
 
+/// The repository service, sending the token its interceptor injects: the login token by
+/// default, or a partition's authorization token from [`RepositoryService::for_partition`].
 #[derive(Clone)]
-pub struct RepositoryService {
-    client: RepositoryServiceClient<AuthenticatedService>,
+pub struct RepositoryService<I = AuthnInterceptor> {
+    client: RepositoryServiceClient<InterceptedService<Channel, I>>,
 }
 
 impl RepositoryService {
@@ -29,7 +33,22 @@ impl RepositoryService {
 
         Self { client }
     }
+}
 
+impl RepositoryService<AuthzInterceptor> {
+    /// Calls about `repository` carrying its authorization token, for a server that
+    /// authorizes them from the token's claims alone.
+    pub fn for_partition(channel: Channel, repository: RepositoryId, auth: GRPCAuthRef) -> Self {
+        let client = RepositoryServiceClient::with_interceptor(
+            channel,
+            AuthzInterceptor { repository, auth },
+        );
+
+        Self { client }
+    }
+}
+
+impl<I: Interceptor + Clone + Send + Sync + 'static> RepositoryService<I> {
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,

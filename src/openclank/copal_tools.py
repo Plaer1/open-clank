@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from src.openclank.copal_storage import configured_bridge
+from src.openclank.copal_bases import _typed_relations
 from src.openclank.copal_urls import canonical_open_url
 from src.openclank.copal_planning import (
     EVENT_KIND,
@@ -208,7 +209,11 @@ async def read_copal(arguments: Any, *, owner: str | None = None, account_id: st
         raise CopalReadError("maintenance.operations requires an admin execution", code="forbidden")
     supplied_bridge = bridge is not None
     bridge = bridge or configured_bridge()
-    docs = await _docs(bridge, owner or "local", workspace)
+    if action == "graph.get":
+        from src.openclank.document_journeys import catalogue
+        docs = await catalogue(bridge, {"owner": str(owner or "local"), "workspace_id": workspace})
+    else:
+        docs = await _docs(bridge, owner or "local", workspace)
     by_id = {str(doc.get("id")): doc for doc in docs if doc.get("id")}
     if action in {"notes.list", "wiki.list", "trash.list"}:
         if action == "trash.list":
@@ -250,9 +255,43 @@ async def read_copal(arguments: Any, *, owner: str | None = None, account_id: st
         projection = planning_projection(docs)
         return _envelope(action, workspace, {"tracks": projection.get("tracks", []), "events": projection.get("events", [])}, kind="galaxy-projection", projection=True, sources=[str(d.get("id")) for d in docs if event_from_document(d) or d.get("kind") == TRACKS_KIND])
     if action == "graph.get":
-        nodes = [_doc_view(doc) for doc in docs if doc.get("kind") not in {"calendar-projection", "planning", "treehouse-state", "copal-operation", "asset"}]
-        edges = [{"source": item["id"], **relation} for item in nodes for relation in item.get("relations", []) if isinstance(relation, dict)]
-        return _envelope(action, workspace, {"nodes": nodes[:200], "edges": edges[:400]}, kind="graph-projection", projection=True, sources=[str(item["id"]) for item in nodes])
+        all_docs = [doc for doc in docs if doc.get("kind") not in {"calendar-projection", "planning", "treehouse-state", "copal-operation", "asset"}]
+        selected = all_docs[:200]
+        nodes = [_doc_view(doc) for doc in selected]
+        ids = {str(item.get('id')) for item in nodes if item.get('id')}
+        edges, notices = [], []
+        for doc, item in zip(selected, nodes):
+            item['relations'] = _typed_relations(doc)
+            for relation in item['relations']:
+                target = relation.get('targetDocumentId')
+                resolution = relation.get('resolution')
+                unverified = (relation.get('origin') == 'parsed' and bool(relation.get('target'))
+                              and not (relation.get('target') == '#' and target == item.get('id')))
+                reason = None
+                if unverified and getattr(docs, 'coverage', {}).get('complete'):
+                    from src.openclank.document_journeys import resolve_outcome
+                    locator = relation['target'] + (('#' + relation['fragment']) if relation.get('fragment') else '')
+                    outcome, matched = resolve_outcome(locator, doc, docs)
+                    if matched:
+                        target = matched.get('id')
+                        relation = {**relation, 'targetDocumentId': target, 'resolution': 'resolved'}
+                        unverified = False
+                        resolution = 'resolved'
+                    else:
+                        reason = 'unresolved' if outcome == 'missing' else outcome
+                if target and str(target) in ids and resolution not in {'ambiguous', 'missing', 'unverified'} and not unverified:
+                    edges.append({'source':item['id'], **relation})
+                else:
+                    reason = reason or ('ambiguous' if resolution == 'ambiguous' else 'unresolved' if resolution == 'missing'
+                              else 'unverified' if unverified else 'not_loaded' if target else 'unresolved')
+                    notices.append({'source':item['id'], 'kind':relation['kind'], 'reason':reason})
+        omitted_nodes = max(0, len(all_docs)-len(nodes))
+        omitted_edges = max(0, len(edges)-400)
+        data = {'nodes':nodes, 'edges':edges[:400], 'notices':notices[:400],
+                'coverage':{'scope':'registered', 'corpusComplete':bool(getattr(docs, 'coverage', {}).get('complete')), 'snapshotGeneration':getattr(docs, 'coverage', {}).get('generation'), 'registeredDocuments':getattr(docs, 'coverage', {}).get('registered'), 'extractionComplete':None, 'loadedDocuments':len(all_docs),
+                    'returnedNodes':len(nodes), 'omittedNodes':omitted_nodes, 'omittedEdges':omitted_edges,
+                    'omittedNotices':max(0,len(notices)-400), 'hasMore':bool(omitted_nodes or omitted_edges or len(notices)>400)}}
+        return _envelope(action, workspace, data, kind="graph-projection", projection=True, sources=[str(item["id"]) for item in nodes])
     if action == "mind.get_outline":
         doc = by_id.get(_id(args["id"]))
         if not doc:

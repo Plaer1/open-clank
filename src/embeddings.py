@@ -158,9 +158,9 @@ class ManagedEmbeddingClient:
             root_operation_id=root,
         )
 
-    def get_sentence_embedding_dimension(self) -> int:
+    def get_sentence_embedding_dimension(self, *, idempotency_key: Optional[str] = None) -> int:
         if self._dim is None:
-            self.encode(["dimension probe"], normalize_embeddings=True)
+            self.encode(["dimension probe"], normalize_embeddings=True, idempotency_key=idempotency_key)
         if self._dim is None:
             raise ManagedEmbeddingError("managed embedding dimension is unavailable")
         return self._dim
@@ -212,10 +212,77 @@ class ManagedEmbeddingClient:
             self._engine_fingerprint = engine_fingerprint
         return vectors
 
+    def _accept_owned_terminal(self, result, *, expected_count, before_issue):
+        """Validate and normalize an exact recovered managed terminal."""
+        if (type(expected_count) is not int or not 1 <= expected_count <= 256
+                or not callable(before_issue) or before_issue() is not True):
+            raise ManagedEmbeddingError('owned embedding recovery unavailable')
+        vectors = np.asarray(self._accept_result(result), dtype='float32')
+        if (vectors.ndim != 2 or vectors.shape[0] != expected_count
+                or not np.isfinite(vectors).all()):
+            raise ManagedEmbeddingError('owned embedding result unavailable')
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        if np.any(~np.isfinite(norms)) or np.any(norms <= 0):
+            raise ManagedEmbeddingError('owned embedding result unavailable')
+        normalized = vectors / norms
+        if before_issue() is not True:
+            raise ManagedEmbeddingError('owned embedding admission changed')
+        return normalized
+
+    async def _encode_owned(self, texts, *, idempotency_key, deadline, before_issue, prepared_original=None):
+        """Issue one original under the existing owned utility frame guard."""
+        from src.openclank.operation_router import ManagedOperationRequest, PreparedManagedOperation, _thaw_json, get_operation_router
+        if (not texts or len(texts)>256 or any(type(x) is not str for x in texts)
+                or type(idempotency_key) is not str or not 16<=len(idempotency_key)<=128
+                or not self.root_operation_id or type(deadline) is not float or not callable(before_issue)):
+            raise ManagedEmbeddingError('owned embedding unavailable')
+        loop=asyncio.get_running_loop()
+        if loop.time()>=deadline or before_issue() is not True:raise ManagedEmbeddingError('owned embedding admission changed')
+        router=get_operation_router()
+        request=ManagedOperationRequest(owner=self.owner,operation='embeddings.create',purpose='embeddings',
+            input={'texts':list(texts),'purpose':self.content_purpose},model_route_id=self.model_route_id,
+            root_operation_id=self.root_operation_id,idempotency_key=idempotency_key)
+        if prepared_original is None:
+            prepared=await asyncio.to_thread(router.prepare,request)
+        else:
+            prepared=prepared_original
+            if (type(prepared) is not PreparedManagedOperation or prepared.router_token!=id(router)
+                    or prepared.owner!=self.owner or prepared.operation!='embeddings.create'
+                    or prepared.request.root_operation_id!=self.root_operation_id or prepared.request.idempotency_key!=idempotency_key
+                    or prepared.request.model_route_id!=self.model_route_id
+                    or _thaw_json(prepared.request.input)!={'texts':list(texts),'purpose':self.content_purpose}
+                    or prepared.request.purpose!='embeddings'):
+                raise ManagedEmbeddingError('owned embedding original unavailable')
+        if loop.time()>=deadline or before_issue() is not True:raise ManagedEmbeddingError('owned embedding admission changed')
+        owned=router.new_prepared_owned(prepared)
+        if await owned.ready(deadline=deadline)!={'state':'ready'}:raise ManagedEmbeddingError('owned embedding outcome unavailable')
+        def check_frame():
+            if before_issue() is not True:raise ManagedEmbeddingError('owned embedding admission changed')
+        if await owned.arm(before_issue=check_frame,deadline=deadline)!={'state':'issued'}:raise ManagedEmbeddingError('owned embedding outcome unavailable')
+        task=asyncio.create_task(owned.wait())
+        def consume(done):
+            if not done.cancelled():
+                try:done.exception()
+                except BaseException:pass
+        task.add_done_callback(consume)
+        remaining=deadline-loop.time()
+        if remaining<=0:raise ManagedEmbeddingError('owned embedding outcome unavailable')
+        try:result=await asyncio.wait_for(asyncio.shield(task),timeout=remaining)
+        except asyncio.TimeoutError as exc:raise ManagedEmbeddingError('owned embedding outcome unavailable') from exc
+        if before_issue() is not True:raise ManagedEmbeddingError('owned embedding admission changed')
+        vectors=np.asarray(self._accept_result(result),dtype='float32')
+        if vectors.ndim!=2 or vectors.shape[0]!=len(texts) or not np.isfinite(vectors).all():
+            raise ManagedEmbeddingError('owned embedding result unavailable')
+        norms=np.linalg.norm(vectors,axis=1,keepdims=True)
+        if np.any(~np.isfinite(norms)) or np.any(norms<=0):raise ManagedEmbeddingError('owned embedding result unavailable')
+        return vectors/norms
+
     def encode(
         self,
         texts: List[str],
         normalize_embeddings: bool = True,
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> np.ndarray:
         if not texts:
             return np.array([], dtype="float32")
@@ -231,6 +298,11 @@ class ManagedEmbeddingClient:
         }
         if self.root_operation_id:
             request["root_operation_id"] = self.root_operation_id
+        if idempotency_key is not None:
+            if (type(idempotency_key) is not str or idempotency_key != idempotency_key.strip()
+                    or not 16 <= len(idempotency_key) <= 128):
+                raise ManagedEmbeddingError("managed embedding idempotency key is invalid")
+            request["idempotency_key"] = idempotency_key
         result = _run_managed(create_embeddings(**request))
         vectors = np.asarray(self._accept_result(result), dtype="float32")
         if vectors.ndim != 2 or vectors.shape[0] != len(texts):

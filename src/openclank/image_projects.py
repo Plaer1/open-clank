@@ -5,9 +5,8 @@ managed project record that is bound to a stable Files image resource identity.
 This module owns that record: creation, versioned state updates, the recoverable
 Save operation, Save-a-copy, and the explicit portable project export.
 
-Recovery is delegated to the shared Lore/history capture seam through an
-injected ``lore_capture`` callable — there is no independent Imps recovery
-system. A Save captures a durable preimage before any mutation, then commits
+Recovery uses the scoped shared History adapter; legacy local cache hooks are
+not recovery authority. A Save captures a durable preimage before any mutation, then commits
 expected revisions. Restore replays a captured preimage.
 
 What the preimage actually contains (this is the honest limit):
@@ -33,7 +32,7 @@ import os
 import re
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -53,9 +52,7 @@ STATE_SCHEMA_VERSION = 2
 # Preimage envelope kind. Restoring is keyed on this marker.
 PREIMAGE_KIND = "imps_project_preimage"
 
-# Honest limitation id: history-worker-side preimage discovery (reading a
-# preimage back out of the history service without its local managed copy) is
-# not orchestrated. Replay uses the local managed preimage store.
+# Legacy compatibility marker for old local-cache records; new restore uses History.
 L_S19_LORE_RESTORE = "L-S19-LORE-RESTORE"
 
 _SAVE_COPY_LOCK = threading.RLock()
@@ -92,67 +89,13 @@ def _preimage_path(action_id: str) -> Path:
     return preimage_store_root() / f"{action_id}.preimage.json"
 
 
-def default_lore_capture(
-    *,
-    operation_id: str,
-    preimage: str,
-    document_id: str | None = None,
-    project_id: str | None = None,
-    resource_id: str | None = None,
-    provider: str | None = None,
-    owner: str | None = None,
-    image_revision: str | None = None,
-    project_revision: int | None = None,
-    **_extra: Any,
-) -> dict[str, Any]:
-    """Production ``ACTIVE_LORE_CAPTURE``: durable capture on the real path.
-
-    The preimage bytes are written with ``core.atomic_io.atomic_write_bytes`` —
-    the same capture path every managed file mutation uses — so a configured
-    history worker sees the exact before-state and an unconfigured one leaves an
-    honest ``history_status`` in the receipt instead of a silent no-op.
-
-    The signature accepts both the S17 document seam
-    (``document_id``/``preimage``/``operation_id``) and the Imps project seam,
-    so one hook serves both callers.
-    """
-    payload = str(preimage or "")
-    if not payload:
-        raise LoreCaptureFailed("empty preimage payload")
-    action_id = str(operation_id or "").strip()
-    target = _preimage_path(action_id)
-    data = payload.encode("utf-8")
-    try:
-        from core.atomic_io import atomic_write_bytes
-
-        digest = atomic_write_bytes(
-            str(target),
-            data,
-            action_id=action_id,
-        )
-    except LoreCaptureFailed:
-        raise
-    except Exception as exc:  # noqa: BLE001 — refuse the save on capture failure
-        raise LoreCaptureFailed(
-            f"preimage capture failed; save left unapplied: {exc}"
-        ) from exc
-    return {
-        "action_id": action_id,
-        "history_status": "complete",
-        "capture_phase": "before_durable",
-        "preimage_path": str(target),
-        "fingerprint": digest,
-        "document_id": document_id,
-        "project_id": project_id,
-        "resource_key": {"provider": provider, "resource_id": resource_id},
-        "owner": owner,
-        "image_revision": image_revision,
-        "project_revision": project_revision,
-    }
+def default_lore_capture(**_kwargs: Any) -> dict[str, Any]:
+    """Legacy cache hook is not a History capture authority."""
+    raise LoreCaptureFailed("scoped project History authority is unavailable")
 
 
 def read_captured_preimage(action_id: str) -> dict[str, Any] | None:
-    """Read back a durable preimage captured by ``default_lore_capture``."""
+    """Read a legacy local cache for deliberate inspection, not recovery authority."""
     try:
         target = _preimage_path(action_id)
     except LoreCaptureFailed:
@@ -168,10 +111,7 @@ def read_captured_preimage(action_id: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-# Process-level Lore capture seam. Routes pass this to the repository so a
-# configured history worker is engaged in production; tests substitute a
-# deterministic capture. Assigned at import so production Save is never a
-# silent no-op for recovery.
+# Retained legacy symbol; the repository never uses this hook as authority.
 ACTIVE_LORE_CAPTURE: Callable[..., Any] | None = default_lore_capture
 
 
@@ -253,6 +193,7 @@ class ManagedProjectRecord:
     height: int | None
     state: dict[str, Any]
     is_active: bool
+    lore_receipt: dict[str, Any] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -335,6 +276,31 @@ def portable_manifest(bundle: Mapping[str, Any]) -> dict[str, Any]:
             raise ImageProjectError("editable PNG could not be decoded or dimensions disagree", code="invalid_export") from exc
         entries.append({"path": path + "/dataUrl", "id": identity, "parentId": parent,
                         "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "width": width, "height": height})
+        sidecar = node.get("inpaintSource")
+        if isinstance(sidecar, Mapping) and sidecar.get("v") == 1:
+            pad = sidecar.get("padPx")
+            if isinstance(pad, bool) or not isinstance(pad, int) or not 0 <= pad <= 80:
+                raise ImageProjectError("invalid inpaint sidecar padding", code="invalid_export")
+            total = 0
+            for key in ("ai", "base", "mask"):
+                part = sidecar.get(key)
+                encoded = part.get("dataUrl") if isinstance(part, Mapping) else None
+                w, h = (part.get("width"), part.get("height")) if isinstance(part, Mapping) else (None, None)
+                if any(isinstance(x, bool) or not isinstance(x, int) or x < 1 or x > 8192 for x in (w, h)) or w*h > 40000000 or not isinstance(encoded, str) or not encoded.startswith("data:image/png;base64,") or len(encoded) > 44739266:
+                    raise ImageProjectError("invalid inpaint sidecar", code="invalid_export")
+                try:
+                    data = base64.b64decode(encoded.split(",", 1)[1], validate=True)
+                    total += len(data)
+                    if total > 32 * 1024 * 1024:
+                        raise ValueError("sidecar limit exceeded")
+                    with Image.open(io.BytesIO(data)) as image:
+                        if image.format != "PNG" or image.size != (w, h):
+                            raise ValueError("sidecar dimensions disagree")
+                        image.load()
+                except Exception as exc:
+                    raise ImageProjectError("inpaint sidecar could not be decoded", code="invalid_export") from exc
+                entries.append({"path": f"{path}/inpaintSource/{key}/dataUrl", "id": f"{identity}:inpaint:{key}", "parentId": identity,
+                                "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "width": w, "height": h})
         masks = node.get("masks") or []
         if not isinstance(masks, list):
             raise ImageProjectError("invalid mask relationships", code="invalid_export")
@@ -414,6 +380,14 @@ def _normalize_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
     return body
 
 
+def _validate_art_project_input(state: dict[str, Any], *, prior: dict[str, Any] | None = None) -> None:
+    from src.openclank.art_project_metadata import ArtProjectMetadataError, validate_art_project_state
+    try:
+        validate_art_project_state(state,prior_state=prior,allow_unchanged_legacy=prior is not None)
+    except ArtProjectMetadataError as exc:
+        raise ImageProjectError('ArtProject metadata unavailable or invalid',code='invalid_art_project') from exc
+
+
 def _row_to_record(row: ManagedImageProject) -> ManagedProjectRecord:
     return ManagedProjectRecord(
         id=row.id,
@@ -440,9 +414,77 @@ class ImageProjectRepository:
         session_factory: Callable[[], Session],
         *,
         lore_capture: Callable[..., Any] | None = None,
+        history: Any = None,
+        account_id: str | None = None,
+        current: Callable[[], bool] | None = None,
     ) -> None:
         self.session_factory = session_factory
-        self.lore_capture = lore_capture
+        self.lore_capture = lore_capture  # legacy input; never recovery authority
+        self.history = history
+        self.account_id = account_id
+        self.current = current
+
+    def _assert_current(self) -> None:
+        if (self.history is None or not isinstance(self.account_id, str) or not self.account_id
+                or getattr(self.history, 'account_id', None) != self.account_id
+                or not callable(self.current) or self.current() is not True):
+            raise LoreCaptureFailed('project History authority unavailable')
+
+    def _action(self, operation_id: str | None, prefix: str) -> str:
+        value = operation_id if operation_id is not None else f'imps-{prefix}-{uuid.uuid4().hex}'
+        if not isinstance(value, str) or not value or len(value.encode('utf-8', 'strict')) > 256 or any(ord(c) < 32 for c in value):
+            raise LoreCaptureFailed('project operation identity unavailable')
+        return value
+
+    def _snapshot(self, record: ManagedProjectRecord, pixels: bytes | None = None) -> bytes:
+        payload = {'version':1, 'kind':PREIMAGE_KIND, 'account_id':self.account_id, 'owner':record.owner,
+            'project_id':record.id, 'image_resource':record.image_identity.as_key(),
+            'image_revision':record.expected_image_revision, 'project_revision':record.project_revision,
+            'name':record.name, 'width':record.width, 'height':record.height, 'state':record.state,
+            'image_bytes_captured':pixels is not None, 'image_bytes':base64.b64encode(pixels).decode('ascii') if pixels is not None else None,
+            'image_bytes_sha256':hashlib.sha256(pixels).hexdigest() if pixels is not None else None}
+        raw=json.dumps(payload,sort_keys=True,separators=(',', ':'),ensure_ascii=False,allow_nan=False).encode('utf-8','strict')
+        if len(raw)>64*1024*1024: raise LoreCaptureFailed('project snapshot exceeds bounds')
+        return raw
+
+    def _prepare(self, *, action_id: str, project_id: str, before: bytes | None, revision: int | None, operation: str, intent: Any):
+        self._assert_current()
+        try:
+            raw=json.dumps(intent,sort_keys=True,separators=(',', ':'),ensure_ascii=False,allow_nan=False).encode('utf-8','strict')
+            if len(raw)>64*1024*1024: raise ValueError('intent exceeds bounds')
+            prepared=self.history.prepare(action_id=action_id,project_id=project_id,expected_revision=revision,
+                before=before,operation=operation,intent_sha256=hashlib.sha256(raw).hexdigest())
+        except Exception as exc: raise LoreCaptureFailed('project History preparation unavailable; original status only') from exc
+        try:self._assert_current()
+        except BaseException:
+            self._finish(prepared,outcome='not_committed')
+            raise
+        return prepared
+
+    def _finish(self, prepared: Any, *, outcome: str, after: bytes | None = None) -> dict[str, Any]:
+        try: return dict(self.history.finish(prepared,outcome=outcome,after=after))
+        except Exception: return {'action_id':prepared.action_id,'outcome':outcome,'history_status':'unknown' if outcome=='unknown' else 'unavailable'}
+
+    def read_preimage(self, *, owner: str, project_id: str, action_id: str) -> dict[str, Any]:
+        self._assert_current(); record=self.get_project(project_id=project_id,owner=owner)
+        try:
+            raw=self.history.read_before(action_id=action_id,project_id=project_id)
+            if type(raw) is not bytes or len(raw)>64*1024*1024: raise ValueError('missing before')
+            payload=json.loads(raw.decode('utf-8','strict'))
+            expected={'version','kind','account_id','owner','project_id','image_resource','image_revision','project_revision','name','width','height','state','image_bytes_captured','image_bytes','image_bytes_sha256'}
+            if (type(payload) is not dict or set(payload)!=expected or payload['version']!=1 or payload['kind']!=PREIMAGE_KIND
+                or payload['account_id']!=self.account_id or payload['project_id']!=project_id
+                or payload['image_resource']!=record.image_identity.as_key() or type(payload['state']) is not dict
+                or type(payload['project_revision']) is not int or payload['project_revision']<1 or type(payload['image_bytes_captured']) is not bool
+                or type(payload['image_revision']) is not str or type(payload['name']) is not str
+                or any(value is not None and (type(value) is not int or value < 0) for value in (payload['width'],payload['height']))): raise ValueError('preimage mismatch')
+            if payload['image_bytes_captured']:
+                pixels=base64.b64decode(payload['image_bytes'],validate=True)
+                if (hashlib.sha256(pixels).hexdigest()!=payload['image_bytes_sha256']
+                    or payload['image_revision']!='sha256:'+payload['image_bytes_sha256']): raise ValueError('pixel mismatch')
+            elif payload['image_bytes'] is not None or payload['image_bytes_sha256'] is not None: raise ValueError('invalid absent pixels')
+            self._assert_current(); return payload
+        except Exception as exc: raise ImageProjectError('History preimage unavailable',code='preimage_missing') from exc
 
     # ── create / read ──────────────────────────────────────────────────
 
@@ -457,6 +499,10 @@ class ImageProjectRepository:
         state: Mapping[str, Any] | None = None,
         expected_image_revision: str = "",
         operation_key: str | None = None,
+        operation_id: str | None = None,
+        _operation_kind: str = "create",
+        _copy_source_id: str | None = None,
+        _copy_source_revision: int | None = None,
     ) -> ManagedProjectRecord:
         """Create a managed project bound to an image resource.
 
@@ -466,11 +512,25 @@ class ImageProjectRepository:
         """
         if not owner:
             raise ImageProjectError("owner is required", code="owner_required")
-        project_id = uuid.uuid4().hex
+        if _operation_kind not in {"create","copy","import"}: raise ImageProjectError("unsupported project operation",code="invalid_export")
+        self._assert_current()
+        action_id=self._action(operation_id or operation_key,"create")
+        project_id=hashlib.sha256(("imps-project-v1\0"+self.account_id+"\0"+action_id).encode("utf-8","strict")).hexdigest()[:32]
         now = _utcnow()
         body = _normalize_state(state)
-        db = self.session_factory()
+        source = None
+        if _copy_source_id is not None:
+            if _operation_kind != 'copy' or type(_copy_source_revision) is not int:
+                raise ImageProjectError('copy source unavailable',code='copy_conflict')
+            source=self.get_project(project_id=_copy_source_id,owner=owner)
+            if source.project_revision != _copy_source_revision:
+                raise StaleProjectRevision('copy source changed')
+        _validate_art_project_input(body,prior=source.state if source is not None else None)
+        intent={"operation":_operation_kind,"owner":owner,"project_id":project_id,"image":image_identity.as_key(),"name":name or "Untitled","width":width,"height":height,"state":body,"image_revision":expected_image_revision or "","operation_key":operation_key}
+        prepared=self._prepare(action_id=action_id,project_id=project_id,before=None,revision=None,operation=_operation_kind,intent=intent)
+        db = self.session_factory(); commit_started=False
         try:
+            self._assert_current()
             row = ManagedImageProject(
                 id=project_id,
                 owner=owner,
@@ -488,11 +548,20 @@ class ImageProjectRepository:
                 updated_at=now,
             )
             db.add(row)
+            db.flush(); record=_row_to_record(row); after=self._snapshot(record)
+            if source is not None:
+                stored=db.query(ManagedImageProject).filter(ManagedImageProject.id==source.id,
+                    ManagedImageProject.owner==owner,ManagedImageProject.is_active==True,
+                    ManagedImageProject.project_revision==source.project_revision).first()
+                if stored is None: raise StaleProjectRevision('copy source changed')
+                _validate_art_project_input(body,prior=_row_to_record(stored).state)
+            self._assert_current(); commit_started=True
             db.commit()
-            db.refresh(row)
-            return _row_to_record(row)
+            receipt=self._finish(prepared,outcome="committed",after=after)
+            return replace(record,lore_receipt=receipt)
         except Exception:
             db.rollback()
+            self._finish(prepared,outcome="unknown" if commit_started else "not_committed")
             raise
         finally:
             db.close()
@@ -561,6 +630,7 @@ class ImageProjectRepository:
         height: int | None = None,
         expected_image_revision: str | None = None,
         new_image_revision: str | None = None,
+        operation_id: str | None = None,
     ) -> ManagedProjectRecord:
         """Commit a new project state under optimistic concurrency.
 
@@ -570,7 +640,8 @@ class ImageProjectRepository:
         overwrite work rebased onto a newer image). ``new_image_revision``
         rebinds the project to a new image revision in the same commit.
         """
-        db = self.session_factory()
+        self._assert_current(); action_id=self._action(operation_id,"update")
+        db = self.session_factory(); prepared=None; commit_started=False
         try:
             row = db.query(ManagedImageProject).filter(
                 ManagedImageProject.id == project_id,
@@ -585,6 +656,13 @@ class ImageProjectRepository:
                 raise StaleProjectRevision(f"project {project_id} is at revision {current_revision}, not {expected_project_revision}")
             if expected_image_revision is not None and current_image != expected_image_revision:
                 raise StaleImageRevision(f"project {project_id} expects image revision {current_image!r}, not {expected_image_revision!r}")
+            record=_row_to_record(row)
+            _validate_art_project_input(_normalize_state(state),prior=record.state)
+            intent={'operation':'update','owner':owner,'project_id':project_id,'expected_project_revision':expected_project_revision,
+                'expected_image_revision':expected_image_revision,'new_image_revision':new_image_revision,
+                'state':_normalize_state(state),'name':name,'width':width,'height':height}
+            prepared=self._prepare(action_id=action_id,project_id=project_id,before=self._snapshot(record),revision=current_revision,operation='update',intent=intent)
+            self._assert_current()
             values = {
                 "state": json.dumps(_normalize_state(state), ensure_ascii=False),
                 "project_revision": current_revision + 1,
@@ -610,12 +688,14 @@ class ImageProjectRepository:
                 if int(fresh.project_revision or 1) != int(expected_project_revision):
                     raise StaleProjectRevision(f"project {project_id} changed during update")
                 raise StaleImageRevision(f"project {project_id} image changed during update")
-            db.commit()
             row = db.query(ManagedImageProject).filter(ManagedImageProject.id == project_id).one()
-            db.refresh(row)
-            return _row_to_record(row)
+            db.refresh(row); record=_row_to_record(row); after=self._snapshot(record)
+            self._assert_current(); commit_started=True
+            db.commit()
+            return replace(record,lore_receipt=self._finish(prepared,outcome="committed",after=after))
         except Exception:
             db.rollback()
+            if prepared is not None:self._finish(prepared,outcome="unknown" if commit_started else "not_committed")
             raise
         finally:
             db.close()
@@ -627,9 +707,11 @@ class ImageProjectRepository:
         owner: str,
         expected_image_revision: str,
         expected_project_revision: int,
+        operation_id: str | None = None,
     ) -> ManagedProjectRecord:
         """Move the project onto a new image revision after a successful Save."""
-        db = self.session_factory()
+        self._assert_current(); action_id=self._action(operation_id,"rebind")
+        db = self.session_factory(); prepared=None; commit_started=False
         try:
             row = (
                 db.query(ManagedImageProject)
@@ -647,6 +729,10 @@ class ImageProjectRepository:
                     f"project {project_id} is at revision {row.project_revision}, "
                     f"not {expected_project_revision}"
                 )
+            record=_row_to_record(row)
+            intent={'operation':'rebind','owner':owner,'project_id':project_id,'expected_project_revision':expected_project_revision,'expected_image_revision':expected_image_revision}
+            prepared=self._prepare(action_id=action_id,project_id=project_id,before=self._snapshot(record),revision=record.project_revision,operation='rebind',intent=intent)
+            self._assert_current()
             changed = db.query(ManagedImageProject).filter(
                 ManagedImageProject.id == project_id,
                 ManagedImageProject.owner == owner,
@@ -659,12 +745,14 @@ class ImageProjectRepository:
             }, synchronize_session=False)
             if changed != 1:
                 raise StaleProjectRevision(f"project {project_id} changed during rebind")
-            db.commit()
             row = db.query(ManagedImageProject).filter(ManagedImageProject.id == project_id).one()
-            db.refresh(row)
-            return _row_to_record(row)
+            db.refresh(row); record=_row_to_record(row); after=self._snapshot(record)
+            self._assert_current(); commit_started=True
+            db.commit()
+            return replace(record,lore_receipt=self._finish(prepared,outcome="committed",after=after))
         except Exception:
             db.rollback()
+            if prepared is not None:self._finish(prepared,outcome="unknown" if commit_started else "not_committed")
             raise
         finally:
             db.close()
@@ -672,7 +760,7 @@ class ImageProjectRepository:
     # ── recoverable Save ───────────────────────────────────────────────
 
     def save_image_and_project(self, **kwargs: Any) -> SaveOutcome:
-        """Serialize Save mutations for one owner/resource identity."""
+        """Save under the existing SQLite, image CAS and History guards."""
         owner = str(kwargs.get("owner") or "")
         record = self.get_project(project_id=str(kwargs.get("project_id") or ""), owner=owner)
         return self._save_image_and_project_locked(**kwargs)
@@ -687,6 +775,7 @@ class ImageProjectRepository:
         new_image_revision: str,
         image_writer: Callable[[], Any],
         image_reader: Callable[[], bytes] | None = None,
+        stage_image_metadata: Callable[[Any], None] | None = None,
         metadata_updater: Callable[[Any], Any] | None = None,
         image_rollback: Callable[[str], Any] | None = None,
         state: Mapping[str, Any] | None = None,
@@ -695,6 +784,7 @@ class ImageProjectRepository:
         height: int | None = None,
         operation_id: str | None = None,
         image_bytes: bytes | None = None,
+        desired_image_sha256: str | None = None,
     ) -> SaveOutcome:
         """Save the writable original image and its managed project together.
 
@@ -719,8 +809,13 @@ class ImageProjectRepository:
         db = self.session_factory()
         published_revision = None
         published = False
+        prepared = None
+        commit_started = False
+        write_started = False
         try:
             pixel_intent = image_reader is not None or image_bytes is not None
+            if pixel_intent and not all(callable(value) for value in (image_reader,image_writer)):
+                raise ImageProjectError("actual image reader and writer required",code="image_revision_unavailable")
             if pixel_intent and (db.bind is None or db.bind.dialect.name != "sqlite"):
                 raise ImageProjectError(
                     "pixel Save requires an atomic SQLite mutation transaction",
@@ -748,21 +843,22 @@ class ImageProjectRepository:
             if (record.expected_image_revision or "") != (expected_image_revision or ""):
                 raise StaleImageRevision(f"project {project_id} expects image revision {record.expected_image_revision!r}, not {expected_image_revision!r}")
 
-            action_id = operation_id or f"imps-save-{uuid.uuid4().hex}"
+            _validate_art_project_input(_normalize_state(state if state is not None else record.state),prior=record.state)
+            action_id = self._action(operation_id,"save")
+            if pixel_intent and (not isinstance(desired_image_sha256,str) or not re.fullmatch(r"[0-9a-f]{64}",desired_image_sha256)):
+                raise ImageProjectError("desired image digest unavailable",code="image_revision_unavailable")
             preimage_state = dict(record.state)
             preimage_revision = record.expected_image_revision
 
         # 1. Lore preimage capture — the mutation is refused if recovery state
         #    could not be made durable.
-            lore_receipt = self._capture_preimages(
-            owner=owner,
-            project_id=project_id,
-            action_id=action_id,
-            record=record,
-            preimage_state=preimage_state,
-            preimage_revision=preimage_revision,
-            image_bytes=image_bytes,
-        )
+            intent={'operation':'save','owner':owner,'project_id':project_id,'expected_project_revision':expected_project_revision,
+                'expected_image_revision':expected_image_revision,'new_image_revision':new_image_revision,
+                'state':_normalize_state(state if state is not None else record.state),'name':name,'width':width,'height':height,
+                'desired_image_sha256':desired_image_sha256}
+            prepared=self._prepare(action_id=action_id,project_id=project_id,before=self._snapshot(record,image_bytes),
+                revision=record.project_revision,operation='save',intent=intent)
+
 
         # 2. Recheck the source after Lore capture, immediately before the
         #    external write. Lore itself may have exposed a concurrent edit.
@@ -774,15 +870,21 @@ class ImageProjectRepository:
                 if observed_before_publish != expected_image_revision:
                     raise StaleImageRevision("image changed during Save; refusing publication")
 
+            self._assert_current()
             # Publish the pixel revision before any post-write callback so all
             # failures after the writer are covered by compensation.
-            written_revision = image_writer()
+            if pixel_intent and stage_image_metadata is not None:
+                stage_image_metadata(db)
+            write_started = pixel_intent
+            written_revision = image_writer() if pixel_intent else new_image_revision
+            if pixel_intent and written_revision != 'sha256:'+desired_image_sha256:
+                raise StaleImageRevision('published image revision unavailable')
             committed_image_revision = str(written_revision) if written_revision is not None else new_image_revision
             published_revision = committed_image_revision
             published = pixel_intent
             if image_reader is not None:
                 latest_bytes = bytes(image_reader())
-                if "sha256:" + hashlib.sha256(latest_bytes).hexdigest() != committed_image_revision:
+                if "sha256:" + hashlib.sha256(latest_bytes).hexdigest() != committed_image_revision or hashlib.sha256(latest_bytes).hexdigest() != desired_image_sha256:
                     raise StaleImageRevision("image changed during Save; refusing publication")
             if metadata_updater is not None:
                 metadata_updater(db)
@@ -802,8 +904,11 @@ class ImageProjectRepository:
             db.flush()
             db.refresh(row)
             updated = _row_to_record(row)
+            after=self._snapshot(updated,latest_bytes if image_reader is not None else None)
+            self._assert_current(); commit_started=True
             db.commit()
             published = False
+            lore_receipt=self._finish(prepared,outcome="committed",after=after)
             return SaveOutcome(
             project_id=updated.id,
             project_revision=updated.project_revision,
@@ -824,19 +929,26 @@ class ImageProjectRepository:
                 "restore": {
                     "path": "replay_preimage",
                     "action_id": action_id,
-                    "limitation": L_S19_LORE_RESTORE,
                 },
             },
             )
         except BaseException as exc:
             try:
-                db.rollback()
-            finally:
-                if published and image_rollback is not None and published_revision is not None:
+                # Keep competing writers out until any disk compensation is verified.
+                if published and not commit_started and published_revision is not None:
                     try:
+                        if not callable(image_rollback): raise RuntimeError('image compensation unavailable')
                         image_rollback(published_revision)
+                        if image_reader is None or image_bytes is None or bytes(image_reader()) != image_bytes:
+                            raise RuntimeError('image compensation not proven')
                     except Exception as rollback_error:  # noqa: BLE001
+                        if prepared is not None:self._finish(prepared,outcome='partial')
                         raise PartialMutation(f"project commit failed and pixel rollback was unsafe: {rollback_error}", recovery_action_id=action_id) from rollback_error
+            finally:
+                db.rollback()
+            unknown=commit_started or (write_started and not published)
+            if prepared is not None:self._finish(prepared,outcome="unknown" if unknown else "not_committed")
+            if unknown:raise PartialMutation("Save outcome unknown; inspect original operation",recovery_action_id=action_id) from exc
             raise
         finally:
             db.close()
@@ -849,18 +961,21 @@ class ImageProjectRepository:
         project_id: str | None,
         image_identity: ImageResourceIdentity,
         expected_image_revision: str,
-        image_writer: Callable[[], Any],
+        image_writer: Callable[[], Any] | None = None,
         state: Mapping[str, Any] | None = None,
         name: str | None = None,
         width: int | None = None,
         height: int | None = None,
         operation_key: str | None = None,
+        operation_id: str | None = None,
     ) -> SaveOutcome:
         """Allocate a separate image resource and a separate project.
 
         The source project and its image are left untouched. The new project is
         bound to the freshly allocated ``image_identity``.
         """
+        if image_writer is not None: raise ImageProjectError('Save Copy image writes are caller-owned',code='unsupported_image_writer')
+        self._assert_current()
         source = self.get_project(project_id=project_id, owner=owner) if project_id else None
         if source is None:
             if state is None:
@@ -893,28 +1008,15 @@ class ImageProjectRepository:
                 if already_bound is not None:
                     raise ImageProjectError("image already has a managed source; open that project before copying", code="copy_conflict")
             if existing is not None:
-                if source is None and (
-                    existing.image_provider != image_identity.provider or existing.image_resource_id != image_identity.resource_id
+                if (existing.image_provider != image_identity.provider or existing.image_resource_id != image_identity.resource_id
                     or existing.expected_image_revision != expected_image_revision or _load_state(existing.state) != body
-                    or existing.name != copy_name or existing.width != copy_width or existing.height != copy_height
-                ):
-                    raise ImageProjectError("copy operation was already bound to a different snapshot", code="copy_conflict")
-                return SaveOutcome(
-                    project_id=existing.id, project_revision=existing.project_revision,
-                    image_identity=ImageResourceIdentity(existing.image_provider, existing.image_resource_id),
-                    action_id=f"imps-copy-replay-{replay_key[:16]}", allocated=False,
-                    refresh_receipt={"operation": "save_copy", "replayed": True,
-                                     "source_project_id": source_id, "image": f"{existing.image_provider}:{existing.image_resource_id}",
-                                     "image_revision": existing.expected_image_revision, "project_revision": existing.project_revision},
-                )
+                    or existing.name != copy_name or existing.width != copy_width or existing.height != copy_height):
+                    raise ImageProjectError('copy operation was already bound to a different snapshot',code='copy_conflict')
+                raise LoreCaptureFailed('original copy operation already exists; status only')
         finally:
             db.close()
-        action_id = f"imps-copy-{uuid.uuid4().hex}"
-
-        written_revision = image_writer()
-        committed_image_revision = (
-            str(written_revision) if written_revision is not None else expected_image_revision
-        )
+        action_id = self._action(operation_id or operation_key,'copy')
+        committed_image_revision = expected_image_revision
         created = self.create_project(
             owner=owner,
             image_identity=image_identity,
@@ -924,6 +1026,10 @@ class ImageProjectRepository:
             state=body,
             expected_image_revision=committed_image_revision,
             operation_key=replay_key,
+            operation_id=action_id,
+            _operation_kind="copy",
+            _copy_source_id=source.id if source is not None else None,
+            _copy_source_revision=source.project_revision if source is not None else None,
         )
         return SaveOutcome(
             project_id=created.id,
@@ -931,7 +1037,9 @@ class ImageProjectRepository:
             image_identity=created.image_identity,
             action_id=action_id,
             allocated=True,
+            lore_receipt=created.lore_receipt,
             refresh_receipt={
+                "lore":created.lore_receipt,
                 "operation": "save_copy",
                 "source_project_id": source_id,
                 "image": created.image_identity.as_key(),
@@ -940,72 +1048,8 @@ class ImageProjectRepository:
             },
         )
 
-    def _capture_preimages(
-        self,
-        *,
-        owner: str,
-        project_id: str,
-        action_id: str,
-        record: ManagedProjectRecord,
-        preimage_state: Mapping[str, Any],
-        preimage_revision: str,
-        image_bytes: bytes | None = None,
-    ) -> dict[str, Any]:
-        """Capture original project + image preimages through Lore.
-
-        The capture callable receives an opaque operation id and the exact
-        before-state. The payload always carries the original project state and
-        image revision; it carries the original image bytes only when the
-        caller supplied them (``image_bytes_captured`` is then ``true``). Any
-        capture failure aborts the Save before mutation — a partially
-        recoverable Save is worse than a refused one. An unhooked seam is a
-        capture failure, not a silent skip.
-        """
-        capture = self.lore_capture if callable(self.lore_capture) else ACTIVE_LORE_CAPTURE
-        if not callable(capture):
-            raise LoreCaptureFailed(
-                "no Lore capture seam is configured; save left unapplied"
-            )
-        if image_bytes is not None and not isinstance(image_bytes, (bytes, bytearray)):
-            raise LoreCaptureFailed("image_bytes must be bytes or None")
-        body = {
-            "kind": PREIMAGE_KIND,
-            "project_id": project_id,
-            "image_resource": record.image_identity.as_key(),
-            "image_revision": preimage_revision,
-            "project_revision": record.project_revision,
-            "state": dict(preimage_state),
-        }
-        if image_bytes is not None:
-            raw = bytes(image_bytes)
-            body["image_bytes"] = base64.b64encode(raw).decode("ascii")
-            body["image_bytes_encoding"] = "base64"
-            body["image_bytes_sha256"] = hashlib.sha256(raw).hexdigest()
-            body["image_bytes_captured"] = True
-        else:
-            body["image_bytes"] = None
-            body["image_bytes_captured"] = False
-        try:
-            receipt = capture(
-                operation_id=action_id,
-                resource_id=record.image_resource_id,
-                provider=record.image_provider,
-                owner=owner,
-                project_id=project_id,
-                preimage=json.dumps(body, sort_keys=True, ensure_ascii=False),
-                image_revision=preimage_revision,
-                project_revision=record.project_revision,
-            )
-        except LoreCaptureFailed:
-            raise
-        except Exception as exc:  # noqa: BLE001 — refuse the save on capture failure
-            raise LoreCaptureFailed(
-                f"preimage capture failed; save left unapplied: {exc}"
-            ) from exc
-        return dict(receipt) if isinstance(receipt, Mapping) else {"result": receipt}
-
     def replay_preimage(self, **kwargs: Any) -> SaveOutcome:
-        """Serialize restore against the same resource as Save."""
+        """Restore through current project/image CAS and History guards."""
         owner = str(kwargs.get("owner") or "")
         project_id = str(kwargs.get("project_id") or "")
         record = self.get_project(project_id=project_id, owner=owner)
@@ -1019,15 +1063,17 @@ class ImageProjectRepository:
         action_id: str,
         image_writer: Callable[[], Any] | None = None,
         image_reader: Callable[[], bytes] | None = None,
+        stage_image_metadata: Callable[[Any], None] | None = None,
         metadata_updater: Callable[[Any], Any] | None = None,
         image_rollback: Callable[[str], Any] | None = None,
         expected_project_revision: int | None = None,
         current_image_bytes: bytes | None = None,
+        operation_id: str | None = None,
     ) -> SaveOutcome:
         """Restore with one authoritative DB transaction around publication."""
         if not owner:
             raise ImageProjectError("owner is required", code="owner_required")
-        payload = read_captured_preimage(action_id)
+        payload = self.read_preimage(owner=owner,project_id=project_id,action_id=action_id)
         if not payload or str(payload.get("kind") or "") != PREIMAGE_KIND:
             raise ImageProjectError(f"no captured preimage for {action_id}", code="preimage_missing")
         if str(payload.get("project_id") or "") != project_id:
@@ -1035,8 +1081,15 @@ class ImageProjectRepository:
         db = self.session_factory()
         published_revision = None
         published = False
+        prepared = None
+        commit_started = False
+        write_started = False
         try:
-            pixel_intent = image_reader is not None or (image_writer is not None and payload.get("image_bytes_captured"))
+            pixel_intent = image_reader is not None or image_writer is not None
+            if image_reader is None and current_image_bytes is not None:
+                raise ImageProjectError('actual image reader required',code='image_revision_unavailable')
+            if pixel_intent and (not payload.get('image_bytes_captured') or not all(callable(value) for value in (image_reader,image_writer))):
+                raise ImageProjectError('actual image reader and writer required',code='image_revision_unavailable')
             if pixel_intent and (db.bind is None or db.bind.dialect.name != "sqlite"):
                 raise ImageProjectError(
                     "pixel Restore requires an atomic SQLite mutation transaction",
@@ -1066,13 +1119,12 @@ class ImageProjectRepository:
             expected_revision = current.project_revision if expected_project_revision is None else int(expected_project_revision)
             if expected_revision != int(current.project_revision):
                 raise StaleProjectRevision(f"project {project_id} is at revision {current.project_revision}, not {expected_revision}")
-            recovery_action_id = f"imps-restore-{uuid.uuid4().hex}"
-            recovery_lore = self._capture_preimages(
-                owner=owner, project_id=project_id, action_id=recovery_action_id,
-                record=current, preimage_state=current.state,
-                preimage_revision=current.expected_image_revision,
-                image_bytes=current_image_bytes,
-            )
+            recovery_action_id = self._action(operation_id,'restore')
+            intent={'operation':'restore','owner':owner,'project_id':project_id,'source_action_id':action_id,
+                'expected_project_revision':expected_revision,'current_image_revision':current.expected_image_revision,
+                'source_sha256':hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',', ':'),ensure_ascii=False).encode('utf-8','strict')).hexdigest()}
+            prepared=self._prepare(action_id=recovery_action_id,project_id=project_id,before=self._snapshot(current,current_image_bytes),
+                revision=current.project_revision,operation='restore',intent=intent)
             if image_reader is not None:
                 if not str(current.expected_image_revision or "").startswith("sha256:"):
                     raise StaleImageRevision("image has no content-hash revision; reload and bind before restoring")
@@ -1080,6 +1132,7 @@ class ImageProjectRepository:
                 observed_before_publish = "sha256:" + hashlib.sha256(before_publish).hexdigest()
                 if observed_before_publish != current.expected_image_revision:
                     raise StaleImageRevision("image changed during Restore; refusing publication")
+            self._assert_current()
             restored_state = _load_state(payload.get("state"))
             restored_image_revision = str(payload.get("image_revision") or "")
             image_restored = False
@@ -1088,14 +1141,20 @@ class ImageProjectRepository:
                 digest = str(payload.get("image_bytes_sha256") or "")
                 if digest and hashlib.sha256(raw).hexdigest() != digest:
                     raise ImageProjectError("captured preimage image bytes are corrupt", code="preimage_corrupt")
+                if stage_image_metadata is not None:
+                    stage_image_metadata(db)
+                write_started = True
                 written_revision = image_writer()
-                committed_image_revision = str(written_revision) if written_revision is not None else restored_image_revision
+                if written_revision != 'sha256:'+digest:
+                    raise StaleImageRevision('restored image revision unavailable')
+                committed_image_revision = str(written_revision)
                 image_restored = True
                 published_revision = committed_image_revision
                 published = True
                 if image_reader is not None:
                     latest_bytes = bytes(image_reader())
-                    if "sha256:" + hashlib.sha256(latest_bytes).hexdigest() != committed_image_revision:
+                    if ("sha256:" + hashlib.sha256(latest_bytes).hexdigest() != committed_image_revision
+                            or hashlib.sha256(latest_bytes).hexdigest() != digest):
                         raise StaleImageRevision("image changed during Restore; refusing publication")
                 if metadata_updater is not None:
                     metadata_updater(db)
@@ -1103,6 +1162,7 @@ class ImageProjectRepository:
                 committed_image_revision = current.expected_image_revision
             values = {
                 "state": json.dumps(_normalize_state(restored_state), ensure_ascii=False),
+                "name": payload['name'], "width": payload['width'], "height": payload['height'],
                 "project_revision": expected_revision + 1,
                 "expected_image_revision": committed_image_revision,
                 "updated_at": _utcnow(),
@@ -1119,29 +1179,39 @@ class ImageProjectRepository:
             db.flush()
             db.refresh(row)
             updated = _row_to_record(row)
+            after=self._snapshot(updated,latest_bytes if image_reader is not None and image_restored else current_image_bytes)
+            self._assert_current(); commit_started=True
             db.commit()
             published = False
+            recovery_lore=self._finish(prepared,outcome="committed",after=after)
             return SaveOutcome(
                 project_id=updated.id, project_revision=updated.project_revision,
-                image_identity=updated.image_identity, action_id=action_id, allocated=False,
+                image_identity=updated.image_identity, action_id=action_id, allocated=False, lore_receipt=recovery_lore,
                 refresh_receipt={
                     "operation": "replay_restore", "image": updated.image_identity.as_key(),
                     "image_revision": updated.expected_image_revision,
                     "project_revision": updated.project_revision, "lore_action_id": action_id,
                     "recovery_action_id": recovery_action_id, "recovery_lore": recovery_lore,
                     "image_restored": image_restored, "state_restored": True,
-                    "limitation": L_S19_LORE_RESTORE,
                 },
             )
-        except BaseException:
+        except BaseException as exc:
             try:
-                db.rollback()
-            finally:
-                if published and image_rollback is not None and published_revision is not None:
+                # Keep competing writers out until any disk compensation is verified.
+                if published and not commit_started and published_revision is not None:
                     try:
+                        if not callable(image_rollback): raise RuntimeError('image compensation unavailable')
                         image_rollback(published_revision)
+                        if image_reader is None or current_image_bytes is None or bytes(image_reader()) != current_image_bytes:
+                            raise RuntimeError('image compensation not proven')
                     except Exception as rollback_error:  # noqa: BLE001
+                        if prepared is not None:self._finish(prepared,outcome='partial')
                         raise PartialMutation(f"restore commit failed and pixel rollback was unsafe: {rollback_error}", recovery_action_id=recovery_action_id) from rollback_error
+            finally:
+                db.rollback()
+            unknown=commit_started or (write_started and not published)
+            if prepared is not None:self._finish(prepared,outcome="unknown" if unknown else "not_committed")
+            if unknown:raise PartialMutation("Restore outcome unknown; inspect original operation",recovery_action_id=recovery_action_id) from exc
             raise
         finally:
             db.close()
@@ -1184,6 +1254,7 @@ class ImageProjectRepository:
         image_identity: ImageResourceIdentity,
         bundle: Mapping[str, Any],
         expected_image_revision: str = "",
+        operation_id: str | None = None,
     ) -> ManagedProjectRecord:
         """Restore an exported project under a (possibly new) image resource.
 
@@ -1208,4 +1279,6 @@ class ImageProjectRepository:
             state=state,
             expected_image_revision=expected_image_revision
             or str((bundle.get("image") or {}).get("revision") or ""),
+            operation_id=operation_id,
+            _operation_kind="import",
         )

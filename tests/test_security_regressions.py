@@ -135,8 +135,8 @@ def test_readme_native_quickstart_uses_loopback():
 def test_ollama_cookbook_runner_does_not_force_public_bind():
     route = Path("routes/cookbook_routes.py").read_text(encoding="utf-8")
     cookbook_js = Path("static/js/cookbook.js").read_text(encoding="utf-8")
-    assert 'OLLAMA_HOST="0.0.0.0:${ODYSSEUS_OLLAMA_PORT}" ollama serve' not in route
-    assert 'OLLAMA_HOST="${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}" ollama serve' in route
+    assert 'OLLAMA_HOST="0.0.0.0:${OPEN_CLANK_OLLAMA_PORT}" ollama serve' not in route
+    assert 'OLLAMA_HOST="${OPEN_CLANK_OLLAMA_HOST}:${OPEN_CLANK_OLLAMA_PORT}" ollama serve' in route
     assert '_ollama_default_host = "0.0.0.0" if remote else "127.0.0.1"' in route
     assert "WARNING: remote Ollama will bind" in route
     assert "OLLAMA_HOST=0.0.0.0:${ollamaPort}" not in cookbook_js
@@ -541,7 +541,7 @@ def test_require_user_rejects_unauthenticated(monkeypatch):
 
 
 def test_inprocess_pollers_gate(monkeypatch):
-    """The ODYSSEUS_INPROCESS_POLLERS env var must let operators kill
+    """The OPEN_CLANK_INPROCESS_POLLERS env var must let operators kill
     the asyncio pollers when cron / systemd is driving the one-shot
     `odysseus-mail poll-*` CLI subcommands instead. Two pollers racing
     on the same SQLite would mark scheduled rows as 'sent' twice."""
@@ -550,17 +550,17 @@ def test_inprocess_pollers_gate(monkeypatch):
     from routes.email_pollers import _inprocess_pollers_enabled  # noqa: WPS433
 
     # Defaults to enabled (preserves single-process deployments).
-    monkeypatch.delenv("ODYSSEUS_INPROCESS_POLLERS", raising=False)
+    monkeypatch.delenv("OPEN_CLANK_INPROCESS_POLLERS", raising=False)
     assert _inprocess_pollers_enabled() is True
 
     # Any of the off-values disables.
     for off in ("0", "false", "no", "off", "FALSE", "Off"):
-        monkeypatch.setenv("ODYSSEUS_INPROCESS_POLLERS", off)
+        monkeypatch.setenv("OPEN_CLANK_INPROCESS_POLLERS", off)
         assert _inprocess_pollers_enabled() is False, f"{off!r} should disable"
 
     # Explicit on-values stay enabled.
     for on in ("1", "true", "yes", "anything-truthy"):
-        monkeypatch.setenv("ODYSSEUS_INPROCESS_POLLERS", on)
+        monkeypatch.setenv("OPEN_CLANK_INPROCESS_POLLERS", on)
         assert _inprocess_pollers_enabled() is True, f"{on!r} should enable"
 
 

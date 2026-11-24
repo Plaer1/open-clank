@@ -62,6 +62,45 @@ class MemoryRecord:
     trust: Optional[Dict[str, Any]] = None
 
 
+@dataclass(frozen=True)
+class MemoryRevisionRef:
+    """Internal identity of the exact persisted V2 value returned by recall."""
+
+    owner: str
+    workspace_id: str
+    project_id: Optional[str]
+    block_id: str
+    revision: int
+    value_sha256: str
+    version: int = 1
+    provider: str = "fm-v2"
+
+
+@dataclass(frozen=True)
+class RecallInvocation:
+    """Host-minted identity of one active C2 recall call."""
+
+    session_id: str
+    root_operation_id: str
+    actor_id: str
+    execution_revision: int
+    inner_turn_id: str
+    recall_attempt_id: str
+
+
+@dataclass(frozen=True)
+class FoundObservation:
+    """Internal fixed-source observation, never model-authored authority."""
+
+    owner: str
+    workspace_id: str
+    source: object
+    invocation: RecallInvocation
+    memory: MemoryRevisionRef
+    version: int = 1
+    features: dict | None = None  # found.features v1; the sender drops the key when None
+
+
 @dataclass
 class MemorySearchHit:
     """A memory returned by provider recall."""
@@ -69,6 +108,7 @@ class MemorySearchHit:
     memory: MemoryRecord
     provider_id: str
     score: Optional[float] = None
+    revision_ref: Optional[MemoryRevisionRef] = None
 
 
 @dataclass(frozen=True)
@@ -377,6 +417,82 @@ class NativeMemoryProvider(MemoryProvider):
         self.memory_manager = memory_manager
         self.memory_vector = memory_vector
 
+    def lifecycle_identity(self, owner: str) -> dict:
+        """Identify the configured supported Native file domain without reading it."""
+        from pathlib import Path
+        if self.memory_vector is not None or not isinstance(owner, str) or not owner:
+            raise MemoryRequestRejectedError("native lifecycle domain unavailable")
+        path = Path(self.memory_manager.memory_file)
+        root = path.parent.resolve(strict=True)
+        if path.name != "memory.json" or path.is_symlink() or not path.is_file():
+            raise MemoryRequestRejectedError("native lifecycle file unavailable")
+        stat = root.stat()
+        return {"version": 1, "kind": "native-json", "root": str(root), "device": stat.st_dev,
+                "inode": stat.st_ino, "owner": owner}
+
+    def lifecycle_snapshot(self, owner: str) -> dict:
+        """Freeze the configured Native file domain and exact owned records."""
+        from services.memory.skill_lifecycle import locked
+        path = self.memory_manager.memory_file
+        with locked(str(path)):
+            identity = self.lifecycle_identity(owner)
+            rows = [row for row in self.memory_manager.load_all() if row.get("owner") == owner]
+            ids = [row.get("id") for row in rows]
+            if any(type(value) is not str or not value for value in ids) or len(set(ids)) != len(ids):
+                raise MemoryRequestRejectedError("native lifecycle identity unavailable")
+            material = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            normalized = [{key: value for key, value in row.items() if key != "owner"} for row in rows]
+            normalized.sort(key=lambda row: row["id"])
+            normalized_bytes = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            reset_rows = sorted(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) for row in rows)
+            reset_bytes = json.dumps(reset_rows, separators=(",", ":")).encode()
+            return {**identity, "count": len(rows),
+                    "ids": sorted(ids), "fingerprint": hashlib.sha256(material).hexdigest(),
+                    "content_fingerprint": hashlib.sha256(normalized_bytes).hexdigest(),
+                    "reset_fingerprint": hashlib.sha256(reset_bytes).hexdigest()}
+
+    def lifecycle_rename(self, source: str, target: str, *, original: dict, target_before: dict) -> dict:
+        """Apply or reconcile the exact previously frozen Native owner move."""
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_manager.memory_file):
+            now_source = self.lifecycle_snapshot(source)
+            now_target = self.lifecycle_snapshot(target)
+            keys = ("version", "kind", "root", "device", "inode")
+            if (type(original) is not dict or type(target_before) is not dict
+                    or any(original.get(key) != now_source.get(key) or target_before.get(key) != now_target.get(key) for key in keys)
+                    or original.get("owner") != source or target_before.get("owner") != target
+                    or target_before.get("count") != 0):
+                raise MemoryRequestRejectedError("native owner manifest changed")
+            if now_source == original and now_target == target_before:
+                entries = self.memory_manager.load_all()
+                for entry in entries:
+                    if entry.get("owner") == source:
+                        entry["owner"] = target
+                if original["count"]:
+                    self.memory_manager.save(entries)
+                return {"state": "applied", "count": original["count"]}
+            if (now_source["count"] == 0 and now_target["ids"] == original.get("ids")
+                    and now_target["content_fingerprint"] == original.get("content_fingerprint")):
+                return {"state": "reconciled", "count": None}
+            raise MemoryRequestRejectedError("native owner state changed")
+
+    def lifecycle_clear(self, owner: str, *, original: dict) -> dict:
+        """Clear only the frozen Native owner domain, or reconcile proven emptiness."""
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_manager.memory_file):
+            current = self.lifecycle_snapshot(owner)
+            keys = ("version", "kind", "root", "device", "inode", "owner")
+            if type(original) is not dict or any(original.get(key) != current.get(key) for key in keys):
+                raise MemoryRequestRejectedError("native reset manifest changed")
+            if current == original:
+                if current["count"]:
+                    entries = self.memory_manager.load_all()
+                    self.memory_manager.save([row for row in entries if row.get("owner") != owner])
+                return {"state": "applied", "count": current["count"]}
+            if current["count"] == 0:
+                return {"state": "reconciled", "count": None}
+            raise MemoryRequestRejectedError("native reset state changed")
+
     def _to_record(self, entry: Dict[str, Any]) -> MemoryRecord:
         metadata = {
             key: value
@@ -439,25 +555,27 @@ class NativeMemoryProvider(MemoryProvider):
         metadata: Optional[Dict[str, Any]] = None,
         workspace_id: Optional[str] = None,
     ) -> MemoryRecord:
-        entry = self.memory_manager.add_entry(
-            text,
-            source=source,
-            category=category,
-            owner=owner,
-        )
-        if session_id:
-            entry["session_id"] = session_id
-        if metadata:
-            entry["metadata"] = dict(metadata)
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_manager.memory_file):
+            entry = self.memory_manager.add_entry(
+                text,
+                source=source,
+                category=category,
+                owner=owner,
+            )
+            if session_id:
+                entry["session_id"] = session_id
+            if metadata:
+                entry["metadata"] = dict(metadata)
 
-        memories = self.memory_manager.load_all()
-        memories.append(entry)
-        self.memory_manager.save(memories)
+            memories = self.memory_manager.load_all()
+            memories.append(entry)
+            self.memory_manager.save(memories)
 
-        if self._vector_available():
-            self.memory_vector.add(entry["id"], entry["text"])
+            if self._vector_available():
+                self.memory_vector.add(entry["id"], entry["text"])
 
-        return self._to_record(entry)
+            return self._to_record(entry)
 
     async def recall(
         self,
@@ -535,26 +653,28 @@ class NativeMemoryProvider(MemoryProvider):
         return None
 
     async def delete(self, memory_id: str, *, owner: Optional[str] = None) -> bool:
-        memories = self.memory_manager.load_all()
-        remaining = []
-        deleted_id = None
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_manager.memory_file):
+            memories = self.memory_manager.load_all()
+            remaining = []
+            deleted_id = None
 
-        for entry in memories:
-            if entry.get("id") != memory_id:
-                remaining.append(entry)
-                continue
-            if owner is not None and entry.get("owner") != owner:
-                remaining.append(entry)
-                continue
-            deleted_id = entry.get("id")
+            for entry in memories:
+                if entry.get("id") != memory_id:
+                    remaining.append(entry)
+                    continue
+                if owner is not None and entry.get("owner") != owner:
+                    remaining.append(entry)
+                    continue
+                deleted_id = entry.get("id")
 
-        if deleted_id is None:
-            return False
+            if deleted_id is None:
+                return False
 
-        self.memory_manager.save(remaining)
-        if self._vector_available():
-            self.memory_vector.remove(deleted_id)
-        return True
+            self.memory_manager.save(remaining)
+            if self._vector_available():
+                self.memory_vector.remove(deleted_id)
+            return True
 
     async def update(
         self,
@@ -564,45 +684,51 @@ class NativeMemoryProvider(MemoryProvider):
         category: Optional[str] = None,
         owner: Optional[str] = None,
     ) -> Optional[MemoryRecord]:
-        memories = self.memory_manager.load_all()
-        for entry in memories:
-            if entry.get("id") != memory_id:
-                continue
-            if owner is not None and entry.get("owner") != owner:
-                return None
-            if text is not None:
-                entry["text"] = text.strip()
-            if category:
-                entry["category"] = category
-            entry["timestamp"] = int(time.time())
-            self.memory_manager.save(memories)
-            if self._vector_available() and text is not None:
-                self.memory_vector.remove(memory_id)
-                self.memory_vector.add(memory_id, entry["text"])
-            return self._to_record(entry)
-        return None
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_manager.memory_file):
+            memories = self.memory_manager.load_all()
+            for entry in memories:
+                if entry.get("id") != memory_id:
+                    continue
+                if owner is not None and entry.get("owner") != owner:
+                    return None
+                if text is not None:
+                    entry["text"] = text.strip()
+                if category:
+                    entry["category"] = category
+                entry["timestamp"] = int(time.time())
+                self.memory_manager.save(memories)
+                if self._vector_available() and text is not None:
+                    self.memory_vector.remove(memory_id)
+                    self.memory_vector.add(memory_id, entry["text"])
+                return self._to_record(entry)
+            return None
 
     async def pin(self, memory_id: str, pinned: bool, *, owner: Optional[str] = None) -> bool:
-        memories = self.memory_manager.load_all()
-        for entry in memories:
-            if entry.get("id") != memory_id:
-                continue
-            if owner is not None and entry.get("owner") != owner:
-                return False
-            entry["pinned"] = bool(pinned)
-            self.memory_manager.save(memories)
-            return True
-        return False
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_manager.memory_file):
+            memories = self.memory_manager.load_all()
+            for entry in memories:
+                if entry.get("id") != memory_id:
+                    continue
+                if owner is not None and entry.get("owner") != owner:
+                    return False
+                entry["pinned"] = bool(pinned)
+                self.memory_manager.save(memories)
+                return True
+            return False
 
     async def purge_owner(self, *, owner: Optional[str] = None) -> Dict[str, Any]:
-        memories = self.memory_manager.load_all()
-        removed = [entry for entry in memories if entry.get("owner") == owner]
-        self.memory_manager.save([entry for entry in memories if entry.get("owner") != owner])
-        if self._vector_available():
-            for entry in removed:
-                if entry.get("id"):
-                    self.memory_vector.remove(entry["id"])
-        return {"purged": True, "counts": {"curated": len(removed)}}
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_manager.memory_file):
+            memories = self.memory_manager.load_all()
+            removed = [entry for entry in memories if entry.get("owner") == owner]
+            self.memory_manager.save([entry for entry in memories if entry.get("owner") != owner])
+            if self._vector_available():
+                for entry in removed:
+                    if entry.get("id"):
+                        self.memory_vector.remove(entry["id"])
+            return {"purged": True, "counts": {"curated": len(removed)}}
 
     async def reset_owner(
         self,
@@ -612,86 +738,90 @@ class NativeMemoryProvider(MemoryProvider):
         components: list[str],
         expected_counts: Optional[dict] = None,
     ) -> dict:
-        if action not in {"reset_preview", "reset_commit"}:
-            raise ValueError("action must be reset_preview|reset_commit")
-        requested = []
-        for component in components:
-            if component not in {"memories", "graph", "ingest"}:
-                raise ValueError(f"unsupported reset component: {component}")
-            if component not in requested:
-                requested.append(component)
-        if not requested:
-            raise ValueError("at least one reset component is required")
-        expanded = list(requested)
-        if "memories" in requested:
-            expanded = ["memories", "graph", "ingest"]
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_manager.memory_file):
+            if action not in {"reset_preview", "reset_commit"}:
+                raise ValueError("action must be reset_preview|reset_commit")
+            requested = []
+            for component in components:
+                if component not in {"memories", "graph", "ingest"}:
+                    raise ValueError(f"unsupported reset component: {component}")
+                if component not in requested:
+                    requested.append(component)
+            if not requested:
+                raise ValueError("at least one reset component is required")
+            expanded = list(requested)
+            if "memories" in requested:
+                expanded = ["memories", "graph", "ingest"]
 
-        memories = self.memory_manager.load_all()
-        owned = [entry for entry in memories if entry.get("owner") == owner]
-        owned_material = sorted(
-            json.dumps(
-                entry,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
+            memories = self.memory_manager.load_all()
+            owned = [entry for entry in memories if entry.get("owner") == owner]
+            owned_material = sorted(
+                json.dumps(
+                    entry,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                for entry in owned
             )
-            for entry in owned
-        )
-        fingerprint = hashlib.sha256(
-            json.dumps(owned_material, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        zero_fingerprint = hashlib.sha256(b"[]").hexdigest()
-        snapshot = {
-            "memories": {"count": len(owned), "fingerprint": fingerprint},
-            "graph": {"count": 0, "fingerprint": zero_fingerprint},
-            "ingest": {"count": 0, "fingerprint": zero_fingerprint},
-        }
-        implications = [
-            "The native provider has no graph or ingest state."
-        ]
-        if "memories" in requested:
-            implications.insert(0, "Memories expands to the graph and ingest dependency closure.")
-        if action == "reset_preview":
+            fingerprint = hashlib.sha256(
+                json.dumps(owned_material, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            zero_fingerprint = hashlib.sha256(b"[]").hexdigest()
+            snapshot = {
+                "memories": {"count": len(owned), "fingerprint": fingerprint},
+                "graph": {"count": 0, "fingerprint": zero_fingerprint},
+                "ingest": {"count": 0, "fingerprint": zero_fingerprint},
+            }
+            implications = [
+                "The native provider has no graph or ingest state."
+            ]
+            if "memories" in requested:
+                implications.insert(0, "Memories expands to the graph and ingest dependency closure.")
+            if action == "reset_preview":
+                return {
+                    "components": snapshot,
+                    "expanded_components": expanded,
+                    "implications": implications,
+                }
+
+            expected = expected_counts or {}
+            stale = any(
+                expected.get(component) != snapshot[component]
+                for component in expanded
+            )
+            current_empty = all(snapshot[component]["count"] == 0 for component in expanded)
+            if stale and not current_empty:
+                raise RuntimeError("owner reset preview is stale; preview again before committing")
+
+            if "memories" in expanded and owned:
+                self.memory_manager.save(
+                    [entry for entry in memories if entry.get("owner") != owner]
+                )
+                if self._vector_available():
+                    for entry in owned:
+                        if entry.get("id"):
+                            self.memory_vector.remove(entry["id"])
             return {
-                "components": snapshot,
-                "expanded_components": expanded,
-                "implications": implications,
+                "complete": True,
+                "categories": {
+                    component: {"state": "complete", **snapshot[component]}
+                    for component in expanded
+                },
             }
 
-        expected = expected_counts or {}
-        stale = any(
-            expected.get(component) != snapshot[component]
-            for component in expanded
-        )
-        current_empty = all(snapshot[component]["count"] == 0 for component in expanded)
-        if stale and not current_empty:
-            raise RuntimeError("owner reset preview is stale; preview again before committing")
-
-        if "memories" in expanded and owned:
-            self.memory_manager.save(
-                [entry for entry in memories if entry.get("owner") != owner]
-            )
-            if self._vector_available():
-                for entry in owned:
-                    if entry.get("id"):
-                        self.memory_vector.remove(entry["id"])
-        return {
-            "complete": True,
-            "categories": {
-                component: {"state": "complete", **snapshot[component]}
-                for component in expanded
-            },
-        }
-
     async def rename_owner(self, new_owner: str, *, owner: Optional[str] = None) -> Dict[str, Any]:
-        memories = self.memory_manager.load_all()
-        changed = 0
-        for entry in memories:
-            if entry.get("owner") == owner:
-                entry["owner"] = new_owner
-                changed += 1
-        self.memory_manager.save(memories)
-        return {"renamed": True, "from": owner, "to": new_owner, "counts": {"curated": changed}}
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_manager.memory_file):
+            memories = self.memory_manager.load_all()
+            changed = 0
+            for entry in memories:
+                if entry.get("owner") == owner:
+                    entry["owner"] = new_owner
+                    changed += 1
+            self.memory_manager.save(memories)
+            return {"renamed": True, "from": owner, "to": new_owner, "counts": {"curated": changed}}
 
     def _vector_available(self) -> bool:
         return bool(self.memory_vector and getattr(self.memory_vector, "healthy", True))

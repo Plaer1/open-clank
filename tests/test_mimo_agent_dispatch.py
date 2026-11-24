@@ -1,7 +1,6 @@
 """Strict Agent dispatch accepts only normalized managed route identities."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -195,16 +194,3 @@ async def test_missing_supervisor_returns_typed_terminal_error():
     ]
     assert "SUPERVISOR_UNAVAILABLE" in events[0]
     assert events[-1] == "data: [DONE]\n\n"
-
-
-def test_mounted_chat_and_agent_loop_have_no_legacy_transport_fallback():
-    chat = Path("routes/chat_routes.py").read_text(encoding="utf-8")
-    loop = Path("src/agent_loop.py").read_text(encoding="utf-8")
-
-    assert "stream_agent_target(" in chat
-    assert 'if requested_mode not in ("", "agent", "chat", "plan"):' in chat
-    assert "stream_llm_with_fallback" not in chat
-    assert "stream_llm_with_fallback" not in loop
-    assert "llm_call_async" not in loop
-    assert "ModelEndpoint" not in loop
-    assert loop.count("stream_agent_target(") >= 2

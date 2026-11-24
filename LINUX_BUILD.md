@@ -1,7 +1,7 @@
 # Linux source build
 
-Experimental: Linux app/release support is unqualified; native Files is not built.
-These instructions were checked against source, not executed on Linux.
+These are source setup instructions. For a relocatable Linux x86_64 package and
+its platform limits, see [Linux packaging](docs/linux-package.md).
 
 Use a glibc Linux x86_64 or ARM64 machine with Python 3.11+ (including venv/pip),
 recent Rust/Cargo supporting edition 2024, Git and C/C++ build tools. Setup needs
@@ -18,9 +18,11 @@ python setup.py
 python scripts/openclank_engine.py verify
 ```
 
-Setup builds the managed engine, Frankenmemory and History workers, initializes
-local data and installs the `openclank` command. For existing data, follow
-[upgrading](docs/upgrading.md) first.
+Setup builds or verifies the managed engine and builds Memery, History,
+and native Files with its Linux thumbnail helper. The optional KDE thumbnail
+adapter uses CMake, Qt6 and KF6 KIO development libraries. Setup initializes
+local data and installs the `openclank` command. Follow [upgrading](docs/upgrading.md)
+before pointing this checkout at an existing profile.
 
 For the complete offline artwork, obtain the matching release parts described in
 [setup](docs/setup.md#offline-emoji-artwork), then assemble and launch:

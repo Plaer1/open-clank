@@ -23,21 +23,3 @@ def test_legacy_and_canonical_note_module_are_same_object():
         "routes.note_routes shim must resolve to the canonical "
         "routes.note.note_routes module object"
     )
-
-
-def test_monkeypatch_via_legacy_alias_reaches_canonical(monkeypatch):
-    """Patching through the legacy alias must reach the canonical module.
-
-    Several note tests do ``import routes.note_routes as note_routes``
-    followed by ``monkeypatch.setattr(note_routes, "SessionLocal", ...)``.
-    For that to take effect at runtime, the legacy module object and the
-    canonical one must be identical.
-    """
-    legacy = importlib.import_module("routes.note_routes")
-    canonical = importlib.import_module("routes.note.note_routes")
-
-    sentinel = object()
-    monkeypatch.setattr(legacy, "setup_note_routes", sentinel)
-    assert canonical.setup_note_routes is sentinel, (
-        "monkeypatch via legacy alias did not reach the canonical module"
-    )

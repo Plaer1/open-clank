@@ -27,6 +27,191 @@ from src.openclank.logging_capture_store import LoggingCaptureStore, CaptureErro
 from src.openclank.sql_owner_lifecycle import CommonSqlOwnerLifecycle
 
 
+def test_actor_final_evidence_does_not_gate_execution_finish(tmp_path):
+    from core.provider_models import ProviderBase, ProviderOperationBinding
+    from src.openclank.acp_bridge import ACPBridge
+    from src.openclank.provider_callbacks import ManagedProviderCallbacks
+    engine=create_engine('sqlite:///' + str(tmp_path / 'actor-final.sqlite3'))
+    Base.metadata.create_all(engine);ProviderBase.metadata.create_all(engine)
+    with engine.connect() as connection:
+        connection.exec_driver_sql('PRAGMA foreign_keys=OFF')
+    factory=sessionmaker(bind=engine,expire_on_commit=False)
+    identity={'sessionID':'engine','rootOperationID':'root','actorID':'child','executionRevision':1}
+    binding=ProviderOperationBinding(id='binding',owner='alice',credential_owner='alice',root_operation_id='root',
+        engine_session_id='engine',actor_id='child',execution_revision=1,connection_id='connection',provider_id='provider',
+        billing_lane='metered_api',model_id='model',model_route_id='route',selected_account_id='account',revision=1)
+    db=factory();db.add(binding);db.commit();db.close()
+    policy=LoggingPolicyStore(loader=lambda _owner:{},saver=lambda *_:None)
+    store=LoggingCaptureStore(factory,policy_store=policy)
+    snapshot={'version':1,'revision':1,'advanced_enabled':False,'request_body_enabled':True,
+              'response_body_enabled':True,'binary_body_enabled':False,'private':False}
+    context={'owner':'alice','holder_id':'worker','root_operation_id':'root','operation_id':'actor-binding:binding',
+        'actor_id':'child','actor_kind':'subagent','actor_execution':identity,'logging_policy_snapshot':snapshot}
+    store.admit(owner='alice',holder_id='worker',context=context,binding=binding)
+    callbacks=ManagedProviderCallbacks.__new__(ManagedProviderCallbacks)
+    callbacks._owner='alice';callbacks._holder_id='worker';callbacks._capture=store;callbacks._session_factory=factory
+    class Runtime:
+        def __init__(self): self.left=0
+        def leave(self,_handle): self.left+=1
+    runtime=Runtime();bridge=ACPBridge.__new__(ACPBridge)
+    bridge._managed_execution_lock=asyncio.Lock();bridge._managed_finished_executions=set();bridge._managed_logging_uncertain=set()
+    bridge._managed_actor_turns={};bridge._managed_actor_executions={('engine','root','child',1):{'foregroundRuntime':runtime,'foregroundHandle':'handle'}}
+    bridge._logging_callbacks=callbacks
+    async def drain(callback): return callback()
+    bridge._drain_actor_logging=drain
+    evidence={'version':1,'bindingID':'binding','bindingRevision':1,'outcome':'success','usage':{'inputTokens':20,'audioInputTokens':4},
+        'metricCoverage':{'input_tokens':{'state':'reported','coverage':'complete','source':'sdk'}},
+        'coveredDispatchIDs':['dispatch-1','dispatch-2'],'lossReasons':[],'identityCoverage':'complete','normalizationProfile':'separated-v1'}
+    async def exercise():
+        with pytest.raises(ValueError): await bridge._handle_managed_execution_finish({**identity,'unknownBase':True})
+        result=await bridge._handle_managed_execution_finish({**identity,'evidence':evidence})
+        assert result == {'accepted':True,'replayed':False,'captureState':'recorded'}
+        replay=await bridge._handle_managed_execution_finish({**identity,'evidence':evidence})
+        assert replay['accepted'] and replay['replayed'] and replay['captureState']=='unavailable'
+        invalid={**identity,'actorID':'other','evidence':{'unexpected':'payload'}}
+        bridge._managed_actor_executions[('engine','root','other',1)]={'foregroundRuntime':runtime,'foregroundHandle':'handle'}
+        result=await bridge._handle_managed_execution_finish(invalid)
+        assert result == {'accepted':True,'replayed':False,'captureState':'unavailable'}
+    asyncio.run(exercise())
+    db=factory();events=db.query(StatsEvent).filter_by(owner='alice',operation_id='actor-binding:binding').all()
+    assert len(events)==1 and events[0].input_tokens==20 and events[0].event_metadata['extra_metrics']=={'audioInputTokens':4} and runtime.left==2
+    db.close();engine.dispose()
+
+
+def test_uncertain_actor_capture_fences_only_its_scope():
+    from src.openclank.logging_capture_store import ActorCaptureFenced
+    policy=LoggingPolicyStore(loader=lambda _owner:{},saver=lambda *_:None)
+    store=LoggingCaptureStore(lambda:None,policy_store=policy)
+    snapshot={'version':1,'revision':1,'advanced_enabled':False,'request_body_enabled':True,
+              'response_body_enabled':True,'binary_body_enabled':False,'private':False}
+    identity={'sessionID':'engine','rootOperationID':'root','actorID':'child','executionRevision':1}
+    context={'owner':'alice','holder_id':'worker','root_operation_id':'root','operation_id':'actor-binding:binding',
+             'actor_id':'child','actor_kind':'subagent','actor_execution':identity,'logging_policy_snapshot':snapshot}
+    binding=SimpleNamespace(id='binding',revision=1,root_operation_id='root',provider_id='provider',connection_id='connection',
+        selected_account_id='account',billing_lane='metered_api',model_id='model',model_route_id='route')
+    token=store.admit(owner='alice',holder_id='worker',context=context,binding=binding)['admissionID']
+    store.fence_actor_execution('alice','worker',identity)
+    assert not store.events(owner='alice',holder_id='worker',payload={'admissionID':token,'dispatchID':'late',
+        'sequence':1,'source':'wire'})['accepted']
+    with pytest.raises(ActorCaptureFenced):
+        store.admit(owner='alice',holder_id='worker',context=context,binding=binding)
+    other={**identity,'actorID':'other'}
+    other_context={**context,'actor_id':'other','actor_execution':other,'operation_id':'actor-binding:other'}
+    other_binding=SimpleNamespace(**{**binding.__dict__,'id':'other'})
+    assert store.admit(owner='alice',holder_id='worker',context=other_context,binding=other_binding)['admissionID']
+
+
+def test_actor_capture_root_two_children_retry_once(tmp_path):
+    from services.stats.ledger import capture_chat_metrics
+    from services.stats.query import StatsScope, query_summary
+    engine = create_engine('sqlite:///' + str(tmp_path / 'actor-stats.sqlite3'))
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine,expire_on_commit=False)
+    policy = LoggingPolicyStore(loader=lambda _owner:{},saver=lambda *_:None)
+    store = LoggingCaptureStore(factory,policy_store=policy)
+    snapshot = {'version':1,'revision':1,'advanced_enabled':False,'request_body_enabled':True,
+                'response_body_enabled':True,'binary_body_enabled':False,'private':False}
+    def admission(actor,op,connection,root='root'):
+        binding = SimpleNamespace(id='binding-'+actor,revision=1,root_operation_id=root,provider_id='provider',
+            connection_id=connection,selected_account_id='account',billing_lane='metered_api',model_id='model',model_route_id='route')
+        identity = {'sessionID':'engine','rootOperationID':root,'actorID':actor,'executionRevision':1}
+        context = {'owner':'alice','holder_id':'worker','root_operation_id':root,'operation_id':op,
+                   'actor_id':actor,'actor_kind':'foreground' if actor=='main' else 'subagent',
+                   'actor_execution':identity,'logging_policy_snapshot':snapshot}
+        return identity,store.admit(owner='alice',holder_id='worker',context=context,binding=binding)['admissionID']
+    main,main_token=admission('main','root-op','connection')
+    child1,child1_token=admission('child1','actor-binding:binding-child1','connection')
+    child2,child2_token=admission('child2','actor-binding:binding-child2','different-connection')
+    def emit(token,dispatch,tokens,retry=None):
+        payload={'admissionID':token,'dispatchID':dispatch,'sequence':1,'source':'wire','terminal':True,
+                 'outcome':'completed','metrics':{'input_tokens':tokens},'normalizationProfile':'separated-v1'}
+        if retry: payload['retryOfDispatchID']=retry
+        assert store.events(owner='alice',holder_id='worker',payload=payload)['accepted']
+    emit(main_token,'main-1',10)
+    emit(main_token,'main-2',3,'main-1')
+    store.finish_actor_execution('alice','worker',main)
+    store.finish_operation('alice','worker','root')
+    # Both admitted children remain live even after the foreground root ends.
+    emit(child1_token,'child-1',20)
+    emit(child2_token,'child-2',30)
+    store.finish_actor_execution('alice','worker',child1)
+    store.finish_actor_execution('alice','worker',child2)
+    db=factory()
+    capture_chat_metrics(db,owner='alice',context={'owner':'alice','root_operation_id':'root',
+        'operation_id':'root-op','instance_id':'worker'},metrics={'input_tokens':13,
+        'covered_dispatch_ids':['main-1','main-2'],'metric_coverage':{'input_tokens':{'state':'reported','coverage':'complete','source':'sdk'}}})
+    db.commit()
+    report=query_summary(db,StatsScope('alice','UTC',None,None,'day'))
+    assert report['totals']['input_tokens']['value']==63
+    assert report['operation_counts']['dispatch_attempts']==4
+    assert db.query(StatsEvent).filter_by(owner='alice',actor_kind='subagent').count()==2
+    # An aggregate with no proven dispatch coverage is never added to its
+    # overlapping attempt as if both were independent measurements.
+    _unknown,unknown_token=admission('unknown','unknown-op','connection',root='unlinked')
+    emit(unknown_token,'unknown-1',5)
+    capture_chat_metrics(db,owner='alice',context={'owner':'alice','root_operation_id':'unlinked',
+        'operation_id':'unknown-op','instance_id':'worker'},metrics={'input_tokens':7,'covered_dispatch_ids':[]})
+    db.commit()
+    ambiguous=query_summary(db,StatsScope('alice','UTC',None,None,'day'))
+    assert ambiguous['totals']['input_tokens']['value']==70
+    assert ambiguous['coverage']['state']=='partial_ambiguous'
+    db.close();engine.dispose()
+
+
+def test_provider_attempt_detail_uses_owned_binding_after_rotation(tmp_path):
+    from core.provider_models import ProviderBase, ProviderOperationBinding
+    from src.openclank.logging_models import LoggingBase
+
+    engine = create_engine("sqlite://")
+    ProviderBase.metadata.create_all(engine)
+    LoggingBase.metadata.create_all(engine)
+    # The synthetic binding represents a previously admitted operation;
+    # unrelated connection/account rows are intentionally outside this fixture.
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    policy = LoggingPolicyStore(loader=lambda _owner: {}, saver=lambda *_args: None)
+    store = LoggingCaptureStore(factory, policy_store=policy)
+    binding = ProviderOperationBinding(id="binding", owner="alice", credential_owner="source-owner", root_operation_id="root",
+        connection_id="connection", provider_id="openai", billing_lane="api", model_id="model", model_route_id="route",
+        selected_account_id="rotated-account", revision=3, attempts=[{"attempt": 1, "outcome": "transient", "account_id": "old-account",
+            "evidence": {"version": 1, "kind": "throttle", "httpStatus": 429, "localNotBefore": "2026-01-01T00:00:00Z"}}])
+    db = factory()
+    db.add(binding)
+    db.commit()
+    context = {"owner": "alice", "holder_id": "holder", "root_operation_id": "root", "operation_id": "operation"}
+    admission = store.admit(owner="alice", holder_id="holder", context=context, binding=binding)
+    captured = dict(store.admissions[admission["admissionID"]]["context"])
+    captured["account_id"] = "old-account"  # Binding has since rotated.
+    db.add(LoggingAttemptDetail(id="owned", owner="alice", instance_id="holder", operation_id="operation", attempt_id="dispatch",
+        root_operation_id="root", policy_revision=1, attribution=captured, capture_state="ready", timing={}, loss_reasons=[]))
+    db.add(LoggingAttemptDetail(id="foreign", owner="bob", instance_id="holder", operation_id="other", attempt_id="dispatch",
+        root_operation_id="root", policy_revision=1, attribution=captured, capture_state="ready", timing={}, loss_reasons=[]))
+    db.commit()
+    db.close()
+    result = store.attempt("alice", "owned")["resource"]["provider_attempts"]
+    assert result == {"state": "reported", "scope": "operation", "truncated": False, "items": [{"attempt": 1,
+        "outcome": "transient", "evidence": {"version": 1, "kind": "throttle", "httpStatus": 429, "localNotBefore": "2026-01-01T00:00:00Z"}}]}
+    assert "account" not in json.dumps(result)
+    assert store.attempt("bob", "foreign")["resource"]["provider_attempts"]["state"] == "unavailable"
+    with pytest.raises(CaptureError):
+        store.attempt("bob", "owned")
+    outer='11111111-1111-4111-8111-111111111111'; inner='22222222-2222-4222-8222-222222222222'
+    observation={'version':1,'profile':'openai.codex.responses.v1','captureDispatchID':outer,'upstreamDispatchID':inner,'httpStatus':429}
+    db=factory(); stored=db.query(ProviderOperationBinding).filter_by(id='binding').one()
+    stored.attempts=[{**stored.attempts[0],'dispatch_observation':observation}]
+    db.query(LoggingAttemptDetail).filter_by(id='owned').one().attempt_id=outer
+    db.commit();db.close()
+    matched=store.attempt('alice','owned')['resource']
+    assert matched['provider_attempts']['dispatch_match']=={'state':'exact','attempt':1}
+    assert matched['provider_attempts']['items'][0]['dispatchObservation']==observation
+    assert matched['measurement']['provider_attempt']=={'state':'unavailable'}  # no Stats row was persisted
+    db=factory();stored=db.query(ProviderOperationBinding).filter_by(id='binding').one()
+    stored.attempts=[stored.attempts[0],{**stored.attempts[0],'attempt':2}];db.commit();db.close()
+    assert store.attempt('alice','owned')['resource']['provider_attempts']['dispatch_match']=={'state':'unavailable'}
+    engine.dispose()
+
+
 def test_managed_capture_policy_gap_retention_and_owner_lifecycle(tmp_path):
     engine = create_engine("sqlite:///" + str(tmp_path / "captures.sqlite3"))
     Base.metadata.create_all(engine)
@@ -154,3 +339,51 @@ def test_managed_capture_policy_gap_retention_and_owner_lifecycle(tmp_path):
         logging.result(); ordinary.result()
     saved = prefs._load_for_user("owner")
     assert saved["theme"] == "dark" and saved["logging_preferences"]["advanced_enabled"]
+
+
+def test_current_main_context_requires_exact_receipt_and_binding(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from core.provider_models import ProviderBase, ProviderOperationBinding
+    from services.stats.ledger import capture_context_receipt, capture_attempt_event
+    from routes.history import history_routes
+    from src import model_dispatch
+    from src.openclank import acp_supervisor_adapter
+    engine = create_engine('sqlite:///' + str(tmp_path / 'context.sqlite3'))
+    Base.metadata.create_all(engine); ProviderBase.metadata.create_all(engine)
+    with engine.connect() as conn: conn.exec_driver_sql('PRAGMA foreign_keys=OFF')
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    identity = {'sessionID':'engine','rootOperationID':'root','actorID':'main','executionRevision':1}
+    binding = ProviderOperationBinding(id='binding',owner='alice',credential_owner='alice',root_operation_id='root',engine_session_id='engine',actor_id='main',execution_revision=1,connection_id='connection',provider_id='provider',billing_lane='metered_api',model_id='model',model_route_id='route',revision=1)
+    db = factory(); db.add(binding); db.flush()
+    ctx = {'actor_kind':'foreground','mapping_revision':2,'instance_id':'holder','session_id':'chat','operation_id':'op','root_operation_id':'root'}
+    capture_context_receipt(db,owner='alice',context=ctx,identity=identity,binding=binding,receipt={'dispatchID':'d','complete':True})
+    capture_attempt_event(db,owner='alice',context=ctx,attempt_id='d',payload={'source':'sdk','sequence':1,'terminal':True,'outcome':'completed','metrics':{'input_tokens':100,'cache_read_tokens':40},'metric_coverage':{'input_tokens':{'state':'reported','coverage':'complete','source':'sdk'}},'normalization_profile':'managed-sdk-inclusive-v1','covered_dispatch_ids':['d'],'identity_coverage':'complete'})
+    db.commit(); db.close()
+    class Mapping:
+        def lookup(self, chat): return {'owner':'alice','current':'engine','revision':2}
+    bridge=SimpleNamespace(_durable_session_map=Mapping(),_session_state={'engine':{'last_root_operation_id':'root'}},_session_context={'engine':{'incognito':False,'auxiliary':False}},_managed_provider_generation='holder')
+    worker=SimpleNamespace(_bridge=bridge,is_alive=lambda:True)
+    class Adapter:
+        def owner_lifecycle_pool(self): return SimpleNamespace(worker_for_owner=lambda owner:worker)
+    monkeypatch.setattr(acp_supervisor_adapter,'AcpSupervisorAdapter',Adapter)
+    monkeypatch.setattr(model_dispatch,'get_agent_supervisor',lambda:Adapter())
+    monkeypatch.setattr(history_routes,'SessionLocal',factory)
+    assert history_routes._last_proven_main_context('alice','chat')['tokens']==100
+    db=factory(); db.query(ProviderOperationBinding).filter_by(id='binding').update({'revision':2}); db.commit(); db.close()
+    assert history_routes._last_proven_main_context('alice','chat') is None
+    engine.dispose()
+
+
+def test_host_stage_timing_is_distinct_from_dispatch_clock(tmp_path):
+    from services.stats.ledger import capture_chat_metrics, project_admitted_events
+    engine = create_engine('sqlite:///' + str(tmp_path / 'host-timing.sqlite3'))
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    db=factory()
+    context={'owner':'alice','instance_id':'host','root_operation_id':'root','operation_id':'op'}
+    event=capture_chat_metrics(db,owner='alice',context=context,metrics={'inputTokens':7,'host_stage_timing':{'version':1,'clock':'host_monotonic','chat_transcript_snapshot_ms':12.4,'preparation_ms':5,'result_processing_ms':3}},outcome='completed')
+    db.commit()
+    timing=event.event_metadata['host_stage_timing']
+    assert timing == {'version':1,'clock':'host_monotonic','chat_transcript_snapshot_ms':12,'preparation_ms':5,'result_processing_ms':3}
+    assert project_admitted_events([event]).events[0].event_metadata['host_stage_timing']==timing
+    db.close();engine.dispose()

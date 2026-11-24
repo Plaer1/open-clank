@@ -1,0 +1,229 @@
+import { afterAll, afterEach, describe, expect, test } from "bun:test"
+import { Effect, Layer } from "effect"
+import fs from "fs"
+import path from "path"
+import { provideTmpdirInstance, tmpdir } from "../fixture/fixture"
+import { testEffect } from "../lib/effect"
+import { Global } from "../../src/global"
+import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
+
+const disableDefault = process.env.OPENCLANK_DISABLE_DEFAULT_PLUGINS
+process.env.OPENCLANK_DISABLE_DEFAULT_PLUGINS = "1"
+
+const { Plugin } = await import("../../src/plugin/index")
+const { Snapshot } = await import("../../src/snapshot/index")
+const { Instance } = await import("../../src/project/instance")
+
+const it = testEffect(Layer.mergeAll(Plugin.defaultLayer, CrossSpawnSpawner.defaultLayer))
+
+afterEach(async () => {
+  await Instance.disposeAll()
+})
+
+afterAll(() => {
+  if (disableDefault === undefined) {
+    delete process.env.OPENCLANK_DISABLE_DEFAULT_PLUGINS
+    return
+  }
+  process.env.OPENCLANK_DISABLE_DEFAULT_PLUGINS = disableDefault
+})
+
+function hookSource(marker: string) {
+  return [
+    "export default {",
+    '  "experimental.chat.system.transform": async (_input, output) => {',
+    `    output.system.push(${JSON.stringify(marker)})`,
+    "  },",
+    "}",
+    "",
+  ].join("\n")
+}
+
+const triggerTransform = () =>
+  Effect.gen(function* () {
+    const plugin = yield* Plugin.Service
+    const out = { system: [] as string[] }
+    yield* plugin.trigger(
+      "experimental.chat.system.transform",
+      { model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" } as any },
+      out,
+    )
+    return out
+  })
+
+describe("plugin file hooks", () => {
+  test("runs the capture barrier immediately before the resolved file hook", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, ".openclank", "hooks", "greet.ts"), hookSource("hook"))
+        await Bun.write(path.join(dir, "openclank.json"), "{}")
+      },
+    })
+    const events: string[] = []
+
+    const out = await Instance.provide({
+      directory: tmp.path,
+      fn: async () =>
+        Effect.gen(function* () {
+          const plugin = yield* Plugin.Service
+          const output = { system: [] as string[] }
+          yield* plugin
+            .trigger(
+              "experimental.chat.system.transform",
+              { model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" } as any },
+              output,
+            )
+            .pipe(
+              Effect.provideService(Snapshot.CaptureBarrier, () => Effect.sync(() => events.push("capture"))),
+            )
+          events.push(...output.system)
+          return { output, events }
+        }).pipe(Effect.provide(Plugin.defaultLayer), Effect.runPromise),
+    })
+
+    expect(out.output.system).toEqual(["hook"])
+    expect(out.events).toEqual(["capture", "hook"])
+  })
+
+  for (const folder of ["hook", "hooks"]) {
+    it.live(`does not import home ${folder} on startup, external edits, or reload`, () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const directory = path.join(Global.Path.home, ".openclank", folder)
+          const sink = path.join(dir, "imports.log")
+          const files = ["example.ts", "example_js.js", "late.ts"].map((name) => path.join(directory, name))
+          const source = [
+            'import fs from "node:fs"',
+            `fs.appendFileSync(${JSON.stringify(sink)}, "imported\\n")`,
+            hookSource("home"),
+          ].join("\n")
+          yield* Effect.acquireRelease(
+            Effect.promise(() => fs.promises.mkdir(directory, { recursive: true })),
+            () => Effect.promise(() => Promise.all(files.map((file) => fs.promises.rm(file, { force: true })))),
+          )
+          yield* Effect.promise(() => Promise.all(files.slice(0, 2).map((file) => Bun.write(file, source))))
+
+          const plugin = yield* Plugin.Service
+          yield* plugin.init()
+          expect(yield* Effect.promise(() => Bun.file(sink).exists())).toBe(false)
+          expect((yield* triggerTransform()).system).toEqual([])
+
+          yield* Effect.promise(() => Bun.write(files[0], source + "\n// updated"))
+          yield* Effect.promise(() => Bun.write(files[2], source))
+          yield* Effect.promise(() => Bun.sleep(600))
+          expect((yield* triggerTransform()).system).toEqual([])
+          expect(yield* Effect.promise(() => Bun.file(sink).exists())).toBe(false)
+
+          yield* plugin.reloadFileHooks()
+          yield* plugin.init()
+          expect((yield* triggerTransform()).system).toEqual([])
+          expect(yield* Effect.promise(() => Bun.file(sink).exists())).toBe(false)
+        }),
+      ),
+    )
+  }
+
+  test("loads hooks from .openclank/hooks and picks up external edits without reload call", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, ".openclank", "hooks", "greet.ts"), hookSource("v1"))
+        await Bun.write(path.join(dir, "openclank.json"), "{}")
+      },
+    })
+    const hookFile = path.join(tmp.path, ".openclank", "hooks", "greet.ts")
+
+    const out = await Instance.provide({
+      directory: tmp.path,
+      fn: async () =>
+        Effect.gen(function* () {
+          const first = yield* triggerTransform()
+          expect(first.system).toEqual(["v1"])
+
+          // Simulate an EXTERNAL edit (no write/edit tool, no reloadFileHooks):
+          // bump content and force a distinct mtime past the staleness throttle.
+          fs.writeFileSync(hookFile, hookSource("v2"))
+          const future = new Date(Date.now() + 5000)
+          fs.utimesSync(hookFile, future, future)
+          yield* Effect.promise(() => Bun.sleep(1200))
+
+          return yield* triggerTransform()
+        }).pipe(Effect.provide(Plugin.defaultLayer), Effect.runPromise),
+    })
+
+    expect(out.system).toEqual(["v2"])
+  })
+
+  test("detects newly added hook files", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await fs.promises.mkdir(path.join(dir, ".openclank", "hooks"), { recursive: true })
+        await Bun.write(path.join(dir, "openclank.json"), "{}")
+      },
+    })
+
+    const out = await Instance.provide({
+      directory: tmp.path,
+      fn: async () =>
+        Effect.gen(function* () {
+          const first = yield* triggerTransform()
+          expect(first.system).toEqual([])
+
+          fs.writeFileSync(path.join(tmp.path, ".openclank", "hooks", "late.ts"), hookSource("late"))
+          yield* Effect.promise(() => Bun.sleep(1200))
+
+          return yield* triggerTransform()
+        }).pipe(Effect.provide(Plugin.defaultLayer), Effect.runPromise),
+    })
+
+    expect(out.system).toEqual(["late"])
+  })
+
+  test("dispatches bus events to file hook event handlers", async () => {
+    const { AppRuntime } = await import("../../src/effect/app-runtime")
+    const { Bus } = await import("../../src/bus")
+    const { Session } = await import("../../src/session")
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        const sink = path.join(dir, "events.log")
+        await Bun.write(path.join(dir, "openclank.json"), "{}")
+        await Bun.write(
+          path.join(dir, ".openclank", "hooks", "listener.ts"),
+          [
+            "import fs from 'fs'",
+            "export default {",
+            "  event: async ({ event }) => {",
+            `    fs.appendFileSync(${JSON.stringify(sink)}, event.type + "\\n")`,
+            "  },",
+            "}",
+            "",
+          ].join("\n"),
+        )
+      },
+    })
+    const sink = path.join(tmp.path, "events.log")
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () =>
+        AppRuntime.runPromise(
+          Effect.gen(function* () {
+            // Force file hook state (and its bus subscription) to initialize.
+            const plugin = yield* Plugin.Service
+            yield* plugin.init()
+            // Give the forked subscription fiber time to register on the bus.
+            yield* Effect.promise(() => Bun.sleep(100))
+
+            const bus = yield* Bus.Service
+            yield* bus.publish(Session.Event.Error, {
+              error: { name: "UnknownError", data: { message: "probe" } } as any,
+            })
+            yield* Effect.promise(() => Bun.sleep(600))
+          }),
+        ),
+    })
+
+    const logged = fs.existsSync(sink) ? fs.readFileSync(sink, "utf8") : ""
+    expect(logged).toContain("session.error")
+  })
+})

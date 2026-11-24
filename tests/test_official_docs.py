@@ -8,6 +8,7 @@ these are repository-level tests against the real ``LooseCopalBridge``.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from openclank.official_docs import (  # noqa: E402
     OFFICIAL_DOCS_SEED_VERSION,
     OFFICIAL_ROOT_FOLDER,
     PRODUCT_MARKER,
+    article_by_id,
     encode_official_note,
     is_user_modified_content,
     known_names,
@@ -28,6 +30,7 @@ from openclank.official_docs import (  # noqa: E402
     plan_input_from_content,
     plan_official_provision,
     plan_summary,
+    run_buddy_help_tool,
 )
 from src.openclank.copal_loose import LooseCopalBridge  # noqa: E402
 from src.openclank.copal_errors import CopalBridgeError  # noqa: E402
@@ -55,45 +58,77 @@ def test_manifest_has_stable_ids_hierarchy_and_aliases():
     home = official_home()
     assert home["id"] == "openclank-docs-home"
     assert home["name"] == f"{OFFICIAL_ROOT_FOLDER}/Home"
-    assert home["aliases"], "home carries known aliases for install fixtures"
-    assert "openclank-docs-formatting-demo" in ids
+    assert home["title"] == "Instruction Manual"
+    assert {"OpenClank/Start Here", "OpenClank Handbook", "Open Clank Handbook"} <= set(home["aliases"])
+    files = article_by_id("openclank-docs-files-imps")
+    assert files["name"] == f"{OFFICIAL_ROOT_FOLDER}/Files and Imps"
+    assert files["title"] == "Files and image editing"
+    assert article_by_id("openclank-docs-journal")["name"] == f"{OFFICIAL_ROOT_FOLDER}/Journal"
 
 
 def test_manifest_covers_required_product_topics():
-    bodies = "\n".join(article["body"] for article in official_articles()).lower()
-    for topic in (
-        "work done", "model", "workspace", "editor", "wiki", "template",
-        "comment", "media", "imps", "graph", "lore", "task", "continuation",
-        "theme", "recovery",
-    ):
-        assert topic in bodies, f"official content covers {topic}"
+    titles = {
+        "accounts-models": "Accounts and Models",
+        "chat-workspaces": "Chat and Workspaces",
+        "editor": "Editor",
+        "journal": "Journal",
+        "wiki-recipes": "Wiki Recipes",
+        "formatting-demo": "Markdown Formatting Demo",
+        "files-imps": "Files and image editing",
+        "deliverables": "Deliverables",
+        "graph": "Graph",
+        "memory-lore": "Memory and Lore",
+        "tasks": "Tasks and Continuations",
+        "settings-themes": "Settings and Themes",
+        "recovery": "Recovery",
+    }
+    for suffix, title in titles.items():
+        article = article_by_id(f"openclank-docs-{suffix}")
+        assert article is not None, title
+        assert article["title"] == title
 
 
 def test_manifest_describes_current_architecture_not_obsolete_storage():
     bodies = "\n".join(article["body"] for article in official_articles()).lower()
-    # Wiki has its own presentation over shared document identity and drafts.
-    assert "dedicated page-authoring applet" in bodies
-    assert "same document identity, drafts, saves, history" in bodies
     assert "copal-wiki.redb" not in bodies
     assert "story card" not in bodies and "carousel" not in bodies
-    # Gallery applet retired in favor of Files/Imps (S19).
-    assert "separate gallery applet has been retired" in bodies
-    assert "settings" in bodies and "appearance" in bodies
+    assert "gallery applet" not in bodies
+    wiki = article_by_id("openclank-docs-wiki-recipes")["body"]
+    assert "![[OpenClank/Editor#Source comments]]" in wiki
+    assert "[[Journal|journal page]]" in wiki
 
 
-def test_manifest_states_honest_capability_limits():
-    bodies = "\n".join(article["body"] for article in official_articles()).lower()
-    assert "strict json cannot contain comments" in bodies
-    assert "platform" in bodies
+def test_manifest_links_platform_claims_to_scope_and_evidence():
+    limits = article_by_id("openclank-docs-limits")["body"]
+    for platform in ("macOS", "Windows", "Linux", "Docker"):
+        assert f"| {platform} |" in limits
+    assert "[[Desktop Capture and Host Opening]]" in limits
+    assert "docs/known-limits.md" in limits
 
 
-def test_manifest_uses_shared_app_links_without_inviting_chat_creation():
-    home = official_home()
-    assert "clank://settings" in home["body"]
-    assert "clank://files" in home["body"]
-    assert "clank://graph" in home["body"]
-    for article in official_articles():
-        assert "clank://" not in article["body"] or article["body"].count("clank://") <= 20
+def test_home_task_links_resolve_to_installed_handbook_articles():
+    names = {
+        name
+        for article in official_articles()
+        for name in (article["name"], article["name"].split("/")[-1])
+    }
+    home = official_home()["body"]
+    targets = set(re.findall(r"\[\[([^]|#]+)(?:[^\]]*)\]\]", home))
+    assert {"Journal", "Editor", "Graph", "TreeHouse", "Tasks and Continuations", "Calendar and Email"} <= targets
+    assert targets <= names, f"Unresolvable links: {sorted(targets - names)}"
+    assert home.startswith("# Open Clank\n")
+
+
+@pytest.mark.parametrize(("label", "suffix", "control"), [
+    ("Copal", "app-windows", "Copal navigation"),
+    ("Journal", "journal", "New journal page"),
+    ("Help", "home", "self-hosted AI workspace"),
+])
+def test_buddy_help_retrieves_evidence_for_the_selected_control(label, suffix, control):
+    evidence, source = run_buddy_help_tool(label)
+    article = article_by_id(f"openclank-docs-{suffix}")
+    assert source == {"article_id": article["id"], "title": article["title"], "term": label}
+    assert control in evidence
 
 
 def test_official_document_bodies_round_trip_cleanly():
@@ -119,19 +154,18 @@ async def test_fresh_owner_gets_real_readonly_official_folder(tmp_path):
     indexed = await bridge.call("index", {"owner": "owner", "workspace_id": "notes"})
     docs = indexed["docs"]
     official = [doc for doc in docs if str(doc.get("name", "")).startswith(f"{OFFICIAL_ROOT_FOLDER}/")]
-    assert len(official) == len(official_payloads())
+    articles_by_name = {article["name"]: article for article in official_articles()}
+    assert {doc["name"] for doc in official} == set(articles_by_name)
     for doc in official:
+        article = articles_by_name[doc["name"]]
         assert doc["readOnly"] is True, "official pages are read-only"
-        assert doc["name"].startswith(f"{OFFICIAL_ROOT_FOLDER}/")
-        props = _identity_properties(await _body(bridge, doc["id"]))
+        content = await _body(bridge, doc["id"])
+        props = _identity_properties(content)
         assert props["product"] == PRODUCT_MARKER
         assert props["builtin"] is True
         assert props["seedVersion"] == OFFICIAL_DOCS_SEED_VERSION
-        assert props["docId"]
-    # A real folder of content, not a link-only placeholder.
-    home = next(doc for doc in official if doc["name"] == f"{OFFICIAL_ROOT_FOLDER}/Home")
-    body = await _body(bridge, home["id"])
-    assert "Handbook" in body or "handbook" in body.lower()
+        assert props["docId"] == article["id"]
+        assert json.loads(content)["extensions"]["interchange"]["source"] == article["body"]
 
 
 async def _body(bridge, document_id: str) -> str:
@@ -324,33 +358,7 @@ def test_official_routes_expose_handbook_surface():
     assert 'official_payloads' in src
 
 
-def test_handbook_help_entry_is_wired():
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]
-    help_js = (root / "static/js/contextualHelp.js").read_text(encoding="utf-8")
-    assert "data-help-handbook" in help_js
-    assert "openClankHandbook" in help_js
-    copal_js = (root / "static/js/copal.js").read_text(encoding="utf-8")
-    assert "function openClankHandbook" in copal_js
-    assert "openclank-docs-home" in copal_js
-    assert "doc.readOnly === true && isOfficialDocument(doc)" in copal_js
-    # Article ids (`openclank-docs-*`) are not document ids (`doc_*`).
-    # The fallback must match the article name/aliases present in state.docs.
-    assert "home?.id && state.docs.find((item) => item.id === home.id)" not in copal_js
-    assert "await loadDocuments(false)" in copal_js
-    assert "sameSaveScope(scope, saveScope())" in copal_js
-
-
 # ── Plan wiring into the live Loose path ─────────────────────────────────────
-
-def test_plan_helper_is_wired_into_live_provisioning():
-    """plan_official_provision must run in production, not only in unit tests."""
-    import inspect
-    from src.openclank import copal_loose
-    src = inspect.getsource(copal_loose.LooseCopalRepository.provision_official_docs)
-    assert "plan_official_provision" in src
-    assert "plan_input_from_content" in src
-
 
 @pytest.mark.asyncio
 async def test_live_provision_adopts_alias_without_duplicating(tmp_path):
@@ -416,9 +424,8 @@ async def test_live_provision_keeps_canonical_body_despite_caller_payload(tmp_pa
         doc["id"] for doc in (await bridge.call("index", {"owner": "owner", "workspace_id": "notes"}))["docs"]
         if doc["name"] == f"{OFFICIAL_ROOT_FOLDER}/Home"
     )
-    body = await _body(bridge, home_id)
-    assert "# Open Clank Handbook (revised)" not in body
-    assert "# Open Clank Handbook" in body
+    record = json.loads(await _body(bridge, home_id))
+    assert record["extensions"]["interchange"]["source"] == official_home()["body"]
 
 
 def test_plan_accepts_subset_payloads_for_interrupted_runs():
@@ -441,35 +448,6 @@ def test_plan_input_from_content_reads_identity():
 
 # ── Formatting demo source-reveal is implemented (not merely claimed) ────────
 
-def test_formatting_demo_source_reveal_is_implemented():
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]
-    notes_js = (root / "static/js/copal/notesFeature.js").read_text(encoding="utf-8")
-    renderer_js = (root / "static/js/copal/markdownRenderer.js").read_text(encoding="utf-8")
-    style_css = (root / "static/style.css").read_text(encoding="utf-8")
-
-    # The claim in official bodies must match a real, demo-only inspector.
-    assert "renderFormattingDemoBody" in notes_js
-    assert "Back to rendered" in notes_js
-    assert "isFormattingDemoDocument" in notes_js
-    assert "FORMATTING_DEMO_DOC_ID" in notes_js
-    # Read-only inspector: no editor mount, no save from the reveal path.
-    assert "copal-md-source-inspector" in notes_js
-    assert "copal-md-source-inspector" in style_css
-    # Renderer stamps source spans the inspector reads.
-    assert "data-md-start" in renderer_js
-    assert "data-md-end" in renderer_js
-
-    bodies = "\n".join(article["body"] for article in official_articles())
-    assert "Back to rendered" in bodies
-    assert "reveal the exact Markdown source" in bodies
-
-
 def test_formatting_demo_claim_is_confined_to_the_demo():
-    """Limits must not claim a universal source toggle."""
-    limits = next(
-        article for article in official_articles()
-        if article["id"] == "openclank-docs-limits"
-    )
-    assert "Source reveal belongs to the formatting demo" in limits["body"]
-    assert "does not make every official page editable" in limits["body"].lower()
+    owners = [article["id"] for article in official_articles() if "**Back to rendered**" in article["body"]]
+    assert owners == ["openclank-docs-formatting-demo"]

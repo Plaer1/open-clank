@@ -15,8 +15,8 @@ def _pool(tmp_path):
 
 def _seed_owner(pool, owner, *, body="private runtime", permission="read"):
     runtime = pool._runtime_home(owner)
-    (runtime / "mimocode" / "data").mkdir(parents=True)
-    (runtime / "mimocode" / "data" / "state.json").write_text(body, encoding="utf-8")
+    (runtime / "openclank-engine" / "data").mkdir(parents=True)
+    (runtime / "openclank-engine" / "data" / "state.json").write_text(body, encoding="utf-8")
     pool._grant_store.add(permission, "/private/path", owner=owner)
     pool._grant_store.remove(permission, "/private/path", owner=owner)
     pool._grant_store.add("write", "/active/private", owner=owner)
@@ -144,7 +144,7 @@ async def test_mimo_owner_rename_rejects_tampered_runtime_same_shape(tmp_path):
     pool = _pool(tmp_path)
     old_runtime = _seed_owner(pool, "alice")
     manifest = await pool.preview_owner_rename("alice", "alice2")
-    (old_runtime / "mimocode" / "data" / "state.json").write_text(
+    (old_runtime / "openclank-engine" / "data" / "state.json").write_text(
         "tampered", encoding="utf-8"
     )
     with pytest.raises(RuntimeError, match="runtime state changed"):

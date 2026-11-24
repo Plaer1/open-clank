@@ -3,7 +3,7 @@
 The simulated boundaries are a local OpenAI-compatible model server and the
 managed engine executor that owns access to it. The application reaches that
 executor only through an owner-scoped normalized route; the memory API,
-multipart parser, Rust fm-mcp process, and SQLite store are production code.
+multipart parser, Rust memery-worker process, and SQLite store are production code.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from core.provider_models import ProviderBase
 from core.models import Session
 from routes.memory.memory_routes import setup_memory_routes
 from services.memory import MemoryManager
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_scope import CHAT_WORKSPACE
 from src.openclank.artifacts import ArtifactStore
 from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
@@ -36,7 +36,7 @@ from src.openclank.provider_store import ProviderStore
 
 
 REPO = Path(__file__).resolve().parent.parent
-FM_BIN = REPO / "mcp_servers/frankenmemory/target/release/fm-mcp"
+FM_BIN = REPO / "native/memery/target/release/memery-worker"
 _PEER = ("203.0.113.7", 54321)
 _EMPTY_RESPONSE_SENTINEL = "EMPTY_RESPONSE_SENTINEL"
 
@@ -118,8 +118,8 @@ def current_fm_binary():
     """Build the release binary so this cannot pass against stale Rust."""
 
     result = subprocess.run(
-        ["cargo", "build", "--release", "-p", "fm-mcp"],
-        cwd=REPO / "mcp_servers/frankenmemory",
+        ["cargo", "build", "--release", "-p", "memery-worker"],
+        cwd=REPO / "native/memery",
         capture_output=True,
         text=True,
         timeout=300,
@@ -127,11 +127,11 @@ def current_fm_binary():
     )
     if result.returncode:
         pytest.fail(
-            "current-source fm-mcp release build failed:\n"
+            "current-source memery-worker release build failed:\n"
             f"{result.stdout}\n{result.stderr}"
         )
     if not FM_BIN.is_file():
-        pytest.fail(f"current-source fm-mcp binary was not produced at {FM_BIN}")
+        pytest.fail(f"current-source memery-worker binary was not produced at {FM_BIN}")
     return FM_BIN
 
 
@@ -292,15 +292,15 @@ def managed_llm(local_llm, tmp_path, monkeypatch):
         engine.dispose()
 
 
-def _provider(db_path: Path) -> FrankenmemoryProvider:
-    return FrankenmemoryProvider(
+def _provider(db_path: Path) -> MemeryProvider:
+    return MemeryProvider(
         command=str(FM_BIN),
         env={"FM_DB_PATH": str(db_path)},
     )
 
 
 def _app(
-    provider: FrankenmemoryProvider,
+    provider: MemeryProvider,
     tmp_path: Path,
     _legacy_endpoint_url: str | None = None,
 ):

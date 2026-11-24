@@ -1,3 +1,5 @@
+import { emitToolTiming, type ToolTimingCapture } from "./tool-timing"
+import { emitToolView, type ToolViewCapture } from "./tool-view-source"
 import { recordSdkUsage } from "@/provider/logging-transport"
 import { Slug } from "@mimo-ai/shared/util/slug"
 import path from "path"
@@ -9,16 +11,18 @@ import { type ProviderMetadata, type LanguageModelUsage } from "ai"
 import { Flag } from "../flag/flag"
 import { InstallationVersion } from "../installation/version"
 
-import { Database, NotFoundError, eq, and, gte, isNull, desc, like, inArray, lt } from "../storage"
+import { Database, NotFoundError, eq, and, gte, isNull, desc, like, inArray, lt, sql } from "../storage"
 import { SyncEvent } from "../sync"
 import type { SQL } from "../storage"
 import { PartTable, SessionTable, MessageTable } from "./session.sql"
+import { issueGcfReceipt } from "./gcf-source-proof"
 import { ActorRegistryTable } from "../actor/actor.sql"
 import { ProjectTable } from "../project/project.sql"
 import { Storage } from "@/storage"
 import { Log } from "../util"
 import { updateSchema } from "../util/update-schema"
 import { MessageV2 } from "./message-v2"
+import { CaptureMembership, issueMembership, matchesActionRef } from "./capture-membership"
 import { hostSourceForMessage, remapForkPart, validateManagedForkSources } from "./fork-source"
 import { Instance } from "../project/instance"
 import { InstanceState } from "@/effect"
@@ -505,6 +509,7 @@ export interface Interface {
   readonly children: (parentID: SessionID, options?: { visible?: boolean }) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void>
   readonly updateMessage: <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
+  readonly updateContextEvidence: (msg:MessageV2.Assistant, expected:{id:MessageID;sessionID:SessionID;parentID:MessageID;created:number;actorID:string;executionRevision?:number}, current:()=>boolean) => Effect.Effect<MessageV2.Assistant>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
   readonly removePart: (input: { sessionID: SessionID; messageID: MessageID; partID: PartID }) => Effect.Effect<PartID>
   readonly getPart: (input: {
@@ -513,6 +518,11 @@ export interface Interface {
     partID: PartID
   }) => Effect.Effect<MessageV2.Part | undefined>
   readonly updatePart: <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
+  readonly changeCaptureMembership?: (binding: Omit<CaptureMembership,"revision"|"coverage"|"members">,
+    change: {kind:"begin"; actionID:string; toolCallID:string} | {kind:"complete"; actionID:string; toolCallID:string; actionRef:string} | {kind:"seal"},
+    current: () => boolean) => Effect.Effect<void>
+  readonly updateGcfCompleted: (part: MessageV2.ToolPart, timing?: ToolTimingCapture, view?: ToolViewCapture, outline?:string) => Effect.Effect<MessageV2.ToolPart>
+  readonly updateTimedTool: (part: MessageV2.ToolPart, timing?: ToolTimingCapture, view?: ToolViewCapture) => Effect.Effect<MessageV2.ToolPart>
   readonly updatePartDelta: (input: {
     sessionID: SessionID
     messageID: MessageID
@@ -639,6 +649,53 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
     })
 
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
+      // The optional guarded profile must check the entire subtree before any
+      // child cleanup, and keep that check and all deletes in one write txn.
+      // Old and producer-only profiles retain the existing removal behavior.
+      const guarded = yield* Effect.sync(() => Database.use((tx) =>
+        tx.all<{name:string}>(sql`PRAGMA table_info('user_input_receipt')`).some((column) => column.name === "source_enrollment"),
+      ))
+      if (guarded) {
+        const hasInstance = yield* InstanceState.directory.pipe(
+          Effect.as(true),
+          Effect.catchCause(() => Effect.succeed(false)),
+        )
+        yield* Effect.sync(() => Database.transaction((tx) => {
+          const ids = tx.all<{id:SessionID}>(sql`
+            WITH RECURSIVE subtree(id) AS (
+              SELECT id FROM session WHERE id=${sessionID}
+              UNION SELECT child.id FROM session child JOIN subtree parent ON child.parent_id=parent.id
+            ) SELECT id FROM subtree LIMIT 4097
+          `).map((row) => row.id)
+          if (!ids.length) throw new NotFoundError({message:`Session not found: ${sessionID}`})
+          if (ids.length > 4096) throw new Error("Session subtree is too large for guarded deletion")
+          const protectedSource = tx.get<{present:number}>(sql`
+            WITH RECURSIVE subtree(id) AS (
+              SELECT id FROM session WHERE id=${sessionID}
+              UNION SELECT child.id FROM session child JOIN subtree parent ON child.parent_id=parent.id
+            ) SELECT 1 AS present FROM user_input_receipt
+              WHERE source_enrollment IS NOT NULL AND session_id IN (SELECT id FROM subtree) LIMIT 1
+          `)
+          if (protectedSource) throw new Error("Enrolled queued source requires a host fence before session deletion")
+          const rows = tx.select().from(SessionTable).where(inArray(SessionTable.id,ids)).all()
+          const byID = new Map(rows.map((row) => [row.id,row]))
+          const depth = (id:SessionID):number => {
+            const seen = new Set<SessionID>(); let current:SessionID | null = id; let count = 0
+            while (current && byID.has(current)) {
+              if (seen.has(current)) throw new Error("Cyclic session subtree cannot be deleted")
+              seen.add(current); count++; current = byID.get(current)?.parent_id ?? null
+            }
+            return count
+          }
+          rows.sort((left,right) => depth(right.id)-depth(left.id))
+          for (const row of rows) {
+            SyncEvent.run(Event.Deleted, {sessionID:row.id,info:fromRow(row)}, {publish:hasInstance})
+            SyncEvent.remove(row.id)
+            Database.effect(() => forwardRef.clearParentGrants(row.id))
+          }
+        }, {behavior:"immediate"}))
+        return
+      }
       try {
         const session = yield* get(sessionID)
         const kids = yield* children(sessionID)
@@ -676,6 +733,28 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
         return msg
       }).pipe(Effect.withSpan("Session.updateMessage"))
 
+    // The existence check, current-turn guard and existing event share one
+    // synchronous immediate transaction, so evidence cannot recreate a row.
+    const updateContextEvidence = (msg:MessageV2.Assistant, expected:{id:MessageID;sessionID:SessionID;parentID:MessageID;created:number;actorID:string;executionRevision?:number}, current:()=>boolean):Effect.Effect<MessageV2.Assistant> => Effect.sync(() =>
+      Database.transaction((db) => {
+        const {actorID,executionRevision}=expected
+        if (!current() || !actorID || msg.id!==expected.id || msg.sessionID!==expected.sessionID || msg.parentID!==expected.parentID || msg.time.created!==expected.created || (msg.agentID ?? 'main') !== actorID || (executionRevision !== undefined && (!Number.isSafeInteger(executionRevision) || executionRevision < 0)) || !msg.metadata?.contextInspection)
+          throw new Error('context evidence unavailable')
+        const actor=executionRevision === undefined ? undefined : db.select().from(ActorRegistryTable).where(and(eq(ActorRegistryTable.session_id,msg.sessionID),eq(ActorRegistryTable.actor_id,actorID))).get()
+        const row=db.select().from(MessageTable).where(and(eq(MessageTable.id,msg.id),eq(MessageTable.session_id,msg.sessionID),eq(MessageTable.agent_id,actorID))).get()
+        if ((executionRevision !== undefined && (!actor || actor.status!=='running' || actor.execution_revision!==executionRevision)) || !row || row.time_created!==msg.time.created || !current())
+          throw new Error('context evidence unavailable')
+        const parsed=MessageV2.Assistant.safeParse({...row.data,id:row.id,sessionID:row.session_id,agentID:row.agent_id})
+        if (!parsed.success || parsed.data.parentID!==msg.parentID || parsed.data.time.created!==msg.time.created || !current())
+          throw new Error('context evidence unavailable')
+        // Validation above proves this exact stored row is an assistant. Keep
+        // its original fields, including extensions that parsing may strip.
+        const original = {...row.data,id:row.id,sessionID:row.session_id,agentID:row.agent_id} as MessageV2.Assistant
+        const merged={...original,metadata:{...original.metadata,contextInspection:msg.metadata.contextInspection}}
+        SyncEvent.run(MessageV2.Event.Updated,{sessionID:msg.sessionID,info:merged})
+        return merged
+      },{behavior:'immediate'}))
+
     const updatePart = <T extends MessageV2.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
         yield* Effect.sync(() =>
@@ -687,6 +766,62 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
         )
         return part
       }).pipe(Effect.withSpan("Session.updatePart"))
+
+    const changeCaptureMembership: NonNullable<Interface["changeCaptureMembership"]> = (binding, change, current) => Effect.sync(() =>
+      Database.transaction((db) => {
+        if (!current()) throw new Error("capture membership authority unavailable")
+        const actor = db.select().from(ActorRegistryTable).where(and(eq(ActorRegistryTable.session_id, binding.sessionID as SessionID),
+          eq(ActorRegistryTable.actor_id, binding.actorID))).get()
+        const row = db.select().from(PartTable).where(and(eq(PartTable.id, binding.stepID as PartID),
+          eq(PartTable.message_id, binding.messageID as MessageID), eq(PartTable.session_id, binding.sessionID as SessionID))).get()
+        const message = db.select().from(MessageTable).where(and(eq(MessageTable.id, binding.messageID as MessageID),
+          eq(MessageTable.session_id, binding.sessionID as SessionID))).get()
+        if (!row || !message || message.agent_id !== binding.actorID || message.data.role !== "assistant"
+            || !actor || actor.execution_revision !== binding.executionRevision || actor.status !== "running" || !current())
+          throw new Error("capture membership scope unavailable")
+        const original = { ...row.data, id: row.id, messageID: row.message_id, sessionID: row.session_id }
+        const parsed = MessageV2.StepStartPart.safeParse(original)
+        if (!parsed.success) throw new Error("capture membership step unavailable")
+        // Preserve stored extension fields while narrowing the exact step type.
+        const part: MessageV2.StepStartPart = { ...original, ...parsed.data }
+        const existing = part.captureMembership === undefined ? undefined : CaptureMembership.parse(part.captureMembership)
+        const value: CaptureMembership = existing ?? CaptureMembership.parse({ ...binding, revision:0, coverage:"open", members:[] })
+        if (value.members.some((item, index) => item.sequence !== index
+              || (item.state === "complete") !== (typeof item.actionRef === "string")
+              || (item.state === "complete" && !matchesActionRef(item.actionRef!,value,item.actionID,item.toolCallID))
+              || value.members.findIndex((other) => other.actionID === item.actionID) !== index))
+          throw new Error("capture membership malformed")
+        for (const [key, expected] of Object.entries(binding))
+          if ((value as Record<string, unknown>)[key] !== expected) throw new Error("capture membership binding changed")
+        const members = value.members.map((item) => ({ ...item }))
+        let coverage = value.coverage
+        if (change.kind === "begin") {
+          if (coverage !== "open" || members.length >= 64 || members.some((item) => item.actionID === change.actionID || item.toolCallID === change.toolCallID))
+            throw new Error("capture membership admission unavailable")
+          members.push({sequence:members.length, actionID:change.actionID, toolCallID:change.toolCallID, state:"pending"})
+        } else if (change.kind === "complete") {
+          const item = members.find((entry) => entry.actionID === change.actionID && entry.toolCallID === change.toolCallID)
+          if (!item || item.state !== "pending" || !matchesActionRef(change.actionRef,value,change.actionID,change.toolCallID))
+            throw new Error("capture membership settlement unavailable")
+          item.state = "complete"; item.actionRef = change.actionRef
+        } else {
+          if (coverage !== "open") throw new Error("capture membership already sealed")
+          coverage = "partial"
+        }
+        if (!current()) throw new Error("capture membership authority changed")
+        const next = CaptureMembership.parse({...value, revision:value.revision+1, coverage, members})
+        issueMembership(part, next, (owned) => SyncEvent.run(MessageV2.Event.PartUpdated, {sessionID:row.session_id, part:owned, time:Date.now()}))
+      }, {behavior:"immediate"}))
+
+    const updateTimedTool = (part: MessageV2.ToolPart, timing?: ToolTimingCapture, view?: ToolViewCapture): Effect.Effect<MessageV2.ToolPart> =>
+      Effect.sync(() => { const final=structuredClone(part); emitToolView(view,final,() => emitToolTiming(timing,final,() => SyncEvent.run(MessageV2.Event.PartUpdated, {sessionID:final.sessionID,part:final,time:Date.now()}))); return part })
+
+    const updateGcfCompleted = (part: MessageV2.ToolPart, timing?: ToolTimingCapture, view?: ToolViewCapture, outline?:string): Effect.Effect<MessageV2.ToolPart> =>
+      Effect.sync(() => issueGcfReceipt(part, (issued) => {
+        const final=structuredClone(issued)
+        emitToolView(view,final,() => emitToolTiming(timing,final,() => SyncEvent.run(MessageV2.Event.PartUpdated, {sessionID:final.sessionID,part:final,time:Date.now()})))
+        return issued
+      },outline))
 
     const getPart: Interface["getPart"] = Effect.fn("Session.getPart")(function* (input) {
       const row = Database.use((db) =>
@@ -874,6 +1009,13 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       messageID: MessageID
       partID: PartID
     }) {
+      // The helper performs the fixed host fence before its own exact CAS;
+      // unavailable authority refuses without touching the enrolled part.
+      const fenced = yield* Effect.promise(async () => {
+        const {fenceAndRemoveQueuedPart} = await import('./user-input')
+        return fenceAndRemoveQueuedPart(input)
+      })
+      if (fenced) return input.partID
       yield* Effect.sync(() =>
         SyncEvent.run(MessageV2.Event.PartRemoved, {
           sessionID: input.sessionID,
@@ -940,9 +1082,13 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       children,
       remove,
       updateMessage,
+      updateContextEvidence,
       removeMessage,
       removePart,
       updatePart,
+      changeCaptureMembership,
+      updateGcfCompleted,
+      updateTimedTool,
       getPart,
       updatePartDelta,
       findMessage,

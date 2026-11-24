@@ -6,6 +6,7 @@ deleted. The fix honors the explicit `drop` set, so an omitted memory survives.
 """
 import asyncio
 import json
+from types import SimpleNamespace
 
 import src.builtin_actions as ba
 
@@ -33,7 +34,7 @@ def test_omitted_memory_survives_only_explicit_drop(monkeypatch):
     from src.openclank import modality_facade
 
     _FakeMM.saved = None
-    monkeypatch.setattr(src.ai_interaction, "_memory_provider", None)
+    monkeypatch.setattr(src.ai_interaction, "_memory_provider", SimpleNamespace(provider_id="native"))
     monkeypatch.setattr(src.memory, "MemoryManager", _FakeMM)
     async def fake_llm(**kwargs):
         # Model keeps 'a', drops 'b', and OMITS 'c' entirely.

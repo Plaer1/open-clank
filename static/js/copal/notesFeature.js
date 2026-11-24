@@ -1,13 +1,27 @@
-import { createExplorerLayout, showExplorerCustomization, createExplorerDivider } from '../editor/explorerLayout.js';
+import { hostRasterMime, hostRasterTrail, hostRasterFingerprint, writeHostRaster } from '../editor/hostRasterOriginal.js';
+import {mountVideoReview,normalizeRecordingCoverage} from '../editor/videoReview.js';
+import { CANVAS_MAX_IMPORT_BYTES, readBoundedImportBlob } from '../editor/clipboard-and-drop.js';
+import {mountHtmlVisualPanel} from '../editor/htmlVisualPanel.js';
+import {openDesignHandoff} from '../editor/designHandoff.js';
+import { mountVisualSourcePanel } from '../editor/visualSourcePanel.js';
+import { extractDocumentReferences, mountInlinePreviewHydration } from './markdownResources.js';
+import { runSlidePdfFiles } from '../editor/slidePdfFiles.js';
+import { runWorkbookPdfFiles } from '../editor/workbookPdfFiles.js';
+import { acquireSlideAssets } from '../editor/slideAssets.js';
+import { newSlideDeckSource, parseSlideDeck, serializeSlideDeck } from '../editor/slideModel.js';
+import { newWorkbookSource, parseWorkbook, serializeWorkbook } from '../editor/workbookModel.js';
+import { mountSlideView } from '../editor/slideView.js';
+import { captureFeedbackScope } from '../editor/feedbackScope.js';
+import { mountWorkbookView } from '../editor/workbookView.js';
+import { captureDeliverableAppearance } from '../theme.js';
+import { showExplorerCustomization } from '../editor/explorerLayout.js';
 import {mountImageRegion} from '../graphics/imageRegion.js';
 import { dispatchFilesDestination, isChatResource, editorDestinationReason } from './resourceDestinations.js';
 import { recordPresentation, acknowledgeVisible, achievementOwner } from '../achievementProducer.js';
 import {
   NOTES_PANELS,
   activateWorkspaceLeaf,
-  closeWorkspaceGroup,
-  closeWorkspaceLeaf,
-  closeWorkspaceOtherLeaves,
+  canRetainClosedImageRecovery, stageWorkspaceClose, stageWorkspaceImageReopen, commitWorkspaceClose, clearExplorerBinding,
   findWorkspaceGroup,
   findWorkspaceLeaf,
   groupForLeaf,
@@ -17,6 +31,8 @@ import {
   normalizeNotesWorkspace,
   noteViewType,
   openWorkspaceDocument,
+  openWorkspaceImage,
+  refreshWorkspaceImage,
   resizeWorkspaceSplit,
   serializeNotesWorkspace,
   setWorkspaceLeafMode,
@@ -27,6 +43,7 @@ import {
   workspacePanelsForSide,
 } from './notesWorkspace.js';
 import { showResourceInFiles } from '../showInFiles.js';
+import { getActiveInputContext } from './inputContext.js';
 import { CODE_GRAPH_LABEL, graphResource, graphDisabledReason, executeCodeGraphNavigation } from './resourceGraphCommands.js';
 import {
   coercePropertyValue,
@@ -48,11 +65,13 @@ import {
   wordCount,
 } from './notesModel.js';
 import { wireDialog, wirePopover as wireBasePopover } from './overlays.js';
+import { classifyWikiPages, planWikiAppend } from './wikiGenerate.js';
 import { LANGUAGE_REGISTRY } from '../editor/languageRegistry.js';
 import { copalStorageKey } from './storage.js';
 import { registerMenuDismiss } from '../escMenuStack.js';
 import { parseTable, createTableWidget, applyTableEdit, evaluateFormula } from './tableModel.js';
 import { createBufferRegistry } from './documentBuffers.js';
+import { changedTextRange, createHostFileWatch, replaceEditorTextPreservingView } from '../editor/hostFileUpdates.js';
 import { createSheetController } from './sheetController.js';
 import { mountSheet } from './sheetView.js';
 import { cloneEnvelope, normalizeResourceHandle, sameResourceKey, snapshotEnvelope } from './resourceModel.js';
@@ -64,8 +83,11 @@ import { languageForPath, languageDialectForPath } from '../editor/entryModel.js
 // touches the DOM only when invoked, while ui.js initializes the full shell.
 import { styledPrompt, styledConfirm } from '../dialogPrimitives.js';
 import { filesFacadeClient } from '../filesFacadeClient.js';
+import { fileResourceCanCopyPath, fileResourceCanOpenCodeGraph, fileResourceCanReveal, fileResourceCopyPath } from '../filesResourceActions.js';
+import { readIwiPreview, metadataFormatForName, metadataFormatId, metadataDetails, metadataLabel } from '../editor/previewModel.js';
+import { attachDerivedImage } from '../fileHandler.js';
 import { createResourcePicker, normalizeAuthorizedResource } from './resourcePicker.js';
-import { filesBrowserResource, installEditorFilesStyles, mountEditorFilesBrowser, runFilesNavigation } from './editorFilesBrowser.js';
+import { filesBrowserResource, installEditorFilesStyles, mountEditorFilesBrowser, resolveEditorHostFolder, runFilesNavigation } from './editorFilesBrowser.js';
 import { fileIcon, uiIcon } from '../langIcons.js';
 import {
   expandTemplate as expandTemplateModel,
@@ -78,6 +100,10 @@ import { createWindowNavigation } from './navigation.js';
 import { isOfficialDocument } from './graphModel.js';
 import { openResourceHistory } from '../historyView.js';
 import { visibleWindowBounds } from '../windowResize.js';
+import { createImageSessionRegistry, saveDistinctImageSessions, admitRecoveredBlank } from '../editor/imageSession.js';
+import { createEditorLifetime } from '../editor/state.js';
+import { createImagePersistence } from '../editor/imagePersistence.js';
+import { closeImageTransaction, captureImageCloseTargets } from '../editor/imageCloseTransaction.js';
 
 // Existing dismissal/keyboard ownership stays in overlays; only presentation
 // is clamped to the owning applet when its local action menu opens.
@@ -178,6 +204,7 @@ export function serializeAttachmentInsertion(insertion, { mode = 'link' } = {}) 
 function attachmentPreparationMayHaveCommitted(error) {
   if (!error || error.name === 'AbortError') return false;
   const code = String(error.code || '').toLowerCase();
+  if (code === 'operation_pending') return true;
   const message = String(error.message || '').toLowerCase();
   const status = Number(error.status || 0);
   if (status >= 400 && status < 500 && status !== 408 && status !== 429) return false;
@@ -195,6 +222,7 @@ function attachmentPreparationMayHaveCommitted(error) {
 export function validateAttachmentPreparationRecovery(result, {
   operationId, generation, sourceKey = '', sourceRef = '', sourceItemId = '', sourceRevision = null,
   targetKey = '', targetRef = '', targetRevision = null, mode = 'link',
+  rootRef = '', rootRevision = null,
   accountId = '', workspace = '', policyGeneration = null,
 } = {}) {
   const operation = String(operationId || '');
@@ -223,6 +251,7 @@ export function validateAttachmentPreparationRecovery(result, {
   const identity = preparation.target_identity;
   const recoveredRef = String(identity?.resource_ref || identity?.resourceRef || '').trim();
   if (!['copal_document', 'host_document'].includes(String(identity?.kind || '')) || (targetRef && recoveredRef !== String(targetRef))) throw new Error('Attachment target changed; retry the drop.');
+  if (rootRef && (identity?.root_ref !== rootRef || identity?.root_revision?.kind !== rootRevision?.kind || identity?.root_revision?.value !== rootRevision?.value)) throw new Error('Attachment root changed; retry the drop.');
   const recoveredKey = identity?.resource_key || identity?.resourceKey;
   if (recoveredKey != null && canonicalEditorResourceKey(recoveredKey) !== String(targetKey)) throw new Error('Attachment target identity changed; retry the drop.');
   if (JSON.stringify(preparation.target_revision) !== JSON.stringify(targetRevision)) throw new Error('Attachment target revision changed; retry the drop.');
@@ -365,29 +394,78 @@ export function rebaseTemplateLinks(source, templateName, destinationName) {
 
 export function createNotesFeature({
   h, api, state, createMarkdownEditor, createSourceEditor = createMarkdownEditor, renderMarkdown, renderPreview = null, renderComment = null, formatBaseCell,
-  saveDocument, renameNote, deleteDocument, showHistory, showTrash, showForm,
-  importVault, loadDocuments, openDocument:openOtherView, persistActiveContext, deleteDocuments,
+  saveDocument, showDocumentConflict, renameNote, deleteDocument, showHistory, showTrash, showForm,
+  importVault, loadDocuments, openDocument:openOtherView, mountEditorActivity = null, persistActiveContext, deleteDocuments,
   activateNotes, renderTimeline, openEventEditor, renderBaseEditor = null, baseAdapter = null, resourceBufferRegistry = null, saveResource = null, uploadAttachment = null, commitAttachment = null, abortAttachment = null,
-  makeEditableWikiCopy = null, canCopyWikiArticle = null, getContext = null, registerGlobalOpener = true,
+  makeEditableWikiCopy = null, canCopyWikiArticle = null, getContext = null, getDocumentContexts = null, registerGlobalOpener = true,
   presentationId = 'notes', getSharedDocumentState = null, onSourceChanged = null, onSaveStateChanged = null, afterRender = null,
   createWikiArticle = null, importWikiMemes = null, exportWikiMemes = null,
 }) {
   let persistTimer = null;
+  const hostTextParents = new WeakMap();
+  // Memory-only quarantine holds refused scene disposal across scope changes.
+  const retiredImages = new Map(); let retiredUnloadBound = false;
+  const retiredImageUnload = event => { if (retiredImages.size) { event.preventDefault(); event.returnValue = ''; } };
   const registry = resourceBufferRegistry || createBufferRegistry();
   const editorConsumer = presentationId === 'notes';
-  const ownsSessionDocuments = owner => Boolean(owner?.window?.visible || owner?.window?.root?.classList.contains('modal-minimized'));
+  const documentContexts = () => getDocumentContexts?.() || state.windows?.values?.() || [context()];
+  const ownsSessionDocuments = owner => Boolean((owner?.window?.physicalVisible ?? owner?.window?.visible) || owner?.window?.root?.classList.contains('modal-minimized'));
   const wikiOwns = buffer => Boolean(ownsSessionDocuments(context()) && context()?.noteWorkspace && workspaceLeaves(context().noteWorkspace).some(leaf => context()?.noteBuffers?.get(leaf.docId) === buffer));
-  // Editor drafts belong to this session. Wiki retains its recovery policy,
-  // but must never persist unrelated buffers from the shared document maps.
+  // Journal recovery is scoped to the browser tab and survives a refresh.
+  // Wiki retains its existing durable recovery policy for other sources.
   const buffers = {
     ...registry,
-    persistDraft:buffer => editorConsumer || !wikiOwns(buffer) ? false : registry.persistDraft(buffer, { consumer:'wiki' }),
-    scheduleDraft:buffer => { if (!editorConsumer && wikiOwns(buffer)) registry.scheduleDraft(buffer, { consumer:'wiki', shouldPersist:wikiOwns }); },
+    persistDraft:buffer => buffer.journalRecovery ? registry.persistDraft(buffer, { consumer:'journal' })
+      : editorConsumer || !wikiOwns(buffer) ? false : registry.persistDraft(buffer, { consumer:'wiki' }),
+    scheduleDraft:buffer => {
+      if (buffer.journalRecovery) registry.scheduleDraft(buffer, { consumer:'journal', onPersist:() => {
+        const current = context();
+        for (const cache of current?.noteLeafViews?.values() || []) {
+          if (current.noteBuffers?.get(cache.docId) === buffer) updateLeafStatus(cache);
+        }
+      } });
+      else if (!editorConsumer && wikiOwns(buffer)) registry.scheduleDraft(buffer, { consumer:'wiki', shouldPersist:wikiOwns });
+    },
     recoverDraft:(handle, options) => editorConsumer ? null : registry.recoverDraft(handle, options),
     discardDraft:(buffer, options = {}) => editorConsumer
-      ? options.explicitDiscard ? registry.discardDraft(buffer, { verifyOwner:true }) : true
-      : registry.discardDraft(buffer),
+      ? buffer.journalRecovery ? registry.discardDraft(buffer, { consumer:'journal' })
+        : registry.hasWikiDraft(buffer) ? registry.discardDraft(buffer, { consumer:'wiki' })
+        : options.explicitDiscard ? registry.discardDraft(buffer, { verifyOwner:true }) : true
+      : registry.discardDraft(buffer, { consumer:buffer.journalRecovery ? 'journal' : 'wiki' }),
   };
+
+  function isJournalPage(doc) {
+    const catalog = state.journalCatalog, resource = doc?.resource, key = resource?.key;
+    if (!catalog || catalog.accountId !== state.accountId || key?.provider !== 'copal' ||
+        key.accountId !== state.accountId || key.workspaceId !== state.workspace ||
+        resource.revision?.kind !== 'copalHead' || resource.capabilities?.edit !== true && resource.capabilities?.write !== true ||
+        !['note', 'wiki', 'markdown'].includes(doc.kind) || doc.builtin || doc.readOnly || doc.rawPreserved ||
+        doc.note_error || doc.hidden || isOfficialDocument(doc) || noteViewType(doc) === 'event') return false;
+    const directory = String(doc.name || '').split(/[/\\]/).filter(Boolean).slice(0, -1);
+    const corpus = doc.corpus || (doc.kind === 'wiki' ? 'wiki' : 'notes');
+    return catalog.configuredIds.some(id => {
+      const binder = catalog.descriptors[id], source = binder?.source;
+      return binder?.enabled && binder.provider === 'copal' && source.workspaceId === key.workspaceId &&
+        source.corpus === corpus && source.root.every((part, index) => part === directory[index]);
+    });
+  }
+
+  function scheduleJournalSave(doc, buffer) {
+    const id = doc?.id, previous = state.saveTimers.get(id);
+    if (previous) { clearTimeout(previous); state.saveTimers.delete(id); }
+    const autosavable = () => buffer?.journalRecovery && buffer.state().dirty && !buffer.pendingEdits.size &&
+      (!buffer.uncertainSave || buffer.journalReplayOnRecovery) && buffer.state().status !== 'conflict';
+    if (!autosavable() || !isJournalPage(doc)) return;
+    const owner = context(), scope = currentScope(owner);
+    state.saveTimers.set(id, setTimeout(() => {
+      state.saveTimers.delete(id);
+      const current = state.docs.find(item => item.id === id);
+      if (context() !== owner || currentScope(owner) !== scope || !isJournalPage(current) ||
+          owner.noteBuffers.get(id) !== buffer || owner.noteSaveRuns.has(id) || !autosavable()) return;
+      if (editorCompositionActive(owner, id)) { scheduleJournalSave(current, buffer); return; }
+      void saveDraft(id);
+    }, 600));
+  }
   const previousResourceOpener = globalThis.__openClankOpenResourceHandle;
   const resourceOpener = async (input = {}) => {
     const resourceRef = String(input.resourceRef || input.resource_ref || input.ref || '').trim();
@@ -397,15 +475,32 @@ export function createNotesFeature({
     if (input.signal?.aborted || input.isCurrent && !input.isCurrent() || input.origin && !pickerOriginCurrent(input.origin)) throw new Error('The original Editor pane is unavailable. Open the file again.');
     const generation = state.filesGeneration;
     const activation = owner ? (owner.noteActivationSequence = Number(owner.noteActivationSequence || 0) + 1) : 0;
-    const response = await filesFacadeClient.openResource(resourceRef, { signal:input.signal || null });
+    const purpose = (metadataFormatId(input.inspectionHint?.formatId) || metadataFormatForName(input.name)) ? 'inspect' : null;
+    const response = await filesFacadeClient.openResource(resourceRef, { signal:input.signal || null, purpose, expectedRevision:input.expectedRevision || null });
     if (owner !== context() || generation !== state.filesGeneration || scope !== currentScope()
       || input.signal?.aborted || input.isCurrent && !input.isCurrent() || input.origin && !pickerOriginCurrent(input.origin)) throw new Error('The active account or workspace changed. Open the file again.');
+    if (input.expectedApp && response?.target?.app !== input.expectedApp) throw new Error('This Files resource is not an image.');
+    input.validateResponse?.(response);
+    const openedKey = response.payload?.resource?.key;
+    if (openedKey?.provider === 'copal' && !state.docs.some(doc =>
+        sameResourceKey(doc.resource?.key, openedKey) && doc.resource.revision?.value === response.payload.resource.revision?.value)) {
+      await loadDocuments(false);
+      if (owner !== context() || generation !== state.filesGeneration || scope !== currentScope() ||
+          input.signal?.aborted || input.isCurrent && !input.isCurrent() || input.origin && !pickerOriginCurrent(input.origin)) throw new Error('The active account or workspace changed. Open the file again.');
+    }
+    if (response?.target?.app === 'editor' && response.resource?.provider === 'host' && response.payload?.kind === 'host-image') {
+      const current = () => context() === owner && state.filesGeneration === generation
+        && owner?.noteActivationSequence === activation && !input.signal?.aborted
+        && (!input.isCurrent || input.isCurrent()) && (!input.origin || pickerOriginCurrent(input.origin));
+      return openRetainedHostImage(response.resource.ref, response.resource.revision, current);
+    }
     return dispatchFilesDestination(response, {
       resourceRef, surface:'editor', selectionOnly:input.selectionOnly === true,
+      openImage:(opened, ref) => openImageResource(opened, ref, {activate:owner?.noteActivationSequence === activation, groupId:input.origin?.groupId, isCurrent:input.isCurrent}),
       openEditor:(resource, payload) => {
         const handle = normalizeResourceHandle(resource);
         return openResource(handle, {
-          ...payload, name:payload.name || input.name || handle.locator.displayName,
+          ...payload, openedFilesResource:response.resource, name:payload.name || input.name || handle.locator.displayName,
           text:payload.text ?? payload.content ?? '',
           parent_resource_ref:payload.parent_resource_ref || input.parentResourceRef || null,
           ...(input.intent ? { intent:input.intent } : {}),
@@ -497,6 +592,7 @@ export function createNotesFeature({
     const savedRoot = workspace?.left?.resourceRoot;
     const savedAnchor = workspace?.left?.folderWorkspaceRoot;
     const savedWorkspaceId = workspace?.left?.folderWorkspaceId;
+    const savedBinder = workspace?.left?.binderContext;
     const requestEpoch = Number(current?.noteResourceRequestEpoch || 0);
     const stableKey = canonicalEditorResourceKey(root?.resourceKey || root?.ref || '', root?.provider || 'unknown');
     const scopeToken = currentScope();
@@ -527,14 +623,32 @@ export function createNotesFeature({
         && scopeToken === currentScope()
         && generation === Number(state.filesGeneration || state.contextEpoch || 0)
         && workspace.left.resourceRoot === savedRoot && workspace.left.folderWorkspaceRoot === savedAnchor
-        && workspace.left.folderWorkspaceId === savedWorkspaceId && requestEpoch === Number(current.noteResourceRequestEpoch || 0);
+        && workspace.left.folderWorkspaceId === savedWorkspaceId && workspace.left.binderContext === savedBinder && requestEpoch === Number(current.noteResourceRequestEpoch || 0);
       let renewedAnchor = workspace.left.folderWorkspaceRoot;
       try {
         let raw;
         let hostRelative = '';
         let hostWorkspaceId = '';
         let recoveredLocationError = null;
-        if (root.provider === 'host') {
+        const binder = workspace.left.binderContext;
+        if (binder) {
+          if (binder.accountId !== String(state.accountId || '') || binder.workspace !== String(state.workspace || '')) throw new Error('The saved Journal belongs to another account or workspace.');
+          const resolved = await filesFacadeClient.resolveBinder(binder.descriptor.id, binder.catalogRevision, binder.descriptor, { signal:controller.signal });
+          if (!stillCurrent()) return false;
+          const anchor = normalizeAuthorizedResource(resolved.resource, { purpose:'folder', ...pickerScope() });
+          if (anchor.resourceKey === root.resourceKey) raw = resolved.resource;
+          else {
+            const renewed = await filesFacadeClient.reissue(root.ref, { signal:controller.signal });
+            if (!stillCurrent()) return false;
+            const ref = renewed?.resource?.ref;
+            if (!ref) throw new Error('The saved Journal folder is unavailable.');
+            const revealed = await filesFacadeClient.reveal(ref, { signal:controller.signal });
+            if (!stillCurrent()) return false;
+            const ancestors = (revealed.ancestors || []).map(item => normalizeAuthorizedResource(item, { purpose:'folder', ...pickerScope() }));
+            if (!ancestors.some(item => item.resourceKey === anchor.resourceKey)) throw new Error('The saved folder is no longer inside this Journal.');
+            raw = (await filesFacadeClient.stat(ref, { signal:controller.signal }))?.resource;
+          }
+        } else if (root.provider === 'host') {
           const locator = savedHostRelativePath(root);
           hostWorkspaceId = String(workspace.left.folderWorkspaceId || '').trim();
           // The chosen Workspace has durable authority independent of a
@@ -556,11 +670,21 @@ export function createNotesFeature({
               const response = await filesFacadeClient.stat(root.ref, { signal:controller.signal });
               raw = response?.resource || response;
             } catch (error) {
-              if (error?.name === 'AbortError' || !stillCurrent() || !hostWorkspaceId || !renewedAnchor) throw error;
-              // Host refs have no reissue lane. Keep the independently renewed
-              // chosen anchor and report the outside location's real failure.
-              recoveredLocationError = error;
-              raw = filesBrowserResource(renewedAnchor); hostRelative = '';
+              if (error?.name === 'AbortError' || !stillCurrent()) throw error;
+              if (!hostWorkspaceId) {
+                if (error?.code !== 'resource_ref_stale') throw error;
+                raw = await resolveEditorHostFolder(filesFacadeClient, root, savedAnchor?.hostFolderTrail, controller.signal);
+                if (!stillCurrent()) return false;
+                if (!raw) {
+                  closeFolderWorkspace(workspace);
+                  return false;
+                }
+              } else {
+                if (!renewedAnchor) throw error;
+                // Restore the registered workspace when its previous outside folder is unavailable.
+                recoveredLocationError = error;
+                raw = filesBrowserResource(renewedAnchor); hostRelative = '';
+              }
             }
           }
         } else {
@@ -588,13 +712,16 @@ export function createNotesFeature({
           const child = normalizeAuthorizedResource(item, { purpose:'file', ...pickerScope(), parentRef:renewed.ref });
           return withHostChildRelativePath(renewed, child, item?.name ?? item?.display_name ?? item?.resource?.name);
         });
+        if (savedAnchor?.resourceId && savedAnchor.resourceId === renewed.resourceId) {
+          renewedAnchor = {...renewed, ...(savedAnchor.hostFolderTrail ? {hostFolderTrail:savedAnchor.hostFolderTrail} : {})};
+        }
         if (renewedAnchor) workspace.left.folderWorkspaceRoot = renewedAnchor;
         if (recoveredLocationError) workspace.left.resourceQuery = '';
         workspace.left.resourceCursor = page.next_cursor || null;
         current.noteResourceRootValidationKey = `${scopeToken}:${generation}:${canonicalEditorResourceKey(renewed.resourceKey, renewed.provider)}`;
         current.noteResourceRootReady = true; current.noteResourceRootError = null;
         persist(true); render();
-        if (recoveredLocationError) current.window?.setStatus(`${recoveredLocationError.message || 'The previous outside folder is unavailable.'} Returned to the chosen Editor workspace.`, true);
+        if (recoveredLocationError && recoveredLocationError.code !== 'resource_ref_stale') current.window?.setStatus('The previous folder is unavailable. Showing the saved workspace.');
         return true;
       } catch (error) {
         if (error?.name === 'AbortError' || !stillCurrent()) return false;
@@ -619,7 +746,7 @@ export function createNotesFeature({
   // The sidebar changes only after the renewed ref, authoritative stat, and
   // first page have succeeded, so a failed child/up/search load cannot erase
   // the folder the user was viewing.
-  async function loadEditorResourceFolder(workspace, requested, { query = '', cursor = null, append = false, commitHistory = true, establishWorkspace = false, signal = null } = {}) {
+  async function loadEditorResourceFolder(workspace, requested, { query = '', cursor = null, append = false, commitHistory = true, establishWorkspace = false, pinOnOpen = null, pinWorkspaceId = '', signal = null } = {}) {
     const current = context();
     const requestedRef = String(requested?.ref || requested?.resourceRef || requested || '').trim();
     const registeredHostTarget = String(requested?.provider || '').toLowerCase() === 'host'
@@ -632,9 +759,6 @@ export function createNotesFeature({
     current.noteResourceRootValidationWorkspace = null;
     current.noteResourceRootValidationKey = null;
     current.noteResourceRootValidationEpoch = Number(current.noteResourceRootValidationEpoch || 0) + 1;
-    if (!workspace.left.folderWorkspaceRoot && workspace.left.resourceRoot?.ref) {
-      workspace.left.folderWorkspaceRoot = workspace.left.resourceRoot;
-    }
     current.noteResourceRequestController?.abort?.();
     const controller = new AbortController();
     const cancel = () => controller.abort();
@@ -668,14 +792,14 @@ export function createNotesFeature({
       if (establishWorkspace && isHostLocationsRoot(raw)) throw new Error('Host locations is browse-only. Choose a folder beneath it.');
       let root = normalizeAuthorizedResource(raw, { purpose:'folder', parentRef:requested?.parentRef || requested?.parent_ref || null, ...pickerScope() });
       if (root.kind !== 'folder' || root.capabilities.children !== true) throw new Error('This authorized folder cannot be listed.');
-      if (establishWorkspace && root.provider !== 'host') throw new Error('Choose a Host folder, or use Close Folder to return to Copal.');
-      if (root.provider === 'host' && (establishWorkspace || requestedLocator.present)) root = withHostRelativePath(root, establishWorkspace ? '' : requestedLocator.path);
+      if (establishWorkspace && root.provider !== 'host') throw new Error('Choose a Host folder, or use Close Folder to return to available places.');
+      if (root.provider === 'host' && (establishWorkspace || pinOnOpen || requestedLocator.present)) root = withHostRelativePath(root, establishWorkspace || pinOnOpen ? '' : requestedLocator.path);
       const registration = establishWorkspace
         ? await filesFacadeClient.workspace(root.ref, 'app_folder', { signal:controller.signal })
         : null;
-      const workspaceId = String(registration?.workspace?.id || registration?.id || '').trim();
+      const workspaceId = String(registration?.workspace?.id || registration?.id || pinWorkspaceId).trim();
       if (establishWorkspace && !workspaceId) throw new Error('Host folder registration did not return a workspace.');
-      if (establishWorkspace) {
+      if (workspaceId) {
         // Creating a Workspace can advance file-policy generation. Reacquire
         // its root through that Workspace before issuing children, so the
         // first listing carries a current generation-bound Host reference.
@@ -692,13 +816,20 @@ export function createNotesFeature({
         const child = normalizeAuthorizedResource(item, { purpose:'file', ...pickerScope(), parentRef:root.ref });
         return withHostChildRelativePath(root, child, item?.name ?? item?.display_name ?? item?.resource?.name);
       });
+      if (pinOnOpen && !pinOnOpen()) return false;
       const seen = new Set(append ? priorRows.map(item => `${item.provider}:${item.resourceKey || item.ref}`) : []);
       const merged = append ? [...priorRows, ...rows.filter(item => { const key = `${item.provider}:${item.resourceKey || item.ref}`; if (seen.has(key)) return false; seen.add(key); return true; })] : rows;
       workspace.left.resourceRoot = root; workspace.left.resourceRows = merged.slice(0, 5001);
       workspace.left.resourceCursor = page.next_cursor || null; workspace.left.resourceQuery = String(query || '');
-      if (establishWorkspace) {
-        workspace.left.folderWorkspaceRoot = root;
+      if (establishWorkspace || pinOnOpen) {
+        workspace.left.folderWorkspaceRoot = requested.hostFolderTrail && !workspaceId
+          ? {...root, hostFolderTrail:requested.hostFolderTrail} : root;
         workspace.left.folderWorkspaceId = workspaceId;
+        workspace.left.binderContext = null;
+        workspace.left.copalWorkspacePinned = false;
+        workspace.left.copalFolderRoot = [];
+        workspace.left.folderWorkspaceExplicit = establishWorkspace;
+        workspace.left.tab = 'files';
         resourceNavigation(current)?.reset?.();
       }
       const stableKey = canonicalEditorResourceKey(root.resourceKey || root.ref, root.provider || 'unknown');
@@ -731,14 +862,29 @@ export function createNotesFeature({
     };
   }
 
+  function syncImageExplorer(current, leaf) {
+    const imageLeafId = leaf?.image ? leaf.id : null;
+    if (imageLeafId === (current.noteImageExplorer?.leafId ?? null)) return;
+    current.noteImageExplorer = imageLeafId ? { leafId:imageLeafId, left:false, right:false } : null;
+    current.noteDrawer = null;
+  }
+
   function toggleSidebar(side) {
     const current = context();
     const workspace = ensureWorkspace();
     if (!current || !workspace) return;
+    if (side === 'left' && !shellViewport().narrow && manualWorkspace(workspace,current)) {
+      current.noteManualExplorerOpen = current.noteManualExplorerOpen === false;
+      render();
+      return;
+    }
     const viewport = shellViewport();
     const drawer = viewport.narrow || (side === 'right' && viewport.compact);
+    syncImageExplorer(current, activeLeaf(workspace));
     if (drawer) current.noteDrawer = current.noteDrawer === side ? null : side;
-    else {
+    else if (current.noteImageExplorer) {
+      current.noteImageExplorer[side] = !current.noteImageExplorer[side];
+    } else {
       workspace[side].open = !workspace[side].open;
       persist(true);
     }
@@ -748,26 +894,22 @@ export function createNotesFeature({
   function ensureShellControls() {
     const current = context();
     if (!current) return null;
-    if (!current.noteShellControls) {
-      const make = (side) => h('button', {
-        id:`copal-notes-${side}-sidebar-toggle`,
-        type:'button',
-        class:`copal-btn copal-shell-toggle ${side}`,
-        'data-shell-side':side,
-        'aria-controls':`copal-notes-${side}-sidebar`,
-        onclick:() => toggleSidebar(side),
-      });
-      current.noteShellControls = { left:make('left'), right:make('right') };
-    }
+    current.noteShellControls ||= { right:h('button', {
+      id:'copal-notes-right-sidebar-toggle',
+      type:'button',
+      class:'copal-btn copal-shell-toggle right',
+      'data-shell-side':'right',
+      'aria-controls':`copal-${presentationId}-right-sidebar`,
+      onclick:() => toggleSidebar('right'),
+    }) };
     return current.noteShellControls;
   }
 
-  function syncShellControl(button, side, expanded, slot) {
-    const noun = side === 'left' ? 'files' : 'details';
+  function syncShellControl(button, expanded, slot) {
     const action = expanded ? 'Collapse' : 'Expand';
-    button.textContent = slot === 'sidebar' ? `Hide ${noun}` : side === 'left' ? 'Files' : 'Details';
-    button.title = `${action} Editor ${noun}`;
-    button.setAttribute('aria-label', `${action} Editor ${noun}`);
+    button.textContent = slot === 'sidebar' ? 'Hide details' : 'Details';
+    button.title = `${action} Editor details`;
+    button.setAttribute('aria-label', button.title);
     button.setAttribute('aria-expanded', String(expanded));
     button.dataset.shellSlot = slot;
   }
@@ -775,8 +917,7 @@ export function createNotesFeature({
   function finishShellControlMove(controls, before, focusedSide) {
     requestAnimationFrame(() => {
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      for (const side of ['left', 'right']) {
-        const button = controls[side];
+      for (const [side, button] of Object.entries(controls)) {
         if (focusedSide === side) button.focus({ preventScroll:true });
         const previous = before[side];
         if (!previous || reduced || !button.isConnected) continue;
@@ -821,8 +962,241 @@ export function createNotesFeature({
     return parts.some((part) => part.startsWith('.'));
   }
 
+  function retainedImageDocuments() {
+    const current = context();
+    const scope = currentScope(current);
+    if (!scope || !current?.noteImages?.size) return [];
+    return state.docs.filter(doc => doc.kind === 'image-session' && current.noteImages.get(doc.id)?.scope === scope);
+  }
+
   function workspaceDocuments() {
-    return [...documents(), TIMELINE_DOCUMENT];
+    const docs = [...documents(), TIMELINE_DOCUMENT], ids = new Set(docs.map(doc => doc.id));
+    const workspace = context()?.noteWorkspace;
+    for (const [id,recovery] of Object.entries(workspace?.closedImageRecovery || {})) {
+      if (ids.has(id) || (!recovery?.unavailable && !imageRecoveryInScope(recovery))) continue;
+      docs.push({id,kind:'image-session',name:recovery?.unavailable ? 'Image recovery unavailable' : recovery.sourceKey ? 'Image · reopen from Files' : recovery.draftId ? 'Image draft' : 'Image recovery',
+        imageRecovery:recovery?.unavailable ? null : recovery});
+      ids.add(id);
+    }
+    for (const leaf of workspace ? workspaceLeaves(workspace) : []) if (leaf.image?.recovery && !ids.has(leaf.docId)) { docs.push({id:leaf.docId,kind:'image-session',name:leaf.image.recovery.sourceKey ? 'Image · reopen from Files' : (context()?.noteImages?.get(leaf.docId)?.draftName || 'Image draft'),imageRecovery:leaf.image.recovery}); ids.add(leaf.docId); }
+    return docs;
+  }
+
+  function splitEditorGroup(workspace, groupId, doc, orientation) {
+    return splitWorkspaceGroup(workspace, groupId, doc, orientation);
+  }
+
+  function openBlankImage(options = {}) {
+    const current=context(), scope=bufferScope(current), capturedScope=currentScope(current);
+    if (!current || !scope || !capturedScope || document.body.dataset.accountId!==scope.accountId) throw new Error('Image Editor account authority is unavailable.');
+    const size=options.presetSize || null;
+    if (size && (!Number.isSafeInteger(size.w) || !Number.isSafeInteger(size.h) || size.w<1 || size.h<1 || size.w>16384 || size.h>16384 || size.w*size.h>67108864)) throw new Error('Invalid canvas size.');
+    const workspace=ensureWorkspace(); current.noteImageRegistry ||= createImageSessionRegistry(); current.noteImages ||= new Map();
+    const session=current.noteImageRegistry.open({scope:{accountId:scope.accountId,workspaceId:scope.workspace}}), id=`image-session:${session.sessionId}`;
+    const name=String(options.name || 'Untitled image').slice(0,256);
+    const image={session,scope:capturedScope,views:new Map(),initialLoad:null,blank:true,presetSize:size,restoreDraft:false,readyViews:new Map(),initialAttachment:options.initialAttachment || null,initialProvenance:options.initialProvenance || null,hostOriginal:options.hostOriginal || null};
+    current.noteImages.set(id,image);
+    state.docs.push({id,kind:'image-session',name,imageRecovery:session.serializeRecovery()});
+    const leaf=openWorkspaceImage(workspace,session,{intent:'newTab'}); current.selected=id; state.selected=id;
+    let target=null;
+    if (options.awaitView) { let resolve,reject; const ready=new Promise((ok,fail)=>{resolve=ok;reject=fail;}); image.readyViews.set(leaf.image.viewId,{resolve,reject}); target=Object.freeze({sessionId:session.sessionId,leafId:leaf.id,viewId:leaf.image.viewId,ready}); }
+    persist(true); render(); return target || leaf.id;
+  }
+
+  async function openFilesCanvasHandoff(handoff) {
+    if (!handoff?.payload || typeof handoff.getContext!=='function') throw new Error('Files image handoff is unavailable.');
+    const owner=context(), scope=currentScope(owner), target=openBlankImage({name:handoff.name || 'Canvas',presetSize:{w:1024,h:1024},awaitView:true});
+    const runtime=await target.ready;
+    const image=owner.noteImages?.get(`image-session:${target.sessionId}`), view=image?.views?.get(target.viewId), leaf=findWorkspaceLeaf(owner.noteWorkspace,target.leafId);
+    const targetScope=image?.session.captureTarget().scope;
+    if (currentScope(owner)!==scope || !image || image.session.sessionId!==target.sessionId || targetScope?.accountId!==handoff.context?.owner || (targetScope?.workspaceId || 'default')!==handoff.context?.workspace || view?.runtime!==runtime || leaf?.image?.viewId!==target.viewId || typeof runtime?.importFilesImage!=='function') throw new Error('The target image view is no longer available.');
+    return runtime.importFilesImage(handoff.payload,handoff.context,handoff.getContext);
+  }
+
+  async function openRetainedHostImage(ref, expected, isCurrent) {
+    const owner=context(), scope=bufferScope(owner), capturedScope=currentScope(owner);
+    const current=()=>context() === owner && capturedScope === currentScope(owner) && isCurrent();
+    const fingerprint=expected?.kind === 'hostFingerprint' && /^sha256:([a-f0-9]{64}):([1-9][0-9]*)$/.exec(expected.value || '');
+    const size=Number(fingerprint?.[2]);
+    if (!scope || !current() || !fingerprint || !Number.isSafeInteger(size) || size > CANVAS_MAX_IMPORT_BYTES) throw new Error('The saved image revision is unavailable.');
+    const sameRevision=row=>row?.provider === 'host' && row.kind === 'file' && row.revision?.kind === expected.kind && row.revision?.value === expected.value;
+    const first=await filesFacadeClient.stat(ref);
+    const source=first?.resource || first;
+    if (!current() || !sameRevision(source) || !/^resource-[a-f0-9]{64}$/.test(source.id || '') ||
+        !source.capabilities?.includes('download') || !source.ref || !/^image[/](?:png|jpeg|gif|webp)$/i.test(source.mime_type || '')) {
+      throw new Error('The exact saved image cannot be read.');
+    }
+    const response=await fetch(filesFacadeClient.contentUrl(source.ref,{purpose:'download',expectedRevision:expected}),
+      {credentials:'same-origin',cache:'no-store'});
+    const blob=await readBoundedImportBlob(response,size);
+    if (!current() || blob.size !== size) throw new Error('The saved image changed.');
+    const bytes=await blob.arrayBuffer();
+    const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('');
+    if (digest !== fingerprint[1] || !current()) throw new Error('The saved image bytes changed.');
+    const checked=await filesFacadeClient.stat(source.ref), after=checked?.resource || checked;
+    if (!current() || !sameRevision(after) || after.id !== source.id || !after.ref) throw new Error('The saved image changed.');
+    const name=String(source.name || 'Saved image').slice(0,256);
+    const provenance={v:1,kind:'host_file',id:source.id,locator:null,digest,owner:scope.accountId,workspace:scope.workspace,chatId:null};
+    const trail=await hostRasterTrail(filesFacadeClient,after);
+    if (!current()) throw new Error('The saved image view changed.');
+    const hostOriginal={name,trail,resourceRef:after.ref,resourceId:after.id,revision:{...expected},
+      mime:after.capabilities?.includes('write') ? hostRasterMime(bytes,source.mime_type.toLowerCase()) : null,stat:ref=>filesFacadeClient.stat(ref)};
+    const target=openBlankImage({name,initialAttachment:new File([blob],name,{type:source.mime_type}),initialProvenance:provenance,hostOriginal,awaitView:true});
+    const runtime=await target.ready;
+    const image=owner.noteImages?.get(`image-session:${target.sessionId}`);
+    if (capturedScope !== currentScope(owner) || image?.views?.get(target.viewId)?.runtime !== runtime) throw new Error('The saved image view was superseded.');
+    return target.leafId;
+  }
+
+  async function openPendingAttachment(file,isCurrent,provenance) {
+    if (!(file instanceof Blob) || typeof isCurrent!=='function' || !isCurrent()) throw new Error('The originating attachment changed.');
+    const owner=context(), scope=currentScope(owner), target=openBlankImage({name:file.name || 'Attachment',initialAttachment:file,initialProvenance:provenance,awaitView:true});
+    const runtime=await target.ready, image=owner.noteImages?.get(`image-session:${target.sessionId}`);
+    if (context()!==owner || currentScope(owner)!==scope || image?.views?.get(target.viewId)?.runtime!==runtime) throw new Error('The attachment image view is unavailable.');
+    return {session:image.session,runtime,viewId:target.viewId,installApply:fn=>{ if (typeof fn!=='function' || image.views?.get(target.viewId)?.runtime!==runtime) throw new Error('Attachment image view is unavailable.'); image.applyAttachment=fn; }};
+  }
+
+  async function openEditableImageCopy(payload,name,isCurrent) {
+    if (!isCurrent()) throw new Error('The originating Editor changed.');
+    const owner=context(), scope=currentScope(owner), target=openBlankImage({name,presetSize:{w:1024,h:1024},awaitView:true});
+    const runtime=await target.ready;
+    const current=() => { const image=owner.noteImages?.get(`image-session:${target.sessionId}`), leaf=findWorkspaceLeaf(owner.noteWorkspace,target.leafId); return context()===owner && currentScope(owner)===scope && image?.session.sessionId===target.sessionId && image?.views?.get(target.viewId)?.runtime===runtime && leaf?.image?.viewId===target.viewId; };
+    if (!current() || typeof runtime?.importEditableCopy!=='function') throw new Error('The image copy target is unavailable.');
+    await runtime.importEditableCopy(payload,current);
+    owner.window?.setStatus('Opened an editable copy. The original is unchanged.');
+  }
+
+  async function openImageDraftCopy(isCurrent) {
+    const response=await fetch('/api/editor-drafts',{credentials:'same-origin'});
+    if (!response.ok || !isCurrent()) throw new Error('Image drafts are unavailable or the Editor changed.');
+    const listing=await response.json(); if (!isCurrent() || !Array.isArray(listing?.drafts)) throw new Error('Image draft list is unavailable.');
+    const selected=await new Promise(resolve => {
+      const dialog=h('dialog',{class:'copal-dialog'},h('h2',{text:'Open image draft'}),h('p',{text:'Legacy drafts open as editable copies; the original draft remains unchanged.'}));
+      let done=false; const finish=value=>{if(done)return;done=true;dialog.close();dialog.remove();resolve(value);};
+      const search=h('input',{type:'search',placeholder:'Search image drafts', 'aria-label':'Search image drafts'}), list=h('select',{'aria-label':'Image drafts',size:Math.min(8,Math.max(2,listing.drafts.length))});
+      const draw=()=>{const query=search.value.trim().toLocaleLowerCase(); list.replaceChildren(); for (const draft of listing.drafts) if (typeof draft.id==='string' && String(draft.name || 'Untitled').toLocaleLowerCase().includes(query)) list.append(h('option',{value:draft.id,text:String(draft.name || 'Untitled').slice(0,200)}));};
+      search.addEventListener('input',draw); draw(); dialog.append(search,list,h('footer',{class:'copal-dialog-actions'},commandButton('Cancel',()=>finish(null)),commandButton('Open',()=>{if(list.value)finish(list.value);}))); wireDialog(dialog); document.body.append(dialog); dialog.addEventListener('cancel',event=>{event.preventDefault();finish(null);});dialog.showModal(); search.focus();
+    });
+    if (!selected) return; if (!isCurrent()) throw new Error('The originating Editor changed.');
+    const result=await fetch(`/api/editor-drafts/${encodeURIComponent(selected)}`,{credentials:'same-origin'});
+    if (!result.ok || !isCurrent()) throw new Error('Image draft is unavailable or the Editor changed.');
+    const draft=await result.json(); if (!isCurrent() || draft?.id!==selected) throw new Error('Image draft identity changed.');
+    if (draft.payload?._imageSessionRecovery) {
+      const owner=context(), local=bufferScope(owner), scope=currentScope(owner), saved={...draft.payload._imageSessionRecovery,draftId:draft.id};
+      if (!local || saved.scope?.accountId!==local.accountId || saved.scope?.workspaceId!==local.workspace || saved.sourceKey!=null || saved.sourceRevision!=null || saved.sourceDigest!=null || saved.opaqueRef!=null || saved.projectId!=null || saved.projectRevision!=null || document.body.dataset.accountId!==local.accountId) throw new Error('This source-bound draft requires its original authorized image recovery.');
+      owner.noteImageRegistry ||= createImageSessionRegistry(); owner.noteImages ||= new Map();
+      const matches=[]; for (const [oldScope,entries] of retiredImages) for (const [oldId,entry] of entries) if (entry.session.sessionId===saved.sessionId) matches.push({oldScope,oldId,entry});
+      if (matches.length>1) throw new Error('Multiple retained images conflict; none was replaced.');
+      const id=`image-session:${saved.sessionId}`, workspace=ensureWorkspace(); let entry;
+      if (matches.length) {
+        const match=matches[0], session=match.entry.session, controller=session.getPersistenceController(), registry=owner.noteImageRegistry, imageMap=owner.noteImages;
+        if (JSON.stringify(session.captureTarget())!==JSON.stringify(saved) || !controller?.canReauthorize()) throw new Error('This retained image has an unresolved operation; recovery remains preserved.');
+        if (!await styledConfirm('Recover retained edits for this image?',{title:'Recover retained image',confirmText:'Recover retained edits',cancelText:'Cancel'})) return;
+        const current=()=>context()===owner && currentScope(owner)===scope && owner.noteWorkspace===workspace && owner.noteImageRegistry===registry && owner.noteImages===imageMap && retiredImages.get(match.oldScope)?.get(match.oldId)===match.entry;
+        const authority={isActive:()=>context()===owner,validateScope:target=>currentScope(owner)===scope && target.scope.accountId===state.accountId && target.scope.workspaceId===String(state.workspace || '') && document.body.dataset.accountId===target.scope.accountId,validate:target=>authority.validateScope(target) && target.sourceKey===null};
+        const adapter=createImagePersistence({session,authority,filesClient:filesFacadeClient});
+        const verifyBlank=async candidate=>{const response=await fetch(`/api/editor-drafts/${encodeURIComponent(candidate.draftId)}`,{credentials:'same-origin'}); if (!response.ok || !current()) return false; const fresh=await response.json(); return current() && fresh?.id===candidate.draftId && JSON.stringify({...fresh.payload?._imageSessionRecovery,opaqueRef:null})===JSON.stringify({...candidate,draftId:null,opaqueRef:null});};
+        const proof=await controller.proveReauthorization({candidate:saved,newAdapter:adapter,newAuthority:authority,isCurrent:current,verifyBlank});
+        if (!current()) throw new Error('The Editor scope changed; retained edits remain preserved.');
+        registry.transferFrom(match.entry.registry,session,()=>controller.commitReauthorization(proof));
+        const entries=retiredImages.get(match.oldScope); entries.delete(match.oldId); if (!entries.size) retiredImages.delete(match.oldScope);
+        if (!retiredImages.size && retiredUnloadBound) {window.removeEventListener('beforeunload',retiredImageUnload); retiredUnloadBound=false;}
+        entry={session,scope,views:new Map(),initialLoad:null,blank:true,presetSize:{w:1,h:1},restoreDraft:false}; imageMap.set(id,entry);
+      } else entry=admitRecoveredBlank(owner.noteImages,owner.noteImageRegistry,saved,scope);
+      let doc=state.docs.find(item=>item.id===id); if (!doc) { doc={id,kind:'image-session',name:String(draft.name || 'Image draft').slice(0,256),imageRecovery:entry.session.serializeRecovery()}; state.docs.push(doc); }
+      const existing=workspaceLeaves(workspace).find(leaf=>leaf.image?.sessionId===entry.session.sessionId);
+      if (existing) { const group=groupForLeaf(workspace,existing.id); if (group) setActive(group.id,existing.id); }
+      else openWorkspaceImage(workspace,entry.session,{intent:'newTab'});
+      owner.selected=id; state.selected=id; persist(true); render(); return;
+    }
+    return openEditableImageCopy(draft,String(draft.name || 'Image draft')+' copy',isCurrent);
+  }
+
+  async function importImageProject(isCurrent) {
+    const file=await new Promise(resolve=>{const input=document.createElement('input');input.type='file';input.accept='application/json,.json';input.addEventListener('change',()=>resolve(input.files?.[0] || null),{once:true});input.addEventListener('cancel',()=>resolve(null),{once:true});input.click();});
+    if (!file) return; if (!isCurrent() || file.size>32*1024*1024) throw new Error('The Editor changed or the project exceeds the import limit.');
+    const text=await file.text(); if (!isCurrent()) throw new Error('The originating Editor changed.');
+    const project=JSON.parse(text); let payload;
+    if (project?.kind==='imps-project') { const response=await fetch('/api/imps/projects/validate-bundle',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:text}); if (!response.ok || !isCurrent()) throw new Error('Image project validation failed or the Editor changed.'); const validated=await response.json(); if (!isCurrent()) throw new Error('The originating Editor changed.'); payload=validated.state; }
+    else if (project?.type==='openclank-imps-editor-project') payload=project;
+    else throw new Error('Not an image project.');
+    return openEditableImageCopy(payload,`${String(file.name || 'Image project').slice(0,180)} copy`,isCurrent);
+  }
+
+  function imageRecoveryInScope(recovery, owner = context()) {
+    const local=bufferScope(owner);
+    return !!local && !!recovery?.scope && recovery.scope.accountId===local.accountId &&
+      recovery.scope.workspaceId===local.workspace && document.body.dataset.accountId===local.accountId;
+  }
+
+  async function recoverBlankLeaf(owner,leaf,cache) {
+    const saved=leaf.image?.recovery, savedIdentity=JSON.stringify(leaf.image?.recovery), scope=currentScope(owner), local=bufferScope(owner);
+    if (!saved || saved.sourceKey != null || saved.sourceRevision != null || saved.sourceDigest != null || saved.opaqueRef != null || saved.projectId != null || saved.projectRevision != null || !saved.draftId || !local || saved.scope.accountId!==local.accountId || saved.scope.workspaceId!==local.workspace || document.body.dataset.accountId!==local.accountId) throw new Error('Blank image recovery is unavailable.');
+    for (const entries of retiredImages.values()) for (const entry of entries.values()) if (entry.session.sessionId===saved.sessionId) throw new Error('Retained image requires explicit recovery in its original scope.');
+    const response=await fetch(`/api/editor-drafts/${encodeURIComponent(saved.draftId)}`,{credentials:'same-origin'});
+    if (!response.ok) throw new Error('Blank image draft is unavailable.');
+    const draft=await response.json(), recorded=draft?.payload?._imageSessionRecovery;
+    if (draft?.id!==saved.draftId || context()!==owner || currentScope(owner)!==scope || owner.noteLeafViews?.get(leaf.id)!==cache || findWorkspaceLeaf(owner.noteWorkspace,leaf.id)!==leaf || JSON.stringify(leaf.image?.recovery)!==savedIdentity || JSON.stringify({...recorded,opaqueRef:null})!==JSON.stringify({...saved,draftId:null,opaqueRef:null})) throw new Error('Blank image draft identity or scope changed.');
+    owner.noteImageRegistry ||= createImageSessionRegistry(); owner.noteImages ||= new Map();
+    const existing=owner.noteImages.get(leaf.docId);
+    const entry=admitRecoveredBlank(owner.noteImages,owner.noteImageRegistry,saved,scope);
+    entry.draftName=draft.name;
+    if (existing) return;
+    owner.noteShellCache=null; render();
+  }
+
+  async function openImageResource(opened, ref, options = {}) {
+    const current = context(), scope = bufferScope(current), row = opened?.resource;
+    const externalCurrent = typeof options.isCurrent === 'function' ? options.isCurrent : () => true;
+    if (options.activate === false || !externalCurrent()) throw new Error('The originating Editor view changed; reopen the image.');
+    if (!current || !scope || opened?.target?.app !== 'imps' || row?.provider !== 'files' || !row.id || row.ref !== ref || !row.capabilities?.includes('open') || !row.capabilities?.includes('preview') || row.revision?.kind !== 'imageSha256' || !/^(?:sha256:)?[a-f0-9]{64}$/.test(row.revision?.value || '')) throw new Error('This image lacks an authorized stable revision; reopen it from Files.');
+    const imageScope = {accountId:scope.accountId,workspaceId:scope.workspace};
+    const workspace = ensureWorkspace(), key = {...imageScope,provider:'files',resourceId:row.id};
+    const savedLeaf = workspaceLeaves(workspace).find(leaf => leaf.image?.recovery?.sourceKey?.provider === 'files' && leaf.image.recovery.sourceKey.resourceId === row.id);
+    current.noteImageRegistry ||= createImageSessionRegistry(); current.noteImages ||= new Map();
+    const matches=[];
+    for (const [oldScope,entries] of retiredImages) for (const [oldId,entry] of entries) {
+      const target=entry.session.captureTarget();
+      if (target.scope.accountId !== imageScope.accountId || target.scope.workspaceId !== imageScope.workspaceId) continue;
+      if (sameResourceKey(target.sourceKey,key) || savedLeaf?.image?.sessionId === target.sessionId) matches.push({oldScope,oldId,entry,target});
+    }
+    if (matches.length > 1) throw new Error('Multiple retained image recoveries conflict; none was replaced.');
+    let session;
+    if (matches.length) {
+      const match=matches[0], saved=match.target, capturedScope=currentScope(current), destinationRegistry=current.noteImageRegistry, imageMap=current.noteImages;
+      if (!sameResourceKey(saved.sourceKey,key) || (savedLeaf && savedLeaf.image.sessionId !== saved.sessionId) || JSON.stringify(saved.sourceRevision)!==JSON.stringify(row.revision) || String(saved.sourceDigest || '').replace(/^sha256:/,'')!==String(row.revision.value).replace(/^sha256:/,'')) throw new Error('Retained image identity or revision conflicts; its edits remain preserved.');
+      const controller=match.entry.session.getPersistenceController();
+      if (!controller?.canReauthorize()) throw new Error('Retained image has an unresolved operation; recovery remains preserved in its original scope.');
+      const answer=await styledConfirm('Recover the retained edits for this image?',{title:'Recover retained image',confirmText:'Recover retained edits',cancelText:'Cancel'});
+      if (answer !== true) return null;
+      const isCurrent=() => externalCurrent() && context()===current && currentScope(current)===capturedScope && current.noteWorkspace===workspace && current.noteImageRegistry===destinationRegistry && current.noteImages===imageMap && retiredImages.get(match.oldScope)?.get(match.oldId)===match.entry;
+      if (!isCurrent()) throw new Error('The Editor scope changed; retained edits remain preserved.');
+      const candidate={...saved,opaqueRef:ref};
+      const authority={isActive:() => context()===current,validateScope:target => currentScope(current)===capturedScope && target.scope.accountId===state.accountId && target.scope.workspaceId===String(state.workspace || '') && document.body.dataset.accountId===target.scope.accountId,
+        validate:target => authority.validateScope(target) && target.sourceKey?.provider==='files'};
+      const freshAdapter=createImagePersistence({session:match.entry.session,authority,filesClient:filesFacadeClient});
+      const proof=await controller.proveReauthorization({candidate,newAdapter:freshAdapter,newAuthority:authority,isCurrent});
+      if (!isCurrent()) throw new Error('The Editor scope changed; retained edits remain preserved.');
+      session=destinationRegistry.transferFrom(match.entry.registry,match.entry.session,() => controller.commitReauthorization(proof));
+      const entries=retiredImages.get(match.oldScope); entries.delete(match.oldId); if (!entries.size) retiredImages.delete(match.oldScope);
+      if (!retiredImages.size && retiredUnloadBound) {window.removeEventListener('beforeunload',retiredImageUnload); retiredUnloadBound=false;}
+      if (savedLeaf) savedLeaf.image.recovery=session.serializeRecovery();
+    } else if (savedLeaf && !current.noteImages.has(savedLeaf.docId)) {
+      const saved = savedLeaf.image.recovery;
+      if (!sameResourceKey(saved.sourceKey,key) || JSON.stringify(saved.sourceRevision) !== JSON.stringify(row.revision) || String(saved.sourceDigest || '').replace(/^sha256:/,'') !== String(row.revision.value).replace(/^sha256:/,'')) throw new Error('Saved image revision or scope changed; its recovery remains preserved.');
+      session = current.noteImageRegistry.restore({...saved,opaqueRef:row.ref});
+      savedLeaf.image.recovery = session.serializeRecovery();
+    } else session = current.noteImageRegistry.open({scope:imageScope,sourceKey:key,sourceRevision:row.revision,sourceDigest:row.revision.value,opaqueRef:row.ref});
+    const recovery = session.serializeRecovery(), id = `image-session:${session.sessionId}`;
+    if (!current.noteImages.has(id)) current.noteImages.set(id, {session,scope:currentScope(current),views:new Map(),initialLoad:null});
+    let doc = state.docs.find(item => item.id === id);
+    if (!doc) { doc = {id,kind:'image-session',name:row.name || 'Image',imageRecovery:recovery}; state.docs.push(doc); }
+    else doc.imageRecovery = recovery;
+    const existing = workspaceLeaves(workspace).find(item => item.image?.sessionId === session.sessionId);
+    if (existing) { current.noteShellCache = null; const group = groupForLeaf(workspace, existing.id); if (options.activate !== false && group) setActive(group.id, existing.id); return existing.id; }
+    const leaf = openWorkspaceImage(workspace,session,{intent:'newTab',...(options.groupId ? {groupId:options.groupId} : {})});
+    if (options.activate !== false) { current.selected = id; state.selected = id; }
+    persist(true); render(); return leaf.id;
   }
 
   function ensureWorkspace() {
@@ -859,7 +1233,8 @@ export function createNotesFeature({
       ...(doc.extensions == null ? {} : { extensions:doc.extensions }),
     }));
     const recoveryScope = bufferScope(current);
-    if (!editorConsumer && recoveryScope) for (const doc of documents()) {
+    const wikiDrafts = !editorConsumer && recoveryScope ? registry.wikiRecoveryIndex() : null;
+    if (wikiDrafts) for (const doc of documents()) {
       const resource = doc.resource;
       if (!resource?.key || current.noteBuffers.has(doc.id)) continue;
       try {
@@ -880,10 +1255,10 @@ export function createNotesFeature({
         };
         current.noteRecoveryChoices ||= new Set();
         if (!current.noteRecoveryChoices.has(doc.id)) {
-          const offer = buffers.recoverDraft(resource, { ...recoveryOptions, offerOnly:true });
-          if (offer) {
+          const offers = registry.wikiRecoveryOffers(resource, recoveryOptions, wikiDrafts);
+          if (offers.length) {
             current.noteRecoveryChoices.add(doc.id);
-            current.noteRecoveryRun = (current.noteRecoveryRun || Promise.resolve()).then(() => offerRecovery(doc, resource, recoveryOptions, recoveryScope));
+            current.noteRecoveryRun = (current.noteRecoveryRun || Promise.resolve()).then(() => offerRecovery(doc, resource, recoveryOptions, recoveryScope, offers));
           }
         }
       } catch (_) { /* an unavailable draft remains isolated from accepted server state */ }
@@ -934,6 +1309,7 @@ export function createNotesFeature({
       return scope;
     }
     if (current.noteBufferScope === value) return scope;
+    retireImages(current);
     detachSaveStatus(current);
     for (const buffer of current.noteBuffers?.values() || []) buffers.persistDraft(buffer);
     buffers.setScope(actorScope, scope.epoch);
@@ -958,6 +1334,7 @@ export function createNotesFeature({
   function suspendScope() {
     const current = context();
     if (!current) return false;
+    retireImages(current);
     detachSaveStatus(current);
     for (const buffer of current.noteBuffers?.values() || []) buffers.persistDraft(buffer);
     clearTimeout(persistTimer);
@@ -973,6 +1350,9 @@ export function createNotesFeature({
     current.notePageHideHandler = null;
     current.noteShellMedia = null;
     current.noteDrawer = null;
+    current.noteManualExplorerOpen = true;
+    current.noteManualDismissedLeaf = null;
+    current.noteImageExplorer = null;
     current.noteDrawerRelease = null;
     current.noteShellCache = null;
     disposeEditorFiles(current);
@@ -993,6 +1373,78 @@ export function createNotesFeature({
   function currentScope(current = context()) {
     const scope = bufferScope(current);
     return scope ? `${scope.accountId}:${scope.workspace}:${scope.storageNamespace}:${scope.epoch}` : null;
+  }
+
+  function retireImages(current) {
+    if (!current) return;
+    for (const [id, image] of current?.noteImages || []) { retireImage(current,id,image); const index = state.docs.findIndex(doc => doc.id === id); if (index >= 0) state.docs.splice(index, 1); }
+    current.noteImages?.clear(); current.noteImageRegistry = null;
+  }
+
+  function retireImage(owner,id,image) {
+    for (const waiter of image.readyViews?.values() || []) waiter.reject(new Error('The target image scope was retired.')); image.readyViews?.clear();
+    if (image.session.dispose()) return true;
+    for (const view of image.views?.values() || []) { view.runtime?.retireView?.(); view.lifetime?.dispose(); }
+    image.views?.clear();
+    const scoped = retiredImages.get(image.scope) || new Map();
+    scoped.set(id,{session:image.session,registry:owner.noteImageRegistry}); retiredImages.set(image.scope,scoped);
+    if (!retiredUnloadBound) { window.addEventListener('beforeunload',retiredImageUnload); retiredUnloadBound = true; }
+    return false;
+  }
+
+  function describeOriginalImageSave(result) {
+    if (result?.state === 'not_committed') return 'Original save was not committed. Image recovery remains preserved.';
+    if (result?.state === 'available' && result.outcome === 'committed') {
+      return result.historyStatus === 'unavailable' ? 'Original save committed. History recovery is unavailable. Image recovery remains preserved.' : 'Original save committed. Image recovery remains preserved.';
+    }
+    return 'Original save outcome is unknown. Image recovery remains preserved.';
+  }
+
+  function showImageMountRecovery(owner,image,view,cache,leafId,notice = '') {
+    const sameOwner = () => context() === owner && currentScope(owner) === image.scope && owner.noteImages?.get(cache.docId) === image && image.views?.get(view.id) === view && owner.noteLeafViews?.get(leafId) === cache;
+    if (!sameOwner() || !view.mountBlocked) return;
+    cache.status.hidden=false; cache.status.style.display='';
+    const status = image.session.recoveryStatus();
+    const messages = {
+      in_flight:'An image operation is still in progress. The retained scene remains open for recovery.',
+      copy_pending:'A previous Save Copy needs reconciliation. The retained scene is preserved.',
+      draft_uncertain:'A draft outcome is unknown. Recovery is required before reopening; the retained scene is preserved.',
+      save_uncertain:'A save outcome is unknown. Recovery is required before reopening; the retained scene is preserved.',
+      scope_unavailable:'The original image authority is unavailable. The retained scene is preserved.',
+      ready:'The image could not be reopened. Its retained scene is preserved.',
+      unavailable:!image.initialAttachment && image.session.canCloseUninitializedBlank() ?
+        'The blank image did not open. Retry or close its tab.' : 'The image could not open. Its recovery remains preserved.',
+    };
+    const controls = [h('span',{text:notice || messages[status.state] || messages.unavailable})];
+    if (status.canRetryCopy) controls.push(commandButton('Retry Save Copy',async () => {
+      if (!sameOwner()) return;
+      cache.status.replaceChildren(h('span',{text:'Reconciling the previous Save Copy…'}));
+      try {
+        const result = await image.session.retrySaveCopy();
+        if (!sameOwner()) return;
+        if (result?.status === 'unavailable' || image.session.recoveryStatus().state !== 'ready') { showImageMountRecovery(owner,image,view,cache,leafId,'Save Copy remains pending; the retained scene is preserved.'); return; }
+        view.mountBlocked=false; owner.noteShellCache=null; render();
+      } catch (_) { if (sameOwner()) showImageMountRecovery(owner,image,view,cache,leafId,'Save Copy could not be reconciled; the retained scene is preserved.'); }
+    }));
+    else if (status.state === 'draft_uncertain') controls.push(commandButton('Retry draft recovery',async () => {
+      try {
+        if (sameOwner() && await image.session.getPersistenceController()?.reconcileDraft?.() && sameOwner()) {
+          view.mountBlocked=false; owner.noteShellCache=null; render(); return;
+        }
+      } catch (_) {}
+      if (sameOwner()) showImageMountRecovery(owner,image,view,cache,leafId,messages.draft_uncertain);
+    }));
+    else if (status.state === 'save_uncertain') controls.push(commandButton('Check original save',async () => {
+      if (!sameOwner()) return;
+      const controller=image.session.getPersistenceController();
+      cache.status.replaceChildren(h('span',{text:'Checking the original save…'}));
+      let result;
+      try { result=await controller?.observeSaveOutcome(); } catch (_) { result={state:'unknown'}; }
+      if (sameOwner() && image.session.getPersistenceController()===controller) showImageMountRecovery(owner,image,view,cache,leafId,describeOriginalImageSave(result));
+    }));
+    else if (status.state === 'in_flight' || status.state === 'scope_unavailable') controls.push(commandButton('Check status',() => showImageMountRecovery(owner,image,view,cache,leafId)));
+    else if (status.state === 'ready' || status.state === 'unavailable') controls.push(commandButton('Retry open',() => { if (!sameOwner()) return; view.mountBlocked=false; owner.noteShellCache=null; render(); }));
+    cache.status.replaceChildren(...controls);
   }
 
   // Sheet leaves can mount before their first dirty edit creates a shared
@@ -1025,11 +1477,18 @@ export function createNotesFeature({
     }
     const write = () => {
       persistTimer = null;
-      localStorage.setItem(copalStorageKey(`odysseus-copal-${presentationId}-layout`, state.workspace), serializeNotesWorkspace(current.noteWorkspace));
+      for (const [id, image] of current.noteImages || []) { const recovery = refreshWorkspaceImage(current.noteWorkspace, image.session); const doc = state.docs.find(item => item.id === id); if (doc) doc.imageRecovery = recovery; }
+      localStorage.setItem(copalStorageKey(`openclank-copal-${presentationId}-layout`, state.workspace), serializeNotesWorkspace(current.noteWorkspace));
     };
     clearTimeout(persistTimer);
     if (immediate) write();
     else persistTimer = setTimeout(write, 80);
+  }
+
+  function persistImageWorkspace(owner, scope) {
+    if (!owner?.noteWorkspace || currentScope(owner) !== scope) return false;
+    for (const [id,image] of owner.noteImages || []) { const recovery=refreshWorkspaceImage(owner.noteWorkspace,image.session); const doc=state.docs.find(item=>item.id===id); if (doc) doc.imageRecovery=recovery; }
+    localStorage.setItem(copalStorageKey(`openclank-copal-${presentationId}-layout`,state.workspace),serializeNotesWorkspace(owner.noteWorkspace)); return true;
   }
 
   function activeLeaf(workspace = ensureWorkspace()) {
@@ -1063,23 +1522,25 @@ export function createNotesFeature({
     const workspace = ensureWorkspace();
     if (!doc || !workspace) return null;
     const activate = options.activate !== false;
+    const openingManual = editorConsumer && isManualArticle(doc);
+    const wasManual = manualWorkspace(workspace);
+    if (activate && openingManual && !wasManual && options.intent === 'current') {
+      options = { ...options, intent:undefined, reuse:true };
+    }
     const scopeAtOpen = currentScope();
     const replacing = options.intent === 'current' && activeLeaf(workspace);
     if (replacing && !replacing.pinned && replacing.docId !== doc.id && !options.resolvedDirty) {
-      void requestCloseLeaves([replacing], { title:'Replace editor tab' }).then(allowed => { if (allowed && scopeAtOpen === currentScope() && activeLeaf(workspace)?.id === replacing.id && activeLeaf(workspace)?.docId === replacing.docId) open(id, { ...options, resolvedDirty:true }); });
+      const owner=context();
+      void requestCloseLeaves([replacing], { title:'Replace editor tab', replacing:true }).then(allowed => {
+        if (!allowed || context()!==owner || scopeAtOpen!==currentScope() || owner.noteWorkspace!==workspace) return;
+        if (!findWorkspaceLeaf(workspace,replacing.id)) open(id,{...options,intent:'newTab',resolvedDirty:true});
+        else if (activeLeaf(workspace)===replacing) open(id,{...options,resolvedDirty:true});
+      });
       return null;
     }
     const previousActive = workspace.activeLeafId;
     const previousGroups = new Map(workspaceGroups(workspace).map(group => [group.id, group.activeLeafId]));
     if (activate) context().noteActivationSequence = Number(context().noteActivationSequence || 0) + 1;
-    if (options.revealHandbook && doc.readOnly === true && isOfficialDocument(doc)) {
-      // Help returns to the Copal explorer without closing any document tabs.
-      if (workspace.left.folderWorkspaceRoot || workspace.left.resourceRoot) closeFolderWorkspace(workspace);
-      workspace.settings.showTutorialFolder = true;
-      setWorkspacePanelPlacement(workspace, 'files', { side:'left', hidden:false });
-      workspace.left.open = true;
-      workspace.left.tab = 'files';
-    }
     // Route copal-event documents to the native event editor.
     if (noteViewType(doc) === 'event' && openEventEditor) {
       openEventEditor(doc.id);
@@ -1106,7 +1567,10 @@ export function createNotesFeature({
       }
       workspace.activeLeafId = previousActive;
     }
-    if (activate) revealInExplorer(doc, workspace);
+    if (activate && openingManual) {
+      context().noteManualDismissedLeaf = null;
+      if (!wasManual || options.manualEntry) context().noteManualExplorerOpen = true;
+    } else if (activate && !isHostDocument(doc)) revealInExplorer(doc, workspace);
     context().selected = findWorkspaceLeaf(workspace)?.docId || id;
     state.selected = context().selected;
     persistActiveContext();
@@ -1125,15 +1589,67 @@ export function createNotesFeature({
     const current = context();
     const existingBuffer = existing && current?.noteBuffers?.get(existing.id);
     const existingDraft = existing && current?.noteDrafts?.get(existing.id);
-    const existingDirty = Boolean(existingDraft || existingBuffer?.state?.()?.dirty);
+    const existingDirty = Boolean(existingDraft || existingBuffer?.state?.()?.dirty || existingBuffer?.drainPromise);
+    const { matchedSourceLine: matchedLine, matchedSourceRange: matchedRange, matchedSourceCurrent, ...fields } = payload;
+    const requiresSourceSelection = matchedLine !== undefined || matchedRange !== undefined;
+    if (requiresSourceSelection) {
+      const lineValid = matchedLine === undefined || Number.isSafeInteger(matchedLine) && matchedLine >= 1;
+      const rangeValid = matchedRange === undefined || matchedRange && Number.isSafeInteger(matchedRange.from) &&
+        Number.isSafeInteger(matchedRange.to) && matchedRange.from >= 0 && matchedRange.to > matchedRange.from;
+      if (!activate || key.provider !== 'host' || !lineValid || !rangeValid ||
+          matchedSourceCurrent?.() !== true) throw new Error('The captured source selection is unavailable.');
+      if (existingDirty) throw new Error('This file has unsaved edits. Save or close that buffer before opening the captured match.');
+    }
     if (existing && existingDirty) {
       // A second Files open refreshes focus only. Preserve the dirty envelope,
       // selections, and CAS base until the existing buffer is explicitly saved.
       open(id, openOptions);
       return id;
     }
+    if (existing && key.provider === 'copal') {
+      // The authorized document index has the canonical document ID, typed
+      // envelope and latest projected text. Files contributes its locator.
+      const ref = handle.locator.opaqueRef || payload.resourceRef;
+      existing.resource = { ...existing.resource, locator:{ ...existing.resource.locator, opaqueRef:ref } };
+      existing.resourceRef = ref;
+      open(id, openOptions);
+      return id;
+    }
     const representation = handle.representation;
-    const resourceKind = representation === 'base' ? 'base' : representation === 'wikiArticle' ? 'wiki' : representation === 'markdown' ? 'markdown' : 'text';
+    const derivedIwi = payload.kind === 'derived-iwi-preview';
+    const hostVideo = payload.kind === 'video-preview';
+    const modelInspect = ['safetensors-inspect','model-header-inspect'].includes(payload.kind);
+    if ((derivedIwi || modelInspect) && (handle.key.provider !== 'host' || handle.capabilities.edit || (derivedIwi ? payload.format?.formatId !== 'iwi' : !metadataFormatId(payload.format?.formatId))
+        || payload.format?.resourceRef !== handle.locator?.opaqueRef
+        || payload.format?.providerRevision?.kind !== handle.revision.kind
+        || payload.format?.providerRevision?.value !== handle.revision.value)) {
+      throw new Error('The captured IWI preview identity is unavailable.');
+    }
+    const filesResource = payload.openedFilesResource, format = filesResource?.format;
+    if(hostVideo && (key.provider!=='host' || !payload.read_only || handle.capabilities.edit || handle.representation!=='asset' || format?.formatId!=='video' || format.resourceRef!==filesResource?.ref || format.providerRevision?.kind!==handle.revision.kind || format.providerRevision?.value!==handle.revision.value || filesResource.id!==key.resourceId || format.policyGeneration!==filesResource.policy_generation)) throw Error('Recording source identity is unavailable.');
+    // The registered view consumes only the descriptor for this exact opened
+    // identity and revision; an extension or a rotating ref is not authority.
+    let sharedWorkbook = false;
+    if (payload.sharedText?.format === 'workbook' && payload.sharedText.isCurrent?.() === true) {
+      try { parseWorkbook(payload.text); sharedWorkbook = true; } catch { throw Error('Shared workbook unavailable.'); }
+    }
+    const workbook = sharedWorkbook || (filesResource?.id === key.resourceId && format?.version === 1
+      && format.variant === 'openclank-workbook-v1' && format.operations?.workbookView?.available === true
+      && format.operations.workbookView.requires === 'workbook-v1' && format.resourceRef === filesResource.ref
+      && format.providerRevision?.kind === handle.revision.kind && format.providerRevision?.value === handle.revision.value
+      && filesResource.revision?.kind === handle.revision.kind && filesResource.revision?.value === handle.revision.value
+      && format.policyGeneration === filesResource.policy_generation);
+    let sharedSlides = false;
+    if (payload.sharedText?.format === 'slides' && payload.sharedText.isCurrent?.() === true) {
+      try { parseSlideDeck(payload.text); sharedSlides = true; } catch { throw Error('Shared slides unavailable.'); }
+    }
+    const slides = sharedSlides || filesResource?.id === key.resourceId && format?.version === 1
+      && format.variant === 'openclank-slides-v1' && format.operations?.slideView?.available === true
+      && format.operations.slideView.requires === 'slides-v1' && format.resourceRef === filesResource.ref
+      && format.providerRevision?.kind === handle.revision.kind && format.providerRevision?.value === handle.revision.value
+      && filesResource.revision?.kind === handle.revision.kind && filesResource.revision?.value === handle.revision.value
+      && format.policyGeneration === filesResource.policy_generation;
+    const resourceKind = hostVideo ? 'host-video' : derivedIwi ? 'derived-iwi-preview' : modelInspect ? 'model-header-inspect' : workbook ? 'workbook' : slides ? 'slides' : representation === 'base' ? 'base' : representation === 'wikiArticle' ? 'wiki' : representation === 'markdown' ? 'markdown' : 'text';
     const snapshot = snapshotEnvelope({
       key:handle.key,
       expectedRevision:handle.revision,
@@ -1144,6 +1660,8 @@ export function createNotesFeature({
         relations:payload.relations == null ? undefined : payload.relations,
       }),
     });
+    if (matchedLine !== undefined && (!['text', 'markdown'].includes(resourceKind) ||
+        matchedLine > snapshot.envelope.text.split('\n').length)) throw new Error('The captured source line is unavailable.');
     const doc = existing || {
       id,
       name:String(payload.name || handle.locator?.displayName || key.resourceId),
@@ -1155,35 +1673,112 @@ export function createNotesFeature({
       text:snapshot.envelope.text, properties:payload.properties || {}, relations:payload.relations || [], tags:[],
       resource:handle, resourceKey:key, savePolicy:'explicit', sourceKind:key.provider === 'host' ? 'host' : 'copal',
       sourceMetadata:handle.metadata || null,
-      readOnly:handle.capabilities?.write !== true && handle.capabilities?.edit !== true,
+      previewFormat:derivedIwi || modelInspect || hostVideo ? payload.format : null,
+      resourceRef:handle.locator?.opaqueRef || payload.resourceRef || null,
+      readOnly:key.provider === 'copal' || hostVideo || derivedIwi || modelInspect || (handle.capabilities?.write !== true && handle.capabilities?.edit !== true),
       resourceSnapshot:snapshot,
       hostParentResourceRef:payload.parent_resource_ref || null,
     };
+    if (existing && key.provider === 'host' && ['text', 'markdown'].includes(resourceKind)) {
+      if (existingBuffer) {
+        const previous = existingBuffer.handle.revision;
+        if (previous.kind !== handle.revision.kind || previous.value !== handle.revision.value) {
+          existingBuffer.resolveExternal(snapshot.envelope, handle.revision);
+        }
+        existingBuffer.handle = handle;
+      }
+      current?.noteAcceptedEnvelopes?.set(id, cloneEnvelope(snapshot.envelope));
+    }
     if (!existing) state.docs.push(doc);
     else Object.assign(existing, {
-      ...payload,
+      ...fields,
       // Host payload.kind is generic text; presentation still follows the
       // authorized handle on refresh, just as on the initial open.
       kind:resourceKind,
       text:snapshot.envelope.text,
       // Exact-open through Files is intentionally read-only until a provider
       // exposes an Editor mutation adapter.  Refresh this on resource
-      // replacement too; an already loaded Copal note may have been opened
+      // replacement too; an already loaded journal page may have been opened
       // through the narrower Files capability surface.
-      readOnly:handle.capabilities?.write !== true && handle.capabilities?.edit !== true,
+      readOnly:hostVideo || derivedIwi || modelInspect || (handle.capabilities?.write !== true && handle.capabilities?.edit !== true),
+      previewFormat:derivedIwi || modelInspect || hostVideo ? payload.format : null,
+      resourceRef:handle.locator?.opaqueRef || payload.resourceRef || null,
       sourceMetadata:handle.metadata || existing.sourceMetadata || null,
       resource:handle, resourceKey:key, resourceSnapshot:snapshot,
       savePolicy:'explicit',
       hostParentResourceRef:payload.parent_resource_ref || existing.hostParentResourceRef || null,
     });
+    doc.recordingJobHint = hostVideo && /^[a-f0-9]{32}$/.test(String(payload.recordingJobHint || '')) ? payload.recordingJobHint : null;
+    const evidence=payload.recordingEvidence;
+    doc.recordingCoverage=doc.recordingJobHint && evidence?.resourceRef === handle.locator.opaqueRef &&
+      evidence.revision?.kind === handle.revision.kind && evidence.revision?.value === handle.revision.value
+      ? normalizeRecordingCoverage(evidence.coverage,doc.recordingJobHint) : null;
+    if (payload.sharedText) doc.sharedText=payload.sharedText;
+    if (key.provider === 'host' && ['text','markdown'].includes(resourceKind) && handle.capabilities.edit &&
+        filesResource?.id === key.resourceId && filesResource.ref && !hostTextParents.has(doc)) {
+      hostTextParents.set(doc, filesFacadeClient.reveal(filesResource.ref).then(result =>
+        result?.resource?.id === key.resourceId ? result : null).catch(async () => {
+        // Files may expose the authorized parent but not its ancestors.
+        if (!payload.parent_resource_ref) return null;
+        const parent = await filesFacadeClient.stat(payload.parent_resource_ref);
+        return parent?.provider === 'host' && parent.kind === 'folder'
+          ? {parent, ancestors:[parent], resource:filesResource} : null;
+      }).catch(() => null));
+    }
     // An opaque Files handoff can replace the presentation and capability
     // envelope of an already-open document without changing its id, active
     // leaf, workspace layout, or the documents array identity. Bump the local
     // render revision so the shell cannot reuse an editable view after the
     // resource has become a read-only Files projection.
     if (current) current.noteRenderVersion = (current.noteRenderVersion || 0) + 1;
-    open(id, openOptions);
+    const leaf = open(id, openOptions);
+    if (requiresSourceSelection) {
+      if (!leaf || matchedSourceCurrent() !== true) throw new Error('The captured source selection is unavailable.');
+      if (leaf.mode === 'reading') {
+        setWorkspaceLeafMode(ensureWorkspace(), leaf.id, 'source');
+        render();
+      }
+      const capturedRevision = handle.revision;
+      const stillCurrent = () => matchedSourceCurrent() &&
+        doc.resource?.revision?.kind === capturedRevision.kind &&
+        doc.resource?.revision?.value === capturedRevision.value &&
+        !context()?.noteDrafts?.has(id) && !context()?.noteBuffers?.get(id)?.state?.()?.dirty;
+      if (matchedRange !== undefined) focusSourceRange(id, matchedRange, stillCurrent);
+      else focusSourceLine(id, matchedLine, stillCurrent);
+    }
     return id;
+  }
+
+  function openSharedText(resource, payload, shared) {
+    if (!shared || typeof shared.isCurrent !== 'function' || !shared.isCurrent()) throw new Error('Shared text authority changed.');
+    const id=openResource(resource, {...payload,sharedText:shared});
+    const doc=state.docs.find(item=>item.id===id);
+    if (!doc) throw new Error('Shared text unavailable.');
+    // Kept on the live document only; the adapter is never a Files ref.
+    if (!doc.sharedText) doc.sharedText=shared;
+    return {id,shared:doc.sharedText};
+  }
+
+  function acceptSharedSnapshot(docId, shared, fresh) {
+    const current=context(), doc=state.docs.find(item=>item.id===docId);
+    if (!current || !doc || doc.sharedText!==shared || !shared.isCurrent()
+        || fresh?.resource_id!==doc.resource?.key?.resourceId
+        || typeof fresh.text!=='string' || current.noteDrafts?.has(docId)) return false;
+    const buffer=current.noteBuffers?.get(docId);
+    if (buffer && (buffer.running || buffer.drainPromise || buffer.state().dirty)) return false;
+    const envelope=cloneEnvelope(buffer?.envelope || doc.resourceSnapshot?.envelope || {text:String(doc.text || '')});
+    envelope.text=fresh.text;
+    // This synchronous owner transition updates the same accepted document,
+    // whether or not a first local edit has created its ResourceBuffer yet.
+    if (shared.adapter && !shared.adapter.adoptExternal(fresh.text,fresh.revision)) return false;
+    if (buffer && !buffer.resolveExternal(envelope,fresh.revision)) return false;
+    doc.text=fresh.text;
+    doc.resource=normalizeResourceHandle({...doc.resource,revision:fresh.revision});
+    doc.resourceSnapshot=snapshotEnvelope({key:doc.resource.key,expectedRevision:fresh.revision,envelope});
+    current.noteAcceptedEnvelopes ||= new Map();
+    current.noteAcceptedEnvelopes.set(docId,cloneEnvelope(envelope));
+    syncDocumentEditors(docId,fresh.text); setLeafSaveState(docId,'saved');
+    return true;
   }
 
   function hostHistoryResourceForDocument(doc) {
@@ -1344,22 +1939,23 @@ export function createNotesFeature({
       && (!origin.leafId || !!findWorkspaceLeaf(workspace, origin.leafId));
   }
 
-  function showResourcePicker(purpose, onSelect, { isContextCurrent = () => true } = {}) {
+  function showResourcePicker(purpose, onSelect, { isContextCurrent = () => true, inspectionOpen = false } = {}) {
     const current = context();
     const origin = capturePickerOrigin();
     const pickerContext = pickerScope();
     current.noteResourcePicker?.destroy();
     let picker;
     picker = createResourcePicker({
-      client:filesFacadeClient, purpose, ...pickerContext, originWindow:origin.window,
+      client:filesFacadeClient, purpose, inspectionOpen, ...pickerContext, originWindow:origin.window,
       initialDirectory:current.noteWorkspace?.left?.resourceRoot || null,
       getGeneration:() => Number(state.filesGeneration || state.contextEpoch || 0),
       getAccountScope:() => String(state.accountId || ''),
       getWorkspaceScope:() => String(state.workspace || ''),
       isOriginCurrent:() => pickerOriginCurrent(origin) && isContextCurrent(),
       isCompatible:resource => editorDestinationReason(resource) || (purpose === 'folder' && resource.provider !== 'host'
-        ? 'Choose a Host folder, or return to Copal with Close Folder.'
-        : purpose === 'file' && !['host', 'copal'].includes(resource.provider)
+        ? 'Choose a Host folder, or use Close Folder to return to available places.'
+        : purpose === 'file' && !['host', 'copal'].includes(resource.provider) &&
+          !(presentationId === 'notes' && resource.provider === 'files' && resource.open_target?.app === 'imps')
           ? 'Open this resource in its source applet.' : ''),
       onSelect:async (selected, selectionContext) => {
         if (!pickerOriginCurrent(origin) || !isContextCurrent()) throw new Error('The original Editor pane changed. Reopen the picker.');
@@ -1368,9 +1964,9 @@ export function createNotesFeature({
         return result;
       },
       onCancel:() => { if (current.noteResourcePicker === picker) current.noteResourcePicker = null; },
-      onClose:() => {
+      onClose:cancelled => {
         if (origin.current !== context() || origin.scope !== currentScope(current) || !origin.window.visible) return;
-        const leaf = origin.leafId ? findWorkspaceLeaf(current.noteWorkspace, origin.leafId) : activeLeaf(current.noteWorkspace);
+        const leaf = cancelled && origin.leafId ? findWorkspaceLeaf(current.noteWorkspace, origin.leafId) : activeLeaf(current.noteWorkspace);
         const editor = current.noteLeafViews?.get(leaf?.id)?.editor;
         if (editor?.view?.dom?.isConnected) editor.focus();
         else origin.window.focus();
@@ -1384,8 +1980,10 @@ export function createNotesFeature({
 
   async function openFileFromPicker(options = {}) {
     return showResourcePicker('file', (selected, origin, selectionContext) => resourceOpener({
-      resourceRef:selected.ref, name:selected.name, parentResourceRef:selected.parentRef, origin, ...selectionContext, selectionOnly:true,
-    }), options);
+      resourceRef:selected.ref, name:selected.name, inspectionHint:selected.inspectionHint, parentResourceRef:selected.parentRef,
+      ...(selected.open_target?.app === 'imps' ? {expectedApp:'imps', expectedRevision:selected.revision} : {}),
+      origin, ...selectionContext, selectionOnly:true,
+    }), {...options, inspectionOpen:true});
   }
 
   async function openFolderFromPicker(options = {}) {
@@ -1394,6 +1992,7 @@ export function createNotesFeature({
       const workspace = current.noteWorkspace;
       const priorReady = current.noteResourceRootReady;
       const priorError = current.noteResourceRootError;
+      current.noteExplorerBindAttempt = null;
       current.noteResourceRootValidationKey = null;
       current.noteResourceRootValidationController?.abort?.();
       current.noteResourceRootReady = false;
@@ -1409,34 +2008,117 @@ export function createNotesFeature({
         }
         throw new Error(failure);
       }
+      if (manualWorkspace(workspace,current)) dismissManualWorkspace(workspace);
       return true;
     }, options);
   }
 
-  function closeFolderWorkspace(workspace) {
+  function closeFolderWorkspace(workspace, {redraw = true} = {}) {
     const current = context();
     current?.noteResourceRequestController?.abort?.();
     current?.noteResourceRootValidationController?.abort?.();
     if (current) current.noteResourceRequestEpoch = Number(current.noteResourceRequestEpoch || 0) + 1;
     current?.noteResourceNavigation?.reset?.();
-    workspace.left.resourceRoot = null;
-    workspace.left.resourceRows = [];
-    workspace.left.resourceCursor = null;
-    workspace.left.resourceQuery = '';
-    workspace.left.folderWorkspaceRoot = null;
-    workspace.left.folderWorkspaceId = '';
+    clearExplorerBinding(workspace.left);
+    workspace.left.tab = 'files';
     if (current) {
+      const leaf=activeLeaf(workspace);
+      current.noteExplorerBindAttempt=leaf ? {leafId:leaf.id,docId:leaf.docId} : null;
       current.noteResourceRootReady = false;
+      current.noteResourceRootValidationKey = null;
       current.noteResourceRootError = null;
-      const explorer = current.noteFilesExplorer;
-      if (explorer) {
-        explorer.filterQuery = ''; explorer.failedSync = null;
-        explorer.displayedRoot = null; explorer.directoryReady = false;
-        explorer.browser?.clearFilter();
-        void explorer.navigate(() => runFilesNavigation(explorer.browser, 'home'), 'Editor places could not be shown.');
-      }
+      current.noteFilesExplorer?.dispose();
+      current.noteFilesExplorer = null;
     }
-    persist(true); render();
+    if (redraw) { persist(true); render(); }
+  }
+
+  function manualArticleId(doc) {
+    const id = doc?.officialRef || (doc?.builtin === true && doc.properties?.docId);
+    return doc?.readOnly === true && isOfficialDocument(doc)
+      && typeof id === 'string' && id.startsWith('openclank-docs-') ? id : '';
+  }
+
+  const isManualArticle = doc => Boolean(manualArticleId(doc));
+
+  function manualWorkspace(workspace, current = context()) {
+    if (!editorConsumer || !workspace) return false;
+    const leaf = findWorkspaceLeaf(workspace);
+    return Boolean(leaf && current?.noteManualDismissedLeaf !== leaf.id
+      && state.docs.some(doc => doc.id === leaf.docId && isManualArticle(doc)));
+  }
+
+  function dismissManualWorkspace(workspace, {redraw = true} = {}) {
+    const current = context();
+    const leaf = activeLeaf(workspace);
+    if (!current || !leaf) return;
+    if (!manualWorkspace(workspace,current)) return;
+    current.noteManualDismissedLeaf = leaf.id;
+    current.noteManualExplorerOpen = true;
+    if (current.noteDrawer === 'left') current.noteDrawer = null;
+    if (redraw) render();
+  }
+
+  function clearLegacyManualBinding(workspace, doc) {
+    const left = workspace.left;
+    if (!left.copalWorkspacePinned || !left.copalFolderRoot?.length || !isManualArticle(doc)) return;
+    const folder = left.copalFolderRoot.join('/');
+    if (doc.name.split('/').slice(0,-1).join('/') !== folder) return;
+    if (state.docs.some(item=>item.name?.startsWith(folder + '/') && !isManualArticle(item))) return;
+    left.copalWorkspacePinned = false;
+    left.copalFolderRoot = [];
+  }
+
+  function closeExplorerWorkspace(workspace) {
+    if (!manualWorkspace(workspace)) return closeFolderWorkspace(workspace);
+    const byId = new Map(state.docs.map(doc=>[doc.id,doc]));
+    const leaves = workspaceLeaves(workspace);
+    const personal = leaves.filter(leaf=>!isManualArticle(byId.get(leaf.docId)));
+    const recent = workspace.recent.map(id=>personal.find(leaf=>leaf.docId===id)).find(Boolean) || personal[0];
+    dismissManualWorkspace(workspace,{redraw:false});
+    const group = recent && groupForLeaf(workspace,recent.id);
+    if (group) return setActive(group.id,recent.id);
+    render();
+    if (!explorerBinding(workspace)) return requestCloseLeaves(leaves);
+  }
+
+  function explorerCloseLabel(binding) {
+    if (binding === 'manual') return 'Close Instruction Manual';
+    return binding === 'binder' ? 'Close Journal' : 'Close Folder';
+  }
+
+  function syncJournalCatalog(catalog) {
+    const workspace = context()?.noteWorkspace;
+    const binder = workspace?.left.binderContext;
+    if (!binder || binder.accountId !== catalog.accountId || binder.accountId !== state.accountId
+        || binder.workspace !== state.workspace || catalog.revision < binder.catalogRevision) return;
+    const descriptor = catalog.descriptors[binder.descriptor.id];
+    if (!descriptor?.enabled || !catalog.configuredIds.includes(descriptor.id)) closeFolderWorkspace(workspace);
+    else {
+      workspace.left.binderContext = {...binder, descriptor, catalogRevision:catalog.revision};
+      persist(true); render();
+    }
+  }
+
+  function showJournal(binder, homeDocumentId) {
+    const workspace = ensureWorkspace();
+    if (!workspace || binder.accountId !== state.accountId || binder.workspace !== state.workspace) return false;
+    dismissManualWorkspace(workspace,{redraw:false});
+    closeFolderWorkspace(workspace,{redraw:false});
+    workspace.left.binderContext = binder;
+    workspace.left.folderWorkspaceExplicit = true;
+    workspace.left.open = true;
+    workspace.left.tab = 'files';
+    if (shellViewport().narrow) context().noteDrawer = 'left';
+    else if (context().noteImageExplorer) context().noteImageExplorer.left = true;
+    if (homeDocumentId) {
+      if (!workspaceDocuments().some(doc => doc.id === homeDocumentId)) throw new Error('The Journal welcome page could not be loaded.');
+      const existing = workspaceLeaves(workspace).find(leaf => leaf.docId === homeDocumentId);
+      open(homeDocumentId, existing ? {leafId:existing.id} : {reuse:true, mode:'reading'});
+    }
+    persist(true);
+    render();
+    return true;
   }
 
   async function configureTemplateFolder(options = {}) {
@@ -1457,10 +2139,65 @@ export function createNotesFeature({
     }, options);
   }
 
+  function explorerBinding(workspace) {
+    if (manualWorkspace(workspace)) return 'manual';
+    const left=workspace.left;
+    if (left.folderWorkspaceRoot) return 'folder';
+    if (left.binderContext) return 'binder';
+    return left.copalWorkspacePinned ? 'copal' : null;
+  }
+
+  function bindExplorerForDocument(current, workspace, leaf, doc) {
+    if (!editorConsumer || !leaf || !doc || doc.virtual || isManualArticle(doc) || explorerBinding(workspace)) return;
+    const prior=current.noteExplorerBindAttempt;
+    if (prior?.leafId===leaf.id && prior.docId===leaf.docId) return;
+    if (prior?.pending && prior.workspace===workspace && findWorkspaceLeaf(workspace,prior.leafId)?.docId===prior.docId) return;
+    const hostImage=current.noteImages?.get(doc.id)?.session?.getPersistenceController()?.hostOriginal || current.noteImages?.get(doc.id)?.hostOriginal;
+    const provider=doc.resource?.key?.provider || doc.resourceKey?.provider
+      || doc.imageRecovery?.sourceKey?.provider || (hostImage && 'host');
+    const ref=doc.resourceRef || doc.resource?.locator?.opaqueRef || doc.imageRecovery?.opaqueRef || hostImage?.resourceRef;
+    if (doc.kind==='image-session' && !ref) return;
+    current.noteExplorerBindAttempt={leafId:leaf.id,docId:leaf.docId};
+    if (!isHostDocument(doc) && (!ref || !provider || provider==='copal')) {
+      workspace.left.copalWorkspacePinned=true;
+      workspace.left.copalFolderRoot=String(doc.name || '').split('/').slice(0,-1).filter(Boolean);
+      workspace.left.tab='files';
+      revealInExplorer(doc,workspace);
+      persist(true);
+      return;
+    }
+    if (!ref) return;
+    const scope=currentScope(current);
+    const attempt=current.noteExplorerBindAttempt={leafId:leaf.id,docId:leaf.docId,workspace,pending:true};
+    const valid=()=>current===context() && currentScope(current)===scope && current.noteWorkspace===workspace
+      && current.noteExplorerBindAttempt===attempt && findWorkspaceLeaf(workspace,leaf.id)?.docId===doc.id && !explorerBinding(workspace);
+    void Promise.all([
+      hostTextParents.get(doc) || filesFacadeClient.reveal(ref),
+      isHostDocument(doc) || provider==='host' ? filesFacadeClient.workspaces().catch(()=>null) : null,
+    ]).then(async ([revealed,catalog])=>{
+      if (!valid() || !revealed) return;
+      const bindings=new Map((catalog?.entries || [])
+        .filter(item=>item.availability==='available' && item.workspace?.id && item.resource?.id)
+        .map(item=>[item.resource.id,item.workspace.id]));
+      const registered=(revealed.ancestors || []).findLast(folder=>bindings.has(folder.id));
+      if (registered) {
+        const root=normalizeAuthorizedResource(registered,{purpose:'folder',...pickerScope()});
+        if (await loadEditorResourceFolder(workspace,root,{pinOnOpen:valid,pinWorkspaceId:bindings.get(registered.id)})) return;
+      }
+      if (!valid() || !revealed.parent || isHostLocationsRoot(revealed.parent)) return;
+      const parent=normalizeAuthorizedResource(revealed.parent,{purpose:'folder',...pickerScope()});
+      if (parent.capabilities.children===true) {
+        const hostFolderTrail = parent.provider === 'host' ? (revealed.ancestors || [])
+          .filter(row => row.kind === 'folder').map(({id,name}) => ({id,name})) : null;
+        await loadEditorResourceFolder(workspace,{...parent,hostFolderTrail},{pinOnOpen:valid});
+      }
+    }).catch(()=>{}).finally(()=>{attempt.pending=false;});
+  }
+
   function revealInExplorer(doc, workspace = ensureWorkspace()) {
     if (isHostDocument(doc)) {
-      const ref = doc.resourceRef || doc.resource?.locator?.opaqueRef;
-      if (ref) context()?.noteFilesExplorer?.reveal?.(ref);
+      const ref=doc.resourceRef || doc.resource?.locator?.opaqueRef;
+      if (workspace.left.folderWorkspaceRoot) void context()?.noteFilesExplorer?.reveal(ref);
       return;
     }
     const parts = String(doc?.name || '').split('/').slice(0, -1);
@@ -1474,11 +2211,27 @@ export function createNotesFeature({
     const current = context();
     const cache = current?.noteLeafViews?.get(leafId);
     if (!cache) return;
+    if (cache.imageId) {
+      const image=current.noteImages?.get(cache.imageId), view=image?.views?.get(cache.imageViewId);
+      image?.readyViews?.get(cache.imageViewId)?.reject(new Error('The target image view was closed.')); image?.readyViews?.delete(cache.imageViewId);
+      view?.runtime?.retireView?.(); view?.lifetime?.dispose(); if (view) image.views.delete(cache.imageViewId);
+      const siblings=workspaceLeaves(current.noteWorkspace).some(leaf=>leaf.docId===cache.imageId);
+      if (!siblings) { if (image) retireImage(current,cache.imageId,image); current.noteImages?.delete(cache.imageId); const index=state.docs.findIndex(doc=>doc.id===cache.imageId); if(index>=0) state.docs.splice(index,1); }
+    }
+    cache.videoReview?.dispose(); cache.videoReview = null;
+    cache.iwiController?.abort(); cache.iwiController = null;
+    if (cache.iwiObjectURL) URL.revokeObjectURL(cache.iwiObjectURL);
+    cache.iwiObjectURL = null;
     cache.graphicalMedia?.dispose();cache.graphicalMedia=null;
+    cache.inlineReading?.dispose(); cache.inlineReading = null;
+    cache.inlinePreview?.dispose(); cache.inlinePreview = null;
     if (cache.readingFrame != null) cancelAnimationFrame(cache.readingFrame);
     cache.readingFrame = null; cache.readingPending = null;
-    cache.wikiArticleContextDispose?.(); cache.wikiArticleContextDispose = null;
     disposeSheet(cache);
+    cache.workbookUnsubscribe?.(); cache.workbookUnsubscribe = null;
+    cache.workbookView?.dispose(); cache.workbookView = null;
+    cache.slideUnsubscribe?.(); cache.slideUnsubscribe = null;
+    cache.slideView?.dispose(); cache.slideView = null;
     disposeRawEditor(cache);
     current.noteLeafViews.delete(leafId);
     pruneSessionHistory();
@@ -1496,7 +2249,11 @@ export function createNotesFeature({
 
   function disposeRawEditor(cache) {
     if (!cache) return;
+    cache.htmlVisualPanel?.dispose(); cache.htmlVisualPanel = null; cache.htmlVisualRoot = null;
+    cache.visualSourcePanel?.dispose(); cache.visualSourcePanel = null; cache.visualSourceRoot = null;
     cache.contextMenuDispose?.(); cache.contextMenuDispose = null;
+    cache.inlineReading?.dispose(); cache.inlineReading = null;
+    cache.inlinePreview?.dispose(); cache.inlinePreview = null;
     if (cache.previewFrame != null) cancelAnimationFrame(cache.previewFrame);
     cache.previewFrame = null; cache.previewPending = null;
     if (cache.editor) {
@@ -1565,7 +2322,7 @@ export function createNotesFeature({
     if (!current) return 0;
     const token = documentId == null ? null : String(documentId);
     const refreshes = [];
-    for (const cache of current.noteLeafViews.values()) {
+    for (const cache of current.noteLeafViews?.values() || []) {
       const controller = cache.sheetController;
       if (!controller) continue;
       const controllerState = controller.getState?.() || {};
@@ -1658,11 +2415,21 @@ export function createNotesFeature({
 
   async function saveDraft(docId, { returnReceipt = false, snapshot = null } = {}) {
     const current = context();
+    clearTimeout(state.saveTimers.get(docId));
+    state.saveTimers.delete(docId);
     if (!flushPendingSourceEdits(docId)) return returnReceipt ? { outcome:'failed', message:'Correct or discard the staged comment before saving.' } : false;
-    const draft = current?.noteDrafts?.get(docId);
+    const buffer = current?.noteBuffers?.get(docId);
+    let draft = current?.noteDrafts?.get(docId);
+    if (!draft && buffer?.state().dirty) {
+      // Recovery and shared views can own a dirty buffer without a local draft mirror.
+      const scopeObject = bufferScope(current);
+      if (!scopeObject || !sameSaveScope(buffer.scope, { ...scopeObject, epoch:String(scopeObject.epoch) })) return false;
+      const doc = workspaceDocuments().find(item => item.id === docId);
+      if (!doc) return false;
+      draft = { doc, scope:currentScope(current), scopeObject };
+    }
     if (!draft) return true;
     if (draft.scope && draft.scope !== currentScope(current)) return false;
-    const buffer = current.noteBuffers?.get(docId);
     const target = snapshot || (buffer ? buffer.snapshot() : cloneEnvelope(draft));
     current.noteSaveTargets ||= new Map();
     const targetKey = `${docId}:${target.localRevision}`;
@@ -1670,6 +2437,13 @@ export function createNotesFeature({
     if (!run) {
       const previous = current.noteSaveRuns.get(docId);
       run = (async () => {
+        if (buffer?.journalRecovery) {
+          // Only the initial same-base recovery can automatically replay an
+          // uncertain action. A failed replay remains available for review.
+          buffer.journalReplayOnRecovery = false;
+          buffers.persistDraft(buffer);
+        }
+        setLeafSaveState(docId, 'saving');
         let receipt;
         if (buffer) receipt = await buffer.flush({ scope:draft.scopeObject, snapshot:target });
         else {
@@ -1683,6 +2457,7 @@ export function createNotesFeature({
         }
         if (draft.scope !== currentScope(current)) return false;
         if (receipt === false || receipt?.outcome === 'conflict' || receipt?.outcome === 'failed') {
+          if (buffer?.journalRecovery) buffers.persistDraft(buffer);
           setLeafSaveState(docId, receipt?.outcome === 'conflict' || buffer?.state().status === 'conflict' ? 'conflict' : 'error');
           setSaveFailureStatus(current, docId, target.localRevision, buffer?.error?.message || receipt?.message || (receipt?.outcome === 'conflict' ? 'Save conflict. Review the saved version before retrying.' : 'Save failed; your changes remain open.'));
           return receipt || false;
@@ -1693,12 +2468,21 @@ export function createNotesFeature({
         current.noteAcceptedEnvelopes.set(docId, cloneEnvelope(accepted));
         const doc = workspaceDocuments().find(item => item.id === docId) || draft.doc;
         if (buffer && doc?.resource) { doc.resource = buffer.handle; doc.resourceKey = buffer.key; if (buffer.handle.revision.kind === 'copalHead') doc.head = buffer.handle.revision.value; }
+        if (buffer && doc && isHostDocument(doc) && accepted) {
+          doc.text = accepted.text;
+          doc.sourceMetadata = accepted.metadata || doc.sourceMetadata;
+          doc.resourceSnapshot = snapshotEnvelope({ key:buffer.key, expectedRevision:buffer.handle.revision, envelope:accepted });
+        }
         if (clean) {
           current.noteDrafts.delete(docId);
           if (buffer && !buffers.discardDraft(buffer)) current.window?.setStatus('Saved. Recovery cleanup failed; retry before discarding or closing.', true);
         } else {
           if (queued && buffer) queued.base = buffer.handle.revision.value;
-          if (buffer) buffers.scheduleDraft(buffer);
+          if (buffer) {
+            if (buffer.journalRecovery) buffers.persistDraft(buffer);
+            else buffers.scheduleDraft(buffer);
+            if (!state.saveTimers.has(docId)) scheduleJournalSave(doc, buffer);
+          }
         }
         if (receipt?.outcome === 'applied') {
           void recordSavedEvidence(docId, draft, receipt).catch(() => {});
@@ -1778,7 +2562,13 @@ export function createNotesFeature({
             throw new Error('The reviewed version is no longer current; compare it again before saving over it.');
           }
         }
+        if (isJournalPage(doc)) buffer.journalRecovery = true;
+        const conflict = buffer.journalRecovery && buffer.conflict;
         buffer.apply(envelope, { origin:options.origin || 'local', history:options.history !== false, sheet:options.sheet === true });
+        if (conflict && buffer.state().dirty) {
+          buffer.conflict = conflict;
+          buffer.status = 'conflict';
+        }
         current.noteBuffers.delete(doc.id); current.noteBuffers.set(doc.id, buffer);
         Object.assign(indexed, cloneEnvelope(envelope));
         buffers.scheduleDraft(buffer);
@@ -1795,9 +2585,9 @@ export function createNotesFeature({
       }
       /* legacy documents continue through the existing notes queue */
     }
-    clearTimeout(state.saveTimers.get(doc.id));
-    doc.savePolicy = 'explicit';
-    setLeafSaveState(doc.id, current.noteDrafts.has(doc.id) ? 'unsaved' : 'saved');
+    const buffer = current.noteBuffers.get(doc.id);
+    scheduleJournalSave(doc, buffer);
+    setLeafSaveState(doc.id, buffer?.state().status === 'conflict' ? 'conflict' : current.noteDrafts.has(doc.id) ? 'unsaved' : 'saved');
   }
 
   // Public source transaction seam for projections such as Mind.  It captures
@@ -1821,11 +2611,13 @@ export function createNotesFeature({
     return { outcome:'queued', source, content:next, snapshot, origin, transactionId };
   }
 
-  function syncDocumentEditors(docId, value, source = null, changes = null, mirror = true) {
+  function syncDocumentEditors(docId, value, source = null, changes = null, mirror = true, preserveView = false) {
     if (mirror) onSourceChanged?.(docId, value, changes);
     for (const cache of context()?.noteLeafViews?.values() || []) {
       if (cache.docId !== docId || cache.editor === source) continue;
+      cache.htmlVisualPanel?.invalidate();
       if (changes && cache.editor?.applyChanges) cache.editor.applyChanges(changes);
+      else if (preserveView) replaceEditorTextPreservingView(cache.editor,value);
       else cache.editor?.setValue(value);
       const liveDoc = workspaceDocuments().find((doc) => doc.id === docId) || null;
       if (cache.reading?.isConnected) scheduleReading(cache, liveDoc, value);
@@ -1882,27 +2674,77 @@ export function createNotesFeature({
     }
   }
 
-  async function offerRecovery(doc, resource, options, scope) {
+  async function offerRecovery(doc, resource, options, scope, offers) {
     const current = context();
-    if (!sameSaveScope(scope, bufferScope(current)) || current.noteDrafts?.has(doc.id)) return;
-    const choice = await styledConfirm(`An unsaved draft of ${doc.name} is available. Restoring it does not save the document. Undo history from the previous browser session is unavailable.`, { title:'Recover unsaved draft', confirmText:'Restore draft', alternateText:'Discard draft', cancelText:'Later' });
-    if (!sameSaveScope(scope, bufferScope(current)) || current.noteDrafts?.has(doc.id) || choice === false) return;
-    const buffer = buffers.recoverDraft(resource, options);
-    if (!buffer) return;
-    if (choice === 'alternate') {
-      if (!buffers.discardDraft(buffer)) { current.window?.setStatus('Recovery storage could not be cleared. Draft discard is pending; retry recovery.', true); current.noteRecoveryChoices.delete(doc.id); return; }
-      buffer.resolveExternal(options.envelope, resource.revision, { force:true }); buffer.discard();
-    } else {
-      current.noteBuffers.set(doc.id, buffer);
-      publishBufferDraft(doc.id, buffer);
-      if (buffer.state().status === 'conflict') current.window?.setStatus('Recovered draft. The saved document changed; compare before saving.', true);
+    const canRecover = () => context() === current && sameSaveScope(scope, bufferScope(current)) &&
+      !current.noteDrafts?.has(doc.id) && !current.noteBuffers?.get(doc.id)?.state().dirty;
+    for (const [index, offer] of offers.entries()) {
+      if (!canRecover()) return;
+      const preview = String(offer.snapshot.envelope?.text || '').slice(0, 160);
+      const detail = offers.length > 1 ? ` (${index + 1}/${offers.length})\n${preview}` : '';
+      const choice = await styledConfirm(`An unsaved draft of ${doc.name} is available. Restoring it does not save the document. Undo history from the previous browser session is unavailable.${detail}`, { title:'Recover unsaved draft', confirmText:'Restore draft', alternateText:'Discard draft', cancelText:'Later' });
+      if (!canRecover()) return;
+      if (choice === false) continue;
+      const buffer = buffers.recoverDraft(resource, { ...options, consumer:'wiki', wikiOffer:offer });
+      if (!buffer) continue;
+      if (choice === 'alternate') {
+        if (!buffers.discardDraft(buffer)) { current.window?.setStatus('Recovery storage could not be cleared. Draft discard is pending; retry recovery.', true); current.noteRecoveryChoices.delete(doc.id); return; }
+        buffer.resolveExternal(options.envelope, resource.revision, { force:true }); buffer.discard();
+      } else {
+        current.noteBuffers.set(doc.id, buffer);
+        publishBufferDraft(doc.id, buffer);
+        if (buffer.state().status === 'conflict') current.window?.setStatus('Recovered draft. The saved document changed; compare before saving.', true);
+      }
+      current.noteRenderVersion = Number(current.noteRenderVersion || 0) + 1;
+      render();
+      if (choice !== 'alternate') return;
     }
-    current.noteRenderVersion = Number(current.noteRenderVersion || 0) + 1;
-    render();
+  }
+
+  async function renewHostTextHandle(snapshot, options, owner) {
+    const left = owner?.noteWorkspace?.left;
+    const origin = await hostTextParents.get(options.document);
+    const trail = origin?.ancestors?.filter(row => row.kind === 'folder').map(({id, name}) => ({id, name}));
+    const folder = origin?.parent?.provider === 'host'
+      ? {provider:'host', resourceId:origin.parent.id, hostFolderTrail:trail}
+      : left?.resourceRoot || left?.folderWorkspaceRoot;
+    if (folder?.provider !== 'host') return null;
+    const locator = savedHostRelativePath(folder);
+    const parent = left?.folderWorkspaceId && locator.present
+      ? (await filesFacadeClient.workspaceResource(left.folderWorkspaceId, locator.path)).resource
+      : await resolveEditorHostFolder(filesFacadeClient, folder, folder.hostFolderTrail || left?.folderWorkspaceRoot?.hostFolderTrail);
+    if (!parent?.ref || parent.id !== folder.resourceId) return null;
+    let cursor = null;
+    do {
+      const page = await filesFacadeClient.children(parent.ref, {query:options.document.name, limit:100, cursor});
+      const row = page.entries.find(entry => entry.provider === 'host' && entry.kind === 'file' && entry.id === snapshot.key.resourceId);
+      if (row) {
+        const opened = await filesFacadeClient.openResource(row.ref, {expectedRevision:snapshot.expectedRevision});
+        const handle = normalizeResourceHandle(opened.payload.resource);
+        return handle.capabilities.edit && sameResourceKey(handle.key, snapshot.key) &&
+          handle.revision.kind === snapshot.expectedRevision.kind && handle.revision.value === snapshot.expectedRevision.value ? handle : null;
+      }
+      cursor = page.next_cursor;
+    } while (cursor);
+    return null;
   }
 
   async function saveHostBuffer(snapshot, options) {
-    const receipt = await saveResource(snapshot, options);
+    const owner = context();
+    let receipt = await saveResource(snapshot, options);
+    if (receipt?.code === 'resource_ref_stale' && receipt.uncertain === false) {
+      const unavailable = {outcome:'failed', uncertain:false, message:'File access expired. Use File → Save as… to keep your edits in a new file.'};
+      let fresh;
+      try { fresh = await renewHostTextHandle(snapshot, options, owner); }
+      catch { return unavailable; }
+      if (!fresh || owner !== context() || !sameSaveScope(options.scope, bufferScope(owner)) ||
+          options.document.resource !== options.resource) return unavailable;
+      options.document.resource = fresh;
+      options.document.resourceRef = fresh.locator.opaqueRef;
+      const buffer = owner.noteBuffers?.get(options.document.id);
+      if (buffer) buffer.handle = fresh;
+      receipt = await saveResource(snapshot, {...options, resource:fresh});
+    }
     if (!receipt?.snapshot?.envelope) return receipt;
     const envelope = cloneEnvelope(receipt.snapshot.envelope);
     // Host receipts describe the provider representation alongside text and
@@ -1912,7 +2754,7 @@ export function createNotesFeature({
     return { ...receipt, snapshot:{ ...receipt.snapshot, envelope } };
   }
 
-  function sourceEditBuffer(doc, fallbackEnvelope = null) {
+  function sourceEditBuffer(doc, fallbackEnvelope = null, { recoverJournal = false } = {}) {
     const current = context();
     if (!current) return null;
     bindSharedDocumentState(current);
@@ -1932,14 +2774,24 @@ export function createNotesFeature({
     });
     if (doc.sourceMetadata && accepted.metadata == null) accepted.metadata = cloneEnvelope(doc.sourceMetadata);
     current.noteAcceptedEnvelopes.set(doc.id, cloneEnvelope(accepted));
-    const buffer = buffers.acquire(resource, accepted, { actorId:`${scopeObject.accountId}:${scopeObject.workspace}`, epoch:scopeObject.epoch, scope:scopeObject, save:async (snapshot, flushOptions = {}) => {
+    const shared=doc.sharedText;
+    const options = { actorId:`${scopeObject.accountId}:${scopeObject.workspace}`, epoch:scopeObject.epoch, scope:scopeObject, ...(shared ? {acceptVerifiedMerge:true, sharedStatusCurrent:()=>shared.isCurrent()} : {}), save:async (snapshot, flushOptions = {}) => {
+      if (shared) return shared.isCurrent() && shared.adapter ? shared.adapter.save(snapshot) : {outcome:'failed',retryable:false,message:'Shared editing unavailable.'};
       if (flushOptions.scope && !sameSaveScope(flushOptions.scope, scopeObject)) return false;
       if (scope !== currentScope(current)) return false;
       const target = state.docs.find(item => item.id === doc.id) || indexed;
       const targetResource = target.resource || (target.resourceKey ? { key:target.resourceKey } : null);
       if (snapshot.key?.provider === 'host' && typeof saveResource === 'function') return saveHostBuffer(snapshot, { resource:targetResource, document:target, scope:scopeObject });
       return saveDocument({ ...target, head:snapshot.expectedRevision.value }, snapshot.envelope?.text ?? '', false, 'notes', { snapshot, returnReceipt:true, scope:scopeObject, viaBuffer:true, sheet:flushOptions.sheet === true });
-    } });
+    } };
+    const buffer = recoverJournal
+      ? registry.recoverDraft(resource, { ...options, consumer:'journal', envelope:accepted })
+      : buffers.acquire(resource, accepted, options);
+    if (!buffer) return null;
+    if (isJournalPage(doc)) buffer.journalRecovery = true;
+    if (recoverJournal && buffer.uncertainSave && buffer.status === 'error' && buffer.error?.result?.retryable !== false) {
+      buffer.journalReplayOnRecovery = true;
+    }
     current.noteBuffers.set(doc.id, buffer);
     notifyDocumentBufferCreated(doc.id, buffer);
     return buffer;
@@ -1994,7 +2846,10 @@ export function createNotesFeature({
     const current = context();
     if (!current?.noteBuffers) return;
     const active = new Set();
-    for (const owner of state.windows?.values?.() || [current]) if (ownsSessionDocuments(owner) && owner.noteWorkspace) for (const leaf of workspaceLeaves(owner.noteWorkspace)) active.add(leaf.docId);
+    for (const owner of documentContexts()) {
+      if (!owner?.noteWorkspace || owner.noteBuffers !== current.noteBuffers) continue;
+      for (const leaf of workspaceLeaves(owner.noteWorkspace)) active.add(leaf.docId);
+    }
     const retained = [...current.noteBuffers].filter(([id, buffer]) => !active.has(id) && !buffer.state().dirty && !buffer.running && !buffer.drainPromise && !buffer.uncertainSave && !buffer.recoveryError);
     let bytes = retained.reduce((sum, [, buffer]) => sum + buffer.historyBytes + buffer.redoBytes, 0);
     while (retained.length > 32 || bytes > 64 * 1024 * 1024) {
@@ -2022,8 +2877,10 @@ export function createNotesFeature({
       if (!buffers.discardDraft(buffer)) current.window?.setStatus('The saved content is restored, but recovery cleanup failed. Retry before closing.', true);
     }
     current.noteRevisionCounters.set(docId, buffer.localRevision);
+    scheduleJournalSave(doc, buffer);
     syncDocumentEditors(docId, String(envelope.text ?? ''));
-    setLeafSaveState(docId, buffer.state().status === 'conflict' ? 'conflict' : buffer.state().dirty ? 'unsaved' : 'saved');
+    const status = buffer.state().status;
+    setLeafSaveState(docId, status === 'conflict' ? 'conflict' : status === 'error' ? 'error' : buffer.state().dirty ? 'unsaved' : 'saved');
     return true;
   }
 
@@ -2039,13 +2896,21 @@ export function createNotesFeature({
     const closing = new Set(closingLeafIds || []);
     const hasSurvivor = (id) => {
       if (force || !closingLeafIds && !closingWindow) return false;
-      for (const owner of state.windows?.values?.() || [current]) {
-        if (!ownsSessionDocuments(owner) || !owner.noteWorkspace) continue;
+      for (const owner of documentContexts()) {
+        if (!ownsSessionDocuments(owner) || !owner.noteWorkspace || closingWindow && owner.window.root === current.window.root) continue;
         if (workspaceLeaves(owner.noteWorkspace).some(leaf => leaf.docId === id && (owner !== current || !closingWindow && !closing.has(leaf.id)))) return true;
       }
       return false;
     };
-    const ids = [...new Set(docIds)].filter(id => !hasSurvivor(id) && (current.noteDrafts?.has(id) || current.noteBuffers?.get(id)?.state().dirty || current.noteBuffers?.get(id)?.recoveryError));
+    const candidates = [...new Set(docIds)];
+    // A write can already be on disk while its receipt is still in flight.
+    // Let the submitted Save finish before deciding whether to prompt.
+    const saving = candidates.filter(id => !hasSurvivor(id)).map(id => current.noteSaveRuns?.get(id)).filter(Boolean);
+    if (saving.length) {
+      await Promise.allSettled(saving);
+      if (scope !== currentScope(current)) return false;
+    }
+    const ids = candidates.filter(id => !hasSurvivor(id) && (current.noteDrafts?.has(id) || current.noteBuffers?.get(id)?.state().dirty || current.noteBuffers?.get(id)?.recoveryError));
     if (!ids.length) return true;
     const captured = new Map(ids.map(id => [id, transitionRevision(current, id)]));
     const stillCurrent = () => scope === currentScope(current) && ids.every(id => transitionRevision(current, id) === captured.get(id));
@@ -2102,10 +2967,148 @@ export function createNotesFeature({
     } catch (error) { current.window?.setStatus(error.message || 'Discard failed; changes remain open.', true); return false; }
   }
 
+  function isOpenHostText(doc) {
+    return doc?.resource?.key?.provider === 'host' && ['text','markdown'].includes(doc.kind) &&
+      doc.resource.locator?.opaqueRef && doc.resource.revision?.kind === 'hostFingerprint';
+  }
+
+  function editorCompositionActive(owner, docId) {
+    return [...(owner.noteLeafViews?.values() || [])].some(cache=>cache.docId === docId &&
+      (cache.editor?.view?.composing || cache.editor?.view?.compositionStarted));
+  }
+
+  function updateHostFileNotice(owner, id, notice) {
+    const notices=owner.noteHostNotices ||= new Map();
+    if (notice) notices.set(id,notice);
+    else notices.delete(id);
+    for (const cache of owner.noteLeafViews?.values() || []) if (cache.docId === id) updateLeafStatus(cache);
+  }
+
+  function showHostFileComparison(owner, doc, notice) {
+    const scope=currentScope(owner), source=sourceValue(doc);
+    const current=()=>context() === owner && currentScope(owner) === scope && owner.noteHostNotices?.get(doc.id) === notice &&
+      workspaceLeaves(owner.noteWorkspace).some(leaf=>leaf.docId === doc.id) && sourceValue(doc) === source;
+    if (!current()) return;
+    const preview=text=>String(text).length > 24000 ? String(text).slice(0,24000)+'\n…' : String(text);
+    const dialog=h('dialog',{class:'copal-dialog'},h('h2',{text:'Compare with disk'}),
+      h('p',{text:`Disk revision ${notice.revision.value}`}),
+      h('h3',{text:'Current Editor text'}),h('pre',{text:preview(source)}),
+      h('h3',{text:'Disk text at the observed revision'}),h('pre',{text:preview(notice.text)}),
+      h('footer',{class:'copal-dialog-actions'},
+        commandButton('Reload latest from disk',()=>{if (current()) void reloadDocument(doc.id); dialog.close();}),
+        commandButton('Keep edits',()=>dialog.close())));
+    wireDialog(dialog); document.body.append(dialog); dialog.showModal();
+  }
+
+  function syncHostFileWatch(owner, workspace, docs) {
+    if (!editorConsumer) return;
+    const scope=currentScope(owner), generation=state.filesGeneration;
+    if (!scope) return;
+    const workspaceFiles=new Set(workspaceLeaves(workspace).map(leaf=>leaf.docId));
+    const targets=docs.filter(doc=>workspaceFiles.has(doc.id) && isOpenHostText(doc))
+      .map(doc=>({id:doc.id,resourceId:doc.resource.key.resourceId,ref:doc.resource.locator.opaqueRef}));
+    let watch=owner.noteHostFileWatch;
+    if (!watch || watch.scope !== scope || watch.generation !== generation) {
+      watch?.dispose();
+      const listener=new AbortController();
+      const isCurrent=()=>context() === owner && currentScope(owner) === scope && state.filesGeneration === generation &&
+        Boolean(owner.noteWorkspace) && !listener.signal.aborted;
+      const locate=entry=>state.docs.find(doc=>doc.id === entry.id && isOpenHostText(doc) && doc.resource.key.resourceId === entry.resourceId);
+      const sameRevision=(left,right)=>Boolean(left && right && left.kind === right.kind && left.value === right.value);
+      const localWork=(doc,buffer)=>Boolean(owner.noteDrafts?.has(doc.id) || buffer?.state().dirty || buffer?.recoveryError ||
+        editorCompositionActive(owner,doc.id));
+      const unavailable=(entry,stage)=>{
+        if (!locate(entry)) return;
+        const existing=owner.noteHostNotices?.get(entry.id);
+        if (stage === 'watch' && existing) return;
+        if (stage === 'read' && existing?.state === 'conflict') {
+          updateHostFileNotice(owner,entry.id,{...existing,currentUnavailable:true});
+          return;
+        }
+        updateHostFileNotice(owner,entry.id,{state:stage === 'watch' ? 'watch-unavailable' : 'resource-unavailable'});
+      };
+      const reconcile=async(entry,entryCurrent)=>{
+        const doc=locate(entry);
+        if (!doc) return;
+        const key=doc.resource.key, signal=entry.controller.signal;
+        const current=()=>entryCurrent() && locate(entry) === doc && sameResourceKey(doc.resource.key,key) &&
+          workspaceLeaves(owner.noteWorkspace).some(leaf=>leaf.docId === doc.id);
+        const pendingSave=()=>owner.noteSaveRuns?.get(doc.id) || owner.noteBuffers?.get(doc.id)?.drainPromise;
+        const pending=pendingSave();
+        if (pending) { await Promise.resolve(pending).catch(()=>{}); if (!current()) return; }
+        const originalBuffer=owner.noteBuffers?.get(doc.id);
+        const originalRevision=workbenchLocalRevision(owner,doc.id);
+        const baseRevision=originalBuffer?.handle.revision || doc.resource.revision;
+        const hadLocalWork=localWork(doc,originalBuffer), initialText=sourceValue(doc);
+        const stat=await filesFacadeClient.stat(entry.ref,{signal});
+        if (!current()) return;
+        const row=stat?.resource || stat;
+        if (row?.provider !== 'host' || row.id !== key.resourceId || !row.ref ||
+            row.revision?.kind !== 'hostFingerprint') throw new Error('Original file identity is unavailable.');
+        const remoteRevision=row.revision;
+        const acceptedRevision=()=>owner.noteBuffers?.get(doc.id)?.handle.revision || doc.resource.revision;
+        if (sameRevision(remoteRevision,acceptedRevision())) {
+          if (['conflict','resource-unavailable'].includes(owner.noteHostNotices?.get(doc.id)?.state)) updateHostFileNotice(owner,doc.id,null);
+          return;
+        }
+        if (!sameRevision(baseRevision,acceptedRevision())) { watch.manual(doc.id); return; }
+        const opened=await filesFacadeClient.openResource(row.ref,{expectedRevision:remoteRevision,signal});
+        if (!current()) return;
+        const next=normalizeResourceHandle(opened?.payload?.resource);
+        const text=opened?.payload?.text ?? opened?.payload?.content;
+        if (!sameResourceKey(next.key,key) || !sameRevision(next.revision,remoteRevision) ||
+            next.representation !== doc.resource.representation || typeof text !== 'string') throw new Error('Exact saved text is unavailable.');
+        const waiting=pendingSave();
+        if (waiting) { await Promise.resolve(waiting).catch(()=>{}); if (current()) watch.manual(doc.id); return; }
+        if (!sameRevision(baseRevision,acceptedRevision())) { watch.manual(doc.id); return; }
+        const buffer=owner.noteBuffers?.get(doc.id);
+        const envelope=cloneEnvelope({...buffer?.acceptedEnvelope,...(next.metadata ? {metadata:next.metadata} : {}),text});
+        if (hadLocalWork || originalBuffer !== buffer || originalRevision !== workbenchLocalRevision(owner,doc.id) ||
+            initialText !== sourceValue(doc) || localWork(doc,buffer)) {
+          const previous=owner.noteHostNotices?.get(doc.id);
+          if (previous?.state === 'conflict' && !previous.currentUnavailable &&
+              sameRevision(previous.revision,next.revision) && previous.text === text && (!buffer || buffer.state().status === 'conflict')) return;
+          if (buffer?.state().dirty && !buffer.running && !buffer.drainPromise) buffer.resolveExternal(envelope,next.revision);
+          setLeafSaveState(doc.id,'conflict');
+          updateHostFileNotice(owner,doc.id,{state:'conflict',revision:next.revision,text});
+          return;
+        }
+        const range=changedTextRange(sourceValue(doc),text);
+        if (buffer && !buffer.resolveExternal(envelope,next.revision)) return;
+        if (buffer) buffer.handle=next;
+        doc.resource=next;
+        doc.resourceRef=next.locator.opaqueRef;
+        doc.sourceMetadata=next.metadata || null;
+        doc.resourceSnapshot=snapshotEnvelope({key,expectedRevision:next.revision,envelope});
+        doc.text=text;
+        owner.noteAcceptedEnvelopes.set(doc.id,cloneEnvelope(envelope));
+        syncDocumentEditors(doc.id,text,null,null,true,true);
+        setLeafSaveState(doc.id,'saved');
+        updateHostFileNotice(owner,doc.id,{state:'refreshed',range});
+      };
+      const registry=createHostFileWatch({client:filesFacadeClient,isCurrent,reconcile,unavailable});
+      watch=owner.noteHostFileWatch={...registry,scope,generation,dispose() {listener.abort(); registry.dispose();}};
+      window.addEventListener('online',()=>registry.reconcileAll({reconnect:true}),{signal:listener.signal});
+      window.addEventListener('focus',()=>registry.reconcileAll({reconnect:true}),{signal:listener.signal});
+      window.addEventListener('openclank-files-watch-dirty',()=>registry.reconcileAll(),{signal:listener.signal});
+      window.addEventListener('openclank-files-resource-mutated',event=>{
+        if (event.detail?.resource?.provider === 'host') registry.reconcileAll();
+      },{signal:listener.signal});
+    }
+    watch.sync(targets);
+    for (const id of owner.noteHostNotices?.keys() || []) if (!workspaceFiles.has(id)) owner.noteHostNotices.delete(id);
+  }
+
   async function reloadDocument(docId) {
     const current = context(), scope = currentScope(current);
     const doc = workspaceDocuments().find(item => item.id === docId);
-    if (!doc || !await resolveDirtyDocuments([docId], { force:true, title:'Reload saved document' })) return false;
+    if (!doc || editorCompositionActive(current,docId)) {
+      if (doc) current.window?.setStatus('Finish entering text before reloading the file.',true);
+      return false;
+    }
+    const active=()=>context() === current && scope === currentScope(current) && !editorCompositionActive(current,docId) &&
+      workspaceDocuments().some(candidate=>candidate === doc);
+    if (!await resolveDirtyDocuments([docId], { force:true, title:'Reload saved document' }) || !active()) return false;
     const revision = transitionRevision(current, docId);
     try {
       let envelope, providerRevision, fresh = null, handle = null;
@@ -2120,31 +3123,164 @@ export function createNotesFeature({
         if (!fresh?.head || fresh.id !== docId) throw new Error('Saved document could not be verified.');
         envelope = cloneEnvelope({ text:String(fresh.text ?? ''), properties:fresh.properties, relations:fresh.relations, ...(fresh.extensions == null ? {} : { extensions:fresh.extensions }) }); providerRevision = { kind:'copalHead', value:fresh.head };
       }
-      if (scope !== currentScope(current) || revision !== transitionRevision(current, docId) || current.noteDrafts.has(docId)) return false;
-      const buffer = current.noteBuffers.get(docId);
+      if (!active() || revision !== transitionRevision(current, docId) || current.noteDrafts.has(docId)) return false;
+      const buffer=current.noteBuffers.get(docId);
       if (buffer?.state().dirty || buffer?.running || buffer?.drainPromise) return false;
-      if (fresh) Object.assign(doc, fresh); if (handle) doc.resource = handle;
-      Object.assign(doc, cloneEnvelope(envelope));
-      buffer?.resolveExternal(envelope, providerRevision, { force:false });
-      current.noteAcceptedEnvelopes.set(docId, cloneEnvelope(envelope)); syncDocumentEditors(docId, envelope.text); setLeafSaveState(docId, 'saved');
+      if (buffer && !buffer.resolveExternal(envelope,providerRevision,{force:false})) return false;
+      if (fresh) Object.assign(doc,fresh);
+      if (handle) {
+        doc.resource=handle;
+        doc.resourceRef=handle.locator.opaqueRef;
+        doc.sourceMetadata=handle.metadata || null;
+        doc.resourceSnapshot=snapshotEnvelope({key:handle.key,expectedRevision:providerRevision,envelope});
+        if (buffer) buffer.handle=handle;
+      }
+      Object.assign(doc,cloneEnvelope(envelope));
+      current.noteAcceptedEnvelopes.set(docId, cloneEnvelope(envelope)); syncDocumentEditors(docId, envelope.text,null,null,true,true); setLeafSaveState(docId, 'saved');
+      if (isHostDocument(doc)) updateHostFileNotice(current,docId,null);
       current.window?.setStatus('Reloaded saved document.'); return true;
     } catch (error) { current.window?.setStatus(error.message || 'Reload failed; the document remains open.', true); return false; }
   }
 
   async function requestCloseLeaves(leaves, options = {}) {
-    const current = context(), workspace = current?.noteWorkspace, scope = currentScope(current);
-    const captured = leaves.filter(Boolean).map(leaf => ({ id:leaf.id, docId:leaf.docId, pinned:leaf.pinned === true }));
-    const allowed = await resolveDirtyDocuments(captured.map(leaf => leaf.docId), { closingLeafIds:captured.map(leaf => leaf.id), ...options });
-    return allowed && scope === currentScope(current) && current.noteWorkspace === workspace && captured.every(item => { const leaf = findWorkspaceLeaf(workspace, item.id); return leaf?.docId === item.docId && (leaf.pinned === true) === item.pinned; });
+    const current=context(), workspace=current?.noteWorkspace, scope=currentScope(current);
+    if (!workspace) return false;
+    const originalFocus=captureTabCloseFocus(current);
+    const captured=[...new Set(leaves.filter(Boolean))].filter(leaf=>options.closingWindow || !leaf.pinned);
+    const membership=()=>JSON.stringify(workspaceGroups(workspace).map(group=>[group.id,group.tabs.map(leaf=>[leaf.id,leaf.docId,leaf.pinned===true])]));
+    const layout=membership();
+    const imageTargets=captureImageCloseTargets({leaves:workspaceLeaves(workspace),selected:captured,imageMap:current.noteImages});
+    const isCurrent=()=>context()===current && scope===currentScope(current) && current.noteWorkspace===workspace &&
+      (options.closingWindow ? current.window?.physicalVisible ?? current.window?.visible : current.window?.visible) && current.window.root?.isConnected && layout===membership() &&
+      captured.every(leaf=>findWorkspaceLeaf(workspace,leaf.id)===leaf) &&
+      (!options.replacing || workspace.activeLeafId===captured[0]?.id) &&
+      imageTargets.isCurrent(workspaceLeaves(workspace),current.noteImages) && (!options.isCurrent || options.isCurrent());
+    if (!isCurrent()) return false;
+    if (!imageTargets.ready) {
+      current.window?.setStatus('Finish opening the image or cancel the canvas size dialog, then close again.',true);
+      return false;
+    }
+    if (imageTargets.unavailable) {
+      current.window?.setStatus('This image recovery identity changed. Reopen the Editor and try again.',true);
+      return false;
+    }
+    const explicitDiscards=new Set();
+    const closeBlocked=(image, reason) => {
+      const recovery=image.entry.session.recoveryStatus().state;
+      const message={
+        image_import_must_settle_or_cancel:'Finish or cancel the image import before closing.',
+        result_outcome_unknown:'The image result is still pending. Check its outcome before closing.',
+        retained_result_unresolved:'Apply the retained image result, keep a draft, or explicitly discard it.',
+        image_not_fully_saved:'The image still has unsaved changes.',
+        result_memory_only:'Download, apply, or explicitly discard the in-memory image result before closing.',
+      }[reason] || {
+        in_flight:'Wait for the image operation to finish, then close again.',
+        copy_pending:'Reconcile the previous Save Copy before closing.',
+        save_uncertain:'Check the original save outcome before closing. Image recovery remains preserved.',
+        draft_uncertain:'The draft outcome is unknown. Image recovery remains preserved.',
+        scope_unavailable:'Return to the original account and workspace to recover this image.',
+      }[recovery] || (image.isOpen() ? 'Image close could not be completed. Review its edits and recovery status before closing again.' : 'Reopen the image or recover its draft before closing. Image recovery remains preserved.');
+      current.window?.setStatus(message,true);
+    };
+    try { return await closeImageTransaction({images:imageTargets.images,isCurrent,onBlocked:closeBlocked,
+      stageLayout:prepared=>{
+        const placeholders=options.closingWindow ? [] : imageTargets.placeholders;
+        const placeholderIds=new Set(placeholders.map(({leaf})=>leaf.id));
+        const recoveringIds=new Set(prepared.filter(({choice})=>choice==='close_recovery').flatMap(({image})=>image.leafIds));
+        const emptyIds=new Set(prepared.filter(({choice})=>choice==='close_uninitialized').flatMap(({image})=>image.leafIds));
+        const remove=captured.filter(leaf=>!leaf.pinned && (options.closingWindow ? emptyIds.has(leaf.id) || recoveringIds.has(leaf.id) || explicitDiscards.has(leaf.docId) :
+          !options.replacing || placeholderIds.has(leaf.id))).map(leaf=>({...leaf,remember:!emptyIds.has(leaf.id) && !explicitDiscards.has(leaf.docId)}));
+        const recoveryByDocument=new Map();
+        for (const {leaf,recovery,recoveryIdentity} of placeholders) {
+          const previous=recoveryByDocument.get(leaf.docId);
+          if (previous && previous.recoveryIdentity!==recoveryIdentity) throw new Error('These image views have conflicting recovery details. The tabs remain open.');
+          recoveryByDocument.set(leaf.docId,{recovery,recoveryIdentity});
+        }
+        const retain=[...recoveryByDocument.values()].map(record=>record.recovery);
+        const forget=[];
+        const refresh=[];
+        for (const {image,choice} of prepared) {
+          if (choice==='close_recovery' || choice==='keep_draft' || choice==='save') {
+            const recovery=image.entry.session.serializeRecovery();
+            refresh.push(recovery);
+            if (choice==='close_recovery' || choice==='keep_draft' && !options.closingWindow) retain.push(recovery);
+          } else if (choice==='discard' && (!options.closingWindow || explicitDiscards.has(image.docId))) forget.push(image.docId);
+        }
+        if (!remove.length && !retain.length && !forget.length && !refresh.length) return {rollback(){},commit(){}};
+        if (current.noteStorageNeedsMigration || (retain.length || refresh.length) && !scope ||
+            [...retain,...refresh].some(recovery=>!imageRecoveryInScope(recovery,current))) {
+          throw new Error('Recovery could not be stored in this account and workspace. The tabs remain open.');
+        }
+        const next=stageWorkspaceClose(workspace,{remove,retain,forget,refresh});
+        const key=copalStorageKey(`openclank-copal-${presentationId}-layout`,state.workspace);
+        let previous;
+        try {
+          previous=localStorage.getItem(key);
+          localStorage.setItem(key,serializeNotesWorkspace(next));
+        } catch (_) {
+          throw new Error('Editor layout could not be saved. The tabs and recovery details remain open. Restore browser storage access and try again.');
+        }
+        const focus=workspaceHasUnclaimedFocus() ? originalFocus : captureTabCloseFocus(current);
+        const focusRemoved=focus && (remove.some(leaf=>leaf.id===focus.leafId) ||
+          focus.groupId && !findWorkspaceGroup(next,focus.groupId));
+        return {
+          rollback() {
+            if (previous===null) localStorage.removeItem(key); else localStorage.setItem(key,previous);
+          },
+          commit() {
+            clearTimeout(persistTimer);
+            commitWorkspaceClose(workspace,next);
+            for (const leaf of remove) disposeLeaf(leaf.id);
+            if (!options.closingWindow) {
+              syncSelectionToModel(workspace);
+              if (!options.replacing || remove.length) {
+                render();
+                if (focusRemoved) restoreFocusAfterTabClose(current,current.noteWorkspace,scope);
+              }
+            }
+          },
+        };
+      },
+      choose:async image => {
+        if (image.canCloseUninitializedBlank()) return 'close_uninitialized';
+        if (image.isOpen() && image.entry.session.recoveryStatus().state==='draft_uncertain') {
+          if (!await image.getPersistenceController()?.reconcileDraft?.() || !isCurrent()) { closeBlocked(image); return 'cancel'; }
+        }
+        if (image.isOpen() && image.getPersistenceController()?.canCloseWithRecovery?.()) {
+          if (!canRetainClosedImageRecovery(workspace)) { closeBlocked(image); return 'cancel'; }
+          const accepted=await styledConfirm('Close this image? Its saved draft keeps the interrupted operation for recovery. Later local edits will be discarded.',{title:'Close image',confirmText:'Close and keep recovery',cancelText:'Cancel'});
+          return accepted ? 'close_recovery' : 'cancel';
+        }
+        if (!image.isOpen() || image.entry.session.recoveryStatus().state !== 'ready') { closeBlocked(image); return 'cancel'; }
+        const dirty=image.isDirty();
+        if (dirty == null) { closeBlocked(image); return 'cancel'; }
+        const results=image.getPersistenceController()?.retainedResultStatus().records || [];
+        if (results.some(result=>result.kind==='import' && result.status==='reserved')) { current.window?.setStatus('Finish or cancel the image import before closing.',true); return 'cancel'; }
+        if (dirty === false && results.every(item=>item.status==='resolved')) return 'discard';
+        const memoryOnly=results.some(result=>result.status==='memory_only');
+        return new Promise(resolve => {
+          const dialog = h('dialog',{class:'copal-dialog'},h('h2',{text:'Close image'}),h('p',{text:memoryOnly ? 'A retained result exists only in memory and will be lost on reload or discard. Download or apply it before closing, or explicitly discard it.' : results.some(item=>['unknown','unavailable'].includes(item.status)) ? 'An earlier image operation has no recoverable result. Save the visible image, keep its draft, or discard your edits.' : 'Choose what to do with the image changes.'}));
+          let settled = false;
+          const finish = choice => { if (settled) return; if (choice==='keep_draft' && !canRetainClosedImageRecovery(workspace)) { current.window?.setStatus('This workspace layout cannot safely retain draft recovery.',true); return; } settled = true; if (choice==='discard') explicitDiscards.add(image.docId); if (dialog.open) dialog.close(); dialog.remove(); resolve(choice); };
+          const viewId=image.entry.views.get(findWorkspaceLeaf(workspace,image.leafIds[0])?.image?.viewId)?.id;
+          const choices = [...(image.entry.session.capabilities(viewId).save && results.every(item=>['resolved','unknown','unavailable'].includes(item.status)) ? [['Save','save']] : []), ['Keep draft','keep_draft'],['Discard','discard'],['Cancel','cancel']];
+          dialog.append(h('footer',{class:'copal-dialog-actions'},...choices.map(([label,choice]) => commandButton(label,() => finish(choice)))));
+          wireDialog(dialog); document.body.append(dialog);
+          dialog.addEventListener('close',()=>finish('cancel'),{once:true});
+          dialog.showModal();
+        });
+      },
+      resolveOthers:() => resolveDirtyDocuments([...captured.map(leaf => leaf.docId), ...(options.extraDocIds || [])], { closingLeafIds:captured.map(leaf => leaf.id), ...options }),
+    }); } catch (error) { current.window?.setStatus(error.message || 'Image close failed.', true); return false; }
   }
 
   async function beforeWindowClose() {
     const current = context(), scope = currentScope(current);
-    const layout = JSON.stringify(workspaceLeaves(current?.noteWorkspace).map(leaf => [leaf.id, leaf.docId]));
+    if (!current?.noteWorkspace) return true;
+    const layout = JSON.stringify(workspaceLeaves(current.noteWorkspace).map(leaf => [leaf.id, leaf.docId]));
     const resources = () => JSON.stringify([...new Set([...(current?.noteDrafts?.keys() || []), ...(current?.noteBuffers?.keys() || [])])].sort());
-    const resourceSet = resources();
-    const allowed = await resolveDirtyDocuments([...(current?.noteDrafts?.keys() || []), ...(current?.noteBuffers?.keys() || [])], { closingWindow:true, title:'Close Editor' });
-    return allowed && scope === currentScope(current) && resourceSet === resources() && layout === JSON.stringify(workspaceLeaves(current?.noteWorkspace).map(leaf => [leaf.id, leaf.docId]));
+    const resourceSet = new Set(JSON.parse(resources()));
+    return requestCloseLeaves(current?.noteWorkspace ? workspaceLeaves(current.noteWorkspace) : [], {closingWindow:true, title:'Close Editor', extraDocIds:[...resourceSet], isCurrent:() => scope === currentScope(current) && JSON.parse(resources()).every(id => resourceSet.has(id)) && layout === JSON.stringify(workspaceLeaves(current.noteWorkspace).map(leaf => [leaf.id, leaf.docId]))});
   }
 
   async function flushAll() {
@@ -2156,22 +3292,24 @@ export function createNotesFeature({
     detachSaveStatus(context());
     persistRecovery();
     const current = context();
+    retireImages(current);
     if (current) {
       current.noteShellCache = null;
       disposeEditorFiles(current);
       current.noteWorkbenchMenu?.dispose(); current.noteWorkbenchMenu = null;
       current.noteWorkbenchMountToken = null;
       current.noteWorkbenchDispose?.(); current.noteWorkbenchDispose = null; current.noteWorkbenchHost = null;
-      current.noteResourceContextDispose?.(); current.noteResourceContextDispose=null;current.noteResourceContextHost=null;
       current.noteGraphPolicyAbort?.abort();current.noteGraphPolicyAbort=null;
     }
     for (const leafId of [...(current?.noteLeafViews?.keys() || [])]) disposeLeaf(leafId);
     if (current?.noteKeyHandler) current.window.root.removeEventListener('keydown', current.noteKeyHandler);
     if (current?.notePageHideHandler) window.removeEventListener('pagehide', current.notePageHideHandler);
+    if (current?.noteLanguageHandler) document.removeEventListener('openclank:languagechange', current.noteLanguageHandler);
     if (current?.noteBeforeUnloadHandler) window.removeEventListener('beforeunload', current.noteBeforeUnloadHandler);
     for (const entry of current?.noteShellMedia || []) entry.query.removeEventListener('change', entry.handler);
     if (current) {
       current.notePageHideHandler = null; current.noteShellMedia = null; current.noteDrawer = null;
+      current.noteLanguageHandler = null;
       current.noteDrawerRelease?.(); current.noteDrawerRelease = null;
       current.noteResourceRequestController?.abort?.(); current.noteResourceRequestController = null;
       current.noteResourceRootValidationController?.abort?.(); current.noteResourceRootValidationController = null;
@@ -2258,9 +3396,18 @@ export function createNotesFeature({
   // keeps the original action id and CAS head for this exact retry.
   async function retryDocumentSave(docId) {
     const buffer = context()?.noteBuffers?.get(docId);
-    const state = buffer?.state?.();
+    const shared=state.docs.find(doc=>doc.id===docId)?.sharedText;
+    if (shared) {
+      if (!buffer?.uncertainSave || !shared.adapter || !shared.isCurrent()) return {outcome:'failed',message:'Original shared status unavailable.'};
+      const original=buffer.uncertainSave;
+      const result=await shared.adapter.reconcile();
+      if (!shared.isCurrent() || !result || !buffer.reconcileVerifiedSave(original,result)) return {outcome:'failed',message:'Original shared status remains unknown.'};
+      shared.adapter.finalizeReconciliation(result);
+      return result;
+    }
+    const bufferState = buffer?.state?.();
     const retryState = documentRetryState(docId);
-    if (!buffer || !state?.dirty || state.status !== 'error' || !retryState.replayable) {
+    if (!buffer || !bufferState?.dirty || bufferState.status !== 'error' || !retryState.replayable) {
       return { outcome:'failed', code:'no-pending-replay', message:retryState.message || 'There is no uncertain pending save to replay.' };
     }
     return saveDraft(docId, { returnReceipt:true, snapshot:buffer.uncertainSave || buffer.pending });
@@ -2350,6 +3497,7 @@ export function createNotesFeature({
   function projectDocument(fresh, scope = null) {
     const source = fresh && typeof fresh === 'object' ? fresh : {};
     const current = context();
+    if (!current) return source;
     bindSharedDocumentState(current);
     if (scope && !sameSaveScope(scope, bufferScope(current))) return source;
     current.noteAcceptedEnvelopes ||= new Map();
@@ -2383,6 +3531,7 @@ export function createNotesFeature({
   }
 
   function showChooser({ title = 'Quick switcher', docs = documents(), choose = null, allowCreate = true } = {}) {
+    allowCreate = allowCreate && !manualWorkspace(ensureWorkspace());
     const dialog = h('dialog', { class:'copal-dialog copal-quick-switcher' }, h('h2', { text:title }));
     const search = h('input', { type:'search', placeholder:'Type a note name…', 'aria-label':title, autocomplete:'off' });
     const list = h('div', { class:'copal-switcher-results', role:'listbox' });
@@ -2436,7 +3585,7 @@ export function createNotesFeature({
   }
 
   async function createDatabaseNote(name, content = '', properties = {}) {
-    const relations = databaseRelations(content, state.docs);
+    const relations = databaseRelations(content, state.docs, { name });
     const result = await api('/documents', { method:'POST', body:JSON.stringify({ name, kind:'note', content, properties, relations }) });
     await loadDocuments(false);
     open(result.doc.id, { intent:'newTab' });
@@ -2473,11 +3622,9 @@ export function createNotesFeature({
     });
   }
 
-  function captureTemplateTarget() {
-    const workspace = ensureWorkspace();
-    const leaf = activeLeaf(workspace);
-    const doc = activeDoc(workspace);
-    const cache = leaf ? context()?.noteLeafViews?.get(leaf.id) : null;
+  function captureTemplateTarget(cache = context()?.noteLeafViews?.get(activeLeaf(ensureWorkspace())?.id)) {
+    const leaf = cache?.leaf;
+    const doc = cache?.doc;
     if (!doc || doc.virtual || doc.readOnly || !cache?.editor) return null;
     return {
       docId:doc.id,
@@ -2492,9 +3639,10 @@ export function createNotesFeature({
     };
   }
 
-  function insertTemplate() {
+  function insertTemplate() { return insertTemplateAt(captureTemplateTarget()); }
+
+  function insertTemplateAt(target) {
     const templates = templateDocuments();
-    const target = captureTemplateTarget();
     if (!target) {
       context()?.window?.setStatus('Open an editable document before inserting a template.', true);
       return;
@@ -2505,42 +3653,41 @@ export function createNotesFeature({
     }
     showChooser({ title:'Insert template', docs:templates, allowCreate:false, choose:async (template) => {
       const current = context();
-      const active = current && current.noteLeafViews?.get(target.leafId);
-      const currentSelection = active?.editor?.getSelection?.() || null;
-      const selectionUnchanged = !target.selection || (currentSelection?.mainIndex === target.selection.mainIndex
-        && JSON.stringify(currentSelection?.ranges) === JSON.stringify(target.selection.ranges));
-      const textUnchanged = target.text === (active?.editor?.getValue?.() ?? '');
-      const revisionUnchanged = target.revision === (activeDoc()?.head || activeDoc()?.resource?.revision?.value || '');
-      if (!active || active.editor !== target.editor || !target.editor.view?.dom?.isConnected || activeDoc()?.id !== target.docId
-        || !selectionUnchanged || !textUnchanged || !revisionUnchanged || target.scope !== currentScope()) {
-        current?.window?.setStatus('The captured template destination is stale. Reopen the command and try again.', true);
-        return;
-      }
-      const now = new Date();
-      // S04 owns token expansion.  Keep the local compatibility export above
-      // for older callers, but use the published model for this mutation.
-      const expanded = expandTemplateModel(template.text, { title:displayName(activeDoc()), now, timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone });
-      let merged = mergeTemplateProperties(activeDoc()?.properties, template.properties);
+      const destination = current?.noteLeafViews?.get(target.leafId);
+      const doc = destination?.doc;
+      const stillCurrent = () => {
+        const selection = destination?.editor?.getSelection?.() || null;
+        return current === context() && current?.window.visible && target.scope === currentScope()
+          && current.noteLeafViews.get(target.leafId) === destination
+          && groupForLeaf(current.noteWorkspace, target.leafId)?.activeLeafId === target.leafId
+          && destination?.editor === target.editor && target.editor.view?.dom?.isConnected
+          && destination.doc === doc && doc?.id === target.docId && !doc.readOnly
+          && target.revision === (doc.head || doc.resource?.revision?.value || '')
+          && target.text === destination.editor.getValue?.()
+          && (!target.selection || selection?.mainIndex === target.selection.mainIndex
+            && JSON.stringify(selection?.ranges) === JSON.stringify(target.selection.ranges));
+      };
+      const stale = () => current?.window?.setStatus('The captured template destination is stale. Reopen the command and try again.', true);
+      if (!stillCurrent()) { stale(); return; }
+      const expanded = expandTemplateModel(template.text, { title:displayName(doc), now:new Date(), timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone });
+      let merged = mergeTemplateProperties(doc.properties, template.properties);
       if (merged.collisions.length) {
         const collisionChoice = await chooseTemplateCollisions(merged.collisions);
         if (collisionChoice === 'cancel') return;
+        if (!stillCurrent()) { stale(); return; }
         if (collisionChoice === 'template') {
           const properties = { ...merged.properties };
           for (const item of merged.collisions) properties[item.key] = item.template;
           merged = { properties, collisions:[] };
         }
       }
-      // CodeMirror's transaction replaces every captured range in one undo
-      // step and leaves all other selections mapped through the edit.
-      activeDoc().properties = merged.properties;
-      const ranges = active.editor.getSelections?.() || [{ from:active.editor.getSelection?.()?.anchor ?? 0, to:active.editor.getSelection?.()?.head ?? 0 }];
-      // Descriptor creation validates the captured multicursor transaction;
-      // the editor remains responsible for applying one atomic history item.
+      const ranges = destination.editor.getSelections?.() || [{ from:target.selection?.anchor ?? 0, to:target.selection?.head ?? 0 }];
       try { createInsertionDescriptors(expanded.text, ranges); } catch (error) {
         current.window.setStatus(error?.message || 'Template selections are stale.', true); return;
       }
       const accountId = achievementOwner(), workspaceId = state.workspace;
-      active.editor.insertText(rebaseTemplateLinks(expanded.text, template.name, activeDoc().name));
+      doc.properties = merged.properties;
+      destination.editor.insertText(rebaseTemplateLinks(expanded.text, template.name, doc.name));
       if (expanded.text.trim()) {
         const draft = current.noteDrafts.get(target.docId);
         if (draft) (draft.savedEvidence ||= []).push({ type:'template.section.inserted', fields:{ documentId:target.docId, spanNonempty:true, sectionKey:template.id }, options:{ accountId, workspaceId, kind:'R' } });
@@ -2598,41 +3745,236 @@ export function createNotesFeature({
           actionId:`template-create-${target.docId}-${Date.now()}`,
         });
         if (!targetStillCurrent()) {
-          context()?.window?.setStatus('The captured template destination became stale; verify the folder before retrying.', true);
+          context()?.window?.setStatus('The template was created, but the captured destination became stale; verify the folder before further changes.', true);
           return;
         }
-        const opened = await filesFacadeClient.openResource(created?.resource?.ref);
+        if (created?.outcome === 'created' && !created?.resource?.ref) {
+          context()?.window?.setStatus('The template was created, but its current contents could not be opened. Refresh before further changes.', true);
+          return;
+        }
+        let opened;
+        try { opened = await filesFacadeClient.openResource(created?.resource?.ref); }
+        catch (error) {
+          if (created?.outcome !== 'created') throw error;
+          context()?.window?.setStatus('The template was created, but could not be opened.', true);
+          return;
+        }
         if (!targetStillCurrent()) {
           context()?.window?.setStatus('The captured template destination became stale; the created resource was not opened.', true);
           return;
         }
         if (opened?.payload?.resource) openResource(opened.payload.resource, opened.payload);
-        context()?.window?.setStatus(`Created ${markdownName} in the Host template folder.`);
+        context()?.window?.setStatus(created?.outcome === 'created' && created?.history?.state !== 'complete'
+          ? `Created ${markdownName}; History completion is unavailable.` : `Created ${markdownName} in the Host template folder.`);
         return;
       }
       await createDatabaseNote(folder && !requested.startsWith(`${folder}/`) ? `${folder}/${requested}` : requested, source, properties);
     });
   }
 
+  function createBlankImageFromEditor() {
+    if (manualWorkspace(ensureWorkspace())) return false;
+    try { return openBlankImage(); }
+    catch (error) { context()?.window?.setStatus(error.message || 'A new image could not be opened.',true); return false; }
+  }
+
   function editorCreationFolder(workspace, current = context()) {
+    if (workspace?.left?.folderWorkspaceRoot) return current?.noteResourceRootReady ? workspace.left.folderWorkspaceRoot : null;
+    if (workspace?.left?.binderContext || workspace?.left?.copalWorkspacePinned) return null;
     const explorer = current?.noteFilesExplorer;
     if (explorer?.ready && explorer.scope === currentScope(current)) return explorer.directoryReady ? explorer.displayedRoot : null;
     return current?.noteResourceRootReady === true ? workspace?.left?.resourceRoot || null : null;
   }
 
   function editorCreationReason(workspace, current = context()) {
+    if (manualWorkspace(workspace,current)) return 'The Instruction Manual is read-only.';
     const explorer = current?.noteFilesExplorer;
-    if (explorer?.directoryPending || explorer?.ready && !explorer.directoryReady) return 'The displayed folder is being authorized. Retry or choose a folder before creating files.';
+    if (workspace?.left?.tab === 'files' && (explorer?.directoryPending || explorer?.ready && !explorer.directoryReady)) return 'The displayed folder is being authorized. Retry or choose a folder before creating files.';
     const folder = editorCreationFolder(workspace, current);
-    if (workspace?.left?.folderWorkspaceRoot && folder?.provider !== 'host') return 'Browse to a Host folder to create files, or use Close Folder to return to Copal.';
+    if (workspace?.left?.folderWorkspaceRoot && folder?.provider !== 'host') return 'Browse to a Host folder to create files, or use Close Folder to return to available places.';
     if (folder?.provider === 'host' && (isHostLocationsRoot(folder) || folder.capabilities?.write !== true)) return 'This folder does not support creating files.';
     return '';
   }
 
+  function editorNewPageLabel(workspace, folder = editorCreationFolder(workspace)) {
+    if (folder?.provider === 'host') return 'New file';
+    return workspace?.left?.binderContext ? 'New journal page' : 'New note';
+  }
+
   function refreshEditorCreationFolder(workspace, folder) {
     const explorer = context()?.noteFilesExplorer;
-    return explorer?.ready ? explorer.refresh()
+    return explorer?.ready && !workspace.left.folderWorkspaceRoot ? explorer.refresh()
       : loadEditorResourceFolder(workspace, folder, { query:workspace.left.resourceQuery || '', commitHistory:false });
+  }
+
+  function standaloneTextShare(target, current) {
+    const owner=target.current, {doc,folder}=target;
+    const parentRef=folder?.provider === 'host' && folder.capabilities?.write === true ? folder.ref : doc?.hostParentResourceRef;
+    if (!parentRef || !isOpenHostText(doc) || !current()) throw new Error('Open a text file and an authorized writable Host folder.');
+    const primary=target.ranges[target.mainIndex];
+    const selection=primary && primary.anchor !== primary.head && target.editor
+      ? target.editor.view.state.doc.sliceString(Math.min(primary.anchor,primary.head),Math.max(primary.anchor,primary.head)) : null;
+    const stateForScope=owner.noteStandaloneText?.scope === target.scope ? owner.noteStandaloneText :
+      (owner.noteStandaloneText={scope:target.scope,drafts:new Map()});
+    let draft=stateForScope.drafts.get(doc.id);
+    if (!draft) {
+      const leafName=String(doc.name || 'Share').split('/').at(-1) || 'Share';
+      draft={name:leafName.replace(/\.[^.]+$/,'').slice(0,220)+'-share.txt',text:selection ?? sourceValue(doc),
+        attempt:null,saved:null,busy:false};
+      stateForScope.drafts.set(doc.id,draft);
+    }
+    return import('../editor/standaloneTextShare.js').then(({openStandaloneTextShare})=>{
+      if (!current()) return false;
+      return openStandaloneTextShare({draft,client:filesFacadeClient,current,parentRef,status:(message,error=false)=>owner.window?.setStatus(message,error)});
+    });
+  }
+
+  const deliverableTypes={
+    workbook:{label:'workbook',suffix:'.clankbook',variant:'openclank-workbook-v1',source:(_name,appearance)=>newWorkbookSource(appearance)},
+    slides:{label:'slide deck',suffix:'.clankslides',variant:'openclank-slides-v1',source:newSlideDeckSource},
+  };
+
+  function deliverableCreationCommands(owner,workspace,isContextCurrent) {
+    return Object.entries(deliverableTypes).map(([kind,format])=>{
+      const pending=owner?.noteDeliverableCreations?.get(kind)?.scope === currentScope(owner);
+      const reason=pending ? '' : editorCreationReason(workspace,owner) ||
+        (editorCreationFolder(workspace,owner)?.provider !== 'host' ? 'Open an authorized Host folder in Editor to create this file.' : '');
+      return {kind,label:pending ? `Check ${format.label} creation…` : `New ${format.label}…`,reason,
+        run:()=>createDeliverable(kind,isContextCurrent)};
+    });
+  }
+
+  async function createDeliverable(kind,isContextCurrent) {
+    const format=deliverableTypes[kind], owner=context(), workspace=ensureWorkspace(), scope=currentScope(owner), origin=capturePickerOrigin();
+    const current=()=>Boolean(scope && currentScope(owner) === scope && pickerOriginCurrent(origin) && isContextCurrent());
+    const attempts=owner.noteDeliverableCreations ||= new Map();
+    const existing=attempts.get(kind);
+    if (existing?.scope === scope) return observeCreation(existing);
+    const folder=editorCreationFolder(workspace,owner);
+    if (!current() || editorCreationReason(workspace,owner) || folder?.provider !== 'host' || folder.capabilities?.write !== true) {
+      throw new Error('Open an authorized writable Host folder in Editor.');
+    }
+    const appearance=captureDeliverableAppearance();
+    if (!appearance) throw new Error('The current account appearance is not ready.');
+    const folderCurrent=()=>current() && editorCreationFolder(workspace,owner) === folder && !editorCreationReason(workspace,owner);
+    const defaultTitle=kind === 'workbook' ? 'Untitled workbook' : 'Untitled slide deck';
+    showForm(`New ${format.label}`,[['name','Name',defaultTitle+format.suffix]],async({name})=>{
+      const outstanding=attempts.get(kind);
+      if (outstanding?.scope === scope) return observeCreation(outstanding);
+      const requested=String(name || '').trim();
+      const title=requested.toLowerCase().endsWith(format.suffix) ? requested.slice(0,-format.suffix.length) : requested;
+      const filename=title+format.suffix;
+      if (!folderCurrent()) throw new Error('The original folder changed. Reopen the creation command.');
+      if (!title || filename.length > 240 || /[\\/\u0000-\u001f\u007f]/.test(filename)) throw new Error('Enter a valid file name.');
+      const stat=await filesFacadeClient.stat(folder.ref);
+      const verified=normalizeAuthorizedResource(stat?.resource || stat,{purpose:'folder',...pickerScope()});
+      if (!folderCurrent() || verified.resourceKey !== folder.resourceKey || verified.provider !== 'host' ||
+          verified.kind !== 'folder' || !verified.capabilities.write || !verified.capabilities.children) {
+        throw new Error('The original folder is no longer writable.');
+      }
+      const roots=await filesFacadeClient.roots({copalWorkspace:state.workspace || 'default'});
+      const generation=Number(roots?.policy_generation);
+      if (!folderCurrent() || !Number.isSafeInteger(generation) || generation < 0) throw new Error('Files authorization changed before creation.');
+      if (attempts.get(kind)?.scope === scope) throw new Error('Check the existing creation request first.');
+      const operationId=`editor-create-${crypto.randomUUID()}`, text=format.source(title,appearance);
+      const attempt={scope,operationId,generation,text,filename,parentRef:verified.ref,busy:true};
+      attempts.set(kind,attempt);
+      try {
+        const file=new File([text],filename,{type:'application/json'});
+        const receipt=await filesFacadeClient.importFile(file,{operationId,itemId:operationId,generation,
+          destinationRef:verified.ref,name:filename,collision:'fail'});
+        return await finishCreation(attempt,receipt);
+      } catch (error) {
+        if (attempts.get(kind) !== attempt) throw error;
+        if (Number(error?.status) >= 400 && Number(error.status) < 500 &&
+            ![408,429].includes(Number(error.status)) && error.code !== 'operation_pending') {
+          attempts.delete(kind);
+          throw error;
+        }
+        throw new Error('Creation outcome is unavailable. Use Check creation to look up the original request.');
+      } finally { attempt.busy=false; }
+    });
+
+    async function observeCreation(attempt) {
+      if (!current() || attempts.get(kind) !== attempt) throw new Error('The original account or workspace changed.');
+      if (attempt.busy) throw new Error('This creation is still in progress.');
+      attempt.busy=true;
+      try {
+        const receipt=await filesFacadeClient.operationReceipt(attempt.operationId,{generation:attempt.generation});
+        return await finishCreation(attempt,receipt);
+      } finally { attempt.busy=false; }
+    }
+
+    async function finishCreation(attempt,receipt) {
+      const item=receipt?.items?.find(entry=>entry.item_id === attempt.operationId);
+      if (!item || item.outcome === 'pending') throw new Error('Creation is pending. Check its original status again.');
+      if (!['committed','unchanged'].includes(item.outcome)) {
+        attempts.delete(kind);
+        throw new Error(item.outcome === 'conflict' ? 'A file with this name already exists.' : 'The file was not created.');
+      }
+      attempts.delete(kind);
+      if (!current()) return false;
+      if (!item.resource_ref || item.revision?.kind !== 'hostFingerprint') {
+        owner.window?.setStatus(`Created ${attempt.filename}. Open it from Files to verify the saved revision.`,true);
+        return false;
+      }
+      try {
+        const opened=await resourceOpener({resourceRef:item.resource_ref,expectedRevision:item.revision,parentResourceRef:attempt.parentRef,
+          name:attempt.filename,origin,isCurrent:current,validateResponse(response) {
+            if (response?.resource?.provider !== 'host' || response.resource.format?.variant !== format.variant ||
+                response?.payload?.text !== attempt.text) throw new Error('The original created source changed.');
+          }});
+        if (!opened) throw new Error('The created source is no longer current.');
+        if (context() !== owner || currentScope(owner) !== scope) return false;
+        owner.window?.setStatus(`Created ${attempt.filename} in Files.`);
+        if (owner.noteFilesExplorer?.ready) void owner.noteFilesExplorer.refresh().catch(()=>{});
+      } catch (_) {
+        if (context() === owner && currentScope(owner) === scope) owner.window?.setStatus(`Created ${attempt.filename}. The exact saved revision could not be opened.`,true);
+      }
+      return true;
+    }
+  }
+
+  function canSaveTextAs(doc) {
+    return doc && !doc.sharedText && !doc.virtual && ['text', 'source', 'note', 'markdown', 'wiki'].includes(doc.kind);
+  }
+
+  async function saveTextAs(doc) {
+    const owner = context();
+    const origin = capturePickerOrigin();
+    if (!canSaveTextAs(doc) || !flushPendingSourceEdits(doc.id)) return false;
+    const revision = transitionRevision(owner, doc.id);
+    const scopeIsCurrent = () => pickerOriginCurrent(origin) && activeDoc(owner.noteWorkspace)?.id === doc.id &&
+      transitionRevision(owner, doc.id) === revision;
+    const text = owner.noteBuffers?.get(doc.id)?.snapshot().envelope?.text ?? sourceValue(doc);
+    const basename = String(doc.name || 'Untitled').split(/[/\\]/).pop();
+    const name = await styledPrompt('Name the new UTF-8 file.', {
+      title:'Save as…', defaultValue:basename.includes('.') ? basename : basename + '.md', confirmText:'Choose folder',
+    });
+    if (name == null || !scopeIsCurrent()) return false;
+    if (!name.trim() || /[/\\]/.test(name) || ['.', '..'].includes(name.trim())) throw new Error('Enter a file name without a folder path.');
+    const newline = doc.sourceMetadata?.newline;
+    const content = newline === '\r\n' || newline === '\r' ? text.replace(/\r\n|\r|\n/g, newline) : text;
+    const blob = new Blob([content], {type:'text/plain;charset=utf-8'});
+    const operations = new Map();
+    return showResourcePicker('folder', async (folder, _origin, selection) => {
+      if (folder.capabilities?.write !== true) throw new Error('Choose a writable folder.');
+      const roots = await filesFacadeClient.roots({ copalWorkspace:state.workspace });
+      if (!selection.isCurrent() || !scopeIsCurrent()) return false;
+      const generation = roots?.policy_generation;
+      if (!Number.isSafeInteger(generation)) throw new Error('Files permissions could not be loaded.');
+      const opKey = JSON.stringify([folder.ref,generation]);
+      if (!operations.has(opKey)) operations.set(opKey, createSaveActionId('editor-save-as'));
+      const operationId = operations.get(opKey);
+      const receipt = await filesFacadeClient.importFile(blob, { operationId, itemId:operationId, generation,
+        destinationRef:folder.ref, name:name.trim(), relativePath:name.trim(), collision:'fail', signal:selection.signal });
+      if (!selection.isCurrent() || !scopeIsCurrent()) return false;
+      const item = receipt?.items?.find(row => row.item_id === operationId);
+      if (!item?.resource_ref || !['committed','unchanged'].includes(item.outcome)) throw new Error(item?.message || 'Files did not confirm the new file. Your original is still open.');
+      const opened = await resourceOpener({ resourceRef:item.resource_ref, name:name.trim(), parentResourceRef:folder.ref, intent:'newTab' });
+      if (opened === false) owner.window?.setStatus('The copy was saved but could not be opened.', true);
+      return true;
+    }, { isContextCurrent:scopeIsCurrent });
   }
 
   function createNew(initial = null, { isContextCurrent = () => true } = {}) {
@@ -2675,9 +4017,16 @@ export function createNotesFeature({
       });
       return;
     }
-    showForm('New Copal note', [['name', 'Name', initial || 'Untitled'], ['content', 'Starting text', '', 'textarea']], async ({ name, content }) => {
+    showForm(editorNewPageLabel(workspace, folder), [['name', 'Name', initial || 'Untitled'], ['content', 'Starting text', '', 'textarea']], async ({ name, content }) => {
       if (!isContextCurrent()) throw new Error('The captured Editor target changed. Reopen New.');
-      await createDatabaseNote(name, content);
+      const binder = workspace.left.binderContext;
+      const prefix = binder?.descriptor.source.root.join('/') || '';
+      const target = prefix && !name.startsWith(prefix+'/') ? prefix+'/'+name : name;
+      if (binder?.descriptor.source.corpus === 'wiki') {
+        const result = await api('/documents', {method:'POST',body:JSON.stringify({name:target,corpus:'wiki',kind:'wiki',content})});
+        await loadDocuments(false);
+        open(result.doc.id,{intent:'newTab'});
+      } else await createDatabaseNote(target,content);
     });
   }
 
@@ -2725,6 +4074,7 @@ export function createNotesFeature({
     const name = `Daily/${date}`;
     const existing = documents().find((doc) => doc.kind === 'note' && doc.name === name);
     if (existing) { open(existing.id); return; }
+    if (manualWorkspace(ensureWorkspace())) return;
     const configured = getSettings().dailyTemplateId;
     const template = templateDocuments().find((doc) => configured && doc.id === configured)
       || templateDocuments().find((doc) => doc.properties?.daily === true || doc.properties?.daily === 'true');
@@ -2734,9 +4084,9 @@ export function createNotesFeature({
   }
 
   function createFromTemplate({ isContextCurrent = () => true } = {}) {
+    if (manualWorkspace(ensureWorkspace())) return;
     const templates = templateDocuments();
-    const folderMode = Boolean(ensureWorkspace()?.left?.folderWorkspaceRoot);
-    const label = folderMode ? 'New Copal note from template' : 'New from template';
+    const label = 'New from template';
     if (!templates.length) {
       context().window.setStatus('No templates yet. Set a note’s type property to template.');
       return;
@@ -2758,12 +4108,11 @@ export function createNotesFeature({
     } });
   }
 
-  function toggleBookmark(docId) {
+  function toggleWikiPin(docId) {
     const workspace = ensureWorkspace();
-    workspace.bookmarks ||= [];
-    workspace.bookmarks = workspace.bookmarks.includes(docId)
-      ? workspace.bookmarks.filter((id) => id !== docId)
-      : [docId, ...workspace.bookmarks];
+    if (!workspace) return;
+    const bookmarks = workspace.bookmarks || [];
+    workspace.bookmarks = bookmarks.includes(docId) ? bookmarks.filter(id => id !== docId) : [docId, ...bookmarks];
     persist(true); render();
   }
 
@@ -2807,34 +4156,71 @@ export function createNotesFeature({
     });
   }
 
-  function registerWikiArticleContextMenu(cache, leaf, doc, workspace, group) {
-    cache.wikiArticleContextDispose?.(); cache.wikiArticleContextDispose = null;
-    if (!canMakeEditableWikiCopy(doc)) return;
-    const current = context();
-    const captured = Object.freeze({
-      current, workspace, scope:currentScope(current), leafId:leaf.id, groupId:group.id,
-      docId:doc.id, name:doc.name, head:String(doc.head || ''), identity:officialWikiCopyIdentity(doc),
-    });
-    cache.wikiArticleContextDispose = registerAdapter(cache.root, {
-      capture:() => captured,
-      commands:(request) => request?.adapterContext === captured && cache.root.isConnected
-        ? [{ id:'copal-wiki-make-editable-copy', label:'Make editable copy' }] : [],
+  function registerReadingContextMenu(root, cache, { allowWikiCopy = false } = {}) {
+    const owner = context();
+    const scope = currentScope(owner);
+    const imageSelector = 'img.copal-attachment,img[data-copal-image-preview]';
+    const hitTest = node => node.closest('img') && !node.closest(imageSelector)
+      || node.closest('input,textarea,select,summary,audio,video,iframe,[contenteditable],.copal-inline-workbook,.copal-inline-preview')
+      || (node.closest('button') && !node.closest('button[data-copal-reading-link]:not(:disabled)')) ? 'native' : true;
+    const capture = (node, event) => {
+      const internal = node.closest('button[data-copal-reading-link]:not(:disabled)');
+      const anchor = node.closest('a[href]');
+      const link = anchor && root.contains(anchor) && /^https?:/.test(anchor.href) ? anchor.href : '';
+      const image = node.closest(imageSelector);
+      const imageSource = image && root.contains(image) ? image.currentSrc || image.src : '';
+      const imageURL = /^(https?:|blob:|data:image\/)/i.test(imageSource) ? imageSource : '';
+      const block = node.closest('[data-md-start],pre.copal-readonly-source');
+      const contentHit = block && root.contains(block) && block.textContent.trim();
+      const keyboard = event.detail === 0 && event.button !== 2 && !event.pointerType;
+      if (!internal && !link && !imageURL && !contentHit && !(keyboard && root.textContent.trim())) return null;
+      const selection = root.ownerDocument.getSelection();
+      const range = selection?.rangeCount === 1 && !selection.isCollapsed ? selection.getRangeAt(0) : null;
+      const text = range && root.contains(range.startContainer) && root.contains(range.endContainer)
+        && (keyboard || [...range.getClientRects()].some(rect => event.clientX >= rect.left && event.clientX <= rect.right
+          && event.clientY >= rect.top && event.clientY <= rect.bottom)) ? range.toString() : '';
+      const doc = cache.doc;
+      const copyIdentity = allowWikiCopy && canMakeEditableWikiCopy(doc) ? officialWikiCopyIdentity(doc) : null;
+      return { node, doc, anchor, link, image, imageURL, internal, text, contentHit, copyIdentity, head:doc.head,
+        revision:workbenchLocalRevision(owner, doc.id), mode:cache.leaf.mode, groupId:groupForLeaf(owner.noteWorkspace, cache.leaf.id)?.id };
+    };
+    const isCurrent = ({ adapterContext:hit } = {}) => Boolean(hit && root.isConnected && root.contains(hit.node)
+      && context() === owner && currentScope(owner) === scope && owner.window.visible
+      && owner.noteLeafViews.get(cache.leaf.id) === cache && cache.doc === hit.doc && cache.leaf.mode === hit.mode
+      && cache.doc.head === hit.head && workbenchLocalRevision(owner, cache.doc.id) === hit.revision
+      && groupForLeaf(owner.noteWorkspace, cache.leaf.id)?.activeLeafId === cache.leaf.id
+      && groupForLeaf(owner.noteWorkspace, cache.leaf.id)?.id === hit.groupId
+      && (!hit.copyIdentity || officialWikiCopyIdentity(cache.doc) === hit.copyIdentity)
+      && (!hit.internal || root.contains(hit.internal) && !hit.internal.disabled)
+      && (!hit.link || root.contains(hit.anchor) && hit.anchor.href === hit.link)
+      && (!hit.imageURL || root.contains(hit.image) && (hit.image.currentSrc || hit.image.src) === hit.imageURL));
+    return registerAdapter(root, {
+      hitTest, capture, isCurrent, editingCommands:false, ownsObjectCommands:true,
+      commands:request => {
+        const hit = request.adapterContext;
+        if (!isCurrent(request)) return [];
+        return [
+          ...(hit.internal || hit.link ? [{ id:'open-link', label:'Open link', menu:hit.imageURL ? 'Link' : undefined }] : []),
+          ...(hit.link && navigator.clipboard?.writeText ? [{ id:'copy-link-address', label:'Copy link address', menu:hit.imageURL ? 'Link' : undefined }] : []),
+          ...(hit.imageURL ? [{ id:'open-image', label:'Open image' }] : []),
+          ...(hit.imageURL && navigator.clipboard?.writeText ? [{ id:'copy-image-address', label:'Copy image address' }] : []),
+          ...(hit.text && navigator.clipboard?.writeText ? [{ id:'copy', label:'Copy' }] : []),
+          ...(!hit.internal && !hit.link && !hit.imageURL ? [{ id:'select-all', label:'Select all' }] : []),
+          ...(hit.copyIdentity && hit.contentHit ? [{ id:'copal-wiki-make-editable-copy', label:'Make editable copy' }] : []),
+        ];
+      },
       execute:async (command, request) => {
-        if (command !== 'copal-wiki-make-editable-copy') return false;
-        const currentContext = context();
-        const currentWorkspace = currentContext?.noteWorkspace;
-        const currentLeaf = findWorkspaceLeaf(currentWorkspace, captured.leafId);
-        const currentGroup = currentLeaf && groupForLeaf(currentWorkspace, currentLeaf.id);
-        const currentDoc = state.docs.find((item) => item.id === captured.docId);
-        if (request?.adapterContext !== captured || captured.current !== currentContext
-          || captured.workspace !== currentWorkspace || currentWorkspace !== workspace
-          || captured.scope !== currentScope(currentContext) || currentLeaf?.docId !== captured.docId
-          || currentGroup?.id !== captured.groupId || !cache.root.isConnected || !currentDoc
-          || currentDoc.name !== captured.name || String(currentDoc.head || '') !== captured.head
-          || officialWikiCopyIdentity(currentDoc) !== captured.identity || !canMakeEditableWikiCopy(currentDoc)) {
-          throw new Error('This Wiki article changed. Reopen its menu and try again.');
-        }
-        await makeEditableWikiCopyFrom(currentDoc);
+        if (!isCurrent(request)) throw new Error('This article changed. Reopen its menu and try again.');
+        const { internal, link, imageURL, text, doc } = request.adapterContext;
+        if (command === 'open-link' && internal) internal.click();
+        else if (command === 'open-link' && link) window.open(link, '_blank', 'noopener,noreferrer');
+        else if (command === 'copy-link-address' && link) await navigator.clipboard.writeText(link);
+        else if (command === 'open-image' && imageURL) window.open(imageURL, '_blank', 'noopener,noreferrer');
+        else if (command === 'copy-image-address' && imageURL) await navigator.clipboard.writeText(imageURL);
+        else if (command === 'copy' && text) await navigator.clipboard.writeText(text);
+        else if (command === 'select-all') root.ownerDocument.getSelection()?.selectAllChildren(root);
+        else if (command === 'copal-wiki-make-editable-copy' && allowWikiCopy && canMakeEditableWikiCopy(doc)) await makeEditableWikiCopyFrom(doc);
+        else return false;
         return true;
       },
     });
@@ -2866,7 +4252,7 @@ export function createNotesFeature({
     if (!workspace || !group) return;
     showChooser({
       title:orientation === 'vertical' ? 'Split below' : 'Split right',
-      choose:(doc) => { splitWorkspaceGroup(workspace, group.id, doc, orientation); persist(true); render(); },
+      choose:(doc) => { splitEditorGroup(workspace, group.id, doc, orientation); persist(true); render(); },
       allowCreate:false,
     });
   }
@@ -3076,18 +4462,23 @@ export function createNotesFeature({
       return;
     }
     const workspace = ensureWorkspace();
-    const folderMode = Boolean(workspace?.left?.folderWorkspaceRoot);
+    const binding = explorerBinding(workspace);
+    const manual = binding === 'manual';
     const doc = activeDoc(workspace);
     const actions = [
-      [folderMode ? 'New File' : 'New note', 'Ctrl+N', () => createNew()],
+      ...(!manual ? [[editorNewPageLabel(workspace), 'Ctrl+N', () => createNew()]] : []),
+      ...(presentationId === 'notes' && !manual ? [['New image…', '', createBlankImageFromEditor]] : []),
       ['Open Folder', '', openFolderFromPicker],
-      ...(workspace?.left?.folderWorkspaceRoot ? [['Close Folder / Back to Copal', '', () => closeFolderWorkspace(workspace)]] : []),
-      ...(typeof createWikiArticle === 'function' ? [['New Wiki article', '', createWikiArticle]] : []),
-      [folderMode ? 'Open Copal today’s note' : 'Open today’s note', '', openDailyNote],
-      [folderMode ? 'New Copal note from template' : 'New from template', '', createFromTemplate],
-      ['Insert template', '', insertTemplate],
-      ['Create template from current document', '', createTemplateFromCurrent],
-      ...(doc?.savePolicy === 'explicit' && !doc.readOnly ? [['Save file', 'Ctrl+S', () => void saveDraft(doc.id)]] : []),
+      ...(binding ? [[explorerCloseLabel(binding), '', () => closeExplorerWorkspace(workspace)]] : []),
+      ...(typeof createWikiArticle === 'function' && !manual ? [['New Wiki article', '', createWikiArticle]] : []),
+      ...(!manual ? [
+        ['Open today’s note', '', openDailyNote],
+        ['New from template', '', createFromTemplate],
+        ['Insert template', '', insertTemplate],
+        ['Create template from current document', '', createTemplateFromCurrent],
+      ] : []),
+      ...(doc && !doc.readOnly && (doc.savePolicy === 'explicit' || isJournalPage(doc)) ? [['Save file', 'Ctrl+S', () => void saveDraft(doc.id)]] : []),
+      ...(canSaveTextAs(doc) ? [['Save as…', 'Ctrl+Shift+S', () => void saveTextAs(doc).catch(error => context()?.window?.setStatus(error.message, true))]] : []),
       ['Quick switcher', 'Ctrl+O', () => showChooser()],
       ['Search documents', 'Ctrl+Shift+F', () => showSearch()],
       ['Open Timeline', '', () => open(TIMELINE_DOCUMENT.id)],
@@ -3101,14 +4492,13 @@ export function createNotesFeature({
       ['Split below', '', () => splitActive('vertical')],
       ['Toggle Editor sidebar', '', () => toggleSidebar('left')],
       ['Toggle linked sidebar', '', () => toggleSidebar('right')],
-      ...(doc?.virtual ? [] : [['Toggle bookmark', '', () => doc && toggleBookmark(doc.id)]]),
       ...(doc ? [[presentationId === 'wiki' ? 'Open in Editor' : 'Open in Wiki', '', () => openOtherView?.(doc.id, presentationId === 'wiki' ? 'notes' : 'wiki')]] : []),
-      ['Reopen closed note', '', reopenClosed],
+      ['Reopen closed tab', '', reopenClosed],
       ...(doc?.virtual ? [] : [['History', '', () => doc && (isHostDocument(doc) ? void openEditorResourceHistory(doc) : showHistory(doc))]]),
       ['Open Trash', '', () => showTrash()],
       ...(canManageCopalDocument(doc) ? [['Move current note to Trash', '', () => deleteDocument(doc)]] : []),
-      ['Import Markdown or Obsidian backup', '', importVault],
-      ...(typeof importWikiMemes === 'function' ? [['Import native .memes', '', importWikiMemes]] : []),
+      ...(!manual ? [['Import Markdown or Obsidian backup', '', importVault]] : []),
+      ...(typeof importWikiMemes === 'function' && !manual ? [['Import native .memes', '', importWikiMemes]] : []),
       ['Syntax gallery', '', () => { const gallery = state.docs.find((d) => d.name.includes('Syntax Gallery') || d.name.includes('syntax-gallery')); if (gallery) open(gallery.id); else showSyntaxGallery(); }],
       ['Export Markdown backup', '', () => { window.location.href = `/api/copal/export/obsidian?workspace=${encodeURIComponent(state.workspace)}`; }],
       ...(typeof exportWikiMemes === 'function' ? [['Export native .memes', '', exportWikiMemes]] : []),
@@ -3152,64 +4542,286 @@ export function createNotesFeature({
   }
 
   function reopenClosed() {
-    const workspace = ensureWorkspace();
-    while (workspace.closed.length) {
-      const id = workspace.closed.shift();
-      const doc = workspaceDocuments().find((item) => item.id === id);
-      if (!doc) continue;
-      const leaf = workspaceLeaves(workspace).find((item) => item.docId === id);
-      if (leaf) {
-        const group = groupForLeaf(workspace, leaf.id);
-        if (group) { setActive(group.id, leaf.id); return; }
+    const workspace=ensureWorkspace(), owner=context();
+    if (!workspace || !owner) return;
+    const recoveries=workspace.closedImageRecovery || {};
+    const ids=new Set([...workspace.closed,...Object.keys(recoveries).reverse()]);
+    const docs=new Map(workspaceDocuments().map(doc=>[doc.id,doc]));
+    let skipped=false;
+    const reportSkipped=() => {
+      if (skipped) owner.window?.setStatus('Reopened the next available tab. Skipped entries stay in Recently Closed.');
+    };
+    for (const id of ids) {
+      const recovery=recoveries[id], doc=docs.get(id);
+      if (!doc || recovery && !imageRecoveryInScope(recovery,owner)) {
+        skipped=true;
+        continue;
       }
-      open(id, { intent:'newTab' });
-      return;
+      if (recovery) {
+        let next;
+        try { next=stageWorkspaceImageReopen(workspace,doc); }
+        catch (_) { skipped=true; continue; }
+        try {
+          localStorage.setItem(copalStorageKey(`openclank-copal-${presentationId}-layout`,state.workspace),serializeNotesWorkspace(next));
+        } catch (_) {
+          owner.window?.setStatus('Image recovery stays in Recently Closed. Restore browser storage access and try again.',true);
+          return;
+        }
+        clearTimeout(persistTimer);
+        commitWorkspaceClose(workspace,next);
+        owner.noteShellCache=null;
+        syncSelectionToModel(workspace);
+        render();
+        reportSkipped();
+        return;
+      }
+      const history=workspace.closed;
+      workspace.closed=history.filter(item=>item!==id);
+      const leaf=workspaceLeaves(workspace).find(item=>item.docId===id);
+      const group=leaf && groupForLeaf(workspace,leaf.id);
+      if (group) { setActive(group.id,leaf.id); reportSkipped(); return; }
+      if (open(id,{intent:'newTab'})) { reportSkipped(); return; }
+      workspace.closed=history;
+      skipped=true;
     }
-    persist(true); render();
+    owner.window?.setStatus(ids.size
+      ? 'No closed tabs are available in this Editor and workspace. All entries were kept.'
+      : 'There are no closed tabs.',Boolean(ids.size));
   }
 
-  function focusEmptyWorkspaceIfIdle() {
-    const workspace = ensureWorkspace();
-    if (!workspace || workspaceLeaves(workspace).length) return;
-    requestAnimationFrame(() => context()?.window.root.querySelector('.copal-notes-empty-workspace')?.focus({ preventScroll:true }));
+  function captureTabCloseFocus(owner) {
+    const focused=document.activeElement;
+    if (!focused || !owner.window.body.contains(focused)) return null;
+    return {
+      leafId:focused.closest('.copal-note-tab[data-leaf-id], .copal-note-leaf[data-leaf-id]')?.dataset.leafId,
+      groupId:focused.closest('.copal-note-group[data-group-id]')?.dataset.groupId,
+    };
+  }
+
+  function workspaceHasUnclaimedFocus() {
+    const focused=document.activeElement;
+    return !focused || focused===document.body || focused===document.documentElement;
+  }
+
+  function restoreFocusAfterTabClose(owner, workspace, scope) {
+    const activeId=workspace.activeLeafId;
+    requestAnimationFrame(() => {
+      if (context()!==owner || currentScope(owner)!==scope || owner.noteWorkspace!==workspace ||
+          !owner.window?.visible || !owner.window.root?.isConnected || workspace.activeLeafId!==activeId ||
+          !workspaceHasUnclaimedFocus()) return;
+      const input=getActiveInputContext();
+      if (input?.windowId && input.windowId!==owner.window.id) return;
+      const selector=activeId
+        ? `.copal-note-tab[data-leaf-id="${CSS.escape(activeId)}"] .copal-note-tab-label`
+        : '.copal-notes-empty-workspace';
+      owner.window.body.querySelector(selector)?.focus({preventScroll:true});
+    });
   }
 
   function emptyWorkspace(workspace) {
-    const folderMode = Boolean(workspace?.left?.folderWorkspaceRoot);
     return h('section', { class:'copal-empty copal-notes-empty-workspace', tabindex:'-1', role:'region', 'aria-label':'No open documents' },
       h('h2', { text:'No open documents' }),
       h('p', { text:'The workspace is empty. Nothing was reopened for you — pick what to open next.' }),
       h('div', { class:'copal-empty-workspace-actions' },
-        commandButton(folderMode ? 'New File' : 'New note', () => createNew(), { class:'copal-btn primary' }),
+        commandButton(editorNewPageLabel(workspace), () => createNew(), { class:'copal-btn primary' }),
+        ...(presentationId === 'notes' ? [commandButton('New image…', createBlankImageFromEditor)] : []),
         commandButton('Quick switcher', () => showChooser()),
-        commandButton('Reopen closed', reopenClosed, workspace.closed.length ? {} : { disabled:true }),
+        commandButton('Reopen closed', reopenClosed, workspace.closed.length || Object.keys(workspace.closedImageRecovery || {}).length ? {} : { disabled:true }),
         commandButton('Open Timeline', () => open(TIMELINE_DOCUMENT.id)),
         commandButton('Import backup', importVault)));
+  }
+
+  function chooseWritableHostFolder(current,isCurrent) {
+    return new Promise((resolve,reject)=>{
+      const origin=capturePickerOrigin();
+      current.noteResourcePicker?.destroy();
+      let selected=null;
+      const picker=createResourcePicker({client:filesFacadeClient,purpose:'folder',...pickerScope(),originWindow:origin.window,
+        initialDirectory:current.noteWorkspace?.left?.resourceRoot || null,
+        getGeneration:()=>Number(state.filesGeneration || state.contextEpoch || 0),
+        getAccountScope:()=>String(state.accountId || ''),getWorkspaceScope:()=>String(state.workspace || ''),
+        isOriginCurrent:()=>pickerOriginCurrent(origin) && isCurrent(),
+        isCompatible:item=>item.provider==='host' && item.capabilities?.write===true ? '' : 'Choose a writable Host folder.',
+        onSelect:item=>{ if (!isCurrent()) return false; selected=item; return true; },
+        onClose:cancelled=>{
+          if (current.noteResourcePicker===picker) current.noteResourcePicker=null;
+          resolve(cancelled ? null : selected);
+        },
+        rootLabel:'PNG destination',title:'Choose PNG destination',confirmLabel:'Choose folder'});
+      current.noteResourcePicker=picker;
+      void picker.open().catch(error=>{reject(error); picker.destroy();});
+    });
+  }
+
+  async function existingPngDestination(folder,name,current) {
+    let cursor=null;
+    const visited=new Set();
+    do {
+      if (!current()) throw Error('Image destination changed.');
+      const page=await filesFacadeClient.children(folder.ref,{cursor,limit:200});
+      const entry=page.entries?.find(row=>row.name===name);
+      if (entry) {
+        const stat=await filesFacadeClient.stat(entry.ref);
+        const row=stat?.resource || stat;
+        if (!current() || row?.id!==entry.id || row.name!==name) throw Error('Image destination changed.');
+        return row;
+      }
+      cursor=page.next_cursor;
+      if (cursor && visited.has(cursor)) throw Error('The selected folder changed. Choose it again.');
+      visited.add(cursor);
+    } while (cursor);
+    return null;
+  }
+
+  async function replaceChosenPng(row,blob,expected,current) {
+    const size=Number(row.revision.value.split(':').at(-1));
+    if (!Number.isSafeInteger(size) || size<=0 || size>CANVAS_MAX_IMPORT_BYTES) throw Error('Choose another name. This destination is too large to verify.');
+    const url=filesFacadeClient.contentUrl(row.ref,{purpose:'download',expectedRevision:row.revision});
+    const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});
+    const original=await readBoundedImportBlob(response,size);
+    const bytes=await original.arrayBuffer();
+    if (bytes.byteLength!==size || size<24 || new DataView(bytes).getBigUint64(0)!==0x89504e470d0a1a0an ||
+        hostRasterMime(bytes,'image/png')!=='image/png' || await hostRasterFingerprint(original)!==row.revision.value) {
+      throw Error('Choose another name. Only a verified, single-frame PNG can be replaced.');
+    }
+    const target={resourceRef:row.ref,resourceId:row.id,revision:row.revision,mime:'image/png',stat:ref=>filesFacadeClient.stat(ref)};
+    const result=await writeHostRaster(target,blob,current,fetch,expected);
+    return {resourceRef:row.ref,resourceId:row.id,revision:result.revision};
+  }
+
+  async function saveImageToChosenHost(owner,image,viewId=null) {
+    if (image.hostSaveInProgress) return image.hostSaveInProgress;
+    const scope=currentScope(owner), id='image-session:'+image.session.sessionId;
+    const current=()=>context()===owner && currentScope(owner)===scope && owner.noteImages?.get(id)===image;
+    const save=async()=>{
+      if (!current()) throw Error('The image is no longer open.');
+      const controller=image.session.getPersistenceController();
+      const folder=await chooseWritableHostFolder(owner,current);
+      if (!folder || !current()) return {status:'cancelled'};
+      const destination=folder.logicalPath || folder.name;
+      const doc=state.docs.find(item=>item.id===id);
+      const proposed=controller.hostOriginal?.name || image.draftName || doc?.name || 'Image';
+      let name=proposed.replace(/\.[^.]+$/,'')+'.png', replacement, destinationLabel;
+      for (;;) {
+        const chosen=await styledPrompt('Save a PNG in '+destination, {
+          title:'Save image as…', defaultValue:name, confirmText:'Save', maxLength:200,
+        });
+        if (chosen==null || !current()) return {status:'cancelled'};
+        name=chosen.trim();
+        if (!name || /[\/\\\u0000-\u001f\u007f]/.test(name) || name==='.' || name==='..') throw Error('Enter a file name.');
+        if (!name.toLowerCase().endsWith('.png')) name+='.png';
+        if (name.length>200) throw Error('Choose a shorter PNG file name.');
+        destinationLabel=destination.replace(/\/$/,'')+'/'+name;
+        replacement=await existingPngDestination(folder,name,current);
+        if (!replacement) break;
+        const writable=replacement.provider==='host' && replacement.kind==='file' && replacement.mime_type==='image/png' &&
+          replacement.capabilities?.includes('write') && replacement.capabilities.includes('download') && replacement.revision?.kind==='hostFingerprint';
+        const choice=await styledConfirm(writable ? destinationLabel+' already exists.' : destinationLabel+' cannot be replaced.', {
+          title:writable ? 'Replace '+name+'?' : 'Choose another PNG name',
+          confirmText:writable ? 'Replace' : 'Choose another name', cancelText:'Cancel',
+          ...(writable ? {alternateText:'Choose another name',danger:true} : {}),
+        });
+        if (!choice || !current()) return {status:'cancelled'};
+        if (writable && choice===true) break;
+      }
+      const write=async (blob,fingerprint)=>{
+        if (!current()) throw Error('The image is no longer open.');
+        const expected=fingerprint || await hostRasterFingerprint(blob);
+        if (replacement) return replaceChosenPng(replacement,blob,expected,current);
+        const key=JSON.stringify([folder.resourceKey,folder.generation,name,expected]);
+        const previous=image.pendingPngImport;
+        const operationId=previous?.key===key ? previous.id : createSaveActionId('editor-image-save-as');
+        image.pendingPngImport={key,id:operationId};
+        const receipt=await filesFacadeClient.importFile(blob,{operationId,itemId:operationId,generation:folder.generation,
+          destinationRef:folder.ref,name,collision:'fail'});
+        const item=receipt?.items?.find(entry=>entry.item_id===operationId);
+        if (item?.outcome==='conflict') {
+          image.pendingPngImport=null;
+          throw Error('That file already exists. Choose another name.');
+        }
+        if (receipt?.state!=='complete' || !['committed','unchanged'].includes(item?.outcome) || !item.resource_ref ||
+            !item.resource_key || item.revision?.kind!=='hostFingerprint' || item.revision.value!==expected) {
+          throw Error('Could not confirm the PNG. Check '+destinationLabel+' before retrying.');
+        }
+        image.pendingPngImport=null;
+        return {resourceRef:item.resource_ref,resourceId:item.resource_key,revision:item.revision};
+      };
+      let result;
+      if (image.session.captureTarget().sourceKey) {
+        const runtime=image.views.get(viewId)?.runtime;
+        if (!runtime) throw Error('Open the image before exporting a PNG.');
+        const snapshot=await runtime.captureAttachmentImage();
+        const saved=await write(snapshot.blob);
+        result={status:'exported',name,...saved};
+      } else {
+        result=await controller.saveToHostDestination({name,write});
+        if (current()) {
+          image.draftName=name;
+          if (doc) doc.name=name;
+          persistImageWorkspace(owner,scope);
+        }
+      }
+      if (current()) owner.window?.setStatus('Saved to '+destinationLabel);
+      return {...result,destinationLabel};
+    };
+    image.hostSaveInProgress=save().finally(()=>{image.hostSaveInProgress=null;});
+    return image.hostSaveInProgress;
+  }
+
+  async function saveImageWithStatus(owner,image,viewId,copy=false) {
+    const scope=currentScope(owner);
+    const current=()=>context()===owner && currentScope(owner)===scope;
+    try {
+      const result=await (copy ? saveImageToChosenHost(owner,image,viewId) : image.session.save(viewId));
+      if (result?.status==='cancelled') return result;
+      if (result?.status==='unavailable') throw new Error(result.reason || 'Image save unavailable.');
+      if (current()) {
+        persistImageWorkspace(owner,scope);
+        owner.window?.setStatus(result?.destinationLabel ? 'Saved to '+result.destinationLabel : copy || result?.status==='saved_copy' ? (result?.resource?.name ? `Saved to Files: ${result.resource.name}` : 'Image copy saved in Files.') : result?.lore_receipt?.history_status==='unavailable' ? 'Image saved. History recovery is unavailable.' : 'Image saved.');
+      }
+      return result;
+    } catch(error) {
+      if (current()) owner.window?.setStatus(error.message || 'Image save failed.',true);
+      throw error;
+    }
   }
 
   function bindKeys(workspace, doc) {
     const current = context();
     if (current.noteKeyHandler) current.window.root.removeEventListener('keydown', current.noteKeyHandler);
     current.noteKeyHandler = (event) => {
-      if (event.defaultPrevented || event.isComposing || !(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (current.window.body.hidden || event.defaultPrevented || event.isComposing || !(event.ctrlKey || event.metaKey) || event.altKey) return;
       const key = event.key.toLowerCase();
       if (key === 'o') { event.preventDefault(); event.stopPropagation(); showChooser(); }
       else if (key === 'p') { event.preventDefault(); event.stopPropagation(); showCommands(); }
       else if (key === 'f' && event.shiftKey) { event.preventDefault(); event.stopPropagation(); showSearch(); }
       else if (key === 'n') { event.preventDefault(); event.stopPropagation(); createNew(); }
-      else if (key === 's' && doc) { event.preventDefault(); event.stopPropagation(); void saveDraft(doc.id); }
+      else if (key === 's' && doc) {
+        event.preventDefault(); event.stopPropagation();
+        const leaf=activeLeaf(workspace), image=current.noteImages?.get(leaf?.docId);
+        if (!image) {
+          if (event.shiftKey) {
+            if (canSaveTextAs(doc)) void saveTextAs(doc).catch(error => current.window?.setStatus(error.message, true));
+          } else void saveDraft(doc.id);
+          return;
+        }
+        void saveImageWithStatus(current,image,leaf.image?.viewId,event.shiftKey).catch(()=>{});
+      }
       else if (key === 'w' && doc) {
         event.preventDefault(); event.stopPropagation();
         const leaf = activeLeaf(workspace); if (!leaf || leaf.pinned) return;
-        void requestCloseLeaves([leaf]).then(allowed => { if (allowed && closeWorkspaceLeaf(workspace, leaf.id)) { disposeLeaf(leaf.id); persist(true); render(); focusEmptyWorkspaceIfIdle(); } });
+        void requestCloseLeaves([leaf]);
       } else if ((key === 'z' || key === 'y') && doc && !doc.readOnly && !event.target.closest?.('input, textarea, [contenteditable]')) {
-        event.preventDefault(); event.stopPropagation(); undoDocument(doc.id, key === 'y' || event.shiftKey);
+        event.preventDefault(); event.stopPropagation();
+        const leaf=activeLeaf(workspace), image=current.noteImages?.get(leaf?.docId), redo=key === 'y' || event.shiftKey;
+        if (image) { if (redo) image.session.redo(leaf.image?.viewId); else image.session.undo(leaf.image?.viewId); }
+        else undoDocument(doc.id,redo);
       }
     };
     current.window.root.addEventListener('keydown', current.noteKeyHandler);
   }
 
-  function fileTree(docs, workspace) {
+  function fileTree(docs, workspace, basePath = []) {
     const current = context();
     // Reuse the immutable tree between shell renders when the document set
     // and navigation state are unchanged.  Shell refreshes otherwise rebuild
@@ -3217,7 +4829,7 @@ export function createNotesFeature({
     // valid; rename, selection, expansion, and source revisions are in the
     // key so navigation never observes stale identity.
     const cacheKey = JSON.stringify([
-      currentScope(current),
+      currentScope(current), basePath,
       docs.map((doc) => [doc.id, doc.name, doc.head, doc.ts]),
       workspace.left.sort, workspace.left.showDotFolders, workspace.left.expanded,
       workspace.left.selected, workspace.settings?.showTutorialFolder, activeLeaf(workspace)?.docId || null,
@@ -3302,7 +4914,7 @@ export function createNotesFeature({
             const captured = request?.adapterContext;
             if (!captured) return [];
             const commands = [{ id:'copal-folder-toggle', label:workspace.left.expanded.includes(full) ? 'Collapse folder' : 'Expand folder' }];
-            if (captured.canCreateNote) commands.push({ id:'copal-folder-new-note', label:'New note in folder' });
+            if (captured.canCreateNote) commands.push({ id:'copal-folder-new-note', label:workspace.left.binderContext ? 'New journal page in folder' : 'New note in folder' });
             if (captured.hasTutorials) commands.push({ id:'copal-folder-hide-tutorials', label:info.tutorials < info.total ? 'Hide built-in tutorials in this folder' : 'Hide Open Clank tutorial folder' });
             return commands;
           },
@@ -3313,20 +4925,20 @@ export function createNotesFeature({
             const signature = JSON.stringify(descendants.map((doc) => [doc.id, doc.name, String(doc.head || '')]).sort((a, b) => a[0].localeCompare(b[0])));
             if (!captured || captured.current !== current || current?.noteWorkspace !== workspace || captured.workspace !== workspace
               || captured.scope !== currentScope(current) || captured.path !== full || captured.descendantSignature !== signature) {
-              throw new Error('This Copal folder changed. Reopen its menu and try again.');
+              throw new Error('This folder changed. Reopen its menu and try again.');
             }
             if (command === 'copal-folder-toggle') {
               setFolderOpen(!workspace.left.expanded.includes(full));
               return true;
             }
             if (command === 'copal-folder-new-note' && captured.canCreateNote) {
-              showForm('New Copal note', [['name', 'Name', `${full}/Untitled`], ['content', 'Starting text', '', 'textarea']], async ({ name, content }) => {
+              showForm(editorNewPageLabel(workspace), [['name', 'Name', `${full}/Untitled`], ['content', 'Starting text', '', 'textarea']], async ({ name, content }) => {
                 const liveContext = context();
                 const liveDescendants = documents().filter((doc) => doc.name.startsWith(`${full}/`));
                 const liveSignature = JSON.stringify(liveDescendants.map((doc) => [doc.id, doc.name, String(doc.head || '')]).sort((a, b) => a[0].localeCompare(b[0])));
                 if (liveContext !== captured.current || liveContext?.noteWorkspace !== workspace || currentScope(liveContext) !== captured.scope
                   || liveSignature !== captured.descendantSignature || workspace.left.folderWorkspaceRoot || workspace.left.resourceRoot?.provider === 'host') {
-                  throw new Error('This Copal folder changed. Reopen its menu and try again.');
+                  throw new Error('This folder changed. Reopen its menu and try again.');
                 }
                 await createDatabaseNote(name, content);
               });
@@ -3396,7 +5008,7 @@ export function createNotesFeature({
               || String(target.head || '') !== captured.head || Boolean(target.readOnly || target.virtual) !== captured.readOnly
               || canManageCopalDocument(target) !== captured.managed
               || String(target.kind || '') !== captured.kind) {
-              throw new Error('This Copal document changed. Reopen its menu and try again.');
+              throw new Error('This document changed. Reopen its menu and try again.');
             }
             if(command==='editor.code-graph'){
               if(captured.selection.length!==1)throw new Error('Select exactly one Host file for Code Graph.');
@@ -3418,7 +5030,7 @@ export function createNotesFeature({
                 if (liveContext !== captured.current || liveContext?.noteWorkspace !== captured.workspace
                   || currentScope(liveContext) !== captured.scope || !liveTarget || liveTarget.name !== captured.name
                   || String(liveTarget.head || '') !== captured.head || !canManageCopalDocument(liveTarget)) {
-                  throw new Error('This Copal document changed. Reopen its menu and try again.');
+                  throw new Error('This document changed. Reopen its menu and try again.');
                 }
                 await renameNote(liveTarget, name);
                 render();
@@ -3451,7 +5063,9 @@ export function createNotesFeature({
       const index = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : Math.max(0, Math.min(items.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
       if (items[index]) { event.preventDefault(); items[index].focus(); }
     });
-    draw(root, tree);
+    const branch = basePath.reduce((node,part) => node?.folders.get(part),root);
+    if (branch) draw(branch, tree, basePath);
+    if (!tree.children.length) tree.append(h('p',{class:'copal-empty-inline',text:'No files here yet.'}));
     if (current) current.noteFileTreeCache = { key:cacheKey, tree };
     return tree;
   }
@@ -3467,6 +5081,8 @@ export function createNotesFeature({
 
   function displayName(doc) {
     const name = String(doc?.name || '').split('/').pop();
+    const title = officialTranslatedTitle(doc);
+    if (title) return title;
     if (noteViewType(doc) === 'base') return name.replace(/\.base$/i, '');
     return ['note', 'markdown'].includes(noteViewType(doc)) ? name.replace(/\.md$/i, '') : name;
   }
@@ -3506,6 +5122,8 @@ export function createNotesFeature({
   }
 
   function disposeEditorFiles(current) {
+    current.noteHostFileWatch?.dispose(); current.noteHostFileWatch=null; current.noteHostNotices?.clear();
+    if (current.noteStandaloneText?.scope !== currentScope(current)) current.noteStandaloneText=null;
     current.noteResourcePicker?.destroy(); current.noteResourcePicker = null;
     current.noteFilesExplorer?.dispose(); current.noteFilesExplorer = null;
     current.noteDocumentNavigation?.dispose(); current.noteDocumentNavigation = null;
@@ -3550,8 +5168,9 @@ export function createNotesFeature({
   function editorFilesExplorer(workspace) {
     const current = context();
     const scope = currentScope(current);
+    const viewKey=workspace.left.folderWorkspaceRoot?.resourceKey || 'places';
     let record = current.noteFilesExplorer;
-    if (record?.scope !== scope) { record?.dispose(); record = null; }
+    if (record?.scope!==scope || record?.viewKey!==viewKey) { record?.dispose(); record=null; }
     if (record) { record.sync(); record.update(); return record.element; }
     const controller = new AbortController();
     const browserHost = h('div', { class:'copal-editor-files-mount' });
@@ -3559,8 +5178,25 @@ export function createNotesFeature({
     const location = h('div', { class:'copal-editor-files-location' });
     const status = h('div', { class:'copal-editor-files-status', role:'status' });
     const retry = commandButton('Retry', () => { void record.refresh(); }, { class:'copal-editor-files-retry', title:'Retry the current or chosen Editor folder', hidden:true });
-    const element = h('section', { class:'copal-editor-files-explorer', 'aria-label':'Files places and folders', 'data-copal-context-object':'editor-resource' }, ...(controls ? [controls] : []), location, browserHost, status, retry);
-    record = { scope, element, browser:null, resources:new Map(), ready:false, syncing:false, syncedRef:null, syncedGeneration:null,
+    const closeBinder = commandButton('Close Journal', () => {
+      if (!stillCurrent() || !current.noteWorkspace?.left?.binderContext) return;
+      record.requestController?.abort(); record.requestEpoch += 1;
+      current.noteResourceRootValidationController?.abort?.();
+      current.noteResourceRequestEpoch = Number(current.noteResourceRequestEpoch || 0) + 1;
+      current.noteWorkspace.left.binderContext = null;
+      current.noteWorkspace.left.resourceRoot = null;
+      current.noteWorkspace.left.folderWorkspaceRoot = null;
+      current.noteWorkspace.left.folderWorkspaceId = '';
+      current.noteWorkspace.left.resourceRows = [];
+      current.noteWorkspace.left.resourceCursor = null;
+      current.noteWorkspace.left.resourceQuery = '';
+      current.noteResourceRootReady = false; current.noteResourceRootValidationKey = null;
+      record.filterQuery = ''; record.displayedRoot = null; record.directoryReady = false;
+      persist(true); record.update();
+      void record.navigate(() => runFilesNavigation(record.browser, 'home'), 'Files home could not be opened.');
+    }, { title:'Close this Journal without closing documents', hidden:true });
+    const element = h('section', { class:'copal-editor-files-explorer', 'aria-label':'Files places and folders', 'data-copal-context-object':'editor-resource' }, ...(controls ? [controls] : []), location, closeBinder, browserHost, status, retry);
+    record = { scope, viewKey, element, browser:null, resources:new Map(), ready:false, syncing:false, syncedRef:null, syncedGeneration:null,
       requestEpoch:0, requestController:null, navigationPromise:null, activeNavigation:null, interactionEpoch:0,
       pendingSync:false, pendingReveal:null, pendingAction:null, failedSync:null,
       displayedRoot:null, directoryReady:false, directoryPending:false,
@@ -3606,7 +5242,12 @@ export function createNotesFeature({
       const model = current.noteWorkspace;
       const folder = record.browser?.getCurrentDirectory();
       const anchor = model?.left?.folderWorkspaceRoot;
-      location.textContent = [anchor ? `Workspace: ${anchor.name}` : '', folder?.name || 'Available places'].filter(Boolean).join(' · ');
+      if (editorConsumer) record.browser?.setEditorRoot?.(
+        anchor && current.noteResourceRootReady && anchor.generation===filesGeneration() ? filesBrowserResource(anchor) : null,
+        Boolean(anchor));
+      location.hidden=editorConsumer && (!folder || !!anchor);
+      location.textContent=folder?.name || '';
+      closeBinder.hidden=!model?.left?.binderContext;
       location.title = location.textContent;
       if (controls) {
       anchorButton.hidden = !anchor;
@@ -3620,7 +5261,9 @@ export function createNotesFeature({
       const reason = editorCreationReason(model, current);
       for (const button of current.window.body.querySelectorAll('[data-editor-create]')) {
         button.disabled = !!reason;
-        button.title = reason || (button.dataset.editorCreate === 'folder' ? 'New folder' : record.displayedRoot?.provider === 'host' ? 'New file' : 'New Copal note');
+        const label = button.dataset.editorCreate === 'folder' ? 'New folder' : editorNewPageLabel(model, editorCreationFolder(model, current));
+        button.title = reason || label;
+        button.setAttribute('aria-label', label);
       }
     };
     const directoryChanged = async (row, { force = false, guard = stillCurrent } = {}) => {
@@ -3644,6 +5287,12 @@ export function createNotesFeature({
           clearError(); return true;
         }
         const column = filesBrowserResource(row);
+        const binder = row.binderContext || null;
+        if (binder) {
+          if (binder.accountId !== String(state.accountId || '') || binder.workspace !== String(state.workspace || '')) throw new Error('The Journal scope changed.');
+          await filesFacadeClient.resolveBinder(binder.descriptor.id, binder.catalogRevision, binder.descriptor, { signal:request.signal });
+          if (!requestCurrent()) return false;
+        }
         const response = await filesFacadeClient.stat(column.ref, { signal:request.signal });
         if (!requestCurrent()) return false;
         let root = cache(response?.resource || response);
@@ -3719,9 +5368,9 @@ export function createNotesFeature({
           try {
             if (task.kind === 'sync') {
               const locator = savedHostRelativePath(task.root);
-              result = task.workspaceId && locator.present
+              result = task.workspaceId && locator.present && !editorConsumer
                 ? await record.browser.revealWorkspaceResource(task.workspaceId, locator.path)
-                : await record.browser.openDirectory(filesBrowserResource(task.root));
+                : await record.browser.openDirectory({ ...filesBrowserResource(task.root), binderContext:task.model.left.binderContext || null });
             } else result = await (task.kind === 'reveal' ? record.browser.revealResource(task.ref) : task.run());
             if (!navigationCurrent(task)) {
               // A normalized workspace/renewed ref can replace the captured
@@ -3771,6 +5420,7 @@ export function createNotesFeature({
         && !(record.activeNavigation?.kind === 'sync' && navigationCurrent(record.activeNavigation))) {
         record.pendingSync = true; record.directoryReady = false;
       }
+      record.update();
       return drainNavigation();
     };
     record.navigate = (run, failure = '') => {
@@ -3796,7 +5446,7 @@ export function createNotesFeature({
           Object.assign(task, captureNavigation({}));
           const target = model.left.resourceRoot;
           const locator = savedHostRelativePath(target);
-          const opened = model.left.folderWorkspaceId && locator.present
+          const opened = model.left.folderWorkspaceId && locator.present && !editorConsumer
             ? await record.browser.revealWorkspaceResource(model.left.folderWorkspaceId, locator.path)
             : await record.browser.openDirectory(filesBrowserResource(target));
           if (opened) record.failedSync = null;
@@ -3841,30 +5491,37 @@ export function createNotesFeature({
         }))
       && (workspaceLeaves(current.noteWorkspace).some(leaf => leaf.docId === doc.id)
         || current.noteDrafts?.has(doc.id) || current.noteBuffers?.get(doc.id)?.state?.().dirty));
+    const treeTargetCurrent = target => Boolean(target && stillCurrent() && target.node.isConnected
+      && record.resources.get(target.id) === target.resource && pickerOriginCurrent(target.origin)
+      && target.generation === Number(state.filesGeneration || state.contextEpoch || 0));
     const contextDispose = registerAdapter(element, {
+      ownsObjectCommands:true,
+      isCurrent:request => treeTargetCurrent(request.adapterContext),
+      hitTest:node => node.closest('.files-tree-row') && !node.closest('button,input,summary') ? true : 'native',
       capture:node => {
-        const id = node.closest?.('[data-tree-resource-id]')?.dataset.treeResourceId;
+        const id = node.closest('.files-tree-row')?.closest('[data-tree-resource-id]')?.dataset.treeResourceId;
         const resource = record.resources.get(id);
-        return resource ? Object.freeze({ resource, node, scope, generation:Number(state.filesGeneration || state.contextEpoch || 0), origin:capturePickerOrigin() }) : null;
+        return resource ? Object.freeze({ resource, node, id, scope, generation:Number(state.filesGeneration || state.contextEpoch || 0), origin:capturePickerOrigin() }) : null;
       },
       commands:request => {
         const resource = request?.adapterContext?.resource;
         if (!resource) return [];
         return [
           { id:'editor-tree-open', label:resource.kind === 'folder' ? 'Open folder' : 'Open in Editor', disabled:resource.capabilities[resource.kind === 'folder' ? 'children' : 'open'] !== true },
-          { id:'editor.code-graph',label:CODE_GRAPH_LABEL,disabled:Boolean(graphDisabledReason([resource])) },
-          { id:'editor-tree-reveal', label:'Reveal in Files' },
-          ...(resource.capabilities.rename ? [{ id:'editor-tree-rename', label:renameRetargetsEditor(resource) ? 'Rename (close in Editor first)' : 'Rename', disabled:renameRetargetsEditor(resource) }] : []),
-        ];
+          { id:'editor.code-graph',label:CODE_GRAPH_LABEL,disabled:!fileResourceCanOpenCodeGraph(resource) },
+          ...(fileResourceCanReveal(resource) ? [{ id:'editor-tree-reveal', label:'Reveal in Files' }] : []),
+          ...(fileResourceCanCopyPath({path:resource.logicalPath}) ? [{ id:'copy-file-path', label:'Copy path' }] : []),
+          ...(resource.capabilities.rename && !renameRetargetsEditor(resource) ? [{ id:'editor-tree-rename', label:'Rename', dialog:true }] : []),
+        ].filter(item => !item.disabled);
       },
       execute:async (command, request) => {
         const target = request?.adapterContext;
         const assertCurrent = () => {
-          if (!target || !stillCurrent() || !target.node.isConnected || !pickerOriginCurrent(target.origin)
-            || target.generation !== Number(state.filesGeneration || state.contextEpoch || 0)) throw new Error('This Editor Files target changed. Reopen its menu.');
+          if (!treeTargetCurrent(target)) throw new Error('This Editor Files target changed. Reopen its menu.');
         };
         assertCurrent();
         const resource = target.resource;
+        if (command === 'copy-file-path') return fileResourceCopyPath({path:resource.logicalPath});
         if(command==='editor.code-graph'){
           await openEditorCodeGraph(resource,{generation:target.generation,current:g=>{
             // Reconcile only this command's exact returned policy generation;
@@ -3891,7 +5548,9 @@ export function createNotesFeature({
         if (!name.trim() || /[\\/\0]/.test(name) || name === '.' || name === '..') throw new Error('Choose a file name without path separators.');
         const fresh = await filesFacadeClient.stat(resource.ref, { signal:controller.signal });
         assertCurrent();
-        const authorized = cache(fresh.resource || fresh);
+        const authorized = normalizeAuthorizedResource(fresh.resource || fresh, {
+          purpose:'file', generation:target.generation, accountScope:resource.accountScope, workspaceScope:resource.workspaceScope, parentRef:resource.parentRef,
+        });
         if (authorized.resourceKey !== resource.resourceKey || !authorized.capabilities.rename || renameRetargetsEditor(authorized)) throw new Error('This file can no longer be renamed.');
         const response = await filesFacadeClient.action(authorized.ref, 'rename', { name:name.trim() }, {
           signal:controller.signal, actionId:`editor-rename-${globalThis.crypto?.randomUUID?.() || Date.now()}`,
@@ -3908,11 +5567,6 @@ export function createNotesFeature({
     };
     record.update();
     // render attaches this retained element before the dynamic import resolves.
-    const activeDocument = state.docs.find(doc => doc.id === activeLeaf(workspace)?.docId);
-    if (isHostDocument(activeDocument)) {
-      const ref = activeDocument.resourceRef || activeDocument.resource?.locator?.opaqueRef;
-      if (ref) record.pendingReveal = { ref, generation:filesGeneration(), workspaceId:workspace.left.folderWorkspaceId };
-    }
     const initialFolderQuery = { query:record.filterQuery, rootKey:workspace.left.resourceRoot?.resourceKey, interactionEpoch:record.interactionEpoch };
     void mountEditorFilesBrowser({ container:browserHost, parentWindow:current.window, navigationOnly:true, getLayoutScope:()=>({owner:state.accountId || state.username,workspace:state.workspace,surface:presentationId === "wiki" ? "wiki" : "editor"}),
       onDirectory:directoryChanged,
@@ -3941,7 +5595,7 @@ export function createNotesFeature({
       if (!stillCurrent()) return;
       record.ready = true; await record.sync();
       if (!current.noteWorkspace?.left?.resourceRoot && stillCurrent()) await directoryChanged(browser.getCurrentDirectory());
-      if (stillCurrent() && initialFolderQuery.query && record.directoryReady
+      if (stillCurrent() && initialFolderQuery.query && record.directoryReady && !(editorConsumer && current.noteWorkspace.left.folderWorkspaceRoot)
         && initialFolderQuery.interactionEpoch === record.interactionEpoch
         && record.displayedRoot?.resourceKey === initialFolderQuery.rootKey) {
         await record.navigate(() => browser.search(initialFolderQuery.query), 'The Editor folder could not be searched.');
@@ -3951,94 +5605,153 @@ export function createNotesFeature({
     return element;
   }
 
-  function explorerSectionLayout() {
-    const current=context();
-    if (!current.noteExplorerLayout) current.noteExplorerLayout=createExplorerLayout({
-      getScope:()=>({owner:state.accountId || state.username,workspace:state.workspace,surface:`${presentationId === 'wiki' ? 'wiki' : 'editor'}-sections`}),
-      onApplied:(records,share)=>{
-        const body=current.noteExplorerSections;
-        if (!body) return;
-        const visible=records.filter(record=>!record.hidden && record.element?.()?.parentElement===body).sort((a,b)=>a.order-b.order);
-        const expanded=visible.filter(record=>!record.collapsed);
-        for (const record of visible) record.element().style.flex=record.collapsed ? '0 0 auto' : expanded.length===1 ? '1 1 0' : `${record.id==='places' ? share : 1-share} 1 0`;
-        const divider=current.noteExplorerDivider;
-        if(divider){divider.hidden=expanded.length!==2;if(expanded.length===2)body.insertBefore(divider,visible[1].element());divider.setAttribute('aria-valuenow',String(Math.round(share*100)));}
-      },
-    });
-    return current.noteExplorerLayout;
-  }
   function customizeExplorer() {
-    return showExplorerCustomization([explorerSectionLayout(),context()?.noteFilesExplorer?.browser?.explorerLayout]);
-  }
-  function explorerSection(id,label,content) {
-    const layout=explorerSectionLayout();
-    const heading=h('header',{class:'copal-explorer-section-heading'});
-    const toggle=h('button',{type:'button',text:label,'aria-label':`Collapse or expand ${label}`});heading.append(toggle);
-    const section=h('section',{class:'copal-explorer-section'},heading,content);
-    layout.register({id,label,group:'editor-sections',element:()=>section,content:()=>content,
-      sync:record=>{toggle.setAttribute('aria-expanded',String(!record.collapsed));toggle.textContent=`${record.collapsed?'▸':'▾'} ${label}`;},
-    });
-    toggle.addEventListener('click',()=>layout.update(id,{collapsed:!layout.records().find(record=>record.id===id).collapsed}));
-    heading.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation();customizeExplorer();});
-    return section;
+    const places = context()?.noteFilesExplorer?.browser?.explorerLayout;
+    if (places) return showExplorerCustomization([places]);
+    context()?.window?.setStatus('Open Explorer to customize its sections.');
   }
 
-  function leftSidebar(workspace, docs, shellState) {
-    const folderMode = Boolean(workspace?.left?.folderWorkspaceRoot);
-    const aside = h('aside', { id:`copal-${presentationId}-left-sidebar`, class:'copal-notes-explorer' });
+  function manualExplorer(workspace) {
+    const title = 'Instruction Manual';
+    const selected = activeLeaf(workspace)?.docId;
+    const tree = h('div', { class:'copal-file-tree copal-manual-tree', 'data-note-panel':'instruction-manual', role:'tree', 'aria-label':title });
+    const canonical = new Map();
+    for (const doc of state.docs) {
+      const id = manualArticleId(doc);
+      if (id && (!canonical.has(id) || doc.officialRef)) canonical.set(id,doc);
+    }
+    const articles = [...canonical].map(([id,doc])=>{
+      const home = id === 'openclank-docs-home';
+      return { doc, home, label:home ? 'Home' : officialTranslatedTitle(doc) || doc.properties?.title || displayName(doc) };
+    }).sort((a,b)=>Number(b.home)-Number(a.home) || a.label.localeCompare(b.label));
+    for (const {doc,label} of articles) {
+      const active = doc.id === selected;
+      tree.append(h('div', { class:`copal-file-entry${active ? ' active' : ''}` },
+        h('button', { type:'button', class:'copal-file-row', role:'treeitem', title:label, 'aria-selected':String(active),
+          tabindex:active ? '0' : '-1', 'data-manual-article':doc.id, onclick:() => {
+            if (!manualWorkspace(workspace)) return;
+            open(doc.id, {intent:'current', mode:'reading', resolvedDirty:true});
+            if (shellViewport().narrow) {
+              context().noteDrawer = null;
+              render();
+            } else context()?.window.root.querySelector(`[data-manual-article="${CSS.escape(doc.id)}"]`)?.focus({preventScroll:true});
+          } }, fileGlyph(doc), h('span', { text:label }))));
+    }
+    tree.addEventListener('keydown',event=>{
+      if (!['ArrowDown','ArrowUp','Home','End'].includes(event.key)) return;
+      const items = [...tree.querySelectorAll('[role="treeitem"]')];
+      const index = items.indexOf(document.activeElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+        : Math.max(0,Math.min(items.length - 1,index + (event.key === 'ArrowDown' ? 1 : -1)));
+      event.preventDefault();
+      items[next]?.focus();
+    });
+    return h('div', { class:'copal-side-body copal-explorer-overview' },
+      h('section', { class:'copal-explorer-overview-docs', 'aria-label':title },
+        h('h3', { text:title }),
+        commandButton('Close Instruction Manual', () => closeExplorerWorkspace(workspace)),
+        tree));
+  }
+
+  function leftSidebar(workspace) {
+    const binding=explorerBinding(workspace);
+    const folderMode=binding==='folder';
+    const aside = h('aside', { id:`copal-${presentationId}-left-sidebar`, class:'copal-notes-explorer', 'aria-label':binding === 'binder' && workspace.left.tab === 'files' ? 'Journal explorer' : 'Explorer', 'data-journal-explorer':binding === 'binder' && workspace.left.tab === 'files' ? 'true' : false });
     aside.style.setProperty('--copal-pane-width', `${workspace.left.width}px`);
+    if (binding === 'manual') {
+      aside.append(h('header', { class:'copal-shell-side-header left' }, h('strong', { text:'Explorer' })),
+        manualExplorer(workspace),resizeHandle('left',workspace));
+      return aside;
+    }
     const closeMenu = (menu) => { if (menu?.open) menu.open = false; };
     const fileMenu = h('details', { class:'copal-editor-file-menu' });
     const summary = h('summary', { class:'copal-btn', 'aria-label':'Editor File menu', text:'File' });
     fileMenu.append(summary);
+    const origin=capturePickerOrigin();
     const menuItems = [
       ['Open File', openFileFromPicker],
+      ...(presentationId === 'notes' ? [
+        ...deliverableCreationCommands(origin.current,workspace,()=>pickerOriginCurrent(origin)).map(command=>[command.label,command.run,command.reason]),
+        ['New image…', createBlankImageFromEditor],
+        ['Open image draft…', () => openImageDraftCopy(() => pickerOriginCurrent(origin))],
+        ['Import image project…', () => importImageProject(() => pickerOriginCurrent(origin))],
+      ] : []),
       ['Open Folder', openFolderFromPicker],
-      ...(folderMode ? [['Close Folder', () => closeFolderWorkspace(workspace)]] : []),
-      [folderMode ? 'New File' : 'New', () => createNew()],
-      ['New Folder', createFolder],
+      ...(binding ? [[binding === 'binder' ? 'Close Journal' : 'Close Folder', () => closeFolderWorkspace(workspace)]] : []),
       ...(typeof createWikiArticle === 'function' ? [['New Wiki article', createWikiArticle]] : []),
-      [folderMode ? 'New Copal note from template' : 'New from template', createFromTemplate],
+      ['New from template', createFromTemplate],
       ['Insert template', insertTemplate],
       ['Choose template folder', configureTemplateFolder],
       ...(typeof importWikiMemes === 'function' ? [['Import native .memes', importWikiMemes]] : []),
       ...(typeof exportWikiMemes === 'function' ? [['Export native .memes', exportWikiMemes]] : []),
     ];
     const menu = h('div', { class:'copal-editor-file-menu-items', role:'menu', 'aria-label':'Editor File actions' });
-    for (const [label, action] of menuItems) {
-      menu.append(h('button', { type:'button', role:'menuitem', text:label, onclick:() => { closeMenu(fileMenu); void action(); } }));
+    for (const [label, action, reason] of menuItems) {
+      menu.append(h('button', { type:'button', role:'menuitem', text:label, disabled:Boolean(reason), title:reason || label, onclick:async () => {
+        closeMenu(fileMenu);
+        try { await action(); }
+        catch (error) { if (pickerOriginCurrent(origin)) origin.window.setStatus(error.message || 'Editor action could not be completed.',true); }
+      } }));
     }
     fileMenu.append(menu);
+    const explorerOverflow = h('details', { class:'copal-file-menu copal-editor-explorer-overflow' });
+    const explorerOverflowSummary = h('summary', { class:'copal-btn', text:'⋯', 'aria-label':'More Explorer actions', title:'More Explorer actions' });
+    const explorerOverflowItems = h('div', { class:'copal-popover-menu', role:'menu', 'aria-label':'More Explorer actions' });
+    const explorerMenuItem = (label, run, attrs = {}) => {
+      const item = h('button', { type:'button', class:'copal-btn', role:'menuitem', text:label, ...attrs });
+      item.addEventListener('click', () => { closeMenu(explorerOverflow); void run(); });
+      return item;
+    };
+    const toggleHiddenFolders = () => { workspace.left.showDotFolders = !workspace.left.showDotFolders; persist(true); render(); };
+    explorerOverflowItems.append(
+      ...(!binding ? [explorerMenuItem('Customize Explorer', customizeExplorer)] : []),
+      explorerMenuItem(workspace.left.showDotFolders ? 'Hide hidden folders' : 'Show hidden folders', toggleHiddenFolders, { 'aria-pressed':String(workspace.left.showDotFolders) }),
+    );
+    explorerOverflow.append(explorerOverflowSummary, explorerOverflowItems);
+    wirePopover(explorerOverflow);
     const sideHead = h('header', { class:'copal-shell-side-header left' },
-      ...(shellState.narrow ? [] : [shellState.controls.left]), h('strong', { text:'Explorer' }), commandButton('⚙',customizeExplorer,{'aria-label':'Customize Explorer',title:'Customize Explorer'}),
+      h('strong', { text: NOTES_PANELS[workspace.left.tab]?.label || 'Explorer' }),
       // Fallback while this applet's local menu module is loading.
       ...(context()?.noteWorkbenchMenu ? [] : [fileMenu]),
-      iconCommandButton('file-plus', () => createNew(), { 'data-editor-create':'file', disabled:!!editorCreationReason(workspace), title:editorCreationReason(workspace) || (editorCreationFolder(workspace)?.provider === 'host' ? 'New file' : 'New Copal note'), 'aria-label':'New file or Copal note' }),
+      iconCommandButton('file-plus', () => createNew(), { 'data-editor-create':'file', disabled:!!editorCreationReason(workspace), title:editorCreationReason(workspace) || editorNewPageLabel(workspace), 'aria-label':editorNewPageLabel(workspace) }),
       iconCommandButton('folder-plus', createFolder, { 'data-editor-create':'folder', disabled:!!editorCreationReason(workspace), title:editorCreationReason(workspace) || 'New folder', 'aria-label':'New folder' }),
-      iconCommandButton(workspace.left.showDotFolders ? 'eye-off' : 'eye', () => { workspace.left.showDotFolders = !workspace.left.showDotFolders; persist(true); render(); }, { title:workspace.left.showDotFolders ? 'Hide hidden folders' : 'Show hidden folders', 'aria-label':workspace.left.showDotFolders ? 'Hide hidden folders' : 'Show hidden folders', 'aria-pressed':String(workspace.left.showDotFolders) }));
-    const tabs = h('div', { class:'copal-side-tabs', role:'tablist', 'aria-label':'Editor navigation' });
-    const panelIds = workspacePanelsForSide(workspace, 'left');
-    for (const key of panelIds) {
-      const def = NOTES_PANELS[key];
-      if (!def) continue;
-      tabs.append(h('button', { class:workspace.left.tab === key ? 'active' : '', role:'tab', 'aria-selected':String(workspace.left.tab === key), text:def.label, 'data-panel-id':key, onclick:() => { workspace.left.tab = key; persist(true); render(); } }));
+      explorerOverflow);
+    if (!binding && workspace.left.tab === 'files') {
+      registerAdapter(sideHead.querySelector('strong'), {
+        capture:() => capturePickerOrigin(),
+        isCurrent:request => sideHead.isConnected && pickerOriginCurrent(request.adapterContext),
+        commands:() => [{ id:'editor.customize-explorer', label:'Customize Explorer…', dialog:true }],
+        execute:(command, request) => {
+          if (command !== 'editor.customize-explorer' || !sideHead.isConnected || !pickerOriginCurrent(request.adapterContext)) return false;
+          customizeExplorer();
+          return true;
+        },
+      });
     }
-    addRovingFocus(tabs, panelIds, (id) => { workspace.left.tab = id; persist(true); render(); });
-    const visibleDocs = workspace.left.folderWorkspaceRoot && getSettings().showCopalInFolderWorkspace !== true ? [] : explorerDocs();
+    const binder = workspace.left.binderContext?.descriptor;
+    const localPath=binder?.source.root || workspace.left.copalFolderRoot || [];
     const body = h('div', { class:'copal-side-body', 'data-note-panel':workspace.left.tab === 'files' ? false : workspace.left.tab });
     if (workspace.left.tab === 'files') {
-      const sort = h('select', { class:'copal-file-sort', 'aria-label':'Sort files' }, h('option', { value:'name', text:'Name' }), h('option', { value:'modified', text:'Modified' }));
-      sort.value = workspace.left.sort;
-      sort.addEventListener('change', () => { workspace.left.sort = sort.value === 'modified' ? 'modified' : 'name'; persist(true); render(); });
-      const allFolders = [...new Set(visibleDocs.flatMap((doc) => {
+      const corpus = binder?.source.corpus || (editorConsumer ? 'notes' : 'wiki');
+      const prefix=localPath.length ? localPath.join('/')+'/' : '';
+      const localBinding=(!editorConsumer && !folderMode) || binding==='copal' || binding==='binder';
+      const scopedDocs=localBinding ? explorerDocs().filter(doc=>!isHostDocument(doc)
+        && (doc.kind==='wiki' ? 'wiki' : 'notes')===corpus && doc.name.startsWith(prefix)) : [];
+      const allFolders = [...new Set(scopedDocs.flatMap((doc) => {
         const parts = doc.name.split('/').slice(0, -1); return parts.map((_, index) => parts.slice(0, index + 1).join('/'));
       }))];
       const expand = () => { workspace.left.expanded = workspace.left.expanded.length === allFolders.length ? [] : allFolders; persist(true); render(); };
-      if (!folderMode) body.append(h('header', { class:'copal-explorer-tools' }, sort,
-        commandButton('↔', () => open(TIMELINE_DOCUMENT.id), { title:'Open Timeline', 'aria-label':'Open Timeline' }),
-        commandButton(workspace.left.expanded.length === allFolders.length ? '−' : '+', expand, { title:'Expand or collapse all collections', 'aria-label':'Expand or collapse all collections' })));
-      if (workspace.left.selected.length) {
-        const chosen = workspace.left.selected.map((id) => state.docs.find((doc) => doc.id === id)).filter(Boolean);
+      if (localBinding) {
+        explorerOverflowItems.append(
+          explorerMenuItem('Sort by name', () => { workspace.left.sort = 'name'; persist(true); render(); }, { role:'menuitemradio', 'aria-checked':String(workspace.left.sort === 'name') }),
+          explorerMenuItem('Sort by modified', () => { workspace.left.sort = 'modified'; persist(true); render(); }, { role:'menuitemradio', 'aria-checked':String(workspace.left.sort === 'modified') }),
+          explorerMenuItem('Open Timeline', () => open(TIMELINE_DOCUMENT.id)),
+          explorerMenuItem(workspace.left.expanded.length === allFolders.length ? 'Collapse all collections' : 'Expand all collections', expand),
+        );
+      }
+      const chosen = workspace.left.selected.length
+        ? scopedDocs.filter(doc => workspace.left.selected.includes(doc.id)) : [];
+      if (chosen.length) {
         body.append(h('div', { class:'copal-file-selection', role:'status' }, h('span', { text:`${chosen.length} selected` }),
           commandButton('Clear', () => { workspace.left.selected = []; persist(true); render(); }),
           commandButton('Trash', async () => {
@@ -4047,15 +5760,12 @@ export function createNotesFeature({
             workspace.left.selected = []; persist(true);
           }, { class:'copal-btn danger' })));
       }
-      body.classList.add('copal-explorer-sections');
-      const current=context(), layout=explorerSectionLayout();current.noteExplorerSections=body;
-      const places=explorerSection('places','Files places',editorFilesExplorer(workspace));body.append(places);
-      if (!folderMode || getSettings().showCopalInFolderWorkspace === true) {
-        body.append(explorerSection('copal-documents','Copal documents',fileTree(visibleDocs,workspace)));
-        if(!current.noteExplorerDivider)current.noteExplorerDivider=createExplorerDivider({getContainer:()=>current.noteExplorerSections,getShare:()=>layout.getShare(),setShare:value=>layout.setShare(value),getDirection:()=>current.noteExplorerSections?.querySelector('.copal-explorer-section')?.dataset.explorerCategory==='places'?1:-1});
-        body.append(current.noteExplorerDivider);
-      } else layout.remove('copal-documents');
-      layout.apply();
+      body.classList.add('copal-explorer-overview');
+      if (localBinding) {
+        const name=binder?.displayName || localPath.at(-1);
+        body.append(h('section',{class:'copal-explorer-overview-docs','aria-label':name},
+          ...(name ? [h('h3',{text:name})] : []),fileTree(scopedDocs,workspace,localPath)));
+      } else body.append(editorFilesExplorer(workspace));
     } else if (workspace.left.tab === 'search') {
       const input = h('input', { class:'copal-note-search-input', type:'search', placeholder:'Search documents and properties…', 'aria-label':'Search documents', value:context().noteSearch || '' });
       const results = h('div', { class:'copal-search-results' });
@@ -4082,8 +5792,6 @@ export function createNotesFeature({
         if (query && !matches.length) results.append(h('p', { class:'copal-empty-inline', text:'No matches' }));
       };
       input.addEventListener('input', draw); body.append(input, results); draw();
-    } else if (workspace.left.tab === 'tags') {
-      appendNavigationPanel(body, 'tags', workspace);
     } else if (['properties', 'links', 'outline'].includes(workspace.left.tab)) {
       const doc = inspectorDoc(workspace);
       if (!doc) body.append(h('p', { class:'copal-empty-inline', text:'No active document.' }));
@@ -4091,11 +5799,11 @@ export function createNotesFeature({
       else if (workspace.left.tab === 'properties') body.append(propertiesPane(doc));
       else if (workspace.left.tab === 'links') body.append(linksPane(doc));
       else body.append(outlinePane(doc, workspace));
-    } else {
-      appendNavigationPanel(body, workspace.left.tab, workspace);
+    } else if (workspace.left.tab === 'recent') {
+      appendRecentDocuments(body, workspace);
     }
     const handle = resizeHandle('left', workspace);
-    aside.append(sideHead, tabs, body, handle);
+    aside.append(sideHead, body, handle);
     return aside;
   }
 
@@ -4146,10 +5854,26 @@ export function createNotesFeature({
   function groupTabs(group, workspace, docs, shellState) {
     const bar = h('div', { class:'copal-note-tabs' });
     const ownsShellControls = shellState.controlGroupId === group.id;
-    const leftSlot = h('div', { class:'copal-shell-tab-slot left', 'data-shell-slot':'left' });
-    if (ownsShellControls && (shellState.narrow || !workspace.left.open)) leftSlot.append(shellState.controls.left);
     const tablist = h('div', { class:'copal-note-tab-scroll', role:'tablist', 'aria-label':'Open Editor tabs' });
-    bar.append(leftSlot, tablist);
+    bar.append(tablist);
+    const owner = context();
+    const scope = currentScope(owner);
+    const recentlyClosed = () => JSON.stringify([workspace.closed, Object.keys(workspace.closedImageRecovery || {})]);
+    const tabStripCurrent = request => request.adapterContext && tablist.isConnected && context() === owner
+      && owner.window.visible && owner.noteWorkspace === workspace && currentScope(owner) === scope
+      && activeGroup(workspace)?.id === group.id && request.adapterContext.closed === recentlyClosed();
+    registerAdapter(tablist, {
+      hitTest:node => node === tablist,
+      capture:() => activeGroup(workspace)?.id === group.id && (workspace.closed.length || Object.keys(workspace.closedImageRecovery || {}).length)
+        ? { closed:recentlyClosed() } : null,
+      isCurrent:tabStripCurrent,
+      commands:() => [{ id:'editor.reopen-closed', label:'Reopen closed tab' }],
+      execute:(command, request) => {
+        if (command !== 'editor.reopen-closed' || !tabStripCurrent(request)) return false;
+        reopenClosed();
+        return true;
+      },
+    });
     for (const leaf of group.tabs) {
       const doc = docs.find((item) => item.id === leaf.docId); if (!doc) continue;
       const tabDirty = Boolean(context()?.noteDrafts?.has(doc.id) || context()?.noteBuffers?.get(doc.id)?.state?.().dirty);
@@ -4158,11 +5882,10 @@ export function createNotesFeature({
         h('span', { class:'copal-note-tab-state', 'aria-label':tabDirty ? 'Unsaved changes' : 'Saved', title:tabDirty ? 'Unsaved changes' : 'Saved', text:tabDirty ? '●' : '' }),
         h('button', { class:'copal-note-tab-pin', text:leaf.pinned ? '●' : '○', title:leaf.pinned ? 'Unpin tab' : 'Pin tab', 'aria-pressed':String(leaf.pinned), onclick:() => { leaf.pinned = !leaf.pinned; persist(true); render(); } }),
         h('button', { class:'copal-note-tab-close', text:'×', disabled:leaf.pinned, 'aria-label':`Close ${doc.name}`, onclick:async () => {
-          if (!await requestCloseLeaves([leaf])) return;
-          const closed = closeWorkspaceLeaf(workspace, leaf.id); if (closed) disposeLeaf(leaf.id);
-          syncSelectionToModel(workspace); persist(true); render(); focusEmptyWorkspaceIfIdle();
+          await requestCloseLeaves([leaf]);
         } }));
       registerAdapter(tab, {
+        hitTest:node => node.closest('.copal-note-tab-close,.copal-note-tab-pin') ? 'native' : true,
         capture:() => Object.freeze({
           current:context(), workspace, scope:currentScope(context()), leafId:leaf.id, docId:doc.id,
           groupId:group.id, name:doc.name, head:String(doc.head || ''), readOnly:doc.readOnly === true,
@@ -4179,13 +5902,13 @@ export function createNotesFeature({
           return [
             {id:'editor.code-graph',label:CODE_GRAPH_LABEL,disabled:Boolean(graphDisabledReason(captured.graphResource?[captured.graphResource]:[]))},
             {id:'editor.reveal-files',label:'Reveal in Files',disabled:!captured.graphResource},
-            { id:'copal-tab-close', label:'Close tab', disabled:captured.pinned },
-            { id:'copal-tab-close-others', label:'Close other tabs', disabled:closableOthers.length === 0 },
+            ...(!captured.pinned ? [{ id:'copal-tab-close', label:'Close tab' }] : []),
+            ...(closableOthers.length ? [{ id:'copal-tab-close-others', label:'Close other tabs' }] : []),
             { id:captured.pinned ? 'copal-tab-unpin' : 'copal-tab-pin', label:captured.pinned ? 'Unpin tab' : 'Pin tab' },
             { id:'copal-tab-split-right', label:'Split right' },
             { id:'copal-tab-split-below', label:'Split below' },
             ...captured.groups.map((groupId, index) => ({ id:`copal-tab-move-group:${encodeURIComponent(groupId)}`, label:`Move to group ${index + 1}` })),
-          ];
+          ].filter(item => !item.disabled);
         },
         execute:async (command, request) => {
           const captured = request?.adapterContext;
@@ -4201,7 +5924,7 @@ export function createNotesFeature({
               || checkDom && !tab.isConnected
               || checkRevision && (currentDoc.name !== captured.name || String(currentDoc.head || '') !== captured.head || (currentDoc.readOnly === true) !== captured.readOnly)
               || checkPinned && (currentLeaf.pinned === true) !== captured.pinned) {
-              throw new Error('This Copal tab changed. Reopen its menu and try again.');
+              throw new Error('This Editor tab changed. Reopen its menu and try again.');
             }
             return { workspace:currentWorkspace, leaf:currentLeaf, group:currentGroup, doc:currentDoc };
           };
@@ -4220,14 +5943,14 @@ export function createNotesFeature({
               dirty:Boolean(context().noteDrafts?.has(captured.docId)||context().noteBuffers?.get(captured.docId)?.state?.().dirty)});return true;
           }
           if (command === 'copal-tab-pin' || command === 'copal-tab-unpin') {
-            if (command === 'copal-tab-pin' && target.leaf.pinned || command === 'copal-tab-unpin' && !target.leaf.pinned) throw new Error('This Copal tab changed. Reopen its menu and try again.');
+            if (command === 'copal-tab-pin' && target.leaf.pinned || command === 'copal-tab-unpin' && !target.leaf.pinned) throw new Error('This Editor tab changed. Reopen its menu and try again.');
             target.leaf.pinned = command === 'copal-tab-pin';
             persist(true); render();
             return true;
           }
           if (command === 'copal-tab-split-right' || command === 'copal-tab-split-below') {
             const orientation = command === 'copal-tab-split-right' ? 'horizontal' : 'vertical';
-            if (splitWorkspaceGroup(target.workspace, target.group.id, target.doc, orientation)) { persist(true); render(); }
+            if (splitEditorGroup(target.workspace, target.group.id, target.doc, orientation)) { persist(true); render(); }
             return true;
           }
           if (command.startsWith('copal-tab-move-group:')) {
@@ -4238,12 +5961,7 @@ export function createNotesFeature({
           }
           if (command === 'copal-tab-close') {
             if (target.leaf.pinned) return true;
-            if (!await requestCloseLeaves([target.leaf])) return true;
-            const fresh = resolveTarget({ checkDom:false, checkRevision:false, checkPinned:false });
-            if (fresh.leaf.pinned) return true;
-            const closed = closeWorkspaceLeaf(fresh.workspace, fresh.leaf.id);
-            if (closed) disposeLeaf(closed.id);
-            syncSelectionToModel(fresh.workspace); persist(true); render(); focusEmptyWorkspaceIfIdle();
+            await requestCloseLeaves([target.leaf]);
             return true;
           }
           if (command === 'copal-tab-close-others') {
@@ -4252,19 +5970,7 @@ export function createNotesFeature({
             if (live.some(({ captured:item, leaf:currentLeaf }) => !currentLeaf || currentLeaf.docId !== item.docId || groupForLeaf(target.workspace, currentLeaf.id)?.id !== captured.groupId || currentLeaf.pinned)) {
               throw new Error('The other tabs changed. Reopen the menu and try again.');
             }
-            if (!await requestCloseLeaves(live.map(({ leaf:other }) => other))) return true;
-            const freshTarget = resolveTarget({ checkDom:false, checkRevision:false, checkPinned:false });
-            for (const { captured:item } of live) {
-              const other = findWorkspaceLeaf(freshTarget.workspace, item.id);
-              if (!other || other.docId !== item.docId || groupForLeaf(freshTarget.workspace, other.id)?.id !== captured.groupId || other.pinned) {
-                throw new Error('The other tabs changed. Reopen the menu and try again.');
-              }
-            }
-            for (const { captured:item } of live) {
-              const closed = closeWorkspaceLeaf(freshTarget.workspace, item.id);
-              if (closed) disposeLeaf(closed.id);
-            }
-            syncSelectionToModel(freshTarget.workspace); persist(true); render();
+            await requestCloseLeaves(live.map(({ leaf:other }) => other));
             return true;
           }
           return false;
@@ -4272,9 +5978,7 @@ export function createNotesFeature({
       });
       tab.addEventListener('auxclick', async (event) => {
         if (event.button !== 1 || leaf.pinned) return;
-        event.preventDefault(); if (!await requestCloseLeaves([leaf])) return;
-        if (closeWorkspaceLeaf(workspace, leaf.id)) disposeLeaf(leaf.id);
-        syncSelectionToModel(workspace); persist(true); render(); focusEmptyWorkspaceIfIdle();
+        event.preventDefault(); await requestCloseLeaves([leaf]);
       });
       tab.addEventListener('dragstart', (event) => event.dataTransfer.setData('text/x-copal-note-leaf', leaf.id));
       tab.addEventListener('dragover', (event) => {
@@ -4318,28 +6022,24 @@ export function createNotesFeature({
         const activeId = group.activeLeafId;
         const activeLeaf = group.tabs.find((leaf) => leaf.id === activeId);
         return activeLeaf ? [
-          commandButton('Split right', () => { const doc = workspaceDocuments().find((item) => item.id === activeLeaf.docId); if (doc && splitWorkspaceGroup(workspace, group.id, doc, 'horizontal')) { persist(true); render(); } }),
-          commandButton('Split below', () => { const doc = workspaceDocuments().find((item) => item.id === activeLeaf.docId); if (doc && splitWorkspaceGroup(workspace, group.id, doc, 'vertical')) { persist(true); render(); } }),
+          commandButton('Split right', () => { const doc = workspaceDocuments().find((item) => item.id === activeLeaf.docId); if (doc && splitEditorGroup(workspace, group.id, doc, 'horizontal')) { persist(true); render(); } }),
+          commandButton('Split below', () => { const doc = workspaceDocuments().find((item) => item.id === activeLeaf.docId); if (doc && splitEditorGroup(workspace, group.id, doc, 'vertical')) { persist(true); render(); } }),
           ...moveToGroupItems(activeId),
         ] : [];
       })()),
       commandButton('Close other tabs', async () => {
         const activeId = group.activeLeafId; const candidates = group.tabs.filter((leaf) => leaf.id !== activeId && !leaf.pinned);
-        if (!await requestCloseLeaves(candidates)) return;
-        for (const closed of closeWorkspaceOtherLeaves(workspace, activeId)) disposeLeaf(closed.id);
-        syncSelectionToModel(workspace); persist(true); render();
+        await requestCloseLeaves(candidates);
       }),
       commandButton('Close tab group', async () => {
         const candidates = group.tabs.filter((leaf) => !leaf.pinned);
-        if (!await requestCloseLeaves(candidates)) return;
-        for (const closed of closeWorkspaceGroup(workspace, group.id)) disposeLeaf(closed.id);
-        syncSelectionToModel(workspace); persist(true); render(); focusEmptyWorkspaceIfIdle();
+        await requestCloseLeaves(candidates);
       }))));
     const controls = h('div', { class:'copal-tab-group-controls' },
       commandButton('+', () => showChooser({ title:'Open note in this group', choose:(doc) => { openWorkspaceDocument(workspace, doc, { groupId:group.id, intent:'newTab' }); persist(true); render(); } }), { title:'Open note', 'aria-label':'Open note' }),
       groupMenu);
     const rightSlot = h('div', { class:'copal-shell-tab-slot right', 'data-shell-slot':'right' });
-    if (ownsShellControls && (shellState.compact || !workspace.right.open)) rightSlot.append(shellState.controls.right);
+    if (ownsShellControls && (shellState.compact || !shellState.rightVisible)) rightSlot.append(shellState.controls.right);
     bar.append(controls, rightSlot); return bar;
   }
 
@@ -4395,10 +6095,11 @@ export function createNotesFeature({
 
   function leafHeader(cache, leaf, doc, workspace, group) {
     const parts = doc.name.split('/');
+    const manualArticle = editorConsumer && isManualArticle(doc);
     const breadcrumb = h('div', { class:'copal-note-breadcrumb', 'aria-label':'Document path' });
     breadcrumb.title = doc.name;
     breadcrumb.append(fileGlyph(doc));
-    if (parts.length > 1) breadcrumb.append(h('span', { class:'copal-breadcrumb-parent', text:parts.slice(0, -1).join(' / ') }), h('span', { text:' / ', 'aria-hidden':'true' }));
+    if (parts.length > 1 || manualArticle) breadcrumb.append(h('span', { class:'copal-breadcrumb-parent', text:manualArticle ? 'Instruction Manual' : parts.slice(0, -1).join(' / ') }), h('span', { text:' / ', 'aria-hidden':'true' }));
     const resourceRef = String(doc.resourceRef || doc.resource?.locator?.opaqueRef || '').trim();
     const resourceReadOnly = Boolean(resourceRef);
     const hostFile = isHostDocument(doc);
@@ -4417,9 +6118,17 @@ export function createNotesFeature({
           `Move to group ${index + 1}`,
           () => { if (moveWorkspaceLeaf(workspace, leaf.id, target.id)) { persist(true); render(); } },
         )),
-        commandButton(workspace.bookmarks?.includes(doc.id) ? 'Remove bookmark' : 'Add bookmark', () => toggleBookmark(doc.id)),
-        commandButton('Reveal in Editor', () => { workspace.left.open = true; workspace.left.tab = 'files'; revealInExplorer(doc, workspace); persist(true); render(); }))));
-      breadcrumb.append(h('strong', { class:'copal-inline-title', text:parts.at(-1) }));
+        commandButton('Reveal in Editor', () => {
+          if (manualArticle) {
+            open(doc.id,{leafId:leaf.id,manualEntry:true});
+            showExplorer(true);
+          } else {
+            workspace.left.open = true; workspace.left.tab = 'files'; revealInExplorer(doc, workspace); persist(true); render();
+          }
+        }))));
+      const title = manualArticle && manualArticleId(doc) === 'openclank-docs-home'
+        ? 'Home' : officialTranslatedTitle(doc) || (manualArticle && doc.properties?.title) || parts.at(-1);
+      breadcrumb.append(h('strong', { class:'copal-inline-title', text:title }));
       cache.header.replaceChildren(breadcrumb, h('span', { class:'copal-leaf-mode', text:'Read only' }), menu);
       return;
     }
@@ -4453,14 +6162,13 @@ export function createNotesFeature({
         `Move to group ${index + 1}`,
         () => { if (moveWorkspaceLeaf(workspace, leaf.id, target.id)) { persist(true); render(); } },
       )),
-      commandButton(workspace.bookmarks?.includes(doc.id) ? 'Remove bookmark' : 'Add bookmark', () => toggleBookmark(doc.id)),
       ...(resourceRef ? [commandButton('Show in Files', () => { void showResourceInFiles(resourceRef); })] : []),
       commandButton('Reveal in Editor', () => { workspace.left.open = true; workspace.left.tab = 'files'; revealInExplorer(doc, workspace); persist(true); render(); }),
       ...(leaf.view === 'canvas' || leaf.view === 'base' ? [commandButton(leaf.rawSource ? 'Back to typed view' : 'View raw source', () => { leaf.rawSource = !leaf.rawSource; persist(true); render(); })] : []),
       ...(canManageCopalDocument(doc) ? [commandButton('Rename', () => renameWithForm(doc)),
         commandButton('Move to trash', () => deleteDocument(doc), { class:'copal-btn danger' })] : []))));
     const actions = h('div', { class:'copal-note-header-actions' },
-      ...(context()?.noteBuffers?.get(doc.id)?.uncertainSave ? [commandButton('Retry previous Save', () => void retryDocumentSave(doc.id), { title:'Reconcile the previously submitted version before saving newer changes' })] : []),
+      ...(context()?.noteBuffers?.get(doc.id)?.uncertainSave ? [commandButton(doc.sharedText ? 'Check original status' : 'Retry previous Save', () => void retryDocumentSave(doc.id), { title:'Reconcile the previously submitted version before saving newer changes' })] : []),
       ...(doc.savePolicy === 'explicit' ? [commandButton('Save', () => void saveDraft(doc.id), { title:'Save file (Ctrl/Cmd+S)', 'aria-label':`Save ${fileName}` })] : []),
       ...(uploadAttachment && !hostFile ? [commandButton('Attach file', () => chooseAttachment(cache, doc), { title:'Attach a file at the captured cursor', 'aria-label':'Attach file' })] : []),
       menu);
@@ -4474,6 +6182,67 @@ export function createNotesFeature({
   // documentation pages stay rendered with no universal source toggle.
   const FORMATTING_DEMO_DOC_ID = 'openclank-docs-formatting-demo';
 
+  function officialTranslationId(doc) {
+    const id = doc?.officialRef;
+    return doc?.readOnly === true && doc.kind === 'wiki' && isOfficialDocument(doc)
+      && id === doc.properties?.docId && typeof id === 'string' ? id : '';
+  }
+
+  function officialTranslatedTitle(doc) {
+    const id = officialTranslationId(doc);
+    return id ? window.openClankI18n?.officialArticleTranslation?.(id, 'title', doc.properties.title)?.text : null;
+  }
+
+  function renderReadonlyArticle(doc, source) {
+    const id = officialTranslationId(doc);
+    const draw = value => renderMarkdown(value, new Set([doc.id]), doc);
+    const translation = id && window.openClankI18n?.officialArticleTranslation?.(id, 'body', source);
+    let rendered = null;
+    let displayedSource = source;
+    if (translation) {
+      const canonicalHeadings = outlineEntries(source);
+      const headings = outlineEntries(translation.text);
+      const referenceKeys = text => {
+        const { references, truncated } = extractDocumentReferences(text);
+        return truncated ? null : JSON.stringify(references.map(({ target, embed }) => JSON.stringify([target, embed])).sort());
+      };
+      const canonicalReferences = referenceKeys(source);
+      if (canonicalReferences !== null && canonicalReferences === referenceKeys(translation.text)
+          && headings.length === canonicalHeadings.length
+          && headings.every(({ level }, index) => level === canonicalHeadings[index].level)) {
+        rendered = draw(translation.text);
+        const byLine = new Map([...rendered.children].filter(node => /^H[1-6]$/.test(node.tagName))
+          .map(node => [Number(node.dataset.line), node]));
+        // Fragment lookup uses the canonical body. Preserve its heading
+        // line identities even if translating the prose moved a heading.
+        headings.forEach(({ line }, index) => {
+          const heading = byLine.get(line);
+          if (heading) heading.dataset.line = String(canonicalHeadings[index].line);
+        });
+        rendered.lang = translation.lang;
+        rendered.dir = translation.dir;
+        displayedSource = translation.text;
+      }
+    }
+    if (!rendered) rendered = draw(source);
+    if (id) {
+      rendered.classList.add('copal-manual-article');
+      for (const media of rendered.querySelectorAll(':scope > p:has(img[src^="/static/docs/media/manual-"])')) {
+        const caption = media.nextElementSibling;
+        const emphasis = caption?.matches('p') && caption.querySelector(':scope > em:only-child');
+        if (!emphasis || caption.textContent.trim() !== emphasis.textContent.trim()) continue;
+        const figure = h('figure', { class:'copal-manual-figure',
+          'data-md-start':media.dataset.mdStart, 'data-md-end':caption.dataset.mdEnd },
+          ...media.childNodes, h('figcaption', {}, ...emphasis.childNodes));
+        media.replaceWith(figure);
+        caption.remove();
+      }
+      rendered.setAttribute('data-i18n-skip', '');
+      if (!rendered.lang) { rendered.lang = 'en'; rendered.dir = 'ltr'; }
+    }
+    return { rendered, displayedSource };
+  }
+
   function isFormattingDemoDocument(doc) {
     if (!doc) return false;
     const docId = doc.properties && doc.properties.docId;
@@ -4484,10 +6253,8 @@ export function createNotesFeature({
       || name.endsWith('/Markdown Formatting Demo');
   }
 
-  function renderFormattingDemoBody(doc) {
-    const source = sourceValue(doc);
-    const sourceLines = String(source || '').split('\n');
-    const rendered = renderMarkdown(source, new Set([doc.id]), doc);
+  function renderFormattingDemoBody(doc, { rendered, displayedSource }) {
+    const sourceLines = displayedSource.split('\n');
     const shell = h('div', { class:'copal-md-source-reveal' });
     let inspector = null;
     const backToRendered = () => {
@@ -4554,8 +6321,50 @@ export function createNotesFeature({
     return shell;
   }
 
+  function syncFocusedImage(current, workspace) {
+    const leaf=activeLeaf(workspace);
+    current.noteWorkbenchMenu?.setContextualMenus?.(Boolean(current.noteImages?.get(leaf?.docId)));
+    for (const image of current.noteImages?.values() || []) {
+      for (const view of image.views.values()) view.runtime?.setFocused(view.leafId === leaf?.id);
+    }
+  }
+
+  function focusVisibleEditorLeaf(current, cache) {
+    const workspace=current.noteWorkspace, leaf=cache.leaf;
+    if (!workspace || !leaf || current !== context() || !current.window.visible || !cache.root.isConnected ||
+        current.noteLeafViews.get(leaf.id) !== cache || workspace.activeLeafId === leaf.id) return;
+    const group=groupForLeaf(workspace,leaf.id);
+    if (group?.activeLeafId !== leaf.id || !activateWorkspaceLeaf(workspace,group.id,leaf.id)) return;
+    current.noteActivationSequence=Number(current.noteActivationSequence || 0)+1;
+    syncSelectionToModel(workspace); bindKeys(workspace,cache.doc); trackDocumentNavigation(current,workspace);
+    current.window.root.querySelectorAll('.copal-note-group').forEach(node=>node.classList.toggle('active-group',node.dataset.groupId === group.id));
+    syncFocusedImage(current,workspace);
+    persistActiveContext(); persist(true);
+  }
+
+  async function sendImageRegionFeedback(region, chat, isCurrent) {
+    if (!chat || !region) throw new Error('Draw a crop preview on the unchanged saved source image first.');
+    const scope = await captureFeedbackScope(chat, isCurrent, fetch);
+    if (!isCurrent()) throw new Error('The image or region changed.');
+    const detail = {
+      chat, target:{ resourceRef:region.resourceRef, expectedRevision:region.expectedRevision, anchor:region.anchor, scope },
+      label:'Image region · bounding rectangle', isCurrent, accepted:false,
+    };
+    document.dispatchEvent(new CustomEvent('openclank:resource-feedback-target', {detail}));
+    if (!detail.accepted) throw new Error('Open the original chat feedback panel first.');
+    return true;
+  }
+
   function renderLeaf(leaf, doc, workspace, group) {
     const current = context();
+    if (isJournalPage(doc) && !current.noteBuffers.has(doc.id) && !current.noteDrafts.has(doc.id)) {
+      current.noteJournalRecoveryChecked ||= new Set();
+      if (!current.noteJournalRecoveryChecked.has(doc.id)) {
+        current.noteJournalRecoveryChecked.add(doc.id);
+        const recovered = sourceEditBuffer(doc, null, { recoverJournal:true });
+        if (recovered?.state().dirty) publishBufferDraft(doc.id, recovered);
+      }
+    }
     let cache = current.noteLeafViews.get(leaf.id);
     if (!cache || cache.docId !== doc.id || cache.view !== leaf.view) {
       const languageMode = cache?.docId === doc.id ? cache.languageMode : [...current.noteLeafViews.values()].find(view => view.docId === doc.id)?.languageMode;
@@ -4567,10 +6376,296 @@ export function createNotesFeature({
       const status = h('footer', { class:'copal-note-status', role:'status', 'aria-live':'polite' });
       root.append(header, body, propsFooter, status);
       cache = { root, header, body, propsFooter, status, docId:doc.id, view:leaf.view, saveState:'saved', cursorLine:1, editor:null, languageMode };
+      const viewCache=cache;
+      root.addEventListener('pointerdown',event=>{ if (event.button === 0) focusVisibleEditorLeaf(current,viewCache); },true);
+      root.addEventListener('focusin',()=>focusVisibleEditorLeaf(current,viewCache));
       cache.graphicalMedia=mountImageRegion({root:body,selector:'img.copal-attachment',isCurrent:()=>context()?.noteLeafViews?.get(leaf.id)===cache});
       current.noteLeafViews.set(leaf.id, cache);
     }
     cache.leaf = leaf; cache.doc = doc;
+    const helpMode = presentationId === 'wiki' ? 'wiki' : leaf.view === 'image' ? 'image' :
+      isJournalPage(doc) ? 'journal' :
+      leaf.rawSource || ['note','markdown','wiki'].includes(leaf.view) ? 'text' : null;
+    if (helpMode) cache.root.dataset.editorHelpMode = helpMode;
+    else delete cache.root.dataset.editorHelpMode;
+    if(doc.kind==='host-video') {
+      const resource=doc.resource, ref=resource?.locator?.opaqueRef, revision=resource?.revision, format=doc.previewFormat;
+      const signature=JSON.stringify([ref,revision,format?.policyGeneration,doc.recordingJobHint,doc.recordingCoverage]);
+      cache.header.replaceChildren(h('strong',{text:doc.name}),h('span',{class:'copal-leaf-mode',text:'Read-only recording'}));
+      if(cache.videoSignature!==signature || cache.videoResource!==resource) {
+        cache.videoReview?.dispose();cache.videoSignature=signature;cache.videoResource=resource;
+        const owner=current, scope=currentScope(owner), generation=state.filesGeneration, policy=state.filesPolicyGeneration;
+        const bound=()=>context()===owner && currentScope(owner)===scope && state.filesGeneration===generation && state.filesPolicyGeneration===policy && owner.noteLeafViews?.get(leaf.id)===cache && cache.doc===doc && doc.resource===resource && resource?.locator?.opaqueRef===ref;
+        const valid=()=>bound() && cache.root.isConnected;
+        if(!ref || !revision || format?.formatId!=='video' || !bound()) {cache.body.textContent='Recording source is unavailable.';return cache.root;}
+        const url=filesFacadeClient.contentUrl(ref,{purpose:'preview',expectedRevision:revision});
+        const attempts=owner.noteVideoFrameAttempts ||= new Map(), attempt=attempts.get(doc.id) || {};attempts.set(doc.id,attempt);
+        const trimAttempts=owner.noteVideoTrimAttempts ||= new Map(), trimAttempt=trimAttempts.get(doc.id) || {};trimAttempts.set(doc.id,trimAttempt);
+        const scopeCurrent=()=>context()===owner && currentScope(owner)===scope && state.filesGeneration===generation && state.filesPolicyGeneration===policy;
+        const exportAttempts=owner.noteVideoExportAttempts ||= new Map(), exportAttempt=exportAttempts.get(doc.id) || {};exportAttempts.set(doc.id,exportAttempt);
+        cache.videoReview=mountVideoReview(cache.body,{url,name:doc.name,resourceRef:ref,isCurrent:valid,
+          recordingCoverage:doc.recordingCoverage,nativeRecording:Boolean(doc.recordingJobHint),hasPendingFrame:()=>Boolean(attempt.unknown || attempt.handles?.length),
+          hasPendingTrim:()=>Boolean(trimAttempt.jobID),
+          hasPendingExport:()=>Boolean(exportAttempt.operationID),
+          onCheckExport:async()=>{if(!scopeCurrent() || !exportAttempt.operationID || exportAttempt.busy)throw Error('Original export status is unavailable.');
+            exportAttempt.busy=true;try{const id=exportAttempt.operationID;const result=await filesFacadeClient.operationReceipt(id);
+              if(!scopeCurrent() || exportAttempt.operationID!==id)throw Error('Original account or Files scope changed.');
+              if(['complete','failed','cancelled'].includes(result?.state))exportAttempt.operationID=null;
+              return `Original export: ${result?.state || 'unknown'}. ${exportAttempt.operationID?'Check status again; do not resubmit.':''}`;
+            }finally{exportAttempt.busy=false;}},
+          onExport:async(selectionCurrent)=>{if(exportAttempt.busy || exportAttempt.operationID)throw Error('Check the original export status first.');
+            const chat=String(window.sessionModule?.getCurrentSessionId?.() || ''),origin=capturePickerOrigin();
+            const frozenRevision={kind:revision.kind,value:revision.value},resourceID=String(resource.key?.resourceId || ''), recordingJobHint=doc.recordingJobHint || null;
+            const stillCurrent=()=>valid() && selectionCurrent() && pickerOriginCurrent(origin) && activeLeaf(owner.noteWorkspace)?.id===leaf.id
+              && String(window.sessionModule?.getCurrentSessionId?.() || '')===chat && resource?.revision?.kind===frozenRevision.kind
+              && resource?.revision?.value===frozenRevision.value && String(resource.key?.resourceId || '')===resourceID && (doc.recordingJobHint || null)===recordingJobHint;
+            if(!chat || !resourceID || !stillCurrent())throw Error('The original task or recording changed.');
+            exportAttempt.busy=true;try{
+              const response=await fetch(`/api/session/${encodeURIComponent(chat)}/plan/feedback`,{credentials:'same-origin',cache:'no-store'});
+              const data=await response.json();if(!stillCurrent() || !response.ok || !Array.isArray(data.entries))throw Error('Feedback is unavailable.');
+              const notes=data.entries.filter(entry=>entry?.resourceTarget?.resource?.resourceID===resourceID
+                && entry.resourceTarget.resource.revision?.kind===frozenRevision.kind && entry.resourceTarget.resource.revision?.value===frozenRevision.value
+                && ['frame','time_range'].includes(entry.resourceTarget.anchor?.kind) && typeof entry.id==='string').slice(0,64);
+              if(!notes.length)throw Error('No matching recorded feedback is available.');
+              const chosen=await styledPrompt(notes.map((entry,i)=>`${i+1}. ${String(entry.text || '').slice(0,160)}`).join('\n')+'\n\nEnter note numbers separated by commas.',{title:'Choose feedback to export'});
+              if(chosen==null)return;if(!stillCurrent())throw Error('The original recording changed.');
+              const numbers=chosen.split(',').map(value=>value.trim());
+              if(!numbers.length || numbers.some(value=>!/^\d+$/.test(value) || +value<1 || +value>notes.length) || new Set(numbers.map(Number)).size!==numbers.length)throw Error('Choose distinct listed note numbers.');
+              const selected=numbers.map(value=>notes[Number(value)-1].id);
+              const includeSource=await styledConfirm('Include the original recording in the ZIP? Playback times remain unverified.',{title:'Recording export',confirmText:'Include recording'});
+              if(!stillCurrent())throw Error('The original recording changed.');
+              const destination=await new Promise(resolve=>{const picker=createResourcePicker({client:filesFacadeClient,purpose:'folder',...pickerScope(),originWindow:origin.window,
+                getGeneration:()=>Number(state.filesGeneration || state.contextEpoch || 0),getAccountScope:()=>String(state.accountId || ''),getWorkspaceScope:()=>String(state.workspace || ''),
+                isOriginCurrent:stillCurrent,isCompatible:item=>item.provider==='host' && item.capabilities?.write===true ? '' : 'Choose a writable Host folder.',
+                onSelect:item=>{resolve(item.ref);return true;},onCancel:()=>resolve(null),onClose:()=>resolve(null)});void picker.open();});
+              if(!destination)return;if(!stillCurrent())throw Error('The original recording changed.');
+              const name=await styledPrompt('Name the new ZIP.',{title:'Export feedback',defaultValue:`${String(doc.name || 'recording').replace(/\.webm$/i,'')}-feedback.zip`});
+              if(name==null)return;if(!stillCurrent())throw Error('The original recording changed.');
+              if(!await styledConfirm(`Export ${selected.length} selected feedback item(s)${includeSource?' with the recording':''} to ${name}? Times are unverified playback hints.`,{title:'Review export',confirmText:'Export'}))return;
+              if(!stillCurrent())throw Error('The original recording changed.');
+              const id=crypto.randomUUID();exportAttempt.operationID=id;
+              const result=await fetch('/api/files-v1/recording-bundle',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:1,session_id:chat,source_ref:ref,expected_revision:frozenRevision,feedback_ids:selected,include_source:includeSource,operation_id:id,item_id:'bundle',destination_ref:destination,name,...(recordingJobHint ? {original_job_id:recordingJobHint} : {})})});
+              const payload=await result.json();if(!scopeCurrent() || exportAttempt.operationID!==id)throw Error('Original export outcome is unknown; check status.');
+              if(!result.ok)throw Error('Original export outcome is unknown; check status.');
+              if(['complete','failed','cancelled'].includes(payload?.state))exportAttempt.operationID=null;
+              if(payload?.state!=='complete')throw Error('Export pending; check original status.');
+              return true;
+            }finally{exportAttempt.busy=false;}},
+          onTeach:async(anchor,selectionCurrent)=>{
+            const frozenRevision={kind:revision.kind,value:revision.value};
+            const selectionValid=()=>valid() && selectionCurrent() && resource?.revision?.kind===frozenRevision.kind && resource?.revision?.value===frozenRevision.value;
+            if(!selectionValid())throw Error('The original recording changed.');
+            const {reviewRecordingSkillDraft}=await import('../skills.js');
+            if(!selectionValid())throw Error('The original recording changed.');
+            const intentCurrent=()=>currentScope(owner)===scope && state.filesGeneration===generation && state.filesPolicyGeneration===policy;
+            const statusCurrent=()=>currentScope(owner)===scope;
+            if(!reviewRecordingSkillDraft({sourceLabel:String(doc.name || 'Recording'),target:{resourceRef:ref,expectedRevision:frozenRevision,anchor},isCurrent:intentCurrent,statusCurrent}))
+              throw Error('Finish the existing Skills draft first.');
+            const modal=document.getElementById('memory-modal');
+            if(!modal || modal.classList.contains('hidden')) (document.getElementById('tool-memory-btn') || document.getElementById('rail-memory'))?.click();
+            document.querySelector('.memory-tab[data-memory-tab="add"]')?.click();
+          },
+          onCheckTrim:async()=>{const checkCurrent=()=>scopeCurrent() && valid();
+            if(!checkCurrent() || trimAttempt.busy || !trimAttempt.jobID)throw Error('Original trim status is unavailable.');
+            trimAttempt.busy=true;try{const {describeTrimTiming}=await import('../mediaJobFlow.js');const id=trimAttempt.jobID;
+              if(!checkCurrent())throw Error('Original recording view changed.');
+              let result=await filesFacadeClient.mediaAction('status',id);if(!checkCurrent() || trimAttempt.jobID!==id)throw Error('Original recording view changed.');
+              if(result?.state==='collecting'){result=await filesFacadeClient.mediaAction('collect',id);if(!checkCurrent() || trimAttempt.jobID!==id)throw Error('Original recording view changed.');}
+              const timing=result?.trimTiming ? ` ${describeTrimTiming(result.trimTiming)}` : '';
+              if(['complete','failed','cancelled'].includes(result?.state))trimAttempt.jobID=null;
+              return `Trim job ${id}: ${result?.state || 'unknown'}.${timing}${result?.state==='unknown_outcome'?' Check the original job in Media jobs; do not resubmit.':''}`;
+            }finally{trimAttempt.busy=false;}},
+          onTrim:async(range,selectionCurrent)=>{if(trimAttempt.busy || trimAttempt.jobID)throw Error('Check the original trim job first.');
+            const chat=String(window.sessionModule?.getCurrentSessionId?.() || ''), origin=capturePickerOrigin();
+            const frozenRevision={kind:revision.kind,value:revision.value}, frozenResourceID=String(resource.key?.resourceId || ''), frozenName=String(doc.name || '');
+            const stillCurrent=()=>valid() && selectionCurrent() && pickerOriginCurrent(origin) && activeLeaf(owner.noteWorkspace)?.id===leaf.id
+              && String(window.sessionModule?.getCurrentSessionId?.() || '')===chat && resource?.revision?.kind===frozenRevision.kind && resource?.revision?.value===frozenRevision.value
+              && String(resource.key?.resourceId || '')===frozenResourceID;
+            if(!chat || !frozenResourceID || !stillCurrent())throw Error('The original task or recording changed.');
+            const chooseDestination=()=>new Promise(resolve=>{const picker=createResourcePicker({client:filesFacadeClient,purpose:'folder',...pickerScope(),originWindow:origin.window,
+              getGeneration:()=>Number(state.filesGeneration || state.contextEpoch || 0),getAccountScope:()=>String(state.accountId || ''),getWorkspaceScope:()=>String(state.workspace || ''),
+              isOriginCurrent:stillCurrent,isCompatible:item=>item.provider==='host' && item.capabilities?.write===true ? '' : 'Choose a writable Host folder.',
+              onSelect:item=>{resolve(item.ref);return true;},onCancel:()=>resolve(null),onClose:()=>resolve(null)});void picker.open();});
+            trimAttempt.busy=true;try{const {runTrimMediaFlow}=await import('../mediaJobFlow.js');
+              await runTrimMediaFlow({client:filesFacadeClient,ui:{styledPrompt,styledConfirm},sessionID:chat,current:stillCurrent,chooseDestination,
+                source:{resourceRef:ref,resourceID:frozenResourceID,name:frozenName,revision:frozenRevision,startMs:range.startMs,endMs:range.endMs},
+                onIssued:id=>{trimAttempt.jobID=id;},status:(message,error=false)=>{if(stillCurrent())cache.status.textContent=message;}});
+            }finally{trimAttempt.busy=false;}},
+          onCheckFrame:async()=>{if(!scopeCurrent())throw Error('Original account or Files scope changed.');if(attempt.unknown)throw Error('Original frame save outcome is unknown; do not resubmit.');if(!attempt.handles?.length)return 'No frame save is pending.';const files=await import('../files.js');const result=await files.reconcileBrowserReportImport(attempt.handles,{isCurrent:scopeCurrent});if(!scopeCurrent())throw Error('Original account or Files scope changed.');if(!result?.terminal){attempt.handles=result?.receiptHandles || attempt.handles;throw Error('Frame save remains pending.');}attempt.handles=null;return result.committed?'Frame copy saved; source correspondence is unverified.':'Frame copy was not saved.';},
+          onSaveFrame:async(blob,timeMs,selectionCurrent)=>{if(attempt.busy || attempt.unknown || attempt.handles?.length)throw Error('Check the previous frame save status first.');attempt.busy=true;try{
+            const files=await import('../files.js');if(!valid()||!selectionCurrent())throw Error('Recording or selected frame changed.');
+            const frameFile=new File([blob],`${doc.name.replace(/\.webm$/i,'')}-frame.png`,{type:'image/png'}), source={version:1,kind:'video_frame_copy',sourceRef:ref,expectedRevision:revision,timeHintMs:timeMs};
+            let result,dispatched=false;try{result=await files.importBrowserReportFile(frameFile,{purpose:'video-frame',videoFrameSource:source,isCurrent:()=>valid()&&selectionCurrent(),beforeDispatch:async()=>{const stat=await filesFacadeClient.stat(ref);const ok=valid()&&selectionCurrent()&&stat?.id===resource.key.resourceId&&stat?.revision?.kind===revision.kind&&stat?.revision?.value===revision.value;if(ok)dispatched=true;return ok;}});}catch(error){if(dispatched)attempt.unknown=true;throw error;}
+            if(result?.receiptHandles?.length){attempt.handles=result.receiptHandles;throw Error('Frame save pending; check its status.');}
+            if(result?.submitted && !result?.committed && !result?.rejected){attempt.unknown=true;throw Error('Frame save outcome unknown; do not resubmit.');}
+            if(!result?.committed)throw Error(result?.cancelled?'Frame save cancelled.':'Frame copy was not saved.');
+          }finally{attempt.busy=false;}},onFeedback:async(anchor,selectionCurrent,explaining)=>{
+          const chat=String(window.sessionModule?.getCurrentSessionId?.() || '');
+          const stillCurrent=()=>valid() && selectionCurrent() && String(window.sessionModule?.getCurrentSessionId?.() || '')===chat && activeLeaf(owner.noteWorkspace)?.id===leaf.id;
+          if(!chat || !stillCurrent())throw Error('The original task or recording changed.');
+          const witness=await captureFeedbackScope(chat,stillCurrent);if(!stillCurrent())throw Error('The original task or recording changed.');
+          const detail={chat,target:{resourceRef:ref,expectedRevision:revision,anchor,scope:witness},label:'Recording playback position · unverified',isCurrent:stillCurrent,accepted:false};
+          detail.text=explaining ? 'Explain the selected recording position or range. No video frames or transcript were supplied; state when the available tools cannot inspect them.' : 'Recording annotation: ';
+          document.dispatchEvent(new CustomEvent('openclank:resource-feedback-draft',{detail}));
+          if(!detail.accepted)throw Error('Open the original task feedback panel and finish its current draft first.');
+        }});
+        cache.status.textContent='Playback position is an unverified hint; original recording is unchanged.';
+      }
+      return cache.root;
+    }
+    if (['safetensors-inspect','model-header-inspect'].includes(doc.kind)) {
+      const ref=doc.resource?.locator?.opaqueRef, revision=doc.resource?.revision, format=doc.previewFormat;
+      const signature=JSON.stringify([ref,revision,format?.policyGeneration]);
+      cache.header.replaceChildren(h('strong',{text:doc.name || metadataLabel(format?.formatId)}),h('span',{class:'copal-leaf-mode',text:'Read-only declarations'}));
+      if (cache.iwiSignature !== signature) {
+        cache.iwiController?.abort(); cache.iwiSignature=signature;
+        const owner=current, scope=currentScope(owner), generation=state.filesGeneration, policy=state.filesPolicyGeneration;
+        const controller=new AbortController(); cache.iwiController=controller;
+        const valid=()=>!controller.signal.aborted && context()===owner && currentScope(owner)===scope && state.filesGeneration===generation
+          && state.filesPolicyGeneration===policy && owner.noteLeafViews?.get(leaf.id)===cache && cache.doc===doc;
+        cache.body.replaceChildren(h('p',{text:format?.formatId === 'wasm' ? 'Reading bounded section framing…' : format?.formatId === 'fastfile' ? 'Scanning bounded FastFile candidates…' : format?.formatId === 'asar' ? 'Reading bounded archive header…' : 'Reading bounded model header…'}));
+        void (async()=>{ try {
+          const result=await filesFacadeClient.inspectModelHeader(ref,revision,{signal:controller.signal,format:format.formatId});
+          if (!valid()) return;
+          cache.body.replaceChildren(h('pre',{text:metadataDetails(result,ref,revision,format.policyGeneration,format.formatId)}));
+          cache.status.replaceChildren(h('span',{text:format.formatId === 'wasm' ? 'Framing only; module and payload not validated' : format.formatId === 'fastfile' ? 'Heuristic candidates; payload not verified' : 'Header declarations; payload not verified'}));
+        } catch(error) { if(valid()) cache.body.replaceChildren(h('p',{class:'copal-inspector-error',text:error.message || 'Inspection unavailable.'})); } })();
+      }
+      return cache.root;
+    }
+    if (doc.kind === 'derived-iwi-preview') {
+      const ref = doc.resource?.locator?.opaqueRef, revision = doc.resource?.revision, format = doc.previewFormat;
+      const signature = JSON.stringify([ref, revision, format?.decoderGeneration, format?.policyGeneration]);
+      cache.header.replaceChildren(h('strong', { text:doc.name || 'IWI preview' }), h('span', { class:'copal-leaf-mode', text:'Read-only preview' }));
+      if (cache.iwiSignature !== signature) {
+        cache.iwiController?.abort();
+        if (cache.iwiObjectURL) URL.revokeObjectURL(cache.iwiObjectURL);
+        cache.iwiObjectURL = null; cache.iwiSignature = signature;
+        const owner = current, scope = currentScope(owner), generation = state.filesGeneration, policy = state.filesPolicyGeneration;
+        const controller = new AbortController(); cache.iwiController = controller;
+        const valid = () => !controller.signal.aborted && context() === owner && currentScope(owner) === scope
+          && state.filesGeneration === generation && state.filesPolicyGeneration === policy && owner.noteLeafViews?.get(leaf.id) === cache
+          && cache.doc === doc && JSON.stringify([doc.resource?.locator?.opaqueRef, doc.resource?.revision,
+            doc.previewFormat?.decoderGeneration, doc.previewFormat?.policyGeneration]) === signature;
+        cache.body.replaceChildren(h('p', { text:'Loading read-only preview…' }));
+        void (async () => {
+          try {
+            if (!ref || format?.resourceRef !== ref || (Number(policy) > 0 && Number(format.policyGeneration) !== Number(policy))) throw new Error('The preview scope changed. Reopen the source.');
+            const response = await fetch(filesFacadeClient.contentUrl(ref, { purpose:'preview', expectedRevision:revision }), { signal:controller.signal });
+            if (!valid()) return;
+            const result = await readIwiPreview(response, { descriptor:format, revision, signal:controller.signal });
+            if (!valid()) return;
+            cache.iwiObjectURL = URL.createObjectURL(result.blob);
+            const preview = h('div', { class:'copal-asset-view image' }, h('img', { src:cache.iwiObjectURL, alt:doc.name || 'IWI preview', 'data-copal-image-preview':'', tabindex:'0' }));
+            registerReadingContextMenu(preview, cache);
+            cache.body.replaceChildren(preview);
+            cache.status.replaceChildren(h('span', { text:`Read-only ${result.evidence.variant} preview` }));
+          } catch (error) {
+            if (valid()) cache.body.replaceChildren(h('p', { class:'copal-inspector-error', text:error.message || 'The IWI preview is unavailable.' }));
+          }
+        })();
+      }
+      return cache.root;
+    }
+    if (doc.kind === 'image-session') {
+      const image = current.noteImages?.get(doc.id);
+      cache.header.replaceChildren(h('strong', {text:doc.name || 'Image'}));
+      if (!image || !leaf.image?.viewId) {
+        if (!image && leaf.image?.recovery?.sourceKey == null && leaf.image?.recovery?.draftId && !cache.blankRecoveryStarted) { cache.blankRecoveryStarted=true; cache.body.textContent='Checking image draft…'; void recoverBlankLeaf(current,leaf,cache).catch(error=>{if (current.noteLeafViews?.get(leaf.id)===cache) cache.body.textContent=error.message || 'Blank image recovery is unavailable.';}); }
+        else if (!cache.blankRecoveryStarted) {
+          const recovery=leaf.image?.recovery;
+          const status=h('p',{text:'Image recovery is unavailable. The saved recovery details are preserved.'});
+          cache.body.replaceChildren(status);
+          if (recovery?.sourceKey?.provider==='files' && recovery.opaqueRef && recovery.sourceRevision && imageRecoveryInScope(recovery,current)) {
+            const scope=currentScope(current);
+            const isCurrent=()=>context()===current && currentScope(current)===scope &&
+              findWorkspaceLeaf(current.noteWorkspace,leaf.id)===leaf && leaf.image.recovery===recovery &&
+              current.noteLeafViews?.get(leaf.id)===cache && current.window?.visible;
+            cache.body.append(commandButton('Reopen saved image',async ()=>{
+              if (!isCurrent()) return;
+              try {
+                await resourceOpener({resourceRef:recovery.opaqueRef,expectedRevision:recovery.sourceRevision,
+                  expectedApp:'imps',isCurrent,validateResponse:response=>{
+                    if (response?.resource?.id!==recovery.sourceKey.resourceId) throw new Error('The saved image identity changed.');
+                  }});
+              } catch (_) {
+                if (isCurrent()) status.textContent='The saved image is unavailable. Try again when Files is available, or reopen the exact image from Files.';
+              }
+            }));
+          }
+        }
+        return cache.root;
+      }
+      image.views ||= new Map();
+      const viewId=leaf.image.viewId;
+      let imageView=image.views.get(viewId);
+      if (!imageView) { imageView={id:viewId,leafId:leaf.id,runtime:null,lifetime:null,mounting:false,mountAttempt:0,mountBlocked:false}; image.views.set(viewId,imageView); }
+      if (imageView.leafId !== leaf.id) { cache.body.textContent='Image view identity conflict.'; return cache.root; }
+      cache.imageId=doc.id; cache.imageViewId=viewId;
+      if (imageView.runtime && !imageView.mounting && !imageView.runtime.isEditorOpen()) { imageView.lifetime?.dispose(); imageView.lifetime=null; imageView.runtime=null; }
+      if (imageView.mountBlocked && !imageView.mounting) showImageMountRecovery(current,image,imageView,cache,leaf.id);
+      if (!imageView.runtime && !imageView.mounting && !imageView.mountBlocked) {
+        imageView.mounting=true;
+        imageView.mountAttempt++;
+        const owner=current, scope=image.scope, session=image.session, root=cache.body, view=imageView;
+        const currentView=()=>context()===owner && currentScope(owner)===scope && owner.noteImages?.get(doc.id)===image && image.views.get(viewId)===view && owner.noteLeafViews.get(leaf.id)===cache;
+        const authority={isActive:()=>context()===owner,validateScope:target=>currentScope(owner)===scope && target.scope.accountId===state.accountId && target.scope.workspaceId===String(state.workspace || '') && document.body.dataset.accountId===target.scope.accountId,
+          validate:target=>authority.validateScope(target) && (image.blank ? target.sessionId===session.sessionId && target.sourceKey==null && target.sourceRevision==null && target.sourceDigest==null && target.opaqueRef==null && target.projectId==null && target.projectRevision==null : target.sourceKey?.provider==='files')};
+        (async()=>{ try {
+          if (image.initialLoad) await image.initialLoad;
+          if (!currentView()) return;
+          const [{createImageRuntime},{default:modalManager}]=await Promise.all([import('../imps.js'),import('../modalManager.js')]);
+          if (image.initialLoad) await image.initialLoad;
+          if (!currentView()) return;
+          if (!authority.validateScope(session.captureTarget())) throw new Error('Image authority changed');
+          const retained=Boolean(session.getSceneAuthority());
+          view.lifetime=createEditorLifetime();
+          const persistence=session.getPersistenceController()?.adapter || createImagePersistence({session,authority,filesClient:filesFacadeClient});
+          const visible = () => root.isConnected && authority.isActive() && owner.window.visible && !owner.window.body.hidden
+            && groupForLeaf(owner.noteWorkspace,leaf.id)?.activeLeafId === leaf.id;
+          root.replaceChildren();
+          view.runtime=createImageRuntime({session,root,lifetime:view.lifetime,authority,persistence,modalManager,viewId,hostOriginal:image.hostOriginal,requestHostSave:()=>saveImageToChosenHost(owner,image),
+            onContextFeedback:(region, chat, isCurrent) => sendImageRegionFeedback(region, chat, () => currentView() && visible() && isCurrent()),
+          });
+          root.style.visibility='hidden';
+          view.runtime.setVisible(visible());
+          const runtime=view.runtime, attachmentSource=image.initialAttachment;
+          const load=(async()=>{
+            const result=retained ? await runtime.mountRetained() :
+              attachmentSource ? await runtime.openAttachmentSource(attachmentSource,doc.name,image.initialProvenance) :
+              image.blank ? await runtime.openEditor(null,null,image.presetSize,doc.name) : await runtime.openResource(session.captureTarget().opaqueRef);
+            if (result?.status==='unavailable' || !runtime.isSceneReady()) throw new Error(result?.reason || 'Image opening did not finish.');
+            session.markInitialized();
+            if (!authority.validateScope(session.captureTarget())) throw new Error('Image authority changed');
+            image.initialAttachment=null; image.initialProvenance=null;
+            if (!attachmentSource && (!retained || image.restoreDraft) && session.captureTarget().draftId) {
+              image.restoreDraft=true;
+              const restored=await session.restoreDraft(viewId);
+              if (restored?.status!=='restored') throw new Error(restored?.reason || 'Image draft restore unavailable');
+              image.restoreDraft=false;
+            }
+          })();
+          if (!retained || image.restoreDraft) image.initialLoad=load;
+          try { await load; } finally { if (image.initialLoad===load) image.initialLoad=null; }
+          if (!currentView()) { view.runtime?.retireView?.(); return; }
+          root.style.visibility='';
+          view.runtime.setSharedCommands(Boolean(current.noteWorkbenchMenu));
+          view.runtime.setFocused(activeLeaf(owner.noteWorkspace)?.id === leaf.id);
+          view.runtime.setVisible(visible());
+          cache.status.hidden=true;
+          cache.status.style.display='none';
+          image.readyViews?.get(viewId)?.resolve(view.runtime); image.readyViews?.delete(viewId);
+        } catch (error) {
+          image.readyViews?.get(viewId)?.reject(error); image.readyViews?.delete(viewId);
+          view.lifetime?.dispose(); view.lifetime=null; view.runtime=null; view.mountBlocked=true;
+          root.style.visibility='';
+          if (currentView()) { root.replaceChildren(); showImageMountRecovery(owner,image,view,cache,leaf.id,error?.message); }
+        }
+        finally { if (!currentView()) { image.readyViews?.get(viewId)?.reject(new Error('The target image view was superseded.')); image.readyViews?.delete(viewId); } view.mounting=false; } })();
+      }
+      imageView.runtime?.setVisible(true);
+      return cache.root;
+    }
     if (leaf.view === 'base' || leaf.view === 'canvas') {
       if (cache.rawSourceActive !== leaf.rawSource) {
         if (leaf.rawSource) disposeSheet(cache);
@@ -4595,18 +6690,117 @@ export function createNotesFeature({
         h('span', { class:'copal-leaf-mode', text:'Canonical Redb view' }),
       );
       renderTimeline?.(cache.body);
-      cache.status.replaceChildren(h('span', { text:'Timeline · canonical Copal planning records' }));
+      cache.status.replaceChildren(h('span', { text:'Timeline · saved planning records' }));
       return cache.root;
     }
     leafHeader(cache, leaf, doc, workspace, group);
-    registerWikiArticleContextMenu(cache, leaf, doc, workspace, group);
     cache.body.classList.toggle('copal-rendered-article-scroll', doc.readOnly === true);
+    if (doc.kind !== 'slides' && cache.slideView) {
+      cache.slideUnsubscribe?.(); cache.slideUnsubscribe = null;
+      cache.slideView.dispose(); cache.slideView = null;
+    }
+    if (doc.kind !== 'workbook' && cache.workbookView) {
+      cache.workbookUnsubscribe?.(); cache.workbookUnsubscribe = null;
+      cache.workbookView.dispose(); cache.workbookView = null;
+    }
+    if (doc.kind === 'workbook' && (leaf.mode === 'source' || leaf.rawSource)) {
+      cache.workbookUnsubscribe?.(); cache.workbookUnsubscribe = null;
+      cache.workbookView?.dispose(); cache.workbookView = null;
+      if (doc.readOnly || doc.sharedText?.format === 'workbook') { disposeRawEditor(cache); cache.body.replaceChildren(h('pre', {class:'copal-readonly-source', tabindex:'0', 'aria-label':'Read-only source'}, h('code', {text:sourceValue(doc)}))); }
+      else updateSourceLeaf(cache, leaf, doc, workspace);
+      updateLeafStatus(cache); return cache.root;
+    }
+    if (doc.kind === 'workbook') {
+      if (cache.editor) disposeRawEditor(cache);
+      const workbookBinding = JSON.stringify([doc.resource?.key, doc.resource?.capabilities?.edit, doc.readOnly]);
+      if (cache.workbookView && (cache.workbookDoc !== doc || cache.workbookBinding !== workbookBinding)) {
+        cache.workbookUnsubscribe?.(); cache.workbookUnsubscribe = null;
+        cache.workbookView.dispose(); cache.workbookView = null;
+      }
+      if (!cache.workbookView) {
+        const owner = current, scope = currentScope(owner), boundDoc = doc, boundBinding = workbookBinding;
+        const valid = () => context() === owner && currentScope(owner) === scope && owner.noteLeafViews?.get(leaf.id) === cache
+          && cache.doc === boundDoc && JSON.stringify([boundDoc.resource?.key, boundDoc.resource?.capabilities?.edit, boundDoc.readOnly]) === boundBinding;
+        cache.workbookDoc = boundDoc; cache.workbookBinding = boundBinding;
+        const buffer = sourceEditBuffer(doc);
+        cache.workbookView = mountWorkbookView(cache.body, {
+          bindContext:(node, hit) => bindDeliverableContext(node, hit, leaf, doc, valid),
+          getSource:() => sourceValue(doc), readOnly:doc.readOnly === true, sharedCellMode:doc.sharedText?.format === 'workbook', isCurrent:valid,
+          captureAppearance:() => captureDeliverableAppearance(),
+          onOpenSource:() => { if (valid()) { setWorkspaceLeafMode(workspace, leaf.id, 'source'); persist(true); render(); } },
+          transact:transform => valid() ? applyDocumentTransaction(doc, transform, {origin:'workbook'}) : {outcome:'failed', message:'The original workbook is unavailable.'},
+        });
+        if (buffer) cache.workbookUnsubscribe = buffer.subscribe(() => { if (valid()) cache.workbookView?.refresh(); });
+      }
+      updateLeafStatus(cache);
+      return cache.root;
+    }
+    if (doc.kind === 'slides' && (leaf.mode === 'source' || leaf.rawSource)) {
+      cache.slideUnsubscribe?.(); cache.slideUnsubscribe = null;
+      cache.slideView?.dispose(); cache.slideView = null;
+      if (doc.readOnly || doc.sharedText?.format === 'slides') { disposeRawEditor(cache); cache.body.replaceChildren(h('pre', {class:'copal-readonly-source', tabindex:'0', 'aria-label':'Read-only source'}, h('code', {text:sourceValue(doc)}))); }
+      else updateSourceLeaf(cache, leaf, doc, workspace);
+      updateLeafStatus(cache); return cache.root;
+    }
+    if (doc.kind === 'slides') {
+      if (cache.editor) disposeRawEditor(cache);
+      const slideBinding = JSON.stringify([doc.resource?.key, doc.resource?.capabilities?.edit, doc.readOnly]);
+      if (cache.slideView && (cache.slideDoc !== doc || cache.slideBinding !== slideBinding)) {
+        cache.slideUnsubscribe?.(); cache.slideUnsubscribe = null;
+        cache.slideView.dispose(); cache.slideView = null;
+      }
+      if (!cache.slideView) {
+        const owner = current, scope = currentScope(owner), boundDoc = doc, boundBinding = slideBinding;
+        const valid = () => context() === owner && currentScope(owner) === scope && owner.noteLeafViews?.get(leaf.id) === cache
+          && cache.doc === boundDoc && JSON.stringify([boundDoc.resource?.key, boundDoc.resource?.capabilities?.edit, boundDoc.readOnly]) === boundBinding;
+        cache.slideDoc = boundDoc; cache.slideBinding = boundBinding;
+        const buffer = sourceEditBuffer(doc);
+        let assets = new Map(), assetController = null, assetTimer = null, disposed = false, innerView = null;
+        const refreshAssets = () => {
+          assetController?.abort(); assetController = null; clearTimeout(assetTimer); assets = new Map();
+          if (!valid() || disposed) return;
+          const source = sourceValue(boundDoc), resource = boundDoc.resource, ref = resource?.locator?.opaqueRef;
+          const revision = resource?.revision, accountId = bufferScope(owner)?.accountId;
+          if (!ref || !revision || !accountId) return;
+          const expectedRevision = JSON.stringify(revision), controller = new AbortController(); assetController = controller;
+          const same = () => !disposed && !controller.signal.aborted && valid() && sourceValue(boundDoc) === source
+            && boundDoc.resource === resource && resource?.locator?.opaqueRef === ref && JSON.stringify(resource?.revision) === expectedRevision
+            && bufferScope(owner)?.accountId === accountId;
+          assetTimer = setTimeout(() => { assetTimer = null;
+            void acquireSlideAssets({source,sourceRef:ref,sourceRevision:revision,filesClient:filesFacadeClient,accountId,signal:controller.signal,isCurrent:same})
+              .then(result => { if (same() && (result.state === 'ready' || result.state === 'partial')) { assets = result.assets; innerView?.refresh(); } })
+              .catch(() => { /* Retain explicit placeholders when acquisition is unavailable. */ });
+          }, 160);
+        };
+        innerView = mountSlideView(cache.body, {
+          bindContext:(node, hit) => bindDeliverableContext(node, hit, leaf, doc, valid),
+          getSource:() => sourceValue(doc), readOnly:doc.readOnly === true, sharedTextMode:doc.sharedText?.format === 'slides', isCurrent:valid,
+          captureAppearance:() => captureDeliverableAppearance(), getAssets:() => assets,
+          onOpenSource:() => { if (valid()) { setWorkspaceLeafMode(workspace, leaf.id, 'source'); persist(true); render(); } },
+          transact:transform => valid() ? applyDocumentTransaction(doc, transform, {origin:'slides'}) : {outcome:'failed', message:'The original slide deck is unavailable.'},
+        });
+        cache.slideView = {refresh() { innerView.refresh(); refreshAssets(); }, getSelection() { return innerView.getSelection(); },
+          dispose() { if (disposed) return; disposed = true; clearTimeout(assetTimer); assetController?.abort(); assets = new Map(); innerView.dispose(); }};
+        refreshAssets();
+        if (buffer) cache.slideUnsubscribe = buffer.subscribe(() => { if (valid()) cache.slideView?.refresh(); });
+      }
+      updateLeafStatus(cache); return cache.root;
+    }
     if (doc.readOnly) {
-      cache.body.replaceChildren(
-        leaf.mode === 'source' ? h('pre', { class:'copal-readonly-source', tabindex:'0', 'aria-label':'Read-only article source' }, h('code', { text:sourceValue(doc) })) : isFormattingDemoDocument(doc)
-          ? renderFormattingDemoBody(doc)
-          : renderMarkdown(sourceValue(doc), new Set([doc.id]), doc),
-      );
+      const readonlySource = sourceValue(doc), formattingDemo = isFormattingDemoDocument(doc);
+      cache.inlineReading?.dispose(); cache.inlineReading = null;
+      cache.inlinePreview?.dispose(); cache.inlinePreview = null;
+      if (leaf.mode === 'source') {
+        const source = h('pre', { class:'copal-readonly-source', tabindex:'0', 'aria-label':'Read-only article source' }, h('code', { text:readonlySource }));
+        registerReadingContextMenu(source, cache);
+        cache.body.replaceChildren(source);
+      } else {
+        const article = renderReadonlyArticle(doc, readonlySource);
+        article.rendered.tabIndex = 0;
+        registerReadingContextMenu(article.rendered, cache, { allowWikiCopy:leaf.view === 'wiki' });
+        cache.body.replaceChildren(formattingDemo ? renderFormattingDemoBody(doc, article) : article.rendered);
+      }
+      if (leaf.mode !== 'source' && !formattingDemo) cache.inlineReading = ownInlinePreview(cache,cache.body,doc,readonlySource);
       if (leaf.view === 'wiki' && leaf.mode !== 'source') {
         cache.body.append(wikiArticleChrome(doc));
         if (canMakeEditableWikiCopy(doc)) {
@@ -4657,34 +6851,33 @@ export function createNotesFeature({
   // split editor or dialog.
   function registerEditorContextMenu(cache) {
     if (cache.contextMenuDispose || !cache.editor?.view) return;
-    const host = cache.editor.view.dom;
-    const register = window.openClankContextMenu?.registerAdapter;
-    if (!register || !host) return;
-    const editing = createCodeMirrorContextAdapter(cache.editor, {
-      // The menu may await clipboard permission while another leaf, account,
-      // or workspace changes.  Keep the captured command bound to this exact
-      // buffer and save scope instead of relying on document length alone.
-      bufferIdentity:() => `${cache.doc?.id || ''}:${JSON.stringify(cache.doc?.resource?.key || cache.doc?.resourceKey || {})}`,
-      revision:() => cache.doc?.head || cache.doc?.resource?.revision?.value || '',
-      scope:() => `${state.accountId || ''}:${state.workspace || ''}:${state.contextEpoch || 0}`,
-      onCommand:async (command) => {
-        if (command === 'insert-template') { insertTemplate(); return true; }
-        if (command === 'new-from-template') { createFromTemplate(); return true; }
-        return false;
+    const editor = cache.editor;
+    const owner = context();
+    const leafId = cache.leaf.id;
+    const editing = createCodeMirrorContextAdapter(editor, {
+      bufferIdentity:() => cache.doc,
+      revision:() => JSON.stringify([cache.doc?.head, cache.doc?.resource?.revision, workbenchLocalRevision(owner, cache.doc?.id)]),
+      scope:() => currentScope(),
+      onCommand:async (command, request) => {
+        if (command !== 'insert-template' || request.adapterContext?.ranges?.length !== 1
+          || request.adapterContext.ranges[0].anchor !== request.adapterContext.ranges[0].head) return false;
+        const target = captureTemplateTarget(cache);
+        if (!target) return false;
+        insertTemplateAt(target);
+        return true;
       },
     });
-    cache.contextMenuDispose=register(host,{
-      ...editing,groupCommands:true,
-      capture:(...args)=>({...editing.capture(...args),navigation:captureNotesWorkbench()}),
-      commands:request=>[...editing.commands(request).map(item=>({...item,menu:'Text & selection'})),...notesWorkbenchCommands(request.adapterContext.navigation).map(item=>({...item,disabled:Boolean(item.disabledReason)}))],
-      execute:async(command,request)=>{
-        if(!command.startsWith('editor.'))return editing.execute(command,request);
-        if(!editing.isCurrent(request))throw new Error('The captured editing selection changed. Reopen its menu.');
-        const target=request.adapterContext.navigation;
-        if(target.editor!==cache.editor||!notesWorkbenchCurrent(target))throw new Error('The captured Editor pane changed. Reopen its menu.');
-        const descriptor=notesWorkbenchCommands(target).find(item=>item.id===command);
-        if(!descriptor||descriptor.disabledReason)throw new Error('This Editor command is unavailable.');
-        await descriptor.run();return true;
+    const isCurrent = request => context() === owner && owner.window.visible && owner.noteLeafViews.get(leafId) === cache
+      && groupForLeaf(owner.noteWorkspace, leafId)?.activeLeafId === leafId && cache.editor === editor && editing.isCurrent(request);
+    cache.contextMenuDispose = registerAdapter(editor.view.dom, {
+      ...editing, isCurrent,
+      commands:request => editing.commands(request).filter(item => item.id !== 'new-from-template'
+        && (item.id !== 'insert-template' || !cache.doc?.virtual && !cache.doc?.readOnly
+          && !request.adapterContext?.text && request.adapterContext?.ranges?.length === 1
+          && request.editable && templateDocuments().length > 0)),
+      execute:(command, request) => {
+        if (!isCurrent(request)) throw new Error('The captured Editor pane changed. Reopen its menu.');
+        return editing.execute(command, request);
       },
     });
   }
@@ -4770,7 +6963,93 @@ export function createNotesFeature({
     return { ok:true, text:`\n${wrapped.text}`, replaceFrom:placement.from, replaceTo:placement.to };
   }
 
+  function hostAttachmentDialog(cache, doc, file, cursor, {clipboard = false} = {}) {
+    if (!cache.editor?.view || !cursor?.revision || !file || file.size < 1 || file.size > 10 * 1024 * 1024) {
+      context()?.window?.setStatus('A current Host document and a file up to 10 MiB are required.', true); return false;
+    }
+    const targetRef=String(doc.resource?.locator?.opaqueRef || doc.resourceRef || '');
+    const targetKey=canonicalEditorResourceKey(doc.resource?.key || doc.resourceKey || {}, 'host');
+    if (!targetRef || !targetKey) { context()?.window?.setStatus('The Host document is unavailable.', true); return false; }
+    const originalScope=currentScope(), ownerContext=context(), origin=capturePickerOrigin(), originalWorkspace=String(state.workspace || 'default'), originalPolicy=state.filesPolicyGeneration;
+    let active=true;
+    const current=()=>active && context() === ownerContext && currentScope() === originalScope && pickerOriginCurrent(origin) && attachmentCursorCurrent(cache,doc,cursor)
+      && String(state.workspace || 'default') === originalWorkspace && state.filesPolicyGeneration === originalPolicy
+      && String(doc.resource?.locator?.opaqueRef || doc.resourceRef || '') === targetRef;
+    const upload = file.name ? file : new File([file], clipboard ? 'clipboard' : 'attachment', {type:file.type || 'application/octet-stream'});
+    const operationId=`host-attachment-${crypto.randomUUID()}`;
+    const caption=h('input',{class:'copal-attachment-caption',type:'text',value:String(upload.name), 'aria-label':'Attachment caption'});
+    const progress=h('p',{class:'copal-attachment-progress',role:'status','aria-live':'polite',text:'Ready to attach.'});
+    const attach=h('button',{class:'copal-btn primary',text:'Attach'}), cancel=h('button',{class:'copal-btn',text:'Cancel'});
+    const dialog=h('dialog',{class:'copal-dialog copal-attachment-dialog'},h('h2',{text:`Attach ${upload.name}`}),
+      h('p',{text:`${upload.type || 'application/octet-stream'} · ${upload.size} bytes`}),h('label',{},h('span',{text:'Caption'}),caption),progress,
+      h('div',{class:'copal-dialog-actions'},cancel,attach));
+    wireDialog(dialog); document.body.append(dialog); dialog.showModal();
+    dialog.addEventListener('close',()=>{active=false;dialog.remove();});
+    cancel.addEventListener('click',()=>{active=false;dialog.close();});
+    let issued=false;
+    attach.addEventListener('click',async()=>{
+      if (issued || !current()) return;
+      attach.disabled=true;
+      try {
+        const choice=await styledPrompt('Type 1 to use the existing document location, or 2 to choose an authorized project folder.',{title:'Attachment location',defaultValue:'1'});
+        if (choice == null) {attach.disabled=false;return;}
+        if (!['1','2'].includes(choice.trim())) throw new Error('Choose 1 or 2.');
+        let selectedRoot=null;
+        if (choice.trim()==='2') {
+          selectedRoot=await new Promise(resolve=>{
+            const picker=createResourcePicker({client:filesFacadeClient,purpose:'folder',...pickerScope(),originWindow:origin.window,
+              getGeneration:()=>Number(state.filesGeneration || state.contextEpoch || 0), getAccountScope:()=>String(state.accountId || ''), getWorkspaceScope:()=>String(state.workspace || ''),
+              isOriginCurrent:current, isCompatible:resource=>resource.provider !== 'host' || resource.capabilities?.write !== true || !resource.revision ? 'Choose a writable Host folder with a current revision.' : '',
+              onSelect:async resource=>{resolve(resource);return true;},onCancel:()=>resolve(null),onClose:()=>resolve(null)});
+            void picker.open();
+          });
+          if (!selectedRoot) {attach.disabled=false;return;}
+        }
+        if (!current()) throw new Error('The Editor target changed.');
+        const roots=await filesFacadeClient.roots({copalWorkspace:originalWorkspace});
+        const generation=Number(roots?.policy_generation);
+        if (!current() || !Number.isSafeInteger(generation) || generation < 0 || (originalPolicy != null && Number(originalPolicy) !== generation)) throw new Error('Files access changed.');
+        const bytes=await upload.arrayBuffer();
+        if (bytes.byteLength !== upload.size) throw new Error('The attachment changed.');
+        const digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');
+        if (!current()) throw new Error('The Editor target changed.');
+        const mode=/^(?:image|video|audio)\//i.test(upload.type || '') ? 'embed' : 'link';
+        const target={kind:'host_document',resource_ref:targetRef,expected_revision:cursor.revision,
+          ...(selectedRoot ? {root_ref:selectedRoot.ref,expected_root_revision:selectedRoot.revision} : {})};
+        issued=true; caption.disabled=true; progress.textContent='Preparing the attachment…';
+        let prepared;
+        try { prepared=await filesFacadeClient.prepareAttachmentUpload({operationId,generation,file:upload,target,mode,workspace:originalWorkspace}); }
+        catch (error) {
+          if (!current()) throw new Error('The Editor target changed; check the original operation.');
+          const recovered=await reconcileAttachment(operationId,originalWorkspace,null);
+          prepared=validateAttachmentPreparationRecovery(recovered,{operationId,generation,sourceRevision:{kind:'contentDigest',value:digest},targetKey,targetRef,targetRevision:cursor.revision,mode,
+            rootRef:selectedRoot?.ref || '',rootRevision:selectedRoot?.revision || null});
+        }
+        if (!current()) throw new Error('The Editor target changed; the prepared attachment was retained.');
+        const source=prepared.source_identity;
+        if (source?.kind !== 'client_upload' || source.sha256 !== digest || source.size !== upload.size || source.name !== upload.name || source.mime !== (upload.type || 'application/octet-stream')) throw new Error('The attachment receipt changed.');
+        preparedAttachmentInsertion(prepared,{operationId,sourceRevision:{kind:'contentDigest',value:digest},targetKey,targetRef,targetRevision:cursor.revision});
+        const insertion={...prepared.insertion,label:caption.value.trim() || upload.name};
+        const placed=placeAttachmentMarkdown(cache,doc,cursor,serializeAttachmentInsertion(insertion,{mode}));
+        if (!placed.ok || !current()) throw new Error(placed.error || 'The Editor target changed.');
+        const transaction=applyDocumentTransaction(doc,text=>{
+          if (text !== cache.editor.view.state.doc.toString()) throw new Error('The document changed.');
+          return `${text.slice(0,placed.replaceFrom ?? cursor.from)}${placed.text}${text.slice(placed.replaceTo ?? cursor.to)}`;
+        },{origin:'files-attachment'});
+        if (!['queued','unchanged'].includes(transaction?.outcome)) throw new Error('Attachment insertion was not applied.');
+        progress.textContent='Attachment inserted.'; dialog.close(); dialog.remove();
+      } catch(error) {
+        progress.textContent=issued ? `Attachment outcome requires review. Check operation ${operationId}; do not repeat it automatically.` : String(error?.message || 'Attachment unavailable.');
+        if (!issued) attach.disabled=false;
+      }
+    });
+    return true;
+  }
+
   function attachmentDialog(cache, doc, file, cursor, { clipboard = false } = {}) {
+    if (String(doc.resource?.key?.provider || doc.resourceKey?.provider || '') === 'host') {
+      return hostAttachmentDialog(cache, doc, file, cursor, {clipboard});
+    }
     if (!uploadAttachment || !cache.editor?.view || !cursor) return false;
     const caption = h('input', { class:'copal-attachment-caption', type:'text', value:String(file.name || ''), 'aria-label':'Attachment caption' });
     const progress = h('p', { class:'copal-attachment-progress', role:'status', 'aria-live':'polite', text:'Ready to attach.' });
@@ -5079,12 +7358,35 @@ export function createNotesFeature({
             throw new Error('The Files source changed; retry the drop.');
           }
           const sourceRevision = source.revision || authorizedSource.revision;
+          const targetProvider = String(doc.resource?.key?.provider || doc.resourceKey?.provider || 'copal');
+          if (!['host','copal'].includes(targetProvider)) throw new Error('This document cannot accept Files attachments.');
+          let selectedRoot = null;
+          if (targetProvider === 'host') {
+            const rootChoice = await styledPrompt('Type 1 to use the existing document location, or 2 to choose an authorized project folder.', {title:'Attachment location', defaultValue:'1'});
+            if (rootChoice == null) throw new Error('Attachment cancelled.');
+            if (!['1','2'].includes(rootChoice.trim())) throw new Error('Choose 1 or 2.');
+            if (rootChoice.trim() === '2') {
+              const origin = capturePickerOrigin();
+              selectedRoot = await new Promise(resolve => {
+                const picker = createResourcePicker({client:filesFacadeClient, purpose:'folder', ...pickerScope(), originWindow:origin.window,
+                  getGeneration:() => Number(state.filesGeneration || state.contextEpoch || 0),
+                  getAccountScope:() => String(state.accountId || ''), getWorkspaceScope:() => String(state.workspace || ''),
+                  isOriginCurrent:() => pickerOriginCurrent(origin) && scope === currentScope() && attachmentCursorCurrent(cache, doc, cursor),
+                  isCompatible:resource => resource.provider !== 'host' || resource.capabilities?.write !== true || !resource.revision ? 'Choose a writable Host folder with a current revision.' : '',
+                  onSelect:async resource => { resolve(resource); return true; }, onCancel:() => resolve(null), onClose:() => resolve(null)});
+                void picker.open();
+              });
+              if (!selectedRoot) throw new Error('Attachment cancelled.');
+            }
+          }
+          if (scope !== currentScope() || !attachmentCursorCurrent(cache, doc, cursor)) throw new Error('The Editor target changed; retry the attachment.');
           let result;
           try {
             result = await filesFacadeClient.prepareAttachment({
               operationId, generation:checked.context.generation,
               source:{ resourceRef:authorizedSource.ref, ...(sourceRevision ? { expectedRevision:sourceRevision } : {}) },
-              target:{ kind:'copal_document', resource_ref:targetRef, expected_revision:cursor.revision }, mode:'link', workspace:checked.context.workspace,
+              target:{ kind:targetProvider === 'host' ? 'host_document' : 'copal_document', resource_ref:targetRef, expected_revision:cursor.revision,
+                ...(selectedRoot ? {root_ref:selectedRoot.ref, expected_root_revision:selectedRoot.revision} : {}) }, mode:'link', workspace:checked.context.workspace,
             }, { signal:controller.signal });
           } catch (error) {
             if (!attachmentPreparationMayHaveCommitted(error)) throw error;
@@ -5094,9 +7396,11 @@ export function createNotesFeature({
               sourceKey:binding.sourceKey, sourceRef:binding.sourceRef, sourceItemId:binding.sourceItemId,
               sourceRevision, targetKey:binding.targetKey, targetRef:binding.targetRef,
               targetRevision:binding.targetRevision, mode:binding.mode,
+              rootRef:selectedRoot?.ref || '', rootRevision:selectedRoot?.revision || null,
               accountId:binding.accountId, workspace:binding.workspace, policyGeneration:binding.policyGeneration,
             });
           }
+          if (selectedRoot && (result.target_identity?.root_ref !== selectedRoot.ref || result.target_identity?.root_revision?.kind !== selectedRoot.revision?.kind || result.target_identity?.root_revision?.value !== selectedRoot.revision?.value)) throw new Error('The attachment root changed.');
           if (scope !== currentScope()) throw new Error('The Editor account changed; retry the drop.');
           const live = validateEditorTransfer(checked.payload, { targetRef, targetKey, sourceKind:'file' });
           if (!live.ok || live.context.commandId !== binding.commandId || live.context.owner !== binding.accountId
@@ -5130,6 +7434,7 @@ export function createNotesFeature({
       cache.editorWrap = h('div', { class:'copal-note-editing-surface' });
       cache.host = h('div', { class:'copal-codemirror-host' });
       cache.preview = h('article', { class:'copal-note-live-preview' });
+      registerReadingContextMenu(cache.preview, cache);
       cache.editorWrap.append(cache.host, cache.preview);
     }
     if (!cache.editor) {
@@ -5173,7 +7478,7 @@ export function createNotesFeature({
         onSelection:(selection, update) => { if (update?.selectionSet && !update?.docChanged) { const buffer = context()?.noteBuffers?.get(doc.id); if (buffer) buffer.lastHistoryTime = 0; } leaf.selection = selection; cache.selectionGeneration = Number(cache.selectionGeneration || 0) + 1; cache.cursorLine = selection.line; persist(); updateLeafStatus(cache); },
         onScroll:(scrollTop) => { leaf.scrollTop = scrollTop; persist(); },
         onSyntaxStatus:() => updateLeafStatus(cache),
-        onChange:(value, update, edit) => { const liveDoc = workspaceDocuments().find(item => item.id === doc.id) || doc; doc.text = value; liveDoc.text = value; queueSave(liveDoc, value, { origin:edit?.origin || 'transaction', history:true }); if (leaf.rawSource) publishRawBaseDefinition(liveDoc, value); syncDocumentEditors(doc.id, value, cache.editor, update?.changes); updatePreview(cache, liveDoc, value); updateLeafStatus(cache); },
+        onChange:(value, update, edit) => { cache.htmlVisualPanel?.invalidate(); const liveDoc = workspaceDocuments().find(item => item.id === doc.id) || doc; doc.text = value; liveDoc.text = value; queueSave(liveDoc, value, { origin:edit?.origin || 'transaction', history:true }); if (leaf.rawSource) publishRawBaseDefinition(liveDoc, value); syncDocumentEditors(doc.id, value, cache.editor, update?.changes); updatePreview(cache, liveDoc, value); updateLeafStatus(cache); },
         onCommand:(command) => {
           if (command === 'save') void saveDraft(doc.id);
           else if (command === 'quick-open') showChooser();
@@ -5192,8 +7497,25 @@ export function createNotesFeature({
     return cache.editorWrap;
   }
 
+  function ownInlinePreview(cache, root, doc, source) {
+    const owner = context(), scope = currentScope(owner), leafId = cache.leaf?.id;
+    const sourceGeneration = workbenchLocalRevision(owner,doc.id), filesGeneration = state.filesGeneration;
+    const originResource = doc.resource, originHead = doc.head;
+    const sourceCurrent = () => context() === owner && currentScope(owner) === scope && owner?.noteLeafViews?.get(leafId) === cache
+      && cache.doc === doc && doc.resource === originResource && doc.head === originHead && state.filesGeneration === filesGeneration
+      && workbenchLocalRevision(owner,doc.id) === sourceGeneration && sourceValue(doc) === source;
+    const hydration = mountInlinePreviewHydration(root, {isCurrent:() => sourceCurrent() && root.isConnected});
+    let unsubscribeBuffer = null, done = false;
+    const dispose = () => { if (done) return; done = true; unsubscribeBuffer?.(); unsubscribeCreation(); hydration.dispose(); };
+    const attach = buffer => { unsubscribeBuffer?.(); unsubscribeBuffer = buffer?.subscribe?.(() => { if (!sourceCurrent()) dispose(); }) || null; };
+    const unsubscribeCreation = subscribeToDocumentBuffer(doc.id,attach);
+    attach(owner?.noteBuffers?.get(doc.id));
+    return Object.freeze({dispose});
+  }
+
   function updatePreview(cache, doc, value = sourceValue(doc)) {
     if (!cache.preview || cache.preview.hidden) return;
+    if (cache.previewValue !== value) { cache.inlinePreview?.dispose(); cache.inlinePreview = null; }
     cache.previewPending = { doc, value };
     if (cache.previewFrame != null) return;
     cache.previewFrame = requestAnimationFrame(() => {
@@ -5201,8 +7523,10 @@ export function createNotesFeature({
       const pending = cache.previewPending; cache.previewPending = null;
       if (!pending || !cache.preview?.isConnected || cache.preview.hidden) return;
       if (cache.previewValue === pending.value) return;
+      cache.inlinePreview?.dispose(); cache.inlinePreview = null;
       cache.preview.replaceChildren(renderMarkdown(pending.value, new Set([pending.doc.id]), pending.doc));
       cache.previewValue = pending.value;
+      cache.inlinePreview = ownInlinePreview(cache,cache.preview,pending.doc,pending.value);
       applyCompletedVisibility(cache.preview);
       wireInteractiveTables(cache.preview, pending.value, pending.doc, cache);
     });
@@ -5371,21 +7695,57 @@ export function createNotesFeature({
     }
   }
 
+  let editorFactoriesLoading;
+  function editorsReady(cache) {
+    if (createMarkdownEditor) return true;
+    cache.body.textContent = 'Loading editor…';
+    if (!editorFactoriesLoading) {
+      editorFactoriesLoading = import('./codemirror.js').then(factories => {
+        createMarkdownEditor = factories.createMarkdownEditor;
+        createSourceEditor = factories.createSourceEditor;
+      }).finally(() => { editorFactoriesLoading = null; });
+    }
+    if (!cache.waitingForEditor) {
+      const owner = context(), scope = currentScope(owner);
+      const current = () => context() === owner && currentScope(owner) === scope
+        && owner?.noteLeafViews?.get(cache.leaf.id) === cache;
+      cache.waitingForEditor = true;
+      editorFactoriesLoading.then(() => {
+        if (current()) { owner.noteShellCache = null; render(); }
+      }).catch(() => {
+        if (current()) cache.body.replaceChildren(h('button', { type:'button', text:'Retry loading editor', onclick:() => {
+          if (current()) { owner.noteShellCache = null; render(); }
+        } }));
+      }).finally(() => { cache.waitingForEditor = false; });
+    }
+    return false;
+  }
+
   function updateMarkdownLeaf(cache, leaf, doc, workspace) {
-    const editorWrap = ensureEditor(cache, leaf, doc, workspace);
     cache.root.dataset.mode = leaf.mode;
     cache.root.dataset.previewLayout = workspace.settings.previewLayout;
     if (leaf.mode === 'reading') {
-      cache.reading ||= h('article', { class:'copal-note-reading', tabindex:'0', 'aria-label':'Article' });
+      cache.inlinePreview?.dispose(); cache.inlinePreview = null;
+      if (!cache.reading) {
+        cache.reading = h('article', { class:'copal-note-reading', tabindex:'0', 'aria-label':'Article' });
+        registerReadingContextMenu(cache.reading, cache);
+      }
       cache.reading.style.height = '100%';
-      cache.reading.replaceChildren(renderMarkdown(sourceValue(doc), new Set([doc.id]), doc));
+      const readingSource = sourceValue(doc);
+      cache.inlineReading?.dispose(); cache.inlineReading = null;
+      cache.reading.replaceChildren(renderMarkdown(readingSource, new Set([doc.id]), doc));
+      cache.inlineReading = ownInlinePreview(cache,cache.reading,doc,readingSource);
       applyCompletedVisibility(cache.reading);
       // Reading view exposes the same table operations as live preview.
       wireInteractiveTables(cache.reading, sourceValue(doc), doc, cache);
       cache.body.replaceChildren(cache.reading);
       return;
     }
+    if (!editorsReady(cache)) return;
+    const editorWrap = ensureEditor(cache, leaf, doc, workspace);
+    cache.inlineReading?.dispose(); cache.inlineReading = null;
     const sideBySide = leaf.mode === 'live' && workspace.settings.previewLayout === 'side-by-side';
+    if (!sideBySide) { cache.inlinePreview?.dispose(); cache.inlinePreview = null; cache.previewValue = null; }
     editorWrap.classList.toggle('side-by-side', sideBySide);
     cache.preview.hidden = !sideBySide;
     if (sideBySide) updatePreview(cache, doc);
@@ -5393,6 +7753,7 @@ export function createNotesFeature({
   }
 
   function updateSourceLeaf(cache, leaf, doc, workspace) {
+    if (!editorsReady(cache)) return;
     const editorWrap = ensureEditor(cache, { ...leaf, mode:'source' }, doc, workspace);
     editorWrap.classList.remove('side-by-side'); cache.preview.hidden = true;
     cache.body.replaceChildren(editorWrap);
@@ -5449,13 +7810,14 @@ export function createNotesFeature({
         cache.sheetResourceKey = resourceKey;
         cache.sheetCleanup = mountSheet(cache.body, cache.sheetController, {
           schema:doc.propertySchema || {},
+          canWriteCell:row => baseAdapter.canWriteCell?.(row) !== false,
+          canChangeViews:!doc.readOnly,
           onToolbar:(action) => baseAdapter.toolbar?.(doc, action, cache.sheetController),
           onOverflow:(sheetState) => baseAdapter.overflow?.(doc, cache.sheetController, sheetState, cache.leaf?.id),
           onColumnMenu:(column) => baseAdapter.columnMenu?.(doc, column, cache.sheetController),
           onColumnResize:(column, width, sheetState) => baseAdapter.columnResize?.(doc, column, width, cache.sheetController, sheetState),
           onColumnReorder:(fromProperty, toProperty, sheetState, payloadScope) => baseAdapter.columnReorder?.(doc, fromProperty, toProperty, cache.sheetController, sheetState, payloadScope),
           onViewCommand:(command, view) => baseAdapter.viewCommand?.(doc, command, view, cache.sheetController),
-          onContextCommand:(command, node) => baseAdapter.contextCommand?.(doc, command, node, cache.sheetController),
           onOpenSource:openBaseSource,
           onClear:(cells) => baseAdapter.clear?.(doc, cells, cache.sheetController),
           onPaste:(preview) => baseAdapter.paste?.(doc, preview, cache.sheetController),
@@ -5518,7 +7880,10 @@ export function createNotesFeature({
   function updateAssetLeaf(cache, doc, view) {
     const url = `${state.api}/api/copal/assets/${encodeURIComponent(doc.id)}?workspace=${encodeURIComponent(state.workspace)}`;
     const host = h('div', { class:`copal-asset-view ${view}` });
-    if (view === 'image') host.append(h('img', { src:url, alt:doc.name }));
+    if (view === 'image') {
+      host.append(h('img', { src:url, alt:doc.name, 'data-copal-image-preview':'', tabindex:'0' }));
+      registerReadingContextMenu(host, cache);
+    }
     else if (view === 'audio') host.append(h('audio', { src:url, controls:true, 'aria-label':doc.name }));
     else if (view === 'video') host.append(h('video', { src:url, controls:true, 'aria-label':doc.name }));
     else if (view === 'pdf') host.append(h('iframe', { src:url, title:doc.name }));
@@ -5607,7 +7972,8 @@ export function createNotesFeature({
 
   function updateLeafStatus(cache) {
     if (!cache?.status || !cache.doc) return;
-    const buffer = context()?.noteBuffers?.get(cache.docId);
+    const owner=context(), buffer = owner?.noteBuffers?.get(cache.docId);
+    const hostNotice=owner?.noteHostNotices?.get(cache.docId);
     const recoveryError = buffer?.state().recoveryError;
     const editor = cache.doc.readOnly || cache.leaf?.mode === 'reading' ? null : cache.editor;
     const status = editor?.getStatus?.();
@@ -5617,7 +7983,9 @@ export function createNotesFeature({
     const line = primary ? editor.view.state.doc.lineAt(primary.head) : null;
     const count = selection?.ranges.length || 0;
     const dirty = Boolean(buffer?.state?.().dirty || context()?.noteDrafts?.has(cache.docId));
-    const saveLabel = cache.doc.readOnly ? 'Read only' : buffer?.uncertainSave ? 'Save outcome unknown' : buffer?.pendingEdits?.size ? 'Staged comment edit' : cache.saveState === 'saving' ? 'Saving…' : cache.saveState === 'conflict' ? 'Conflict'
+    const journalConflict = buffer?.journalRecovery && buffer.state().status === 'conflict' && buffer.conflict?.remote;
+    const saving = cache.saveState === 'saving' || buffer?.running;
+    const saveLabel = cache.doc.readOnly ? 'Read only' : journalConflict ? 'Conflict' : saving ? 'Saving…' : buffer?.uncertainSave ? 'Save outcome unknown' : buffer?.pendingEdits?.size ? 'Staged comment edit' : cache.saveState === 'conflict' ? 'Conflict'
       : cache.saveState === 'error' ? 'Save failed' : dirty ? 'Unsaved' : 'Saved';
     const language = status?.language?.name || status?.language?.id
       || SELECTABLE_LANGUAGES.find(entry => entry.id === cache.languageMode)?.displayName
@@ -5628,8 +7996,20 @@ export function createNotesFeature({
       ...(line ? [h('span', { class:'copal-status-position', text:`Ln ${line.number}, Col ${primary.head - line.from + 1}` })] : []),
       ...(count ? [h('span', { class:'copal-status-cursors', text:`${count} cursor${count === 1 ? '' : 's'}`, title:`${count} selection range${count === 1 ? '' : 's'}` })] : []),
       h('span', { class:`copal-save-state ${dirty ? 'unsaved' : cache.saveState}`, text:saveLabel }),
+      ...(buffer?.journalRecovery && buffer.recovered ? [h('span', { text:'Recovered draft' })] : []),
       ...(recoveryError ? [h('span', { class:'copal-save-state error', text:dirty ? 'Recovery unavailable' : 'Recovery cleanup failed', title:`${dirty ? 'Save before closing; restart recovery is unavailable.' : 'Saved; old recovery draft could not be cleared.'} ${String(recoveryError.message || recoveryError)}` })] : []),
-      ...(buffer?.uncertainSave ? [commandButton('Retry previous Save', () => void retryDocumentSave(cache.docId))] : []),
+      ...(journalConflict && showDocumentConflict ? [commandButton('Compare saved version', () => {
+        const remote = journalConflict.envelope ? { ...journalConflict.envelope, head:journalConflict.revision?.value } : journalConflict;
+        showDocumentConflict({ ...cache.doc, head:buffer.handle.revision.value }, String(buffer.envelope.text ?? ''), remote, presentationId);
+      })] : buffer?.uncertainSave && !saving ? [commandButton(cache.doc.sharedText ? 'Check original status' : 'Retry previous Save', () => void retryDocumentSave(cache.docId))] : []),
+      ...(hostNotice?.state === 'refreshed' ? [
+        h('span',{text:hostNotice.range ? `Updated from disk · lines ${hostNotice.range.firstLine}–${hostNotice.range.lastLine}` : 'Disk revision updated'}),
+        ...(hostNotice.range ? [commandButton('Jump to change',()=>focusSourceLine(cache.docId,hostNotice.range.firstLine))] : []),
+      ] : hostNotice?.state === 'conflict' ? [
+        h('span',{text:hostNotice.currentUnavailable ? 'Original file unavailable · edits kept' : 'Changed on disk · edits kept',title:`Disk revision ${hostNotice.revision.value}`}),
+        commandButton('Compare with disk',()=>showHostFileComparison(owner,cache.doc,hostNotice)),
+      ] : hostNotice ? [h('span',{text:hostNotice.state === 'watch-unavailable' ? 'Live updates unavailable' : 'Original file unavailable'})] : []),
+      ...(hostNotice && hostNotice.state !== 'refreshed' ? [commandButton('Refresh from disk',()=>owner.noteHostFileWatch?.manual(cache.docId))] : []),
       ...(buffer?.historyNotice ? [h('span', { text:'Undo history limit reached', title:buffer.historyNotice })] : []),
       ...(syntaxLabel ? [h('span', { class:'copal-syntax-status', text:syntaxLabel, title:syntax.message }), ...(syntax.retryable ? [h('button', { type:'button', class:'copal-btn', text:'Retry syntax', onclick:() => editor?.retrySyntax?.() })] : [])] : []));
   }
@@ -5924,6 +8304,10 @@ export function createNotesFeature({
 
   function focusOutline(leaf, entry) {
     const cache = context().noteLeafViews.get(leaf.id);
+    if (officialTranslationId(cache?.doc) && leaf.mode !== 'source') {
+      cache.body.querySelector(`[data-line="${entry.line}"]`)?.scrollIntoView({ block:'center' });
+      return;
+    }
     if (leaf.mode === 'reading') {
       cache?.reading?.querySelector(`[data-line="${entry.line}"]`)?.scrollIntoView({ block:'center' });
       return;
@@ -5931,12 +8315,36 @@ export function createNotesFeature({
     cache?.editor?.focusLine(entry.line);
   }
 
-  function focusSourceLine(docId, line) {
+  function focusSourceRange(docId, range, isCurrent) {
+    const workspace = ensureWorkspace();
+    const leaf = activeLeaf(workspace);
+    if (!leaf || leaf.docId !== docId) return;
+    const current = context();
+    const focusOwner = document.activeElement;
+    requestAnimationFrame(async () => {
+      if (current !== context() || activeLeaf(workspace)?.id !== leaf.id || !isCurrent()) return;
+      if (editorFactoriesLoading) await editorFactoriesLoading.catch(() => {});
+      const editor = current.noteLeafViews.get(leaf.id)?.editor;
+      if (editor?.getSyntaxStatus?.().state === 'loading') await editor.languageReady;
+      if (current !== context() || activeLeaf(workspace)?.id !== leaf.id || !isCurrent()
+          || current.noteLeafViews.get(leaf.id)?.editor !== editor
+          || (document.activeElement !== focusOwner && document.activeElement !== document.body
+              && document.activeElement !== editor?.view?.contentDOM)) return;
+      const view = editor?.view;
+      if (!view?.dom?.isConnected || range.to > view.state.doc.length) return;
+      editor.focus();
+      view.dispatch({selection:{anchor:range.from,head:range.to},scrollIntoView:true});
+    });
+  }
+
+  function focusSourceLine(docId, line, isCurrent = () => true) {
     const workspace = ensureWorkspace();
     const leaf = activeLeaf(workspace);
     if (!leaf || leaf.docId !== docId) return false;
     const current = context();
-    requestAnimationFrame(() => { if (current === context() && activeLeaf(workspace)?.id === leaf.id) focusOutline(leaf, { line }); });
+    requestAnimationFrame(() => {
+      if (current === context() && activeLeaf(workspace)?.id === leaf.id && isCurrent()) focusOutline(leaf, { line });
+    });
     return true;
   }
 
@@ -5977,29 +8385,20 @@ export function createNotesFeature({
     return pane;
   }
 
-  function appendNavigationPanel(body, tab, workspace) {
-    const button = (doc) => h('button', { class:'copal-doc-row', 'data-note-tree-key':`document:${doc.id}`, text:doc.name, onclick:() => open(doc.id) });
-    if (tab === 'tags') {
-      const tagged = new Map();
-      for (const doc of explorerDocs()) for (const tag of doc.tags || []) {
-        const name = String(tag).replace(/^#/, '');
-        if (!tagged.has(name)) tagged.set(name, []);
-        if (!tagged.get(name).includes(doc)) tagged.get(name).push(doc);
-      }
-      const expanded = context().noteTagGroups ||= new Set();
-      body.append(h('header', {}, h('strong', { text:'Tags' })));
-      for (const [tag, matches] of [...tagged].sort(([a], [b]) => a.localeCompare(b))) {
-        const section = h('details', { class:'copal-tag-group', open:expanded.has(tag) }, h('summary', { 'data-note-tree-key':`tag:${tag}`, text:`#${tag} · ${matches.length}` }));
-        section.addEventListener('toggle', () => { if (section.isConnected) section.open ? expanded.add(tag) : expanded.delete(tag); });
-        section.append(...matches.map(button)); body.append(section);
-      }
-      if (!tagged.size) body.append(h('p', { class:'copal-empty-inline', text:'No tags yet.' }));
-      return;
-    }
-    const bookmarks = tab === 'bookmarks';
-    const unique = [...new Set(bookmarks ? workspace.bookmarks : workspace.recent)].map(id => state.docs.find(doc => doc.id === id)).filter(doc=>doc && !isChatResource(doc));
-    body.append(h('header', {}, h('strong', { text:bookmarks ? 'Bookmarks' : 'Recent documents' })), ...unique.map(button));
-    if (!unique.length) body.append(h('p', { class:'copal-empty-inline', text:bookmarks ? 'Bookmark a document from its actions menu.' : 'No recent documents.' }));
+  function appendRecentDocuments(body, workspace) {
+    const recent = [...new Set(workspace.recent)].map(id => state.docs.find(doc => doc.id === id)).filter(doc => doc && !isChatResource(doc));
+    body.append(h('header', {}, h('strong', { text:'Recent documents' })));
+    for (const doc of recent) body.append(h('button', { class:'copal-doc-row', 'data-note-tree-key':`document:${doc.id}`, text:doc.name, onclick:() => open(doc.id) }));
+    if (!recent.length) body.append(h('p', { class:'copal-empty-inline', text:'No recent documents.' }));
+  }
+
+  function documentTags(doc) {
+    const indexedTags = Array.isArray(doc.tags) ? doc.tags : [];
+    const tags = [...new Set(indexedTags.map(tag => String(tag).trim().replace(/^#/, '')).filter(Boolean))];
+    const body = tags.length
+      ? h('div', { class:'copal-inline-props' }, ...tags.map(tag => h('span', { class:'copal-inline-props-chip', text:`#${tag}` })))
+      : h('p', { class:'copal-empty-inline', text:'No tags.' });
+    return h('section', { 'aria-label':'Document tags' }, h('h3', { text:'Tags' }), body);
   }
 
   function rightSidebar(workspace, shellState) {
@@ -6015,11 +8414,14 @@ export function createNotesFeature({
     }
     addRovingFocus(tabs, panelIds, (id) => { workspace.right.tab = id; persist(true); render(); });
     const pin = commandButton(workspace.right.pinnedDocId ? 'Unpin' : 'Pin', () => { workspace.right.pinnedDocId = workspace.right.pinnedDocId ? null : activeLeaf(workspace)?.docId || null; persist(true); render(); }, { 'aria-pressed':String(!!workspace.right.pinnedDocId) });
-    const body = h('div', { class:'copal-inspector-body', 'data-note-panel':workspace.right.tab });
-    if (['tags', 'bookmarks', 'recent'].includes(workspace.right.tab)) appendNavigationPanel(body, workspace.right.tab, workspace);
+    const body = h('div', { class:'copal-inspector-body', role:'region', 'aria-label':NOTES_PANELS[workspace.right.tab]?.label, 'data-note-panel':workspace.right.tab });
+    if (workspace.right.tab === 'recent') appendRecentDocuments(body, workspace);
     else if (!doc) body.append(h('p', { class:'copal-empty-inline', text:'No active document.' }));
     else if (doc.virtual) body.append(h('p', { class:'copal-empty-inline', text:'Timeline is a canonical database view. Select a note to inspect properties, links, or outline.' }));
-    else if (workspace.right.tab === 'properties') body.append(propertiesPane(doc));
+    else if (workspace.right.tab === 'properties') {
+      if (presentationId === 'notes') body.append(documentTags(doc));
+      body.append(propertiesPane(doc));
+    }
     else if (workspace.right.tab === 'links') body.append(linksPane(doc));
     else if (workspace.right.tab === 'outline') body.append(outlinePane(doc, workspace));
     aside.append(h('header', { class:'copal-shell-side-header right' }, tabs, pin,
@@ -6027,36 +8429,108 @@ export function createNotesFeature({
     return aside;
   }
 
-  function ribbon(workspace) {
-    const folderMode = Boolean(workspace?.left?.folderWorkspaceRoot);
-    return h('nav', { class:'copal-notes-ribbon', 'aria-label':'Editor actions' },
-      h('button', { text:'＋', title:folderMode ? 'New File' : 'New note', 'aria-label':folderMode ? 'New File' : 'New note', onclick:() => createNew() }),
-      h('button', { text:'↔', title:'Open Timeline', 'aria-label':'Open Timeline', onclick:() => open(TIMELINE_DOCUMENT.id) }),
-      h('button', { text:'⌕', title:'Quick switcher', 'aria-label':'Quick switcher', onclick:() => showChooser() }),
-      h('button', { text:'⌘', title:'Command palette', 'aria-label':'Command palette', onclick:showCommands }));
+  function showExplorer(forceOpen = false) {
+    const current = context();
+    const workspace = ensureWorkspace();
+    if (!current || !workspace) return;
+    if (manualWorkspace(workspace,current)) {
+      if (shellViewport().narrow) current.noteDrawer = forceOpen || current.noteDrawer !== 'left' ? 'left' : null;
+      else current.noteManualExplorerOpen = forceOpen || current.noteManualExplorerOpen === false;
+      render();
+      return;
+    }
+    const visible = shellViewport().narrow ? current.noteDrawer === 'left' : current.noteImageExplorer?.left ?? workspace.left.open;
+    const selected = workspace.left.tab === 'files';
+    workspace.left.tab = 'files';
+    if (!visible || (selected && !forceOpen)) toggleSidebar('left');
+    else { persist(true); render(); }
+  }
+
+  function ribbon(workspace, visible) {
+    const icons = {files:'folder', search:'search', recent:'clock', properties:'settings', links:'link', outline:'list'};
+    const panels = workspacePanelsForSide(workspace,'left').filter(id => !mountEditorActivity || id !== 'files');
+    const activatePanel = (id, collapse = false) => {
+      if (collapse && visible && workspace.left.tab === id) toggleSidebar('left');
+      else {
+        const current = context();
+        workspace.left.tab = id;
+        if (shellViewport().narrow) current.noteDrawer = 'left';
+        else if (current.noteImageExplorer) current.noteImageExplorer.left = true;
+        else workspace.left.open = true;
+        persist(true); render();
+      }
+      context()?.window.body.querySelector(`[data-rail-panel="${id}"]`)?.focus({preventScroll:true});
+    };
+    const tabs = h('div',{role:'tablist','aria-label':'Editor sidebar panels','aria-orientation':'vertical'});
+    for (const id of panels) {
+      const label = NOTES_PANELS[id].label;
+      const selected = workspace.left.tab === id;
+      tabs.append(iconCommandButton(icons[id], () => activatePanel(id,true), {type:'button',role:'tab',
+        class:selected && visible ? 'active' : '', 'data-rail-panel':id, title:label,'aria-label':label,
+        'aria-controls':`copal-${presentationId}-left-sidebar`, 'aria-selected':String(selected && visible),tabindex:selected || (!panels.includes(workspace.left.tab) && id === panels[0]) ? '0' : '-1'}));
+    }
+    addRovingFocus(tabs,panels,id => activatePanel(id));
+    const shortcuts = workspace.settings.ribbon ? h('div',{class:'copal-ribbon-shortcuts'},
+      ...(!manualWorkspace(workspace) ? [iconCommandButton('file-plus', () => createNew(),{title:editorNewPageLabel(workspace),'aria-label':editorNewPageLabel(workspace)})] : []),
+      iconCommandButton('timeline', () => open(TIMELINE_DOCUMENT.id),{title:'Open Timeline','aria-label':'Open Timeline'}),
+      iconCommandButton('terminal',showCommands,{title:'Command palette','aria-label':'Command palette'})) : null;
+    if (!mountEditorActivity) return h('nav', {class:'copal-notes-ribbon','aria-label':'Editor navigation'},tabs,shortcuts);
+    const contents = document.createDocumentFragment();
+    contents.append(tabs);
+    if (shortcuts) contents.append(shortcuts);
+    return contents;
   }
 
   function render() {
+    const current = context();
+    if (current?.window.body?.hidden) return;
     const started = performance.now();
     activateNotes?.();
-    const current = context();
     const workspace = ensureWorkspace();
     if (!current || !workspace || !current.window.body) return;
     ensureWorkbenchProvider(current);
     trackDocumentNavigation(current, workspace);
-    current.notePanelPositions = capturePanelPositions(current.window.body, current.notePanelPositions);
     const docs = documents();
     const workspaceDocs = workspaceDocuments();
+    syncHostFileWatch(current,workspace,workspaceDocs);
     const leaf = activeLeaf(workspace);
     const doc = leaf ? workspaceDocs.find((item) => item.id === leaf.docId) || null : null;
+    if (editorConsumer) clearLegacyManualBinding(workspace,doc);
+    bindExplorerForDocument(current,workspace,leaf,doc);
+    const binding=explorerBinding(workspace);
+    const manual = binding === 'manual';
+    const viewKey=workspace.left.folderWorkspaceRoot?.resourceKey || 'places';
+    if (current.noteFilesExplorer && (binding==='copal' || binding==='binder' || current.noteFilesExplorer.viewKey!==viewKey)) {
+      current.noteFilesExplorer.dispose();
+      current.noteFilesExplorer=null;
+    }
+    if (!leaf) current.noteExplorerBindAttempt=null;
+    syncFocusedImage(current,workspace);
     current.selected = doc?.id || null;
     state.selected = current.selected;
     persistActiveContext();
     bindKeys(workspace, doc);
+    if (!current.noteLanguageHandler) {
+      current.noteLanguageHandler = () => {
+        if (state.view !== presentationId || context() !== current || !current.noteWorkspace || !current.window.body.isConnected) return;
+        const openIds = new Set(workspaceLeaves(current.noteWorkspace).map(item => item.docId));
+        if (state.docs.some(item => openIds.has(item.id) && officialTranslationId(item))) render();
+      };
+      document.addEventListener('openclank:languagechange', current.noteLanguageHandler);
+    }
     if (!current.notePageHideHandler) {
       current.notePageHideHandler = () => { persist(true); persistRecovery(); };
       window.addEventListener('pagehide', current.notePageHideHandler);
-      current.noteBeforeUnloadHandler ||= event => { if (current.noteDrafts?.size || [...(current.noteBuffers?.values() || [])].some(buffer => buffer.state().dirty)) { persistRecovery(); event.preventDefault(); event.returnValue = ''; } };
+      current.noteBeforeUnloadHandler ||= event => {
+        persistRecovery();
+        const needsWarning = buffer => !buffer?.journalRecovery || Boolean(buffer.recoveryError);
+        if ([...(current.noteImages?.values() || [])].some(image => image.session.isDirty()) ||
+            [...(current.noteDrafts?.keys() || [])].some(id => needsWarning(current.noteBuffers?.get(id))) ||
+            [...(current.noteBuffers?.values() || [])].some(buffer => buffer.state().dirty && needsWarning(buffer))) {
+          event.preventDefault();
+          event.returnValue = '';
+        }
+      };
       window.addEventListener('beforeunload', current.noteBeforeUnloadHandler);
     }
     if (!current.noteShellMedia) {
@@ -6069,6 +8543,7 @@ export function createNotesFeature({
     }
 
     const viewport = shellViewport();
+    syncImageExplorer(current, leaf);
     current.noteDrawer ||= null;
     if (!viewport.compact) current.noteDrawer = null;
     if (!viewport.narrow && current.noteDrawer === 'left') current.noteDrawer = null;
@@ -6092,9 +8567,14 @@ export function createNotesFeature({
       serializeNotesWorkspace(workspace),
       current.selected,
       current.noteDrawer || null,
+      binding,
+      current.noteManualExplorerOpen !== false,
+      current.noteImageExplorer?.left ?? null,
+      current.noteImageExplorer?.right ?? null,
       viewport.narrow,
       viewport.compact,
       current.noteRenderVersion || 0,
+      window.openClankI18n?.locale || 'en',
       // Authorization/listing readiness lives outside the persisted layout.
       // Its transitions must replace stale rendered controls even when the
       // renewed ref and rows happen to be identical to the saved page.
@@ -6105,6 +8585,15 @@ export function createNotesFeature({
       current.noteResourceRequestEpoch || 0,
     ]);
     const cached = current.noteShellCache;
+    const visibleViews = new Set(workspaceGroups(workspace)
+      .map(group => group.tabs.find(item => item.id === group.activeLeafId)?.image?.viewId).filter(Boolean));
+    for (const owner of documentContexts()) {
+      for (const image of owner.noteImages?.values() || []) {
+        for (const view of image.views.values()) {
+          view.runtime?.setVisible(owner === current && visibleViews.has(view.id));
+        }
+      }
+    }
     if (cached && cached.key === renderCacheKey && cached.docs === state.docs && cached.shell?.isConnected) {
       current.noteMetrics.renders += 1;
       current.noteMetrics.lastRenderMs = performance.now() - started;
@@ -6112,19 +8601,20 @@ export function createNotesFeature({
       afterRender?.(cached.shell);
       return;
     }
+    current.notePanelPositions = capturePanelPositions(current.window.body, current.notePanelPositions);
     const controls = ensureShellControls();
     for (const button of Object.values(controls)) {
       for (const animation of button.getAnimations()) animation.cancel();
       button.style.pointerEvents = '';
     }
     const before = Object.fromEntries(Object.entries(controls).map(([side, button]) => [side, button.isConnected ? button.getBoundingClientRect() : null]));
-    const focusedSide = document.activeElement === controls.left ? 'left' : document.activeElement === controls.right ? 'right' : null;
-    const leftVisible = viewport.narrow ? current.noteDrawer === 'left' : workspace.left.open;
-    const rightVisible = viewport.compact ? current.noteDrawer === 'right' : workspace.right.open;
+    const focusedSide = document.activeElement === controls.right ? 'right' : null;
+    const leftVisible = viewport.narrow ? current.noteDrawer === 'left'
+      : manual ? current.noteManualExplorerOpen !== false : (current.noteImageExplorer?.left ?? workspace.left.open);
+    const rightVisible = viewport.compact ? current.noteDrawer === 'right' : (current.noteImageExplorer?.right ?? workspace.right.open);
     const controlGroupId = groupForLeaf(workspace, workspace.activeLeafId)?.id || workspaceGroups(workspace)[0]?.id || null;
-    const shellState = { ...viewport, controls, controlGroupId };
-    syncShellControl(controls.left, 'left', leftVisible, !viewport.narrow && leftVisible ? 'sidebar' : 'tabs');
-    syncShellControl(controls.right, 'right', rightVisible, !viewport.compact && rightVisible ? 'sidebar' : 'tabs');
+    const shellState = { ...viewport, controls, controlGroupId, rightVisible };
+    syncShellControl(controls.right, rightVisible, !viewport.compact && rightVisible ? 'sidebar' : 'tabs');
 
     const shell = h('div', {
       class:`copal-notes-workspace${leftVisible ? '' : ' left-closed'}${rightVisible ? '' : ' right-closed'}${workspace.settings.ribbon ? ' ribbon-open' : ''}${viewport.narrow ? ' narrow' : viewport.compact ? ' compact' : ''}`,
@@ -6133,8 +8623,9 @@ export function createNotesFeature({
       'data-editor-constructions':current.noteMetrics.editorConstructions,
       'data-drawer':current.noteDrawer || 'none',
     });
-    if (workspace.settings.ribbon) shell.append(ribbon(workspace));
-    if (leftVisible) shell.append(leftSidebar(workspace, docs, shellState));
+    const activity = ribbon(workspace,leftVisible);
+    if (!mountEditorActivity) shell.append(activity);
+    if (leftVisible) shell.append(leftSidebar(workspace));
     const main = h('main', { class:'copal-notes-main' }, renderNode(workspace.root, workspace, workspaceDocs, shellState));
     shell.append(main);
     if (rightVisible) shell.append(rightSidebar(workspace, shellState));
@@ -6144,7 +8635,14 @@ export function createNotesFeature({
     for (const leafId of [...current.noteLeafViews.keys()]) if (!validLeaves.has(leafId)) disposeLeaf(leafId);
     const previousFocus = current.window.body.contains(document.activeElement) ? document.activeElement : null;
     current.window.body.querySelectorAll('.copal-sidebar-resize').forEach(handle => handle._copalResizeCleanup?.());
-    current.window.body.replaceChildren(shell);
+    if (mountEditorActivity) {
+      const previousPanel = previousFocus?.closest?.('[data-rail-panel]')?.dataset.railPanel;
+      mountEditorActivity(activity);
+      const previousShell = current.window.body.querySelector(':scope > .copal-notes-workspace');
+      if (previousShell) previousShell.replaceWith(shell);
+      else current.window.body.append(shell);
+      if (previousPanel) current.window.body.querySelector(`[data-rail-panel="${previousPanel}"]`)?.focus({ preventScroll:true });
+    } else current.window.body.replaceChildren(shell);
     restorePanelPositions(current.window.body, current.notePanelPositions);
     if (previousFocus?.isConnected) {
       const editorHost = previousFocus.closest?.('.cm-editor');
@@ -6228,7 +8726,7 @@ export function createNotesFeature({
     const editor = cache?.editor?.view?.dom?.isConnected && leaf?.mode !== 'reading' ? cache.editor : null;
     const selection = editor?.view.state.selection;
     return Object.freeze({
-      current, workspace, scope:currentScope(current), generation:Number(state.filesGeneration || state.contextEpoch || 0),
+      current, workspace, scope:currentScope(current), generation:Number(state.filesGeneration || state.contextEpoch || 0), image:current?.noteImages?.get(doc?.id) || null, imageRuntime:current?.noteImages?.get(doc?.id)?.views?.get(leaf?.image?.viewId)?.runtime || null, imageViewId:leaf?.image?.viewId || null,
       leafId:leaf?.id || null, groupId:group?.id || null, docId:doc?.id || null, doc,
       name:doc?.name || '', head:String(doc?.head || doc?.resource?.revision?.value || ''),
       readOnly:Boolean(doc?.readOnly || doc?.builtin || doc?.virtual || doc?.note_error || doc?.rawPreserved),
@@ -6237,6 +8735,8 @@ export function createNotesFeature({
       folderEpoch:current?.noteResourceRequestEpoch || 0,
       buffer:current?.noteBuffers?.get(doc?.id) || null, localRevision:workbenchLocalRevision(current, doc?.id),
       editor, documentIdentity:editor?.view.state.doc || null,
+      workbookView:cache?.workbookView || null, workbookSelection:cache?.workbookView?.getSelection?.() || null,
+      slideView:cache?.slideView || null, slideSelection:cache?.slideView?.getSelection?.() || null,
       ranges:selection ? selection.ranges.map(range => ({ anchor:range.anchor, head:range.head })) : [],
       mainIndex:selection?.mainIndex || 0, status:editor ? getEditorStatus() : null,
     });
@@ -6257,6 +8757,8 @@ export function createNotesFeature({
       || !allowFolderRefresh && (editorCreationFolder(workspace, current) !== target.folder || workspace?.left?.folderWorkspaceRoot !== target.anchor
         || (current?.noteResourceRequestEpoch || 0) !== target.folderEpoch)) return false;
     if (!allowEditing && workbenchLocalRevision(current, target.docId) !== target.localRevision) return false;
+    if ((current.noteImages?.get(target.docId) || null) !== target.image) return false;
+    if ((target.image?.views?.get(target.imageViewId)?.runtime || null) !== target.imageRuntime) return false;
     if (!allowEditing && !allowSaved && (String(doc?.head || doc?.resource?.revision?.value || '') !== target.head
       || (current.noteBuffers?.get(target.docId) || null) !== target.buffer)) return false;
     if (target.editor) {
@@ -6271,6 +8773,94 @@ export function createNotesFeature({
     return true;
   }
 
+  // A captured target is only an address to the existing transaction owner;
+  // it is not a source or write grant and cannot be reconstructed by callers.
+  const summaryDocumentTargets = new WeakMap();
+  function captureSummaryDocumentTarget() {
+    const target = captureNotesWorkbench(), doc = target.doc;
+    const resource = doc?.resource, key = resource?.key || doc?.resourceKey;
+    const scope = bufferScope(target.current);
+    if (!doc || target.readOnly || !['note','markdown'].includes(doc.kind)
+        || !key || !scope?.accountId || document.body?.dataset?.accountId !== scope.accountId
+        || resource?.capabilities?.edit === false
+        || (doc.sharedText && (doc.sharedText.format !== 'text' || !doc.sharedText.adapter || doc.sharedText.isCurrent?.() !== true))
+        || !notesWorkbenchCurrent(target)) return null;
+    const source = sourceValue(doc), localRevision = workbenchLocalRevision(target.current, doc.id);
+    const handle = Object.freeze({name:String(doc.name || 'Document')});
+    summaryDocumentTargets.set(handle, {target, doc, resource, key:JSON.stringify(key), scope, source, localRevision});
+    return handle;
+  }
+
+  function insertSummaryDocumentSection(handle, {section, marker} = {}) {
+    const captured = handle && summaryDocumentTargets.get(handle);
+    if (!captured || typeof section !== 'string' || !section || typeof marker !== 'string' || !marker
+        || section.length > 1048576 || !section.isWellFormed()
+        || !/^<!-- openclank-summary-section:v1:[0-9a-f]{64} -->$/.test(marker)
+        || !section.startsWith(marker + '\n') || section.indexOf(marker) !== section.lastIndexOf(marker))
+      return {outcome:'failed',message:'Summary insertion unavailable.'};
+    const {target, doc, resource, key, scope, source, localRevision} = captured;
+    const liveKey = doc.resource?.key || doc.resourceKey;
+    if (!notesWorkbenchCurrent(target) || target.readOnly || doc.resource !== resource
+        || JSON.stringify(liveKey) !== key || !sameSaveScope(bufferScope(target.current), scope)
+        || document.body?.dataset?.accountId !== scope.accountId || !['note','markdown'].includes(doc.kind)
+        || doc.resource?.capabilities?.edit === false
+        || (doc.sharedText && (doc.sharedText.format !== 'text' || !doc.sharedText.adapter || doc.sharedText.isCurrent?.() !== true))
+        || workbenchLocalRevision(target.current,doc.id) !== localRevision || sourceValue(doc) !== source || source.includes(marker))
+      return {outcome:'failed',message:'The document changed or the summary is already present.'};
+    const separator = !source || source.endsWith('\n\n') ? '' : source.endsWith('\n') ? '\n' : '\n\n';
+    const result = applyDocumentTransaction(doc, text => text + separator + section,
+      {origin:'code-summary-section',expectedSource:source,expectedLocalRevision:localRevision});
+    if (result.outcome === 'queued' || result.outcome === 'unchanged') summaryDocumentTargets.delete(handle);
+    return result;
+  }
+
+  // Append-only wiki write. Same drift guards as insertSummaryDocumentSection;
+  // never removes or replaces existing text. {preview:true} only classifies.
+  function insertWikiPages(handle, {indexMarkdown, pages, preview = false} = {}) {
+    const captured = handle && summaryDocumentTargets.get(handle);
+    if (!captured || typeof indexMarkdown !== 'string' || !Array.isArray(pages))
+      return {outcome:'failed',message:'Wiki insertion unavailable.'};
+    const {target, doc, resource, key, scope, source, localRevision} = captured;
+    const liveKey = doc.resource?.key || doc.resourceKey;
+    if (!notesWorkbenchCurrent(target) || target.readOnly || doc.resource !== resource
+        || JSON.stringify(liveKey) !== key || !sameSaveScope(bufferScope(target.current), scope)
+        || document.body?.dataset?.accountId !== scope.accountId || !['note','markdown'].includes(doc.kind)
+        || doc.resource?.capabilities?.edit === false
+        || (doc.sharedText && (doc.sharedText.format !== 'text' || !doc.sharedText.adapter || doc.sharedText.isCurrent?.() !== true))
+        || workbenchLocalRevision(target.current,doc.id) !== localRevision || sourceValue(doc) !== source)
+      return {outcome:'failed',message:'The document changed. Preview again.'};
+    if (preview) return {outcome:'preview', revision:localRevision, ...classifyWikiPages(source, {indexMarkdown, pages})};
+    const plan = planWikiAppend(source, {indexMarkdown, pages});
+    if (plan.outcome === 'failed') return plan;
+    const {appended, skipped, stale, bytes} = plan;
+    if (plan.outcome === 'unchanged') { summaryDocumentTargets.delete(handle); return {outcome:'unchanged', appended, skipped, stale, bytes}; }
+    const result = applyDocumentTransaction(doc, text => text + plan.text,
+      {origin:'code-wiki-pages',expectedSource:source,expectedLocalRevision:localRevision});
+    if (result.outcome === 'queued' || result.outcome === 'unchanged') summaryDocumentTargets.delete(handle);
+    return {outcome:result.outcome, message:result.message, appended, skipped, stale, bytes};
+  }
+
+  function bindDeliverableContext(node, selection, leaf, doc, valid) {
+    registerAdapter(node, {
+      ownsObjectCommands:true, editingCommands:false,
+      capture() {
+        const base = captureNotesWorkbench();
+        if (!valid() || base.leafId !== leaf.id || base.doc !== doc) return null;
+        const hitCurrent = () => valid() && node.isConnected && notesWorkbenchCurrent(base);
+        const field = doc.kind === 'slides' ? 'slideSelection' : 'workbookSelection';
+        const target = {...base, [field]:selection, hitCurrent};
+        const allowed = new Set([doc.kind === 'slides' ? 'editor.slide-pdf' : 'editor.workbook-pdf']);
+        if (window.sessionModule?.getCurrentSessionId?.()) allowed.add('editor.resource-feedback');
+        if (doc.kind === 'workbook' || selection.objectType === 'text') allowed.add('editor.shared-feedback');
+        const commands = notesWorkbenchCommands(target).filter(item => allowed.has(item.id) && !item.disabledReason);
+        return {hitCurrent, commands};
+      },
+      isCurrent:({adapterContext}) => adapterContext.hitCurrent(),
+      commands:({adapterContext}) => adapterContext.commands.map(({id,label}) => ({id,label})),
+      execute:(id, {adapterContext}) => adapterContext.hitCurrent() && adapterContext.commands.find(item => item.id === id)?.run(),
+    });
+  }
+
   function notesWorkbenchCommands(target) {
     const { workspace, doc, editor, current } = target;
     const hasDoc = doc && !doc.virtual;
@@ -6280,32 +8870,441 @@ export function createNotesFeature({
     const modeReason = editable || (!textView ? 'This document uses a typed view.' : '');
     const dirty = Boolean(current.noteDrafts?.has(target.docId) || target.buffer?.state?.().dirty);
     const creationReason = editorCreationReason(workspace, current);
+    const manualReason = manualWorkspace(workspace,current) ? creationReason : '';
     const assertTarget = (options) => { if (!notesWorkbenchCurrent(target, options)) throw new Error('The captured Editor target changed. Reopen the command.'); };
     const commands = [];
     const add = (id, label, menu, run, disabledReason = '') => commands.push({ id:`editor.${id}`, label, menu, disabledReason,
       run:() => { assertTarget(); return run(); } });
-    add('new', target.folder?.provider === 'host' ? 'New file…' : 'New note…', 'File',
+    if (doc?.sharedText && ['commenter','editor'].includes(doc.sharedText.role)) add('shared-feedback', 'Shared feedback…', 'Tools', async () => {
+      assertTarget();
+      const shared=doc.sharedText, revision=doc.resource?.revision;
+      if (dirty || !revision || shared.isCurrent?.() !== true) throw Error('Save or reopen the current shared revision first.');
+      let anchor={kind:'whole'};
+      const workbookSelection=target.workbookSelection, workbookView=target.workbookView;
+      const slideSelection=target.slideSelection, slideView=target.slideView;
+      const sharedCurrent=()=>{
+        if (!notesWorkbenchCurrent(target) || shared.isCurrent?.()!==true || doc.sharedText!==shared) return false;
+        if (target.hitCurrent) return target.hitCurrent();
+        if (anchor.kind==='slide') {
+          const live=current.noteLeafViews?.get(target.leafId)?.slideView, selected=live?.getSelection?.();
+          return live===slideView && selected?.generation===slideSelection.generation && selected?.slideId===slideSelection.slideId && selected?.objectId===slideSelection.objectId;
+        }
+        if (anchor.kind!=='cell') return true;
+        const live=current.noteLeafViews?.get(target.leafId)?.workbookView, selected=live?.getSelection?.();
+        return live===workbookView && selected?.generation===workbookSelection.generation && selected?.sheetId===workbookSelection.sheetId && selected?.cellId===workbookSelection.cellId && selected?.rangeId===workbookSelection.rangeId && selected?.startCellId===workbookSelection.startCellId && selected?.endCellId===workbookSelection.endCellId;
+      };
+      if (shared.format==='workbook' && workbookSelection && workbookView) {
+        const workbookID=String(doc.resource?.key?.resourceId || '');
+        if(!workbookID || !workbookSelection.sheetId || !(workbookSelection.cellId || workbookSelection.rangeId))throw Error('The selected cell or range is unavailable.');
+        anchor={kind:'cell',workbookID,sheetID:workbookSelection.sheetId,range:{startCellID:workbookSelection.startCellId || workbookSelection.cellId,endCellID:workbookSelection.endCellId || workbookSelection.cellId}};
+        if(!sharedCurrent())throw Error('The selected cell changed.');
+      }
+      if (shared.format==='slides' && slideSelection && slideView) {
+        const deck=parseSlideDeck(sourceValue(doc)), slide=deck.slides.find(item=>item.id===slideSelection.slideId), object=slide?.objects.find(item=>item.id===slideSelection.objectId);
+        if(object?.type==='text') {
+          anchor={kind:'slide',deckID:deck.id,slideID:slide.id,objectID:object.id};
+          if(!sharedCurrent())throw Error('The selected slide object changed.');
+        }
+      }
+      if (shared.format==='text' && editor?.view) {
+        const selection=editor.view.state.selection.main, text=editor.view.state.doc.toString();
+        if (selection.from !== selection.to) {
+          const encoder=new TextEncoder(), start=encoder.encode(text.slice(0,selection.from)).length, selected=encoder.encode(text.slice(selection.from,selection.to));
+          if (selected.length>8192) throw Error('Select at most 8 KiB of text.');
+          const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',selected)), b=>b.toString(16).padStart(2,'0')).join('');
+          assertTarget(); anchor={kind:'text',start,end:start+selected.length,sha256:digest};
+        }
+      }
+      const {openSharedFeedback}=await import('../editor/sharedFeedback.js');
+      assertTarget();
+      return openSharedFeedback({publicationID:shared.publicationID,expectedRevision:{...revision},anchor,canComment:true,
+        isCurrent:sharedCurrent});
+    }, dirty ? 'Save this shared revision before adding feedback.' : '');
+    if ((doc?.kind === 'workbook' || doc?.kind === 'slides') && !['workbook','slides'].includes(doc.sharedText?.format)) add('apply-current-theme', 'Apply current theme', 'Tools', () => {
+      assertTarget();
+      const appearance = captureDeliverableAppearance();
+      if (!appearance) throw new Error('The current account appearance is not ready.');
+      const source = sourceValue(doc), workbook = doc.kind === 'workbook';
+      const result = applyDocumentTransaction(doc, text => {
+        const value = workbook ? parseWorkbook(text) : parseSlideDeck(text);
+        value.appearance = appearance;
+        return workbook ? serializeWorkbook(value) : serializeSlideDeck(value);
+      }, {origin:'apply-current-theme', expectedSource:source, expectedLocalRevision:target.localRevision});
+      if (result.outcome === 'failed') throw new Error(result.message || 'Appearance could not be applied.');
+      current.window?.setStatus(result.outcome === 'unchanged' ? 'Appearance is already current.' : 'Current theme applied; save this file to keep the revision.', false);
+      return result;
+    }, editable);
+    const resource = doc?.resource, resourceRef = resource?.locator?.opaqueRef;
+    const feedbackReason = !resourceRef || !resource?.revision || resource.key?.provider !== 'host' ? 'Open a saved Host Files resource first.'
+      : dirty ? 'Save this file before targeting its saved revision.' : '';
+    if (/\.(?:html|svg)$/i.test(String(doc?.name || ''))) add('design-handoff', 'Design handoff to an actor…', 'File', async () => {
+      assertTarget();
+      const appearance=captureDeliverableAppearance(); if(!appearance)throw Error('The current appearance is not ready.');
+      const chat=String(window.sessionModule?.getCurrentSessionId?.() || ''), format=String(doc.name).toLowerCase().endsWith('.svg')?'svg':'html';
+      const capturedSource=sourceValue(doc), capturedHead=String(doc.head || resource?.revision?.value || '');
+      const valid=()=>notesWorkbenchCurrent(target,{allowEditing:true}) && workbenchLocalRevision(current,target.docId)===target.localRevision && (current.noteBuffers?.get(target.docId) || null)===target.buffer && String(doc.head || resource?.revision?.value || '')===capturedHead && sourceValue(doc)===capturedSource && String(window.sessionModule?.getCurrentSessionId?.() || '')===chat && doc.resource===resource && resource?.locator?.opaqueRef===resourceRef && !current.noteDrafts?.has(target.docId) && !current.noteBuffers?.get(target.docId)?.state?.().dirty;
+      if(!chat || !valid())throw Error('Open the original task and saved source first.');
+      const response=await fetch(`/api/orchestration/${encodeURIComponent(chat)}`,{credentials:'same-origin',cache:'no-store'});
+      const overview=await response.json();if(!valid() || !response.ok || !Array.isArray(overview.actors) || typeof overview.engineSessionId!=='string')throw Error('Running actors are unavailable.');
+      const actors=overview.actors.filter(actor=>actor?.status==='running' && typeof actor.actorID==='string' && typeof actor.sessionID==='string' && actor.hostContext?.chatID===chat && (actor.sessionID===overview.engineSessionId || (actor.sessionBinding?.kind==='peer_child' && actor.sessionBinding.parentSessionId===overview.engineSessionId))).slice(0,100).map(actor=>({actorID:actor.actorID,sessionID:actor.sessionID,rootSessionID:overview.engineSessionId}));
+      if(!actors.length)throw Error('No running actor is available.');
+      const captureScope=actor=>captureFeedbackScope(chat,valid,fetch,actor);
+      const chooseAsset=()=>new Promise(resolve=>{
+        const origin=capturePickerOrigin(); current.noteResourcePicker?.destroy();let picker;
+        picker=createResourcePicker({client:filesFacadeClient,purpose:'snapshot-file',...pickerScope(),originWindow:origin.window,initialDirectory:current.noteWorkspace?.left?.resourceRoot || null,
+          getGeneration:()=>Number(state.filesGeneration || state.contextEpoch || 0),getAccountScope:()=>String(state.accountId || ''),getWorkspaceScope:()=>String(state.workspace || ''),
+          isOriginCurrent:()=>pickerOriginCurrent(origin)&&valid(),isCompatible:item=>item.provider==='host'&&item.revision?.kind==='hostFingerprint'?'':'Choose a revision-bound Host asset.',
+          onSelect:item=>{if(!valid())throw Error('The source changed.');resolve({name:item.name,resourceRef:item.ref,expectedRevision:{...item.revision}});current.noteResourcePicker=null;return true;},
+          onCancel:()=>{if(current.noteResourcePicker===picker)current.noteResourcePicker=null;resolve(null);},rootLabel:'Design asset'});
+        current.noteResourcePicker=picker;void picker.open();
+      });
+      const chooseDestination=()=>new Promise(resolve=>{
+        const origin=capturePickerOrigin();current.noteResourcePicker?.destroy();let picker;
+        picker=createResourcePicker({client:filesFacadeClient,purpose:'folder',...pickerScope(),originWindow:origin.window,initialDirectory:current.noteWorkspace?.left?.resourceRoot || null,
+          getGeneration:()=>Number(state.filesGeneration || state.contextEpoch || 0),getAccountScope:()=>String(state.accountId || ''),getWorkspaceScope:()=>String(state.workspace || ''),
+          isOriginCurrent:()=>pickerOriginCurrent(origin)&&valid(),isCompatible:item=>item.provider==='host'&&item.capabilities?.write===true?'':'Choose a writable Host folder.',
+          onSelect:async item=>{const response=await filesFacadeClient.stat(item.ref);if(!valid() || !pickerOriginCurrent(origin))throw Error('The source or task changed.');const row=response?.resource || response;if(row?.revision?.kind!=='hostDirectoryRevision')throw Error('Folder revision unavailable.');resolve({name:item.name,resourceRef:item.ref,expectedRevision:{...row.revision}});current.noteResourcePicker=null;return true;},
+          onCancel:()=>{if(current.noteResourcePicker===picker)current.noteResourcePicker=null;resolve(null);},rootLabel:'Output folder'});current.noteResourcePicker=picker;void picker.open();
+      });
+      const readAppearance=async asset=>{
+        if(!valid())throw Error('The source or task changed.');
+        const response=await fetch(filesFacadeClient.contentUrl(asset.resourceRef,{purpose:'download',expectedRevision:asset.expectedRevision}),{credentials:'same-origin'});
+        if(!response.ok || !response.body || !valid())throw Error('Saved appearance is unavailable.');
+        const reader=response.body.getReader(),parts=[];let size=0;
+        try {for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>16384)throw Error('Saved appearance exceeds 16 KiB.');parts.push(value);}}
+        catch(error) {await reader.cancel().catch(()=>{});throw error;}
+        finally {reader.releaseLock();}
+        if(!valid())throw Error('The source or task changed.');
+        const bytes=new Uint8Array(size);let offset=0;for(const part of parts){bytes.set(part,offset);offset+=part.byteLength;}
+        return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
+      };
+      openDesignHandoff({source:doc.name,format,appearance,actors,captureScope,isCurrent:valid,chooseAsset,chooseDestination,readAppearance,onUse:(designContext,witness)=>{
+        if(!valid())throw Error('The source or task changed.');
+        const detail={chat,target:{resourceRef,expectedRevision:resource.revision,anchor:{kind:'whole'},scope:witness,designContext},label:'Design handoff · source revision will be verified',isCurrent:valid,accepted:false};
+        document.dispatchEvent(new CustomEvent('openclank:design-feedback-target',{detail}));
+        if(!detail.accepted)throw Error('Open the original task feedback panel and finish its existing draft first.');
+      }});
+    }, feedbackReason || editable);
+    const resourceFeedback = async (selection = null) => {
+      assertTarget();
+      const chat = String(window.sessionModule?.getCurrentSessionId?.() || '');
+      if (!chat) throw new Error('Open the original chat first.');
+      const workbookSelection = target.workbookSelection, workbookView = target.workbookView;
+      const slideSelection = target.slideSelection, slideView = target.slideView;
+      const deckId = doc.kind === 'slides' && slideView && slideSelection?.objectId ? parseSlideDeck(sourceValue(doc)).id : null;
+      const stillCurrent = () => {
+        if (!notesWorkbenchCurrent(target) || String(window.sessionModule?.getCurrentSessionId?.() || '') !== chat
+            || doc.resource !== resource || resource.locator?.opaqueRef !== resourceRef
+            || current.noteDrafts?.has(target.docId) || current.noteBuffers?.get(target.docId)?.state?.().dirty) return false;
+        if (target.hitCurrent) return target.hitCurrent();
+        if (doc.kind === 'workbook' && workbookSelection && workbookView) {
+          const live = current.noteLeafViews?.get(target.leafId)?.workbookView, selected = live?.getSelection?.();
+          return live === workbookView && selected?.generation === workbookSelection.generation
+            && selected?.sheetId === workbookSelection.sheetId && selected?.cellId === workbookSelection.cellId
+            && selected?.rangeId === workbookSelection.rangeId && selected?.startCellId === workbookSelection.startCellId && selected?.endCellId === workbookSelection.endCellId;
+        }
+        if (deckId) {
+          const live = current.noteLeafViews?.get(target.leafId)?.slideView, selected = live?.getSelection?.();
+          return live === slideView && Number.isSafeInteger(slideSelection.generation)
+            && selected?.generation === slideSelection.generation && selected?.slideId === slideSelection.slideId
+            && selected?.objectId === slideSelection.objectId;
+        }
+        return true;
+      };
+      // Capture the task execution before any selection hashing or UI handoff.
+      const scope = await captureFeedbackScope(chat, stillCurrent, fetch, selection);
+      let anchor = {kind:'whole'}, label = 'Whole file';
+      if (doc.kind === 'workbook' && workbookSelection && workbookView) {
+        anchor = {kind:'cell', workbookID:resource.key.resourceId, sheetID:workbookSelection.sheetId,
+          range:{startCellID:workbookSelection.startCellId || workbookSelection.cellId, endCellID:workbookSelection.endCellId || workbookSelection.cellId}};
+        label = workbookSelection.rangeId ? `Workbook range ${workbookSelection.rangeId}: ${anchor.range.startCellID} – ${anchor.range.endCellID} · verify on save` : 'Workbook cell · verify on save';
+      } else if (deckId) {
+        const deck=parseSlideDeck(sourceValue(doc)), object=deck.slides.find(item=>item.id===slideSelection.slideId)?.objects.find(item=>item.id===slideSelection.objectId);
+        if (!object || !window.confirm(`Use ${object.type} object ${slideSelection.objectId} on slide ${slideSelection.slideId} for feedback? Cancel to choose another object.`)) return false;
+        anchor = {kind:'slide', deckID:deckId, slideID:slideSelection.slideId, objectID:slideSelection.objectId};
+        label = `Slide ${object.type} object ${slideSelection.slideId} / ${slideSelection.objectId} · verify on save`;
+      } else if (editor && target.ranges.length === 1 && target.ranges[0].anchor !== target.ranges[0].head) {
+        const text = editor.getValue?.(), meta = doc.sourceMetadata || resource.metadata || {};
+        if (typeof text === 'string' && String(meta.encoding || '').toLowerCase() === 'utf-8'
+            && Number(meta.bomBytes || 0) === 0 && meta.newline === '\n' && !text.includes('\r')) {
+          const {feedbackSelection} = await import('../planFeedback.js');
+          const selection = await feedbackSelection(text, target.ranges[0]);
+          if (selection) { anchor = {kind:'text', ...selection}; label = 'Selected text · verify on save'; }
+        } else label = 'Whole file · selection encoding cannot be verified';
+      }
+      if (!stillCurrent()) throw new Error('The Editor target changed; choose it again.');
+      const detail = {chat, target:{resourceRef, expectedRevision:resource.revision, anchor, scope}, label, isCurrent:stillCurrent, accepted:false};
+      document.dispatchEvent(new CustomEvent('openclank:resource-feedback-target', {detail}));
+      if (!detail.accepted) throw new Error('Open the original chat feedback panel first.');
+      return true;
+    };
+    add('resource-feedback', 'Feedback on file or selection…', 'File', () => resourceFeedback(), feedbackReason);
+    add('resource-feedback-actor', 'Feedback to an actor…', 'File', async () => {
+      assertTarget(); const chat=String(window.sessionModule?.getCurrentSessionId?.() || '');
+      const valid=()=>notesWorkbenchCurrent(target) && String(window.sessionModule?.getCurrentSessionId?.() || '')===chat && doc.resource===resource && resource?.locator?.opaqueRef===resourceRef && !current.noteDrafts?.has(target.docId) && !current.noteBuffers?.get(target.docId)?.state?.().dirty;
+      if(!chat || !valid())throw Error('Open the original chat and saved source first.');
+      const {chooseFeedbackActor}=await import('../editor/feedbackScope.js');const selection=await chooseFeedbackActor(chat,valid);
+      if(selection && valid())return resourceFeedback(selection);
+      return false;
+    }, feedbackReason);
+    if (doc && /\.tex$/i.test(String(doc.name || ''))) {
+      const latexAttempts = current.noteLatexAttempts ||= new Map();
+      const attempt = latexAttempts.get(target.docId) || {}; latexAttempts.set(target.docId,attempt);
+      const originalScope = () => notesWorkbenchCurrent(target) && doc.resource === resource
+        && bufferScope(current)?.accountId === attempt.accountId && resource?.key?.resourceId === attempt.resourceId;
+      const show = value => { if (currentScope(current) === target.scope) current.window?.setStatus(value); };
+      add('latex-compile', attempt.jobID ? 'Check LaTeX job status' : 'Compile LaTeX (self-contained)…', 'File', async () => {
+        assertTarget();
+        if (attempt.busy) throw new Error('LaTeX job is already being checked.');
+        if (attempt.unknown && !attempt.jobID) throw new Error('LaTeX preparation outcome is unknown. Check Jobs before starting another.');
+        attempt.busy = true;
+        try {
+          if (attempt.jobID) {
+            if (!originalScope()) throw new Error('Original LaTeX job scope is unavailable.');
+            let result = await filesFacadeClient.mediaAction('status',attempt.jobID);
+            if (result?.state === 'collecting' && originalScope()) result = await filesFacadeClient.mediaAction('collect',attempt.jobID);
+            if (originalScope()) show(`LaTeX job: ${result?.state || 'unknown'}. Cancellation covers the original compiler child; descendants are unverified.`);
+            return result;
+          }
+          const source = sourceValue(doc), ref = resource?.locator?.opaqueRef, revision = resource?.revision && {...resource.revision};
+          const resourceId = resource?.key?.resourceId, accountId = bufferScope(current)?.accountId;
+          const sessionID = String(window.sessionModule?.getCurrentSessionId?.() || '');
+          const valid = () => notesWorkbenchCurrent(target) && doc.resource === resource && resource?.key?.resourceId === resourceId
+            && bufferScope(current)?.accountId === accountId && resource?.locator?.opaqueRef === ref
+            && resource?.revision?.kind === revision?.kind && resource?.revision?.value === revision?.value
+            && sourceValue(doc) === source && !current.noteDrafts?.has(target.docId) && !current.noteBuffers?.get(target.docId)?.state?.().dirty
+            && String(window.sessionModule?.getCurrentSessionId?.() || '') === sessionID;
+          if (!ref || !revision || !resourceId || !accountId || !sessionID || !valid()) throw new Error('Save this file and open its original chat before compiling.');
+          const ready = await filesFacadeClient.latexReadiness();
+          if (!valid()) throw new Error('LaTeX source or account changed.');
+          if (!ready?.available) throw new Error('pdflatex is unavailable on this machine.');
+          const revealed = await filesFacadeClient.reveal(ref), actual = revealed?.resource, parent = revealed?.parent;
+          if (!valid() || actual?.id !== resourceId || actual?.revision?.kind !== revision.kind || actual?.revision?.value !== revision.value
+              || !parent?.ref || !parent.capabilities?.includes('write') || !parent.capabilities?.includes('children'))
+            throw new Error('The source folder is unavailable for PDF output.');
+          const name = `${String(doc.name).replace(/\.tex$/i,'').replace(/[\\/\u0000-\u001f\u007f]/g,'_') || 'document'}.pdf`;
+          attempt.accountId=accountId;attempt.resourceId=resourceId;attempt.unknown=true;
+          const prepared = await filesFacadeClient.prepareLatex({sessionID,source:{ref,revision},dependencies:[],destinationRef:parent.ref,destinationName:name});
+          if (!prepared?.jobID) throw new Error('LaTeX job preparation is unknown; check Jobs.');
+          attempt.jobID=prepared.jobID;attempt.unknown=false;
+          if (!valid()) throw new Error('LaTeX source changed; the prepared job was not submitted.');
+          const result = await filesFacadeClient.runMedia({jobID:prepared.jobID,revision:prepared.revision,parameters:{}});
+          if (originalScope()) show(`LaTeX job: ${result?.state || 'unknown'}. Cancellation covers the original compiler child; descendants are unverified.`);
+          return result;
+        } finally { attempt.busy=false; }
+      }, feedbackReason || (dirty ? 'Save this file before compiling.' : ''));
+      if (attempt.jobID) add('latex-cancel','Cancel LaTeX job','File',async () => {
+        if (!originalScope()) throw new Error('Original LaTeX job scope is unavailable.');
+        const result=await filesFacadeClient.mediaAction('cancel',attempt.jobID);
+        if (originalScope()) show(`LaTeX job: ${result?.state || 'unknown'}. Only the original compiler child is covered; descendants are unverified.`);
+        return result;
+      });
+    }
+    if (doc?.kind === 'workbook') add('workbook-pdf', 'Export PDF to Files…', 'File', async () => {
+      assertTarget();
+      const source = sourceValue(doc), ref = resource?.locator?.opaqueRef, revision = resource?.revision && {...resource.revision};
+      const resourceId = resource?.key?.resourceId, accountId = bufferScope(current)?.accountId;
+      const pdfStateMap = current.noteWorkbookPdfAttempts ||= new Map();
+      const pdfState = pdfStateMap.get(target.docId) || {}; pdfStateMap.set(target.docId,pdfState);
+      const valid = () => notesWorkbenchCurrent(target) && doc.resource === resource && resource?.key?.resourceId === resourceId
+        && bufferScope(current)?.accountId === accountId && resource?.locator?.opaqueRef === ref
+        && resource?.revision?.kind === revision?.kind && resource?.revision?.value === revision?.value && sourceValue(doc) === source
+        && !current.noteDrafts?.has(target.docId) && !current.noteBuffers?.get(target.docId)?.state?.().dirty;
+      if (!ref || !revision || !resourceId || !accountId || !valid()) throw new Error('Save the current workbook before exporting.');
+      const files = await import('../files.js');
+      if (!valid()) throw new Error('The workbook source changed; start again.');
+      const verifySource = async () => {
+        if (!valid()) return false;
+        try {
+          const response = await filesFacadeClient.stat(ref), actual = response?.resource || response;
+          if (!valid() || actual?.id !== resourceId || actual?.revision?.kind !== revision.kind || actual?.revision?.value !== revision.value) return false;
+          const opened = await filesFacadeClient.openResource(ref,{expectedRevision:revision}), captured = opened?.payload?.resource;
+          return valid() && opened?.resource?.id === resourceId && captured?.key?.resourceId === resourceId
+            && captured?.revision?.kind === revision.kind && captured?.revision?.value === revision.value && opened?.payload?.text === source;
+        } catch (_) { return false; }
+      };
+      const result = await runWorkbookPdfFiles({state:pdfState,source,sourceRef:ref,sourceRevision:revision,name:doc.name,isCurrent:valid,verifySource,
+        loadRenderer:() => import('../document.js').then(module => module.loadDocumentPdfRenderer()),
+        importFile:files.importBrowserReportFile,reconcile:files.reconcileBrowserReportImport});
+      const messages = {saved:'PDF saved in Files.',pending:'Files import is pending or unknown. Use Export PDF again to check its original receipt.',
+        unknown:'The Files outcome is unknown and no receipt ID is available. Check History before starting another import.',
+        rejected:'Files rejected the PDF import.',cancelled:'PDF import cancelled.',unavailable:`PDF unavailable: ${result.reason || 'renderer unavailable'}.`};
+      if (currentScope(current) === target.scope) current.window?.setStatus(messages[result.state] || 'PDF export unavailable.',result.state !== 'saved');
+      return result;
+    }, feedbackReason || (dirty ? 'Save this workbook before exporting.' : ''));
+    if (doc?.kind === 'slides') add('slide-pdf', 'Export PDF to Files…', 'File', async () => {
+      assertTarget();
+      const source = sourceValue(doc), ref = resource?.locator?.opaqueRef, revision = resource?.revision;
+      const pdfStateMap = current.noteSlidePdfAttempts ||= new Map();
+      const pdfState = pdfStateMap.get(target.docId) || {}; pdfStateMap.set(target.docId, pdfState);
+      const valid = () => notesWorkbenchCurrent(target) && doc.resource === resource
+        && resource?.locator?.opaqueRef === ref && resource?.revision?.kind === revision?.kind
+        && resource?.revision?.value === revision?.value && sourceValue(doc) === source
+        && !current.noteDrafts?.has(target.docId) && !current.noteBuffers?.get(target.docId)?.state?.().dirty;
+      if (!ref || !revision || !valid()) throw new Error('Save the current slide deck before exporting.');
+      const files = await import('../files.js');
+      if (!valid()) throw new Error('The slide source changed; start again.');
+      const accountId = bufferScope(current)?.accountId;
+      if (!accountId) throw new Error('The original account is unavailable.');
+      const result = await runSlidePdfFiles({state:pdfState,source,sourceRef:ref,sourceRevision:revision,name:doc.name,isCurrent:valid,
+        acquireAssets:() => acquireSlideAssets({source,sourceRef:ref,sourceRevision:revision,filesClient:filesFacadeClient,accountId,
+          isCurrent:() => valid() && bufferScope(current)?.accountId === accountId}),
+        verifyAssets:async () => {
+          if (!valid() || bufferScope(current)?.accountId !== accountId) return false;
+          try {
+            const objects = parseSlideDeck(source).slides.flatMap(slide => slide.objects.filter(object => object.type === 'image' || object.type === 'chart'));
+            for (const object of objects) {
+              const stat = await filesFacadeClient.stat(object.resourceRef);
+              if (!valid() || bufferScope(current)?.accountId !== accountId || stat?.revision?.kind !== object.revision?.kind || stat?.revision?.value !== object.revision?.value) return false;
+            }
+            const stat = await filesFacadeClient.stat(ref);
+            return valid() && bufferScope(current)?.accountId === accountId && stat?.revision?.kind === revision.kind && stat?.revision?.value === revision.value;
+          } catch (_) { return false; }
+        },
+        loadRenderer:() => import('../document.js').then(module => module.loadDocumentPdfRenderer()),
+        importFile:files.importBrowserReportFile, reconcile:files.reconcileBrowserReportImport});
+      const messages = {saved:'PDF saved in Files.',pending:'Files import is pending or unknown. Use Export PDF again to check its original receipt.',
+        unknown:'The Files outcome is unknown and no receipt ID is available. Check History before starting another import.',
+        rejected:'Files rejected the PDF import.',cancelled:'PDF import cancelled.',unavailable:`PDF unavailable: ${result.reason || 'renderer unavailable'}.`};
+      if (currentScope(current) === target.scope) current.window?.setStatus(messages[result.state] || 'PDF export unavailable.', result.state !== 'saved');
+      return result;
+    }, feedbackReason || (dirty ? 'Save this slide deck before exporting.' : ''));
+    const image = target.image, imageSession = image?.session, imageRuntime = target.imageRuntime;
+    const imageReason = imageSession && imageRuntime?.isSceneReady() ? '' : 'This image is still opening or needs recovery.';
+    const imageAction = name => { if (!imageRuntime?.command(name)) throw new Error('This image action is unavailable.'); };
+    add('new', `${editorNewPageLabel(workspace, target.folder)}…`, 'File',
       () => createNew(null, { isContextCurrent:() => notesWorkbenchCurrent(target, { allowFolderRefresh:target.folder?.provider === 'host' }) }),
       creationReason);
     add('open-file', 'Open file…', 'File', () => openFileFromPicker({ isContextCurrent:() => notesWorkbenchCurrent(target) }));
+    add('reopen-closed', 'Reopen closed tab', 'File', reopenClosed,
+      workspace.closed.length || Object.keys(workspace.closedImageRecovery || {}).length ? '' : 'There are no closed tabs.');
+    if (presentationId === 'notes') {
+      add('new-image', 'New image…', 'File', createBlankImageFromEditor, manualReason);
+      for (const command of deliverableCreationCommands(current,workspace,()=>notesWorkbenchCurrent(target,{allowEditing:true}))) {
+        add(`new-${command.kind}`,command.label,'File',command.run,command.reason);
+      }
+      add('open-image-draft', 'Open image draft…', 'File', () => openImageDraftCopy(() => notesWorkbenchCurrent(target)));
+      add('import-image-project', 'Import image project…', 'File', () => importImageProject(() => notesWorkbenchCurrent(target)), manualReason);
+    }
     add('new-folder', target.folder?.provider === 'host' ? 'New folder…' : 'New collection…', 'File', () => createFolder({ isContextCurrent:() => notesWorkbenchCurrent(target) }), creationReason);
     add('template-folder', 'Choose template folder…', 'Tools', () => configureTemplateFolder({ isContextCurrent:() => notesWorkbenchCurrent(target) }));
-    add('new-template', 'New Copal note from template…', 'File', () => createFromTemplate({ isContextCurrent:() => notesWorkbenchCurrent(target) }));
-    if (typeof createWikiArticle === 'function') add('new-wiki', 'New Wiki article…', 'File', createWikiArticle);
-    if (typeof importWikiMemes === 'function') add('import-memes', 'Import native .memes…', 'File', importWikiMemes);
+    add('new-template', 'New from template…', 'File', () => createFromTemplate({ isContextCurrent:() => notesWorkbenchCurrent(target) }), manualReason);
+    if (typeof createWikiArticle === 'function') add('new-wiki', 'New Wiki article…', 'File', createWikiArticle, manualReason);
+    if (typeof importWikiMemes === 'function') add('import-memes', 'Import native .memes…', 'File', importWikiMemes, manualReason);
     if (typeof exportWikiMemes === 'function') add('export-memes', 'Export native .memes…', 'File', exportWikiMemes);
     add('open-folder', 'Open folder…', 'File', () => openFolderFromPicker({ isContextCurrent:() => notesWorkbenchCurrent(target) }));
-    add('close-folder', 'Close folder', 'File', () => closeFolderWorkspace(workspace), workspace.left.folderWorkspaceRoot ? '' : 'No folder workspace is open.');
-    add('save', 'Save file', 'File', async () => { if (!await saveDraft(target.docId)) throw new Error('The file could not be saved. Review its save status.'); },
-      editable || (doc?.savePolicy !== 'explicit' ? 'This document saves automatically.' : !dirty ? 'The file has no unsaved changes.' : ''));
+    const binding = explorerBinding(workspace);
+    add('close-folder', explorerCloseLabel(binding), 'File', () => closeExplorerWorkspace(workspace), binding ? '' : 'No folder workspace is open.');
+    if (canSaveTextAs(doc)) add('save-as', 'Save as…', 'File', () => saveTextAs(doc));
+    add('save', 'Save file', 'File', async () => { if (imageSession) { await saveImageWithStatus(current,image,target.imageViewId); } else if (!await saveDraft(target.docId)) throw new Error('The file could not be saved. Review its save status.'); },
+      image ? (imageReason || (!imageSession.capabilities(target.imageViewId).save ? 'This image has no available original; use Save as copy.' : !imageSession.isDirty() && !imageSession.getPersistenceController()?.needsHostSaveDestination && !imageSession.getPersistenceController()?.canSaveRecoveredCopy ? 'The image has no unsaved changes.' : '')) : editable || (!dirty ? 'The file has no unsaved changes.' : ''));
+    if (image) {
+      add('image-region-feedback','Feedback on image region…','File',async () => {
+        assertTarget(); const chat=String(window.sessionModule?.getCurrentSessionId?.() || ''), region=imageRuntime?.captureFeedbackRegion?.();
+        const valid=()=>notesWorkbenchCurrent(target) && String(window.sessionModule?.getCurrentSessionId?.() || '')===chat && imageRuntime?.captureFeedbackRegion?.()?.witness===region?.witness;
+        return sendImageRegionFeedback(region,chat,valid);
+      },imageReason);
+      if (image.applyAttachment) add('apply-attachment','Apply to chat attachment','File',() => image.applyAttachment(),imageReason);
+      const attachmentResult=imageRuntime?.attachmentApplyStatus?.();
+      if (attachmentResult?.state==='committed') add('attach-derived-image','Attach this result to chat…','File',() => attachDerivedImage(attachmentResult),imageReason);
+      const retained=imageRuntime?.retainedResultStatus?.(), result=retained?.records?.find(item=>item.status!=='resolved');
+      if (result) {
+        const readable=['received','memory_only'].includes(result.status), warning=result.status==='memory_only' ? ' This result is only in memory and will be lost on reload.' : '';
+        add('apply-retained-result',result.mask ? 'Recover selection mask as layer' : result.inpaint ? 'Recover generated image as layer' : 'Apply retained result as layer','File',async () => { const message=result.mask ? 'Recover the original selection mask as a separate layer? The current selection will not change.' : result.inpaint ? 'Recover the original generated image as a new layer? Existing masks stay unchanged, and feather adjustments are unavailable for this recovered result.' : result.originChanged ? 'The source has changed since this result was generated. Apply it as a new layer to the current image?' : null; if (message && !await styledConfirm(message,{title:'Apply retained result',confirmText:'Apply',cancelText:'Cancel'})) return; assertTarget(); return imageRuntime.applyRetainedResult(result.id); },imageReason || (!readable ? 'The result is unavailable or its outcome is unknown.' : ''));
+        add('keep-retained-result','Keep result in draft','File',async () => { const status=await imageRuntime.keepRetainedResult(); if (!status.durable) throw new Error('The retained result is not saved in a draft.'); current.window?.setStatus(result.status==='memory_only' ? 'Only the descriptor was saved; image bytes will be lost on reload.' : 'Retained result saved in the draft.'); },imageReason);
+        add('export-retained-result','Download retained result','File',() => imageRuntime.exportRetainedResult(result.id),imageReason || (!readable ? 'The result bytes are unavailable.' : ''));
+        add('discard-retained-result','Discard retained result…','File',async () => { if (!await styledConfirm(`Discard this retained result?${warning}`,{title:'Discard retained result',confirmText:'Discard',cancelText:'Cancel'})) return; assertTarget(); imageRuntime.discardRetainedResult(result.id); },imageReason || (!readable ? 'This outcome requires reconciliation.' : ''));
+      }
+      if (imageRuntime?.projectOperationStatus?.()) add('check-original-save','Check original save','File',async () => {
+        assertTarget();
+        let result; try { result=await imageRuntime.observeProjectOperation(); } catch (_) { result={state:'unknown'}; }
+        assertTarget();
+        current.window?.setStatus(describeOriginalImageSave(result));
+      },imageReason);
+      add('project-metadata','Project metadata…','File',() => imageAction('project-metadata'),imageReason);
+      if (imageSession.getPersistenceController()?.hostOriginal || image.hostOriginal) add('reveal-image-source','Reveal saved original in Files','Go',async () => {
+        const files=await import('../files.js'); assertTarget();
+        const {resourceRef,revision}=imageSession.getPersistenceController()?.hostOriginal || image.hostOriginal;
+        if (!await files.revealResource(resourceRef,{expectedRevision:revision,isCurrent:()=>notesWorkbenchCurrent(target)})) {
+          throw new Error('The original saved image is unavailable or changed.');
+        }
+      });
+      add('save-as',imageSession.captureTarget().sourceKey ? 'Save PNG to folder…' : 'Save image as…','File',()=>saveImageWithStatus(current,image,target.imageViewId,true),imageReason);
+      add('save-copy','Save layered copy to Files → Gallery…','File',async () => { const result=await imageSession.saveCopy(target.imageViewId); if (result?.status === 'unavailable') throw new Error(result.reason || 'Image Save Copy unavailable.'); return result; },imageReason || (!imageSession.capabilities(target.imageViewId).saveCopy ? 'Image Save Copy is unavailable.' : ''));
+      add('retry-copy','Retry saving copy','File',() => imageSession.retrySaveCopy(),imageReason || (!imageSession.capabilities(target.imageViewId).retrySaveCopy ? 'No image copy is awaiting reconciliation.' : ''));
+      add('download-image','Download PNG','File',() => imageRuntime.downloadPNG(),imageReason);
+      add('share-image','Share standalone PNG…','File',async () => {
+        assertTarget();
+        const valid=()=>notesWorkbenchCurrent(target,{allowEditing:true,allowSaved:true,allowFolderRefresh:true});
+        const draft=image.standaloneShare ||= {name:'image.png',review:null,runtime:null,attempt:null,saved:null,busy:false,preparing:false};
+        if (draft.preparing) return;
+        const revisionCurrent=()=>valid() && draft.runtime===imageRuntime && !!draft.review
+          && imageRuntime.isAttachmentSnapshotCurrent(draft.review.snapshot);
+        draft.preparing=true;
+        try {
+          const {identifyImageShareSnapshot,openStandaloneImageShare}=await import('../editor/standaloneImageShare.js');
+          if (!valid()) throw new Error('The original image is unavailable.');
+          if (!draft.attempt && !revisionCurrent()) {
+            const snapshot=await imageRuntime.captureAttachmentImage();
+            const review=await identifyImageShareSnapshot(snapshot);
+            if (!valid() || !imageRuntime.isAttachmentSnapshotCurrent(snapshot)) throw new Error('The image changed. Review a fresh PNG.');
+            Object.assign(draft,{review,runtime:imageRuntime,saved:null});
+          }
+          const chooseParent=async isCurrent=>(await chooseWritableHostFolder(current,isCurrent))?.ref || null;
+          const capturedReview=draft.review;
+          openStandaloneImageShare({draft,client:filesFacadeClient,current:valid,chooseParent,
+            revisionCurrent:()=>draft.review===capturedReview && revisionCurrent(),
+            status:(message,bad=false)=>current.window?.setStatus(message,bad)});
+        } finally {
+          draft.preparing=false;
+        }
+      },imageReason || (!imageRuntime?.capabilities()?.exportProject ? 'No editable image is open.' : ''));
+      add('export-image-project','Export layered project…','File',() => imageRuntime.exportProject(),imageReason || (!imageSession.capabilities(target.imageViewId).exportProject ? 'No editable image is open.' : ''));
+    }
+    const images = [...new Set([...documentContexts()].flatMap(owner => [...(owner.noteImages?.values() || [])].filter(entry => entry.scope === target.scope).map(entry => entry.session)))];
+    const textSaveIds = [...new Set([...(current.noteDrafts?.keys() || []), ...[...(current.noteBuffers || [])].filter(([,buffer]) => buffer.state().dirty).map(([id]) => id)])];
+    add('save-all','Save all','File',async () => {
+      const [imageResults, textResults] = await Promise.all([saveDistinctImageSessions(images), Promise.allSettled(textSaveIds.map(id => saveDraft(id)))]);
+      const results = [...imageResults,...textResults];
+      if (results.some(item => item.status === 'rejected' || item.value === false || item.value?.status === 'unavailable')) throw new Error('Some documents could not be saved; review their status.');
+      persistImageWorkspace(current,target.scope); return results;
+    }, images.some(session => session.isDirty()) || textSaveIds.length ? '' : 'There are no unsaved documents.');
     add('close-tab', 'Close editor tab', 'File', async () => {
-      if (!await requestCloseLeaves([findWorkspaceLeaf(workspace, target.leafId)])) return;
-      assertTarget({ allowEditing:true, allowSaved:true });
-      const closed = closeWorkspaceLeaf(workspace, target.leafId); if (closed) disposeLeaf(closed.id);
-      syncSelectionToModel(workspace); persist(true); render(); focusEmptyWorkspaceIfIdle();
+      await requestCloseLeaves([findWorkspaceLeaf(workspace, target.leafId)]);
     }, !target.leafId ? 'There is no active editor tab.' : target.pinned ? 'Unpin this tab before closing it.' : '');
     add('find', 'Find and replace…', 'Edit', () => showFindReplace(editor, { isContextCurrent:() => notesWorkbenchCurrent(target, { allowEditing:true }) }),
       editable || (!editor ? 'Switch to an editable text view first.' : ''));
+    add('svg-visual-properties', 'SVG visual Properties', 'View', () => {
+      assertTarget();
+      const cache = current.noteLeafViews?.get(target.leafId);
+      if (!cache?.editorWrap || !target.editor) throw new Error('Open the SVG source in the Editor first.');
+      if (cache.visualSourcePanel) { cache.visualSourcePanel.dispose(); cache.visualSourcePanel = null; cache.visualSourceRoot?.remove(); cache.visualSourceRoot = null; return; }
+      const root = document.createElement('section'); root.setAttribute('aria-label', 'SVG visual Properties'); cache.editorWrap.append(root); cache.visualSourceRoot = root;
+      const originResource = doc.resource, originHead = doc.head, originGeneration = Number(state.filesGeneration || state.contextEpoch || 0);
+      const capture = () => ({ source:sourceValue(doc), localRevision:workbenchLocalRevision(current,doc.id), resource:doc.resource, head:doc.head });
+      const valid = snap => context() === current && currentScope(current) === target.scope && current.noteLeafViews?.get(target.leafId) === cache && cache.doc === doc && cache.editor === target.editor && cache.editorWrap?.isConnected && doc.resource === originResource && snap.resource === originResource && doc.head === originHead && snap.head === originHead && Number(state.filesGeneration || state.contextEpoch || 0) === originGeneration && workbenchLocalRevision(current,doc.id) === snap.localRevision && sourceValue(doc) === snap.source && !doc.readOnly;
+      cache.visualSourcePanel = mountVisualSourcePanel(root, {capture, current:valid, transact:(snap,next) => valid(snap) ? applyDocumentTransaction(doc, () => next, {origin:'svg-properties',expectedSource:snap.source,expectedLocalRevision:snap.localRevision}) : {outcome:'failed',message:'Source or account changed.'}});
+    }, editable || (!editor || doc?.sourceKind !== 'host' || !/\.svg$/i.test(doc?.name || '') ? 'Open an editable Host SVG source first.' : ''));
+    add('html-source-properties', 'HTML source Properties', 'View', () => {
+      assertTarget();const cache=current.noteLeafViews?.get(target.leafId);
+      if(!cache?.editorWrap || !target.editor || !resourceRef || !resource?.revision)throw Error('Open a revision-bound Host HTML source in Editor first.');
+      if(cache.htmlVisualPanel){cache.htmlVisualPanel.dispose();cache.htmlVisualPanel=null;cache.htmlVisualRoot?.remove();cache.htmlVisualRoot=null;return;}
+      const root=document.createElement('section');root.setAttribute('aria-label','HTML source Properties');cache.editorWrap.append(root);cache.htmlVisualRoot=root;
+      const originResource=doc.resource, originHead=doc.head, originGeneration=Number(state.filesGeneration || state.contextEpoch || 0), originRef=originResource?.locator?.opaqueRef;
+      const capture=()=>({source:sourceValue(doc),localRevision:workbenchLocalRevision(current,doc.id),buffer:current.noteBuffers?.get(doc.id) || null,resource:doc.resource,resourceID:String(resource?.key?.resourceId || ''),head:doc.head});
+      const valid=snap=>context()===current && currentScope(current)===target.scope && current.noteLeafViews?.get(target.leafId)===cache && activeLeaf(current.noteWorkspace)?.id===target.leafId && cache.doc===doc && cache.editor===target.editor && cache.editorWrap?.isConnected && doc.resource===originResource && snap.resource===originResource && originResource?.locator?.opaqueRef===originRef && doc.head===originHead && snap.head===originHead && Number(state.filesGeneration || state.contextEpoch || 0)===originGeneration && workbenchLocalRevision(current,doc.id)===snap.localRevision && (current.noteBuffers?.get(doc.id) || null)===snap.buffer && sourceValue(doc)===snap.source && !doc.readOnly;
+      const saved=async (snap,model)=>{
+        if (!valid(snap) || snap.buffer?.state?.().dirty || !snap.resourceID || !resource?.revision || resource.revision.kind!=='hostFingerprint') throw Error('Save this exact source before selecting feedback.');
+        const expected=`sha256:${model.sourceSHA256}:${new TextEncoder().encode(snap.source).length}`;
+        if(resource.revision.value!==expected)throw Error('The saved source revision changed.');
+      };
+      cache.htmlVisualPanel=mountHtmlVisualPanel(root,{capture,current:valid,transact:(snap,next)=>valid(snap)?applyDocumentTransaction(doc,()=>next,{origin:'html-source-properties',expectedSource:snap.source,expectedLocalRevision:snap.localRevision}):{outcome:'failed',message:'Source or account changed.'},
+        onReveal:async(snap,item,model)=>{await saved(snap,model);if(!valid(snap))throw Error('The saved source changed.');target.editor.setSelection({ranges:[{anchor:item.from,head:item.to}],mainIndex:0});},
+        onFeedback:async(snap,anchor,model)=>{await saved(snap,model);const chat=String(window.sessionModule?.getCurrentSessionId?.() || '');const stillCurrent=()=>valid(snap) && !snap.buffer?.state?.().dirty && String(window.sessionModule?.getCurrentSessionId?.() || '')===chat;
+          if(!chat || !stillCurrent())throw Error('Open the original chat and saved source first.');const scope=await captureFeedbackScope(chat,stillCurrent,fetch);await saved(snap,model);if(!stillCurrent())throw Error('The source or task changed.');
+          const detail={chat,target:{resourceRef,expectedRevision:resource.revision,anchor,scope},label:'Static HTML source element · saved revision',isCurrent:stillCurrent,accepted:false};document.dispatchEvent(new CustomEvent('openclank:resource-feedback-target',{detail}));if(!detail.accepted)throw Error('Open the original chat feedback panel first.');}
+      });
+    }, editable || (!editor || doc?.sourceKind!=='host' || !resourceRef || !resource?.revision || !/\.html$/i.test(doc?.name || '') ? 'Open an editable revision-bound Host HTML source first.' : ''));
     add('sidebar', 'Toggle Editor sidebar', 'View', () => toggleSidebar('left'));
     add('linked-sidebar', 'Toggle linked sidebar', 'View', () => toggleSidebar('right'));
     for (const [mode, label] of [['source', 'Source mode'], ['live', doc?.kind === 'note' ? 'Editing mode' : 'Live Preview mode'], ['reading', 'Reading mode']]) {
@@ -6324,19 +9323,32 @@ export function createNotesFeature({
       generation:target.generation,dirty,current:g=>notesWorkbenchCurrent(target,{generation:g,allowFolderRefresh:true}),
     }),graphDisabledReason(graphResource?[graphResource]:[]));
     add('reveal-files','Reveal in Files','Go',()=>showResourceInFiles(graphResource.resource_ref),graphResource?'':'Only saved Host resources can be revealed in Files.');
-    add('reload-document', 'Reload saved document', 'File', () => reloadDocument(target.docId), missing);
-    add('undo-document', 'Undo document edit', 'Edit', () => undoDocument(target.docId), editable || (!target.buffer?.state().canUndo ? 'There is no document edit to undo.' : ''));
-    add('redo-document', 'Redo document edit', 'Edit', () => undoDocument(target.docId, true), editable || (!target.buffer?.state().canRedo ? 'There is no document edit to redo.' : ''));
+    if (!image) add('reload-document', 'Reload saved document', 'File', () => reloadDocument(target.docId), missing);
+    if (isOpenHostText(doc)) {
+      add('check-file-revision','Refresh from disk','File',()=>current.noteHostFileWatch?.manual(doc.id));
+      add('standalone-text-share','Share standalone text…','File',
+        ()=>standaloneTextShare(target,()=>notesWorkbenchCurrent(target,{allowEditing:true})),
+        doc.hostParentResourceRef || target.folder?.provider === 'host' && target.folder.capabilities?.write === true ? '' : 'Choose a writable Host folder for the private copy.');
+    }
+    add('undo-document', image ? 'Undo image edit' : 'Undo document edit', 'Edit', () => image ? imageAction('undo') : undoDocument(target.docId), image ? imageReason || (!imageSession.capabilities(target.imageViewId).canUndo ? 'There is no image edit to undo.' : '') : editable || (!target.buffer?.state().canUndo ? 'There is no document edit to undo.' : ''));
+    add('redo-document', image ? 'Redo image edit' : 'Redo document edit', 'Edit', () => image ? imageAction('redo') : undoDocument(target.docId, true), image ? imageReason || (!imageSession.capabilities(target.imageViewId).canRedo ? 'There is no image edit to redo.' : '') : editable || (!target.buffer?.state().canRedo ? 'There is no document edit to redo.' : ''));
     add('reload-folder', 'Reload Explorer folder', 'Go', () => current.noteFilesExplorer?.refresh(),
       current.noteFilesExplorer ? '' : 'Open Explorer first.');
-    add('history', 'Document revision history…', 'Go', () => isHostDocument(doc) ? openEditorResourceHistory(doc) : showHistory(doc), missing);
+    add('history', image ? 'Image history…' : 'Document revision history…', image ? 'Edit' : 'Go', () => image ? imageAction('history') : isHostDocument(doc) ? openEditorResourceHistory(doc) : showHistory(doc), image ? imageReason : missing);
+    if (image) for (const [id,label,menu] of [
+      ['zoom-in','Zoom in','View'],['zoom-out','Zoom out','View'],['zoom-fit','Fit image','View'],['zoom-actual','Actual size','View'],
+      ['image-resize','Resize canvas…','Image'],['image-rotate-90','Rotate 90°','Image'],['image-rotate-180','Rotate 180°','Image'],['image-flip-h','Flip horizontal','Image'],['image-flip-v','Flip vertical','Image'],
+      ['layer-add','Add layer','Layer'],['layer-merge-down','Merge down','Layer'],['layer-merge-all','Merge all','Layer'],
+      ['selection-invert','Invert selection','Selection'],['selection-delete','Delete selected pixels','Selection'],['selection-copy','Copy selection to layer','Selection'],['selection-mask','Selection to mask','Selection'],
+      ['filter-blur-gaussian','Gaussian blur…','Filter'],['filter-blur-zoom','Zoom blur…','Filter'],
+    ]) add(`image-${id}`,label,menu,() => imageAction(id),imageReason);
     add('customize-explorer','Customize Explorer…','View',customizeExplorer);
     add('switch-document-presentation',presentationId === 'wiki' ? 'Open in Editor' : 'Open in Wiki','View',() => target.docId && openOtherView?.(target.docId, presentationId === 'wiki' ? 'notes' : 'wiki'));
     add('settings', 'Editor settings…', 'Tools', showSettings);
     for (const [direction, orientation] of [['right', 'horizontal'], ['below', 'vertical']]) {
       add(`split-${direction}`, `Split editor ${direction}…`, 'Window', () => showChooser({
         title:`Split ${direction}`, allowCreate:false, choose:(chosen) => {
-          assertTarget(); if (splitWorkspaceGroup(workspace, target.groupId, chosen, orientation)) { persist(true); render(); }
+          assertTarget(); if (splitEditorGroup(workspace, target.groupId, chosen, orientation)) { persist(true); render(); }
         },
       }), target.groupId ? '' : 'Open an editor tab group first.');
     }
@@ -6345,34 +9357,21 @@ export function createNotesFeature({
 
   function ensureWorkbenchProvider(current = context()) {
     const workbench = window.__openClankWorkbench;
-    const host = current?.window?.root;
+    const host = current?.window?.workbenchHost || current?.window?.root;
     if (!host) return;
+    const menuTargetCurrent = target => !current.window.body.hidden && notesWorkbenchCurrent(target);
     installEditorFilesStyles();
     if(!current.noteGraphPolicyAbort){
       current.noteGraphPolicyAbort=new AbortController();
       document.addEventListener('openclank:file-policy-changed',()=>{current.noteGraphPolicyEpoch=(current.noteGraphPolicyEpoch||0)+1;},{signal:current.noteGraphPolicyAbort.signal});
     }
-    if(current.noteResourceContextHost!==host){
-      current.noteResourceContextDispose?.();current.noteResourceContextHost=host;
-      current.noteResourceContextDispose=registerAdapter(host,{
-        groupCommands:true,capture:captureNotesWorkbench,isCurrent:request=>notesWorkbenchCurrent(request?.adapterContext),
-        commands:request=>request?.adapterContext?notesWorkbenchCommands(request.adapterContext).map(item=>({...item,disabled:Boolean(item.disabledReason)})):[],
-        execute:async(command,request)=>{
-          if(!command.startsWith('editor.'))return false;
-          if(!notesWorkbenchCurrent(request?.adapterContext))throw new Error('The captured Editor pane changed. Reopen its menu.');
-          const descriptor=notesWorkbenchCommands(request.adapterContext).find(item=>item.id===command);
-          if(!descriptor||descriptor.disabledReason)throw new Error('This Editor command is unavailable.');
-          await descriptor.run();return true;
-        },
-      });
-    }
     if (workbench?.registerSurface && !(current.noteWorkbenchHost === host && current.noteWorkbenchDispose)) {
       current.noteWorkbenchDispose?.();
       current.noteWorkbenchHost = host;
       current.noteWorkbenchDispose = workbench.registerSurface(host, {
-        kind:'editor', capture:captureNotesWorkbench, isCurrent:notesWorkbenchCurrent, commands:notesWorkbenchCommands,
+        kind:'editor', capture:captureNotesWorkbench, isCurrent:menuTargetCurrent, commands:notesWorkbenchCommands,
         editingTarget:(target) => target.editor?.view.contentDOM || null,
-        restore:(target) => { if (notesWorkbenchCurrent(target)) target.editor?.focus(); },
+        restore:(target) => { if (menuTargetCurrent(target)) target.editor?.focus(); },
       });
     }
     if (current.noteWorkbenchMenu || current.noteWorkbenchMountToken) return;
@@ -6386,6 +9385,9 @@ export function createNotesFeature({
       // Notes replaces only window.body. Never mount inside a rebuilt leaf.
       current.noteWorkbenchMenu = mountWorkbenchMenu({ host, container:current.window.content, before:current.window.body,
         id:current.window.id, kind:'editor', label:presentationId === 'wiki' ? 'Wiki' : 'Editor' });
+      current.noteWorkbenchMenu.element.hidden = current.window.body.hidden;
+      syncFocusedImage(current,current.noteWorkspace);
+      for (const image of current.noteImages?.values() || []) for (const view of image.views?.values() || []) view.runtime?.setSharedCommands(true);
       current.noteWorkbenchMountToken = null;
       ensureWorkbenchProvider(current);
       current.window.body.querySelectorAll('.copal-editor-file-menu').forEach(menu => menu.remove());
@@ -6399,7 +9401,14 @@ export function createNotesFeature({
     const workspace = ensureWorkspace();
     const leaf = activeLeaf(workspace);
     const editor = context()?.noteLeafViews?.get(leaf?.id)?.editor;
-    if (name === 'save') { const doc = activeDoc(workspace); if (!doc) return false; void saveDraft(doc.id); return true; }
+    if (name === 'save') {
+      const doc=activeDoc(workspace), owner=context();
+      if (!doc) return false;
+      const image=owner?.noteImages?.get(doc.id);
+      if (image) void saveImageWithStatus(owner,image,leaf?.image?.viewId).catch(()=>{});
+      else void saveDraft(doc.id);
+      return true;
+    }
     if (name === 'quick-open') { showChooser(); return true; }
     if (name === 'palette') { showCommands(); return true; }
     if (name === 'search') { showSearch(); return true; }
@@ -6418,15 +9427,15 @@ export function createNotesFeature({
   if (registerGlobalOpener) globalThis.__openClankOpenResourceHandle = resourceOpener;
 
   return {
-    receiveDocumentSource, receiveSaveState:(docId, value) => setLeafSaveState(docId, value, false),
+    retainedImageDocuments, receiveDocumentSource, receiveSaveState:(docId, value) => setLeafSaveState(docId, value, false),
     setMode:(mode) => { const doc = activeDoc(); const leaf = activeLeaf(); if (doc && leaf) open(doc.id, { leafId:leaf.id, mode }); },
-    pinDocument:toggleBookmark,
+    ...(presentationId === 'wiki' ? { pinDocument:toggleWikiPin } : {}),
     showDocumentPanel:(panel) => { const workspace = ensureWorkspace(); workspace.right.open = true; workspace.right.tab = panel; persist(true); render(); },
     insertAttachment:(target) => { if (!notesWorkbenchCurrent(target) || target.readOnly) return false; const cache = target.current.noteLeafViews.get(target.leafId); chooseAttachment(cache, target.doc); return true; },
-    render, open, openResource, customizeExplorer, destroy, beforeWindowClose, resolveDirtyDocuments, persistRecovery, flushAll, queueSave, queueDocumentSave, suspendScope, loadSaved, showChooser, showCommands, showSearch, showSettings, insertTemplate, createTemplateFromCurrent, createFromTemplate, openDailyNote,
-    acceptSavedDocument, getDraftSnapshot, getAuthoritativeSnapshot, applyDocumentTransaction, rotateResourceRef, retrySaveAtRevision, retryDocumentSave, documentRetryState, rebaseDocumentAtRevision, projectDocument, prepareDelete, getSettings, updateSettings, getNotesPanels, updateNotesPanel, focusSourceLine, flushDocument:saveDraft,
-    getContext:context, openResourceRef:resourceOpener, captureEditorTarget:captureNotesWorkbench, editorTargetCurrent:notesWorkbenchCurrent,
-    subscribeToDocumentBuffer, invalidateBaseLeaves, runCommand, getEditorStatus,
+    render, open, openResource, showJournal, syncJournalCatalog, showExplorer, openSharedText, acceptSharedSnapshot, customizeExplorer, destroy, beforeWindowClose, resolveDirtyDocuments, persistRecovery, flushAll, queueSave, queueDocumentSave, suspendScope, loadSaved, showChooser, showCommands, showSearch, showSettings, insertTemplate, createTemplateFromCurrent, createFromTemplate, openDailyNote,
+    acceptSavedDocument, getDraftSnapshot, getAuthoritativeSnapshot, applyDocumentTransaction, rotateResourceRef, retrySaveAtRevision, retryDocumentSave, documentRetryState, rebaseDocumentAtRevision, projectDocument, prepareDelete, getSettings, updateSettings, getNotesPanels, updateNotesPanel, focusSourceLine, focusSourceRange, flushDocument:saveDraft,
+    getContext:context, openBlankImage, openFilesCanvasHandoff, openRetainedHostImage, openPendingAttachment, openResourceRef:resourceOpener, captureEditorTarget:captureNotesWorkbench, editorTargetCurrent:notesWorkbenchCurrent,
+    subscribeToDocumentBuffer, invalidateBaseLeaves, runCommand, getEditorStatus, captureSummaryDocumentTarget, insertSummaryDocumentSection, insertWikiPages,
     mergeTemplateProperties,
     toggleLeft:() => toggleSidebar('left'),
     toggleRight:() => toggleSidebar('right'),

@@ -17,6 +17,8 @@ through the standard agent_tools.py pipeline.
 import asyncio
 import json
 import logging
+import os
+import re
 import uuid
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
@@ -40,8 +42,6 @@ _memory_manager = None
 _memory_vector = None
 _memory_provider = None
 _memory_lifecycle = None
-_rag_manager = None
-_personal_docs_manager = None
 
 
 def set_session_manager(mgr):
@@ -63,12 +63,6 @@ def set_memory_manager(mgr, vector=None, provider=None, lifecycle=None):
     _memory_vector = vector
     _memory_provider = provider
     _memory_lifecycle = lifecycle
-
-
-def set_rag_manager(rag_mgr, personal_docs_mgr=None):
-    global _rag_manager, _personal_docs_manager
-    _rag_manager = rag_mgr
-    _personal_docs_manager = personal_docs_mgr
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +210,8 @@ async def do_pipeline(
 # Memory management tool
 # ---------------------------------------------------------------------------
 
-async def do_recall_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+async def do_recall_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None,
+                           *, _qualified_hits: Optional[list] = None, _provider=None) -> Dict:
     """Read-only memory recall — the chat lane's ONLY tool (T8 pull
     affordance). No write actions exist here by design; manage_memory's
     add/edit/delete stay agent-lane.
@@ -228,7 +223,18 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
     records (hand-authored/pinned/toggled kinds) return as plain trusted
     lines; everything else returns inside the untrusted guard wrapper so
     a pulled memory can't smuggle instructions past the firewall."""
-    if not _memory_provider:
+    from src.openclank.memery_preferences import owner_preferences
+    if not (await asyncio.to_thread(owner_preferences, owner))["memery_agent_search_enabled"]:
+        return {"error": "Agent Memery search is disabled"}
+    result = await _recall_memory_result(content, session_id, owner, _qualified_hits, _provider)
+    if not (await asyncio.to_thread(owner_preferences, owner))["memery_agent_search_enabled"]:
+        return {"error": "Agent Memery search is disabled"}
+    return result
+
+
+async def _recall_memory_result(content, session_id, owner, _qualified_hits, _provider):
+    provider = _provider if _provider is not None else _memory_provider
+    if not provider:
         return {"error": "Memory provider not available"}
     query = content.strip()
     if not query:
@@ -237,18 +243,56 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
     from src.memory_trust import trusted
     from src.prompt_security import untrusted_context_message
 
+    graph_fallback = False
+    if query.startswith("graph-evidence/v1\n"):
+        if not owner or len(query.encode()) > 2048:
+            return {"error": "Scoped graph recall unavailable"}
+        try:
+            graph_input = json.loads(query.split("\n", 1)[1])
+        except ValueError:
+            return {"error": "Invalid graph evidence request"}
+        if not isinstance(graph_input, dict) or set(graph_input) != {"query", "seed_ids", "intent"}:
+            return {"error": "Invalid graph evidence request"}
+        graph_query, seeds = graph_input["query"], graph_input["seed_ids"]
+        if ((graph_query is not None and (type(graph_query) is not str or not graph_query.strip()
+                                         or len(graph_query.encode()) > 1024 or not graph_query.isprintable()))
+                or type(seeds) is not list or len(seeds) > 1
+                or (seeds and (type(seeds[0]) is not str or re.fullmatch(
+                    r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}", seeds[0]) is None))
+                or graph_input["intent"] not in ("general", "temporal", "causal", "entity")
+                or (graph_query is None and not seeds)):
+            return {"error": "Invalid graph evidence request"}
+        try:
+            reconstruct = getattr(provider, "reconstruct_graph", None)
+            evidence = await reconstruct(owner=owner, request={
+                **graph_input, "max_steps": 4, "max_nodes": 12, "max_edges": 32, "per_kind": 4,
+            }) if callable(reconstruct) else None
+            if isinstance(evidence, dict) and evidence.get("version") == 1 and evidence.get("nodes"):
+                wrapped = untrusted_context_message("ranked memory witnesses", json.dumps(evidence, ensure_ascii=False))
+                return {"results": wrapped["content"]}
+        except Exception:
+            pass
+        graph_fallback = True
+        query = "id: " + seeds[0] if seeds else graph_query
     try:
         if query.lower().startswith("id:"):
             memory_id = query[3:].strip()
-            record = await _memory_provider.get(memory_id, owner=owner)
+            record = await provider.get(memory_id, owner=owner)
             records = [record] if record else []
+            hits = []
         else:
-            hits = await _memory_provider.recall(query, owner=owner, top_k=5)
+            hits = await provider.recall(query, owner=owner, top_k=5)
             records = [h.memory for h in hits]
     except Exception as exc:
         return {"error": f"Memory recall failed: {exc}"}
     if not records:
-        return {"results": "No matching memories."}
+        return {"results": ("No ranked graph evidence or matching memories."
+                            if graph_fallback else "No matching memories.")}
+
+    # The app-owned qualified-recall path receives only actual final hits;
+    # references stay internal and are never added to the model response.
+    if _qualified_hits is not None:
+        _qualified_hits.extend(hit for hit in hits if getattr(hit, 'revision_ref', None) is not None)
 
     try:
         from routes.prefs_routes import _load_for_user
@@ -257,7 +301,7 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
     except Exception:
         prefs = {}
 
-    handler_label = await _resolve_handler_label(owner)
+    handler_label = await _resolve_handler_label(owner, provider=provider)
 
     def _render(text) -> str:
         return _render_memory_text(text, handler_label)
@@ -272,7 +316,7 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
 
     endorsed = [r for r in records if trusted(r, prefs)]
     reference = [r for r in records if r not in endorsed]
-    sections = []
+    sections = ["Ranked graph evidence was unavailable. Matching memory records follow."] if graph_fallback else []
     if endorsed:
         sections.append(
             "Endorsed by the user (treat as reliable):\n"
@@ -286,22 +330,23 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
         sections.append(str(wrapped["content"]))
 
     used_ids = [r.id for r in records if getattr(r, "id", None)]
-    if used_ids and hasattr(_memory_provider, "record_access"):
+    if used_ids and _qualified_hits is None and hasattr(provider, "record_access"):
         try:
-            await _memory_provider.record_access(used_ids, owner=owner)
+            await provider.record_access(used_ids, owner=owner)
         except Exception:
             logger.debug("recall_memory access accounting failed", exc_info=True)
 
     return {"results": "\n\n".join(sections)}
 
 
-async def _resolve_handler_label(owner) -> str:
+async def _resolve_handler_label(owner, *, provider=None) -> str:
     """Owner-scoped Handler label for read-time %USER% rendering (fail-safe)."""
     try:
-        label = getattr(_memory_provider, "handler_display_label", None)
+        selected = provider if provider is not None else _memory_provider
+        label = getattr(selected, "handler_display_label", None)
         if callable(label):
             return await label(owner=owner)
-        if getattr(_memory_provider, "_broker_url", ""):
+        if getattr(selected, "_broker_url", ""):
             return "Handler"
         from services.memory.principal_context import resolve_handler_display_label
         return resolve_handler_display_label(owner)
@@ -332,7 +377,8 @@ def _normalize_question(text: str) -> str:
     return f"{trimmed}?" if trimmed else ""
 
 
-async def do_manage_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+async def do_manage_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None,
+                           *, management_args: Optional[dict] = None) -> Dict:
     """Manage memories: list, add, edit, delete, search, resolve.
 
     Content format:
@@ -360,7 +406,8 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
     if not lines:
         return {"error": "Need at least 1 line: action"}
 
-    action = lines[0].strip().lower()
+    args = management_args or {}
+    action = args.get("action", lines[0].strip().lower())
     from routes.prefs_routes import _load_for_user
     from src.memory_gate import memory_mode, write_allowed
 
@@ -377,6 +424,9 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         if action == "list":
             try:
                 records = await _memory_provider.list_memories(owner=owner, limit=100)
+                if args.get("category"):
+                    category = "unknown" if args["category"] == "question" else args["category"]
+                    records = [r for r in records if r.category == category]
                 if not records:
                     return {"results": "No memories found."}
                 result_lines = [f"Found {len(records)} memory entries:\n"]
@@ -392,10 +442,10 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 return {"error": f"Provider list failed: {e}"}
 
         elif action == "add":
-            if len(lines) < 2:
+            if not args and len(lines) < 2:
                 return {"error": "Add needs line 2: memory text"}
-            text = lines[1].strip()
-            category = lines[2].strip().lower() if len(lines) > 2 and lines[2].strip() else "fact"
+            text = args["text"].strip() if args else lines[1].strip()
+            category = args.get("category", "fact") if args else (lines[2].strip().lower() if len(lines) > 2 and lines[2].strip() else "fact")
             if category in ("unknown", "question"):
                 category = "unknown"
                 text = _normalize_question(text)
@@ -410,7 +460,7 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                     category=category,
                     # Open questions are user-authored requests by contract.
                     # Agent-discovered answers remain AI-attributed facts.
-                    source="user" if category == "unknown" else "ai_agent",
+                    source="user" if category == "unknown" and not args else "ai_agent",
                     capture_mode="review_only" if review_only else "manual",
                 )
                 if review_only:
@@ -426,11 +476,11 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 return {"error": f"Provider add failed: {e}"}
 
         elif action == "edit":
-            if len(lines) < 3:
+            if not args and len(lines) < 3:
                 return {"error": "Edit needs line 2: memory_id, line 3: new text"}
-            display_id = lines[1].strip()
-            new_text = lines[2].strip()
-            category = lines[3].strip().lower() if len(lines) > 3 and lines[3].strip() else None
+            display_id = args["memory_id"].strip() if args else lines[1].strip()
+            new_text = args["text"].strip() if args else lines[2].strip()
+            category = args.get("category") if args else (lines[3].strip().lower() if len(lines) > 3 and lines[3].strip() else None)
             if not new_text:
                 return {"error": "New text cannot be empty"}
             try:
@@ -446,9 +496,9 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 return {"error": f"Provider edit failed: {e}"}
 
         elif action == "delete":
-            if len(lines) < 2:
+            if not args and len(lines) < 2:
                 return {"error": "Delete needs line 2: memory_id"}
-            display_id = lines[1].strip()
+            display_id = args["memory_id"].strip() if args else lines[1].strip()
             try:
                 memory_id = await _memory_provider.resolve_id(display_id, owner=owner)
                 if _memory_lifecycle is None:
@@ -467,9 +517,12 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 return {"error": f"Provider delete failed: {e}"}
 
         elif action == "search":
-            if len(lines) < 2:
+            if not args and len(lines) < 2:
                 return {"error": "Search needs line 2: query"}
-            query = lines[1].strip()
+            from src.openclank.memery_preferences import owner_preferences
+            if not (await asyncio.to_thread(owner_preferences, owner))["memery_agent_search_enabled"]:
+                return {"error": "Agent Memery search is disabled"}
+            query = args["query"].strip() if args else lines[1].strip()
             try:
                 hits = await _memory_provider.recall(query, owner=owner, top_k=20)
                 if not hits:
@@ -480,20 +533,25 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                     mid = h.memory.id[:8]
                     text = _render_memory_text(h.memory.text, await _resolve_handler_label(owner))
                     result_lines.append(f"- [{cat}] `{mid}` — {text}")
+                if not (await asyncio.to_thread(owner_preferences, owner))["memery_agent_search_enabled"]:
+                    return {"error": "Agent Memery search is disabled"}
                 return {"results": "\n".join(result_lines)}
             except Exception as e:
                 return {"error": f"Provider search failed: {e}"}
 
         elif action == "resolve":
-            if len(lines) < 2:
+            if not args and len(lines) < 2:
                 return {"error": "Resolve needs line 2: question memory_id"}
-            display_id = lines[1].strip()
-            answer_value = "\n".join(lines[2:]).strip() if len(lines) > 2 else ""
+            display_id = args["memory_id"].strip() if args else lines[1].strip()
+            answer_value = args.get("answer", "") if args else "\n".join(lines[2:]).strip()
             try:
                 memory_id = await _memory_provider.resolve_id(display_id, owner=owner)
                 resolved_by = None
                 answer = answer_value
-                if answer_value.startswith("memory_id:"):
+                if args.get("answer_memory_id"):
+                    resolved_by = await _memory_provider.resolve_id(args["answer_memory_id"], owner=owner)
+                    answer = None
+                elif not args and answer_value.startswith("memory_id:"):
                     resolved_by = await _memory_provider.resolve_id(
                         answer_value.split(":", 1)[1].strip(), owner=owner
                     )
@@ -527,94 +585,52 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
 # RAG management tool
 # ---------------------------------------------------------------------------
 
-async def do_manage_rag(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """Manage RAG indexed documents: list, add_directory, remove_directory.
+async def do_manage_rag(arguments: dict, *, owner: str, workspace_id: Optional[str] = None) -> Dict:
+    """Run an administrative document-index operation against the host's Memery store."""
+    from src.rag_singleton import get_rag_manager
 
-    Content format:
-      Line 1: action (list|add_directory|remove_directory)
-      Line 2: directory path (for add/remove)
-    """
-    lines = content.strip().split("\n")
-    if not lines:
-        return {"error": "No action specified"}
-    action = lines[0].strip().lower()
+    if not owner:
+        return {"error": "An authenticated owner is required", "exit_code": 1}
+    scope = {"owner": owner, "workspace_id": workspace_id, "project_id": None}
 
-    if action == "list":
-        if not _personal_docs_manager:
-            return {"results": "Personal docs manager not available. RAG may not be configured."}
-        try:
-            files = []
-            if hasattr(_personal_docs_manager, 'index'):
-                files = _personal_docs_manager.index or []
-            dirs = []
-            if hasattr(_personal_docs_manager, 'get_indexed_directories'):
-                dirs = _personal_docs_manager.get_indexed_directories()
+    def operate():
+        manager = get_rag_manager()
+        if manager is None:
+            raise ValueError("RAG manager unavailable")
+        action = arguments.get("action")
+        if action == "status":
+            return manager.get_stats(owner=owner)
+        if action == "list":
+            sources = manager.list_sources(**scope)
+            return {"count": len(sources), "sources": sources[:50]}
+        if action == "rebuild_embeddings":
+            return manager.build_embedding_generation(**scope, publish=True)
+        if action == "rollback_embedding":
+            generation = arguments.get("generation_id")
+            if not isinstance(generation, str) or not generation.strip():
+                raise ValueError("rollback_embedding requires generation_id")
+            return manager.rollback_generation(owner=owner, generation_id=generation.strip(),
+                                               expected_scope=(workspace_id or "", ""))
+        if action not in ("add_directory", "remove_directory"):
+            raise ValueError(f"Unknown RAG action: {action}")
+        directory = arguments.get("directory")
+        if not isinstance(directory, str) or not directory.strip():
+            raise ValueError(f"{action} requires a directory")
+        path = os.path.abspath(os.path.expanduser(directory.strip()))
+        if action == "add_directory":
+            if not os.path.isdir(path):
+                raise ValueError(f"Directory not found: {path}")
+            result = manager.index_personal_documents(path, **scope)
+        else:
+            result = manager.remove_directory(path, **scope)
+        if not isinstance(result, dict) or not result.get("success"):
+            raise ValueError(result.get("message") if isinstance(result, dict) else "Index operation failed")
+        return result
 
-            result_lines = []
-            if dirs:
-                result_lines.append(f"**Indexed directories ({len(dirs)}):**")
-                for d in dirs:
-                    result_lines.append(f"  - `{d}`")
-            if files:
-                result_lines.append(f"\n**Indexed files ({len(files)}):**")
-                for f in files[:50]:
-                    name = f.get("name", str(f)) if isinstance(f, dict) else str(f)
-                    result_lines.append(f"  - {name}")
-                if len(files) > 50:
-                    result_lines.append(f"  ... and {len(files) - 50} more")
-
-            if not result_lines:
-                return {"results": "No files or directories indexed in RAG."}
-            return {"results": "\n".join(result_lines)}
-        except Exception as e:
-            return {"error": str(e)}
-
-    elif action == "add_directory":
-        if len(lines) < 2:
-            return {"error": "add_directory needs line 2: directory path"}
-        directory = lines[1].strip()
-
-        import os
-        directory = os.path.expanduser(directory)
-        if not os.path.isdir(directory):
-            return {"error": f"Directory not found: {directory}"}
-
-        if not _rag_manager:
-            return {"error": "RAG manager not available"}
-
-        try:
-            result = _rag_manager.index_personal_documents(directory, owner=owner)
-            indexed = result.get("indexed", 0) if isinstance(result, dict) else 0
-            return {"action": "add_directory", "directory": directory,
-                    "results": f"Directory '{directory}' added to RAG index ({indexed} files indexed)"}
-        except Exception as e:
-            return {"error": f"Failed to index directory: {e}"}
-
-    elif action == "remove_directory":
-        if len(lines) < 2:
-            return {"error": "remove_directory needs line 2: directory path"}
-        directory = lines[1].strip()
-
-        if not _personal_docs_manager:
-            return {"error": "Personal docs manager not available"}
-
-        try:
-            if hasattr(_personal_docs_manager, 'remove_directory'):
-                # Performs a targeted per-directory delete (#1660). The previous
-                # unconditional _rag_manager.rebuild_index() here wiped the whole
-                # collection on every remove (even for untracked dirs) and has
-                # been removed.
-                try:
-                    _personal_docs_manager.remove_directory(directory, owner=owner)
-                except TypeError:
-                    _personal_docs_manager.remove_directory(directory)
-            return {"action": "remove_directory", "directory": directory,
-                    "results": f"Directory '{directory}' removed from RAG index"}
-        except Exception as e:
-            return {"error": f"Failed to remove directory: {e}"}
-
-    else:
-        return {"error": f"Unknown action '{action}'. Use: list, add_directory, remove_directory"}
+    try:
+        return {"stdout": json.dumps(await asyncio.to_thread(operate), ensure_ascii=False), "exit_code": 0}
+    except Exception as error:
+        return {"error": str(error), "exit_code": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +648,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
       toggle <name> <on|off>  — Toggle a setting (web, bash, rag, research, incognito, document_editor)
       switch_model <model>    — Change the model for the current session
       set_theme <preset>      — Apply a built-in theme preset (clanker-dark, clanker-light, dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute)
-      create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|clanker-sweep|clanker-blueprint|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
+      create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|clanker-routefield|clanker-kene-weave|clanker-signal-weave|clanker-matrix-rain|clanker-emoji-rain|clanker-emoji-drift|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
       open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook, usage)
       open_email_reply <uid> [folder] [reply|reply-all|ai-reply] [body text] — Open a reply draft document for an email; does not send. ALWAYS append the body text when the user told you what to say (one-shot draft); only omit body when the user just asked to "open a reply" without content.
       get_toggles             — Return current toggle states (server-side knowledge)
@@ -756,7 +772,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         parts = lines[0].strip().split()
         # create_theme <name> <bg> <fg> <panel> <border> <accent> [key=value ...]
         if len(parts) < 7:
-            return {"error": "create_theme needs: create_theme <name> <bg> <fg> <panel> <border> <accent> (all hex colors). Optional advanced color key=value pairs (userBubbleBg, aiBubbleBg, bubbleBorder, sidebarBg, sectionAccent, brandColor, inputBg, inputBorder, sendBtnBg, sendBtnHover, codeBg, codeFg, toggleBg, toggleActive, accentPrimary, accentError). Optional background EFFECTS: bgPattern=<none|clanker-sweep|clanker-blueprint|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num e.g. 1>, bgEffectSize=<num e.g. 1>, frosted=true|false"}
+            return {"error": "create_theme needs: create_theme <name> <bg> <fg> <panel> <border> <accent> (all hex colors). Optional advanced color key=value pairs (userBubbleBg, aiBubbleBg, bubbleBorder, sidebarBg, sectionAccent, brandColor, inputBg, inputBorder, sendBtnBg, sendBtnHover, codeBg, codeFg, toggleBg, toggleActive, accentPrimary, accentError). Optional background EFFECTS: bgPattern=<none|clanker-routefield|clanker-kene-weave|clanker-signal-weave|clanker-matrix-rain|clanker-emoji-rain|clanker-emoji-drift|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num e.g. 1>, bgEffectSize=<num e.g. 1>, frosted=true|false"}
         name = parts[1].lower().replace(" ", "-")
         colors = {"bg": parts[2], "fg": parts[3], "panel": parts[4], "border": parts[5], "red": parts[6]}
         # Validate base hex colors
@@ -774,7 +790,8 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         advanced = {}
         # Background-effect fields (animated pattern + frosted glass). Different
         # value types than the hex-only advanced keys, so parse separately.
-        _BG_PATTERNS = {"none", "clanker-sweep", "clanker-blueprint", "dots", "synapse", "rain", "constellations",
+        _BG_PATTERNS = {"none", "clanker-routefield", "clanker-kene-weave", "clanker-signal-weave",
+                        "clanker-matrix-rain", "clanker-emoji-rain", "clanker-emoji-drift", "clanker-sweep", "clanker-blueprint", "dots", "synapse", "rain", "constellations",
                         "perlin-flow", "petals", "sparkles", "embers"}
         bg = {}
         for part in parts[7:]:

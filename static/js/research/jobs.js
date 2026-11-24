@@ -9,7 +9,7 @@ let _idCounter = 0;
 
 // Dismissed-from-panel IDs persist across reloads so Clear actually sticks.
 // (Items still live on disk and in the Library; this just hides them here.)
-const _DISMISSED_KEY = 'odysseus-research-dismissed';
+const _DISMISSED_KEY = 'openclank-research-dismissed';
 function _loadDismissed() {
   try {
     const raw = localStorage.getItem(_DISMISSED_KEY);
@@ -34,13 +34,19 @@ const _LIBRARY_SYNC_MIN_MS = 120000;
 
 export function init(apiBase) {
   _apiBase = apiBase;
-  _reconnectActive({ includeLibrary: true, forceLibrary: true });
-  // Poll for active sessions periodically so research started elsewhere
-  // (e.g. by the agent via trigger_research) gets adopted into the
-  // sidebar — _reconnectActive only ran once at load before, so
-  // agent-started jobs never appeared until a page reload.
-  if (_activePollInterval) clearInterval(_activePollInterval);
-  _activePollInterval = setInterval(() => { _reconnectActive(); }, 20000);
+  document.removeEventListener('visibilitychange', _scheduleDiscovery);
+  document.addEventListener('visibilitychange', _scheduleDiscovery);
+  _scheduleDiscovery();
+}
+
+function _scheduleDiscovery() {
+  clearInterval(_activePollInterval);
+  _activePollInterval = null;
+  if (document.hidden) return;
+  void _reconnectActive();
+  // A visible sidebar can discover externally started work. Job streams
+  // continue to deliver completion notifications while the tab is hidden.
+  _activePollInterval = setInterval(_reconnectActive, 20000);
 }
 
 // Allow an immediate adopt when the chat stream signals a new research
@@ -54,7 +60,7 @@ export function refreshLibrary(options = {}) {
   return _syncLibrary(options);
 }
 
-async function _reconnectActive(options = {}) {
+async function _reconnectActive() {
   if (_activePollInFlight) return;
   _activePollInFlight = true;
   try {
@@ -62,6 +68,7 @@ async function _reconnectActive(options = {}) {
     const res = await fetch(`${_apiBase}/api/research/active`, { credentials: 'same-origin' });
     if (res.ok) {
       const data = await res.json();
+      let adopted = false;
       for (const task of (data.active || [])) {
         if (_jobs.some(j => j.id === task.session_id)) continue;
         const job = {
@@ -71,15 +78,14 @@ async function _reconnectActive(options = {}) {
           elapsed: task.started_at ? Date.now() - task.started_at * 1000 : 0,
           result: null, sources: null, findings: null,
           errorMsg: null, avgDuration: null, modelName: null,
-          settings: {}, _es: null, _timerInterval: null,
+          settings: {}, _es: null,
         };
         _jobs.push(job);
         _connectStream(job);
+        adopted = true;
       }
+      if (adopted) _notify();
     }
-
-    if (options.includeLibrary) await _syncLibrary({ force: !!options.forceLibrary });
-    _notify();
   } catch {
   } finally {
     _activePollInFlight = false;
@@ -130,7 +136,7 @@ async function _syncLibrary(options = {}) {
           category: item.category || '',
           errorMsg: null, avgDuration: null, modelName: null,
           settings: { max_rounds: item.rounds || 8 },
-          _es: null, _timerInterval: null, _fromLibrary: true,
+          _es: null, _fromLibrary: true,
         });
       }
     }
@@ -229,7 +235,6 @@ export function clearAll() {
   if (doneIds.length) _markDismissed(doneIds);
   for (const job of _jobs) {
     if (job._es) { job._es.close(); job._es = null; }
-    if (job._timerInterval) { clearInterval(job._timerInterval); job._timerInterval = null; }
   }
   _jobs = [];
   _notify();
@@ -265,7 +270,7 @@ function _makeJob(query, settings) {
     category: settings?.category || '',
     errorMsg: null, avgDuration: null,
     modelName: null, endpointName: null,
-    _es: null, _timerInterval: null,
+    _es: null,
   };
 }
 
@@ -300,11 +305,6 @@ async function _launchJob(job) {
 }
 
 function _connectStream(job) {
-  job._timerInterval = setInterval(() => {
-    job.elapsed = Date.now() - job.startedAt;
-    _notify();
-  }, 1000);
-
   const es = new EventSource(`${_apiBase}/api/research/stream/${job.id}`);
   job._es = es;
 
@@ -343,6 +343,7 @@ async function _pollFallback(job) {
       if (d.status === 'done') _fetchResult(job);
       return;
     }
+    _notify();
     setTimeout(() => _pollFallback(job), 2000);
   } catch { _finishJob(job, 'error'); }
 }
@@ -350,7 +351,6 @@ async function _pollFallback(job) {
 function _finishJob(job, status) {
   job.status = status;
   if (job._es) { job._es.close(); job._es = null; }
-  if (job._timerInterval) { clearInterval(job._timerInterval); job._timerInterval = null; }
   job.elapsed = Date.now() - (job.startedAt || Date.now());
   if (status === 'done') {
     if ('Notification' in window && Notification.permission === 'granted') {

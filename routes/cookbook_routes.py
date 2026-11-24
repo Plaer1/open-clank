@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Response, Depends
 
 from src.auth_helpers import effective_user, require_user
 from src.constants import COOKBOOK_STATE_FILE
@@ -91,7 +91,7 @@ def _append_mlx_image_server_script(runner_lines: list[str]) -> None:
     except Exception as e:
         logger.warning("Failed to read mlx_image_server.py: %s", e)
         runner_lines.append('echo "ERROR: Odysseus could not prepare the MLX image server helper."')
-        runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=127')
+        runner_lines.append('OPEN_CLANK_PREFLIGHT_EXIT=127')
         return
     runner_lines.append('mkdir -p scripts')
     runner_lines.append("cat > scripts/mlx_image_server.py <<'PY'")
@@ -138,10 +138,10 @@ def _append_openai_port_preflight_lines(lines: list[str], *, cmd: str, expected_
     port = _serve_port_from_cmd(cmd)
     if not port:
         return
-    lines.append(f"ODYSSEUS_SERVE_PORT='{_bash_squote(port)}'")
-    lines.append(f"ODYSSEUS_EXPECTED_MODEL='{_bash_squote(expected_model)}'")
-    lines.append("if [ -n \"$ODYSSEUS_SERVE_PORT\" ]; then")
-    lines.append("  python3 - \"$ODYSSEUS_SERVE_PORT\" \"$ODYSSEUS_EXPECTED_MODEL\" <<'PY'")
+    lines.append(f"OPEN_CLANK_SERVE_PORT='{_bash_squote(port)}'")
+    lines.append(f"OPEN_CLANK_EXPECTED_MODEL='{_bash_squote(expected_model)}'")
+    lines.append("if [ -n \"$OPEN_CLANK_SERVE_PORT\" ]; then")
+    lines.append("  python3 - \"$OPEN_CLANK_SERVE_PORT\" \"$OPEN_CLANK_EXPECTED_MODEL\" <<'PY'")
     lines.append("import json, sys, urllib.request")
     lines.append("port = sys.argv[1]")
     lines.append("expected = (sys.argv[2] or '').strip()")
@@ -162,7 +162,7 @@ def _append_openai_port_preflight_lines(lines: list[str], *, cmd: str, expected_
     lines.append("raise SystemExit(98)")
     lines.append("PY")
     lines.append("  _ody_port_ec=$?")
-    lines.append("  if [ \"$_ody_port_ec\" -ne 0 ]; then ODYSSEUS_PREFLIGHT_EXIT=\"$_ody_port_ec\"; fi")
+    lines.append("  if [ \"$_ody_port_ec\" -ne 0 ]; then OPEN_CLANK_PREFLIGHT_EXIT=\"$_ody_port_ec\"; fi")
     lines.append("fi")
 
 _OLLAMA_SIDECAR_CONTAINERS = {"ollama-test", "ollama-rocm"}
@@ -266,26 +266,26 @@ def _remote_posix_path_prefix() -> str:
 def _remote_tmux_command(*args: str) -> str:
     """Shell command for remote tmux when non-login SSH has a thin PATH."""
     tmux = (
-        'ODYSSEUS_TMUX="$(command -v tmux '
+        'OPEN_CLANK_TMUX="$(command -v tmux '
         '|| command -v /opt/homebrew/bin/tmux '
         '|| command -v /usr/local/bin/tmux '
         '|| command -v /usr/bin/tmux '
         '|| true)"; '
-        'if [ -z "$ODYSSEUS_TMUX" ]; then echo "tmux not found" >&2; exit 127; fi; '
+        'if [ -z "$OPEN_CLANK_TMUX" ]; then echo "tmux not found" >&2; exit 127; fi; '
     )
     quoted = " ".join(shlex.quote(str(arg)) for arg in args)
-    return f'{_remote_posix_path_prefix()}{tmux}"$ODYSSEUS_TMUX" {quoted}'
+    return f'{_remote_posix_path_prefix()}{tmux}"$OPEN_CLANK_TMUX" {quoted}'
 
 
 def _remote_tmux_launch_command(session_id: str, runner: str) -> str:
     """Shell command that chmods a runner and starts it in remote tmux."""
     tmux = (
-        'ODYSSEUS_TMUX="$(command -v tmux '
+        'OPEN_CLANK_TMUX="$(command -v tmux '
         '|| command -v /opt/homebrew/bin/tmux '
         '|| command -v /usr/local/bin/tmux '
         '|| command -v /usr/bin/tmux '
         '|| true)"; '
-        'if [ -z "$ODYSSEUS_TMUX" ]; then echo "tmux not found" >&2; exit 127; fi; '
+        'if [ -z "$OPEN_CLANK_TMUX" ]; then echo "tmux not found" >&2; exit 127; fi; '
     )
     sid = shlex.quote(str(session_id))
     runner_q = shlex.quote(str(runner))
@@ -293,8 +293,8 @@ def _remote_tmux_launch_command(session_id: str, runner: str) -> str:
     return (
         f'{_remote_posix_path_prefix()}{tmux}'
         f'chmod +x {runner_q} && '
-        f'"$ODYSSEUS_TMUX" set-option -g history-limit 100000 2>/dev/null; '
-        f'"$ODYSSEUS_TMUX" new-session -d -s {sid} {runner_exec}'
+        f'"$OPEN_CLANK_TMUX" set-option -g history-limit 100000 2>/dev/null; '
+        f'"$OPEN_CLANK_TMUX" new-session -d -s {sid} {runner_exec}'
     )
 
 
@@ -365,19 +365,19 @@ def _append_local_ollama_download_command_lines(
     docker_fallback_blocked: bool,
 ) -> None:
     lines.append('if command -v ollama >/dev/null 2>&1; then')
-    lines.append(f'  ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote(ollama_cmd)}')
+    lines.append(f'  OPEN_CLANK_OLLAMA_PULL_CMD={shlex.quote(ollama_cmd)}')
     if docker_fallback_available:
         lines.append('elif command -v docker >/dev/null 2>&1; then')
-        lines.append("  ODYSSEUS_OLLAMA_CONTAINER=\"$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^(ollama-rocm|ollama-test)$' | head -1)\"")
-        lines.append('  if [ -n "$ODYSSEUS_OLLAMA_CONTAINER" ]; then')
-        lines.append(f'    ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote("docker exec ${ODYSSEUS_OLLAMA_CONTAINER} " + ollama_cmd)}')
+        lines.append("  OPEN_CLANK_OLLAMA_CONTAINER=\"$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^(ollama-rocm|ollama-test)$' | head -1)\"")
+        lines.append('  if [ -n "$OPEN_CLANK_OLLAMA_CONTAINER" ]; then')
+        lines.append(f'    OPEN_CLANK_OLLAMA_PULL_CMD={shlex.quote("docker exec ${OPEN_CLANK_OLLAMA_CONTAINER} " + ollama_cmd)}')
         lines.append('  fi')
     elif docker_fallback_blocked:
         hint = shlex.quote("ERROR: " + HOST_DOCKER_ACCESS_HINT)
         lines.append('else')
         lines.append(f"  printf '%s\\n' {hint}; exit 127")
     lines.append('fi')
-    lines.append('if [ -z "$ODYSSEUS_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi')
+    lines.append('if [ -z "$OPEN_CLANK_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi')
 
 
 def setup_cookbook_routes(
@@ -602,6 +602,8 @@ def setup_cookbook_routes(
 
     def _state_for_client(state):
         """Return cookbook state without raw secrets for browser clients."""
+        from src.openclank.cookbook_state import client_state
+        state = client_state(state)
         _strip_task_secrets(state)
         env = state.get("env") if isinstance(state, dict) else None
         if isinstance(state, dict) and not isinstance(env, dict):
@@ -1147,7 +1149,7 @@ def setup_cookbook_routes(
             # ── Windows remote: generate .ps1 runner, use Start-Process for background ──
             remote_runner = f".{session_id}_run.ps1"
             ps_lines = []
-            ps_lines.append('$sessionDir = "$env:TEMP\\odysseus-sessions"')
+            ps_lines.append('$sessionDir = "$env:TEMP\\open-clank-sessions"')
             ps_lines.append('New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null')
             if req.hf_token:
                 ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
@@ -1201,7 +1203,7 @@ def setup_cookbook_routes(
             _pf = f"-p {_port} " if _port and _port != "22" else ""
             # Start-Process creates a fully detached process that survives SSH disconnect
             launch_ps = (
-                "$sd = \\\"$env:TEMP\\odysseus-sessions\\\"; "
+                "$sd = \\\"$env:TEMP\\open-clank-sessions\\\"; "
                 f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
                 f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
                 f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
@@ -1236,42 +1238,42 @@ def setup_cookbook_routes(
                 )
             # Ensure pip-user scripts (e.g. hf CLI installed via --user) are on PATH
             runner_lines.append('export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
-            runner_lines.append('ODYSSEUS_PY="$(command -v python3 || command -v python || true)"')
-            runner_lines.append('if [ -z "$ODYSSEUS_PY" ]; then echo "ERROR: python3/python not found on this server."; exit 127; fi')
+            runner_lines.append('OPEN_CLANK_PY="$(command -v python3 || command -v python || true)"')
+            runner_lines.append('if [ -z "$OPEN_CLANK_PY" ]; then echo "ERROR: python3/python not found on this server."; exit 127; fi')
             # Install hf CLI + optional hf_transfer best-effort. Retries disable
             # hf_transfer because the Rust parallel path is fast but has been
             # flaky near the end of very large multi-file downloads.
             # Use --break-system-packages on PEP-668 systems (Arch, newer Debian) so it doesn't bail.
             if is_ollama_download:
                 runner_lines.append('if command -v ollama >/dev/null 2>&1; then')
-                runner_lines.append(f'  ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote(ollama_cmd)}')
+                runner_lines.append(f'  OPEN_CLANK_OLLAMA_PULL_CMD={shlex.quote(ollama_cmd)}')
                 runner_lines.append('elif command -v docker >/dev/null 2>&1; then')
-                runner_lines.append('  ODYSSEUS_OLLAMA_CONTAINER="$(docker ps --format \'{{.Names}}\' 2>/dev/null | grep -E \'^(ollama-rocm|ollama-test)$\' | head -1)"')
-                runner_lines.append('  if [ -n "$ODYSSEUS_OLLAMA_CONTAINER" ]; then')
-                runner_lines.append(f'    ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote("docker exec ${ODYSSEUS_OLLAMA_CONTAINER} " + ollama_cmd)}')
+                runner_lines.append('  OPEN_CLANK_OLLAMA_CONTAINER="$(docker ps --format \'{{.Names}}\' 2>/dev/null | grep -E \'^(ollama-rocm|ollama-test)$\' | head -1)"')
+                runner_lines.append('  if [ -n "$OPEN_CLANK_OLLAMA_CONTAINER" ]; then')
+                runner_lines.append(f'    OPEN_CLANK_OLLAMA_PULL_CMD={shlex.quote("docker exec ${OPEN_CLANK_OLLAMA_CONTAINER} " + ollama_cmd)}')
                 runner_lines.append('  fi')
                 runner_lines.append('fi')
-                runner_lines.append('if [ -z "$ODYSSEUS_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi')
+                runner_lines.append('if [ -z "$OPEN_CLANK_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi')
             else:
                 hf_hub_install = _pip_install_fallback_chain(
                     "huggingface_hub",
-                    python_cmd='"$ODYSSEUS_PY" -m pip',
+                    python_cmd='"$OPEN_CLANK_PY" -m pip',
                     upgrade=True,
                 )
                 runner_lines.append(f"command -v hf >/dev/null 2>&1 || command -v huggingface-cli >/dev/null 2>&1 || {hf_hub_install}")
                 runner_lines.append('hash -r 2>/dev/null || true')
-                runner_lines.append('ODYSSEUS_HF_CLI="$(command -v hf || command -v huggingface-cli || true)"')
-                runner_lines.append('if [ -z "$ODYSSEUS_HF_CLI" ]; then echo "ERROR: HF CLI not found after installing huggingface_hub."; exit 127; fi')
+                runner_lines.append('OPEN_CLANK_HF_CLI="$(command -v hf || command -v huggingface-cli || true)"')
+                runner_lines.append('if [ -z "$OPEN_CLANK_HF_CLI" ]; then echo "ERROR: HF CLI not found after installing huggingface_hub."; exit 127; fi')
                 if req.disable_hf_transfer:
                     runner_lines.append("export HF_HUB_ENABLE_HF_TRANSFER=0")
                     runner_lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=4")
                 else:
                     hf_transfer_install = _pip_install_fallback_chain(
                         "hf_transfer",
-                        python_cmd='"$ODYSSEUS_PY" -m pip',
+                        python_cmd='"$OPEN_CLANK_PY" -m pip',
                     )
-                    runner_lines.append(f"\"$ODYSSEUS_PY\" -c 'import hf_transfer' 2>/dev/null || {hf_transfer_install}")
-                    runner_lines.append("\"$ODYSSEUS_PY\" -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1")
+                    runner_lines.append(f"\"$OPEN_CLANK_PY\" -c 'import hf_transfer' 2>/dev/null || {hf_transfer_install}")
+                    runner_lines.append("\"$OPEN_CLANK_PY\" -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1")
                     runner_lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=8")
                 # Surface whether the HF token actually reached THIS server, so a gated
                 # download's "not authorized" failure can be told apart from a missing
@@ -1284,9 +1286,9 @@ def setup_cookbook_routes(
             runner_lines.append('while [ $_attempt -lt $_max_retries ]; do')
             runner_lines.append('  _attempt=$((_attempt+1))')
             if is_ollama_download:
-                runner_lines.append('  eval "$ODYSSEUS_OLLAMA_PULL_CMD" < /dev/null')
+                runner_lines.append('  eval "$OPEN_CLANK_OLLAMA_PULL_CMD" < /dev/null')
             else:
-                runner_lines.append(f'  "$ODYSSEUS_HF_CLI" {hf_download_args} < /dev/null')
+                runner_lines.append(f'  "$OPEN_CLANK_HF_CLI" {hf_download_args} < /dev/null')
             runner_lines.append('  _ec=$?')
             runner_lines.append('  if [ $_ec -eq 0 ]; then break; fi')
             runner_lines.append('  if [ $_attempt -lt $_max_retries ]; then')
@@ -1323,7 +1325,7 @@ def setup_cookbook_routes(
             if not is_ollama_download:
                 lines.append(_HF_TOKEN_STATUS_SNIPPET)
             # Retry loop — same rationale as the remote-bash path. Issue #2722.
-            _hf_invoke = 'eval "$ODYSSEUS_OLLAMA_PULL_CMD" < /dev/null' if is_ollama_download else (hf_cmd if IS_WINDOWS else f"{hf_cmd} < /dev/null")
+            _hf_invoke = 'eval "$OPEN_CLANK_OLLAMA_PULL_CMD" < /dev/null' if is_ollama_download else (hf_cmd if IS_WINDOWS else f"{hf_cmd} < /dev/null")
             lines.append('_max_retries=10; _attempt=0; _ec=0')
             lines.append('while [ $_attempt -lt $_max_retries ]; do')
             lines.append('  _attempt=$((_attempt+1))')
@@ -1964,7 +1966,7 @@ def setup_cookbook_routes(
         ):
             home_match = re.search(r"((?:/Users|/home)/[^/\s'\"]+)", req.cmd or "")
             if home_match:
-                model_id = f"{home_match.group(1)}/.cache/odysseus/mlx-shims/{short_name}"
+                model_id = f"{home_match.group(1)}/.cache/open-clank/mlx-shims/{short_name}"
 
         try:
             result = await _ensure_cookbook_provider_connection(
@@ -2115,7 +2117,7 @@ def setup_cookbook_routes(
             # ── Windows remote: generate .ps1 serve runner ──
             remote_runner = f".{session_id}_run.ps1"
             ps_lines = []
-            ps_lines.append('$sessionDir = "$env:TEMP\\odysseus-sessions"')
+            ps_lines.append('$sessionDir = "$env:TEMP\\open-clank-sessions"')
             ps_lines.append('New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null')
             if req.hf_token:
                 ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
@@ -2152,7 +2154,7 @@ def setup_cookbook_routes(
             _Pf = f"-P {_port} " if _port and _port != "22" else ""
             _pf = f"-p {_port} " if _port and _port != "22" else ""
             launch_ps = (
-                "$sd = \\\"$env:TEMP\\odysseus-sessions\\\"; "
+                "$sd = \\\"$env:TEMP\\open-clank-sessions\\\"; "
                 f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
                 f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
                 f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
@@ -2175,13 +2177,13 @@ def setup_cookbook_routes(
             # the post-crash interactive shell's neofetch banner ALSO gets
             # teed into the log file and `tail -N` returns ONLY the banner —
             # the actual traceback ends up earlier than the tail window.
-            runner_lines.append("mkdir -p /tmp/odysseus-tmux 2>/dev/null || true")
+            runner_lines.append("mkdir -p /tmp/open-clank-tmux 2>/dev/null || true")
             runner_lines.append("exec 3>&1 4>&2")
             runner_lines.append(
-                f"exec > >(tee -a /tmp/odysseus-tmux/{session_id}.log) 2>&1"
+                f"exec > >(tee -a /tmp/open-clank-tmux/{session_id}.log) 2>&1"
             )
             runner_lines.extend(_user_shell_path_bootstrap())
-            runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=""')
+            runner_lines.append('OPEN_CLANK_PREFLIGHT_EXIT=""')
             # Put Open Clank's own venv bin on PATH (local runs only) so the serve
             # shell resolves the bundled python3/hf, mirroring the download flow.
             if not remote:
@@ -2250,7 +2252,7 @@ def setup_cookbook_routes(
                 # Source the env file the prebuilt-download path writes so
                 # LD_LIBRARY_PATH includes the directory holding libllama.so
                 # and friends. No-op when prebuilt wasn't used.
-                runner_lines.append('  [ -r ~/.config/odysseus-llama-cpp-env ] && . ~/.config/odysseus-llama-cpp-env')
+                runner_lines.append('  [ -r ~/.config/open-clank-llama-cpp-env ] && . ~/.config/open-clank-llama-cpp-env')
                 # Auto-upgrade pip llama-cpp-python to the CUDA-enabled
                 # wheel when (a) NVIDIA hardware is present and (b) the
                 # currently-installed wheel is CPU-only. Without this the
@@ -2317,7 +2319,7 @@ def setup_cookbook_routes(
                 runner_lines.append('  fi')
                 runner_lines.append('  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then')
                 runner_lines.append('    echo "ERROR: llama.cpp serving is not available after install/build attempts."')
-                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('    OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
                 runner_lines.append('fi')
             elif re.search(r"\bollama\s+serve\b", req.cmd):
@@ -2332,13 +2334,13 @@ def setup_cookbook_routes(
                 # ollama on 11434), scan upward for a free one rather than
                 # silently reattaching to an external service that Stop
                 # can't reach.
-                runner_lines.append(f'ODYSSEUS_OLLAMA_HOST={_bash_squote(_ollama_host)}')
-                runner_lines.append(f'ODYSSEUS_OLLAMA_PORT="{_ollama_port}"')
+                runner_lines.append(f'OPEN_CLANK_OLLAMA_HOST={_bash_squote(_ollama_host)}')
+                runner_lines.append(f'OPEN_CLANK_OLLAMA_PORT="{_ollama_port}"')
                 runner_lines.append('for _ody_off in 0 1 2 3 4 5 6 7 8 9; do')
-                runner_lines.append('  _ody_try_port=$((ODYSSEUS_OLLAMA_PORT + _ody_off))')
+                runner_lines.append('  _ody_try_port=$((OPEN_CLANK_OLLAMA_PORT + _ody_off))')
                 runner_lines.append('  if ! (exec 3<>/dev/tcp/127.0.0.1/$_ody_try_port) 2>/dev/null; then')
                 runner_lines.append('    exec 3<&-; exec 3>&-')
-                runner_lines.append('    ODYSSEUS_OLLAMA_PORT="$_ody_try_port"')
+                runner_lines.append('    OPEN_CLANK_OLLAMA_PORT="$_ody_try_port"')
                 runner_lines.append('    break')
                 runner_lines.append('  fi')
                 runner_lines.append('  exec 3<&-; exec 3>&-')
@@ -2352,12 +2354,12 @@ def setup_cookbook_routes(
                 runner_lines.append('  echo "=== Process exited with code 127 ==="')
                 runner_lines.append('  exec bash -i')
                 runner_lines.append('fi')
-                runner_lines.append('ODYSSEUS_OLLAMA_URL="http://${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}"')
+                runner_lines.append('OPEN_CLANK_OLLAMA_URL="http://${OPEN_CLANK_OLLAMA_HOST}:${OPEN_CLANK_OLLAMA_PORT}"')
                 if remote and _ollama_host in ("0.0.0.0", "::"):
-                    runner_lines.append('echo "[odysseus] WARNING: remote Ollama will bind to ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT} so Open Clank can reach it from this host."')
+                    runner_lines.append('echo "[odysseus] WARNING: remote Ollama will bind to ${OPEN_CLANK_OLLAMA_HOST}:${OPEN_CLANK_OLLAMA_PORT} so Open Clank can reach it from this host."')
                     runner_lines.append('echo "[odysseus] Ollama has no built-in authentication; expose this only on a trusted LAN/VPN or provide an explicit OLLAMA_HOST with your own access controls."')
-                runner_lines.append('echo "Starting ollama server on ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}..."')
-                runner_lines.append('OLLAMA_HOST="${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}" ollama serve')
+                runner_lines.append('echo "Starting ollama server on ${OPEN_CLANK_OLLAMA_HOST}:${OPEN_CLANK_OLLAMA_PORT}..."')
+                runner_lines.append('OLLAMA_HOST="${OPEN_CLANK_OLLAMA_HOST}:${OPEN_CLANK_OLLAMA_PORT}" ollama serve')
                 runner_lines.append('_ody_exit=$?')
                 runner_lines.append('echo')
                 runner_lines.append('echo "=== Process exited with code ${_ody_exit} ==="')
@@ -2366,7 +2368,7 @@ def setup_cookbook_routes(
                 # vLLM is CUDA/ROCm-only and does not run on macOS at all.
                 runner_lines.append('if [ "$(uname -s)" = "Darwin" ]; then')
                 runner_lines.append('  echo "ERROR: vLLM does not run on macOS. Use Ollama or llama.cpp (Metal) instead."')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=1')
+                runner_lines.append('  OPEN_CLANK_PREFLIGHT_EXIT=1')
                 runner_lines.append('fi')
                 # Put ~/.local/bin on PATH first — without a venv, vllm installs
                 # there via --user and the non-login serve shell otherwise can't
@@ -2374,11 +2376,11 @@ def setup_cookbook_routes(
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
                 runner_lines.append('if ! command -v vllm &>/dev/null; then')
                 runner_lines.append('  echo "ERROR: vLLM is not installed."')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
-                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
-                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ]; then')
-                runner_lines.append('  ODYSSEUS_VLLM_HELP_CMD="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append(f"OPEN_CLANK_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('if [ -z "$OPEN_CLANK_PREFLIGHT_EXIT" ]; then')
+                runner_lines.append('  OPEN_CLANK_VLLM_HELP_CMD="$(python3 - "$OPEN_CLANK_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('try:')
@@ -2389,17 +2391,17 @@ def setup_cookbook_routes(
                 runner_lines.append('    print(shlex.join(parts[:serve_i + 1] + ["--help"]))')
                 runner_lines.append('PY')
                 runner_lines.append(')"')
-                runner_lines.append('  ODYSSEUS_VLLM_SUPPORTS_SWAP=0')
-                runner_lines.append('  if eval "$ODYSSEUS_VLLM_HELP_CMD" 2>&1 | grep -q -- "--swap-space"; then ODYSSEUS_VLLM_SUPPORTS_SWAP=1; fi')
+                runner_lines.append('  OPEN_CLANK_VLLM_SUPPORTS_SWAP=0')
+                runner_lines.append('  if eval "$OPEN_CLANK_VLLM_HELP_CMD" 2>&1 | grep -q -- "--swap-space"; then OPEN_CLANK_VLLM_SUPPORTS_SWAP=1; fi')
                 runner_lines.append('fi')
-                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ] && [ "${ODYSSEUS_VLLM_SUPPORTS_SWAP:-0}" = "1" ] && ! printf "%s" "$ODYSSEUS_SERVE_CMD" | grep -q -- "--swap-space"; then')
+                runner_lines.append('if [ -z "$OPEN_CLANK_PREFLIGHT_EXIT" ] && [ "${OPEN_CLANK_VLLM_SUPPORTS_SWAP:-0}" = "1" ] && ! printf "%s" "$OPEN_CLANK_SERVE_CMD" | grep -q -- "--swap-space"; then')
                 runner_lines.append('  echo "[odysseus] Setting vLLM --swap-space 0 so the runtime does not reserve CPU swap per GPU."')
-                runner_lines.append('  ODYSSEUS_SERVE_CMD="${ODYSSEUS_SERVE_CMD} --swap-space 0"')
+                runner_lines.append('  OPEN_CLANK_SERVE_CMD="${OPEN_CLANK_SERVE_CMD} --swap-space 0"')
                 runner_lines.append('fi')
-                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ] && [ "${ODYSSEUS_VLLM_SUPPORTS_SWAP:-0}" != "1" ]; then')
-                runner_lines.append('  if printf "%s" "$ODYSSEUS_SERVE_CMD" | grep -q -- "--swap-space"; then')
+                runner_lines.append('if [ -z "$OPEN_CLANK_PREFLIGHT_EXIT" ] && [ "${OPEN_CLANK_VLLM_SUPPORTS_SWAP:-0}" != "1" ]; then')
+                runner_lines.append('  if printf "%s" "$OPEN_CLANK_SERVE_CMD" | grep -q -- "--swap-space"; then')
                 runner_lines.append('    echo "[odysseus] vLLM serve does not expose --swap-space; removing the flag and patching the runtime default to 0."')
-                runner_lines.append('    ODYSSEUS_SERVE_CMD="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('    OPEN_CLANK_SERVE_CMD="$(python3 - "$OPEN_CLANK_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('out = []')
@@ -2418,7 +2420,7 @@ def setup_cookbook_routes(
                 runner_lines.append('PY')
                 runner_lines.append(')"')
                 runner_lines.append('  fi')
-                runner_lines.append('  ODYSSEUS_SERVE_CMD="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('  OPEN_CLANK_SERVE_CMD="$(python3 - "$OPEN_CLANK_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('patch = r"""import inspect, sys')
@@ -2468,8 +2470,8 @@ def setup_cookbook_routes(
                 runner_lines.append('fi')
             elif "sglang.launch_server" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
-                runner_lines.append('ODYSSEUS_SGLANG_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append(f"OPEN_CLANK_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('OPEN_CLANK_SGLANG_CMD_PY="$(python3 - "$OPEN_CLANK_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('py = "python3"')
@@ -2480,20 +2482,20 @@ def setup_cookbook_routes(
                 runner_lines.append('print(py)')
                 runner_lines.append('PY')
                 runner_lines.append(')"')
-                runner_lines.append('if ! "$ODYSSEUS_SGLANG_CMD_PY" -c "import sglang" &>/dev/null; then')
+                runner_lines.append('if ! "$OPEN_CLANK_SGLANG_CMD_PY" -c "import sglang" &>/dev/null; then')
                 runner_lines.append('  if ! command -v sglang &>/dev/null; then')
                 runner_lines.append('    echo "ERROR: SGLang is not installed."')
                 runner_lines.append('  else')
                 runner_lines.append('    echo "ERROR: SGLang is installed but failed to import in the launch Python."')
                 runner_lines.append('  fi')
-                runner_lines.append('  ODYSSEUS_SGLANG_IMPORT_ERROR="$("$ODYSSEUS_SGLANG_CMD_PY" -c "import sglang" 2>&1)"')
-                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_SGLANG_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  OPEN_CLANK_SGLANG_IMPORT_ERROR="$("$OPEN_CLANK_SGLANG_CMD_PY" -c "import sglang" 2>&1)"')
+                runner_lines.append('  printf "%s\\n" "$OPEN_CLANK_SGLANG_IMPORT_ERROR"')
+                runner_lines.append('  OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
             elif "mlx_lm.server" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
-                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
-                runner_lines.append('ODYSSEUS_MLX_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append(f"OPEN_CLANK_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('OPEN_CLANK_MLX_CMD_PY="$(python3 - "$OPEN_CLANK_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('py = "python3"')
@@ -2504,13 +2506,13 @@ def setup_cookbook_routes(
                 runner_lines.append('print(py)')
                 runner_lines.append('PY')
                 runner_lines.append(')"')
-                runner_lines.append('if ! ODYSSEUS_MLX_IMPORT_ERROR="$("$ODYSSEUS_MLX_CMD_PY" -c "import mlx_lm" 2>&1)"; then')
-                runner_lines.append('  echo "ERROR: MLX LM is not installed in the launch Python: $ODYSSEUS_MLX_CMD_PY"')
-                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_MLX_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('if ! OPEN_CLANK_MLX_IMPORT_ERROR="$("$OPEN_CLANK_MLX_CMD_PY" -c "import mlx_lm" 2>&1)"; then')
+                runner_lines.append('  echo "ERROR: MLX LM is not installed in the launch Python: $OPEN_CLANK_MLX_CMD_PY"')
+                runner_lines.append('  printf "%s\\n" "$OPEN_CLANK_MLX_IMPORT_ERROR"')
+                runner_lines.append('  OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
-                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ]; then')
-                runner_lines.append('  ODYSSEUS_SERVE_CMD="$("$ODYSSEUS_MLX_CMD_PY" - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('if [ -z "$OPEN_CLANK_PREFLIGHT_EXIT" ]; then')
+                runner_lines.append('  OPEN_CLANK_SERVE_CMD="$("$OPEN_CLANK_MLX_CMD_PY" - "$OPEN_CLANK_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import json, os, shlex, sys')
                 runner_lines.append('from pathlib import Path')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
@@ -2572,9 +2574,9 @@ def setup_cookbook_routes(
                 runner_lines.append('                print("[odysseus] WARNING: failed to apply MLX DeepSeek-V4 compatibility patch:", e, file=sys.stderr)')
                 runner_lines.append('            try:')
                 runner_lines.append('                src = Path(best)')
-                runner_lines.append('                shim = Path.home() / ".cache" / "odysseus" / "mlx-shims" / src.name')
+                runner_lines.append('                shim = Path.home() / ".cache" / "open-clank" / "mlx-shims" / src.name')
                 runner_lines.append('                if len(src.name) > 20:')
-                runner_lines.append('                    shim = Path.home() / ".cache" / "odysseus" / "mlx-shims" / model.split("/")[-1]')
+                runner_lines.append('                    shim = Path.home() / ".cache" / "open-clank" / "mlx-shims" / model.split("/")[-1]')
                 runner_lines.append('                shim.mkdir(parents=True, exist_ok=True)')
                 runner_lines.append('                for child in src.iterdir():')
                 runner_lines.append('                    target = shim / child.name')
@@ -2603,8 +2605,8 @@ def setup_cookbook_routes(
             elif "scripts/mlx_image_server.py" in req.cmd or ".mlx_image_server.py" in req.cmd:
                 _append_mlx_image_server_script(runner_lines)
                 runner_lines.append('export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
-                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
-                runner_lines.append('ODYSSEUS_MLX_IMAGE_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append(f"OPEN_CLANK_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('OPEN_CLANK_MLX_IMAGE_CMD_PY="$(python3 - "$OPEN_CLANK_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('py = "python3"')
@@ -2615,13 +2617,13 @@ def setup_cookbook_routes(
                 runner_lines.append('print(py)')
                 runner_lines.append('PY')
                 runner_lines.append(')"')
-                runner_lines.append('ODYSSEUS_MLX_IMAGE_BIN_DIR="$(dirname "$ODYSSEUS_MLX_IMAGE_CMD_PY" 2>/dev/null || true)"')
-                runner_lines.append('if [ -n "$ODYSSEUS_MLX_IMAGE_BIN_DIR" ]; then export PATH="$ODYSSEUS_MLX_IMAGE_BIN_DIR:$PATH"; fi')
-                runner_lines.append('if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import fastapi, uvicorn, multipart" >/dev/null 2>&1; then')
-                runner_lines.append('  echo "ERROR: MLX image serving requires FastAPI + uvicorn + python-multipart in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY. Install the MLX image dependencies in Cookbook Dependencies."')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('OPEN_CLANK_MLX_IMAGE_BIN_DIR="$(dirname "$OPEN_CLANK_MLX_IMAGE_CMD_PY" 2>/dev/null || true)"')
+                runner_lines.append('if [ -n "$OPEN_CLANK_MLX_IMAGE_BIN_DIR" ]; then export PATH="$OPEN_CLANK_MLX_IMAGE_BIN_DIR:$PATH"; fi')
+                runner_lines.append('if ! "$OPEN_CLANK_MLX_IMAGE_CMD_PY" -c "import fastapi, uvicorn, multipart" >/dev/null 2>&1; then')
+                runner_lines.append('  echo "ERROR: MLX image serving requires FastAPI + uvicorn + python-multipart in the launch Python: $OPEN_CLANK_MLX_IMAGE_CMD_PY. Install the MLX image dependencies in Cookbook Dependencies."')
+                runner_lines.append('  OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
-                runner_lines.append('ODYSSEUS_MLX_IMAGE_MODEL="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('OPEN_CLANK_MLX_IMAGE_MODEL="$(python3 - "$OPEN_CLANK_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('model = ""')
@@ -2632,67 +2634,67 @@ def setup_cookbook_routes(
                 runner_lines.append('print(model)')
                 runner_lines.append('PY')
                 runner_lines.append(')"')
-                runner_lines.append('if printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -qi hidream; then')
-                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import mlx, mlx_vlm, transformers, huggingface_hub, safetensors, numpy, PIL" >/dev/null 2>&1; then')
-                runner_lines.append('    echo "ERROR: HiDream MLX serving needs the model requirements in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
-                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart mlx mlx-vlm \'transformers>=4.57.0,<6.0\' huggingface_hub safetensors numpy pillow tqdm sentencepiece hf_transfer"')
-                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('if printf "%s" "$OPEN_CLANK_MLX_IMAGE_MODEL" | grep -qi hidream; then')
+                runner_lines.append('  if ! "$OPEN_CLANK_MLX_IMAGE_CMD_PY" -c "import mlx, mlx_vlm, transformers, huggingface_hub, safetensors, numpy, PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: HiDream MLX serving needs the model requirements in the launch Python: $OPEN_CLANK_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $OPEN_CLANK_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart mlx mlx-vlm \'transformers>=4.57.0,<6.0\' huggingface_hub safetensors numpy pillow tqdm sentencepiece hf_transfer"')
+                runner_lines.append('    OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
-                runner_lines.append('elif printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -qi boogu; then')
-                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import boogu_image_mlx, mlx, huggingface_hub, safetensors, numpy, PIL" >/dev/null 2>&1; then')
-                runner_lines.append('    echo "ERROR: Boogu MLX serving needs boogu-image-mlx in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
-                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U git+https://github.com/xocialize/boogu-image-mlx.git fastapi uvicorn python-multipart pillow"')
-                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('elif printf "%s" "$OPEN_CLANK_MLX_IMAGE_MODEL" | grep -qi boogu; then')
+                runner_lines.append('  if ! "$OPEN_CLANK_MLX_IMAGE_CMD_PY" -c "import boogu_image_mlx, mlx, huggingface_hub, safetensors, numpy, PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: Boogu MLX serving needs boogu-image-mlx in the launch Python: $OPEN_CLANK_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $OPEN_CLANK_MLX_IMAGE_CMD_PY -m pip install -U git+https://github.com/xocialize/boogu-image-mlx.git fastapi uvicorn python-multipart pillow"')
+                runner_lines.append('    OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
-                runner_lines.append('elif printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -Eqi "ddcolor"; then')
-                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import PIL" >/dev/null 2>&1; then')
-                runner_lines.append('    echo "ERROR: DDColor MLX serving needs Pillow in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
-                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub"')
-                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('elif printf "%s" "$OPEN_CLANK_MLX_IMAGE_MODEL" | grep -Eqi "ddcolor"; then')
+                runner_lines.append('  if ! "$OPEN_CLANK_MLX_IMAGE_CMD_PY" -c "import PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: DDColor MLX serving needs Pillow in the launch Python: $OPEN_CLANK_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $OPEN_CLANK_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub"')
+                runner_lines.append('    OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
                 runner_lines.append('  if ! command -v odysseus-mlx-colorize >/dev/null 2>&1 && ! command -v mlx-ddcolor-serve >/dev/null 2>&1; then')
                 runner_lines.append('    echo "ERROR: DDColor MLX serving requires the Odysseus mlx-ddcolor-swift bridge on PATH: odysseus-mlx-colorize or mlx-ddcolor-serve."')
                 runner_lines.append('    echo "Build it from swift/odysseus-mlx-image-bridge in Cookbook Dependencies."')
-                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('    OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
-                runner_lines.append('  ODYSSEUS_DDCOLOR_BIN="$(command -v odysseus-mlx-colorize 2>/dev/null || command -v mlx-ddcolor-serve 2>/dev/null || true)"')
-                runner_lines.append('  if [ -n "$ODYSSEUS_DDCOLOR_BIN" ]; then')
-                runner_lines.append('    ODYSSEUS_DDCOLOR_DIR="$(dirname "$ODYSSEUS_DDCOLOR_BIN")"')
-                runner_lines.append('    if [ ! -f "$ODYSSEUS_DDCOLOR_DIR/mlx.metallib" ] && [ ! -f "$ODYSSEUS_DDCOLOR_DIR/default.metallib" ]; then')
+                runner_lines.append('  OPEN_CLANK_DDCOLOR_BIN="$(command -v odysseus-mlx-colorize 2>/dev/null || command -v mlx-ddcolor-serve 2>/dev/null || true)"')
+                runner_lines.append('  if [ -n "$OPEN_CLANK_DDCOLOR_BIN" ]; then')
+                runner_lines.append('    OPEN_CLANK_DDCOLOR_DIR="$(dirname "$OPEN_CLANK_DDCOLOR_BIN")"')
+                runner_lines.append('    if [ ! -f "$OPEN_CLANK_DDCOLOR_DIR/mlx.metallib" ] && [ ! -f "$OPEN_CLANK_DDCOLOR_DIR/default.metallib" ]; then')
                 runner_lines.append('      echo "ERROR: DDColor MLX serving found the Swift runner, but mlx.metallib/default.metallib is missing next to it."')
                 runner_lines.append('      echo "Run the DDColor MLX image editing dependency install again; it copies mlx.metallib from the launch Python MLX package."')
-                runner_lines.append('      ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('      OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('    fi')
                 runner_lines.append('  fi')
-                runner_lines.append('elif printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -Eqi "mi-gan|migan|lama"; then')
-                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import PIL" >/dev/null 2>&1; then')
-                runner_lines.append('    echo "ERROR: LaMa / MI-GAN MLX serving needs Pillow in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
-                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub"')
-                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('elif printf "%s" "$OPEN_CLANK_MLX_IMAGE_MODEL" | grep -Eqi "mi-gan|migan|lama"; then')
+                runner_lines.append('  if ! "$OPEN_CLANK_MLX_IMAGE_CMD_PY" -c "import PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: LaMa / MI-GAN MLX serving needs Pillow in the launch Python: $OPEN_CLANK_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $OPEN_CLANK_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub"')
+                runner_lines.append('    OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
                 runner_lines.append('  if ! command -v odysseus-mlx-inpaint >/dev/null 2>&1 && ! command -v mlx-lama-serve >/dev/null 2>&1; then')
                 runner_lines.append('    echo "ERROR: LaMa / MI-GAN MLX serving requires the Odysseus mlx-lama-swift bridge on PATH: odysseus-mlx-inpaint or mlx-lama-serve."')
                 runner_lines.append('    echo "Build it from swift/odysseus-mlx-image-bridge in Cookbook Dependencies."')
-                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('    OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
-                runner_lines.append('  ODYSSEUS_INPAINT_BIN="$(command -v odysseus-mlx-inpaint 2>/dev/null || command -v mlx-lama-serve 2>/dev/null || true)"')
-                runner_lines.append('  if [ -n "$ODYSSEUS_INPAINT_BIN" ]; then')
-                runner_lines.append('    ODYSSEUS_INPAINT_DIR="$(dirname "$ODYSSEUS_INPAINT_BIN")"')
-                runner_lines.append('    if [ ! -f "$ODYSSEUS_INPAINT_DIR/mlx.metallib" ] && [ ! -f "$ODYSSEUS_INPAINT_DIR/default.metallib" ]; then')
+                runner_lines.append('  OPEN_CLANK_INPAINT_BIN="$(command -v odysseus-mlx-inpaint 2>/dev/null || command -v mlx-lama-serve 2>/dev/null || true)"')
+                runner_lines.append('  if [ -n "$OPEN_CLANK_INPAINT_BIN" ]; then')
+                runner_lines.append('    OPEN_CLANK_INPAINT_DIR="$(dirname "$OPEN_CLANK_INPAINT_BIN")"')
+                runner_lines.append('    if [ ! -f "$OPEN_CLANK_INPAINT_DIR/mlx.metallib" ] && [ ! -f "$OPEN_CLANK_INPAINT_DIR/default.metallib" ]; then')
                 runner_lines.append('      echo "ERROR: LaMa / MI-GAN MLX serving found the Swift runner, but mlx.metallib/default.metallib is missing next to it."')
                 runner_lines.append('      echo "Run the LaMa / MI-GAN MLX image editing dependency install again; it copies mlx.metallib from the launch Python MLX package."')
-                runner_lines.append('      ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('      OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('    fi')
                 runner_lines.append('  fi')
                 runner_lines.append('elif ! command -v mflux-generate >/dev/null 2>&1 && ! command -v mflux-generate-qwen >/dev/null 2>&1; then')
-                runner_lines.append('  echo "ERROR: mflux-compatible MLX image serving requires mflux-generate or mflux-generate-qwen in PATH for launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
-                runner_lines.append('  echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U mflux fastapi uvicorn python-multipart"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  echo "ERROR: mflux-compatible MLX image serving requires mflux-generate or mflux-generate-qwen in PATH for launch Python: $OPEN_CLANK_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('  echo "Install with: $OPEN_CLANK_MLX_IMAGE_CMD_PY -m pip install -U mflux fastapi uvicorn python-multipart"')
+                runner_lines.append('  OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
             elif "scripts/diffusion_server.py" in req.cmd or ".diffusion_server.py" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
-                runner_lines.append('ODYSSEUS_DIFFUSION_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append(f"OPEN_CLANK_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('OPEN_CLANK_DIFFUSION_CMD_PY="$(python3 - "$OPEN_CLANK_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('py = "python3"')
@@ -2703,10 +2705,10 @@ def setup_cookbook_routes(
                 runner_lines.append('print(py)')
                 runner_lines.append('PY')
                 runner_lines.append(')"')
-                runner_lines.append('if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$("$ODYSSEUS_DIFFUSION_CMD_PY" -c "import torch, torchvision, diffusers" 2>&1)"; then')
-                runner_lines.append('  echo "ERROR: Diffusion serving requires PyTorch + Torchvision + diffusers in the launch Python: $ODYSSEUS_DIFFUSION_CMD_PY."')
-                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_DIFFUSION_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('if ! OPEN_CLANK_DIFFUSION_IMPORT_ERROR="$("$OPEN_CLANK_DIFFUSION_CMD_PY" -c "import torch, torchvision, diffusers" 2>&1)"; then')
+                runner_lines.append('  echo "ERROR: Diffusion serving requires PyTorch + Torchvision + diffusers in the launch Python: $OPEN_CLANK_DIFFUSION_CMD_PY."')
+                runner_lines.append('  printf "%s\\n" "$OPEN_CLANK_DIFFUSION_IMPORT_ERROR"')
+                runner_lines.append('  OPEN_CLANK_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
 
             handled_ollama_sidecar_probe = False
@@ -2733,7 +2735,7 @@ def setup_cookbook_routes(
                     keep_shell_open=not local_windows,
                 )
                 if "vllm serve" in req.cmd or "mlx_lm.server" in req.cmd:
-                    runner_lines.append('eval "$ODYSSEUS_SERVE_CMD"')
+                    runner_lines.append('eval "$OPEN_CLANK_SERVE_CMD"')
                 elif is_pip_install:
                     if not is_windows and (req.platform or "").lower() in {"darwin", "macos"}:
                         req.cmd = _pip_install_command_without_break_system_packages(req.cmd)
@@ -2906,7 +2908,7 @@ def setup_cookbook_routes(
             # Also create the session directory for background tasks
             setup_script = (
                 'powershell -Command "'
-                "New-Item -ItemType Directory -Force -Path $env:TEMP\\odysseus-sessions | Out-Null; "
+                "New-Item -ItemType Directory -Force -Path $env:TEMP\\open-clank-sessions | Out-Null; "
                 "try { python --version } catch { Write-Host 'ERROR: Python not found — install from python.org'; exit 1 }; "
                 "python -m pip install -q huggingface-hub 2>$null; "
                 "python -c \\\"from huggingface_hub import snapshot_download; print('OK')\\\""
@@ -3402,29 +3404,12 @@ def setup_cookbook_routes(
     async def get_cookbook_state(request: Request):
         """Load saved cookbook state (tasks, servers, presets, settings)."""
         require_admin(request)
-        now = time.monotonic()
+        from src.openclank.cookbook_state import transaction, CookbookStateError
         try:
-            mtime = _cookbook_state_path.stat().st_mtime if _cookbook_state_path.exists() else 0.0
-        except Exception:
-            mtime = 0.0
-        cached = _state_get_cache.get("value")
-        if cached is not None and _state_get_cache.get("mtime") == mtime and now - float(_state_get_cache.get("ts") or 0) < 1.5:
-            return cached
-        if _cookbook_state_path.exists():
-            try:
-                state = json.loads(_cookbook_state_path.read_text(encoding="utf-8"))
-                saved_tasks = state.get("tasks", [])
-                tasks = saved_tasks if isinstance(saved_tasks, list) else list(saved_tasks.values()) if isinstance(saved_tasks, dict) else []
-                client_state = _state_for_client(state)
-                _state_get_cache.update({"ts": now, "mtime": mtime, "value": client_state})
-                return client_state
-            except Exception:
-                client_state = _state_for_client({})
-                _state_get_cache.update({"ts": now, "mtime": mtime, "value": client_state})
-                return client_state
-        client_state = _state_for_client({})
-        _state_get_cache.update({"ts": now, "mtime": mtime, "value": client_state})
-        return client_state
+            with transaction(_cookbook_state_path) as state:
+                return _state_for_client(state)
+        except CookbookStateError as exc:
+            raise HTTPException(503, "Cookbook state unavailable") from exc
 
     @router.post("/api/cookbook/state")
     async def save_cookbook_state(request: Request):
@@ -3444,113 +3429,109 @@ def setup_cookbook_routes(
         require_admin(request)
         RACE_WINDOW_MS = 60_000
         try:
-            from core.atomic_io import atomic_write_json
+            from src.openclank.cookbook_state import PRIVATE_KEY, transaction, save
             data = await request.json()
-            if not isinstance(data, dict):
-                data = {}
-            try:
-                if _cookbook_state_path.exists():
-                    on_disk = json.loads(_cookbook_state_path.read_text(encoding="utf-8"))
-                else:
-                    on_disk = {}
-            except Exception:
-                on_disk = {}
-            # Anti-wipe guard for env servers. The UI debounces a
-            # sync of whatever is in memory; if it fires before the state has
-            # hydrated from GET /state (a load-time race) or during a render
-            # glitch, `env.servers` would be empty and silently overwrite the
-            # saved servers on disk. Never let an empty/absent incoming
-            # env.servers clobber a populated on-disk one — preserve the disk
-            # values while still accepting the rest of the incoming env.
-            disk_env = on_disk.get("env") if isinstance(on_disk, dict) and isinstance(on_disk.get("env"), dict) else None
-            if disk_env:
-                inc_env = data.get("env") if isinstance(data.get("env"), dict) else None
-                if inc_env is None:
-                    data["env"] = disk_env
-                    logger.warning("cookbook state POST: incoming body had no env; preserved on-disk env (anti-wipe guard)")
-                elif disk_env.get("servers") and not inc_env.get("servers"):
-                    inc_env["servers"] = disk_env["servers"]
-                    logger.warning("cookbook state POST: incoming env.servers empty; preserved on-disk servers (anti-wipe guard)")
+            if not isinstance(data, dict) or PRIVATE_KEY in data:
+                raise ValueError("invalid Cookbook state submission")
+            with transaction(_cookbook_state_path) as on_disk:
+                # Anti-wipe guard for env servers. The UI debounces a
+                # sync of whatever is in memory; if it fires before the state has
+                # hydrated from GET /state (a load-time race) or during a render
+                # glitch, `env.servers` would be empty and silently overwrite the
+                # saved servers on disk. Never let an empty/absent incoming
+                # env.servers clobber a populated on-disk one — preserve the disk
+                # values while still accepting the rest of the incoming env.
+                disk_env = on_disk.get("env") if isinstance(on_disk, dict) and isinstance(on_disk.get("env"), dict) else None
+                if disk_env:
+                    inc_env = data.get("env") if isinstance(data.get("env"), dict) else None
+                    if inc_env is None:
+                        data["env"] = disk_env
+                        logger.warning("cookbook state POST: incoming body had no env; preserved on-disk env (anti-wipe guard)")
+                    elif disk_env.get("servers") and not inc_env.get("servers"):
+                        inc_env["servers"] = disk_env["servers"]
+                        logger.warning("cookbook state POST: incoming env.servers empty; preserved on-disk servers (anti-wipe guard)")
 
-            disk_tasks = on_disk.get("tasks") or [] if isinstance(on_disk, dict) else []
-            incoming_tasks = data.get("tasks") if isinstance(data.get("tasks"), list) else []
-            incoming_removed = data.get("removedTasks") if isinstance(data.get("removedTasks"), dict) else {}
-            disk_removed = on_disk.get("removedTasks") if isinstance(on_disk, dict) and isinstance(on_disk.get("removedTasks"), dict) else {}
-            removed_tasks = {**disk_removed, **incoming_removed}
-            data["removedTasks"] = removed_tasks
-            removed_ids = set(removed_tasks.keys())
-            if removed_ids:
-                incoming_tasks = [
-                    t for t in incoming_tasks
-                    if not (isinstance(t, dict) and t.get("sessionId") in removed_ids)
-                ]
-                data["tasks"] = incoming_tasks
-            # Anti-poisoning guard: a stale browser tab can keep POSTing a
-            # download task as status='done' from before the strict-finish
-            # fix landed, undoing any server-side correction. For each
-            # incoming "done" download, override to "running" if the last
-            # shard pattern says N<total AND no DOWNLOAD_OK/DOWNLOAD_FAILED/
-            # /snapshots/ sentinel is in the output.
-            import re as _re_dl
-            for _it in incoming_tasks:
-                if (not isinstance(_it, dict)) or _it.get("type") != "download" or _it.get("status") != "done":
-                    continue
-                _out = _it.get("output") or ""
-                if ("DOWNLOAD_OK" in _out) or ("DOWNLOAD_FAILED" in _out) or ("/snapshots/" in _out):
-                    continue
-                _shards = _re_dl.findall(r"model-(\d+)-of-(\d+)\.safetensors", _out)
-                if _shards:
-                    _n, _tot = _shards[-1]
-                    if int(_n) < int(_tot):
-                        logger.info(f"cookbook state POST: rejecting stale done for {_it.get('sessionId')} "
-                                    f"(last shard {_n}/{_tot}, no DOWNLOAD_OK)")
-                        _it["status"] = "running"
-                else:
-                    _completed = _out.count("Download complete")
-                    _starts = _out.count("Downloading '")
-                    if _starts > _completed:
-                        logger.info(f"cookbook state POST: rejecting stale done for {_it.get('sessionId')} "
-                                    f"({_completed}/{_starts} files complete, no DOWNLOAD_OK)")
-                        _it["status"] = "running"
-            incoming_ids = {t.get("sessionId") for t in incoming_tasks if isinstance(t, dict) and t.get("sessionId")}
-            import time as _t
-            now_ms = int(_t.time() * 1000)
-            preserved = []
-            for t in disk_tasks:
-                if not isinstance(t, dict):
-                    continue
-                sid = t.get("sessionId")
-                if not sid or sid in incoming_ids:
-                    continue  # client's version wins
-                if sid in removed_ids:
-                    continue  # intentional cross-device clear/remove
-                ts = t.get("ts") or 0
-                if isinstance(ts, (int, float)) and (now_ms - ts) <= RACE_WINDOW_MS:
-                    preserved.append(t)
-            if preserved:
-                logger.info(f"cookbook state POST: preserving {len(preserved)} recent task(s) "
-                            f"not in incoming body (race guard): "
-                            f"{[t.get('sessionId') for t in preserved]}")
-                data["tasks"] = incoming_tasks + preserved
-            storage_state = _state_for_storage(data, on_disk)
-            if storage_state == on_disk:
-                return {"ok": True, "preserved": len(preserved), "unchanged": True}
-            atomic_write_json(str(_cookbook_state_path), storage_state, indent=2)
-            try:
-                mtime = _cookbook_state_path.stat().st_mtime
-                _state_get_cache.update({
-                    "ts": time.monotonic(),
-                    "mtime": mtime,
-                    "value": _state_for_client(storage_state),
-                })
-            except Exception:
-                pass
-            return {"ok": True, "preserved": len(preserved)}
+                disk_tasks = on_disk.get("tasks") or [] if isinstance(on_disk, dict) else []
+                incoming_tasks = data.get("tasks") if isinstance(data.get("tasks"), list) else []
+                incoming_removed = data.get("removedTasks") if isinstance(data.get("removedTasks"), dict) else {}
+                disk_removed = on_disk.get("removedTasks") if isinstance(on_disk, dict) and isinstance(on_disk.get("removedTasks"), dict) else {}
+                removed_tasks = {**disk_removed, **incoming_removed}
+                data["removedTasks"] = removed_tasks
+                removed_ids = set(removed_tasks.keys())
+                if removed_ids:
+                    incoming_tasks = [
+                        t for t in incoming_tasks
+                        if not (isinstance(t, dict) and t.get("sessionId") in removed_ids)
+                    ]
+                    data["tasks"] = incoming_tasks
+                # Anti-poisoning guard: a stale browser tab can keep POSTing a
+                # download task as status='done' from before the strict-finish
+                # fix landed, undoing any server-side correction. For each
+                # incoming "done" download, override to "running" if the last
+                # shard pattern says N<total AND no DOWNLOAD_OK/DOWNLOAD_FAILED/
+                # /snapshots/ sentinel is in the output.
+                import re as _re_dl
+                for _it in incoming_tasks:
+                    if (not isinstance(_it, dict)) or _it.get("type") != "download" or _it.get("status") != "done":
+                        continue
+                    _out = _it.get("output") or ""
+                    if ("DOWNLOAD_OK" in _out) or ("DOWNLOAD_FAILED" in _out) or ("/snapshots/" in _out):
+                        continue
+                    _shards = _re_dl.findall(r"model-(\d+)-of-(\d+)\.safetensors", _out)
+                    if _shards:
+                        _n, _tot = _shards[-1]
+                        if int(_n) < int(_tot):
+                            logger.info(f"cookbook state POST: rejecting stale done for {_it.get('sessionId')} "
+                                        f"(last shard {_n}/{_tot}, no DOWNLOAD_OK)")
+                            _it["status"] = "running"
+                    else:
+                        _completed = _out.count("Download complete")
+                        _starts = _out.count("Downloading '")
+                        if _starts > _completed:
+                            logger.info(f"cookbook state POST: rejecting stale done for {_it.get('sessionId')} "
+                                        f"({_completed}/{_starts} files complete, no DOWNLOAD_OK)")
+                            _it["status"] = "running"
+                incoming_ids = {t.get("sessionId") for t in incoming_tasks if isinstance(t, dict) and t.get("sessionId")}
+                import time as _t
+                now_ms = int(_t.time() * 1000)
+                preserved = []
+                for t in disk_tasks:
+                    if not isinstance(t, dict):
+                        continue
+                    sid = t.get("sessionId")
+                    if not sid or sid in incoming_ids:
+                        continue  # client's version wins
+                    if sid in removed_ids:
+                        continue  # intentional cross-device clear/remove
+                    ts = t.get("ts") or 0
+                    if isinstance(ts, (int, float)) and (now_ms - ts) <= RACE_WINDOW_MS:
+                        preserved.append(t)
+                if preserved:
+                    logger.info(f"cookbook state POST: preserving {len(preserved)} recent task(s) "
+                                f"not in incoming body (race guard): "
+                                f"{[t.get('sessionId') for t in preserved]}")
+                    data["tasks"] = incoming_tasks + preserved
+                storage_state = _state_for_storage(data, on_disk)
+                if PRIVATE_KEY in on_disk:
+                    storage_state[PRIVATE_KEY] = on_disk[PRIVATE_KEY]
+                if storage_state == on_disk:
+                    return {"ok": True, "preserved": len(preserved), "unchanged": True}
+                save(_cookbook_state_path, storage_state)
+                try:
+                    mtime = _cookbook_state_path.stat().st_mtime
+                    _state_get_cache.update({
+                        "ts": time.monotonic(),
+                        "mtime": mtime,
+                        "value": _state_for_client(storage_state),
+                    })
+                except Exception:
+                    pass
+                return {"ok": True, "preserved": len(preserved)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
     @router.get("/api/cookbook/hf-latest")
-    async def hf_latest(vram_gb: float = 0, limit: int = 10, pipeline: str = "text-generation", owner: str = Depends(require_user)):
+    async def hf_latest(vram_gb: float = 0, limit: int = 10, pipeline: str = "text-generation", search: str = "", owner: str = Depends(require_user)):
         """Fetch latest HuggingFace models, filtered by what fits in available VRAM.
 
         vram_gb: total available VRAM in GB. 0 = no filter (return everything).
@@ -3558,22 +3539,22 @@ def setup_cookbook_routes(
         pipeline: HF pipeline_tag filter (text-generation, text-to-image, etc.).
         """
         import re
-        import httpx
+        import math
+        from src.openclank.hub_discovery import public_json
+
+        if not math.isfinite(vram_gb) or vram_gb < 0 or not re.fullmatch(r'[A-Za-z0-9_-]{0,64}', pipeline) or len(search.encode('utf-8')) > 128 or any(ord(c) < 32 for c in search):
+            raise HTTPException(400, 'Invalid public Hub search')
+        limit = max(1, min(limit, 50))
 
         # Fetch a larger pool so we have enough to filter from (we drop ~80%)
         pool_size = max(limit * 15, 100)
-        url = (
-            "https://huggingface.co/api/models"
-            f"?sort=trendingScore&direction=-1&limit={pool_size}&filter={pipeline}"
-        )
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(url)
-                if resp.status_code != 200:
-                    return {"models": [], "error": f"HF API HTTP {resp.status_code}"}
-                raw = resp.json()
-        except Exception as e:
-            return {"models": [], "error": str(e)}
+            params = {'sort':'trendingScore','direction':'-1','limit':pool_size,'filter':pipeline}
+            if search: params['search'] = search
+            raw = await public_json('/api/models', params=params)
+            if not isinstance(raw, list): raise ValueError('invalid response')
+        except Exception:
+            return {"models": [], "error": "Public Hub discovery unavailable"}
 
         # Estimate VRAM from the model id. Looks for patterns like "7B", "70B", "1.5B" etc.
         # Returns approx VRAM in GB at fp16 (params*2). Caller adjusts for quant.
@@ -3582,6 +3563,8 @@ def setup_cookbook_routes(
             if not m:
                 return None
             params_b = float(m.group(1))
+            if not math.isfinite(params_b) or params_b > 1_000_000:
+                return None
             return params_b * 2.0  # fp16 baseline
 
         # Detect quantization from repo_id / tags. Returns a multiplier on fp16 size.
@@ -3622,18 +3605,22 @@ def setup_cookbook_routes(
             return False
 
         out = []
-        for entry in raw:
+        for entry in raw[:pool_size]:
+            if not isinstance(entry, dict): continue
             repo_id = entry.get("modelId") or entry.get("id") or ""
-            if not repo_id:
+            if (not isinstance(repo_id, str) or len(repo_id) > 256
+                or not re.fullmatch(r'[A-Za-z0-9._-]+/[A-Za-z0-9._-]+', repo_id)
+                or any(part in {'.','..'} for part in repo_id.split('/'))):
                 continue
-            tags = entry.get("tags") or []
-            pipeline_tag = entry.get("pipeline_tag") or ""
+            tags = entry.get("tags") if isinstance(entry.get("tags"), list) else []
+            tags = [tag for tag in tags[:100] if isinstance(tag, str) and len(tag) <= 256]
+            pipeline_tag = entry.get("pipeline_tag") if isinstance(entry.get("pipeline_tag"), str) and len(entry['pipeline_tag']) <= 64 else ""
 
             # Hard filter: only the requested pipeline (HF's filter param is loose)
             if pipeline and pipeline_tag and pipeline_tag != pipeline:
                 continue
             # Skip adapters, LoRAs, datasets, etc.
-            if _is_excluded(repo_id, tags):
+            if not search and _is_excluded(repo_id, tags):
                 continue
 
             est_fp16 = _est_vram_fp16(repo_id)
@@ -3653,9 +3640,9 @@ def setup_cookbook_routes(
 
             out.append({
                 "repo_id": repo_id,
-                "downloads": entry.get("downloads", 0),
-                "likes": entry.get("likes", 0),
-                "createdAt": entry.get("createdAt", ""),
+                "downloads": entry.get("downloads") if type(entry.get("downloads")) is int and 0 <= entry['downloads'] <= 2**53-1 else None,
+                "likes": entry.get("likes") if type(entry.get("likes")) is int and 0 <= entry['likes'] <= 2**53-1 else None,
+                "createdAt": entry.get("createdAt") if isinstance(entry.get("createdAt"), str) and len(entry['createdAt']) <= 64 else "",
                 "tags": tags[:5],  # trim
                 "pipeline_tag": pipeline_tag,
                 "est_vram_gb": round(est_vram, 1) if est_vram else None,
@@ -3892,11 +3879,179 @@ def setup_cookbook_routes(
 
         if adopted_any:
             try:
-                from core.atomic_io import atomic_write_json
-                state["tasks"] = tasks
-                atomic_write_json(_cookbook_state_path, state)
+                from src.openclank.cookbook_state import transaction, save, merge_orphan_tasks
+                with transaction(_cookbook_state_path) as current:
+                    merge_orphan_tasks(current, tasks)
+                    save(_cookbook_state_path, current)
             except Exception as e:
                 logger.warning(f"orphan sweep: state write failed: {e}")
+
+    def _pinned_human(request: Request):
+        from src.owner_identity import is_internal_tool_identity
+        try:
+            require_admin(request)
+            owner = require_user(request).strip().lower()
+        except HTTPException as exc:
+            exc.headers = {**(exc.headers or {}), 'Cache-Control':'private, no-store'}
+            raise
+        if is_internal_tool_identity(owner) or getattr(request.state, "api_token", False):
+            raise HTTPException(403, "A named administrator session is required", headers={'Cache-Control':'private, no-store'})
+        manager = getattr(request.app.state, "auth_manager", None)
+        account = manager.account_id(owner) if manager else None
+        if not account or manager.username_for_account_id(account) != owner:
+            raise HTTPException(503, "Account authority unavailable", headers={'Cache-Control':'private, no-store'})
+        return owner, account
+
+    def _pinned_destination(path):
+        from src.openclank.cookbook_worker import _cache_root
+        if not isinstance(path, str) or not path.startswith('/') or path != os.path.normpath(path):
+            raise ValueError("An existing absolute cache directory is required")
+        info = os.lstat(path)
+        destination = {"path":path, "device":info.st_dev, "inode":info.st_ino}
+        fd = _cache_root(destination)
+        os.close(fd)
+        return destination
+
+    def _pinned_sdk_ready():
+        import importlib.metadata
+        import inspect
+        if sys.platform != 'linux' or getattr(sys, 'frozen', False) or not re.fullmatch(r'python(?:3(?:\.\d+)?)?', os.path.basename(sys.executable)) or not os.path.isdir('/proc/self/fd') or not shutil.which('tmux'):
+            return False
+        try:
+            import huggingface_hub
+            version = importlib.metadata.version('huggingface_hub')
+            match = re.match(r'^(\d+)\.(\d+)', version)
+            params = inspect.signature(huggingface_hub.hf_hub_download).parameters
+            return bool(match and (int(match.group(1)), int(match.group(2))) >= (0, 25)
+                        and int(match.group(1)) < 2
+                        and {'repo_id','filename','revision','cache_dir','token','endpoint'} <= set(params))
+        except Exception:
+            return False
+
+    @router.post("/api/cookbook/pinned/prepare")
+    async def pinned_prepare(request: Request, response: Response):
+        from src.openclank.hub_discovery import manifest
+        from src.openclank.cookbook_acquisition import reviewed_request
+        from src.openclank.cookbook_state import transaction, reserve, save
+        response.headers["Cache-Control"] = "private, no-store"
+        owner, account = _pinned_human(request)
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {'repoID','revision','files','cacheRoot'}:
+            raise HTTPException(400, 'Invalid review request')
+        if not _pinned_sdk_ready():
+            raise HTTPException(503, 'Installed local Hub SDK or tmux unavailable')
+        try:
+            current = await manifest(body['repoID'])
+            if current['revision'] != body['revision']:
+                raise ValueError('Repository revision changed')
+            review, digest = reviewed_request(manifest=current, selected_paths=body['files'], destination=_pinned_destination(body['cacheRoot']))
+            if sum(f['size'] for f in review['files']) > 8*1024**3:
+                raise ValueError('Selection exceeds size budget')
+            if _pinned_human(request) != (owner, account):
+                raise ValueError('Account changed')
+            operation_id = uuid.uuid4().hex
+            with transaction(_cookbook_state_path) as state:
+                row = reserve(state, operation_id=operation_id, account_id=account, digest=digest, review=review, owner=owner)
+                save(_cookbook_state_path, state)
+            return {'operationID':operation_id, 'revision':row['revision'], 'review':review,
+                    'notice':'Creates a new private job cache under the selected directory; existing blobs are not shared.'}
+        except Exception as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/api/cookbook/pinned")
+    async def pinned_list(request: Request, response: Response):
+        from src.openclank.cookbook_state import transaction, PRIVATE_KEY
+        response.headers["Cache-Control"] = "private, no-store"
+        owner, account = _pinned_human(request)
+        with transaction(_cookbook_state_path) as state:
+            entries = [(key, row) for key, row in state.get(PRIVATE_KEY, {}).items()
+                       if row['account_id'] == account and row.get('owner') == owner and row.get('review')]
+            entries.sort(key=lambda item: item[0])
+            return {'items':[{'operationID':key, 'repoID':row['review']['repoID'], 'state':'unknown' if row['state'] == 'dispatching' else row['state'],
+                              'revision':row['revision'], 'receipt':row.get('receipt')} for key, row in entries[:100]],
+                    'omitted':max(0, len(entries)-100)}
+
+    @router.get("/api/cookbook/pinned/{operation_id}")
+    async def pinned_status(operation_id: str, request: Request, response: Response):
+        from src.openclank.cookbook_state import transaction, PRIVATE_KEY
+        response.headers["Cache-Control"] = "private, no-store"
+        owner, account = _pinned_human(request)
+        with transaction(_cookbook_state_path) as state:
+            row = state.get(PRIVATE_KEY, {}).get(operation_id)
+            if not row or row['account_id'] != account or row.get('owner') != owner:
+                raise HTTPException(404, 'Operation unavailable', headers={'Cache-Control':'private, no-store'})
+            return {'operationID':operation_id, 'revision':row['revision'], 'state':'unknown' if row['state'] == 'dispatching' else row['state'], 'receipt':row.get('receipt')}
+
+    @router.post("/api/cookbook/pinned/{operation_id}/confirm")
+    async def pinned_confirm(operation_id: str, request: Request, response: Response):
+        from src.openclank.hub_discovery import manifest
+        from src.openclank.cookbook_acquisition import reviewed_request
+        from src.openclank.cookbook_state import transaction, PRIVATE_KEY, advance, save
+        from src.openclank.cookbook_worker import _cache_root
+        response.headers["Cache-Control"] = "private, no-store"
+        owner, account = _pinned_human(request)
+        body = await request.json()
+        if not re.fullmatch(r'[0-9a-f]{32}', operation_id) or not isinstance(body, dict) or set(body) != {'revision'} or type(body['revision']) is not int:
+            raise HTTPException(400, 'Invalid confirmation')
+        with transaction(_cookbook_state_path) as state:
+            row = state.get(PRIVATE_KEY, {}).get(operation_id)
+            if not row or row['account_id'] != account or row.get('owner') != owner:
+                raise HTTPException(404, 'Operation unavailable', headers={'Cache-Control':'private, no-store'})
+            if row['state'] != 'prepared':
+                return {'operationID':operation_id, 'revision':row['revision'], 'state':'unknown' if row['state'] == 'dispatching' else row['state'], 'receipt':row.get('receipt')}
+            if row['revision'] != body['revision'] or row.get('cache'):
+                raise HTTPException(409, 'Operation requires reconciliation')
+            review, digest = row['review'], row['digest']
+        if not _pinned_sdk_ready():
+            raise HTTPException(503, 'Installed local Hub SDK or tmux unavailable')
+        current = await manifest(review['repoID'])
+        fresh, fresh_digest = reviewed_request(manifest=current, selected_paths=[f['path'] for f in review['files']], destination=_pinned_destination(review['destination']['path']))
+        if fresh != review or fresh_digest != digest or _pinned_human(request) != (owner, account):
+            raise HTTPException(409, 'Review changed; prepare again')
+        name = 'acquisition-' + operation_id
+        with transaction(_cookbook_state_path) as state:
+            row = state[PRIVATE_KEY].get(operation_id)
+            if not row or row['account_id'] != account or row['state'] != 'prepared' or row['revision'] != body['revision'] or row['digest'] != digest or row.get('cache'):
+                raise HTTPException(409, 'Operation changed')
+            row['cache'] = {'phase':'intent', 'name':name}
+            save(_cookbook_state_path, state)
+        parent_fd = _cache_root(review['destination'])
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                info = os.fstat(fd)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(parent_fd)
+        with transaction(_cookbook_state_path) as state:
+            row = state[PRIVATE_KEY].get(operation_id)
+            if not row or row['account_id'] != account or row['revision'] != body['revision'] or row.get('cache') != {'phase':'intent','name':name}:
+                raise HTTPException(409, 'Operation requires reconciliation')
+            row['cache'] = {'phase':'created','name':name,'device':info.st_dev,'inode':info.st_ino}
+            advance(state, operation_id=operation_id, account_id=account, digest=digest, revision=body['revision'], expected='prepared', target='dispatching')
+            save(_cookbook_state_path, state)
+        try:
+            source_root = Path(__file__).resolve().parent.parent
+            if not (source_root / 'src/openclank/cookbook_worker.py').is_file():
+                raise RuntimeError('Worker source unavailable')
+            proc = await asyncio.create_subprocess_exec('tmux', 'new-session', '-d', '-s', 'cookbook-'+operation_id, '-c', str(source_root), sys.executable, '-m', 'src.openclank.cookbook_worker', str(_cookbook_state_path), operation_id, digest, str(body['revision']+1), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception:
+            pass
+        if _pinned_human(request) != (owner, account):
+            raise HTTPException(403, 'Account changed')
+        return {'operationID':operation_id, 'revision':body['revision']+1, 'state':'unknown', 'receipt':None}
+
+    @router.get("/api/cookbook/hf-public-manifest")
+    async def hf_public_manifest(repo_id: str, owner: str = Depends(require_user)):
+        from src.openclank.hub_discovery import HubUnavailable, manifest
+        _validate_repo_id(repo_id)
+        try:
+            return await manifest(repo_id)
+        except HubUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
 
     @router.get("/api/cookbook/hf-gguf-files")
     async def hf_gguf_files(repo_id: str, owner: str = Depends(require_user)):
@@ -3916,7 +4071,7 @@ def setup_cookbook_routes(
                     return {"ok": False, "files": [], "error": f"HF API HTTP {resp.status_code}"}
                 data = resp.json()
         except Exception:
-            logger.exception("HF GGUF file scan failed for %s", repo)
+            logger.exception("HF GGUF file scan failed for %s", repo_id)
             return {"ok": False, "files": [], "error": "HF API request failed"}
         files = [
             str(s.get("rfilename") or "")
@@ -4404,7 +4559,7 @@ def setup_cookbook_routes(
                     continue
             if task_platform == "windows" and remote:
                 # Windows: check PID file + Get-Process, read log tail
-                sd = "$env:TEMP\\odysseus-sessions"
+                sd = "$env:TEMP\\open-clank-sessions"
                 ssh_base = ["ssh"]
                 if _tport and _tport != "22":
                     ssh_base.extend(["-p", str(_tport)])

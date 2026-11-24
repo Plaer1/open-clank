@@ -8,6 +8,9 @@ This is the single place that handles:
 - Session lifecycle (create, archive, delete)
 """
 
+import asyncio
+from copy import deepcopy
+from functools import wraps
 import hashlib
 import json
 import time
@@ -39,6 +42,20 @@ except Exception:  # pragma: no cover - module present in normal deployments
 from .models import set_session_manager_instance, get_session_manager_instance
 
 logger = logging.getLogger(__name__)
+
+
+def _cached_history_mutation(fn):
+    """Serialize one synchronous cache/DB mutation on its existing Session."""
+    @wraps(fn)
+    def wrapped(self, session_id, *args, **kwargs):
+        session = kwargs.get('_session') or self.sessions.get(session_id)
+        if session is None:
+            return fn(self, session_id, *args, **kwargs)
+        with session._history_lock:
+            if self.sessions.get(session_id) is not session:
+                raise RuntimeError('Session cache changed')
+            return fn(self, session_id, *args, **kwargs)
+    return wrapped
 
 
 def _now_ms() -> int:
@@ -80,6 +97,33 @@ def _parse_msg_content(raw):
     return raw
 
 
+async def _await_guarded_writer(function, *args, **kwargs):
+    """Keep the caller's live guard until the synchronous writer settles."""
+    import asyncio
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        try:
+            task.result()
+        except Exception:
+            pass
+        raise
+
+
+def _history_fingerprint(session):
+    def values(item):
+        if isinstance(item, dict):
+            return id(item), str(item.get('role')), str(item.get('content')), str(item.get('metadata'))
+        return id(item), str(getattr(item,'role',None)), str(getattr(item,'content',None)), str(getattr(item,'metadata',None))
+    return tuple(values(item) for item in session.history)
+
+
 class SessionManager:
     """
     Manages chat sessions with database persistence.
@@ -96,6 +140,170 @@ class SessionManager:
         self.sessions: Dict[str, Session] = {}
         self.upload_handler = None
         self.load_sessions()
+
+    async def publish_bound_shell(self, proof, *, mapping, chat_guard, target_authority):
+        """Publish or reconcile one host-issued shell result under its held chat guard.
+
+        A dispatching proof can insert only once. An absent row on a later
+        reconciliation is unknown: it may have been inserted and then erased.
+        The caller retains the account admission and chat guard until return.
+        """
+        from src.bg_jobs import BoundShellPublication
+        from src.openclank.session_map import OwnerSessionMap
+        from src.openclank.memory_job_admission import TargetAuthority
+        if (type(proof) is not BoundShellPublication or type(mapping) is not OwnerSessionMap
+                or type(target_authority) is not TargetAuthority or proof.privacy != 'normal'):
+            return 'unavailable'
+        state = getattr(self, 'lifecycle_context', None)
+        auth = getattr(state, 'auth_manager', None)
+        supervisor = getattr(state, 'mimo_supervisor', None)
+        try:
+            pool = supervisor.owner_lifecycle_pool()
+            if (target_authority._auth is not auth or target_authority._supervisor is not pool
+                    or mapping.owner != proof.owner
+                    or mapping.path.resolve() != (pool._runtime_home(proof.owner) / 'session-map.json').resolve()):
+                return 'unavailable'
+            target = target_authority.resolve(proof.account_id)
+            def current():
+                proof.assert_current()
+                mapping.validate_chat_guard(proof.session_id, chat_guard)
+                if (auth.account_id(proof.owner) != proof.account_id
+                        or auth.username_for_account_id(proof.account_id) != proof.owner
+                        or target_authority.resolve(proof.account_id) != target):
+                    raise ValueError('publication authority changed')
+            current()
+            result = await _await_guarded_writer(self._publish_bound_shell_locked, proof, current)
+            current()
+            return result
+        except Exception:
+            logger.warning('Bound shell publication unavailable')
+            return 'unknown' if getattr(proof, '_insert_used', [False])[0] else 'unavailable'
+
+    def _publish_bound_shell_locked(self, proof, current):
+        from src.openclank.conversation_archive import get_conversation_archive
+        from src.openclank.chat_source_bridge import available, enqueue_new, deliver
+        archive = get_conversation_archive()
+        current()
+        session = self.sessions.get(proof.session_id)
+        if session is None:
+            return 'unavailable'
+        with session._history_lock:
+            if (self.sessions.get(proof.session_id) is not session or session.owner != proof.owner
+                    or session.workspace_id != proof.workspace_id or session.incognito
+                    or archive.chat_erasure_started(owner=proof.owner, chat_id=proof.session_id)):
+                return 'unavailable'
+            db = SessionLocal()
+            claimed = False
+            try:
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+                parent = db.query(DbSession).filter(DbSession.id == proof.session_id).first()
+                if (parent is None or parent.owner != proof.owner or parent.workspace_id != proof.workspace_id
+                        or parent.archived):
+                    return 'unavailable'
+                existing = db.query(DbChatMessage).filter(DbChatMessage.id == proof.message_id).first()
+                if existing is not None:
+                    if (existing.session_id != proof.session_id or existing.role != 'assistant'
+                            or hashlib.sha256(existing.content.encode('utf-8')).hexdigest() != proof.body_sha256
+                            or hashlib.sha256((existing.meta_data or '').encode('utf-8')).hexdigest() != proof.metadata_sha256):
+                        return 'conflict'
+                    from src.openclank.session_operations import visibility
+                    excluded = visibility(parent.mimo_state or {}, require_settled=True)
+                    rows = db.query(DbChatMessage).filter(
+                        DbChatMessage.session_id == proof.session_id
+                    ).order_by(DbChatMessage.timestamp, DbChatMessage.id).all()
+                    visible = [row for row in rows if row.id not in excluded]
+                    cached = list(session.history)
+                    def cache_id(item):
+                        metadata = item.metadata if isinstance(item, ChatMessage) else item.get('metadata')
+                        return metadata.get('_db_id') if isinstance(metadata, dict) else None
+                    ids = [cache_id(item) for item in cached]
+                    if proof.message_id in excluded:
+                        if proof.message_id in ids:
+                            return 'unavailable'
+                        current()
+                        return 'already_present'
+                    if ids.count(proof.message_id) == 1:
+                        item = cached[ids.index(proof.message_id)]
+                        role = item.role if isinstance(item, ChatMessage) else item.get('role')
+                        content = item.content if isinstance(item, ChatMessage) else item.get('content')
+                        if role != 'assistant' or content != proof.body:
+                            return 'conflict'
+                        current()
+                        return 'already_present'
+                    if proof.message_id in ids or any(not item for item in ids):
+                        return 'unavailable'
+                    others = [row for row in visible if row.id != proof.message_id]
+                    if ids != [row.id for row in others]:
+                        return 'unavailable'
+                    for item, row in zip(cached, others):
+                        role = item.role if isinstance(item, ChatMessage) else item.get('role')
+                        content = item.content if isinstance(item, ChatMessage) else item.get('content')
+                        if role != row.role or content != _parse_msg_content(row.content):
+                            return 'unavailable'
+                    metadata = json.loads(existing.meta_data or '{}')
+                    if type(metadata) is not dict:
+                        return 'unavailable'
+                    metadata['_db_id'] = existing.id
+                    metadata.setdefault('timestamp', _message_timestamp_iso(existing.timestamp))
+                    recovered = ChatMessage(role='assistant', content=existing.content, metadata=metadata)
+                    position = next((i for i, row in enumerate(visible) if row.id == proof.message_id), None)
+                    if position is None:
+                        return 'unavailable'
+                    current()
+                    session.history = cached[:position] + [recovered] + cached[position:]
+                    session._history = session.history
+                    session.message_count = len(session.history)
+                    return 'already_present'
+                if not session.history and session.message_count:
+                    return 'unavailable'
+                metadata = json.loads(proof.metadata_json)
+                if type(metadata) is not dict:
+                    raise ValueError('invalid publication metadata')
+                current()
+                if not proof.claim_insert():
+                    return 'unknown'
+                claimed = True
+                now = datetime.utcnow()
+                record = DbChatMessage(id=proof.message_id, session_id=proof.session_id,
+                    role='assistant', content=proof.body, meta_data=proof.metadata_json, timestamp=now)
+                db.add(record)
+                source_enabled = available(db)
+                source_owner = None
+                if source_enabled:
+                    source_owner = archive.resolve_owner(proof.owner)
+                    if source_owner != proof.account_id:
+                        raise ValueError('publication source owner changed')
+                    db.flush()
+                    enqueue_new(db, archive=archive, owner=source_owner, chat_id=proof.session_id,
+                        message_id=proof.message_id, body=proof.body, origin=None)
+                message = ChatMessage(role='assistant', content=proof.body, metadata=dict(metadata))
+                from services.stats.ledger import capture_message_event
+                capture_message_event(db, parent, record, message)
+                parent.message_count = int(parent.message_count or 0) + 1
+                parent.last_accessed = parent.last_message_at = datetime.now(timezone.utc)
+                current()
+                db.commit()
+                message.metadata['_db_id'] = proof.message_id
+                session.history.append(message)
+                session._history = session.history
+                session.message_count = len(session.history)
+                self._archive_message_parts(proof.session_id, message, msg_id=proof.message_id,
+                    revision=1, event_sequence=len(session.history) - 1, skip_body=source_enabled)
+                if source_enabled:
+                    try:
+                        deliver(db, archive, owner=source_owner, chat_id=proof.session_id,
+                            message_id=proof.message_id, revision=1)
+                    except Exception:
+                        db.rollback()
+                        logger.warning('host source delivery pending')
+                return 'inserted'
+            except Exception:
+                db.rollback()
+                if claimed:
+                    return 'unknown'
+                raise
+            finally:
+                db.close()
 
     # ------------------------------------------------------------------
     # Loading
@@ -158,6 +366,8 @@ class SessionManager:
             history=[],
             owner=getattr(db_session, "owner", None),
             workspace_id=getattr(db_session, "workspace_id", None),
+            response_style=db_session.response_style,
+            response_style_revision=db_session.response_style_revision,
             is_important=getattr(db_session, "is_important", False) or False,
         )
         session.message_count = getattr(db_session, "message_count", 0) or 0
@@ -221,6 +431,8 @@ class SessionManager:
             history=history,
             owner=getattr(db_session, 'owner', None),
             workspace_id=getattr(db_session, "workspace_id", None),
+            response_style=db_session.response_style,
+            response_style_revision=db_session.response_style_revision,
             is_important=getattr(db_session, 'is_important', False) or False,
         )
 
@@ -240,6 +452,7 @@ class SessionManager:
         revision: int = 1,
         event_sequence: int = 0,
         role_override: Optional[str] = None,
+        skip_body: bool = False,
     ) -> None:
         """Archive one message as ordered source parts (not a text pair).
 
@@ -295,7 +508,7 @@ class SessionManager:
         seq = 0
         # Always archive a text (or block) body part so text-pair capture is
         # never the only durable record of a turn.
-        if content is not None:
+        if content is not None and not skip_body:
             parts.append(_part("body", "text", content, part_seq=seq))
             seq += 1
 
@@ -330,7 +543,7 @@ class SessionManager:
                 "byte_size": ref.get("size"),
                 "provenance": {"source": "host_upload", "name": ref.get("name")},
             })
-        if asset_specs and parts:
+        if asset_specs and parts and not skip_body:
             # Attach assets to the body part revision (same dedupe key).
             from dataclasses import replace as _dc_replace
             parts[0] = _dc_replace(parts[0], assets=tuple(asset_specs))
@@ -359,28 +572,37 @@ class SessionManager:
             message: ChatMessage to add
         """
         session = self.get_session(session_id)
-        session.history.append(message)
-        session._history = session.history
-        session.message_count = len(session.history)
-
-        try:
+        with session._history_lock:
+            if self.sessions.get(session_id) is not session:
+                raise RuntimeError("Session cache changed")
             persisted = self._persist_message(session_id, message)
             if not persisted:
                 raise RuntimeError(f"Session {session_id} no longer exists")
-        except Exception:
-            if session.history and session.history[-1] is message:
-                session.history.pop()
-            else:
-                session.history = [item for item in session.history if item is not message]
+            session.history.append(message)
             session._history = session.history
             session.message_count = len(session.history)
-            raise
 
-    def _persist_message(self, session_id: str, message: ChatMessage):
+    def _persist_message(self, session_id: str, message: ChatMessage, *, origin_admission=None, connector_guard=None, channel_guard=None, tui_guard=None):
         """Persist a single message to the database."""
         db = SessionLocal()
         try:
+            if connector_guard is not None and tui_guard is not None:
+                raise ValueError('Multiple turn authorities unavailable')
+            if connector_guard is not None or tui_guard is not None:
+                from src.openclank.connector_turns import ConnectorTurnGuard
+                from src.openclank.tui_turns import TuiTurnGuard
+                guard = connector_guard if connector_guard is not None else tui_guard
+                expected = ConnectorTurnGuard if connector_guard is not None else TuiTurnGuard
+                if type(guard) is not expected or db.bind.dialect.name != 'sqlite':
+                    raise ValueError('Turn transaction unavailable')
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if connector_guard is not None or tui_guard is not None:
+                guard.prepare(db, db_session, message)
+            if channel_guard is not None:
+                from src.openclank.channels.turn_guard import ChannelTurnGuard
+                if type(channel_guard) is not ChannelTurnGuard: raise ValueError('Channel transaction unavailable')
+                channel_guard.prepare(db_session, message)
             if db_session is None:
                 # A stream/tool callback can outlive a session delete. Do not
                 # create a chat_messages row with no parent session; also drop
@@ -441,12 +663,25 @@ class SessionManager:
                 timestamp=msg_time,
             )
             db.add(db_message)
+            from src.openclank.chat_source_bridge import available, enqueue_new, deliver
+            source_enabled = available(db)
+            source_owner = None
+            if source_enabled:
+                from src.openclank.conversation_archive import get_conversation_archive
+                source_archive = get_conversation_archive()
+                source_owner = source_archive.resolve_owner(db_session.owner)
+                db.flush()
+                if origin_admission is not None and (origin_admission.owner != source_owner or origin_admission.chat_id != session_id or origin_admission.root_operation_id != msg_id):
+                    logger.warning("host origin admission no longer matches canonical scope")
+                    origin_admission = None
+                enqueue_new(db, archive=source_archive, owner=source_owner, chat_id=session_id, message_id=msg_id, body=_content, origin=origin_admission)
             # Numeric Stats facts share the canonical message transaction.
             from services.stats.ledger import capture_message_event
             capture_message_event(db, db_session, db_message, message)
 
             if session_id in self.sessions:
-                db_session.message_count = len(self.sessions[session_id].history)
+                history = self.sessions[session_id].history
+                db_session.message_count = len(history) + (0 if any(item is message for item in history) else 1)
             else:
                 db_session.message_count = 0
             _now = datetime.now(timezone.utc)
@@ -456,6 +691,8 @@ class SessionManager:
             # sort that ignores renames / model swaps / mere opens.
             db_session.last_message_at = _now
 
+            if connector_guard is not None or tui_guard is not None: guard.before_commit()
+            if channel_guard is not None: channel_guard.assert_current()
             db.commit()
 
             # Store DB ID on the in-memory message for edit/delete by ID
@@ -470,7 +707,14 @@ class SessionManager:
                 msg_id=msg_id,
                 revision=1,
                 event_sequence=len(self.sessions.get(session_id).history) if session_id in self.sessions else 0,
+                skip_body=source_enabled,
             )
+            if source_enabled:
+                try:
+                    deliver(db, source_archive, owner=source_owner, chat_id=session_id, message_id=msg_id, revision=1)
+                except Exception:
+                    db.rollback()
+                    logger.warning("host source delivery pending", exc_info=True)
 
             logger.debug(f"Persisted message to session {session_id}")
             return True
@@ -482,18 +726,114 @@ class SessionManager:
         finally:
             db.close()
 
-    def truncate_messages(self, session_id: str, keep_count: int) -> bool:
-        """Truncate session history, keeping only the first `keep_count` messages."""
-        session = self.get_session(session_id)
+    @staticmethod
+    def _lock_source_intents(db, session_id):
+        """Keep pending origin completions from racing a guarded rewrite."""
+        from src.openclank.chat_source_bridge import origin_available
+        from sqlalchemy import text
+        if db.get_bind().dialect.name == 'postgresql' and origin_available(db):
+            # Exhaust the cursor so every existing intent is row-locked until
+            # the host transaction commits; no native await occurs here.
+            for _ in db.execute(text('SELECT message_id FROM host_source_delivery_intent WHERE chat_id=:chat FOR UPDATE').execution_options(stream_results=True, yield_per=128), {'chat':session_id}):
+                pass
 
+    def _truncate_snapshot(self, db, session_id, keep_count):
+        row = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if row is None or type(keep_count) is not int or keep_count < 0:
+            raise ValueError('truncate selection unavailable')
+        rows = db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).order_by(DbChatMessage.timestamp, DbChatMessage.id).all()
+        ids = tuple(item.id for item in rows[keep_count:])
+        roots = set()
+        from src.openclank.chat_source_bridge import origin_available
+        from src.openclank.conversation_archive import get_conversation_archive
+        from sqlalchemy import text, bindparam
+        if ids and origin_available(db):
+            account = get_conversation_archive().resolve_owner(row.owner)
+            stmt = text("SELECT DISTINCT message_id FROM host_source_delivery_intent WHERE owner=:owner AND chat_id=:chat AND part_id='body' AND revision=1 AND origin_assistant_id IN :ids").bindparams(bindparam('ids',expanding=True))
+            for offset in range(0,len(ids),128):
+                roots.update(item[0] for item in db.execute(stmt,{'owner':account,'chat':session_id,'ids':ids[offset:offset+128]}))
+        from src.openclank.chat_source_bridge import available
+        versions = {}
+        if available(db):
+            versions = {item[0]:(item[1],item[2]) for item in db.execute(text('SELECT id,source_body_revision,source_body_hash FROM chat_messages WHERE session_id=:chat'), {'chat':session_id})}
+        material = [row.owner, row.workspace_id, int(row.transcript_revision or 0), keep_count, sorted(roots), [(item.id,item.role,
+            hashlib.sha256(str(item.content).encode()).hexdigest(),versions.get(item.id)) for item in rows]]
+        return hashlib.sha256(json.dumps(material,separators=(',',':'),ensure_ascii=False).encode()).hexdigest(), ids, row.owner, tuple(sorted(roots))
+
+    async def truncate_messages_guarded(self, session_id: str, keep_count: int) -> bool:
+        from src.openclank.chat_source_bridge import guarded_source_mutation, canonical_source_provider
+        state = getattr(self, 'lifecycle_context', None)
+        provider = canonical_source_provider(state) if state is not None else None
+        if provider is None:
+            return self.truncate_messages(session_id, keep_count)
+        try:
+            session = self.get_session(session_id)
+            with session._history_lock:
+                before_history = _history_fingerprint(session)
+            def snapshot():
+                with SessionLocal() as db:
+                    return self._truncate_snapshot(db,session_id,keep_count)
+            expected, ids, owner, roots = await _await_guarded_writer(snapshot)
+            def check():
+                with SessionLocal() as db:
+                    current, now_ids, now_owner, now_roots = self._truncate_snapshot(db,session_id,keep_count)
+                    if (current,now_ids,now_owner,now_roots) != (expected,ids,owner,roots):
+                        raise ValueError('truncate selection changed')
+            async with guarded_source_mutation(state=state,owner=owner,chat_id=session_id,
+                    message_ids=tuple(sorted(set(ids)|set(roots))),pre_fence=check,_bulk=True,_pre_fence_offloop=True) as guard:
+                if guard is None or guard.provider is not provider or canonical_source_provider(state) is not provider:
+                    raise ValueError('source authority changed')
+                try:
+                    result = await _await_guarded_writer(self.truncate_messages,session_id,keep_count,_source_capability=(guard,expected),_defer_cache=True,_session=session)
+                except asyncio.CancelledError:
+                    if self.sessions.get(session_id) is session:
+                        self.sessions.pop(session_id, None)
+                    raise
+                if result:
+                    with session._history_lock:
+                        if _history_fingerprint(session) == before_history:
+                            session.history = session.history[:keep_count]
+                            session._history = session.history
+                        elif self.sessions.get(session_id) is session:
+                            self.sessions.pop(session_id, None)
+                return result
+        except Exception as exc:
+            raise ArchiveUnavailableError(message='truncate source guard unavailable') from exc
+
+    @_cached_history_mutation
+    def truncate_messages(self, session_id: str, keep_count: int, *, _source_capability=None, _defer_cache=False, _session=None) -> bool:
+        """Truncate session history, keeping only the first `keep_count` messages."""
+        session = _session if _session is not None else self.get_session(session_id)
+        if getattr(session, "id", None) != session_id:
+            raise ValueError("session identity changed")
         if keep_count < 0:
             return False
 
         db = SessionLocal()
         try:
+            from src.openclank.chat_source_bridge import canonical_source_provider, _HostChatFenceCapability, withdraw_deleted_messages
+            from src.openclank.conversation_archive import get_conversation_archive
+            state = getattr(self, 'lifecycle_context', None)
+            provider = canonical_source_provider(state) if state is not None else None
+            if provider is not None:
+                if type(_source_capability) is not tuple or len(_source_capability) != 2 or type(_source_capability[0]) is not _HostChatFenceCapability:
+                    raise ArchiveUnavailableError(message='truncate source guard unavailable')
+                if db.get_bind().dialect.name == 'sqlite':
+                    db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+                db.query(DbSession).filter(DbSession.id == session_id).with_for_update().first()
+                self._lock_source_intents(db, session_id)
+                expected, ids, owner, _roots = self._truncate_snapshot(db,session_id,keep_count)
+                _source_capability[0].validate(provider=provider,owner=owner,chat_id=session_id)
+                if not _source_capability[0].whole_chat and not (set(ids) | set(_roots)).issubset(_source_capability[0].fenced_ids):
+                    raise ArchiveUnavailableError(message='truncate source fence incomplete')
+                if expected != _source_capability[1]:
+                    raise ArchiveUnavailableError(message='truncate selection changed')
+                archive = get_conversation_archive()
+                account = archive.resolve_owner(owner)
+                withdraw_deleted_messages(db,archive,owner=account,chat_id=session_id,message_ids=ids)
             db_messages = db.query(DbChatMessage).filter(
                 DbChatMessage.session_id == session_id
-            ).order_by(DbChatMessage.timestamp).all()
+            ).order_by(DbChatMessage.timestamp, DbChatMessage.id).all()
 
             deleted = 0
             for msg in db_messages[keep_count:]:
@@ -511,8 +851,9 @@ class SessionManager:
             db.commit()
 
             # Update in-memory
-            session.history = session.history[:keep_count]
-            session._history = session.history
+            if not _defer_cache:
+                session.history = session.history[:keep_count]
+                session._history = session.history
 
             logger.info(f"Truncated session {session_id} to {keep_count} messages")
             return True
@@ -520,11 +861,101 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Error truncating session: {e}")
             db.rollback()
+            if isinstance(e, ArchiveUnavailableError):
+                raise
             return False
         finally:
             db.close()
 
-    def replace_messages(self, session_id: str, messages: list) -> bool:
+    @staticmethod
+    def _projection_fingerprint(db, session_id, messages, expected_sources=()):
+        """Hash current row identities and the proposed retained values."""
+        row = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if row is None:
+            raise ValueError('session unavailable')
+        current = db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).order_by(DbChatMessage.timestamp, DbChatMessage.id).all()
+        existing = {item.id: item for item in current}
+        for mid, role, content_hash in expected_sources:
+            original = existing.get(mid)
+            if original is None or original.role != role or hashlib.sha256(str(original.content).encode()).hexdigest() != content_hash:
+                raise ValueError('projection source changed')
+        proposed = []
+        for message in messages:
+            meta = message.metadata or {}
+            mid = str(getattr(message, 'persistence_id', None) or meta.get('_db_id') or '')
+            content = persistable_message_content(message.content, message.metadata)
+            if mid in existing and existing[mid].role in ('user','assistant'):
+                # Compaction retains source components verbatim. Changed source
+                # bodies require the separate source-edit admission path.
+                if existing[mid].role != message.role or existing[mid].content != content:
+                    raise ValueError('projection changes retained source')
+            proposed.append((mid, message.role, hashlib.sha256(str(content).encode()).hexdigest()))
+        from src.openclank.chat_source_bridge import available
+        from sqlalchemy import text
+        versions = {}
+        if available(db):
+            versions = {item[0]:(item[1],item[2]) for item in db.execute(text('SELECT id,source_body_revision,source_body_hash FROM chat_messages WHERE session_id=:chat'), {'chat':session_id})}
+        material = [row.owner, row.workspace_id, int(row.transcript_revision or 0), list(expected_sources), [(item.id, item.role,
+            hashlib.sha256(str(item.content).encode()).hexdigest(), versions.get(item.id)) for item in current], proposed]
+        return hashlib.sha256(json.dumps(material, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+
+    async def replace_messages_guarded(self, session_id: str, messages: list, *, _expected_sources=(), _required_provider=None, _expected_history=None) -> bool:
+        """Serialize presentation replacement with host-source publication."""
+        from src.openclank.chat_source_bridge import guarded_source_mutation, canonical_source_provider
+        state = getattr(self, 'lifecycle_context', None)
+        session = self.get_session(session_id)
+        provider = canonical_source_provider(state) if state is not None else None
+        if _required_provider is not None and provider is not _required_provider:
+            raise ArchiveUnavailableError(message='projection source authority changed')
+        if provider is None and not _expected_sources:
+            return self.replace_messages(session_id, messages, _expected_history=_expected_history)
+        owner = session.owner
+        try:
+            with session._history_lock:
+                planned_messages = deepcopy(messages)
+                before_history = _history_fingerprint(session)
+                if _expected_history is not None and before_history != _expected_history:
+                    return False
+            expected_sources = tuple(_expected_sources)
+            def snapshot():
+                with SessionLocal() as db:
+                    return self._projection_fingerprint(db, session_id, planned_messages, expected_sources)
+            expected = await _await_guarded_writer(snapshot)
+            def check():
+                with SessionLocal() as db:
+                    if self._projection_fingerprint(db, session_id, planned_messages, expected_sources) != expected:
+                        raise ValueError('projection changed')
+            from contextlib import asynccontextmanager
+            @asynccontextmanager
+            async def no_source_guard():
+                yield None
+            context = (guarded_source_mutation(state=state,owner=owner,chat_id=session_id,pre_fence=check,_pre_fence_offloop=True)
+                       if state is not None else no_source_guard())
+            async with context as guard:
+                current_provider = canonical_source_provider(state) if state is not None else None
+                if current_provider is not provider or (provider is not None and (guard is None or guard.provider is not provider)) or (provider is None and guard is not None):
+                    raise ValueError('source authority changed')
+                try:
+                    result = await _await_guarded_writer(self.replace_messages,session_id,planned_messages,_source_capability=(guard,expected,expected_sources),_defer_cache=True,_session=session,_expected_history=before_history)
+                except asyncio.CancelledError:
+                    if self.sessions.get(session_id) is session:
+                        self.sessions.pop(session_id, None)
+                    raise
+                if not result:
+                    raise ValueError('projection write failed')
+                with session._history_lock:
+                    if _history_fingerprint(session) == before_history:
+                        session.history = planned_messages
+                        session._history = session.history
+                        session.message_count = len(planned_messages)
+                    elif self.sessions.get(session_id) is session:
+                        self.sessions.pop(session_id, None)
+                return result
+        except Exception as exc:
+            raise ArchiveUnavailableError(message='projection source guard unavailable') from exc
+
+    @_cached_history_mutation
+    def replace_messages(self, session_id: str, messages: list, *, _source_capability=None, _defer_cache=False, _session=None, _expected_history=None) -> bool:
         """Replace the presentation projection without deleting original history.
 
         Canonical source parts are archived first (idempotent). Retained
@@ -534,15 +965,41 @@ class SessionManager:
         host finite-context projection writer; it is not a source-history
         destroy/rekey operation.
         """
-        session = self.get_session(session_id)
+        session = _session if _session is not None else self.get_session(session_id)
+        if getattr(session, "id", None) != session_id:
+            raise ValueError("session identity changed")
+        if _expected_history is not None and _history_fingerprint(session) != _expected_history:
+            return False
         db = SessionLocal()
         try:
-            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if _source_capability is not None and db.get_bind().dialect.name == 'sqlite':
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+            query = db.query(DbSession).filter(DbSession.id == session_id)
+            if _source_capability is not None:
+                query = query.with_for_update()
+            db_session = query.first()
+            if _source_capability is not None:
+                self._lock_source_intents(db, session_id)
             if db_session is None:
                 logger.warning("Cannot replace history for missing session %s", session_id)
                 return False
 
             from src.openclank.conversation_archive import get_conversation_archive
+            from src.openclank.chat_source_bridge import canonical_source_provider, _HostChatFenceCapability
+            lifecycle_context = getattr(self, 'lifecycle_context', None)
+            provider = canonical_source_provider(lifecycle_context) if lifecycle_context is not None else None
+            if provider is not None or _source_capability is not None:
+                if type(_source_capability) is not tuple or len(_source_capability) != 3:
+                    raise ArchiveUnavailableError(message='projection source guard unavailable')
+                guard, expected, expected_sources = _source_capability
+                if provider is not None:
+                    if type(guard) is not _HostChatFenceCapability:
+                        raise ArchiveUnavailableError(message='projection source guard unavailable')
+                    guard.validate(provider=provider,owner=db_session.owner,chat_id=session_id)
+                elif guard is not None:
+                    raise ArchiveUnavailableError(message='projection source authority changed')
+                if self._projection_fingerprint(db, session_id, messages, expected_sources) != expected:
+                    raise ArchiveUnavailableError(message='projection changed')
             if get_conversation_archive().chat_erasure_started(owner=db_session.owner, chat_id=session_id):
                 raise RuntimeError("Conversation deletion is pending; history writes are closed")
 
@@ -601,6 +1058,13 @@ class SessionManager:
             dropped_rows = [
                 row for row in existing_rows if row.id not in incoming_existing_ids
             ]
+            if provider is not None:
+                from src.openclank.chat_source_bridge import mark_projection_drops
+                archive = get_conversation_archive()
+                account = archive.resolve_owner(db_session.owner)
+                if not account:
+                    raise ArchiveUnavailableError(message='projection owner unavailable')
+                mark_projection_drops(db, archive, owner=account, chat_id=session_id, rows=dropped_rows)
             for row in dropped_rows:
                 db.delete(row)
             # Flush the projection drops before any insert so the SQL order is
@@ -676,9 +1140,10 @@ class SessionManager:
             #    Source parts are already archived and remain retrievable.
             self._record_projection(session_id, messages, owner=getattr(db_session, "owner", None))
 
-            session.history = list(messages)
-            session._history = session.history
-            session.message_count = len(messages)
+            if not _defer_cache:
+                session.history = list(messages)
+                session._history = session.history
+                session.message_count = len(messages)
             logger.info(
                 "Replaced session %s projection with %d messages (%d retained ids, source archived)",
                 session_id,
@@ -955,6 +1420,7 @@ class SessionManager:
 
         return self.sessions[session_id]
 
+    @_cached_history_mutation
     def sync_session_metadata(self, session_id: str, *, allow_pending_history: bool = False) -> bool:
         """Refresh non-message session fields from the DB into the cached object."""
         from src.openclank.session_operations import HistoryOperationError
@@ -984,6 +1450,8 @@ class SessionManager:
             session.archived = db_session.archived
             session.owner = getattr(db_session, "owner", None)
             session.workspace_id = getattr(db_session, "workspace_id", None)
+            session.response_style = db_session.response_style
+            session.response_style_revision = db_session.response_style_revision
             session.is_important = getattr(db_session, "is_important", False) or False
             session.message_count = getattr(db_session, "message_count", session.message_count) or 0
             from src.openclank.session_operations import visibility, HistoryOperationError
@@ -1012,6 +1480,7 @@ class SessionManager:
         finally:
             db.close()
 
+    @_cached_history_mutation
     def _load_session_from_db(self, session_id: str):
         """Hydrate a single session (with messages) from the database."""
         db = SessionLocal()
@@ -1064,8 +1533,13 @@ class SessionManager:
         endpoint_id: str | None = None,
         provider_model_route_id: str | None = None,
         workspace_id: str | None = None,
+        response_style: str = 'normal',
+        connector_create_digest: str | None = None,
+        connector_current=None,
     ) -> Session:
         """Create a new session and save to database."""
+        from src.openclank.response_style import normalize_mode
+        response_style = normalize_mode(response_style)
         db = SessionLocal()
         try:
             db_session = DbSession(
@@ -1079,10 +1553,14 @@ class SessionManager:
                 headers={},
                 owner=owner,
                 workspace_id=str(workspace_id).strip() or None if workspace_id else None,
+                response_style=response_style, response_style_revision=0,
+                connector_create_digest=connector_create_digest,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc)
             )
             db.add(db_session)
+            if connector_current is not None and not connector_current():
+                raise ValueError("Connector credential changed before session creation")
             db.commit()
 
             session = Session(
@@ -1096,6 +1574,7 @@ class SessionManager:
                 headers={},
                 owner=owner,
                 workspace_id=str(workspace_id).strip() or None if workspace_id else None,
+                response_style=response_style, response_style_revision=0,
             )
 
             self.sessions[session_id] = session
@@ -1132,7 +1611,8 @@ class SessionManager:
             cached.workspace_id = value
         return True
 
-    def delete_session(self, session_id: str) -> bool:
+    @_cached_history_mutation
+    def delete_session(self, session_id: str, *, retired_execution: bool = False, _source_capability=None) -> bool:
         """Permanently delete a session and all its messages."""
         db = SessionLocal()
         try:
@@ -1144,16 +1624,24 @@ class SessionManager:
                 else getattr(memory_session, "owner", None)
             )
             if db_session is not None or memory_session is not None:
+                from src.openclank.chat_source_bridge import require_chat_source_capability, canonical_source_provider
+                lifecycle_context = getattr(self, 'lifecycle_context', None)
+                source_provider = canonical_source_provider(lifecycle_context) if lifecycle_context is not None else None
+                if db_session is not None or not getattr(memory_session, 'incognito', False):
+                    require_chat_source_capability(provider=source_provider, owner=session_owner,
+                        chat_id=session_id, capability=_source_capability)
                 from src import agent_runs
                 if agent_runs.is_active(session_id):
                     raise RuntimeError("Conversation has an active run")
                 if not session_owner:
                     raise RuntimeError("Conversation owner is unavailable")
+                from src import bg_jobs
+                bg_jobs.assert_session_owner_purge_ready(
+                    session_id=session_id, owner=str(session_owner)
+                )
                 if not getattr(memory_session, "incognito", False):
                     from src.openclank.conversation_archive import get_conversation_archive
                     get_conversation_archive().begin_chat_erasure(owner=session_owner, chat_id=session_id)
-                from src import bg_jobs
-
                 bg_jobs.delete_for_session_owner(
                     session_id=session_id,
                     owner=str(session_owner or ""),
@@ -1183,7 +1671,8 @@ class SessionManager:
                 mark_session_image_source_removed(db, owner=session_owner, session_id=session_id, image_ids=pending_image_ids)
                 if not getattr(memory_session, "incognito", False):
                     from src.openclank.session_deletion import erase_retained_content
-                    erase_retained_content(db, owner=session_owner, session_id=session_id, upload_handler=self.upload_handler)
+                    erase_retained_content(db, owner=session_owner, session_id=session_id, upload_handler=self.upload_handler,
+                        source_provider=source_provider, _source_capability=_source_capability)
                     # SessionLocal disables autoflush. Persist content-free
                     # Stats/Memory detachment before message/session cascades.
                     db.flush()
@@ -1212,7 +1701,17 @@ class SessionManager:
                 db.commit()
                 self.sessions.pop(session_id, None)
                 from src.session_image_cleanup import retire_reconciled_session_images
-                retire_reconciled_session_images(owner=session_owner, session_id=session_id, upload_handler=self.upload_handler)
+                try:
+                    retire_reconciled_session_images(owner=session_owner, session_id=session_id, upload_handler=self.upload_handler)
+                except Exception:
+                    # The host deletion already committed; durable image intent remains for reconciliation.
+                    logger.warning("Could not reconcile committed chat image claims for %s", session_id)
+                if retired_execution and self.upload_handler and session_owner:
+                    try:
+                        self.upload_handler.retire_chat_input_receipt_claims(owner=session_owner, session_id=session_id)
+                    except Exception:
+                        # The host deletion already committed. Leave receipt claims intact for reconciliation.
+                        logger.warning("Could not retire committed chat input receipt claims for %s", session_id)
                 logger.info(f"Deleted session {session_id}")
                 return True
             return False
@@ -1519,6 +2018,12 @@ class SessionManager:
 
                 # Delete empty sessions only if older than min_age_hours
                 if db_session.message_count == 0:
+                    # Empty presentation history can still have qualified
+                    # archived sources. Real deletion must use chat lifecycle.
+                    from src.openclank.chat_source_bridge import canonical_source_provider
+                    lifecycle_context = getattr(self, 'lifecycle_context', None)
+                    if lifecycle_context is not None and canonical_source_provider(lifecycle_context) is not None:
+                        continue
                     if db_session.created_at is not None:
                         created = db_session.created_at
                         if created.tzinfo is None:

@@ -182,7 +182,7 @@ def test_managed_engine_catalogues_copilot_adapter():
 
     source = (
         Path(__file__).resolve().parents[1]
-        / "packages/mimo-code/packages/opencode/src/acp/provider-control.ts"
+        / "packages/mimo-code/packages/cli/src/acp/provider-control.ts"
     ).read_text(encoding="utf-8")
     assert 'id: "github-copilot"' in source
     assert 'adapters: ["copilot-chat"]' in source

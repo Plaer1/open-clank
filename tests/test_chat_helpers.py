@@ -655,3 +655,20 @@ async def test_build_chat_context_respects_memory_mode_read_gate(
     )
 
     assert captured["preface_use_memory"] is expected
+
+
+def test_whole_history_derivation_is_unavailable_without_source_coverage(monkeypatch, caplog):
+    from types import SimpleNamespace
+    from routes import chat_helpers
+    monkeypatch.setattr(chat_helpers, 'capture_allowed', lambda *args, **kwargs: True)
+    monkeypatch.setattr(chat_helpers, 'needs_auto_name', lambda name: False)
+    monkeypatch.setattr(chat_helpers, '_spawn_bg', lambda *args, **kwargs: pytest.fail('unverified history was scheduled'))
+    session = SimpleNamespace(history=[object()] * 4, name='Existing', model='model')
+    kwargs = dict(sess=session, session_manager=None, session_id='chat', message='hello', full_response='answer',
+                  last_metrics=None, uprefs={'auto_skills': True}, memory_manager=None, memory_vector=None,
+                  webhook_manager=None, owner='alice', agent_rounds=2, skills_manager=object())
+    with caplog.at_level('INFO'):
+        chat_helpers.run_post_response_tasks(**kwargs)
+        chat_helpers.run_post_response_tasks(**kwargs, no_memory=True)
+    assert 'native memory derivation unavailable for owner alice' in caplog.text
+    assert 'skill derivation unavailable for owner alice' in caplog.text

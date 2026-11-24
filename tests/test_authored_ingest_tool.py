@@ -1,4 +1,4 @@
-"""SLICE-06 — authored-file ingest tool against the real fm-mcp binary.
+"""SLICE-06 — authored-file ingest tool against the real memery-worker binary.
 
 The mimo reconcile pass projects agent-authored MEMORY.md sections through
 the `ingest_authored` tool; these tests pin the tool contract Brain relies
@@ -11,15 +11,15 @@ import os
 
 import pytest
 
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_scope import CHAT_WORKSPACE
 
 FM_BIN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "mcp_servers/frankenmemory/target/release/fm-mcp",
+    "native/memery/target/release/memery-worker",
 )
 
-needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="fm-mcp release binary not built")
+needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="memery-worker release binary not built")
 
 PATH = "/data/memory/global/MEMORY.md"
 
@@ -30,7 +30,7 @@ def _sections(*contents):
 
 @needs_fm
 async def test_ingest_authored_round_trip_and_wipe(tmp_path):
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         first = await provider._call_tool(

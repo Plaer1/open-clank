@@ -10,6 +10,8 @@ from src.tool_policy import (
     WEB_TOOL_NAMES,
     build_effective_tool_policy,
     detect_guide_only_turn,
+    normalize_turn_policy_snapshot,
+    resolve_turn_policy,
     web_search_enabled_for_turn,
 )
 
@@ -105,15 +107,15 @@ def test_strict_native_worker_stays_closed_while_rust_tools_are_projected(monkey
     workspace.mkdir()
     registry = FilesystemRootRegistry(registry_path)
     registry.add("alice", str(workspace), "recursive_directory", ["read", "write"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry_path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry_path))
     monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda _owner: True)
 
     projected = tool_security.brokered_agent_file_tools("alice", str(workspace))
-    assert projected == {"read_file", "write_file", "edit_file", "ls", "glob", "grep"}
+    assert projected == {"read_file", "write_file", "edit_file", "manage_files", "ls", "glob", "grep"}
     unavailable = tool_security.unavailable_strict_agent_tools("alice", str(workspace))
-    # The 2026-08-14 owner ruling: process tools are admitted through the
-    # approval gates; only unbrokered scoped file tools stay unavailable.
-    assert "manage_files" in unavailable
+    # Process tools use their approval gates; scoped file tools require the
+    # matching Agent Files capabilities and their own operation checks.
+    assert "manage_files" not in unavailable
     assert {"bash", "python", "manage_bg_jobs"}.isdisjoint(unavailable)
     assert projected.isdisjoint(unavailable)
     # Direct OS aliases never become available merely because the Rust-backed
@@ -135,7 +137,7 @@ def test_brokered_agent_tools_intersect_non_admin_visibility(monkeypatch, tmp_pa
     ceiling = registry.add("admin", str(visible), "recursive_directory", ["read", "write"])
     assignment = registry.assign_visibility("admin", "alice", ceiling["id"], ["read", "write"])
     registry.add("alice", str(workspace), "recursive_directory", ["read", "write"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry_path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry_path))
     monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda _owner: False)
 
     assert {"write_file", "edit_file"}.issubset(
@@ -154,6 +156,45 @@ def test_web_search_enabled_for_turn_requires_explicit_enable():
     assert web_search_enabled_for_turn(True, None) is True
     assert web_search_enabled_for_turn("false", "true") is False
     assert web_search_enabled_for_turn(False, "true") is False
+
+
+def test_shared_turn_policy_resolver_matches_mode_and_toggle_composition():
+    choices = normalize_turn_policy_snapshot({
+        "version": 1,
+        "mode": "plan",
+        "allowBash": False,
+        "allowWebSearch": False,
+        "useWeb": True,
+        "useResearch": True,
+        "compareMode": False,
+        "incognito": False,
+        "noMemory": False,
+    })
+    resolved = resolve_turn_policy(
+        choices,
+        disabled_tools={"custom_disabled", "manage_memory"},
+        last_user_message="Please outline the approach.",
+        memory_read_allowed=True,
+    )
+    from src.tool_security import plan_mode_disabled_tools
+    expected_disabled = plan_mode_disabled_tools() | {"custom_disabled", "manage_memory", "bash"} | WEB_TOOL_NAMES
+    assert resolved.policy.all_disabled_names() == expected_disabled
+    assert resolved.allowed_tools is None
+    assert resolved.research_requested is True
+
+
+def test_shared_turn_policy_resolver_preserves_compare_gate_and_guide_only():
+    choices = {
+        "version": 1, "mode": "agent", "allowBash": True,
+        "allowWebSearch": True, "useWeb": False, "useResearch": False,
+        "compareMode": True, "incognito": False, "noMemory": False,
+    }
+    resolved = resolve_turn_policy(choices, disabled_tools={"admin_disabled"}, last_user_message="Do not use tools.")
+    from src.tool_security import COMPARE_READONLY_TOOLS, compare_mode_disabled_tools
+    assert resolved.allowed_tools == frozenset(COMPARE_READONLY_TOOLS)
+    assert resolved.policy.block_all_tool_calls is True
+    assert "admin_disabled" in resolved.policy.all_disabled_names()
+    assert set(compare_mode_disabled_tools()).issubset(resolved.policy.all_disabled_names())
 
 
 def _schema_names(tools):

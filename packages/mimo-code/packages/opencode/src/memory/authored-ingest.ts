@@ -1,6 +1,4 @@
-import { Log } from "../util"
-
-const log = Log.create({ service: "memory.authored-ingest" })
+import { RecoverableError } from "@/tool/recoverable"
 
 export type AuthoredSection = { anchor: string; content: string }
 export type FmIngestScope = { owner: string; workspaceId: string }
@@ -35,26 +33,9 @@ export function splitSections(body: string): AuthoredSection[] {
  * file's projection (the file left the disk). Failures are logged and
  * swallowed — ingest is a maintenance mirror, never a search blocker. */
 export async function ingestAuthoredFile(
-  absPath: string,
-  body: string | null,
-  scope: FmIngestScope,
+  _absPath: string,
+  _body: string | null,
+  _scope: FmIngestScope,
 ): Promise<boolean> {
-  try {
-    const { callMemoryTool, getSharedMcpClient } = await import("./mcp-client")
-    const client = await getSharedMcpClient(undefined, scope)
-    await callMemoryTool(
-      client,
-      "ingest_authored",
-      {
-        source_path: absPath,
-        sections: body === null ? [] : splitSections(body),
-        owner: scope.owner,
-        workspace_id: scope.workspaceId,
-      },
-    )
-    return true
-  } catch (err) {
-    log.warn("fm authored ingest failed", { path: absPath, error: String(err) })
-    return false
-  }
+  throw new RecoverableError("Legacy authored-file memory ingest requires an admitted Host source owner")
 }

@@ -81,3 +81,20 @@ def test_audit_teacher_resolution_scoped_to_owner(monkeypatch):
     assert seen["owner"] == "alice"
     assert seen["spec"] == "teacher-model"
     assert seen["setting_owners"] == ["alice", "alice"]
+
+
+def test_teacher_bound_route_and_output_budget(monkeypatch):
+    sent=[]
+    monkeypatch.setattr('src.openclank.chat_routing.resolve_chat_model_spec', lambda **_: _route(grant_id=None))
+    async def complete(**kwargs):
+        sent.append(kwargs)
+        return 'reply'
+    monkeypatch.setattr('src.openclank.modality_facade.complete_text', complete)
+    async def run():
+        rejected=await teacher_escalation._call_teacher('teacher-model','prompt',owner='alice',
+            expected_model_route_id='route-teacher',expected_grant_id='wrong',max_output_tokens=512,timeout_seconds=10)
+        assert rejected is None and not sent
+        result=await teacher_escalation._call_teacher('teacher-model','prompt',owner='alice',
+            expected_model_route_id='route-teacher',expected_grant_id=None,max_output_tokens=512,timeout_seconds=10)
+        assert result=='reply' and len(sent)==1 and sent[0]['max_output_tokens']==512 and sent[0]['grant_id'] is None
+    asyncio.run(run())

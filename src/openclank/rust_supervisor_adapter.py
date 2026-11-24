@@ -73,6 +73,10 @@ class RustSupervisorAdapter:
         del owner, provider_id, model_id
         raise self._disabled()
 
+    async def admit_private_agent(self, owner: str, ghost_id: str, provider_id: str, model_id: str) -> Any:
+        del owner, ghost_id, provider_id, model_id
+        raise AgentSupervisorAdmissionError("PRIVATE_RUNTIME_UNAVAILABLE", "Private Agent runtime is unavailable", phase="driver", retryable=False, status=503)
+
     async def admit_provider_control(self, owner: str | None) -> Any:
         del owner
         raise self._disabled()

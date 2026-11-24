@@ -69,7 +69,7 @@ class ChatHandler:
     # Preset helpers
     # ------------------------------------------------------------------
 
-    def validate_and_extract_preset(self, preset_id: Optional[str], owner: str = "") -> tuple:
+    def validate_and_extract_preset(self, preset_id: Optional[str], owner: str = "", *, _factory_sink=None) -> tuple:
         """Returns (temperature, max_tokens, preset_system_prompt, character_name)."""
         if preset_id and preset_id not in self.preset_manager.presets:
             raise HTTPException(400, f"Invalid preset_id: {preset_id}")
@@ -83,7 +83,7 @@ class ChatHandler:
             preset = self.preset_manager.presets[preset_id]
             if preset.get("enabled") is False:
                 logger.info(f"Preset {preset_id} is disabled, using defaults")
-                return self._default_persona_preset(owner, temperature, max_tokens)
+                return self._default_persona_preset(owner, temperature, max_tokens, _factory_sink=_factory_sink)
             if preset.get("system_prompt"):
                 preset_system_prompt = preset["system_prompt"]
             character_name = preset.get("character_name", "")
@@ -102,16 +102,27 @@ class ChatHandler:
             # No explicit persona/preset on this turn: the DEFAULT persona
             # speaks (ruling R10 — the default is real and editable, never a
             # pretend-blank).
-            return self._default_persona_preset(owner, temperature, max_tokens)
+            return self._default_persona_preset(owner, temperature, max_tokens, _factory_sink=_factory_sink)
 
         logger.info(f"Preset {preset_id}: temp={temperature}, max_tokens={max_tokens}")
         return temperature, max_tokens, preset_system_prompt, character_name
 
+    def _validate_preset_with_factory_origin(self, preset_id, *, owner):
+        selections = []
+        values = self.validate_and_extract_preset(preset_id, owner=owner, _factory_sink=selections.append)
+        return values, selections[0] if len(selections) == 1 else None
+
     @staticmethod
-    def _default_persona_preset(owner: str, temperature, max_tokens) -> tuple:
+    def _default_persona_preset(owner: str, temperature, max_tokens, *, _factory_sink=None) -> tuple:
         try:
-            from src.default_persona import get_default_persona
-            persona = get_default_persona(owner or "")
+            if callable(_factory_sink):
+                from src.default_persona import _get_default_persona_with_origin
+                persona, origin = _get_default_persona_with_origin(owner or "")
+                if origin is not None:
+                    _factory_sink(origin)
+            else:
+                from src.default_persona import get_default_persona
+                persona = get_default_persona(owner or "")
         except Exception:
             return temperature, max_tokens, None, ""
         prompt = f"Your name is {persona['name']}. {persona['system_prompt']}"
@@ -135,6 +146,8 @@ class ChatHandler:
         structured_resources: bool = False,
         root_operation_id: Optional[str] = None,
         provider_grant_id: Optional[str] = None,
+        auth_manager=None,
+        media_witnesses=None,
     ) -> tuple:
         """
         Common preprocessing for both chat endpoints.
@@ -194,6 +207,12 @@ class ChatHandler:
             for att_id in effective_att_ids:
                 fi = self.upload_handler.resolve_upload(att_id, owner=owner)
                 if fi:
+                    if fi.get('generated_summary_origin') is not None:
+                        from src.openclank.generated_summary_attachment import verify_upload
+                        account=auth_manager.account_id(owner) if auth_manager and owner else None
+                        verified=verify_upload(fi,handler=self.upload_handler,owner=owner,account_id=account,chat_id=getattr(sess,'id',None)) if account and auth_manager.username_for_account_id(account)==owner else None
+                        fi['_generated_summary_state']='verified' if verified is not None else 'unknown'
+                        if verified is not None: fi['_generated_summary_envelope']=fi['generated_summary_origin']
                     files_by_id[att_id] = fi
 
             for att_id in effective_att_ids:
@@ -208,6 +227,9 @@ class ChatHandler:
                         "created_at": fi.get("created_at") or fi.get("uploaded_at"),
                         "width": fi.get("width"),
                         "height": fi.get("height"),
+                        **({'generated_summary_state':fi['_generated_summary_state']} if fi.get('_generated_summary_state') else {}),
+                        # The upload-time media-input receipt rides on the attachment record; the send-time receipt below replaces it.
+                        **({'media_input': fi['media_input']} if isinstance(fi.get('media_input'), dict) else {}),
                     })
 
         # Analyze images only when attachment preprocessing is actually
@@ -273,14 +295,15 @@ class ChatHandler:
                         # expose an explicit capability result to the caller.
                         enhanced_message = (
                             f"{enhanced_message}\n\n[Image attached: {file_info['name']} — "
-                            "the selected route does not declare native vision input; "
-                            "choose an explicit image extraction action.]"
+                            "the selected route does not declare native vision input, so the image is not sent. "
+                            "Choose a model that accepts images, or use Caption on the image to have it described.]"
                         )
                         _m = meta_by_id.get(att_id)
                         if _m is not None:
                             _m["native_status"] = "unsupported"
                             _m["native_reason"] = "selected route lacks vision capability"
 
+        _media_receipts: Dict[str, Dict[str, Any]] = {}
         user_content = build_user_content(
             enhanced_message, effective_att_ids, UPLOAD_DIR, self.upload_handler,
             session_id=getattr(sess, "id", None),
@@ -291,7 +314,14 @@ class ChatHandler:
             # ACP/native structured delivery owns original bytes; do not also
             # run PDF/OCR/office extraction as an incidental side effect.
             extract_attachments=allow_tool_preprocessing and not structured_resources,
+            # Structured/native delivery (no preprocessing) keeps sending images as before.
+            route_has_vision=main_is_vision or not (allow_tool_preprocessing and vision_enabled),
+            media_receipts=_media_receipts,
+            media_witnesses=media_witnesses,
         )
+        for _m in attachment_meta:   # one receipt per evaluated image, sent or omitted, on the attachment record the message carries
+            if _m["id"] in _media_receipts:
+                _m["media_input"] = _media_receipts[_m["id"]]
 
         # Strip image_url entries for text-only models (VL description is already in the text)
         if allow_tool_preprocessing and (not vision_enabled or not main_is_vision) and isinstance(user_content, list):
@@ -327,8 +357,9 @@ class ChatHandler:
             session.name = "Chat: " + derived if derived else "Chat"
 
     def trim_history_if_needed(self, session):
-        if len(session.history) > MAX_CONTEXT_MESSAGES:
-            session.history = session.history[-MAX_CONTEXT_MESSAGES:]
+        with session._history_lock:
+            if len(session.history) > MAX_CONTEXT_MESSAGES:
+                session.history = session.history[-MAX_CONTEXT_MESSAGES:]
 
     async def handle_memory_command(
         self,
@@ -388,15 +419,17 @@ class ChatHandler:
                             ),
                         )
                 else:
-                    mem = self.memory_manager.load(owner=owner)
-                    duplicate = self.memory_manager.find_duplicates(memory_text, mem)
-                    if not duplicate:
-                        new_entry = self.memory_manager.add_entry(
-                            memory_text, source="user_created", owner=owner
-                        )
-                        all_mem = self.memory_manager.load_all()
-                        all_mem.append(new_entry)
-                        self.memory_manager.save(all_mem)
+                    from services.memory.skill_lifecycle import locked
+                    with locked(self.memory_manager.memory_file):
+                        mem = self.memory_manager.load(owner=owner)
+                        duplicate = self.memory_manager.find_duplicates(memory_text, mem)
+                        if not duplicate:
+                            new_entry = self.memory_manager.add_entry(
+                                memory_text, source="user_created", owner=owner
+                            )
+                            all_mem = self.memory_manager.load_all()
+                            all_mem.append(new_entry)
+                            self.memory_manager.save(all_mem)
             except Exception as exc:
                 logger.warning("Inline memory save failed: %s", exc)
                 raise HTTPException(503, "Active memory provider is unavailable") from exc

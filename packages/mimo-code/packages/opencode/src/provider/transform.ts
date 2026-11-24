@@ -1742,6 +1742,8 @@ function sanitizeMoonshot(node: any): any {
   return result
 }
 
+/** Identity of the checked-in native schema transform, not a wire-delivery claim. */
+export const schemaTransformProfile = "provider-schema-transform-v1"
 export function schema(model: Provider.Model, schema: JSONSchema.BaseSchema | JSONSchema7): JSONSchema7 {
   /*
   if (["openai", "azure"].includes(providerID)) {

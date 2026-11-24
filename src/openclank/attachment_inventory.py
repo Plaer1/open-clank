@@ -23,6 +23,35 @@ IMAGE_LINK = re.compile(r"image:(" + IMAGE_ID + r")(?=[^A-Za-z0-9_-]|$)")
 RESOURCE_LINK = re.compile(r"(?:resource_ref|file_ref|ref)=(rr1\.[A-Za-z0-9_%=-]+)")
 
 
+def input_receipt_claim_owner_prefix(owner: str) -> str:
+    owner_key = str(owner or "").strip().lower()
+    if not owner_key:
+        raise ValueError("receipt claim requires an owner")
+    owner_digest = hashlib.sha256(owner_key.encode("utf-8")).hexdigest()
+    return f"receipt:v1:{owner_digest}:"
+
+
+def input_receipt_claim_prefix(owner: str, chat_id: str) -> str:
+    """Versioned private staging namespace, enumerable for one owner/chat."""
+    chat_key = str(chat_id or "").strip()
+    if not chat_key:
+        raise ValueError("receipt claim requires a chat")
+    chat_digest = hashlib.sha256(chat_key.encode("utf-8")).hexdigest()
+    return input_receipt_claim_owner_prefix(owner) + f"{chat_digest}:"
+
+
+def input_receipt_claim_scope(owner: str, chat_id: str, request_id: str) -> str:
+    request_key = str(request_id or "").strip()
+    if not request_key:
+        raise ValueError("receipt claim requires a request ID")
+    request_digest = hashlib.sha256(request_key.encode("utf-8")).hexdigest()
+    return input_receipt_claim_prefix(owner, chat_id) + request_digest
+
+
+def input_receipt_attempt_prefix(owner: str, chat_id: str, request_id: str) -> str:
+    return input_receipt_claim_scope(owner, chat_id, request_id) + ":attempt:"
+
+
 def _typed_resource_token(token: str) -> set[tuple[str, str]]:
     from urllib.parse import unquote
     from src.openclank.resource_refs import _decode_resource_ref

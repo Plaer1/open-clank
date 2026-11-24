@@ -1,0 +1,148 @@
+import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlite-core"
+import { ProjectTable } from "../project/project.sql"
+import type { MessageV2 } from "./message-v2"
+import type { Snapshot } from "../snapshot"
+import type { Permission } from "../permission"
+import type { ProjectID } from "../project/schema"
+import type { SessionID, MessageID, PartID } from "./schema"
+import type { WorkspaceID } from "../control-plane/schema"
+import type { JSONSchema7 } from "@ai-sdk/provider"
+import { Timestamps } from "../storage/schema.sql"
+
+type PartData = Omit<MessageV2.Part, "id" | "sessionID" | "messageID">
+type InfoData = Omit<MessageV2.Info, "id" | "sessionID">
+
+export const SessionTable = sqliteTable(
+  "session",
+  {
+    id: text().$type<SessionID>().primaryKey(),
+    project_id: text()
+      .$type<ProjectID>()
+      .notNull()
+      .references(() => ProjectTable.id, { onDelete: "cascade" }),
+    workspace_id: text().$type<WorkspaceID>(),
+    parent_id: text().$type<SessionID>(),
+    context_from: text().$type<SessionID>(),
+    context_watermark: text().$type<MessageID>(),
+    slug: text().notNull(),
+    directory: text().notNull(),
+    title: text().notNull(),
+    title_source: text().$type<"fallback" | "generated" | "user">().notNull().default("user"),
+    title_revision: integer().notNull().default(0),
+    version: text().notNull(),
+    // `share_url` stays in the database, cleared, for older clients sharing it. It is deliberately not
+    // declared: databases that ran an earlier draft of the clearing migration no longer have the column.
+    summary_additions: integer(),
+    summary_deletions: integer(),
+    summary_files: integer(),
+    summary_diffs: text({ mode: "json" }).$type<Snapshot.FileDiff[]>(),
+    revert: text({ mode: "json" }).$type<{ messageID: MessageID; partID?: PartID; snapshot?: string; diff?: string }>(),
+    permission: text({ mode: "json" }).$type<Permission.Ruleset>(),
+    prompt: text({ mode: "json" }).$type<{
+      system?: string
+      systemMode?: "append" | "replace-agent"
+      harness: "auto" | "codex" | "default"
+    }>(),
+    ...Timestamps,
+    time_compacting: integer(),
+    time_archived: integer(),
+    last_checkpoint_message_id: text().$type<MessageID>(),
+    // Retain the inert column for older clients sharing this database.
+    auto_worktree_hint_sent: integer({ mode: "boolean" }),
+  },
+  (table) => [
+    index("session_project_idx").on(table.project_id),
+    index("session_workspace_idx").on(table.workspace_id),
+    index("session_parent_idx").on(table.parent_id),
+    index("session_context_from_idx").on(table.context_from),
+  ],
+)
+
+export type SessionPrefixToolSnapshot = {
+  name: string
+  description?: string
+  input_schema: JSONSchema7
+}
+
+export const SessionPrefixSnapshotTable = sqliteTable(
+  "session_prefix_snapshot",
+  {
+    session_id: text()
+      .$type<SessionID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    profile_key: text().notNull(),
+    system: text({ mode: "json" }).$type<string[]>().notNull(),
+    system_hash: text().notNull(),
+    tools_hash: text().notNull(),
+    tools: text({ mode: "json" }).$type<SessionPrefixToolSnapshot[]>(),
+    provenance: text({ mode: "json" }).$type<import("./prefix-provenance").PrefixProvenance>(),
+    watermark_message_id: text().$type<MessageID>().notNull(),
+    revision: integer().notNull(),
+    created_at: integer().notNull(),
+    updated_at: integer().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.session_id, table.profile_key] })],
+)
+
+export const MessageTable = sqliteTable(
+  "message",
+  {
+    id: text().$type<MessageID>().primaryKey(),
+    session_id: text()
+      .$type<SessionID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    agent_id: text().notNull().default("main"),
+    ...Timestamps,
+    data: text({ mode: "json" }).notNull().$type<InfoData>(),
+  },
+  (table) => [
+    index("message_session_time_created_id_idx").on(table.session_id, table.time_created, table.id),
+    index("message_session_agent_idx").on(table.session_id, table.agent_id, table.id),
+  ],
+)
+
+export const PartTable = sqliteTable(
+  "part",
+  {
+    id: text().$type<PartID>().primaryKey(),
+    message_id: text()
+      .$type<MessageID>()
+      .notNull()
+      .references(() => MessageTable.id, { onDelete: "cascade" }),
+    session_id: text().$type<SessionID>().notNull(),
+    ...Timestamps,
+    data: text({ mode: "json" }).notNull().$type<PartData>(),
+  },
+  (table) => [
+    index("part_message_id_id_idx").on(table.message_id, table.id),
+    index("part_session_idx").on(table.session_id),
+  ],
+)
+
+export const TodoTable = sqliteTable(
+  "todo",
+  {
+    session_id: text()
+      .$type<SessionID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    content: text().notNull(),
+    status: text().notNull(),
+    position: integer().notNull(),
+    ...Timestamps,
+  },
+  (table) => [
+    primaryKey({ columns: [table.session_id, table.position] }),
+    index("todo_session_idx").on(table.session_id),
+  ],
+)
+
+export const PermissionTable = sqliteTable("permission", {
+  project_id: text()
+    .primaryKey()
+    .references(() => ProjectTable.id, { onDelete: "cascade" }),
+  ...Timestamps,
+  data: text({ mode: "json" }).notNull().$type<Permission.Ruleset>(),
+})

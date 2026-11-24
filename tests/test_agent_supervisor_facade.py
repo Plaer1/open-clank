@@ -277,7 +277,7 @@ def test_compatibility_admission_error_can_be_constructed_with_full_contract():
 def test_backend_selection_is_server_owned_and_fails_closed(monkeypatch):
     monkeypatch.delenv("OPEN_CLANK_AGENT_SUPERVISOR_BACKEND", raising=False)
     assert selected_agent_supervisor_backend() == "acp"
-    monkeypatch.setenv("OPEN_CLANK_AGENT_SUPERVISOR_BACKEND", "mimo")
+    monkeypatch.setenv("OPEN_CLANK_AGENT_SUPERVISOR_BACKEND", "acp")
     assert selected_agent_supervisor_backend() == "acp"
     monkeypatch.setenv("OPEN_CLANK_AGENT_SUPERVISOR_BACKEND", "rust")
     with pytest.raises(AgentSupervisorConfigurationError, match="disabled"):

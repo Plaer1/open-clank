@@ -76,7 +76,7 @@ const BRANDS = Object.freeze([
   'Anthropic', 'Claude', 'Google', 'Gemini', 'GitHub', 'Gmail', 'Microsoft',
   'Outlook', 'Matrix', 'Discord', 'Slack', 'Notion', 'Box', 'Figma',
   'Atlassian', 'Rovo', 'SharePoint', 'Teams', 'Obsidian', 'Godot',
-  'Hugging Face', 'Ollama', 'llama.cpp', 'TreeHouse', 'Frankenmemory',
+  'Hugging Face', 'Ollama', 'llama.cpp', 'TreeHouse', 'Memery',
   'FastAPI', 'Next.js', 'React', 'Radix', 'CodeMirror',
 ]);
 
@@ -88,6 +88,7 @@ const STABLE_TOKENS = Object.freeze([
 
 const JS_EXCLUDES = [
   /\/static\/lib\//,
+  /\/static\/js\/vendor\//,
   /\.min\.js$/,
   /\/static\/js\/i18n\.js$/,
   // The source editor build emits both codemirror.js and content-hashed
@@ -530,11 +531,13 @@ function extract() {
   try {
     const structured = JSON.parse(execFileSync('python3', [path.join(ROOT, 'scripts', 'i18n_structured_extract.py')], {
       encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
       cwd: ROOT,
     }));
     for (const record of structured.records || []) {
       const existing = collector.entries.get(record.key);
       if (existing) {
+        if (record.module === 'docs') existing.source = record.source;
         if (!existing.locations.includes(...record.locations)) {
           for (const location of record.locations) if (!existing.locations.includes(location)) existing.locations.push(location);
         }
@@ -557,6 +560,14 @@ function extract() {
   // A source census is allowed to lose a render site while a compatibility
   // key is still present in shipped catalogs. Keep that key and make the
   // reason explicit in the ledger instead of silently deleting translations.
+  const archivedManualKeys = new Map();
+  for (const { key, source } of liveRecords) {
+    if (!key.startsWith('docs.openclank-docs-') || !Object.hasOwn(existingEnglish, key) || existingEnglish[key] === source) continue;
+    const prior = existingEnglish[key];
+    const archiveKey = `${key}.compat-${hashText(prior).slice(0, 12)}`;
+    existingEnglish[archiveKey] ??= prior;
+    archivedManualKeys.set(archiveKey, key);
+  }
   const liveKeys = new Set(liveRecords.map(record => record.key));
   const compatibilityRecords = Object.entries(existingEnglish)
     .filter(([key]) => !liveKeys.has(key))
@@ -566,7 +577,9 @@ function extract() {
       kind: 'compatibility',
       status: 'compatibility',
       locations: [],
-      reason: 'retained catalog key absent from current first-party census',
+      reason: /\.compat-[a-f0-9]{12}$/.test(key) && key.startsWith('docs.openclank-docs-')
+        ? 'previous manual wording and translations retained outside the live guide'
+        : 'retained catalog key absent from current first-party census',
     }));
   const records = [...liveRecords, ...compatibilityRecords]
     .sort((a, b) => a.key.localeCompare(b.key));
@@ -588,6 +601,7 @@ function extract() {
   const registry = {
     version: 2,
     default_locale: 'en',
+    released_locales: existingRegistry.released_locales || ['en'],
     locales: Object.fromEntries(Object.entries(LOCALES).map(([id, item]) => {
       const meta = {
         name: item.name,
@@ -615,10 +629,15 @@ function extract() {
     const file = path.join(I18N_DIR, `${locale}.json`);
     if (!fs.existsSync(file)) continue;
     const catalog = readJson(file, {});
+    for (const [archiveKey, currentKey] of archivedManualKeys) {
+      catalog[archiveKey] ??= catalog[currentKey] || existingEnglish[archiveKey];
+    }
     writeJson(file, Object.fromEntries(
       Object.keys(english).map(key => [
         key,
-        typeof catalog[key] === 'string' && catalog[key].trim() ? catalog[key] : english[key],
+        typeof catalog[key] === 'string' && catalog[key].trim()
+          && (!key.startsWith('docs.') || existingEnglish[key] === english[key])
+          ? catalog[key] : english[key],
       ]),
     ));
   }
@@ -816,6 +835,7 @@ function importDonor(donor) {
   writeJson(path.join(I18N_DIR, 'registry.json'), {
     version: 2,
     default_locale: currentRegistry.default_locale || 'en',
+    released_locales: currentRegistry.released_locales || ['en'],
     locales,
     aliases: currentRegistry.aliases || {},
     do_not_auto_map: currentRegistry.do_not_auto_map || [],
@@ -914,7 +934,7 @@ function validate() {
         continue;
       }
       if (BIDI_CONTROLS.test(target)) errors.push(`${locale}:${key}: forbidden bidi control`);
-      if (/<\/?[a-z][^>]*>/i.test(target)) errors.push(`${locale}:${key}: HTML is forbidden`);
+      if (containsTranslatedHtml(source, target)) errors.push(`${locale}:${key}: HTML is forbidden`);
       if (JSON.stringify(placeholderSet(source)) !== JSON.stringify(placeholderSet(target))) {
         errors.push(`${locale}:${key}: placeholder mismatch ${JSON.stringify(placeholderSet(source))} != ${JSON.stringify(placeholderSet(target))}`);
       }
@@ -1111,8 +1131,16 @@ async function translateLocaleGoogle(locale) {
   }
 }
 
+function containsTranslatedHtml(source, target) {
+  // Markdown command examples can contain literal argument placeholders.
+  // Ignore only exact command spans already present in the English source.
+  const prose = target.replace(/`(\/[a-z][a-z0-9-]*(?: (?:<[a-z][a-z0-9-]*>|[a-z0-9-]+))+)`/g,
+    span => source.includes(span) ? '' : span);
+  return /<\/?[a-z][^>]*>/i.test(prose);
+}
+
 function translationIsStructurallyValid(source, target) {
-  if (typeof target !== 'string' || !target.trim() || BIDI_CONTROLS.test(target) || /<\/?[a-z][^>]*>/i.test(target)) return false;
+  if (typeof target !== 'string' || !target.trim() || BIDI_CONTROLS.test(target) || containsTranslatedHtml(source, target)) return false;
   if (JSON.stringify(placeholderSet(source)) !== JSON.stringify(placeholderSet(target))) return false;
   return [...BRANDS, ...STABLE_TOKENS].every(token => !source.includes(token) || target.includes(token));
 }

@@ -51,7 +51,7 @@ export function normalizeWindowSizeRecord(value, viewport = {}) {
 
 // Desktop applet geometry shares the measured navigation boundary. Mobile
 // navigation is an overlay drawer, so sheets retain the full viewport.
-export function windowViewportBounds() {
+export function windowViewportBounds({gutter = 4} = {}) {
   const width = window.innerWidth, height = window.innerHeight;
   let left = 0, right = width;
   const desktop = width > 768;
@@ -66,7 +66,7 @@ export function windowViewportBounds() {
     left = Math.max(0, Math.min(left, width - 9));
     right = Math.max(left + 9, Math.min(width, right));
   }
-  const margin = desktop ? Math.min(4, (right - left - 1) / 2, (height - 1) / 2) : 0;
+  const margin = desktop ? Math.min(gutter, (right - left - 1) / 2, (height - 1) / 2) : 0;
   left += margin; right -= margin;
   const top = margin, bottom = height - margin;
   return { left, top, right, bottom, width:right - left, height:bottom - top };

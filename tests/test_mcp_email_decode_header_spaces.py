@@ -138,7 +138,7 @@ async def test_mcp_email_configured_owner_filters_accounts(tmp_path, monkeypatch
     db_path = tmp_path / "app.db"
     _init_accounts_db(db_path)
     monkeypatch.setattr(es, "APP_DB", str(db_path))
-    monkeypatch.setenv("ODYSSEUS_MCP_EMAIL_OWNER", "alice")
+    monkeypatch.setenv("OPEN_CLANK_MCP_EMAIL_OWNER", "alice")
 
     out = await es.call_tool("list_email_accounts", {})
     text = out[0].text

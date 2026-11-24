@@ -1,0 +1,37 @@
+import { wireDialog } from '../copal/overlays.js';
+import { inspectArtProject, cloneArtProject, emptyArtProject, validateArtProject } from './artProjectMetadata.js';
+
+// Edits a private candidate; the caller owns the single scene transaction.
+export function openArtProjectDialog({value,present,current,accountId,selectReference,checkReference,signal}) {
+  const inspected=inspectArtProject(value,present), editable=inspected.state==='supported' || inspected.state==='absent';
+  const candidate=inspected.state==='supported' ? cloneArtProject(inspected.value) : editable ? emptyArtProject() : null;
+  const dialog=document.createElement('dialog'), title=document.createElement('h2'), intro=document.createElement('p'), body=document.createElement('div'), status=document.createElement('p'), actions=document.createElement('div');
+  dialog.className='copal-dialog'; dialog.style.maxHeight='85vh'; dialog.style.overflowY='auto'; title.textContent='Project metadata'; status.setAttribute('role','status');
+  intro.textContent=editable ? 'References remain external and are not included in project exports. Dimensions and pivots are annotations.' : 'This metadata version is unsupported or invalid. It is preserved unchanged and cannot be edited here.';
+  const button=(label,fn)=>{const b=document.createElement('button'); b.type='button'; b.className='copal-btn'; b.textContent=label; b.addEventListener('click',fn); return b;};
+  const input=(label,value,onchange,type='text')=>{const wrap=document.createElement('label'), field=document.createElement(type==='textarea'?'textarea':'input'); wrap.textContent=label+' '; if(type!=='textarea') field.type=type; field.value=value==null?'':String(value); field.addEventListener('input',()=>onchange(field.value)); wrap.append(field); return wrap;};
+  const section=label=>{const el=document.createElement('section'), heading=document.createElement('h3'); heading.textContent=label; el.append(heading); body.append(el); return el;};
+  const id=()=>crypto.randomUUID(); let settled=false, result=null, busy=false;
+  const report=error=>{status.textContent=String(error?.message || 'Metadata is unavailable.');};
+  const draw=()=>{
+    body.replaceChildren(); if (!editable) return;
+    const style=section('Style'); style.append(input('Notes',candidate.style,v=>candidate.style=v,'textarea'));
+    const colors=section('Palette');
+    candidate.palette.forEach((row,i)=>{const group=document.createElement('div'); group.append(input('Name',row.name,v=>row.name=v),input('Color (#RRGGBBAA)',row.color,v=>row.color=v),button('Remove color',()=>{candidate.palette.splice(i,1);draw();}));colors.append(group);});
+    colors.append(button('Add color',()=>{candidate.palette.push({id:id(),name:'Color',color:'#000000FF'});draw();}));
+    const refs=section('References');
+    candidate.references.forEach((row,i)=>{const group=document.createElement('div'), info=document.createElement('p');info.textContent=`External reference · ${row.resourceKey.provider} · ${row.revision.kind} (unresolved until checked)`;group.append(input('Label',row.label,v=>row.label=v),info,button('Check current revision',async()=>{if(busy || !current())return; busy=true; try { const ok=await checkReference(row,{accountId,current,signal}); if (!current()) throw new Error('The image changed.'); status.textContent=ok ? 'Reference revision matches now.' : 'Reference is unavailable or changed.'; } catch(error){report(error);} finally{busy=false;}}),button('Replace reference…',async()=>{if(busy || !current())return;busy=true;try{const next=await selectReference({accountId,current,signal});if(!current())throw new Error('The image changed.');if(next){row.resourceKey=next.resourceKey;row.revision=next.revision;delete row.sha256;draw();}}catch(error){report(error);}finally{busy=false;}}),button('Remove reference',()=>{candidate.references.splice(i,1);draw();}));refs.append(group);});
+    refs.append(button('Add reference…',async()=>{if(busy || !current())return;busy=true;try{const next=await selectReference({accountId,current,signal});if(!current())throw new Error('The image changed.');if(next){candidate.references.push({id:id(),label:'Reference',resourceKey:next.resourceKey,revision:next.revision});draw();}}catch(error){report(error);}finally{busy=false;}}));
+    const clips=section('Clips and frames');
+    candidate.clips.forEach((clip,i)=>{const group=document.createElement('div');group.append(input('Clip name',clip.name,v=>clip.name=v),input('Facing',clip.facing,v=>clip.facing=v));
+      clip.frames.forEach((frame,j)=>{const f=document.createElement('fieldset'), legend=document.createElement('legend');legend.textContent=`Frame ${j+1}`;const refLabel=document.createElement('label'), refSelect=document.createElement('select'), none=document.createElement('option');refLabel.textContent='Reference ';none.value='';none.textContent='None';refSelect.append(none);candidate.references.forEach((reference,index)=>{const option=document.createElement('option');option.value=reference.id;option.textContent=`${reference.label} (${index+1})`;refSelect.append(option);});if(frame.referenceId && !candidate.references.some(reference=>reference.id===frame.referenceId)){const missing=document.createElement('option');missing.value=frame.referenceId;missing.textContent='Removed reference — choose another';refSelect.append(missing);}refSelect.value=frame.referenceId || '';refSelect.onchange=()=>frame.referenceId=refSelect.value || null;refLabel.append(refSelect);f.append(legend,refLabel,input('Width',frame.width,v=>frame.width=v===''?null:Number(v),'number'),input('Height',frame.height,v=>frame.height=v===''?null:Number(v),'number'));
+        const pivot=document.createElement('input');pivot.type='checkbox';pivot.checked=frame.pivot!==null;const pivotLabel=document.createElement('label');pivotLabel.textContent=' Set pivot ';pivotLabel.append(pivot);pivot.onchange=()=>{frame.pivot=pivot.checked?{x:null,y:null}:null;draw();};f.append(pivotLabel);if(frame.pivot) f.append(input('Pivot X',frame.pivot.x,v=>frame.pivot.x=v===''?null:Number(v),'number'),input('Pivot Y',frame.pivot.y,v=>frame.pivot.y=v===''?null:Number(v),'number'));f.append(button('Remove frame',()=>{clip.frames.splice(j,1);draw();}));group.append(f);});
+      group.append(button('Add frame',()=>{clip.frames.push({id:id(),referenceId:null,width:null,height:null,pivot:null});draw();}),button('Remove clip',()=>{candidate.clips.splice(i,1);draw();}));clips.append(group);});
+    clips.append(button('Add clip',()=>{candidate.clips.push({id:id(),name:'Clip',facing:'',frames:[{id:id(),referenceId:null,width:null,height:null,pivot:null}]});draw();}));
+  };
+  const cancel=button(editable?'Cancel':'Close',()=>dialog.close());actions.append(cancel);
+  if(editable) actions.append(button('Apply',()=>{if(busy)return;if(!current()){status.textContent='The image changed; reopen metadata.';return;}if(!validateArtProject(candidate)){status.textContent='Check the fields, IDs, limits and frame references.';return;}result=cloneArtProject(candidate);dialog.close();}));
+  dialog.append(title,intro,body,status,actions);draw();wireDialog(dialog);document.body.append(dialog);
+  signal?.addEventListener('abort',()=>dialog.close(),{once:true});
+  return new Promise(resolve=>{dialog.addEventListener('close',()=>{if(settled)return;settled=true;dialog.remove();resolve(result);},{once:true});dialog.showModal();cancel.focus();});
+}

@@ -1,8 +1,8 @@
 """Acceptance ledger for Python-side outbound model execution.
 
 The hard cut deliberately distinguishes model execution from bounded GET-only
-catalogue/health observation. Retired text request shapers remain isolated for
-protocol fixture coverage; speech transports are removed entirely.
+catalogue/health observation. The retired Python direct-dispatch island has no
+POST observations; public compatibility doors remain fail-closed guards.
 """
 
 from __future__ import annotations
@@ -149,15 +149,7 @@ def test_scoped_outbound_network_has_an_exhaustive_role_ledger():
         ("src/model_context.py", "_query_context_length", "GET"),
     }
 
-    # Request shaping/parsing is retained only as inert compatibility code.
-    # Public entry points below are separately asserted to have no path here.
-    inert_legacy_execution = {
-        ("src/llm_core.py", "_legacy_llm_call", "POST"),
-        ("src/llm_core.py", "_legacy_llm_call_async", "POST"),
-        ("src/llm_core.py", "_legacy_stream_llm_inner", "POST"),
-    }
-
-    assert observed == get_only_observation | inert_legacy_execution
+    assert observed == get_only_observation
     assert not _network_calls("src/model_dispatch.py")
 
 
@@ -210,6 +202,13 @@ def test_no_shipped_module_imports_or_calls_private_legacy_transports():
         "services/tts/tts_service.py",
     }
     references: list[tuple[str, int, str]] = []
+    llm_core_tree = _tree("src/llm_core.py")
+    definitions = {
+        node.name
+        for node in ast.walk(llm_core_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert not definitions.intersection(legacy_names)
     roots = ("app.py", "core", "routes", "services", "src", "mcp_servers")
     paths: list[Path] = []
     for raw in roots:

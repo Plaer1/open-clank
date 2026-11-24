@@ -2,21 +2,43 @@
   "id": "batch-028",
   "group": "docs.openclank-docs-graph",
   "surface": "docs",
-  "entry_count": 1,
-  "character_count": 1637,
+  "entry_count": 3,
+  "character_count": 6151,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-graph.body",
-      "source": "# Graph\n\nGraph shows how your documents connect: wikilinks, embeds, tags and typed\nrelations all become edges. Galaxy mode arranges documents and calendar\nevents together; structure mode turns a document's headings and bullets into\na navigable outline.\n\nOpen the [Graph](clank://graph) or jump to [Galaxy](clank://galaxy).\n\n## What you see\n\nNodes are documents. Edges are relationships — a link, an embed, a tag\nmembership or a typed relation from a note's properties. Clicking a node\nopens that document in Editor.\n\n## Filters\n\nThe filter panel narrows by kind, folder, tag and property value. Facets come\nfrom real document metadata, so a value that exists only on a document you\nhave not loaded yet is still discoverable — the facet list pages through the\nserver until it has seen everything.\n\nEmpty selections narrow the result; clearing a filter opens it back up.\n\n## Official documentation in Graph\n\nThis handbook is provisioned documentation. Graph hides provisioned documents\nby default so your personal notes are what you see first. Turn on **Include\nofficial docs** to add them back, or click the `OpenClank` folder chip to\ninclude just that folder.\n\nHiding is based on real identity metadata — the shipped product marker — not\non the folder name. Your own notes in any folder, including `OpenClank/`, are\nnever hidden just because of where they live.\n\n## Structure mode\n\nFor a single document, structure mode lists headings and bullets and lets you\nrearrange sections. It is the right tool for reshaping a long page; [[Editor]]\nis the right tool for rewriting one.",
+      "source": "# Graph\n\nOpen [Graph](clank://graph) from the Editor rail. In **Graph view**, choose **Journal & Wiki** to follow page links or **Code** to follow relationships in saved source code.\n\n![Editor activity rail → Graph → Graph view. Journal & Wiki uses saved workspace pages and links. For Code, use File → Open folder… to select an authorized code folder, then expand a file to load symbols.](/static/docs/media/manual-graph-source-scope/preview.webp)\n\n*Graph source diagram. Inspect saved links in Journal & Wiki. In Code, check index coverage before interpreting a gap in the graph.*\n\n## Find a useful view\n\nFilter by folder, kind, tag or property. Clear filters if the view is empty. Use **Structure** for a page outline and **Galaxy** for document and calendar relationships. For dated events, open [Timeline](clank://timeline).\n\n## Try a small graph\n\nCreate **Field Notes** and **Reading List** in the same [[Journal]]. Add `[[Reading List]]` to Field Notes and save it. In **Journal & Wiki**, select the Reading List node linked to Field Notes to open that page. See [[Wiki Recipes]] for more link and embed examples.\n\n## Code Graph\n\n1. In Graph, choose **File → Open folder…** and select an authorized Host folder. Graph switches to Code. From Files or Editor, **Open in Code Graph** takes one supported file or folder. Confirm the containing folder if you started from a file.\n2. In an Open Clank checkout, wait for indexing and open **View → Search & evidence**. Under **Indexed metadata**, find `atomic_write_text` in `core/atomic_io.py`. Select the declaration and choose **Show in graph**. Use **Source contents · literal** to find case-sensitive text in saved, indexed files.\n3. Choose **Graph → Connections for selected item**. With **Calls** visible, choose **Trace from selection** in Inspector and select `atomic_write_bytes` as the endpoint. Choose **Open witness** to read the saved call site. Use **View → Graph table** for a text view.\n\n### Expand a large folder\n\n**Gravity** is the default for a new view. **Web** shows a network and **Map** a compact strip. In Editor’s Explorer sidebar, select a folder and use **Graph → Expand selected branch**. Choose **Load more for selected branch** if more results are available. Use **Hide selected branch children** to clear space.\n\nIn **View → Graph settings…**, choose **Gravity override** for a change specific to Gravity or **Common defaults** for all layouts.\n\n| What you need | Where to adjust it |\n| --- | --- |\n| Load more of a branch | **Paging & expansion** controls read size and depth. |\n| Keep or show more of what is loaded | **Map cache** bounds what Graph retains. **Display capacity** bounds what it draws. Check **Effective capacity** for the limits in use. |\n| Include more source files | **Settings → System → Code indexing** sets file and byte limits. |\n| Make a crowded view readable | Use **Labels & relationships** to isolate calls or imports and **Motion & camera** to reduce animation. Save grouping and spacing under **Named physics settings**. |\n\n### Resolve a partial or stale graph\n\nFolder structure can appear before symbol evidence is ready. If a branch is missing, check **View → Coverage and diagnostics** for index coverage, then clear filters or load more. After a source save, use **Graph → Refresh now** if the old view is still showing. Use **Retry indexing** or **Readmit erased index** when offered.\n\n### Review and share evidence\n\nOpen a call witness for the saved source behind a static edge. Inferred edges reflect source rules. **Recorded changes** shows observed file activity, and eligible static-function views can open **Imported trace evidence**. Open a trace there to inspect the observations it contains.\n\nChoose **Add selected evidence to chat** to put it in the draft or **Ask about selected evidence** to send a question. In **Search & evidence**, use **Summarize selected evidence → Preview** to review the source scope and model before generating. Check the finished summary against its source links. To save a fact for future recall, see [[Memory and Lore]].\n\nUse **File → Export current graph…** to preview the displayed graph and omissions. Choose a format and **Save**, or **Create new wiki document…** when offered. Reopen the preview if the graph changes.\n\n## Official pages\n\nUse **Include official documentation** to show handbook pages.\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:439"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-graph.title",
+      "source": "Graph",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-graph.body.compat-9f2dec33b355",
+      "source": "# Graph\n\nGraph shows how your documents connect: wikilinks, embeds, tags and typed\nrelations all become edges. Galaxy mode arranges documents and calendar\nevents together; structure mode turns a document's headings and bullets into\na navigable outline.\n\nOpen the [Graph](clank://graph) or jump to [Galaxy](clank://galaxy).\n\n## What you see\n\nNodes are documents. Edges are relationships — a link, an embed, a tag\nmembership or a typed relation from a note's properties. Clicking a node\nopens that document in Editor.\n\n## Filters\n\nThe filter panel narrows by kind, folder, tag and property value. Facets come\nfrom real document metadata, so a value that exists only on a document you\nhave not loaded yet is still discoverable — the facet list pages through the\nserver until it has seen everything.\n\nEmpty selections narrow the result; clearing a filter opens it back up.\n\n## Official documentation in Graph\n\nThis handbook is provisioned documentation. Graph hides provisioned documents\nby default so your personal notes are what you see first. Turn on **Include\nofficial docs** to add them back, or click the `OpenClank` folder chip to\ninclude just that folder.\n\nHiding is based on real identity metadata — the shipped product marker — not\non the folder name. Your own notes in any folder, including `OpenClank/`, are\nnever hidden just because of where they live.\n\n## Structure mode\n\nFor a single document, structure mode lists headings and bullets and lets you\nrearrange sections. It is the right tool for reshaping a long page; [[Editor]]\nis the right tool for rewriting one.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
       "complexity": "prose"
     }
   ]

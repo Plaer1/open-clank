@@ -32,8 +32,9 @@ export async function importLibraryDocuments(files) {
   return library.libraryImportFiles(files, { refresh: false });
 }
 
-export async function cloneLibraryDocument(resourceRef, { sessionId = null } = {}) {
+export async function cloneLibraryDocument(resourceRef, { sessionId = null, isCurrent = () => true } = {}) {
   const source = await resolveLibraryDocument(resourceRef);
+  if (!isCurrent()) throw new DOMException('The selected Library document changed.', 'AbortError');
   const response = await request('/api/document', {
     method: 'POST', headers: JSON_HEADERS,
     body: JSON.stringify({
@@ -46,8 +47,9 @@ export async function cloneLibraryDocument(resourceRef, { sessionId = null } = {
   return response.json();
 }
 
-export async function deleteLibraryDocument(resourceRef) {
+export async function deleteLibraryDocument(resourceRef, { isCurrent = () => true } = {}) {
   const source = await resolveLibraryDocument(resourceRef);
+  if (!isCurrent()) throw new DOMException('The selected Library document changed.', 'AbortError');
   await request('/api/document/' + encodeURIComponent(source.id), { method: 'DELETE' });
   return source;
 }

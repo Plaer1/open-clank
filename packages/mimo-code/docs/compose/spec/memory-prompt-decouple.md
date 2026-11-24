@@ -1,0 +1,151 @@
+---
+feature: memory-prompt-decouple
+status: delivered
+updated: 2026-09-14
+source: https://github.com/XiaomiMiMo/MiMo-Code/pull/2389
+---
+
+# Memory Prompt Decouple From Checkpoint
+
+## Report
+
+**What was built** — `# Memory system` is now always injected for main/peer
+actors. `MIMOCODE_DISABLE_CHECKPOINT` only filters checkpoint-write subsections
+(checkpoint.md / task progress paths, writer-as-curator, Active recall,
+Four-vs-Two wording). Project MEMORY.md, global MEMORY.md, notes.md scratchpad,
+subagent return format, and search-first rules stay on so embedders that close
+checkpoint (e.g. Desktop) still teach the model where memory lives.
+
+**Verification** —
+- `bun run typecheck` from `packages/cli` — PASS
+- `bun test test/session/llm-system-prompt.test.ts test/tool/checkpoint-tool-description.test.ts test/flag/disable-checkpoint-flag.test.ts test/session/prune.test.ts` — PASS (30 pass / 0 fail; llm-system-prompt 6/6)
+
+**Journey log**
+- Desktop sets `MIMOCODE_DISABLE_CHECKPOINT=1` for checkpoint bugs; engine previously dropped the whole memory system prompt with that flag — wrong coupling.
+- Existing test `MIMOCODE_DISABLE_CHECKPOINT=true — memory instructions are not appended` encoded the old coupling; inverted to core-on + ckpt-extras-off.
+- Flag-on test must not assert absence of the string `checkpoint-writer` — base `agent.prompt` mentions that agent name; assert memory-system-specific copy instead.
+- `memory.disable_write` remains a separate write kill-switch; this change does not couple prompts to it.
+- After engine-pin bump Desktop gets memory paths while keeping checkpoint off; do not also copy `# Memory system` into `desktop-base`.
+
+## [S1] Problem
+
+`# Memory system` is injected by `buildSystemArray` only when
+`servesCheckpoint && !Flag.MIMOCODE_DISABLE_CHECKPOINT`
+(`packages/cli/src/session/llm.ts`). Desktop embeds the engine with
+`MIMOCODE_DISABLE_CHECKPOINT=1` because checkpoint had production bugs, so the
+entire memory write/read contract disappears from the model: no MEMORY.md /
+notes.md / global paths, no when-to-write rules, no search-first reflex.
+
+Memory itself is a file system + FTS + `memory` tool. Checkpoint is one
+*writer* of those files. Coupling the prompt to the checkpoint flag is wrong:
+closing checkpoint for writer/rebuild bugs must not erase memory ownership
+paths.
+
+## [S2] Design
+
+**Contract:** for main/peer actors (`servesCheckpoint`), `# Memory system` is
+always injected. `MIMOCODE_DISABLE_CHECKPOINT` only toggles the *checkpoint
+write* subsections inside that block, not the block itself.
+
+| Content | Always | Gated by `MIMOCODE_DISABLE_CHECKPOINT` |
+|---|---|---|
+| `# Memory system` heading + file-type list | yes | |
+| Project `MEMORY.md` path + when agent may Edit | yes | |
+| Global `MEMORY.md` path | yes | |
+| Session `notes.md` scratchpad path + format | yes | |
+| Subagent return format | yes | |
+| What NOT to do: no ad-hoc memory files; search before asking user | yes | |
+| Session `checkpoint.md` / `tasks/<id>/progress.md` paths | | yes |
+| "writer is sole curator; agent does not maintain mid-task" | | yes |
+| MEMORY.md edit is exception vs norm wording | | yes |
+| "Don't Edit checkpoint.md" | | yes |
+| Active recall protocol (rebuild dumps in context) | | yes |
+| File-type count wording "Four" vs "Two" | derived from flag | |
+
+**Implementation choke points:**
+
+1. `session/llm.ts` `buildSystemArray` — injection `if` is `servesCheckpoint`
+   only; `buildMemoryInstructions(memoryRoot)` internal
+   `checkpointEnabled` splits ckpt extras.
+2. `buildMemoryInstructions` / injection-site comments state always-on for
+   main/peer; flag only narrows content.
+3. `tool/checkpoint-description.ts` — unchanged. Base `memory.txt` stays;
+   only `memory.checkpoint.txt` extra stays gated.
+4. Memory paths reminder (`session/prompt.ts`
+   `memoryPathsReminderTarget`, see `session-memory-dir-reminder.md`) —
+   gated on `servesCheckpoint`, independent of the checkpoint flag.
+5. `memory.disable_write` remains the write switch (separate axis); this
+   feature does not couple prompts to it.
+
+**Tests (engine):** `llm-system-prompt.test.ts` flag-on case asserts core
+memory present (`# Memory system`, MEMORY.md paths, Notes scratchpad, Subagent
+return format, When to Edit, search-first) and ckpt extras absent (Active
+recall, sole curator, Session checkpoint, session checkpoint.md path). Default
+on path still expects Active recall + writer ownership. system-spawned actors
+still receive no memory block.
+
+## [S3] Out of Scope
+
+- Re-enabling desktop checkpoint / fixing historical checkpoint bugs.
+- Changing `memory.disable_write` semantics or memory-path-guard.
+- Injecting memory system into system-spawned writers (they must keep using
+  checkpoint task paths).
+- Desktop prompt assets (`desktop-base`) — engine supplies the block after pin
+  bump; desktop should not duplicate it.
+
+## Native memory paths
+
+Memory reads and FTS reconciliation support Windows drive, UNC and mixed-separator
+paths as well as POSIX paths. `memory/paths.ts` normalizes separators only in the
+layout-matching representation shared by `parsePath` and `parseCcPath`; native
+filesystem paths remain the FTS identity and search result path. Nested keys use
+`/` for type detection. POSIX filenames containing backslashes keep their literal
+characters. This leaves checkpoint gating and memory write permissions unchanged.
+
+Desktop regression coverage is tracked by engine-runtime `TP-R6-06`: path parsing,
+native `buildPath` round-trips, filesystem reconciliation/search, fingerprint hits,
+updates/deletes, and the embedded Node memory tool.
+
+## Chinese memory recall
+
+Memory search supports contiguous Chinese substrings, one- and two-character
+queries, whitespace-separated terms, and Han/Latin/digit mixtures in both CLI
+and Desktop. Contiguous query runs stay adjacent phrases; separate runs retain
+OR semantics and the relative BM25 score floor. Scattered individual characters
+must not satisfy a multi-character phrase. Scope, type and limit filters remain
+part of the search contract.
+
+`memory_fts.body` stores the original file. `body_idx` inserts a space at each
+Han/letter-or-digit boundary, using the same transform for indexing and queries.
+Only `body_idx` is indexed by the external-content FTS5 table. The disk
+reconciler supplies both columns on insert/update. Snippet presentation removes
+only spaces inserted by the transform, preserving original whitespace and FTS
+highlighting. History uses the same segmentation strategy; memory retains its
+independent OR query semantics.
+
+The new SQL migration rebuilds the FTS table over the new column and, only when
+`memory_fts` already has rows, records a pending content migration with an id
+cursor. Desktop runs the engine on the Electron main thread, so `Database.Client()`
+only reads the pending marker (no writer lock) and `memory/migration.ts` backfills
+in the background: bounded batches (32 rows / 8 ms budget, <=5% duty cycle), each
+in its own immediate transaction that advances the cursor, cleared on completion.
+A failed batch rolls back, never fails startup, and retries after 30 s or on the
+next boot; `Database.close()` stops the job. Rows awaiting backfill are briefly
+unsearchable because `memory_fts` is a cache of disk files. SQL triggers use the
+external-content `'delete'` command for updates/deletes. The migration is
+replay-safe (`IF NOT EXISTS` / `OR IGNORE`); original bodies, IDs, fingerprints
+and timestamps remain intact. Shipped SQL migrations are unchanged.
+
+Regression coverage: Desktop engine-runtime `TP-R6-07`, engine
+`test/memory/service.test.ts`, `test/memory/cjk-migration.test.ts`,
+`test/memory/fts-query.test.ts`, and `test/tool/memory.test.ts`. These cover
+Chinese recall, mixed text, snippets, existing-row upgrade, non-blocking startup,
+writer-lock contention, batch resume, restart retry, journal replay, trigger
+integrity, English recall and the public tool result.
+
+## Tasks
+
+- [x] T1: `llm.ts` always inject `# Memory system` when `servesCheckpoint`; flag only filters ckpt extras — acceptance: with `MIMOCODE_DISABLE_CHECKPOINT=true`, main-agent system contains `# Memory system` + project MEMORY.md + notes.md and omits checkpoint-writer ownership / Active recall (covers: S2)
+- [x] T2: Update `buildMemoryInstructions` comments to match always-on contract — acceptance: comments no longer claim the whole block is skipped when checkpoint is off (covers: S2; depends: T1)
+- [x] T3: Invert/extend `llm-system-prompt.test.ts` for flag-on vs flag-off content split — acceptance: tests cover always-on core + ckpt-gated extras + system-spawned exclusion; suite green (covers: S2; depends: T1)
+- [x] T4: `bun typecheck` + `bun test packages/cli/test/session/llm-system-prompt.test.ts` from worktree — acceptance: typecheck clean; target tests pass (covers: S2; depends: T3)

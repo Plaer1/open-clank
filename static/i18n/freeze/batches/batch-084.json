@@ -1,0 +1,35 @@
+{
+  "id": "batch-084",
+  "group": "docs.openclank-docs-agent-settings",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1629,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-agent-settings.title",
+      "source": "Agent Settings and Compaction",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-agent-settings.body",
+      "source": "# Agent Settings and Compaction\n\nOpen [Settings](clank://settings) → **AI Defaults** to set the model for new chats and manage reusable personas. In Chat, use the model and persona pickers to change those choices for one conversation. The model picker can offer saved **Presets** and route-specific **Thinking effort**. Use `/model` to see the current selection, `/agent-profile` to list eligible native profiles, and the response label to see which model answered.\n\n## Change a policy deliberately\n\nFor a long native chat, open **AI Defaults → Native agent settings**. To compact earlier, lower **Maximum context**, for example to `50%`. Select **Save for next turn** and check **Effective native values**. The model route sets the hard window, and the running turn keeps its original policy.\n\nUse **Automatic compaction** and the recent-turn or recent-token settings to control the working context. **Advanced checkpoint settings** holds thresholds, reserve and writer controls. For an eligible chat, choose **Compact** from the context meter or type `/compact`. Reopen the meter for the result. Use **Reset overrides** to restore inherited values.\n\n## Context, cost and access\n\nSee [[Chat and Workspaces#See what the chat is using|Inspect the context of a chat]], [[Memory and Lore|Review retained memory]] or [[Usage and Stats#Optional cost and capture controls|Change cost and logging options]]. [[Workspace Hexes]] covers project rules and approvals.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

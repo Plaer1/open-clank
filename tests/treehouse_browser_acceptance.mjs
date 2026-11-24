@@ -51,9 +51,9 @@ test('real browser mounts TreeHouse scope preview and per-mode context', async (
     await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent === 'Admin').click()");
     await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent === 'Analytics').click()");
     await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent === 'Learner').click()");
-    assert.equal(await evaluate("localStorage.getItem('odysseus-treehouse-section:acct-bob:learner:scope:browser-treehouse:school')"), 'courses');
-    assert.equal(await evaluate("localStorage.getItem('odysseus-treehouse-course:acct-bob:learner:scope:browser-treehouse:school')"), 'course:shared');
+    assert.equal(await evaluate("localStorage.getItem('openclank-treehouse-section:acct-bob:learner:scope:browser-treehouse:school')"), 'courses');
+    assert.equal(await evaluate("localStorage.getItem('openclank-treehouse-course:acct-bob:learner:scope:browser-treehouse:school')"), 'course:shared');
     await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent === 'Admin').click()");
-    assert.equal(await evaluate("localStorage.getItem('odysseus-treehouse-section:acct-bob:admin:scope:browser-treehouse:school')"), 'analytics');
+    assert.equal(await evaluate("localStorage.getItem('openclank-treehouse-section:acct-bob:admin:scope:browser-treehouse:school')"), 'analytics');
   });
 });

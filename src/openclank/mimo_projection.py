@@ -72,10 +72,12 @@ _ADAPTER_NPM = {
     "copilot-chat": "@ai-sdk/github-copilot",
     "google-generative-ai": "@ai-sdk/google",
     "google-vertex": "@ai-sdk/google-vertex",
+    "grok-cli-chat": "@ai-sdk/openai-compatible",
     "mimo-native": "@ai-sdk/openai-compatible",
     "models-dev-anthropic": "@ai-sdk/anthropic",
     "models-dev-openai-compatible": "@ai-sdk/openai-compatible",
     "ollama": "@ai-sdk/openai-compatible",
+    "opencode-native": "@ai-sdk/openai-compatible",
     "xai-responses": "@ai-sdk/xai",
 }
 
@@ -104,7 +106,10 @@ _DEFAULT_APIS = {
     ("openai", "default"): "https://api.openai.com/v1",
     ("openai", "subscription"): "https://chatgpt.com/backend-api/codex",
     ("openrouter", "default"): "https://openrouter.ai/api/v1",
+    ("opencode-console", "opencode-native"): "https://opencode.ai/inference",
+    ("opencode-go", "opencode-native"): "https://opencode.ai/inference/go",
     ("xai", "default"): "https://api.x.ai/v1",
+    ("grok", "grok-cli-chat"): "https://cli-chat-proxy.grok.com/v1",
     ("xiaomi", "default"): "https://api.xiaomimimo.com/v1",
 }
 
@@ -270,13 +275,21 @@ def _provider_options(connection: ProviderConnection, api: str) -> dict[str, Any
     safe_settings = _nonsecret_json(dict(connection.settings or {}))
     family, adapter = _runtime_identity(connection)
     options: dict[str, Any] = {
-        "baseURL": api,
         "_openclankConnectionID": connection.id,
         "_openclankFamilyID": family,
         "_openclankAdapterID": adapter,
         "_openclankBillingLane": connection.billing_lane,
         "_openclankConnectionKind": _runtime_kind(connection),
     }
+    # A Token Plan subscription without an explicit connection URL inherits
+    # its regional gateway from the leased credential. Keep the model catalog
+    # URL out of connection options so the engine can distinguish a real pin.
+    credential_selects_gateway = (
+        family == "xiaomi" and adapter == "mimo-native"
+        and connection.billing_lane == "subscription" and not connection.normalized_url
+    )
+    if adapter != "opencode-native" and not credential_selects_gateway:
+        options["baseURL"] = api
     if safe_settings:
         options["_openclankSettings"] = safe_settings
     for source, target in _SDK_SETTING_ALIASES.items():
@@ -294,15 +307,33 @@ def _model_config(
 ) -> dict[str, Any]:
     capabilities = _nonsecret_json(dict(route.capabilities or {}))
     family, adapter = _runtime_identity(connection)
+    model_npm = npm
+    model_api = api
+    api_protocol = capabilities.get("apiProtocol") if isinstance(capabilities, Mapping) else None
+    if adapter == "opencode-native":
+        protocol_routes = {
+            "openai-responses": ("@ai-sdk/openai", "/openai/v1"),
+            "anthropic-messages": ("@ai-sdk/anthropic", "/anthropic/v1"),
+            "openai-chat": ("@ai-sdk/openai-compatible", "/openai/v1"),
+            "google-generative-ai": ("@ai-sdk/google", "/google/v1beta"),
+        }
+        selected = protocol_routes.get(str(api_protocol))
+        if selected is None:
+            raise ProjectionConfigurationError(
+                f"OpenCode route {route.provider_model_id} has no supported native API protocol"
+            )
+        model_npm, suffix = selected
+        model_api = f"{api.rstrip('/')}{suffix}"
     model: dict[str, Any] = {
         "id": route.provider_model_id,
         "name": route.display_name or route.provider_model_id,
-        "provider": {"npm": npm, "api": api},
+        "provider": {"npm": model_npm, "api": model_api},
         "options": {
             "_openclankConnectionID": connection.id,
             "_openclankModelRouteID": route.id,
             "_openclankFamilyID": family,
             "_openclankAdapterID": adapter,
+            **({"_openclankApiProtocol": api_protocol} if adapter == "opencode-native" else {}),
             "_openclankBillingLane": connection.billing_lane,
             "_openclankOperations": sorted(str(item) for item in (route.operations or ())),
             "_openclankCatalogRevision": int(route.catalog_revision or 0),
@@ -329,6 +360,26 @@ def _model_config(
     ):
         if name in capabilities:
             model[name] = capabilities[name]
+    # Copilot and Codex account catalogues declare exact supported efforts.
+    # Feed those through the existing provider variant mechanism so the engine
+    # applies provider-native options without creating pseudo model routes.
+    if adapter in {"copilot-chat", "openai-responses"}:
+        from src.openclank.provider_request_options import project_request_options
+
+        descriptors = project_request_options(
+            capabilities,
+            catalog_revision=max(1, int(route.catalog_revision or 1)),
+            source="account-discovery",
+        )
+        effort = next(
+            (item for item in descriptors if item["id"] == "reasoning_effort"),
+            None,
+        )
+        if effort:
+            model["variants"] = {
+                value: {"reasoningEffort": value}
+                for value in effort["values"]
+            }
     return model
 
 

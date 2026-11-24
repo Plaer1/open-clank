@@ -207,7 +207,7 @@ def test_change_password_rejects_short_password(tmp_path):
     mgr.create_user("alice", "old-password", is_admin=False)
     endpoint, ChangePasswordRequest = _change_password_endpoint(mgr)
     request = SimpleNamespace(
-        cookies={"odysseus_session": "current-token"},
+        cookies={"open_clank_session": "current-token"},
         client=SimpleNamespace(host="127.0.0.1"),
     )
     # Mock get_username_for_token to return alice
@@ -226,7 +226,7 @@ def test_admin_self_change_accepts_exactly_empty_password(tmp_path):
     mgr.create_user("admin", "old-password", is_admin=True)
     endpoint, ChangePasswordRequest = _change_password_endpoint(mgr)
     request = SimpleNamespace(
-        cookies={"odysseus_session": "current-token"},
+        cookies={"open_clank_session": "current-token"},
         client=SimpleNamespace(host="127.0.0.1"),
     )
     mgr.get_username_for_token = MagicMock(return_value="admin")
@@ -252,7 +252,7 @@ def test_non_admin_self_change_keeps_minimum_password_policy(tmp_path, new_passw
     mgr.create_user("alice", "old-password", is_admin=False)
     endpoint, ChangePasswordRequest = _change_password_endpoint(mgr)
     request = SimpleNamespace(
-        cookies={"odysseus_session": "current-token"},
+        cookies={"open_clank_session": "current-token"},
         client=SimpleNamespace(host="127.0.0.1"),
     )
     mgr.get_username_for_token = MagicMock(return_value="alice")
@@ -278,7 +278,7 @@ def test_admin_self_change_rejects_short_nonempty_password(tmp_path):
     mgr.create_user("admin", "old-password", is_admin=True)
     endpoint, ChangePasswordRequest = _change_password_endpoint(mgr)
     request = SimpleNamespace(
-        cookies={"odysseus_session": "current-token"},
+        cookies={"open_clank_session": "current-token"},
         client=SimpleNamespace(host="127.0.0.1"),
     )
     mgr.get_username_for_token = MagicMock(return_value="admin")
@@ -313,7 +313,7 @@ def test_admin_create_user_cannot_use_empty_password_even_for_an_admin(tmp_path)
         and "POST" in getattr(route, "methods", set())
     )
     mgr.get_username_for_token = MagicMock(return_value="admin")
-    request = SimpleNamespace(cookies={"odysseus_session": "current-token"})
+    request = SimpleNamespace(cookies={"open_clank_session": "current-token"})
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(

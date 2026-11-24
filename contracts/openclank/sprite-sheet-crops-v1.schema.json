@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.local/contracts/sprite-sheet-crops-v1.schema.json",
+  "title": "Selected four-frame sprite sheet layout",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "source",
+    "sourceWidth",
+    "sourceHeight",
+    "cellWidth",
+    "cellHeight",
+    "sheetWidth",
+    "sheetHeight",
+    "frames",
+    "fps",
+    "facing",
+    "palette",
+    "style",
+    "sha256"
+  ],
+  "properties": {
+    "version": {
+      "const": 2
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resourceID",
+        "revision",
+        "sha256"
+      ],
+      "properties": {
+        "resourceID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "revision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "sourceWidth": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4096
+    },
+    "sourceHeight": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4096
+    },
+    "cellWidth": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 512
+    },
+    "cellHeight": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 512
+    },
+    "sheetWidth": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 1024
+    },
+    "sheetHeight": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 1024
+    },
+    "frames": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "index",
+          "sourceRect",
+          "x",
+          "y",
+          "width",
+          "height",
+          "pivot"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "sourceRect": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "properties": {
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4095
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4095
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 512
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 512
+              }
+            }
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 512
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 512
+          },
+          "pivot": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "x",
+              "y"
+            ],
+            "properties": {
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 512
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 512
+              }
+            }
+          }
+        }
+      }
+    },
+    "fps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 60
+    },
+    "facing": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      ]
+    },
+    "palette": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      ]
+    },
+    "style": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

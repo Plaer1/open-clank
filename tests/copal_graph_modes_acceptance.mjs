@@ -31,7 +31,7 @@ window.__graphTest={
  snapshot(){return structuredClone(getGraphView());},
  editor(){const body=state.body;state.windows.set('notes',{window:{body,content:body,root:body},selected:null,filter:'',reading:false});activateView('notes');body.replaceChildren(Object.assign(document.createElement('p'),{textContent:'Editor sentinel'}));},
  hide(){state.windows.get('graph').window.visible=false;state.body.querySelector('.copal-graph-wrap')?._copalDestroy?.();},
- dotFolders(show){localStorage.setItem(copalStorageKey('odysseus-copal-notes-layout',state.workspace),JSON.stringify({left:{showDotFolders:show}}));},
+ dotFolders(show){localStorage.setItem(copalStorageKey('openclank-copal-notes-layout',state.workspace),JSON.stringify({left:{showDotFolders:show}}));},
  facets(){return makeGraphFacetCatalog().canonical({force:true});},
  catalogSnapshot(){return window.__graphTest.catalog?.snapshot() || null;},
  context(){return {view:state.view,selected:state.selected};},

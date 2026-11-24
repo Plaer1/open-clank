@@ -80,10 +80,11 @@ export function mountGraphFilters({ element, graphState, facets = {}, mode = 'do
   const reset = button('Reset filters', () => {
     if (!live()) return;
     graphState.searchQuery = ''; search.value = '';
-    graphState.activeKinds.clear(); for (const item of facets.kinds || []) graphState.activeKinds.add(item.value);
+    graphState.activeKinds.clear();
+    for (const kind of mode === 'documents' ? ['note','wiki'] : (facets.kinds || []).map(item => item.value)) graphState.activeKinds.add(kind);
     graphState.activeFolders.clear(); graphState.activeTags.clear();
     for (const values of Object.values(graphState.activeProperties)) values.clear();
-    graphState.includeOfficial = false; changed();
+    graphState.includeOfficial = mode === 'documents'; changed();
   }, { 'aria-label':'Reset graph filters' });
   const categories = mode === 'galaxy' ? [['kinds','Kinds']] : [['kinds','Kinds'],['folders','Folders'],['tags','Tags']];
   const triggers = new Map(categories.map(([category, label]) => {

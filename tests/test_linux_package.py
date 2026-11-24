@@ -50,7 +50,7 @@ def test_safe_links_survive_archive_relocation(bundle, tmp_path):
 
 @pytest.mark.parametrize('mutation', ['content', 'mode', 'missing', 'extra'])
 def test_payload_changes_rejected(bundle, mutation):
-    path = bundle / '_internal/bin/fm-mcp'
+    path = bundle / '_internal/bin/memery-worker'
     if mutation == 'content': path.write_bytes(b'tampered')
     elif mutation == 'mode': path.chmod(0o644)
     elif mutation == 'missing': path.unlink()

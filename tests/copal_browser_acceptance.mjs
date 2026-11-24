@@ -50,7 +50,7 @@ if (authCookieFdRaw) {
 
 async function authenticatedFetch(url, options = {}) {
   const headers = new Headers(options.headers || {});
-  if (authSessionToken) headers.set('Cookie', `odysseus_session=${authSessionToken}`);
+  if (authSessionToken) headers.set('Cookie', `open_clank_session=${authSessionToken}`);
   try {
     return await fetch(url, { ...options, headers });
   } catch (error) {
@@ -185,7 +185,7 @@ await command('Emulation.setDeviceMetricsOverride', { width:1440, height:1000, d
 
 if (authSessionToken) {
   const cookie = await command('Network.setCookie', {
-    name:'odysseus_session', value:authSessionToken, url:`${new URL(base).origin}/`,
+    name:'open_clank_session', value:authSessionToken, url:`${new URL(base).origin}/`,
     httpOnly:true, secure:false, sameSite:'Lax',
   });
   assert.notEqual(cookie.success, false, 'Chromium rejected the Open Clank session cookie');
@@ -215,11 +215,11 @@ const scopedCopalStorageKey = (name, workspace = '') => {
     ? `${name}${suffix}`
     : `${name}:scope:${encodeURIComponent(copalStatus.storage_namespace)}${suffix}`;
 };
-const notesWindowSizeKey = scopedCopalStorageKey('odysseus-copal-notes-window-size');
-const notesLayoutKey = scopedCopalStorageKey('odysseus-copal-notes-layout', 'default');
-const timelineDefaultKey = scopedCopalStorageKey('odysseus-copal-timeline-v2', 'default');
-const timelineOtherKey = scopedCopalStorageKey('odysseus-copal-timeline-v2', 'slice02-other');
-const copalWorkspaceKey = scopedCopalStorageKey('odysseus-copal-workspace');
+const notesWindowSizeKey = scopedCopalStorageKey('openclank-copal-notes-window-size');
+const notesLayoutKey = scopedCopalStorageKey('openclank-copal-notes-layout', 'default');
+const timelineDefaultKey = scopedCopalStorageKey('openclank-copal-timeline-v2', 'default');
+const timelineOtherKey = scopedCopalStorageKey('openclank-copal-timeline-v2', 'slice02-other');
+const copalWorkspaceKey = scopedCopalStorageKey('openclank-copal-workspace');
 const primaryModifier = await evaluate("/Mac|iPhone|iPad|iPod/i.test(navigator.userAgentData?.platform || navigator.platform) ? 4 : 2");
 
 const planningBaseline = await jsonRequest('/api/copal/planning?workspace=default');
@@ -788,7 +788,7 @@ await evaluate("document.getElementById('user-bar-settings').click()");
 await waitFor("!document.getElementById('settings-modal').classList.contains('hidden')", 'Settings window');
 await evaluate("document.querySelector('#settings-modal [data-settings-tab=\"appearance\"]').click()");
 await waitFor(`['previewLayout','templateFolder','dailyTemplateId','lineNumbers','readableLineWidth','ribbon','completedVisibility'].every((name) => document.querySelector('#settings-modal [data-settings-panel="appearance"] [data-copal-notes-setting="' + name + '"]'))`, 'current Editor Appearance controls');
-await waitFor("document.querySelector('#settings-modal [data-copal-notes-setting=\"previewLayout\"]') && document.querySelector('#settings-modal [data-copal-notes-setting=\"ribbon\"]')", 'stable Copal Notes Appearance controls');
+await waitFor("document.querySelector('#settings-modal [data-copal-notes-setting=\"previewLayout\"]') && document.querySelector('#settings-modal [data-copal-notes-setting=\"ribbon\"]')", 'stable Journal pages Appearance controls');
 assert(await evaluate("document.querySelectorAll('#settings-modal [data-copal-entry-id]').length > 0"));
 assert(await evaluate("document.querySelectorAll('#settings-modal .copal-panel-setting').length > 0"));
 await evaluate(`(() => {

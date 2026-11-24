@@ -1,12 +1,14 @@
 # Bundled font identity and notices
 
-Inspected directly from the shipped font name tables on October 4, 2026; filenames alone are not provenance. Font bytes are unchanged. [Asset fingerprints](BUNDLED-COMPONENTS.md#asset-fingerprints) identify the inspected variants.
+Embedded identities come from the shipped font name tables. [Asset fingerprints](BUNDLED-COMPONENTS.md#asset-fingerprints) identify the inspected variants.
 
 | Files under static/fonts/ | Embedded identity/version | License evidence |
 | --- | --- | --- |
 | FiraCode-{Light,Regular,SemiBold}.woff2 | Fira Code 6.002 | Embedded OFL-1.1; Fira Code Project Authors 2014–2021 |
 | Inter-{Regular,Medium,SemiBold}.woff2 | Inter 4.001; git-9221beed3 | Embedded OFL-1.1; Inter Project Authors 2016 |
 | Fredoka-Variable.woff2 | Fredoka 2.001; weight 300–700, width 75–125 | Embedded OFL-1.1; Fredoka Project Authors 2016, Milena B. Brandão and Ben Nathan |
+| ComicClank-{style}.woff2, ComicClankMono-{style}.woff2 | Comic Clank and Comic Clank Mono 0.300 | Complete WOFF2 faces from the Comic Clank Project Authors. Both families include light, regular, medium, semibold and bold, each upright and italic. [Copyright and OFL 1.1](../static/fonts/ComicClank-OFL.txt) |
+| ComicClankMono-Bold-Wordmark.woff2 | Comic Clank Mono Bold 0.300, weight 700 | Open Clank wordmark subset of the Comic Clank Project Authors' OTF; [copyright and OFL 1.1](../static/fonts/ComicClank-OFL.txt) |
 | ComicNeue-Regular.woff2 | Comic Neue 2.003 | Embedded OFL-1.1; Craig Rozynski; [retained text](ComicNeue-OFL.txt) |
 | OpenDyslexic-{Regular,Bold}.woff2 | OpenDyslexic 0.920 | Embedded full OFL-1.1 and reserved-name notice; Abbie Gonzalez; [retained text](OpenDyslexic-OFL.txt) |
 | LigaComicMono-Regular.woff2 | Liga Comic Mono 0.1.1 | Comic Mono source URL plus Ilya Skriblovsky/Fira Code ligature copyright; see unresolved chain below |

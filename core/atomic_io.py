@@ -44,8 +44,42 @@ class AtomicRollbackError(RuntimeError):
         )
 
 
+def rename_directory_noreplace(src_dir_fd: int, src_name: str, dst_dir_fd: int, dst_name: str) -> None:
+    """Move one directory without replacing a destination, using held parent FDs.
+
+    Linux only. Callers own source no-follow identity checks, authority, history,
+    durability and reconciliation after an ambiguous failure. No fallback is used.
+    """
+    import ctypes
+    import errno
+    import sys
+
+    for fd in (src_dir_fd, dst_dir_fd):
+        if type(fd) is not int or fd < 0:
+            raise ValueError("parent directory fd must be a nonnegative integer")
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "parent fd is not a directory")
+    for name in (src_name, dst_name):
+        if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\0" in name:
+            raise ValueError("name must be a single relative leaf")
+    if sys.platform != "linux":
+        raise OSError(errno.ENOTSUP, "renameat2 no-replace is unavailable")
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError) as exc:
+        raise OSError(errno.ENOTSUP, "renameat2 no-replace is unavailable") from exc
+    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    renameat2.restype = ctypes.c_int
+    RENAME_NOREPLACE = 1
+    if renameat2(src_dir_fd, os.fsencode(src_name), dst_dir_fd, os.fsencode(dst_name), RENAME_NOREPLACE) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), src_name, None, dst_name)
+
+
 def _require_history_complete(result: dict[str, Any]) -> None:
     if result.get("history_status") in {"paused", "unavailable", "unconfigured"}:
+        return
+    if result.get("history_status") == "skipped" and result.get("capture_phase") == "recovery_settled":
         return
     if result.get("history_status") != "complete":
         phase = result.get("capture_phase") or "unknown"
@@ -130,7 +164,9 @@ def _fsync_directory(directory: str) -> None:
 def _stage_bytes(path: str, data: bytes, mode: Optional[int]) -> str:
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.tmp.", dir=directory)
+    # Leave room for the random suffix on Windows paths near MAX_PATH.
+    prefix = ".tmp." if os.name == "nt" else f".{os.path.basename(path)}.tmp."
+    fd, tmp = tempfile.mkstemp(prefix=prefix, dir=directory)
     try:
         if mode is not None and os.name != "nt":
             os.fchmod(fd, stat.S_IMODE(mode))
@@ -266,6 +302,10 @@ def atomic_write_batch(changes: Sequence[AtomicFileChange]) -> None:
     with _path_locks(canonical_targets):
         primary = canonical_targets[0] if canonical_targets else ""
         action_id = next((change.action_id for change in changes if change.action_id), None)
+        recoverability_requested = any(
+            change.history_context is not None for change in changes
+        ) and len(changes) > 1
+        history_required = any(change.require_history for change in changes)
         history = (
             begin_file_capture(
                 primary,
@@ -273,14 +313,11 @@ def atomic_write_batch(changes: Sequence[AtomicFileChange]) -> None:
                 context=next((change.history_context for change in changes if change.history_context), None),
                 action_id=action_id,
                 paths=canonical_targets[1:],
+                required_recovery=history_required or recoverability_requested,
             )
             if primary
             else None
         )
-        recoverability_requested = any(
-            change.history_context is not None for change in changes
-        ) and len(changes) > 1
-        history_required = any(change.require_history for change in changes)
         if history_required and (history is None or not history.available):
             raise AtomicWriteConflict(
                 "history_prepare_required: this mutation cannot publish without durable history"

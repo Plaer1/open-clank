@@ -105,7 +105,7 @@ try {
     window.__filesOwner = 'owner';
     window.__filesRootsStatus = 200;
     window.__hostPolicyVisible = true;
-    localStorage.setItem('odysseus-files-favorites:owner', JSON.stringify(['/work']));
+    localStorage.setItem('openclank-files-favorites:owner', JSON.stringify(['/work']));
     window.__filesRequests = [];
     window.__filesRequestMethods = [];
     window.__filesChildrenBodies = [];
@@ -1118,7 +1118,7 @@ try {
   await waitFor("[...document.querySelectorAll('.files-action-menu-item')].some(node => node.textContent.includes('Use as workspace'))", 'Host Workspace action');
   await evaluate("[...document.querySelectorAll('.files-action-menu-item')].find(node => node.textContent.includes('Use as workspace')).click()");
   await waitFor("window.__workspaceResourceRequests.some(body => body.resource_ref === 'rr1.host-src' && body.purpose === 'agent_workspace')", 'opaque Workspace handoff');
-  await waitFor("localStorage.getItem('odysseus-workspace-id') === 'workspace-host-src'", 'stable Workspace ID persisted');
+  await waitFor("localStorage.getItem('openclank-workspace-id') === 'workspace-host-src'", 'stable Workspace ID persisted');
   await waitFor("document.querySelector('[data-files-path]').textContent.includes('Home')", 'Host refresh after workspace handoff');
   await waitFor("window.__filesPlaces.some(resource => resource.id === 'resource-host-src') && document.querySelector('[data-files-favorite-id=\"resource-host-src\"]')", 'opaque src Place retained after workspace refresh');
   await evaluate("[...document.querySelectorAll('.files-entry')].find(node => node.textContent.includes('src')).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
@@ -1127,7 +1127,7 @@ try {
   await waitFor("window.__filesRequestMethods.some(([method, pathname]) => method === 'DELETE' && pathname === '/api/files-v1/places/place-' + 'a'.repeat(32))", 'opaque Place removal');
   await waitFor("!document.querySelector('[data-files-favorite-id=\"resource-host-src\"]')", 'opaque server Place removed');
   assert.equal(await evaluate(`window.__filesRequestMethods.some(([method, pathname]) => method === 'DELETE' && pathname === '/api/files-v1/places/place-' + 'a'.repeat(32))`), true);
-  assert.equal(await evaluate("localStorage.getItem('odysseus-files-favorites:owner')?.includes('rr1.')"), false);
+  assert.equal(await evaluate("localStorage.getItem('openclank-files-favorites:owner')?.includes('rr1.')"), false);
 
   await evaluate("document.querySelector('[title=\"Archive Project Source\"]').click()");
   await waitFor("document.getElementById('styled-confirm-overlay') && !document.getElementById('styled-confirm-overlay').classList.contains('hidden')", 'Workspace archive confirmation');
@@ -1135,7 +1135,7 @@ try {
   await waitFor("window.__workspaceUpdates.length === 2", 'Workspace archive request');
   await waitFor("!document.querySelector('[data-files-workspace-id=\"workspace-host-src\"]') && window.__workspaceCatalog[0].workspace.archived === true", 'archived Workspace removed from active catalog');
   assert.deepEqual(await evaluate("window.__workspaceUpdates[1]"), { archived: true, expected_revision: 2 });
-  assert.equal(await evaluate("localStorage.getItem('odysseus-workspace-id')"), null, 'archiving the current Workspace clears the browser pointer');
+  assert.equal(await evaluate("localStorage.getItem('openclank-workspace-id')"), null, 'archiving the current Workspace clears the browser pointer');
 
   await evaluate(`(() => {
     const provider = document.querySelector('.files-provider-select');
@@ -1401,7 +1401,7 @@ try {
   const accountSwitch = await evaluate(`(() => ({
     treeIds: [...document.querySelectorAll('[data-files-tree] [data-tree-resource-id]')].map(node => node.dataset.treeResourceId),
     visibleText: document.querySelector('.files-window')?.textContent || '',
-    otherPrefs: !!localStorage.getItem('odysseus-files-view-preferences:other'),
+    otherPrefs: !!localStorage.getItem('openclank-files-view-preferences:other'),
   }))()`);
   assert.deepEqual(accountSwitch.treeIds, ['resource-host-other-home', 'resource-host-other-file']);
   assert.equal(accountSwitch.visibleText.includes('/work'), false);

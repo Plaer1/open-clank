@@ -108,7 +108,7 @@ def qualify(installer, target, output, pack):
     sentinel_hash = hashlib.sha256(sentinel.read_bytes()).hexdigest()
     environment = os.environ.copy()
     for variable in tuple(environment):
-        if variable.endswith(('_TOKEN', '_API_KEY')) or variable in {'DATABASE_URL', 'ODYSSEUS_DATA_DIR', 'PYTHONHOME', 'PYTHONPATH', 'OPEN_CLANK_RUNTIME_PYTHON', 'OPEN_CLANK_PYTHON'}:
+        if variable.endswith(('_TOKEN', '_API_KEY')) or variable in {'DATABASE_URL', 'OPEN_CLANK_DATA_DIR', 'PYTHONHOME', 'PYTHONPATH', 'OPEN_CLANK_RUNTIME_PYTHON', 'OPEN_CLANK_PYTHON'}:
             environment.pop(variable, None)
     home = work / 'launcher-home'
     home.mkdir()
@@ -178,7 +178,8 @@ def qualify(installer, target, output, pack):
             subprocess.run([str(executable), 'profile', 'add', 'installer-fixture', url, '--use'], env=environment, check=True, stdout=log, stderr=log, timeout=60)
         powershell('Start-Process -FilePath $args[0]', group / 'Open Clank.lnk', environment=environment)
         launcher_started = True
-        deadline = time.monotonic() + 90
+        from src.openclank.server_manager import WINDOWS_PACKAGED_START_SECONDS
+        deadline = time.monotonic() + WINDOWS_PACKAGED_START_SECONDS + 15
         while True:
             try:
                 with urllib.request.urlopen(url + '/api/auth/status', timeout=2) as response:

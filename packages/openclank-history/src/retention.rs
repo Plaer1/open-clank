@@ -75,6 +75,34 @@ impl ScopePolicy {
     }
 }
 
+/// Preferences for newly captured history. Older catalogs inherit these defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CapturePolicy {
+    pub enabled: bool,
+    pub files: bool,
+    pub images: bool,
+    pub agent_files: bool,
+    pub memery_records: bool,
+    pub memery_evidence: bool,
+    pub memery_artifacts: bool,
+    pub frequency: String,
+    pub interval_seconds: u64,
+    pub versions_per_item: u64,
+    pub max_age_days: Option<u64>,
+}
+
+impl Default for CapturePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true, files: true, images: true, agent_files: true,
+            memery_records: true, memery_evidence: true, memery_artifacts: true,
+            frequency: "interval".into(), interval_seconds: 300, versions_per_item: 10,
+            max_age_days: None,
+        }
+    }
+}
+
 /// Persisted policy collection.  The global target remains the frozen 1 GiB
 /// default while workspace and directory limits are optional overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,6 +110,10 @@ pub struct PolicySet {
     pub revision: u64,
     pub global: HistoryPolicy,
     pub scopes: Vec<ScopePolicy>,
+    #[serde(default)]
+    pub capture_defaults: CapturePolicy,
+    #[serde(default)]
+    pub accounts: std::collections::BTreeMap<String, CapturePolicy>,
 }
 
 impl Default for PolicySet {
@@ -90,6 +122,8 @@ impl Default for PolicySet {
             revision: 1,
             global: HistoryPolicy::default(),
             scopes: Vec::new(),
+            accounts: Default::default(),
+            capture_defaults: Default::default(),
         }
     }
 }
@@ -102,6 +136,25 @@ pub struct EffectivePolicy {
 }
 
 impl PolicySet {
+    pub fn capture_for(&self, owner: &str) -> CapturePolicy {
+        let mut capture = self.accounts.get(owner).unwrap_or(&self.capture_defaults).clone();
+        capture.enabled &= self.global.enabled;
+        capture
+    }
+
+    pub fn permits_action(&self, action: &crate::catalog::ActionRecord) -> bool {
+        let capture = self.capture_for(&action.actor_account_id);
+        let category_enabled = match action.resource_key.provider.as_str() {
+            "imps-project" => capture.images,
+            "memery-record" => capture.memery_records,
+            "memery-evidence" => capture.memery_evidence,
+            "memery-artifact" => capture.memery_artifacts,
+            _ if action.actor_kind == "agent" || action.managed_tool_origin_v1.is_some() => capture.agent_files,
+            _ => capture.files,
+        };
+        capture.enabled && category_enabled
+    }
+
     pub fn effective_for(
         &self,
         workspace_id: &str,
@@ -138,6 +191,14 @@ impl PolicySet {
     }
 
     pub fn validate(&self) -> Result<(), BudgetError> {
+        for capture in self.accounts.values().chain(std::iter::once(&self.capture_defaults)) {
+            if !matches!(capture.frequency.as_str(), "every_change" | "interval" | "manual")
+                || !(1..=31_536_000).contains(&capture.interval_seconds)
+                || !(1..=100_000).contains(&capture.versions_per_item)
+                || capture.max_age_days.is_some_and(|days| !(1..=36_500).contains(&days)) {
+                return Err(BudgetError::InvalidPolicy("invalid capture frequency or retention".into()));
+            }
+        }
         if self.global.total_bytes == 0 {
             return Err(BudgetError::InvalidPolicy("global target must be positive".into()));
         }

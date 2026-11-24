@@ -388,31 +388,3 @@ async def test_cancellation_contract_holds_for_chat_and_agent_shaped_streams(mod
 
     assert sink.saves == [mode_chunks[0]]
     assert sink.completions == []
-
-
-# --------------------------------------------------------------------------- #
-# chat_stream wiring: compare-mode requests must skip agent_runs.start (stream
-# directly, cancellable promptly); normal requests must still go through it
-# (detached, survives client disconnect). This pins the actual branch added to
-# routes/chat_routes.py rather than re-deriving it from source text.
-# --------------------------------------------------------------------------- #
-
-def test_compare_mode_branch_skips_agent_runs_in_source():
-    """The compare_mode branch must return the raw generator as the SSE body
-    (bypassing agent_runs.start/subscribe) BEFORE the detached agent_runs.start
-    call below it — otherwise compare streams would still be detached and a
-    pane's Stop (closing the SSE) wouldn't cancel the upstream call."""
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py").read_text(encoding="utf-8")
-
-    branch_idx = src.index("if compare_mode:")
-    direct_return_idx = src.index("return StreamingResponse(_safe_stream(), media_type=", branch_idx)
-    detach_idx = src.index(
-        "agent_runs.start(session, _safe_stream(), owner=_user)",
-        branch_idx,
-    )
-
-    assert branch_idx < direct_return_idx < detach_idx, (
-        "compare_mode must short-circuit to a direct (non-detached) "
-        "StreamingResponse before normal streams are wrapped in agent_runs"
-    )

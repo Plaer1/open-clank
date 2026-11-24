@@ -1,0 +1,1213 @@
+import { Log } from "../util"
+import { captureWindowDeclarations } from "./model-window-declarations"
+import path from "path"
+import { pathToFileURL } from "url"
+import os from "os"
+import z from "zod"
+import { clone, mergeDeep, pipe } from "remeda"
+import { Global } from "../global"
+import fsNode from "fs/promises"
+import { NamedError } from "@mimo-ai/shared/util/error"
+import { Flag } from "../flag/flag"
+import { Auth } from "../auth"
+import { Env } from "../env"
+import { applyEdits, modify } from "jsonc-parser"
+import { Instance, type InstanceContext } from "../project/instance"
+import { existsSync } from "fs"
+import { GlobalBus } from "@/bus/global"
+import { Event } from "../server/event"
+import { Account } from "@/account/account"
+import { isRecord } from "@/util/record"
+import type { ConsoleState } from "./console-state"
+import { AppFileSystem } from "@mimo-ai/shared/filesystem"
+import { InstanceState } from "@/effect"
+import { Context, Duration, Effect, Layer, Option, Schema } from "effect"
+import { EffectFlock } from "@mimo-ai/shared/util/effect-flock"
+import { InstanceRef } from "@/effect/instance-ref"
+import { zod, ZodOverride } from "@/util/effect-zod"
+import { ConfigAgent } from "./agent"
+import { ConfigCommand } from "./command"
+import { ConfigCompose } from "./compose"
+import { ConfigFormatter } from "./formatter"
+import { OPENCLANK_GITIGNORE_ENTRIES } from "./gitignore"
+import { ConfigLayout } from "./layout"
+import { ConfigLSP } from "./lsp"
+import { ConfigLLMServer } from "./llm-server"
+import { ConfigManaged } from "./managed"
+import { ConfigMCP } from "./mcp"
+import { ConfigModelID } from "./model-id"
+import { ConfigParse } from "./parse"
+import { ConfigPaths } from "./paths"
+import { ConfigPermission } from "./permission"
+import { ConfigPlugin } from "./plugin"
+import { ConfigProvider } from "./provider"
+import { ConfigRetry } from "./retry"
+import { ConfigServer } from "./server"
+import { ConfigSkills } from "./skills"
+import { ConfigVariable } from "./variable"
+
+const log = Log.create({ service: "config" })
+
+// Custom merge function that concatenates array fields instead of replacing them
+function mergeConfigConcatArrays(target: Info, source: Info): Info {
+  const merged = mergeDeep(target, source)
+  if (target.instructions && source.instructions) {
+    merged.instructions = Array.from(new Set([...target.instructions, ...source.instructions]))
+  }
+  return merged
+}
+
+function normalizeLoadedConfig(data: unknown, source: string) {
+  if (!isRecord(data)) return data
+  const copy = { ...data }
+  // History indexing is uniform; ignore settings written by older releases.
+  delete copy.history
+  // Ignore the removed worktree policy in existing files and host-injected config.
+  delete copy.auto_worktree
+  // Cloud sharing settings from existing files cannot enable a transport.
+  delete copy.share
+  delete copy.autoshare
+  // Only the removed share transport read the enterprise endpoint.
+  delete copy.enterprise
+  if (isRecord(copy.memory) && copy.memory.provider === "frankenmemory") {
+    copy.memory = { ...copy.memory, provider: "memery" }
+  }
+  const hadLegacy = "theme" in copy || "keybinds" in copy || "tui" in copy
+  if (!hadLegacy) return copy
+  delete copy.theme
+  delete copy.keybinds
+  delete copy.tui
+  log.warn("tui keys in openclank config are deprecated; move them to tui.json", { path: source })
+  return copy
+}
+
+async function resolveLoadedPlugins<T extends { plugin?: ConfigPlugin.Spec[] }>(config: T, filepath: string) {
+  if (!config.plugin) return config
+  for (let i = 0; i < config.plugin.length; i++) {
+    // Normalize path-like plugin specs while we still know which config file declared them.
+    // This prevents `./plugin.ts` from being reinterpreted relative to some later merge location.
+    config.plugin[i] = await ConfigPlugin.resolvePluginSpec(config.plugin[i], filepath)
+  }
+  return config
+}
+
+export const Server = ConfigServer.Server.zod
+export const Layout = ConfigLayout.Layout.zod
+export type Layout = ConfigLayout.Layout
+
+// Schemas that still live at the zod layer (have .transform / .preprocess /
+// .meta not expressible in current Effect Schema) get referenced via a
+// ZodOverride-annotated Schema.Any.  Walker sees the annotation and emits the
+// exact zod directly, preserving component $refs.
+const AgentRef = Schema.Any.annotate({ [ZodOverride]: ConfigAgent.Info })
+const PermissionRef = Schema.Any.annotate({ [ZodOverride]: ConfigPermission.Info })
+const LogLevelRef = Schema.Any.annotate({ [ZodOverride]: Log.Level })
+
+const PositiveInt = Schema.Number.check(Schema.isInt()).check(Schema.isGreaterThan(0))
+const NonNegativeInt = Schema.Number.check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0))
+// Token count as a number or a shorthand string ("300K", "1.5M", "50%").
+const TokenQuantity = Schema.Union([NonNegativeInt, Schema.String])
+
+const InfoSchema = Schema.Struct({
+  $schema: Schema.optional(Schema.String).annotate({
+    description: "JSON schema reference for configuration validation",
+  }),
+  logLevel: Schema.optional(LogLevelRef).annotate({ description: "Log level" }),
+  server: Schema.optional(ConfigServer.Server).annotate({
+    description: "Server configuration for openclank-engine serve and web commands",
+  }),
+  llmServer: Schema.optional(ConfigLLMServer.LLMServer).annotate({
+    description: "Token lifetime defaults for the temporary local LLM server (openclank-engine llm-server)",
+  }),
+  command: Schema.optional(Schema.Record(Schema.String, ConfigCommand.Info)).annotate({
+    description: "Command configuration, see https://mimo.xiaomi.com/mimocode/commands",
+  }),
+  skills: Schema.optional(ConfigSkills.Info).annotate({ description: "Additional skill folder paths" }),
+  compose: Schema.optional(ConfigCompose.Info).annotate({ description: "Compose mode configuration" }),
+  watcher: Schema.optional(
+    Schema.Struct({
+      ignore: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
+    }),
+  ),
+  snapshot: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Legacy compatibility option; Git snapshot capture is unavailable. File recovery uses Lore.",
+  }),
+  // User-facing plugin config is stored as Specs; provenance gets attached later while configs are merged.
+  plugin: Schema.optional(Schema.mutable(Schema.Array(ConfigPlugin.Spec))),
+  autoupdate: Schema.optional(Schema.Union([Schema.Boolean, Schema.Literal("notify")])).annotate({
+    description:
+      "Automatically update to the latest version. Set to true to auto-update, false to disable, or 'notify' to show update notifications",
+  }),
+  disabled_providers: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+    description: "Disable providers that are loaded automatically",
+  }),
+  enabled_providers: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+    description: "When set, ONLY these providers will be enabled. All other providers will be ignored",
+  }),
+  model: Schema.optional(ConfigModelID).annotate({
+    description: "Model to use in the format of provider/model, eg anthropic/claude-2",
+  }),
+  small_model: Schema.optional(ConfigModelID).annotate({
+    description: "Small model to use for tasks like title generation in the format of provider/model",
+  }),
+  vision_model: Schema.optional(ConfigModelID).annotate({
+    description:
+      "Model to use for image/vision subagent tasks in the format of provider/model. If unset, a vision-capable model is chosen automatically (in-house models preferred, then cheapest).",
+  }),
+  model_groups: Schema.optional(
+    Schema.Record(
+      Schema.String,
+      Schema.Union([
+        // string shorthand: group is just its default model
+        ConfigModelID,
+        Schema.Struct({
+          default: ConfigModelID,
+          models: Schema.optional(Schema.mutable(Schema.Array(ConfigModelID))),
+        }),
+      ]),
+    ),
+  ).annotate({
+    description:
+      "Named model groups (capability tiers, e.g. ultra/standard/lite). Each group has a default model and optional member models. A group name can be used anywhere a provider/model string is accepted.",
+  }),
+  default_agent: Schema.optional(Schema.String).annotate({
+    description:
+      "Default agent to use when none is specified. Must be a primary agent. Falls back to 'build' if not set or if the specified agent is invalid.",
+  }),
+  username: Schema.optional(Schema.String).annotate({
+    description: "Custom username to display in conversations instead of system username",
+  }),
+  mode: Schema.optional(
+    Schema.StructWithRest(
+      Schema.Struct({
+        build: Schema.optional(AgentRef),
+        plan: Schema.optional(AgentRef),
+      }),
+      [Schema.Record(Schema.String, AgentRef)],
+    ),
+  ).annotate({ description: "@deprecated Use `agent` field instead." }),
+  agent: Schema.optional(
+    Schema.StructWithRest(
+      Schema.Struct({
+        // primary
+        plan: Schema.optional(AgentRef),
+        build: Schema.optional(AgentRef),
+        // subagent
+        general: Schema.optional(AgentRef),
+        explore: Schema.optional(AgentRef),
+        // specialized
+        title: Schema.optional(AgentRef),
+        summary: Schema.optional(AgentRef),
+        compaction: Schema.optional(AgentRef),
+      }),
+      [Schema.Record(Schema.String, AgentRef)],
+    ),
+  ).annotate({ description: "Agent configuration, see https://mimo.xiaomi.com/mimocode/agents" }),
+  provider: Schema.optional(Schema.Record(Schema.String, ConfigProvider.Info)).annotate({
+    description: "Custom provider configurations and model overrides",
+  }),
+  retry: Schema.optional(ConfigRetry.Info).annotate({
+    description: "Retry budgets for provider requests, streams, and long-running network recovery",
+  }),
+  mcp: Schema.optional(
+    Schema.Record(
+      Schema.String,
+      Schema.Union([
+        ConfigMCP.Info,
+        // Matches the legacy `{ enabled: false }` form used to disable a server.
+        Schema.Any.annotate({ [ZodOverride]: z.object({ enabled: z.boolean() }).strict() }),
+      ]),
+    ),
+  ).annotate({ description: "MCP (Model Context Protocol) server configurations" }),
+  formatter: Schema.optional(ConfigFormatter.Info),
+  lsp: Schema.optional(ConfigLSP.Info),
+  instructions: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+    description: "Additional instruction files or patterns to include",
+  }),
+  layout: Schema.optional(ConfigLayout.Layout).annotate({ description: "@deprecated Always uses stretch layout." }),
+  permission: Schema.optional(PermissionRef),
+  tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+  compaction: Schema.optional(
+    Schema.Struct({
+      auto: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable automatic compaction when context is full (default: true)",
+      }),
+      prune: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable pressure-based pruning of older context (default: false)",
+      }),
+      tail_turns: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Maximum recent whole API rounds reserved before compaction (default: 2).",
+      }),
+      preserve_recent_tokens: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Token budget shared by reserved recent rounds and rounds arriving during compaction (default: 25% of usable context, clamped to 2000–8000).",
+      }),
+      reserved: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Token buffer for compaction. Leaves enough window to avoid overflow during compaction (default: up to 33000, capped by the model's maximum output).",
+      }),
+      max_context: Schema.optional(Schema.Union([TokenQuantity, Schema.Record(Schema.String, TokenQuantity)])).annotate(
+        {
+          description:
+            'Compact earlier than the model window. A token count (300000), a shorthand string ("300K", "1M", "50%"), ' +
+            'or a map keyed by "<providerID>/<modelID>" with wildcards ("openai/gpt-5*"). Always clamped to the ' +
+            "model's real window — it can only lower the compaction trigger, never raise it. 0 means no budget.",
+        },
+      ),
+    }),
+  ),
+  checkpoint: Schema.optional(
+    Schema.Struct({
+      thresholds: Schema.optional(Schema.Array(Schema.String)).annotate({
+        description:
+          "Context fill thresholds that trigger checkpoint writes. Strings may be percentages (\"40%\"), absolute tokens (\"100K\", \"1.5M\"), or mixed (\"100K\", \"50%\"). Each threshold must be <= window minus reserved tokens. Defaults depend on the effective model window.",
+      }),
+      reserved: Schema.optional(NonNegativeInt).annotate({
+        description: "Token buffer reserved for checkpoint operations. Default: 13000.",
+      }),
+      fork: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Whether to fork the parent agent's message prefix into the writer session for prefix-cache reuse. Requires provider cache-breakpoint support. Default: true.",
+      }),
+      push_caps: Schema.optional(
+        Schema.Struct({
+          tasks_ledger: Schema.optional(PositiveInt).annotate({
+            description: "Token cap for the tasks ledger section of rebuild context. Default: 2000.",
+          }),
+          focus_task: Schema.optional(PositiveInt).annotate({
+            description: "Token cap for the focus task body in rebuild context. Default: 4000.",
+          }),
+          actor_ledger: Schema.optional(PositiveInt).annotate({
+            description: "Token cap for the actor ledger section of rebuild context. Default: 500.",
+          }),
+          memory_titles: Schema.optional(PositiveInt).annotate({
+            description: "Token cap for memory titles in rebuild context. Default: 500.",
+          }),
+          global: Schema.optional(PositiveInt).annotate({
+            description:
+              "Token cap for the global memory section (global/MEMORY.md) of rebuild context. Default: 6000.",
+          }),
+          checkpoint: Schema.optional(PositiveInt).annotate({
+            description:
+              "Token cap for the session checkpoint section (checkpoint.md) of rebuild context. Default: 11000.",
+          }),
+          memory: Schema.optional(PositiveInt).annotate({
+            description: "Token cap for the project memory section (MEMORY.md) of rebuild context. Default: 10000.",
+          }),
+          notes: Schema.optional(PositiveInt).annotate({
+            description: "Token cap for the session notes (notes.md) of rebuild context. Default: 6000.",
+          }),
+          design_decisions: Schema.optional(PositiveInt).annotate({
+            description: "Token cap for §10 Design decisions section of checkpoint.md (writer-side budget validation). Default: 3000.",
+          }),
+          open_notes: Schema.optional(PositiveInt).annotate({
+            description: "Token cap for §11 Open notes section of checkpoint.md (writer-side budget validation). Default: 800.",
+          }),
+          recent_user: Schema.optional(NonNegativeInt).annotate({
+            description: "Token cap for the recent user input section (verbatim user messages from the live DB, FIFO eviction). Default: 16000. Set 0 to disable.",
+          }),
+          recent_user_per_msg: Schema.optional(PositiveInt).annotate({
+            description: "Per-message cap inside recent user input section; oversized messages get head/tail truncation with messageID elision marker. Default: 2000.",
+          }),
+        }),
+      ).annotate({
+        description:
+          "Per-section token caps for rebuild context (renderRebuildContext). Each section is loaded up to its cap so the rebuild stays within a predictable budget.",
+      }),
+      task_archive_days: Schema.optional(PositiveInt).annotate({
+        description: "Number of days after task done/abandoned before it's filtered out of `list({include_archived: false})`. Rows are NOT deleted — see v9 for true GC. Default: 7.",
+      }),
+      task_cleanup_days: Schema.optional(PositiveInt).annotate({
+        description: "[deprecated] Alias for task_archive_days. Will be removed in v9.",
+      }),
+      memory_reconcile_on_search: Schema.optional(Schema.Boolean).annotate({
+        description: "Whether to reconcile memory state on search operations. Default: true.",
+      }),
+      memory_search_score_floor: Schema.optional(Schema.Number).annotate({
+        description:
+          "Relative BM25 floor for memory.search (OR-joined query): keep results scoring >= this fraction of the top hit, dropping common-word-only noise. The #1 result is always kept. Default: 0.15. Set 0 to keep all matches.",
+      }),
+    }),
+  ),
+  memory: Schema.optional(
+    Schema.Struct({
+      disable_write: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Stop WRITING new memory. Default: false (memory is written). When true, no new memory is produced — session checkpoint.md, project MEMORY.md, notes.md and per-task progress.md are never written, the high-pressure 'save your learnings to memory' nudge is suppressed, and automatic dream/distill runs are skipped. Existing memory stays READABLE on demand: the builtin `memory` search tool keeps working and the files can still be read directly. What does stop is the AUTOMATIC injection — checkpoint rebuild is short-circuited to compaction while writing is off, and the memory dumps that a rebuild would have placed in context are only produced by that rebuild, so nothing is loaded on its own; an agent that wants memory has to search or read for it. Nothing is ever deleted — set it back to false to resume writing on top of the existing files.",
+      }),
+      cc_index: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Index Claude Code memory (~/.claude/projects/<slug>/memory) and expose under scope='cc'. Default: false. Note: when enabled, every openclank agent (build/explore/subagents) can search these memories via the builtin `memory` tool — including CC's `type: user` (your role/preferences) and `type: feedback` (your guidance) categories. CC originally writes them for future CC sessions; flipping this on widens the consumer set to openclank agents on the same machine. Leave disabled (default) if you don't want personal context recallable from a prompt-injection-vulnerable agent.",
+      }),
+      provider: Schema.optional(Schema.Literals(["native", "memery"])).annotate({
+        description:
+          "Memory search provider. Select 'memery' for host-managed semantic memory. Managed search requires an authorized Memery connection.",
+      }),
+      graph: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean).annotate({
+            description:
+              "Extract a knowledge graph (entities/relations/cues) from each captured turn via one small LLM call and store it in Memery. Requires memory.provider = 'memery'. Default: true.",
+          }),
+          model: Schema.optional(Schema.String).annotate({
+            description:
+              "Model for graph extraction as 'provider/model'. Default: the cheapest configured model (by input cost), falling back to the session default.",
+          }),
+          every_n_turns: Schema.optional(PositiveInt).annotate({
+            description:
+              "Extract from every Nth captured turn per session. Default: 1 (every turn). Raise to trade graph freshness for token spend.",
+          }),
+          min_interval_seconds: Schema.optional(NonNegativeInt).annotate({
+            description:
+              "Minimum seconds between extractions per session, applied on top of every_n_turns. Default: 0.",
+          }),
+        }),
+      ),
+    }),
+  ),
+  dream: Schema.optional(
+    Schema.Struct({
+      auto: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Auto-trigger dream memory consolidation on new session start. Default: false.",
+      }),
+      interval_days: Schema.optional(NonNegativeInt).annotate({
+        description: "Minimum days between automatic dream runs. Set to 0 to trigger on every new session. Default: 7.",
+      }),
+    }),
+  ),
+  distill: Schema.optional(
+    Schema.Struct({
+      auto: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Auto-trigger distill workflow packaging on new session start. Default: false.",
+      }),
+      interval_days: Schema.optional(NonNegativeInt).annotate({
+        description: "Minimum days between automatic distill runs. Default: 30.",
+      }),
+    }),
+  ),
+  voice: Schema.optional(
+    Schema.Struct({
+      asr_model: Schema.optional(ConfigModelID).annotate({
+        description:
+          "Model to use for voice ASR transcription in provider/model format. Defaults to xiaomi/mimo-v2.5-asr.",
+      }),
+      control_model: Schema.optional(ConfigModelID).annotate({
+        description:
+          "Model to use for voice control (multimodal) in provider/model format. Defaults to xiaomi/mimo-v2.6-flash.",
+      }),
+    }),
+  ).annotate({ description: "Voice input provider and model configuration." }),
+  experimental: Schema.optional(
+    Schema.Struct({
+      disable_paste_summary: Schema.optional(Schema.Boolean),
+      batch_tool: Schema.optional(Schema.Boolean).annotate({ description: "Enable the batch tool" }),
+      openTelemetry: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable OpenTelemetry spans for AI SDK calls (using the 'experimental_telemetry' flag)",
+      }),
+      primary_tools: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+        description: "Tools that should only be available to primary agents.",
+      }),
+      continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
+        description: "Continue the agent loop when a tool call is denied",
+      }),
+      try_best: Schema.optional(
+        Schema.Struct({
+          edit_window: Schema.optional(PositiveInt).annotate({
+            description: "Recent edit events to compare (default 12).",
+          }),
+          edit_similarity: Schema.optional(Schema.Number).annotate({
+            description: "Jaccard threshold for near-identical edit detection (default 0.8).",
+          }),
+          edit_matches: Schema.optional(PositiveInt).annotate({
+            description: "Prior similar edits required before pausing (default 2).",
+          }),
+          action_streak: Schema.optional(PositiveInt).annotate({
+            description: "Consecutive edit or verify actions without progress before pausing (default 4).",
+          }),
+        }),
+      ).annotate({ description: "Try-best loop detector thresholds." }),
+      loop_streak_recovery: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean).annotate({
+            description: "Crop repeated thinking/tool streaks from the next request and inject a recovery note.",
+          }),
+          trigger_count: Schema.optional(PositiveInt).annotate({
+            description: "Consecutive identical streak keys required to trigger (default 3).",
+          }),
+          max_span: Schema.optional(PositiveInt).annotate({
+            description: "Max assistant messages cropped from the trailing streak (default 64).",
+          }),
+        }),
+      ).annotate({ description: "Loop-streak request-layer recovery (experimental)." }),
+      uncommitted_hint: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean).annotate({
+            description:
+              "After a completed user-source main turn, if the session workspace has uncommitted git changes, inject a soft hint (may repeat on later dirty user turns; hook turns never re-inject; does not force a commit). Default off.",
+          }),
+        }),
+      ).annotate({ description: "Turn-end uncommitted-changes soft hint (experimental)." }),
+      mcp_timeout: Schema.optional(PositiveInt).annotate({
+        description: "Timeout in milliseconds for model context protocol (MCP) requests",
+      }),
+      predict_next_prompt: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Predict the user's likely next prompt after each turn and show it as inline ghost text (Tab to accept). Off by default; set to true to enable.",
+      }),
+      maxMode: Schema.optional(
+        Schema.Struct({
+          candidates: Schema.optional(PositiveInt).annotate({
+            description: "Number of parallel reasoning candidates per step in max mode (default 5).",
+          }),
+        }),
+      ).annotate({
+        description:
+          "Max mode (experimental): the 'max' agent runs N parallel reasoning candidates each step, picks the best via a judge call, and executes only the winner.",
+      }),
+    }),
+  ),
+  workflow: Schema.optional(
+    Schema.Struct({
+      maxConcurrentAgents: Schema.optional(Schema.Number).annotate({
+        description:
+          "Process-wide ceiling on subagents running concurrently across ALL workflow runs (including nested children). Default min(16, 2x CPU cores). No upper clamp: the previous 2x-cores hard cap was removed so an operator can match real provider capacity — but that also means a misconfigured value (e.g. an extra zero) can exhaust provider rate limits or host memory. This is the only concurrency ceiling, so set it deliberately.",
+      }),
+      maxDepth: Schema.optional(Schema.Number).annotate({
+        description: "Max nesting depth for workflow()-calls-workflow. Default 8. Exceeding it fails the run.",
+      }),
+      maxLifecycleAgents: Schema.optional(Schema.Number).annotate({
+        description:
+          "Hard ceiling on total agents a single workflow run may spawn over its life. Default 1000. Over-cap agent() calls return null (graceful degradation). PER-RUN, not tree-wide: each child workflow has its own independent budget, so a deep nesting can spawn maxDepth × this over the whole tree (concurrent in-flight is still bounded by maxConcurrentAgents).",
+      }),
+      scriptDeadlineMs: Schema.optional(Schema.Number).annotate({
+        description:
+          "Wall-clock budget for a whole workflow script, in milliseconds. Default 12h. The sandbox interrupt handler enforces this as a hard kill-switch.",
+      }),
+    }),
+  ).annotate({ description: "Dynamic workflow runtime settings." }),
+})
+
+// Schema.Struct produces readonly types by default, but the service code
+// below mutates Info objects directly (e.g. `config.mode = ...`). Strip the
+// readonly recursively so callers get the same mutable shape zod inferred.
+//
+// `Types.DeepMutable` from effect-smol would be a drop-in, but its fallback
+// branch `{ -readonly [K in keyof T]: ... }` collapses `unknown` to `{}`
+// (since `keyof unknown = never`), which widens `Record<string, unknown>`
+// fields like `ConfigPlugin.Options`. The local version gates on
+// `extends object` so `unknown` passes through.
+//
+// Tuple branch preserves `ConfigPlugin.Spec`'s `readonly [string, Options]`
+// shape (otherwise the general array branch widens it to an array).
+type DeepMutable<T> = T extends readonly [unknown, ...unknown[]]
+  ? { -readonly [K in keyof T]: DeepMutable<T[K]> }
+  : T extends readonly (infer U)[]
+    ? DeepMutable<U>[]
+    : T extends object
+      ? { -readonly [K in keyof T]: DeepMutable<T[K]> }
+      : T
+
+// The walker emits `z.object({...})` which is non-strict by default. Config
+// historically uses `.strict()` (additionalProperties: false in openapi.json),
+// so layer that on after derivation.  Re-apply the Config ref afterward
+// since `.strict()` strips the walker's meta annotation.
+export const Info = (zod(InfoSchema) as unknown as z.ZodObject<any>)
+  .strict()
+  .meta({ ref: "Config" }) as unknown as z.ZodType<DeepMutable<Schema.Schema.Type<typeof InfoSchema>>>
+
+export type Info = z.output<typeof Info> & {
+  // plugin_origins is derived state, not a persisted config field. It keeps each winning plugin spec together
+  // with the file and scope it came from so later runtime code can make location-sensitive decisions.
+  plugin_origins?: ConfigPlugin.Origin[]
+  mcp_origins?: Record<string, ConfigMCP.Origin>
+}
+
+/** Worker-generation workflow policy, shared by runtime enforcement and readback. */
+export function workflowPolicyFor(config: Info) {
+  return {
+    maxConcurrentAgents: Math.max(1, config.workflow?.maxConcurrentAgents ?? Math.min(16, 2 * (os.cpus().length || 4))),
+    maxDepth: config.workflow?.maxDepth ?? 8,
+    maxLifecycleAgents: config.workflow?.maxLifecycleAgents ?? 1000,
+    scriptDeadlineMs: config.workflow?.scriptDeadlineMs ?? 12 * 60 * 60 * 1000,
+  }
+}
+
+/** Resolve the selected managed profile from the same merged config used at admission. */
+export function withManagedModelSettings(config: Info, model: { providerID: string; id: string; options: Record<string, unknown> }): Info {
+  const selected = config.provider?.[model.providerID]
+  return withManagedAgentSettings(config, model.options["_openclankAgentSettings"] ?? selected?.models?.[model.id]?.options?.["_openclankAgentSettings"] ?? selected?.options?.["_openclankAgentSettings"])
+}
+
+/** Apply one immutable managed settings snapshot to an admitted turn. */
+export function withManagedAgentSettings(config: Info, raw: unknown): Info {
+  if (!isRecord(raw)) return config
+  const incoming = raw as Record<string, unknown>
+  const compaction = isRecord(incoming.compaction) ? incoming.compaction : undefined
+  const checkpoint = isRecord(incoming.checkpoint) ? incoming.checkpoint : undefined
+  const dream = isRecord(incoming.dream) ? incoming.dream : undefined
+  const distill = isRecord(incoming.distill) ? incoming.distill : undefined
+  const experimental = isRecord(incoming.experimental) ? incoming.experimental : undefined
+  if (!compaction && !checkpoint && !dream && !distill && !experimental) return config
+  const next: Info = { ...config }
+  if (compaction) {
+    next.compaction = {
+      ...(config.compaction ?? {}),
+      ...(typeof compaction.auto === "boolean" ? { auto: compaction.auto } : {}),
+      ...(typeof compaction.prune === "boolean" ? { prune: compaction.prune } : {}),
+      ...(typeof compaction.tail_turns === "number" && Number.isSafeInteger(compaction.tail_turns) && compaction.tail_turns >= 0 ? { tail_turns: compaction.tail_turns } : {}),
+      ...(typeof compaction.preserve_recent_tokens === "number" && Number.isSafeInteger(compaction.preserve_recent_tokens) && compaction.preserve_recent_tokens >= 0 ? { preserve_recent_tokens: compaction.preserve_recent_tokens } : {}),
+      ...(typeof compaction.reserved === "number" && Number.isSafeInteger(compaction.reserved) && compaction.reserved >= 0 ? { reserved: compaction.reserved } : {}),
+      ...(typeof compaction.max_context === "number" || typeof compaction.max_context === "string" || isRecord(compaction.max_context) ? { max_context: structuredClone(compaction.max_context) as NonNullable<Info["compaction"]>["max_context"] } : {}),
+    }
+  }
+  if (checkpoint) {
+    next.checkpoint = {
+      ...(config.checkpoint ?? {}),
+      ...(Array.isArray(checkpoint.thresholds) && checkpoint.thresholds.every((value) => typeof value === "string") ? { thresholds: [...checkpoint.thresholds] } : {}),
+      ...(typeof checkpoint.reserved === "number" && Number.isSafeInteger(checkpoint.reserved) && checkpoint.reserved >= 0 ? { reserved: checkpoint.reserved } : {}),
+      ...(typeof checkpoint.fork === "boolean" ? { fork: checkpoint.fork } : {}),
+      ...(isRecord(checkpoint.push_caps) ? { push_caps: { ...config.checkpoint?.push_caps, ...structuredClone(checkpoint.push_caps) } } : {}),
+    }
+  }
+  for (const [key, section] of [["dream", dream], ["distill", distill]] as const) {
+    if (!section) continue
+    next[key] = {
+      ...config[key],
+      ...(typeof section.auto === "boolean" ? { auto: section.auto } : {}),
+      ...(typeof section.interval_days === "number" && Number.isSafeInteger(section.interval_days) && section.interval_days >= 0 ? { interval_days: section.interval_days } : {}),
+    }
+  }
+  if (experimental) {
+    next.experimental = {
+      ...config.experimental,
+      ...(typeof experimental.continue_loop_on_deny === "boolean" ? { continue_loop_on_deny: experimental.continue_loop_on_deny } : {}),
+      ...(isRecord(experimental.try_best) ? { try_best: { ...config.experimental?.try_best, ...structuredClone(experimental.try_best) } } : {}),
+    }
+  }
+  return next
+}
+
+type State = {
+  config: Info
+  directories: string[]
+  consoleState: ConsoleState
+}
+
+const visionConfigLifetimes = new WeakMap<State, {alive:boolean}>()
+
+export const MODEL_KEYS = ["provider", "enabled_providers", "disabled_providers", "model", "small_model", "vision_model", "model_groups"] as const
+
+export interface Interface {
+  readonly invalidateSource: () => Effect.Effect<void>
+  readonly prepareModelRefresh: () => Effect.Effect<{ config: Info; commit: () => void } | undefined>
+  readonly get: () => Effect.Effect<Info>
+  /** Non-secret vision selection and cache-lifetime evidence for source observation. */
+  readonly visionSelectionWithProvenance?: () => Effect.Effect<{vision_model:Info["vision_model"]; vision_group:NonNullable<Info["model_groups"]>["vision"] | undefined; current:()=>boolean}>
+  readonly getGlobal: () => Effect.Effect<Info>
+  readonly getConsoleState: () => Effect.Effect<ConsoleState>
+  readonly update: (config: Info) => Effect.Effect<void>
+  readonly updateGlobal: (config: Info) => Effect.Effect<Info>
+  readonly invalidate: (wait?: boolean) => Effect.Effect<void>
+  readonly directories: () => Effect.Effect<string[]>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@opencode/Config") {}
+
+function globalConfigFile() {
+  const candidates = ["openclank.jsonc", "openclank.json", "config.json"].map((file) =>
+    path.join(Global.Path.config, file),
+  )
+  for (const file of candidates) {
+    if (existsSync(file)) return file
+  }
+  return candidates[0]
+}
+
+function patchJsonc(input: string, patch: unknown, path: string[] = []): string {
+  if (!isRecord(patch)) {
+    const edits = modify(input, path, patch, {
+      formattingOptions: {
+        insertSpaces: true,
+        tabSize: 2,
+      },
+    })
+    return applyEdits(input, edits)
+  }
+
+  return Object.entries(patch).reduce((result, [key, value]) => {
+    if (value === undefined) return result
+    return patchJsonc(result, value, [...path, key])
+  }, input)
+}
+
+function writable(info: Info) {
+  const { plugin_origins: _plugin_origins, mcp_origins: _mcp_origins, ...next } = info
+  return next
+}
+
+export const ConfigDirectoryTypoError = NamedError.create(
+  "ConfigDirectoryTypoError",
+  z.object({
+    path: z.string(),
+    dir: z.string(),
+    suggestion: z.string(),
+  }),
+)
+
+export const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const fs = yield* AppFileSystem.Service
+    const authSvc = yield* Auth.Service
+    const accountSvc = yield* Account.Service
+    const env = yield* Env.Service
+
+    const readConfigFile = Effect.fnUntraced(function* (filepath: string) {
+      return yield* fs.readFileString(filepath).pipe(
+        Effect.catchIf(
+          (e) => e.reason._tag === "NotFound",
+          () => Effect.succeed(undefined),
+        ),
+        Effect.orDie,
+      )
+    })
+
+    const loadConfig = Effect.fnUntraced(function* (
+      text: string,
+      options: { path: string; modelsOnly?: boolean } | { dir: string; source: string },
+    ) {
+      const source = "path" in options ? options.path : options.source
+      const expanded = yield* Effect.promise(() =>
+        ConfigVariable.substitute(
+          "path" in options ? { text, type: "path", path: options.path } : { text, type: "virtual", ...options },
+        ),
+      )
+      const parsed = ConfigParse.jsonc(expanded, source)
+      const data = ConfigParse.schema(Info, normalizeLoadedConfig(parsed, source), source)
+      if (!("path" in options) || options.modelsOnly) return data
+
+      yield* Effect.promise(() => resolveLoadedPlugins(data, options.path))
+      return data
+    })
+
+    const loadFile = Effect.fnUntraced(function* (filepath: string, modelsOnly = false) {
+      log.info("loading", { path: filepath })
+      const text = yield* readConfigFile(filepath)
+      if (!text) return {} as Info
+      return yield* loadConfig(text, { path: filepath, modelsOnly })
+    })
+
+    const loadGlobal = Effect.fnUntraced(function* (modelsOnly = false) {
+      let result: Info = pipe(
+        {},
+        mergeDeep(yield* loadFile(path.join(Global.Path.config, "config.json"), modelsOnly)),
+        mergeDeep(yield* loadFile(path.join(Global.Path.config, "openclank.json"), modelsOnly)),
+        mergeDeep(yield* loadFile(path.join(Global.Path.config, "openclank.jsonc"), modelsOnly)),
+      )
+
+      if (modelsOnly) return result
+      const legacy = path.join(Global.Path.config, "config")
+      if (existsSync(legacy)) {
+        yield* Effect.promise(() =>
+          import(pathToFileURL(legacy).href, { with: { type: "toml" } })
+            .then(async (mod) => {
+              const { provider, model, ...rest } = mod.default
+              if (provider && model) result.model = `${provider}/${model}`
+              result = mergeDeep(result, rest)
+              await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
+              await fsNode.unlink(legacy)
+            })
+            .catch(() => {}),
+        )
+      }
+
+      // Seed a starter config when no global config file exists yet
+      const globalConfigFile = path.join(Global.Path.config, "openclank.jsonc")
+      if (
+        !existsSync(path.join(Global.Path.config, "config.json")) &&
+        !existsSync(path.join(Global.Path.config, "openclank.json")) &&
+        !existsSync(globalConfigFile)
+      ) {
+        const starter = "{}\n"
+        yield* fs.writeFileString(globalConfigFile, starter).pipe(Effect.catch(() => Effect.void))
+      }
+
+      return result
+    })
+
+    const [cachedGlobal, invalidateGlobal] = yield* Effect.cachedInvalidateWithTTL(
+      loadGlobal().pipe(
+        Effect.tapError((error) =>
+          Effect.sync(() => log.error("failed to load global config, using defaults", { error: String(error) })),
+        ),
+        Effect.orElseSucceed((): Info => ({})),
+      ),
+      Duration.infinity,
+    )
+
+    const getGlobal = Effect.fn("Config.getGlobal")(function* () {
+      return yield* cachedGlobal
+    })
+
+    const ensureGitignore = Effect.fn("Config.ensureGitignore")(function* (dir: string) {
+      const gitignore = path.join(dir, ".gitignore")
+      const hasIgnore = yield* fs.existsSafe(gitignore)
+      if (!hasIgnore) {
+        yield* fs
+          .writeFileString(
+            gitignore,
+            OPENCLANK_GITIGNORE_ENTRIES.join("\n"),
+          )
+          .pipe(
+            Effect.catchIf(
+              (e) => e.reason._tag === "PermissionDenied",
+              () => Effect.void,
+            ),
+          )
+      }
+    })
+
+    const loadInstanceState = Effect.fn("Config.loadInstanceState")(
+      function* (ctx: InstanceContext, modelsOnly = false) {
+        const auth = yield* authSvc.all().pipe(Effect.orDie)
+
+        let result: Info = {}
+        const consoleManagedProviders = new Set<string>()
+        let activeOrgName: string | undefined
+
+        const pluginScopeForSource = Effect.fnUntraced(function* (source: string) {
+          if (source.startsWith("http://") || source.startsWith("https://")) return "global"
+          if (source === "OPENCLANK_CONFIG_CONTENT") return "local"
+          if (yield* InstanceRef.use((ctx) => Effect.succeed(Instance.containsPath(source, ctx)))) return "local"
+          return "global"
+        })
+
+        const mergePluginOrigins = Effect.fnUntraced(function* (
+          source: string,
+          // mergePluginOrigins receives raw Specs from one config source, before provenance for this merge step
+          // is attached.
+          list: ConfigPlugin.Spec[] | undefined,
+          // Scope can be inferred from the source path, but some callers already know whether the config should
+          // behave as global or local and can pass that explicitly.
+          kind?: ConfigPlugin.Scope,
+        ) {
+          if (!list?.length) return
+          const hit = kind ?? (yield* pluginScopeForSource(source))
+          // Merge newly seen plugin origins with previously collected ones, then dedupe by plugin identity while
+          // keeping the winning source/scope metadata for downstream installs, writes, and diagnostics.
+          const plugins = ConfigPlugin.deduplicatePluginOrigins([
+            ...(result.plugin_origins ?? []),
+            ...list.map((spec) => ({ spec, source, scope: hit })),
+          ])
+          result.plugin = plugins.map((item) => item.spec)
+          result.plugin_origins = plugins
+        })
+
+        const mergeMcpOrigins = (source: string, next: Info, type: ConfigMCP.Origin["type"]) => {
+          if (!next.mcp) return
+          result.mcp_origins = {
+            ...(result.mcp_origins ?? {}),
+            ...Object.fromEntries(Object.keys(next.mcp).map((name) => [name, { type, source }])),
+          }
+        }
+
+        const merge = (source: string, next: Info, kind?: ConfigPlugin.Scope) => {
+          result = mergeConfigConcatArrays(result, next)
+          mergeMcpOrigins(source, next, "opencode")
+          return modelsOnly ? Effect.void : mergePluginOrigins(source, next.plugin, kind)
+        }
+
+        const readClaudeConfig = Effect.fnUntraced(function* (source: string) {
+          const text = yield* readConfigFile(source)
+          if (!text) return undefined
+          return yield* Effect.try({
+            try: () => JSON.parse(text) as unknown,
+            catch: () => new Error(`failed to parse ${source}; Claude Code MCP compatibility skipped.`),
+          }).pipe(
+            Effect.tapError((error) => Effect.sync(() => log.warn(error.message))),
+            Effect.option,
+            Effect.map(Option.getOrUndefined),
+          )
+        })
+
+        const mergeClaudeMcp = Effect.fnUntraced(function* (source: string) {
+          const data = yield* readClaudeConfig(source)
+          if (!isRecord(data)) return
+          if (!isRecord(data.mcpServers)) return
+
+          for (const [name, server] of Object.entries(data.mcpServers)) {
+            const existing = result.mcp?.[name]
+            if (existing && result.mcp_origins?.[name]?.type !== "claude") {
+              log.info(`skipped Claude Code MCP server "${name}"; native opencode MCP with same name already exists.`)
+              continue
+            }
+
+            const converted = ConfigMCP.fromClaude(name, server)
+            if ("warning" in converted) {
+              log.warn(converted.warning)
+              continue
+            }
+
+            const next = ConfigParse.schema(Info, { mcp: { [name]: converted.config } }, source)
+            result.mcp = {
+              ...(result.mcp ?? {}),
+              [name]: next.mcp![name],
+            }
+            result.mcp_origins = {
+              ...(result.mcp_origins ?? {}),
+              [name]: { type: "claude", source },
+            }
+          }
+        })
+
+        for (const [key, value] of Object.entries(auth)) {
+          if (value.type === "wellknown") {
+            const url = key.replace(/\/+$/, "")
+            process.env[value.key] = value.token
+            log.debug("fetching remote config", { url: `${url}/.well-known/opencode` })
+            const response = yield* Effect.promise(() =>
+              fetch(`${url}/.well-known/opencode`, { signal: AbortSignal.timeout(1000) }),
+            )
+            if (!response.ok) {
+              throw new Error(`failed to fetch remote config from ${url}: ${response.status}`)
+            }
+            const wellknown = (yield* Effect.promise(() => response.json())) as { config?: Record<string, unknown> }
+            const remoteConfig = wellknown.config ?? {}
+            const source = `${url}/.well-known/opencode`
+            const next = yield* loadConfig(JSON.stringify(remoteConfig), {
+              dir: path.dirname(source),
+              source,
+            })
+            yield* merge(source, next, "global")
+            log.debug("loaded remote config from well-known", { url })
+          }
+        }
+
+        const global = yield* (modelsOnly ? loadGlobal(true) : getGlobal())
+        yield* merge(Global.Path.config, global, "global")
+
+        if (Flag.OPENCLANK_CONFIG) {
+          yield* merge(Flag.OPENCLANK_CONFIG, yield* loadFile(Flag.OPENCLANK_CONFIG, modelsOnly))
+          log.debug("loaded custom config", { path: Flag.OPENCLANK_CONFIG })
+        }
+
+        if (!Flag.OPENCLANK_DISABLE_PROJECT_CONFIG) {
+          for (const file of yield* ConfigPaths.files("openclank", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
+            yield* merge(file, yield* loadFile(file, modelsOnly), "local")
+          }
+        }
+
+        result.agent = result.agent || {}
+        result.mode = result.mode || {}
+        result.plugin = result.plugin || []
+
+        const directories = yield* ConfigPaths.directories(ctx.directory, ctx.worktree)
+
+        if (Flag.OPENCLANK_CONFIG_DIR) {
+          log.debug("loading config from OPENCLANK_CONFIG_DIR", { path: Flag.OPENCLANK_CONFIG_DIR })
+        }
+
+        // Load Claude Code commands first so .openclank commands override on name collision.
+        for (const dir of modelsOnly ? [] : yield* ConfigPaths.claudeCommandDirectories(ctx.directory, ctx.worktree)) {
+          result.command = mergeDeep(result.command ?? {}, yield* Effect.promise(() => ConfigCommand.load(dir)))
+        }
+
+        for (const dir of directories) {
+          if (dir.endsWith(".openclank") || dir === Flag.OPENCLANK_CONFIG_DIR) {
+            for (const file of ["openclank.json", "openclank.jsonc"]) {
+              const source = path.join(dir, file)
+              log.debug(`loading config from ${source}`)
+              yield* merge(source, yield* loadFile(source, modelsOnly))
+              result.agent ??= {}
+              result.mode ??= {}
+              result.plugin ??= []
+            }
+          }
+
+          if (modelsOnly) continue
+          yield* ensureGitignore(dir).pipe(Effect.orDie)
+
+          result.command = mergeDeep(result.command ?? {}, yield* Effect.promise(() => ConfigCommand.load(dir)))
+          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.load(dir)))
+          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.loadMode(dir)))
+          // Auto-discovered plugins under `.openclank/plugin(s)` are already local files, so ConfigPlugin.load
+          // returns normalized Specs and we only need to attach origin metadata here.
+          const list = yield* Effect.promise(() => ConfigPlugin.load(dir))
+          yield* mergePluginOrigins(dir, list)
+        }
+
+        if (process.env.OPENCLANK_CONFIG_CONTENT) {
+          const source = "OPENCLANK_CONFIG_CONTENT"
+          const next = yield* loadConfig(process.env.OPENCLANK_CONFIG_CONTENT, {
+            dir: ctx.directory,
+            source,
+          })
+          yield* merge(source, next, "local")
+          log.debug("loaded custom config from OPENCLANK_CONFIG_CONTENT")
+        }
+
+        const activeAccount = Option.getOrUndefined(
+          yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
+        )
+        if (activeAccount?.active_org_id) {
+          const accountID = activeAccount.id
+          const orgID = activeAccount.active_org_id
+          const url = activeAccount.url
+          yield* Effect.gen(function* () {
+            const [configOpt, tokenOpt] = yield* Effect.all(
+              [accountSvc.config(accountID, orgID), accountSvc.token(accountID)],
+              { concurrency: 2 },
+            )
+            if (Option.isSome(tokenOpt)) {
+              process.env["OPENCLANK_CONSOLE_TOKEN"] = tokenOpt.value
+              yield* env.set("OPENCLANK_CONSOLE_TOKEN", tokenOpt.value)
+            }
+
+            if (Option.isSome(configOpt)) {
+              const source = `${url}/api/config`
+              const next = yield* loadConfig(JSON.stringify(configOpt.value), {
+                dir: path.dirname(source),
+                source,
+              })
+              for (const providerID of Object.keys(next.provider ?? {})) {
+                consoleManagedProviders.add(providerID)
+              }
+              yield* merge(source, next, "global")
+            }
+          }).pipe(
+            Effect.withSpan("Config.loadActiveOrgConfig"),
+            Effect.catch((err) => {
+              log.debug("failed to fetch remote account config", {
+                error: err instanceof Error ? err.message : String(err),
+              })
+              return Effect.void
+            }),
+          )
+        }
+
+        const managedDir = ConfigManaged.managedConfigDir()
+        if (existsSync(managedDir)) {
+          for (const file of ["openclank.json", "openclank.jsonc"]) {
+            const source = path.join(managedDir, file)
+            yield* merge(source, yield* loadFile(source, modelsOnly), "global")
+          }
+        }
+
+        // macOS managed preferences (.mobileconfig deployed via MDM) override everything
+        const managed = yield* Effect.promise(() => ConfigManaged.readManagedPreferences())
+        if (managed) {
+          const next = yield* loadConfig(managed.text, {
+            dir: path.dirname(managed.source),
+            source: managed.source,
+          })
+          result = mergeConfigConcatArrays(result, next)
+          mergeMcpOrigins(managed.source, next, "opencode")
+        }
+
+        if (!modelsOnly && !Flag.OPENCLANK_DISABLE_CLAUDE_CODE_MCP) {
+          yield* mergeClaudeMcp(path.join(Global.Path.home, ".claude.json"))
+          yield* mergeClaudeMcp(path.join(ctx.directory, ".claude.json"))
+        }
+
+        for (const [name, mode] of Object.entries(result.mode ?? {})) {
+          result.agent = mergeDeep(result.agent ?? {}, {
+            [name]: {
+              ...mode,
+              mode: "primary" as const,
+            },
+          })
+        }
+
+        if (Flag.OPENCLANK_DANGEROUSLY_SKIP_PERMISSIONS) {
+          // Allow-all base, merged UNDER user config so an explicit deny still
+          // wins. Matches `openclank-engine run --dangerously-skip-permissions`: auto-approve
+          // everything not explicitly denied.
+          result.permission = mergeDeep({ "*": "allow" } as ConfigPermission.Info, result.permission ?? {})
+        }
+
+        if (Flag.OPENCLANK_PERMISSION) {
+          result.permission = mergeDeep(result.permission ?? {}, JSON.parse(Flag.OPENCLANK_PERMISSION))
+        }
+
+        if (result.tools) {
+          const perms: Record<string, ConfigPermission.Action> = {}
+          for (const [tool, enabled] of Object.entries(result.tools)) {
+            const action: ConfigPermission.Action = enabled ? "allow" : "deny"
+            if (tool === "write" || tool === "edit" || tool === "patch" || tool === "multiedit") {
+              perms.edit = action
+              continue
+            }
+            perms[tool] = action
+          }
+          result.permission = mergeDeep(perms, result.permission ?? {})
+        }
+
+        if (!result.username) result.username = os.userInfo().username
+
+        if (Flag.OPENCLANK_DISABLE_AUTOCOMPACT) {
+          result.compaction = { ...result.compaction, auto: false }
+        }
+
+        // Preserve explicit lite (even unresolvable refs); small_model is a
+        // compatibility alias only when lite is absent. Host defaults come last
+        // and underneath effective user configuration, never via CONFIG_CONTENT.
+        if (result.model_groups?.lite === undefined && result.small_model !== undefined) {
+          result.model_groups = { ...result.model_groups, lite: result.small_model }
+        }
+        if (process.env.OPENCLANK_CONFIG_DEFAULTS) {
+          const defaults = yield* loadConfig(process.env.OPENCLANK_CONFIG_DEFAULTS, { dir: ctx.directory, source: "OPENCLANK_CONFIG_DEFAULTS" })
+          result = mergeConfigConcatArrays(defaults, result)
+        }
+        return {
+          config: result,
+          directories,
+          consoleState: {
+            consoleManagedProviders: Array.from(consoleManagedProviders),
+            activeOrgName,
+            switchableOrgCount: 0,
+          },
+        }
+      },
+      Effect.provideService(AppFileSystem.Service, fs),
+    )
+
+    const state = yield* InstanceState.make<State>(
+      Effect.fn("Config.state")(function* (ctx) {
+        const result = yield* loadInstanceState(ctx).pipe(Effect.orDie)
+        // Capture the private declaration fact before Config.get can expose
+        // this mutable root to plugin config hooks.
+        captureWindowDeclarations(result.config)
+        const lifetime = {alive:true}
+        visionConfigLifetimes.set(result, lifetime)
+        yield* Effect.addFinalizer(() => Effect.sync(() => { lifetime.alive = false }))
+        return result
+      }),
+    )
+
+    const prepareModelRefresh = Effect.fn("Config.prepareModelRefresh")(function* () {
+      if (!(yield* InstanceState.has(state))) return undefined
+      const target = yield* InstanceState.get(state)
+      const fresh = yield* loadInstanceState(yield* InstanceState.context, true).pipe(Effect.orDie)
+      const next: Info = clone(target.config)
+      for (const key of MODEL_KEYS) Object.assign(next, { [key]: fresh.config[key] })
+      return {
+        config: next,
+        commit: () => {
+          const committed = { ...target.config }
+          for (const key of MODEL_KEYS) Object.assign(committed, { [key]: next[key] })
+          target.config = committed
+        },
+      }
+    })
+
+    const get = Effect.fn("Config.get")(function* () {
+      return yield* InstanceState.use(state, (s) => s.config)
+    })
+
+    const visionSelectionWithProvenance = Effect.fn("Config.visionSelectionWithProvenance")(function* () {
+      const value = yield* InstanceState.get(state)
+      const lifetime = visionConfigLifetimes.get(value)
+      const fields = () => {
+        try {
+          const model=value.config.vision_model, group=value.config.model_groups?.vision
+          if (group !== undefined && typeof group !== "string" &&
+              (!group || typeof group !== "object" || Array.isArray(group) || Object.keys(group).some(key=>key !== "default" && key !== "models") ||
+                typeof group.default !== "string" || (group.models !== undefined && (!Array.isArray(group.models) || group.models.length > 128)))) return
+          const normalized = typeof group === "string" || group === undefined ? group :
+            {default:group.default,...(group.models === undefined ? {} : {models:[...group.models]})}
+          const refs = [model,...(typeof normalized === "string" ? [normalized] : normalized ? [normalized.default,...(normalized.models ?? [])] : [])]
+          if (refs.length > 130 || refs.some(ref=>ref !== undefined && (typeof ref !== "string" || Buffer.byteLength(ref,"utf8")>256))) return
+          return {model,group:normalized,snapshot:JSON.stringify([model,normalized])}
+        } catch { return }
+      }
+      const captured = fields()
+      return {vision_model:captured?.model, vision_group:captured?.group, current:()=> {
+        try { return !!lifetime?.alive && captured !== undefined && fields()?.snapshot === captured.snapshot } catch { return false }
+      }}
+    })
+
+    const directories = Effect.fn("Config.directories")(function* () {
+      return yield* InstanceState.use(state, (s) => s.directories)
+    })
+
+    const getConsoleState = Effect.fn("Config.getConsoleState")(function* () {
+      return yield* InstanceState.use(state, (s) => s.consoleState)
+    })
+
+    const update = Effect.fn("Config.update")(function* (config: Info) {
+      const dir = yield* InstanceState.directory
+      const file = path.join(dir, "config.json")
+      const existing = yield* loadFile(file)
+      yield* fs
+        .writeFileString(file, JSON.stringify(mergeDeep(writable(existing), writable(config)), null, 2))
+        .pipe(Effect.orDie)
+      yield* Effect.promise(() => Instance.dispose())
+    })
+
+    const invalidate = Effect.fn("Config.invalidate")(function* (wait?: boolean) {
+      yield* invalidateGlobal
+      const task = Instance.disposeAll()
+        .catch(() => undefined)
+        .finally(() =>
+          GlobalBus.emit("event", {
+            directory: "global",
+            payload: {
+              type: Event.Disposed.type,
+              properties: {},
+            },
+          }),
+        )
+      if (wait) yield* Effect.promise(() => task)
+      else void task
+    })
+
+    const updateGlobal = Effect.fn("Config.updateGlobal")(function* (config: Info) {
+      const file = globalConfigFile()
+      const before = (yield* readConfigFile(file)) ?? "{}"
+
+      let next: Info
+      if (!file.endsWith(".jsonc")) {
+        const existing = ConfigParse.schema(Info, normalizeLoadedConfig(ConfigParse.jsonc(before, file), file), file)
+        const merged = mergeDeep(writable(existing), writable(config))
+        yield* fs.writeFileString(file, JSON.stringify(merged, null, 2)).pipe(Effect.orDie)
+        next = merged
+      } else {
+        let updated = patchJsonc(before, writable(config))
+        const patched = ConfigParse.jsonc(updated, file)
+        if (isRecord(patched) && isRecord(patched.memory) && patched.memory.provider === "frankenmemory") {
+          updated = patchJsonc(updated, "memery", ["memory", "provider"])
+        }
+        next = ConfigParse.schema(Info, normalizeLoadedConfig(ConfigParse.jsonc(updated, file), file), file)
+        yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
+      }
+
+      yield* invalidate()
+      return next
+    })
+
+    return Service.of({
+      invalidateSource: () => invalidateGlobal,
+      prepareModelRefresh,
+      get,
+      visionSelectionWithProvenance,
+      getGlobal,
+      getConsoleState,
+      update,
+      updateGlobal,
+      invalidate,
+      directories,
+    })
+  }),
+)
+
+export const defaultLayer = layer.pipe(
+  Layer.provide(EffectFlock.defaultLayer),
+  Layer.provide(AppFileSystem.defaultLayer),
+  Layer.provide(Env.defaultLayer),
+  Layer.provide(Auth.defaultLayer),
+  Layer.provide(Account.defaultLayer),
+)

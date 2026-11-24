@@ -49,6 +49,8 @@ fn default_active() -> bool {
 pub struct ResourceRegistry {
     pub version: u32,
     #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
     pub entries: BTreeMap<String, ResourceRegistration>,
 }
 
@@ -56,12 +58,32 @@ impl Default for ResourceRegistry {
     fn default() -> Self {
         Self {
             version: RESOURCE_REGISTRY_VERSION,
+            revision: 0,
             entries: BTreeMap::new(),
         }
     }
 }
 
 impl ResourceRegistry {
+    /// Profile-5 read: bounded regular private registry snapshot, no path fallback.
+    #[cfg(unix)]
+    pub fn load_bounded(path:&Path, limit:u64)->io::Result<Self> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let file=fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK|libc::O_CLOEXEC).open(path)?;
+        let metadata=file.metadata()?;
+        if !metadata.is_file() || metadata.len()>limit {return Err(io::Error::new(io::ErrorKind::InvalidData,"registry unavailable"));}
+        let mut bytes=Vec::new();file.take(limit+1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64>limit{return Err(io::Error::new(io::ErrorKind::InvalidData,"registry unavailable"));}
+        let registry:Self=serde_json::from_slice(&bytes).map_err(|_|io::Error::new(io::ErrorKind::InvalidData,"registry unavailable"))?;
+        if registry.version!=RESOURCE_REGISTRY_VERSION || registry.entries.iter().any(|(key,entry)|key!=&entry.resource_id) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,"registry unavailable"));
+        }
+        Ok(registry)
+    }
+    #[cfg(not(unix))]
+    pub fn load_bounded(_path:&Path,_limit:u64)->io::Result<Self> {Err(io::Error::new(io::ErrorKind::Unsupported,"registry unavailable"))}
+
     pub fn load(path: &Path) -> io::Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -118,7 +140,9 @@ impl ResourceRegistry {
         Ok(upgraded)
     }
 
-    pub fn persist(&self, path: &Path) -> io::Result<()> {
+    pub fn persist(&mut self, path: &Path) -> io::Result<()> {
+        self.revision=self.revision.checked_add(1).filter(|v|*v<=9_007_199_254_740_991)
+            .ok_or_else(||io::Error::new(io::ErrorKind::InvalidData,"registry revision exhausted"))?;
         if self.version != RESOURCE_REGISTRY_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

@@ -23,10 +23,10 @@ import pytest
 
 FM_BIN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "mcp_servers/frankenmemory/target/release/fm-mcp",
+    "native/memery/target/release/memery-worker",
 )
 
-needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="fm-mcp release binary not built")
+needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="memery-worker release binary not built")
 
 
 def _chat_helpers(monkeypatch):
@@ -48,7 +48,7 @@ def _chat_helpers(monkeypatch):
 
 
 class _CaptureProvider:
-    provider_id = "frankenmemory"
+    provider_id = "memery"
 
     def __init__(self):
         self.calls = []
@@ -225,10 +225,10 @@ async def test_native_provider_object_also_takes_legacy_path(harness):
 async def test_provider_capture_lands_candidate_in_canonical_workspace(tmp_path):
     """SLICE-02 acceptance shape against the real engine: one direct-endpoint
     turn → raw rows plus an auto-admitted candidate, all in "global"."""
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
     from src.memory_scope import CHAT_WORKSPACE
 
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         result = await provider.capture(

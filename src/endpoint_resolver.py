@@ -188,7 +188,7 @@ def _is_mlx_deepseek_v4_repo_id(model_id: str) -> bool:
 
 
 def _is_mlx_deepseek_v4_shim_id(model_id: str) -> bool:
-    return "/.cache/odysseus/mlx-shims/deepseek-v4" in str(model_id or "").lower()
+    return "/.cache/open-clank/mlx-shims/deepseek-v4" in str(model_id or "").lower()
 
 
 def _filter_mlx_deepseek_v4_repo_when_shimmed(model_ids) -> list:

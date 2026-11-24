@@ -233,15 +233,6 @@ def test_invalid_limit_exits_cleanly(capsys):
     assert "must be a positive integer" in capsys.readouterr().err
 
 
-def test_help_includes_limit():
-    audit = load_module()
-
-    help_text = audit.build_parser().format_help()
-
-    assert "--limit LIMIT" in help_text
-    assert "Live mode: max open PRs to fetch/analyze" in help_text
-
-
 def test_progress_goes_to_stderr_not_stdout(monkeypatch, capsys):
     audit = load_module()
 
@@ -952,13 +943,3 @@ def test_json_empty_input_handled_cleanly(tmp_path, capsys):
     assert parsed["summary"]["total_prs_analyzed"] == 0
     assert parsed["hot_files"] == []
     assert parsed["review_priorities"] == []
-
-
-def test_help_includes_json_format_choice():
-    audit = load_module()
-
-    help_text = audit.build_parser().format_help()
-
-    assert "markdown" in help_text
-    assert "terminal" in help_text
-    assert "json" in help_text

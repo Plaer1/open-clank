@@ -10,8 +10,37 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { appletPath, resolveAppletLocation, updateAppletRoute } from '../../static/js/appletRoutes.js';
-import { createTreeHouseFeature } from '../../static/js/copal/treehouse.js';
 import { configureCopalStorage } from '../../static/js/copal/storage.js';
+
+// treehouse.js pulls in modules (markdown, modalSnap, theme code) that use `window` and `document` while they are
+// imported. Small plain stand-ins let the import finish; each test replaces both with its own fixture before it runs.
+class ImportElement {
+  constructor() { this.style = {}; this.dataset = {}; this.children = []; this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false }; }
+  append(...kids) { this.children.push(...kids); }
+  appendChild(kid) { this.children.push(kid); return kid; }
+  setAttribute() {} removeAttribute() {} addEventListener() {} removeEventListener() {} remove() {} focus() {}
+  querySelector() { return null; } querySelectorAll() { return []; } closest() { return null; } getBoundingClientRect() { return { left: 0, top: 0, width: 0, height: 0 }; }
+}
+const importLocation = { origin: 'http://localhost', href: 'http://localhost/', pathname: '/', search: '', hash: '' };
+globalThis.location ??= importLocation;
+globalThis.window ??= { location: importLocation, addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }), innerWidth: 1280, innerHeight: 800 };
+globalThis.document ??= { createElement: () => new ImportElement(), createElementNS: () => new ImportElement(), addEventListener() {}, removeEventListener() {}, getElementById: () => null,
+  querySelector: () => null, querySelectorAll: () => [], head: new ImportElement(), body: new ImportElement(), documentElement: new ImportElement(), readyState: 'complete' };
+const memoryStore = () => { const m = new Map(); return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
+globalThis.localStorage ??= memoryStore();
+globalThis.sessionStorage ??= memoryStore();
+globalThis.requestAnimationFrame ??= () => 0;
+globalThis.cancelAnimationFrame ??= () => {};
+globalThis.matchMedia ??= () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+for (const name of ['MutationObserver', 'ResizeObserver', 'IntersectionObserver']) globalThis[name] ??= class { observe() {} unobserve() {} disconnect() {} };
+// Timers, requests and channels those modules start while loading must neither keep the process alive nor reach a network.
+const realSetInterval = globalThis.setInterval, realSetTimeout = globalThis.setTimeout, realFetch = globalThis.fetch, realBroadcastChannel = globalThis.BroadcastChannel;
+globalThis.setInterval = (...args) => { const t = realSetInterval(...args); t?.unref?.(); return t; };
+globalThis.setTimeout = (...args) => { const t = realSetTimeout(...args); t?.unref?.(); return t; };
+globalThis.fetch = () => Promise.reject(new Error('no network in this test'));
+globalThis.BroadcastChannel = undefined; // achievementClient.js opens one at load and works without it
+const { createTreeHouseFeature } = await import('../../static/js/copal/treehouse.js');
+globalThis.setInterval = realSetInterval; globalThis.setTimeout = realSetTimeout; globalThis.fetch = realFetch; globalThis.BroadcastChannel = realBroadcastChannel;
 
 class FakeNode {
   constructor(tag, attrs = {}) {
@@ -30,6 +59,8 @@ class FakeNode {
   removeEventListener() {}
   focus() {}
   remove() {}
+  get childNodes() { return this.children; }
+  contains() { return false; }
   querySelector() { return null; }
   querySelectorAll() { return []; }
   get value() { return this._value || ''; }
@@ -107,7 +138,7 @@ function installBrowserGlobals(initialHref) {
   };
   globalThis.location = location;
   globalThis.history = history;
-  globalThis.document = { body: new FakeNode('body'), activeElement: null, createElement: (tag) => new FakeNode(tag) };
+  globalThis.document = { body: new FakeNode('body'), head: new FakeNode('head'), activeElement: null, createElement: (tag) => new FakeNode(tag), getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {} };
   globalThis.window = {
     location, history, document: globalThis.document,
     localStorage: globalThis.localStorage, sessionStorage: globalThis.sessionStorage,

@@ -2,7 +2,6 @@ import { Plugin } from "../plugin"
 import { Format } from "../format"
 import { LSP } from "../lsp"
 import { File } from "../file"
-import { Snapshot } from "../snapshot"
 import * as Project from "./project"
 import * as Vcs from "./vcs"
 import { Bus } from "../bus"
@@ -33,7 +32,6 @@ export const InstanceBootstrap = Effect.gen(function* () {
       File.Service,
       FileWatcher.Service,
       Vcs.Service,
-      Snapshot.Service,
       WriterService,
       BackfillService,
     ].map((s) => Effect.forkDetach(s.use((i) => i.init()))),

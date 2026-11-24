@@ -13,6 +13,105 @@ class AdmittedAgentSettings:
     generation: int
     effective: Mapping[str, Any]
 
+@dataclass(frozen=True)
+class AdmittedGcfPreference:
+    """Exact installed projection captured by one worker admission."""
+    revision: str
+    requested: bool
+    provider_id: str
+    model_id: str
+    json_whitespace_requested: bool = False
+    gcf_memoization_requested: bool = False
+    terminal_ansi_requested: bool = False
+    html_markdown_requested: bool = False
+    structured_search_requested: bool = False
+    repeated_lines_requested: bool = False
+    unified_diff_requested: bool = False
+    schema_annotations_requested: bool = False
+    toon_requested: bool = False
+    source_outlines_requested: bool = False
+    tap13_requested: bool = False
+    gcf_argument_decode_requested: bool = False
+    base64_lines_requested: bool = False
+    ndjson_logs_requested: bool = False
+    line_cap_requested: bool = False
+    line_cap_rows: int = 40
+    json_shape_requested: bool = False
+    read_unnumbered_requested: bool = False
+    progress_redraw_requested: bool = False
+    lockfile_versions_requested: bool = False
+    markdown_slim_requested: bool = False
+    adaptive_verbosity_requested: bool = False
+    gcf_same_request_rows_requested: bool = False
+    git_diff_no_color_requested: bool = False
+    unittest_success_requested: bool = False
+    cargo_artifacts_requested: bool = False
+    untracked_status_requested: bool = False
+    gcf_graph_references_requested: bool = False
+    gcf_session_view_requested: bool = False
+
+@dataclass(frozen=True)
+class AdmittedBrowserSnapshotPreference:
+    revision: str
+    requested: bool
+    provider_id: str
+    model_id: str
+
+def admitted_browser_snapshot_preference(snapshot, provider_id: str, model_id: str) -> AdmittedBrowserSnapshotPreference | None:
+    try:
+        provider = snapshot.providers[provider_id]
+        model = provider['models'][model_id]
+        raw = (model.get('options') or {}).get('_openclankAgentSettings',
+            (provider.get('options') or {}).get('_openclankAgentSettings'))
+        if raw is None: return None
+        settings = validate_agent_settings(raw)
+        return AdmittedBrowserSnapshotPreference(agent_settings_revision(settings),
+            settings.get('tokenomics', {}).get('browser_snapshot_repeat', False), provider_id, model_id)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+def admitted_gcf_preference(snapshot, provider_id: str, model_id: str) -> AdmittedGcfPreference | None:
+    try:
+        provider = snapshot.providers[provider_id]
+        model = provider['models'][model_id]
+        raw = (model.get('options') or {}).get('_openclankAgentSettings',
+            (provider.get('options') or {}).get('_openclankAgentSettings'))
+        if raw is None: return None
+        settings = validate_agent_settings(raw)
+        return AdmittedGcfPreference(agent_settings_revision(settings),
+            settings.get('tokenomics', {}).get('gcf_filtering', False), provider_id, model_id,
+            settings.get('tokenomics', {}).get('json_whitespace', False),
+            settings.get('tokenomics', {}).get('gcf_memoization', False),
+            settings.get('tokenomics', {}).get('terminal_ansi', False),
+            settings.get('tokenomics', {}).get('html_markdown', False),
+            settings.get('tokenomics', {}).get('structured_search', False),
+            settings.get('tokenomics', {}).get('repeated_lines', False),
+            settings.get('tokenomics', {}).get('unified_diff', False),
+            settings.get('tokenomics', {}).get('schema_annotations', False),
+            settings.get('tokenomics', {}).get('toon', False),
+            settings.get('tokenomics', {}).get('source_outlines', False),
+            settings.get('tokenomics', {}).get('tap13', False),
+            settings.get('tokenomics', {}).get('gcf_argument_decode', False),
+            settings.get('tokenomics', {}).get('base64_lines', False),
+            settings.get('tokenomics', {}).get('ndjson_logs', False),
+            settings.get('tokenomics', {}).get('line_cap', False),
+            settings.get('tokenomics', {}).get('line_cap_rows', 40),
+            settings.get('tokenomics', {}).get('json_shape', False),
+            settings.get('tokenomics', {}).get('read_unnumbered', False),
+            settings.get('tokenomics', {}).get('progress_redraw', False),
+            settings.get('tokenomics', {}).get('lockfile_versions', False),
+            settings.get('tokenomics', {}).get('markdown_slim', False),
+            settings.get('tokenomics', {}).get('adaptive_verbosity', False),
+            settings.get('tokenomics', {}).get('gcf_same_request_rows', False),
+            settings.get('tokenomics', {}).get('git_diff_no_color', False),
+            settings.get('tokenomics', {}).get('unittest_success', False),
+            settings.get('tokenomics', {}).get('cargo_artifacts', False),
+            settings.get('tokenomics', {}).get('untracked_status', False),
+            settings.get('tokenomics', {}).get('gcf_graph_references', False),
+            settings.get('tokenomics', {}).get('gcf_session_view', False))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
 def admit_agent_settings(owner: str, settings: Mapping[str, Any], *, generation: int, context_window: int, max_output: int) -> AdmittedAgentSettings:
     effective = effective_agent_settings(settings, context_window=context_window, max_output=max_output)
     return AdmittedAgentSettings(str(owner), int(generation), _freeze(effective))
@@ -20,12 +119,51 @@ def admit_agent_settings(owner: str, settings: Mapping[str, Any], *, generation:
 DEFAULT_AGENT_SETTINGS = {
     "compaction": {"auto": True, "prune": True, "tail_turns": 2, "preserve_recent_tokens": None, "reserved": None, "max_context": None},
     "checkpoint": {"reserved": 13000, "max_writer_failures": 3, "fork": False, "push_caps": {}},
+    "suggestions": {"enabled": False},
+    "worker_naming": {"enabled": False},
+    "dream": {"auto": False, "interval_days": 7},
+    "distill": {"auto": False, "interval_days": 30},
+    "tokenomics": {"image_downscale": False, "browser_snapshot_repeat": False, "gcf_argument_decode": False, "gcf_filtering": False, "json_whitespace": False, "gcf_memoization": False, "terminal_ansi": False, "html_markdown": False, "structured_search": False, "repeated_lines": False, "unified_diff": False, "schema_annotations": False, "toon": False, "source_outlines": False, "tap13": False, "base64_lines": False, "ndjson_logs": False, "line_cap": False, "line_cap_rows": 40, "json_shape": False, "read_unnumbered": False, "progress_redraw": False, "lockfile_versions": False, "markdown_slim": False, "adaptive_verbosity": False, "gcf_same_request_rows": False, "git_diff_no_color": False, "unittest_success": False, "cargo_artifacts": False, "untracked_status": False, "gcf_graph_references": False, "gcf_session_view": False},
 }
 
 PUSH_CAPS = ("tasks_ledger", "focus_task", "actor_ledger", "memory_titles", "global", "checkpoint", "memory", "notes", "design_decisions", "open_notes", "recent_user", "recent_user_per_msg")
 
 # Only fields consumed by the immutable managed native admission are writable.
 FIELD_SPECS = {
+    "suggestions.enabled": ("boolean", None, None, "Suggest a next prompt after a response using this chat’s model and thinking. Additional model usage; cost is unknown."),
+    "worker_naming.enabled": ("boolean", None, None, "Request names for eligible new workers using the initiating model and Thinking. Current process, route and source checks apply; additional model usage and cost are unknown."),
+    "tokenomics.image_downscale": ("boolean", None, None, "Optional image model view. Off by default; selected-model fidelity and cost qualification is unavailable."),
+    "tokenomics.untracked_status": ("boolean", None, None, "Request bounded untracked-status-shaped text views"),
+    "tokenomics.cargo_artifacts": ("boolean", None, None, "Request bounded Cargo artifact-output summaries"),
+    "tokenomics.unittest_success": ("boolean", None, None, "Request bounded unittest success-output views"),
+    "tokenomics.git_diff_no_color": ("boolean", None, None, "Request the exact no-color Git diff command substitution"),
+    "tokenomics.gcf_session_view": ("boolean", None, None, "Experimental. Keep a scoped GCF source descriptor and explicitly reanchor authorized originals. Off by default."),
+    "tokenomics.gcf_same_request_rows": ("boolean", None, None, "Request eligible same-request GCF row views"),
+    "tokenomics.browser_snapshot_repeat": ("boolean", None, None, "Experimental. References exact repeated sanitized Browser snapshot text within one request. Off by default."),
+    "tokenomics.gcf_graph_references": ("boolean", None, None, "Experimental. Sends a later Code Graph result as a difference against an earlier one in the same request when that is smaller. Off by default. Needs the GCF codec."),
+    "tokenomics.adaptive_verbosity": ("boolean", None, None, "Request an advisory concise style for crowded eligible text context"),
+    "tokenomics.markdown_slim": ("boolean", None, None, "Request bounded web Markdown omission views"),
+    "tokenomics.lockfile_versions": ("boolean", None, None, "Request bounded npm lockfile version views"),
+    "tokenomics.progress_redraw": ("boolean", None, None, "Request bounded carriage-return progress views"),
+    "tokenomics.read_unnumbered": ("boolean", None, None, "Request native read views without generated line gutters"),
+    "tokenomics.json_shape": ("boolean", None, None, "Request JSON structure views that omit scalar values"),
+    "tokenomics.line_cap": ("boolean", None, None, "Request bounded native grep line-cap views"),
+    "tokenomics.line_cap_rows": ("integer", 1, 100, "Maximum whole grep matches retained in a line-cap view"),
+    "tokenomics.gcf_argument_decode": ("boolean", None, None, "Request bounded GCF arguments for eligible read-only tools; addon availability is checked per turn"),
+    "tokenomics.ndjson_logs": ("boolean", None, None, "Request bounded NDJSON log model views"),
+    "tokenomics.base64_lines": ("boolean", None, None, "Request base64-shaped line elision in eligible output"),
+    "tokenomics.tap13": ("boolean", None, None, "Request bounded TAP 13 test-report views"),
+    "tokenomics.toon": ("boolean", None, None, "Request bounded TOON model views for eligible MCP results"),
+    "tokenomics.source_outlines": ("boolean", None, None, "Request source outline views when available"),
+    "tokenomics.schema_annotations": ("boolean", None, None, "Request compact tool schema annotations for eligible main turns"),
+    "tokenomics.repeated_lines": ("boolean", None, None, "Request exact repeated-line model views"),
+    "tokenomics.unified_diff": ("boolean", None, None, "Request bounded unified-diff context views"),
+    "tokenomics.terminal_ansi": ("boolean", None, None, "Request bounded terminal SGR model views"),
+    "tokenomics.html_markdown": ("boolean", None, None, "Request bounded HTML-to-Markdown model views"),
+    "tokenomics.structured_search": ("boolean", None, None, "Request bounded structured search model views"),
+    "tokenomics.gcf_memoization": ("boolean", None, None, "Memoize eligible GCF encodings in memory for the admitted scope"),
+    "tokenomics.gcf_filtering": ("boolean", None, None, "Request GCF filtering when the admitted codec, route and source are qualified"),
+    "tokenomics.json_whitespace": ("boolean", None, None, "Request compact JSON tool views when the source and route are qualified"),
     "compaction.auto": ("boolean", None, None, "Automatic context compaction"),
     "compaction.prune": ("boolean", None, None, "Prune old tool output"),
     "compaction.tail_turns": ("integer", 0, 1000, "Recent turns kept during compaction"),
@@ -55,7 +193,7 @@ FIELD_SPECS = {
     "watcher.ignore": ("string_array", None, None, "Workspace watcher ignore patterns"),
     "runtime_flags.try_best_handoff": ("boolean", None, None, "Enable Try-best detection on later worker generation; saved thresholds are inactive while this is false"),
     "never_ask": ("boolean", None, None, "Question owner: choose rather than ask on later worker generation; does not auto-approve permissions or answer pending questions"),
-    "snapshot": ("boolean", None, None, "Native file snapshots; disabling snapshots prevents file undo"),
+    "snapshot": ("boolean", None, None, "Legacy Git snapshot option; file recovery uses Lore."),
     "experimental.continue_loop_on_deny": ("boolean", None, None, "Continue after a denied tool call"),
     "experimental.try_best.edit_window": ("integer", 1, None, "Recent edit events compared for loop detection"),
     "experimental.try_best.edit_matches": ("integer", 1, None, "Similar prior edits before pausing"),
@@ -73,7 +211,7 @@ FIELD_REFERENCE_PATHS = {
     "compaction.max_context": ["compaction.max_context.*"],
 }
 
-PROFILE_FIELDS = frozenset({"checkpoint.task_archive_days", "checkpoint.memory_reconcile_on_search", "checkpoint.memory_search_score_floor", "workflow.maxConcurrentAgents", "workflow.maxDepth", "workflow.maxLifecycleAgents", "workflow.scriptDeadlineMs", "watcher.ignore", "snapshot", "agent", "default_agent", "model_groups", "command", "formatter", "lsp", "instructions", "never_ask", "runtime_flags.try_best_handoff"})
+PROFILE_FIELDS = frozenset({"checkpoint.task_archive_days", "checkpoint.memory_reconcile_on_search", "checkpoint.memory_search_score_floor", "workflow.maxConcurrentAgents", "workflow.maxDepth", "workflow.maxLifecycleAgents", "workflow.scriptDeadlineMs", "watcher.ignore", "agent", "default_agent", "model_groups", "command", "formatter", "lsp", "instructions", "never_ask", "runtime_flags.try_best_handoff"})
 
 def profile_agent_settings(value: Mapping[str, Any]) -> dict[str, Any]:
     """Only typed instance consumers enter the canonical owner inline layer."""
@@ -94,9 +232,9 @@ def profile_agent_settings(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def runtime_agent_settings(value: Mapping[str, Any]) -> dict[str, str]:
     parsed = validate_agent_settings(value)
-    result = {"MIMOCODE_NEVER_ASK": "1" if parsed["never_ask"] else "0"} if "never_ask" in parsed else {}
+    result = {"OPENCLANK_NEVER_ASK": "1" if parsed["never_ask"] else "0"} if "never_ask" in parsed else {}
     flags = parsed.get("runtime_flags", {})
-    if "try_best_handoff" in flags: result["MIMOCODE_ENABLE_TRY_BEST_HANDOFF"] = "1" if flags["try_best_handoff"] else "0"
+    if "try_best_handoff" in flags: result["OPENCLANK_ENABLE_TRY_BEST_HANDOFF"] = "1" if flags["try_best_handoff"] else "0"
     return result
 
 def agent_settings_schema() -> dict[str, Any]:
@@ -109,8 +247,27 @@ def agent_settings_schema() -> dict[str, Any]:
             item["source"] = "owner_generation_env" if path in {"never_ask", "runtime_flags.try_best_handoff"} else "owner_inline_config"
         else: item["source"] = "managed_admission_overlay"
         item["reference_paths"] = [path, *FIELD_REFERENCE_PATHS.get(path, []), *([path + "[]"] if kind == "string_array" else [])]
+        if path == "suggestions.enabled":
+            item.update(label="Next-prompt suggestions", source="host_owner", apply="next_readback")
+        if path == "worker_naming.enabled":
+            item.update(label="Automatic worker names", source="host_owner", apply="next_admission",
+                available=True, supported=True, resettable=True)
+        if path == "tokenomics.image_downscale":
+            item.update(available=False, supported=False, resettable=True, apply="unavailable",
+                reason_code="IMAGE_MODEL_QUALIFICATION_UNAVAILABLE",
+                reason="Selected-model image fidelity and cost qualification is unavailable; original images remain in use.")
+        if path == "snapshot":
+            item.update(available=False, supported=False, resettable=True, source="legacy_compatibility", apply="unavailable", reason_code="LORE_RECOVERY_OWNER", reason="Saved legacy value only. Git snapshot capture is unavailable; file recovery uses Lore.")
+        if path == "checkpoint.max_writer_failures":
+            item.update(available=False, supported=False, resettable=True, reason_code="CLASS_PROGRESS_RETRY_OWNER", reason="Saved legacy value only. Checkpoint retries use failure class and context progress; clear this override with Inherit.")
         if path == "instructions":
             item.update(available=False, supported=False, resettable=True, reason_code="INSTRUCTION_SOURCE_OWNER_REQUIRED", reason="Instruction paths/URLs need the existing Files permission checks; you can clear this override with Inherit")
+        if path.startswith("dream."):
+            item.update(available=False, supported=False, resettable=True, reason_code="MEMORY_POLICY_OWNER", reason="Compatibility value only. Use the Memory consolidation control for automatic maintenance.")
+        if path.startswith("distill."):
+            item.update(available=True, supported=True, resettable=True, source="account_scheduler_intent",
+                apply="next_scheduler_wake", help="Saved request. The scheduler evaluates the current profile, configured teacher and eligible repeated sources when it runs; eligibility is not evaluated here.")
+            if path == "distill.interval_days": item["max"] = 365
         if path.startswith("experimental.try_best."): item["gate"] = "runtime_flags.try_best_handoff"
         if low is not None: item["min"] = low
         if high is not None: item["max"] = high
@@ -123,7 +280,11 @@ def _freeze(value: Any) -> Any:
     return value
 
 def agent_settings_revision(value: Mapping[str, Any] | None) -> str:
-    return hashlib.sha256(json.dumps(value or {}, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    value = deepcopy(value or {})
+    tokenomics = value.get("tokenomics") if isinstance(value, dict) else None
+    if isinstance(tokenomics, dict) and tokenomics.get("line_cap") is True:
+        tokenomics.setdefault("line_cap_rows", 40)
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 def _quantity(item: Any) -> bool:
     if type(item) in (int, float): return math.isfinite(item) and item >= 0
@@ -225,6 +386,15 @@ def validate_agent_settings(value: Any) -> dict[str, Any]:
 def patch_agent_settings(current: Mapping[str, Any], update: Any, *, reset: Any = None) -> dict[str, Any]:
     """Sparse object merge; arrays/maps are values, reset deletes only a path."""
     parsed = validate_agent_settings(update)
+    distill = update.get("distill") if isinstance(update, Mapping) else None
+    if isinstance(distill, Mapping) and distill.get("interval_days") is not None:
+        value = distill["interval_days"]
+        if type(value) is not int or not 0 <= value <= 365:
+            raise ValueError("distill.interval_days must be between 0 and 365")
+    if isinstance(update, Mapping) and update.get("snapshot") is not None:
+        raise ValueError("snapshot is unavailable (LORE_RECOVERY_OWNER)")
+    if isinstance(update, Mapping) and isinstance(update.get("checkpoint"), Mapping) and update["checkpoint"].get("max_writer_failures") is not None:
+        raise ValueError("checkpoint.max_writer_failures is unavailable (CLASS_PROGRESS_RETRY_OWNER)")
     result = deepcopy(dict(current))
     def merge(target: dict, source: dict, prefix: str = "") -> None:
         for key, item in source.items():
@@ -262,6 +432,7 @@ def patch_agent_settings(current: Mapping[str, Any], update: Any, *, reset: Any 
 def effective_agent_settings(settings: Mapping[str, Any], *, context_window: int, max_output: int) -> dict[str, Any]:
     c = {**DEFAULT_AGENT_SETTINGS["compaction"], **dict(settings.get("compaction", {}))}
     k = {**DEFAULT_AGENT_SETTINGS["checkpoint"], **dict(settings.get("checkpoint", {}))}
+    k.pop("max_writer_failures", None)  # retained saved legacy value is not an admitted native option
     usable = max(0, int(context_window))
     recent = c["preserve_recent_tokens"] if c["preserve_recent_tokens"] is not None else max(2000, min(8000, usable // 4))
     # Native overflow.py keeps an explicitly configured reserve verbatim. Its
@@ -270,7 +441,10 @@ def effective_agent_settings(settings: Mapping[str, Any], *, context_window: int
     max_context = c["max_context"]
     if isinstance(max_context, str) and max_context.lower().endswith("k"): max_context = int(float(max_context[:-1]) * 1000)
     if isinstance(max_context, (int, float)) and max_context > 0: usable = min(usable, int(max_context))
-    return {"compaction": {**c, "preserve_recent_tokens": recent, "reserved": reserve, "effective_window": usable}, "checkpoint": k}
+    return {"compaction": {**c, "preserve_recent_tokens": recent, "reserved": reserve, "effective_window": usable}, "checkpoint": k,
+            "dream": {**DEFAULT_AGENT_SETTINGS["dream"], **dict(settings.get("dream", {}))},
+            "distill": {**DEFAULT_AGENT_SETTINGS["distill"], **dict(settings.get("distill", {}))},
+            "tokenomics": {**DEFAULT_AGENT_SETTINGS["tokenomics"], **dict(settings.get("tokenomics", {}))}}
 
 
 def model_route_references(settings: Mapping[str, Any]):

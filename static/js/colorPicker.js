@@ -4,14 +4,8 @@
 // their .value stays the source of truth, and we dispatch 'input'
 // events so existing listeners keep working.
 
-const LS_RECENT = 'odysseus-recent-colors';
+const LS_RECENT = 'openclank-recent-colors';
 const MAX_RECENT = 12;
-
-let _popover = null;
-let _input = null;
-let _h = 0, _s = 100, _v = 100;   // HSV
-let _drag = null;                  // 'sl' | 'hue' | null
-let _onOutside = null;
 
 // ── Color math ────────────────────────────────────────────────────────
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
@@ -82,6 +76,20 @@ function addRecent(hex) {
   try { localStorage.setItem(LS_RECENT, JSON.stringify(recents)); } catch {}
 }
 
+export function createColorPicker({ root = globalThis.document, lifetime = null } = {}) {
+  if (!root) throw new TypeError('picker root is required');
+  const doc = root.ownerDocument || root, win = doc.defaultView || globalThis.window;
+  const portal = root === doc ? doc.body : root;
+  let disposed = false, generation = 0;
+  const removers = [], frames = new Set();
+  const listen = (node, type, fn, options) => { const wrapped = (...args) => { if (!disposed) fn(...args); }; node.addEventListener(type, wrapped, options); removers.push(() => node.removeEventListener(type, wrapped, options)); };
+  const frame = fn => { const current = generation, id = win.requestAnimationFrame(() => { frames.delete(id); if (!disposed && current === generation) fn(); }); frames.add(id); };
+let _popover = null;
+let _input = null;
+let _h = 0, _s = 100, _v = 100;   // HSV
+let _drag = null;                  // 'sl' | 'hue' | null
+let _onOutside = null;
+
 // ── Suggestions based on current color (5 harmony swatches) ──────────
 function computeSuggestions() {
   // Complement, analogous ±30°, split-complement (+150), tone shift
@@ -96,7 +104,7 @@ function computeSuggestions() {
 
 // ── Popover build ─────────────────────────────────────────────────────
 function buildPopover() {
-  const p = document.createElement('div');
+  const p = doc.createElement('div');
   p.className = 'cp-popover';
   p.innerHTML = `
     <div class="cp-sl" data-drag="sl">
@@ -122,7 +130,7 @@ function buildPopover() {
     <div class="cp-section-label">Recent</div>
     <div class="cp-swatches cp-recent"></div>
   `;
-  document.body.appendChild(p);
+  portal.appendChild(p);
   wireHandlers(p);
   return p;
 }
@@ -147,7 +155,7 @@ function syncUI() {
 
   const current = hsvToHex(_h, _s, _v);
   preview.style.background = current;
-  if (document.activeElement !== hex) hex.value = current;
+  if (doc.activeElement !== hex) hex.value = current;
 
   // Suggestions
   const sContainer = _popover.querySelector('.cp-suggestions');
@@ -184,8 +192,8 @@ let _windowPointerInstalled = false;
 function _installWindowPointer() {
   if (_windowPointerInstalled) return;
   _windowPointerInstalled = true;
-  window.addEventListener('pointermove', (e) => { if (_drag) handleDrag(e); });
-  window.addEventListener('pointerup', () => {
+  listen(win, 'pointermove', (e) => { if (_drag) handleDrag(e); });
+  listen(win, 'pointerup', () => {
     if (_drag) {
       _drag = null;
       commitCurrent();
@@ -230,17 +238,17 @@ function wireHandlers(p) {
     }
   });
 
-  if (window.EyeDropper) {
+  if (win.EyeDropper) {
     eye.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       // Suppress the outside-click close while the OS eyedropper is open.
       // Without this, the user's pixel-pick fires a window click that
       // hits our document-capture listener and closes the popover.
-      const wasOnOutside = _onOutside;
+      const wasOnOutside = _onOutside, eyeGeneration = generation;
       _detachOutsideHandlers();
       try {
-        const r = await new window.EyeDropper().open();
-        if (r && r.sRGBHex) {
+        const r = await new win.EyeDropper().open();
+        if (!disposed && _popover === p && r && r.sRGBHex) {
           setFromHex(r.sRGBHex);
           applyToInput(true);
           commitCurrent();
@@ -248,13 +256,13 @@ function wireHandlers(p) {
       } catch (_) { /* user cancelled */ }
       // Re-arm outside-click handler after a frame so the eyedropper's
       // own pick-click doesn't immediately re-close us.
-      if (wasOnOutside && _popover) {
-        requestAnimationFrame(() => {
-          if (!_popover) return;
+      if (wasOnOutside && !disposed && _popover === p && generation === eyeGeneration) {
+        frame(() => {
+          if (disposed || _popover !== p || generation !== eyeGeneration) return;
           _onOutside = wasOnOutside;
           _onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
-          document.addEventListener('click', _onOutside, true);
-          document.addEventListener('keydown', _onEsc, true);
+          doc.addEventListener('click', _onOutside, true);
+          doc.addEventListener('keydown', _onEsc, true);
         });
       }
     });
@@ -295,8 +303,8 @@ function position(p, anchor) {
   const pRect = p.getBoundingClientRect();
   let left = rect.left;
   let top = rect.bottom + 6;
-  if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
-  if (top + pRect.height > window.innerHeight - 8) top = rect.top - pRect.height - 6;
+  if (left + pRect.width > win.innerWidth - 8) left = win.innerWidth - pRect.width - 8;
+  if (top + pRect.height > win.innerHeight - 8) top = rect.top - pRect.height - 6;
   if (left < 8) left = 8;
   if (top < 8) top = 8;
   p.style.left = left + 'px';
@@ -307,18 +315,19 @@ let _onEsc = null;
 
 function _detachOutsideHandlers() {
   if (_onOutside) {
-    document.removeEventListener('click', _onOutside, true);
-    document.removeEventListener('mousedown', _onOutside, true);
-    document.removeEventListener('pointerdown', _onOutside, true);
+    doc.removeEventListener('click', _onOutside, true);
+    doc.removeEventListener('mousedown', _onOutside, true);
+    doc.removeEventListener('pointerdown', _onOutside, true);
     _onOutside = null;
   }
   if (_onEsc) {
-    document.removeEventListener('keydown', _onEsc, true);
+    doc.removeEventListener('keydown', _onEsc, true);
     _onEsc = null;
   }
 }
 
 function _destroyPopover() {
+  generation++;
   _detachOutsideHandlers();
   if (_popover && _popover.parentNode) {
     _popover.parentNode.removeChild(_popover);
@@ -340,7 +349,7 @@ function open(inputEl) {
   _popover.style.opacity = '1';
   _popover.style.pointerEvents = 'auto';
   // Let it render with its natural size, then position
-  requestAnimationFrame(() => {
+  frame(() => {
     if (_popover && _input) position(_popover, _input);
   });
   syncUI();
@@ -374,13 +383,13 @@ function open(inputEl) {
   // Defer install so the click that opened us doesn't immediately close us.
   // Use requestAnimationFrame instead of setTimeout(0) to be sure the current
   // click event has fully bubbled before we register the listener.
-  requestAnimationFrame(() => {
-    document.addEventListener('click', _onOutside, true);
+  frame(() => {
+    doc.addEventListener('click', _onOutside, true);
     // pointerdown fires before click on touch devices, and reliably even
     // when the tap target swallows the click. Catching it ensures
     // outside-touches close the picker on mobile.
-    document.addEventListener('pointerdown', _onOutside, true);
-    document.addEventListener('keydown', _onEsc, true);
+    doc.addEventListener('pointerdown', _onOutside, true);
+    doc.addEventListener('keydown', _onEsc, true);
   });
 }
 
@@ -401,9 +410,11 @@ function _syncSwatch(el) {
   if (/^#[0-9a-f]{6}$/i.test(v || '')) el.style.background = v;
 }
 
-export function attachColorPicker(inputEl) {
-  if (!inputEl || !_NATIVE_VALUE_DESC || inputEl.dataset.cpAttached === '1') return;
+function attachColorPicker(inputEl) {
+  if (disposed || !inputEl || !_NATIVE_VALUE_DESC || inputEl.dataset.cpAttached === '1') return;
   inputEl.dataset.cpAttached = '1';
+  const originalType = inputEl.type, originalReadOnly = inputEl.readOnly;
+  removers.push(() => { delete inputEl.dataset.cpAttached; delete inputEl.value; inputEl.type = originalType; inputEl.readOnly = originalReadOnly; inputEl.classList.remove('cp-swatch-input'); inputEl.removeAttribute('data-cp-original-type'); });
 
   // Neutralize the native color dialog by changing the element's type.
   // Existing `.value` reads + `input` event listeners continue to work.
@@ -429,7 +440,7 @@ export function attachColorPicker(inputEl) {
 
   // Use mousedown so we fire BEFORE any document-level click handler
   // (e.g. our own _onOutside listener) can decide to close.
-  inputEl.addEventListener('mousedown', (e) => {
+  listen(inputEl, 'mousedown', (e) => {
     e.preventDefault();
     e.stopPropagation();
     // If the same input already has the picker open, close it (toggle).
@@ -441,17 +452,27 @@ export function attachColorPicker(inputEl) {
     }
   });
   // Suppress the trailing click so it can't bubble to overlays/listeners.
-  inputEl.addEventListener('click', (e) => {
+  listen(inputEl, 'click', (e) => {
     e.preventDefault();
     e.stopPropagation();
   });
 }
 
+function dispose() {
+  if (disposed) return;
+  disposed = true; _destroyPopover();
+  for (const id of frames) win.cancelAnimationFrame(id);
+  for (const remove of removers.splice(0)) remove();
+}
+lifetime?.add(dispose);
+return Object.freeze({ attach: attachColorPicker, dispose });
+}
+let legacyPicker = null;
+export function attachColorPicker(inputEl) {
+  if (!legacyPicker) legacyPicker = createColorPicker();
+  return legacyPicker.attach(inputEl);
+}
 export function initColorPickers(root = document) {
   root.querySelectorAll('input[type="color"]').forEach(attachColorPicker);
 }
-
-// Re-run on new inputs that may mount after init
-export function refreshColorPickers(root = document) {
-  initColorPickers(root);
-}
+export function refreshColorPickers(root = document) { initColorPickers(root); }

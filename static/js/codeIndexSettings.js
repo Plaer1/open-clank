@@ -5,12 +5,15 @@ export function parseMaxThreads(value) {
 }
 
 const RESOURCE_FIELDS = [
-  {name:'max_files', key:'code_index_max_files', label:'Max selected files per code folder', max:10000},
-  {name:'max_source_bytes', key:'code_index_max_source_bytes', label:'Total acquired source bytes per code folder', max:67108864},
-  {name:'max_file_bytes', key:'code_index_max_file_bytes', label:'Bytes per source file', max:524288},
-  {name:'max_generation_bytes', key:'code_index_max_generation_bytes', label:'Derived generation disk limit (bytes; default 2 GiB, maximum 8 GiB)', min:4096, step:4096, max:8589934592, default:2147483648},
+  {name:'max_files', key:'code_index_max_files', label:'Max indexed files per code folder', max:75000},
+  {name:'max_source_bytes', key:'code_index_max_source_bytes', label:'Total acquired source bytes per code folder', max:2**30, default:256*2**20},
+  {name:'max_file_bytes', key:'code_index_max_file_bytes', label:'Bytes per source file', max:16*2**20, default:4*2**20},
+  {name:'max_generation_bytes', key:'code_index_max_generation_bytes', label:'Derived index disk budget (bytes)', min:4096, step:4096, max:32*2**30, default:8*2**30},
 ];
 const positive = (value,max) => typeof value==='string' && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value)<=max ? Number(value) : null;
+const formatBytes=n=>n>=2**30 ? (n/2**30).toLocaleString(undefined,{maximumFractionDigits:2})+' GiB'
+  : n>=2**20 ? (n/2**20).toLocaleString(undefined,{maximumFractionDigits:2})+' MiB'
+  : n.toLocaleString()+' bytes';
 const limitsSummary = limits => limits ? `${integer(limits.max_files)} files, ${integer(limits.max_source_bytes)} total bytes, ${integer(limits.max_file_bytes)} bytes/file, ${integer(limits.max_generation_bytes)} bytes/generation` : 'unknown';
 const integer = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : 'unknown';
 export function schedulerSummary(data) {
@@ -19,7 +22,8 @@ export function schedulerSummary(data) {
       || !['pending', 'draining', 'applied'].includes(scheduler.status)) return 'Indexing status unavailable. Refresh to try again.';
   const desired = Number.isInteger(data.code_index_max_threads) && data.code_index_max_threads >= 1 && data.code_index_max_threads <= 32
     ? data.code_index_max_threads : 'unknown';
-  return `Saved/requested threads: ${desired}. ${scheduler.status === 'applied' ? 'Applied' : scheduler.status === 'draining' ? 'Draining active work before applying' : 'Pending application'}. Native: ${scheduler.native_status}. Effective: ${integer(scheduler.effective)}; active: ${integer(scheduler.active)}; queued: ${integer(scheduler.queued)}. Revision: ${integer(data.code_index_settings_revision)}; native revision: ${integer(scheduler.native_revision)}; effective revision: ${integer(scheduler.effective_revision)}. Drain pending: ${scheduler.drain_pending === true ? 'yes' : scheduler.drain_pending === false ? 'no' : 'unknown'}. Resource limits requested: ${limitsSummary(scheduler.desired_limits)}. Effective: ${limitsSummary(scheduler.effective_limits)}.`;
+  const legacy = scheduler.legacy_file_default ? ' Retained legacy 10,000-file value.' : '';
+  return `Saved/requested threads: ${desired}. ${scheduler.status === 'applied' ? 'Applied' : scheduler.status === 'draining' ? 'Draining active work before applying' : 'Pending application'}. Native: ${scheduler.native_status}. Effective: ${integer(scheduler.effective)}; active: ${integer(scheduler.active)}; queued: ${integer(scheduler.queued)}. Revision: ${integer(data.code_index_settings_revision)}; native revision: ${integer(scheduler.native_revision)}; effective revision: ${integer(scheduler.effective_revision)}. Drain pending: ${scheduler.drain_pending === true ? 'yes' : scheduler.drain_pending === false ? 'no' : 'unknown'}. Resource limits requested: ${limitsSummary(scheduler.desired_limits)}. Effective: ${limitsSummary(scheduler.effective_limits)}.${legacy}`;
 }
 
 export function mountCodeIndexSettings(root, {fetcher = globalThis.fetch} = {}) {
@@ -35,7 +39,28 @@ export function mountCodeIndexSettings(root, {fetcher = globalThis.fetch} = {}) 
     control.min=String(field.min??1);control.max=String(field.max);control.step=String(field.step??1);control.inputMode='numeric';control.value=String(field.default??field.max);
     control.setAttribute('aria-describedby','code-index-settings-status');
     label.htmlFor=control.id;label.textContent=field.label;
-    save.before(label,control);return {...field,control};
+    const slider=document.createElement('input');
+    slider.type='range';slider.min='0';slider.max='100';slider.step='1';
+    slider.setAttribute('aria-label',field.label);
+    const min=Number(control.min), max=field.max, step=Number(control.step);
+    const span=Math.log(max/min);
+    const reading=document.createElement('output');
+    reading.htmlFor=control.id;
+    const syncSlider=()=>{
+      const n=Number(control.value);
+      if(n<min || n>max || !Number.isFinite(n))return;
+      slider.value=String(Math.round(100*Math.log(n/min)/span));
+      reading.textContent=field.name==='max_files' ? n.toLocaleString()+' files' : formatBytes(n);
+      slider.setAttribute('aria-valuetext',reading.textContent);
+    };
+    slider.addEventListener('input',()=>{
+      const raw=min*Math.exp(span*Number(slider.value)/100);
+      control.value=String(Math.max(min,Math.min(max,Math.round(raw/step)*step)));
+      syncSlider();
+    });
+    control.addEventListener('input',syncSlider);
+    syncSlider();
+    save.before(label,reading,slider,control);return {...field,control,slider,syncSlider};
   });
   const explanation=document.createElement('p');explanation.className='admin-toggle-sub';
   explanation.textContent='Resource limits apply after active indexing drains. File-count and source-byte limits change the producer identity; the storage-only generation disk limit does not. Existing source and published generations are preserved. Per-file bytes cannot exceed total source bytes. The generation disk limit bounds derived index storage; it does not reserve free disk space.';
@@ -43,7 +68,7 @@ export function mountCodeIndexSettings(root, {fetcher = globalThis.fetch} = {}) 
   const hardStatus=document.createElement('p');hardStatus.className='admin-toggle-sub';hardStatus.textContent='Native hard quotas: readback pending.';status.after(hardStatus);
   let busy = false;
   let forbidden = false;
-  const controls = () => { for(const field of resourceInputs)field.control.disabled=busy||forbidden; input.disabled = busy || forbidden; save.disabled = busy || forbidden; refresh.disabled = busy; };
+  const controls = () => { for(const field of resourceInputs)field.control.disabled=field.slider.disabled=busy||forbidden; input.disabled = busy || forbidden; save.disabled = busy || forbidden; refresh.disabled = busy; };
   const request = async (method) => {
     if (busy) return;
     const value = method === 'POST' ? parseMaxThreads(input.value) : null;
@@ -79,7 +104,7 @@ export function mountCodeIndexSettings(root, {fetcher = globalThis.fetch} = {}) 
       }
       const data = await response.json();
       if (Number.isInteger(data.code_index_max_threads) && data.code_index_max_threads >= 1 && data.code_index_max_threads <= 32) input.value = String(data.code_index_max_threads);
-      for(const field of resourceInputs)if(Number.isSafeInteger(data[field.key])&&data[field.key]>=(field.min??1)&&data[field.key]<=field.max&&data[field.key]%(field.step??1)===0)field.control.value=String(data[field.key]);
+      for(const field of resourceInputs)if(Number.isSafeInteger(data[field.key])&&data[field.key]>=(field.min??1)&&data[field.key]<=field.max&&data[field.key]%(field.step??1)===0){field.control.value=String(data[field.key]);field.syncSlider();}
       const hard=data.code_index_scheduler?.hard_limits;
       hardStatus.textContent=hard ? `Native hard resource ceilings: ${limitsSummary(hard)}. Read-only quotas: ${integer(hard.max_queued_jobs)} queued jobs; ${integer(hard.max_descriptor_bytes)} descriptor bytes; ${integer(hard.max_retained_data_bytes)} retained data bytes (not process RSS); ${integer(hard.max_source_records)} evidence records; ${integer(hard.max_resolution_records)} resolution records.` : 'Native hard quotas unavailable; saved limits remain pending.';
       status.textContent = schedulerSummary(data);

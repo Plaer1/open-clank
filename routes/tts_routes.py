@@ -16,6 +16,16 @@ from services.tts.tts_service import _safe_speed
 
 logger = logging.getLogger(__name__)
 
+
+def _is_local_kokoro_route(route) -> bool:
+    return bool(
+        route
+        and route.get("model_id") == "kokoro/Kokoro-82M"
+        and route.get("family_id") == "local-executor"
+        and route.get("adapter_id") == "openclank-local-executor"
+        and route.get("billing_lane") == "local"
+    )
+
 class TTSRequest(BaseModel):
     text: str
     format: str = "audio"  # "audio" or "base64"
@@ -58,17 +68,22 @@ def setup_tts_routes(tts_service):
                 tts_service.cache_dir.glob("*.mp3")
             )
             available = bool(browser or (enabled and route))
+            local_kokoro = _is_local_kokoro_route(route)
+            configured = bool(enabled and route) or browser
+            configured_speed = _safe_speed(settings.get("tts_speed", "1"))
             return {
                 "available": available,
-                "ready": available,
+                "ready": bool(available and not local_kokoro),
+                "configured": configured,
+                "runtime_status": "unknown" if local_kokoro else ("ready" if available else "disabled"),
                 "provider": "browser" if browser else ("managed" if enabled and route else "disabled"),
                 "model": (
                     "Browser (Web Speech API)"
                     if browser
                     else ((route or {}).get("model_name") or (route or {}).get("model_id") or "")
                 ),
-                "voice": settings.get("tts_voice", "alloy"),
-                "speed": _safe_speed(settings.get("tts_speed", "1")),
+                "voice": ("af_heart" if local_kokoro and not browser and settings.get("tts_voice", "alloy") == "alloy" else settings.get("tts_voice", "alloy")),
+                "speed": configured_speed,
                 "cache_entries": len(cache_files),
                 "cache_size_mb": round(
                     sum(path.stat().st_size for path in cache_files) / (1024 * 1024),
@@ -101,14 +116,19 @@ def setup_tts_routes(tts_service):
             if route is None:
                 raise HTTPException(503, detail={"message": "TTS service not available"})
             text = body.text[:5000]
-            voice = str(settings.get("tts_voice") or "alloy")
+            local_kokoro = _is_local_kokoro_route(route)
+            voice = str(settings.get("tts_voice") or ("af_heart" if local_kokoro else "alloy"))
+            if local_kokoro and voice == "alloy":
+                voice = "af_heart"
             speed = _safe_speed(settings.get("tts_speed", "1"))
+            if local_kokoro and speed != 1.0:
+                raise HTTPException(status_code=400, detail={"message": "Local Kokoro supports only speech speed 1"})
             audio_data, mime, _ = await synthesize_audio(
                 owner=owner,
                 text=text,
                 voice=voice,
                 speed=speed,
-                response_format="mp3",
+                response_format="wav" if local_kokoro else "mp3",
                 model_route_id=route["model_route_id"],
             )
             if body.format == "base64":

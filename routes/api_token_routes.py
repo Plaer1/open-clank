@@ -14,6 +14,8 @@ MAX_NAME_LEN = 100
 DEFAULT_SCOPES = "chat"
 ALLOWED_SCOPES = {
     "chat",
+    "sessions:read",
+    "sessions:write",
     "todos:read",
     "todos:write",
     "documents:read",
@@ -65,6 +67,7 @@ def _normalize_scopes(scopes: str | list[str] | None = None, profile: str | None
         idx = normalized.index(write_scope)
         normalized.insert(idx, read_scope)
 
+    ensure_before("sessions:write", "sessions:read")
     ensure_before("todos:write", "todos:read")
     ensure_before("documents:write", "documents:read")
     ensure_before("calendar:write", "calendar:read")

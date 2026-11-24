@@ -79,7 +79,7 @@ async fn format_marker_is_required_and_version_checked_before_lore_open() {
     drop(first);
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap(),
-        "openclank-history\nformat=1\n"
+        "openclank-history\nformat=2\nlore-source=f00dbbf07cb449103e211ccbecaa995630f47d2d\npatchset=openclank-v012-p04-1\n"
     );
 
     let future = tempfile::tempdir().unwrap();
@@ -120,7 +120,7 @@ async fn format_marker_is_required_and_version_checked_before_lore_open() {
     assert!(second.wait().unwrap().success());
     assert_eq!(
         std::fs::read_to_string(concurrent.path().join(".openclank-history-format")).unwrap(),
-        "openclank-history\nformat=1\n"
+        "openclank-history\nformat=2\nlore-source=f00dbbf07cb449103e211ccbecaa995630f47d2d\npatchset=openclank-v012-p04-1\n"
     );
 }
 

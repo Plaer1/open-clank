@@ -1,0 +1,238 @@
+.bound-buddy {
+  --buddy-tone: #ffd662;
+  position: fixed;
+  inset: auto 16px 110px auto;
+  width: 44px;
+  height: 44px;
+  z-index: 10031;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.bound-buddy-play {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  color: var(--buddy-tone);
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+  border: 0;
+  cursor: grab;
+  touch-action: none;
+}
+
+.bound-buddy-figure {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  isolation: isolate;
+  pointer-events: none;
+}
+
+.bound-buddy-figure::before {
+  position: absolute;
+  content: '';
+  inset: 0;
+  z-index: -1;
+  clip-path: polygon(50% 2%, 97% 84%, 3% 84%);
+  background: var(--panel, #34373e);
+}
+.bound-buddy:not(.openclank-annotator) .bound-buddy-play:is(:hover, :focus, :active, .bound-buddy-target) {
+  background: transparent;
+  outline: none !important;
+  box-shadow: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.bound-buddy:not(.openclank-annotator) .bound-buddy-play { background: transparent; user-select: none; }
+.bound-buddy-play:focus-visible .bound-buddy-figure::before,
+.bound-buddy-play.bound-buddy-target .bound-buddy-figure::before {
+  background: var(--buddy-tone);
+}
+.bound-buddy-play:focus-visible .bound-buddy-figure::after,
+.bound-buddy-play.bound-buddy-target .bound-buddy-figure::after {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  z-index: -1;
+  clip-path: polygon(50% 2%, 97% 84%, 3% 84%);
+  background: var(--panel, #34373e);
+}
+.bound-buddy-play:active { cursor: grabbing; }
+
+.bound-buddy-art {
+  position: relative;
+  width: 34px;
+  height: 34px;
+}
+
+.bound-buddy-art::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: center / contain no-repeat url('/static/icons/treehouse-achievements/kit/mascot.svg');
+}
+
+@supports (mask: url('') center / contain no-repeat) {
+  .bound-buddy-art::before {
+    background: currentColor;
+    mask: url('/static/icons/treehouse-achievements/kit/mascot.svg') center / contain no-repeat;
+  }
+}
+
+.bound-buddy-eye {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  top: 49%;
+  left: 51%;
+  border-radius: 50%;
+  background: var(--bg);
+  transform: translate(var(--buddy-look-x, 0), var(--buddy-look-y, 0));
+  pointer-events: none;
+}
+
+.bound-buddy[data-look='winter'] {
+  --buddy-tone: #8adfff;
+}
+
+.bound-buddy[data-look='winter'] .bound-buddy-art::after {
+  content: '✦';
+  position: absolute;
+  right: -2px;
+  top: -5px;
+  color: var(--buddy-tone);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+/* Quiet and sleeping poses slow the shared sway. */
+.bound-buddy { --buddy-idle-period: 4s; }
+.bound-buddy[data-pose='drowsy'] { --buddy-idle-period: 5s; }
+.bound-buddy[data-pose='sleeping'] { --buddy-idle-period: 6s; }
+
+.bound-buddy-actions,
+.bound-buddy-picker-hint {
+  position: absolute;
+  inset-inline-end: 0;
+  bottom: calc(100% + 6px);
+  width: max-content;
+  max-width: min(220px, calc(100vw - 16px));
+  padding: 8px;
+  background: var(--panel, var(--bg));
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.bound-buddy-actions[hidden] { display: none; }
+.bound-buddy-target-tooltip {
+  position: fixed;
+  pointer-events: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  background: var(--panel, var(--bg));
+  white-space: nowrap;
+}
+.bound-buddy-open-down :is(.bound-buddy-actions,.bound-buddy-picker-hint) { bottom: auto; top: calc(100% + 6px); }
+.bound-buddy-open-right :is(.bound-buddy-actions,.bound-buddy-picker-hint) { inset-inline: 0 auto; }
+.bound-buddy-actions button, .bound-buddy-picker-hint button {
+  cursor: pointer;
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: inherit;
+}
+.bound-buddy-picker-hint button { margin-inline-start: 6px; }
+.bound-buddy-picking { pointer-events: none; }
+.bound-buddy-picking .bound-buddy-play, .bound-buddy-picker-hint { pointer-events: auto; }
+.bound-buddy-target {
+  outline: 2px solid var(--accent-primary,#f6be48) !important;
+  outline-offset: -2px !important;
+  cursor: crosshair !important;
+}
+
+[data-buddy-appearance] .settings-label {
+  display: block;
+  margin-bottom: 6px;
+}
+
+/* Toon2 float-wobble separates vertical travel from the later turn. */
+@keyframes buddy-float {
+  0%, 50%, 100% { translate: 0 0; }
+  25% { translate: 0 -3px; }
+  75% { translate: 0 2px; }
+}
+@keyframes buddy-turn {
+  0%, 100% { rotate: 0deg; }
+  35% { rotate: 3deg; }
+  60% { rotate: -1deg; }
+  85% { rotate: -3deg; }
+}
+/* Toon2 breathing-surface, reduced to the foreground insignia's scale. */
+@keyframes buddy-insignia-breath {
+  0%, 50%, 100% { scale: 1; }
+  25% { scale: 1.025 .976; }
+  75% { scale: .982 1.019; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .bound-buddy-figure {
+    transform-origin: 50% 80%;
+    animation: buddy-float var(--buddy-idle-period) ease-in-out infinite,
+      buddy-turn var(--buddy-idle-period) ease-in-out infinite;
+  }
+  .bound-buddy-art {
+    transform-origin: 50% 55%;
+    animation: buddy-insignia-breath 3.7s ease-in-out infinite;
+  }
+}
+
+.bound-buddy-notice {
+  position: absolute;
+  inset-inline-end: 100%;
+  min-width: max-content;
+  padding-inline-end: 6px;
+  pointer-events: none;
+}
+
+.bound-buddy-notice:empty {
+  display: none;
+}
+
+.openclank-annotator {
+  inset-inline: auto 70px;
+}
+
+.openclank-annotator .annotator-launcher {
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--panel, var(--bg));
+  color: var(--fg);
+  font-size: 24px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.annotator-feedback {
+  width: min(420px, calc(100vw - 28px));
+}
+
+.annotator-feedback form label,
+.annotator-feedback textarea {
+  display: block;
+  width: 100%;
+}
+
+.annotator-feedback textarea {
+  margin-block: 6px;
+  resize: vertical;
+}
+
+.annotator-feedback #annotator-feedback-target {
+  overflow-wrap: anywhere;
+}

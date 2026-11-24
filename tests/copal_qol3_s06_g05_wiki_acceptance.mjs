@@ -74,7 +74,7 @@ const collect = chunk => { appOutput += String(chunk); if (appOutput.length > 30
 app.stdout.on('data', collect); app.stderr.on('data', collect);
 async function waitHealth() { for (let attempt = 0; attempt < 1200; attempt += 1) { if (app.exitCode != null) throw new Error(`FastAPI exited: ${appOutput.slice(-4000)}`); try { if ((await fetch(`${base}/api/health`)).ok) return; } catch (_) {} await delay(100); } throw new Error(`health timeout: ${appOutput.slice(-4000)}`); }
 let session = '';
-async function request(route, options = {}) { const headers = new Headers(options.headers || {}); if (session) headers.set('Cookie', `odysseus_session=${session}`); return fetch(`${base}${route}`, { ...options, headers }); }
+async function request(route, options = {}) { const headers = new Headers(options.headers || {}); if (session) headers.set('Cookie', `open_clank_session=${session}`); return fetch(`${base}${route}`, { ...options, headers }); }
 async function json(route, options = {}) { const response = await request(route, { ...options, headers:{ 'Content-Type':'application/json', ...(options.headers || {}) } }); const body = await response.text(); assert(response.ok, `${route}: HTTP ${response.status} ${body}`); return JSON.parse(body); }
 async function openBrowser() {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'copal-qol3-g05-browser-'));
@@ -98,7 +98,7 @@ let browser;
 try {
   await waitHealth();
   const login = await fetch(`${base}/api/auth/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ username:'e', password, remember:true }) });
-  assert.equal(login.status, 200, await login.text()); session = (login.headers.get('set-cookie') || '').match(/odysseus_session=([^;]+)/)?.[1] || ''; assert(session, 'login did not return a session cookie');
+  assert.equal(login.status, 200, await login.text()); session = (login.headers.get('set-cookie') || '').match(/open_clank_session=([^;]+)/)?.[1] || ''; assert(session, 'login did not return a session cookie');
   const status = await json('/api/copal/status?workspace=default'); assert.equal(status.owner, 'e');
   const listed = await json('/api/copal/documents?workspace=default&corpus=wiki&hidden=include');
   const historical = listed.docs.filter(doc => names.includes(doc.name));
@@ -112,7 +112,7 @@ try {
   assert.equal(override.doc.owner, 'e'); assert.equal(override.doc.workspace_id, 'g05-override'); assert.equal(override.doc.name, names[0]);
   const overrideView = await json('/api/copal/documents?workspace=g05-override&corpus=wiki&hidden=include'); const owned = overrideView.docs.filter(doc => doc.name === names[0]); assert.equal(owned.length, 1); assert.equal(owned[0].owner, 'e'); assert.equal(owned[0].text, 'G05 USER OVERRIDE');
   browser = await openBrowser(); const { cdp, evaluate, until } = browser;
-  await cdp('Network.setCookie', { name:'odysseus_session', value:session, url:`${base}/`, httpOnly:true, sameSite:'Lax' });
+  await cdp('Network.setCookie', { name:'open_clank_session', value:session, url:`${base}/`, httpOnly:true, sameSite:'Lax' });
   await cdp('Page.navigate', { url:`${base}/copal/editor` }); await until('Boolean(window.copalModule)', 'Copal module'); await evaluate('window.copalModule.init(location.origin)'); await until('Boolean(window.__openClankCopalContext?.())', 'Copal storage scope'); await evaluate('window.copalModule.open("wiki", false)');
   await until(`[...document.querySelectorAll('[data-wiki-library] .copal-doc-row')].filter(node => ${JSON.stringify(names)}.includes(node.textContent.trim())).length === 8`, 'all eight historical library rows');
   const screenshots = [];

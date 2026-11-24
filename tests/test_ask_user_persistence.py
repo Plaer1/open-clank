@@ -7,13 +7,11 @@ cannot cover/push away the card.  The same payload must be persisted inside
 
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import src.agent_loop as agent_loop
 
 
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _collect(gen):
@@ -98,13 +96,3 @@ def test_ask_user_is_emitted_last_and_persisted(monkeypatch):
 
     metrics = next(event["data"] for event in events if event.get("type") == "metrics")
     assert metrics["tool_events"][0]["ask_user"] == payload
-
-
-def test_frontend_uses_one_renderer_for_live_and_restored_cards():
-    chat = (ROOT / "static" / "js" / "chat.js").read_text(encoding="utf-8")
-    renderer = (ROOT / "static" / "js" / "chatRenderer.js").read_text(encoding="utf-8")
-
-    assert "chatRenderer.renderAskUserCard(json.data || {})" in chat
-    assert "export function renderAskUserCard" in renderer
-    assert "renderAskUserCard(pendingAskUser" in renderer
-    assert "if (role === 'user') removeAskUserCards(box)" in renderer

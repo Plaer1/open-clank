@@ -1,0 +1,100 @@
+import { Deferred, Effect, Fiber, ScopedCache, Scope, Context } from "effect"
+import * as EffectLogger from "./logger"
+import { Instance, type InstanceContext } from "@/project/instance"
+import { LocalContext } from "@/util"
+import { InstanceRef, WorkspaceRef } from "./instance-ref"
+import { registerDisposer } from "./instance-registry"
+import { WorkspaceContext } from "@/control-plane/workspace-context"
+
+const TypeId = "~opencode/InstanceState"
+
+export interface InstanceState<A, E = never, R = never> {
+  readonly [TypeId]: typeof TypeId
+  readonly cache: ScopedCache.ScopedCache<string, Deferred.Deferred<A, E>, never, R>
+}
+
+export const bind = <F extends (...args: any[]) => any>(fn: F): F => {
+  const fiber = Fiber.getCurrent()
+  const ctx = fiber ? Context.getReferenceUnsafe(fiber.context, InstanceRef) : undefined
+  // Match context's precedence: resumed fibers can run under another instance's ALS.
+  if (ctx) return ((...args: any[]) => Instance.restore(ctx, () => fn(...args))) as F
+  try {
+    return Instance.bind(fn)
+  } catch (err) {
+    if (!(err instanceof LocalContext.NotFound)) throw err
+  }
+  return fn
+}
+
+export const context = Effect.gen(function* () {
+  return (yield* InstanceRef) ?? Instance.current
+})
+
+export const workspaceID = Effect.gen(function* () {
+  return (yield* WorkspaceRef) ?? WorkspaceContext.workspaceID
+})
+
+export const directory = Effect.map(context, (ctx) => ctx.directory)
+
+export const make = <A, E = never, R = never>(
+  init: (ctx: InstanceContext) => Effect.Effect<A, E, R | Scope.Scope>,
+  opts?: { phase?: "normal" | "late" },
+): Effect.Effect<InstanceState<A, E, Exclude<R, Scope.Scope>>, never, R | Scope.Scope> =>
+  Effect.gen(function* () {
+    const cache = yield* ScopedCache.make<string, Deferred.Deferred<A, E>, never, R>({
+      capacity: Number.POSITIVE_INFINITY,
+      lookup: () =>
+        Effect.gen(function* () {
+          const ctx = yield* context
+          const workspace = yield* workspaceID
+          const entry = yield* Effect.scope
+          // Register resources first so entry closure stops their users before releasing them.
+          const resources = yield* Scope.fork(entry)
+          const result = yield* Deferred.make<A, E>()
+          yield* Effect.suspend(() => init(ctx)).pipe(
+            Scope.provide(resources),
+            Effect.provideService(InstanceRef, ctx),
+            Effect.provideService(WorkspaceRef, workspace),
+            Effect.interruptible,
+            Deferred.into(result),
+            // Enter Deferred.into even if invalidation precedes the fiber's first scheduled step.
+            Effect.forkIn(entry, { uninterruptible: true }),
+          )
+          return result
+        }).pipe(Effect.uninterruptible),
+    })
+
+    const off = registerDisposer(
+      (directory) => Effect.runPromise(ScopedCache.invalidate(cache, directory).pipe(Effect.provide(EffectLogger.layer))),
+      { phase: opts?.phase },
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(off))
+
+    return {
+      [TypeId]: TypeId,
+      cache,
+    }
+  })
+
+export const get = <A, E, R>(self: InstanceState<A, E, R>) =>
+  Effect.gen(function* () {
+    const result = yield* ScopedCache.get(self.cache, yield* directory).pipe(Effect.uninterruptible)
+    return yield* Deferred.await(result)
+  })
+
+export const use = <A, E, R, B>(self: InstanceState<A, E, R>, select: (value: A) => B) => Effect.map(get(self), select)
+
+export const useEffect = <A, E, R, B, E2, R2>(
+  self: InstanceState<A, E, R>,
+  select: (value: A) => Effect.Effect<B, E2, R2>,
+) => Effect.flatMap(get(self), select)
+
+export const has = <A, E, R>(self: InstanceState<A, E, R>) =>
+  Effect.gen(function* () {
+    return yield* ScopedCache.has(self.cache, yield* directory)
+  })
+
+export const invalidate = <A, E, R>(self: InstanceState<A, E, R>) =>
+  Effect.gen(function* () {
+    return yield* ScopedCache.invalidate(self.cache, yield* directory)
+  })

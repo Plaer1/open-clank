@@ -1,0 +1,35 @@
+{
+  "id": "batch-093",
+  "group": "docs.openclank-docs-journal",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 2012,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-journal.title",
+      "source": "Journal",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-journal.body",
+      "source": "# Journal\n\nYour journal is a workspace for pages, pictures and sources you want to find again. **Copal → Journal** opens it in Editor. The name at the top of **Editor’s file sidebar (Explorer)** is the journal you’re in. Rename it *Field Notes* and that is what the sidebar shows.\n\n![In the sidebar, Copal contains Journal, its Manage journals menu, and Editor. Tools contains Instruction Manual. Editor's activity rail contains Explorer, Wiki, and Graph.](/static/docs/media/manual-editor-journal-navigation/preview.webp)\n\n*Navigation diagram. Journal opens the configured default. If Journal is hidden, open Settings → Appearance → Copal navigation → Manage journals.*\n\n## Write a journal page\n\nThe starter journal opens on **Welcome to your journal**, which you can edit. Choose **New journal page** in Editor’s sidebar to add a page of your own. Type `[[Field observations]]` in another page to link to one named *Field observations*. Open the linked page in Wiki to see which pages point back, or follow the links in [[Graph]]. [[Wiki Recipes]] shows how to embed just one section.\n\n## Manage Journals\n\nUse the menu beside **Journal** in Copal, or open **Settings → Appearance → Copal navigation → Manage journals**. **Add Journal…** registers an eligible account folder. **Open** switches to it for this session; **Make default** chooses where the sidebar shortcut takes you next time. **Remove** unregisters a journal and leaves its files in place.\n\n**File → Close Journal** in Editor releases the workspace and keeps open tabs. If you hid the Journal shortcut, restore it in **Copal navigation**.\n\nConverting an older journal? **Review Journal conversion…** previews conflicts. Applying the conversion makes the chosen folder the only registered journal and the default. Keep the operation ID so **Check Journal conversion…** can confirm the outcome before you retry.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

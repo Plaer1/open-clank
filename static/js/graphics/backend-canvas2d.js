@@ -1,3 +1,5 @@
+import { createBoundedCache } from './resources.js';
+
 /**
  * Ordinary Canvas2D graphics backend.
  *
@@ -21,6 +23,8 @@ const NATIVE_EMOJI_PATTERN = (() => {
 const EMOJI_RASTER_SIZE = 24;
 const MAX_NATIVE_EMOJI_ENTRIES = 512;
 const MAX_NATIVE_EMOJI_PIXELS = 1024 * 1024;
+const MAX_TINT_RASTER_EDGE = 128;
+const MAX_TINT_CACHE_PIXELS = 1024 * 1024;
 
 function isNativeEmojiGlyph(value) {
   const text = String(value == null ? '' : value);
@@ -47,6 +51,12 @@ export function createCanvas2DBackend({ canvas, limits }) {
   // native emoji animation from allocating a fresh raster for every size.
   const nativeEmojiCache = new Map();
   let nativeEmojiPixels = 0;
+  const tintCache = createBoundedCache({ maxEntries:512 });
+  const tintSourceIds = new WeakMap();
+  let tintSequence = 0;
+  let tintPixels = 0;
+  let tintScratch = null;
+  let tintScratchCtx = null;
 
   function releaseNativeEmojiEntry(entry) {
     if (!entry) return;
@@ -80,6 +90,66 @@ export function createCanvas2DBackend({ canvas, limits }) {
       }
     } catch (_) { return null; }
     return surface;
+  }
+
+  function paintTint(target, source, color, width, height) {
+    target.clearRect(0, 0, width, height);
+    target.drawImage(source, 0, 0);
+    target.globalCompositeOperation = 'source-in';
+    target.fillStyle = color;
+    target.fillRect(0, 0, width, height);
+    target.globalCompositeOperation = 'source-over';
+  }
+
+  function paintTintedImage(source, dx, dy, dw, dh, tint) {
+    const width = source.width, height = source.height;
+    if (!width || !height || width > MAX_TINT_RASTER_EDGE || height > MAX_TINT_RASTER_EDGE) return false;
+
+    if (tint.cache) {
+      let sourceId = tintSourceIds.get(source);
+      if (!sourceId) {
+        sourceId = ++tintSequence;
+        tintSourceIds.set(source, sourceId);
+      }
+      const key = sourceId + ':' + tint.color;
+      let entry = tintCache.get(key);
+      if (!entry) {
+        const pixels = width * height;
+        while (tintPixels + pixels > MAX_TINT_CACHE_PIXELS) {
+          const oldest = tintCache.oldest();
+          if (!oldest) break;
+          tintCache.delete(oldest.key);
+        }
+        const surface = createRasterCanvas(width, height);
+        const surfaceCtx = surface?.getContext('2d');
+        if (surfaceCtx) {
+          paintTint(surfaceCtx, source, tint.color, width, height);
+          tintPixels += pixels;
+          entry = tintCache.set(key, {
+            surface,
+            dispose() {
+              tintPixels -= pixels;
+              surface.width = surface.height = 0;
+            },
+          });
+        }
+      }
+      if (entry) {
+        ctx.drawImage(entry.surface, dx, dy, dw, dh);
+        return true;
+      }
+    }
+
+    // Color variation can produce a new tint for every drop. Reuse one
+    // surface and keep the original glyph mask, without allocating variants.
+    if (!tintScratch) {
+      tintScratch = createRasterCanvas(MAX_TINT_RASTER_EDGE, MAX_TINT_RASTER_EDGE);
+      tintScratchCtx = tintScratch?.getContext('2d');
+    }
+    if (!tintScratchCtx) return false;
+    paintTint(tintScratchCtx, source, tint.color, width, height);
+    ctx.drawImage(tintScratch, 0, 0, width, height, dx, dy, dw, dh);
+    return true;
   }
 
   function nativeEmojiEntry(glyph) {
@@ -343,13 +413,14 @@ export function createCanvas2DBackend({ canvas, limits }) {
     },
 
     /** Paint a ready image source with per-sprite opacity. */
-    drawImage(source, dx, dy, dw, dh, alpha = 1) {
+    drawImage(source, dx, dy, dw, dh, alpha = 1, _mediaShape = null, tint = null) {
       if (!alive() || !source) return;
       const previousAlpha = ctx.globalAlpha;
       const requestedAlpha = Number(alpha);
       const opacity = Math.max(0, Math.min(1, Number.isFinite(requestedAlpha) ? requestedAlpha : 1));
       ctx.globalAlpha = previousAlpha * opacity;
       try {
+        if (tint && paintTintedImage(source, dx, dy, dw, dh, tint)) return;
         if (dw == null) ctx.drawImage(source, dx, dy);
         else ctx.drawImage(source, dx, dy, dw, dh);
       } catch (_) {
@@ -368,6 +439,9 @@ export function createCanvas2DBackend({ canvas, limits }) {
       if (disposed) return;
       disposed = true;
       clearNativeEmojiCache();
+      tintCache.clear();
+      if (tintScratch) tintScratch.width = tintScratch.height = 0;
+      tintScratch = tintScratchCtx = null;
     },
   };
 }

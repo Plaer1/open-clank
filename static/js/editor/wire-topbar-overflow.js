@@ -13,11 +13,13 @@
  *   registerDocClickAway: (handler: (e: Event) => void) => void,
  * }} deps
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 
-export function wireTopbarOverflow({ container }) {
+export function wireTopbarOverflow({ container, state = legacyState, lifetime = null }) {
+  const win = container.ownerDocument.defaultView;
+  if (state !== legacyState && !lifetime) throw new TypeError('isolated overflow requires lifetime');
   // Canvas-size badge updater (kept simple — it lives in the topbar).
-  const sizeLabel = document.getElementById('ge-canvas-size');
+  const sizeLabel = container.querySelector(':is(#ge-canvas-size,[data-ge-id="ge-canvas-size"])');
   function updateSizeLabel() {
     if (sizeLabel) sizeLabel.textContent = `${state.imgWidth}×${state.imgHeight}`;
   }
@@ -27,7 +29,7 @@ export function wireTopbarOverflow({ container }) {
   // The Gen control + its "Gen" label span — collapse as a group when
   // narrow. The Inpaint model selector moved into the side panel.
   const aiGroup = [
-    container.querySelector('#ge-ai-model'),
+    container.querySelector(':is(#ge-ai-model,[data-ge-id="ge-ai-model"])'),
     ...container.querySelectorAll('.ge-topbar span[style*="font-size:9px"]'),
   ].filter(Boolean);
 
@@ -40,10 +42,12 @@ export function wireTopbarOverflow({ container }) {
     }
   }
 
-  if (topbar && window.ResizeObserver) {
-    const ro = new ResizeObserver(() => syncOverflow());
+  if (topbar && win.ResizeObserver) {
+    const ro = new win.ResizeObserver(() => syncOverflow());
     ro.observe(topbar);
+    lifetime?.add(() => ro.disconnect());
   }
   // Initial pass after layout settles.
-  requestAnimationFrame(syncOverflow);
+  const frame = win.requestAnimationFrame(() => { if (!lifetime?.disposed) syncOverflow(); });
+  lifetime?.add(() => win.cancelAnimationFrame(frame));
 }

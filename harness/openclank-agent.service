@@ -1,0 +1,16 @@
+# Source template: install under a dedicated OS account; adjust paths before use.
+[Unit]
+Description=Open Clank agent ACP server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/open-clank/bin/mimo acp --hostname 127.0.0.1
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+Environment=OPENCLANK_CLIENT=acp
+
+[Install]
+WantedBy=multi-user.target

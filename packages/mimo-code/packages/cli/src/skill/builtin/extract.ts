@@ -1,0 +1,145 @@
+import { createHash } from "node:crypto"
+import path from "path"
+import { Effect } from "effect"
+import { AppFileSystem } from "@mimo-ai/shared/filesystem"
+import { Flag } from "@/flag/flag"
+import { Path as GlobalPath } from "@/global"
+import { InstallationLocal, InstallationVersion } from "@/installation/version"
+import { Log } from "@/util"
+import { loadBuiltinBundle } from "./bundle.macro" with { type: "macro" }
+import { loadBuiltinBundle as loadBuiltinBundleDev } from "./bundle.macro"
+
+export const OFFICIAL_SKILL_NAMES = new Set([
+  "docx-official",
+  "pdf-official",
+  "pptx-official",
+  "xlsx-official",
+  "html-to-video-pipeline",
+])
+
+export const AGENT_CLI_SKILL_NAMES = new Set(["claude-code", "codex", "grok-build"])
+
+export function shouldExtractBuiltinSkill(
+  name: string,
+  opts?: { disableOfficialSkills?: boolean; enableAgentCliSkills?: boolean },
+): boolean {
+  const disableOfficial = opts?.disableOfficialSkills ?? Flag.OPENCLANK_DISABLE_OFFICIAL_SKILLS
+  const enableAgentCli = opts?.enableAgentCliSkills ?? Flag.OPENCLANK_ENABLE_AGENT_CLI_SKILLS
+  if (disableOfficial && OFFICIAL_SKILL_NAMES.has(name)) return false
+  if (!enableAgentCli && AGENT_CLI_SKILL_NAMES.has(name)) return false
+  return true
+}
+
+const DOCUMENT_SKILL_TRIGGERS: Array<{
+  skill: string
+  mimes: readonly string[]
+  filenameRe: RegExp
+}> = [
+  {
+    skill: "pdf-official",
+    mimes: ["application/pdf"],
+    filenameRe: /\.pdf$/i,
+  },
+  {
+    skill: "docx-official",
+    mimes: [
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+      "application/msword",
+    ],
+    filenameRe: /\.(docx|dotx)$/i,
+  },
+  {
+    skill: "xlsx-official",
+    mimes: [
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+      "application/vnd.ms-excel",
+      "application/vnd.ms-excel.sheet.macroenabled.12",
+      "text/csv",
+      "text/tab-separated-values",
+    ],
+    filenameRe: /\.(xlsx|xlsm|xltx|csv|tsv)$/i,
+  },
+  {
+    skill: "pptx-official",
+    mimes: [
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "application/vnd.ms-powerpoint",
+    ],
+    filenameRe: /\.pptx$/i,
+  },
+]
+
+export function builtinSkillRoot() {
+  return path.join(GlobalPath.data, "builtin_skills", InstallationVersion, BUNDLE_REVISION, "skills")
+}
+
+export function matchDocumentSkills(candidates: Array<{ mime?: string; filename?: string }>): string[] {
+  const hits = new Set<string>()
+  for (const candidate of candidates) {
+    for (const trigger of DOCUMENT_SKILL_TRIGGERS) {
+      if (candidate.mime && trigger.mimes.includes(candidate.mime)) {
+        hits.add(trigger.skill)
+        continue
+      }
+      if (candidate.filename && trigger.filenameRe.test(candidate.filename)) {
+        hits.add(trigger.skill)
+      }
+    }
+  }
+  return DOCUMENT_SKILL_TRIGGERS.filter((t) => hits.has(t.skill)).map((t) => t.skill)
+}
+
+function safeLoadBuiltinBundle() {
+  try {
+    return loadBuiltinBundle()
+  } catch(e) {
+    if (e instanceof ReferenceError) {
+      return loadBuiltinBundleDev()
+    }
+    throw e
+  }
+}
+const BUILTIN_BUNDLE = safeLoadBuiltinBundle()
+const BUNDLE_REVISION = createHash("sha256").update(JSON.stringify(BUILTIN_BUNDLE)).digest("hex")
+
+const log = Log.create({ service: "skill.builtin" })
+
+export const extractBuiltinBundle = Effect.fn("Skill.extractBuiltinBundle")(function* (
+  fsys: AppFileSystem.Interface,
+) {
+  const skillsRoot = builtinSkillRoot()
+  const root = path.dirname(skillsRoot)
+  const marker = path.join(root, ".extracted")
+  const enabled = new Set(Object.keys(BUILTIN_BUNDLE).filter((name) => shouldExtractBuiltinSkill(name)))
+  const markerContent = JSON.stringify({ version: InstallationVersion, revision: BUNDLE_REVISION, skills: Array.from(enabled).toSorted() })
+
+  if (
+    !InstallationLocal &&
+    (yield* fsys.existsSafe(marker)) &&
+    (yield* fsys.readFileString(marker).pipe(Effect.orElseSucceed(() => ""))) === markerContent
+  )
+    return root
+
+  // Retired skills must not remain discoverable from a previous extraction.
+  yield* fsys.ensureDir(skillsRoot)
+  yield* Effect.forEach(
+    (yield* fsys.readDirectoryEntries(skillsRoot)).filter(
+      (entry) => entry.type === "directory" && !enabled.has(entry.name),
+    ),
+    (entry) => fsys.remove(path.join(skillsRoot, entry.name), { recursive: true }),
+    { discard: true },
+  )
+
+  for (const [skillName, files] of Object.entries(BUILTIN_BUNDLE)) {
+    if (!enabled.has(skillName)) continue
+    const skillDir = path.join(skillsRoot, skillName)
+    for (const [relPath, content] of Object.entries(files)) {
+      yield* fsys.writeWithDirs(path.join(skillDir, relPath), content)
+    }
+  }
+  yield* fsys.writeWithDirs(marker, markerContent)
+  log.info("extracted builtin skills", { root })
+  return root
+})

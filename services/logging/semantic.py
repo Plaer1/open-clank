@@ -92,7 +92,7 @@ class ArchiveReferenceSource:
                 if source is None or locator.get("type") != "conversation_archive_part":
                     continue
                 text = _text(source["body"])[int(locator["start"]):int(locator["end"])]
-                from src.frankenmemory_rag import _hash
+                from src.memery_rag import _hash
                 if _hash(text) != row["chunk_hash"]:
                     continue
                 hydrated.append({**dict(row), "text": text})
@@ -162,7 +162,7 @@ class ConversationSemanticSearch:
         readiness = {key: value for key, value in result.items() if key != "items"}
         readiness["conversation_source"] = {"state": "bound", "authority": "conversation_archive", "storage": "reference_only"}
         coverage = {"state": "complete" if ready and result["health"] == "current" else "partial" if ready else "unavailable",
-                    "reason": result.get("reason"), "authority": "frankenmemory_canonical_index", "readiness": readiness}
+                    "reason": result.get("reason"), "authority": "memery_canonical_index", "readiness": readiness}
         if not ready or result.get("health") == "lagging":
             coverage["setup"] = self.setup()
         # Deduplicate chunk hits to canonical parts. Rehydrate/filter in a fresh

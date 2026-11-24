@@ -1,22 +1,21 @@
+import { normalizeImageRecovery } from '../editor/imageSession.js';
+
 export const NOTES_WORKSPACE_VERSION = 3;
 export const NOTES_SELECTION_VERSION = 1;
 
+const UNKNOWN_WORKSPACE_STATE = Symbol('unknown-workspace-state');
 const MODES = new Set(['live', 'source', 'reading']);
 const PREVIEW_LAYOUTS = new Set(['inline', 'side-by-side']);
-const LEFT_TABS = new Set(['files', 'search', 'tags', 'bookmarks', 'recent']);
-const RIGHT_TABS = new Set(['properties', 'links', 'outline']);
 const FILE_SORTS = new Set(['name', 'modified']);
 
 // Panel registry: id → { label, allowedSides, defaultSide, defaultOrder }
 // Files and Search are left-locked (drag/drop and search-focus semantics);
 // others are movable between sides.
 const PANELS = Object.freeze({
-  files:      { label:'Files',      allowedSides:['left'],             defaultSide:'left',  defaultOrder:0 },
+  files:      { label:'Explorer',      allowedSides:['left'],             defaultSide:'left',  defaultOrder:0 },
   search:     { label:'Search',     allowedSides:['left'],             defaultSide:'left',  defaultOrder:1 },
-  tags:       { label:'Tags',       allowedSides:['left','right'],     defaultSide:'left',  defaultOrder:2 },
-  bookmarks:  { label:'Bookmarks',  allowedSides:['left','right'],     defaultSide:'left',  defaultOrder:3 },
   recent:     { label:'Recent',     allowedSides:['left','right'],     defaultSide:'left',  defaultOrder:4 },
-  properties: { label:'Properties', allowedSides:['left','right'],     defaultSide:'right', defaultOrder:0 },
+  properties: { label:'Details', allowedSides:['right'],     defaultSide:'right', defaultOrder:0 },
   links:      { label:'Links',      allowedSides:['left','right'],     defaultSide:'right', defaultOrder:1 },
   outline:    { label:'Outline',    allowedSides:['left','right'],     defaultSide:'right', defaultOrder:2 },
 });
@@ -86,10 +85,7 @@ export function normalizeNotesSettings(raw = {}) {
     readableLineWidth:settings.readableLineWidth !== false,
     ribbon:settings.ribbon === true,
     completedVisibility:settings.completedVisibility === 'hide' ? 'hide' : 'show',
-    // Built-in handbook visibility is on by default; global Copal collections
-    // stay out of a Host folder workspace unless the owner opts in.
     showTutorialFolder:settings.showTutorialFolder !== false,
-    showCopalInFolderWorkspace:settings.showCopalInFolderWorkspace === true,
     // Template preferences are ordinary workspace state. Keep paths and IDs
     // opaque strings; Files/host authorization remains provider-owned.
     templateFolder:typeof settings.templateFolder === 'string' ? settings.templateFolder.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : '',
@@ -121,6 +117,8 @@ export function normalizeNotesSettings(raw = {}) {
 export function noteViewType(doc = {}) {
   const kind = String(doc.kind || '').toLowerCase();
   const name = String(doc.name || '').toLowerCase();
+  if (kind === 'image-session' || kind === 'derived-iwi-preview') return 'image';
+  if (kind === 'host-video') return 'video';
   if (kind === 'timeline') return 'timeline';
   if (kind === 'note') return 'note';
   if (kind === 'copal-event') return 'event';
@@ -144,7 +142,7 @@ function makeLeaf(doc, source = {}) {
   const selection = source.selection && typeof source.selection === 'object'
     ? normalizeSelection(source.selection, String(doc.text || '').length)
     : null;
-  return {
+  const leaf = {
     type: 'leaf',
     id: typeof source.id === 'string' && source.id ? source.id : nextId('leaf'),
     docId: doc.id,
@@ -155,6 +153,15 @@ function makeLeaf(doc, source = {}) {
     selection,
     scrollTop: safeNumber(source.scrollTop, 0, 0, Number.MAX_SAFE_INTEGER),
   };
+  if (doc.kind === 'image-session' && doc.imageRecovery) {
+    const recovery = normalizeImageRecovery(doc.imageRecovery);
+    const saved = source.image && source.image.version === 1 && source.image.sessionId === recovery.sessionId ? source.image : {};
+    leaf.image = { version:1, sessionId:recovery.sessionId,
+      viewId:typeof saved.viewId === 'string' && saved.viewId.length > 0 && saved.viewId.length <= 256 && !/^data:/i.test(saved.viewId) && !/[\u0000-\u001f\u007f]/.test(saved.viewId) ? saved.viewId : nextId('image-view'),
+      zoom:safeNumber(saved.zoom, 1, 0.01, 64), recovery };
+    leaf.selection = null;
+  }
+  return leaf;
 }
 
 function makeGroup(leaves = [], source = {}) {
@@ -170,23 +177,27 @@ function makeGroup(leaves = [], source = {}) {
   };
 }
 
-function normalizeLeaf(raw, docsById, usedLeafIds) {
+function normalizeLeaf(raw, docsById, usedLeafIds, usedViewIds) {
   if (!raw || raw.type !== 'leaf' || typeof raw.docId !== 'string') return null;
   const doc = docsById.get(raw.docId);
   if (!doc) return null;
   const leaf = makeLeaf(doc, raw);
   if (usedLeafIds.has(leaf.id)) leaf.id = nextId('leaf');
   usedLeafIds.add(leaf.id);
+  if (leaf.image) {
+    if (usedViewIds.has(leaf.image.viewId)) leaf.image.viewId = nextId('image-view');
+    usedViewIds.add(leaf.image.viewId);
+  }
   return leaf;
 }
 
-function normalizeNode(raw, docsById, usedNodeIds, usedLeafIds, depth = 0, ancestors = new Set()) {
+function normalizeNode(raw, docsById, usedNodeIds, usedLeafIds, usedViewIds, depth = 0, ancestors = new Set()) {
   if (!raw || typeof raw !== 'object' || depth > 16 || ancestors.has(raw)) return null;
   const nextAncestors = new Set(ancestors);
   nextAncestors.add(raw);
   if (raw.type === 'group') {
     const tabs = (Array.isArray(raw.tabs) ? raw.tabs : [])
-      .map((leaf) => normalizeLeaf(leaf, docsById, usedLeafIds))
+      .map((leaf) => normalizeLeaf(leaf, docsById, usedLeafIds, usedViewIds))
       .filter(Boolean);
     const group = makeGroup(tabs, raw);
     if (usedNodeIds.has(group.id)) group.id = nextId('group');
@@ -195,7 +206,7 @@ function normalizeNode(raw, docsById, usedNodeIds, usedLeafIds, depth = 0, ances
   }
   if (raw.type !== 'split') return null;
   const children = (Array.isArray(raw.children) ? raw.children : [])
-    .map((child) => normalizeNode(child, docsById, usedNodeIds, usedLeafIds, depth + 1, nextAncestors))
+    .map((child) => normalizeNode(child, docsById, usedNodeIds, usedLeafIds, usedViewIds, depth + 1, nextAncestors))
     .filter(Boolean);
   if (!children.length) return null;
   if (children.length === 1) return children[0];
@@ -221,26 +232,76 @@ function flattenLeaves(node, output = []) {
   return output;
 }
 
+export function clearExplorerBinding(left) {
+  Object.assign(left,{
+    resourceRoot:null, folderWorkspaceRoot:null, folderWorkspaceId:'', folderWorkspaceExplicit:false,
+    copalWorkspacePinned:false, copalFolderRoot:[], binderContext:null,
+    resourceRows:[], resourceCursor:null, resourceQuery:'', selected:[],
+  });
+}
+
 function createEmptyWorkspace(fallbackDoc) {
   const leaf = fallbackDoc ? makeLeaf(fallbackDoc) : null;
   const root = makeGroup(leaf ? [leaf] : []);
   return {
     version:NOTES_WORKSPACE_VERSION, root, activeLeafId:leaf?.id || null,
-    left:{ open:true, width:224, tab:'files', sort:'name', expanded:[], selected:[], showDotFolders:false, resourceRoot:null, folderWorkspaceRoot:null, folderWorkspaceId:'', resourceRows:[], resourceCursor:null, resourceQuery:'' },
+    left:{ open:true, width:224, tab:'files', sort:'name', expanded:[], selected:[], showDotFolders:false, resourceRoot:null, folderWorkspaceRoot:null, folderWorkspaceId:'', folderWorkspaceExplicit:false, copalWorkspacePinned:false, copalFolderRoot:[], binderContext:null, resourceRows:[], resourceCursor:null, resourceQuery:'' },
     right:{ open:false, width:280, tab:'properties', pinnedDocId:null },
-    panels:defaultPanels(), settings:normalizeNotesSettings(), bookmarks:[], recent:leaf ? [leaf.docId] : [], closed:[],
+    panels:defaultPanels(), settings:normalizeNotesSettings(), bookmarks:[], recent:leaf ? [leaf.docId] : [], closed:[], closedImageRecovery:{},
   };
 }
 
 export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
+  const preserved = raw?.[UNKNOWN_WORKSPACE_STATE];
   const visibleDocs = docs.filter((doc) => doc && typeof doc.id === 'string');
   const docsById = new Map(visibleDocs.map((doc) => [doc.id, doc]));
   const fallbackDoc = docsById.get(selected) || visibleDocs[0] || null;
-  if (!raw || raw.version !== NOTES_WORKSPACE_VERSION || !raw.root) return createEmptyWorkspace(fallbackDoc);
-
-  let root = normalizeNode(raw.root, docsById, new Set(), new Set()) || makeGroup();
+  if (!raw || raw.version !== NOTES_WORKSPACE_VERSION || !raw.root) {
+    const fallback = createEmptyWorkspace(fallbackDoc);
+    if (raw && Number.isSafeInteger(raw.version) && raw.version > NOTES_WORKSPACE_VERSION) {
+      try { Object.defineProperty(fallback, UNKNOWN_WORKSPACE_STATE, { value:preserved || JSON.stringify(raw), configurable:true }); } catch (_) {}
+    }
+    return fallback;
+  }
+  // Image leaves are recoverable without inventing a text document or storing pixels.
+  let hasFutureImage = false;
+  const seen = new Set();
+  const collect = (node, depth = 0) => {
+    if (!node || typeof node !== 'object' || depth > 16 || seen.has(node)) return;
+    seen.add(node);
+    if (node.type === 'group') for (const leaf of Array.isArray(node.tabs) ? node.tabs : []) {
+      if (leaf?.image?.version > 1 || leaf?.image?.recovery?.version > 1) { hasFutureImage = true; continue; }
+      try {
+        const recovery = normalizeImageRecovery(leaf?.image?.recovery);
+        if (leaf.image.version === 1 && leaf.image.sessionId === recovery.sessionId && leaf.docId === `image-session:${recovery.sessionId}`) {
+          docsById.set(leaf.docId, { id:leaf.docId, kind:'image-session', imageRecovery:recovery });
+        }
+      } catch (_) { if (leaf?.image) hasFutureImage=true; }
+    }
+    if (node.type === 'split') for (const child of Array.isArray(node.children) ? node.children : []) collect(child, depth + 1);
+  };
+  collect(raw.root);
+  const closedImageRecovery={};
+  const rawRecoveries=raw.closedImageRecovery;
+  if (rawRecoveries != null && (typeof rawRecoveries !== 'object' || Array.isArray(rawRecoveries))) hasFutureImage=true;
+  if (rawRecoveries && typeof rawRecoveries==='object' && !Array.isArray(rawRecoveries)) {
+    for (const [id,value] of Object.entries(rawRecoveries)) {
+      if (!id.startsWith('image-session:')) { hasFutureImage=true; continue; }
+      try {
+        const recovery=normalizeImageRecovery(value);
+        if (id!==`image-session:${recovery.sessionId}`) throw new Error('invalid recovery');
+        closedImageRecovery[id]=recovery;
+        if (!docsById.has(id)) docsById.set(id,{id,kind:'image-session',imageRecovery:recovery});
+      } catch (_) {
+        hasFutureImage=true;
+        closedImageRecovery[id]={unavailable:true};
+        if (!docsById.has(id)) docsById.set(id,{id,kind:'image-session',imageRecoveryUnavailable:true});
+      }
+    }
+  }
+  let root = pruneNode(normalizeNode(raw.root, docsById, new Set(), new Set(), new Set()) || makeGroup());
   let leaves = flattenLeaves(root);
-  if (selected && docsById.has(selected) && !leaves.some((leaf) => leaf.docId === selected)) {
+  if (selected && !Object.hasOwn(closedImageRecovery,selected) && docsById.has(selected) && !leaves.some((leaf) => leaf.docId === selected)) {
     const leaf = makeLeaf(docsById.get(selected));
     const group = (() => {
       const groups = [];
@@ -271,21 +332,25 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
   const visibleOn = (side) => Object.entries(panels).filter(([, item]) => item.side === side && !item.hidden).sort(([, a], [, b]) => a.order - b.order).map(([id]) => id);
   const leftVisible = visibleOn('left');
   const rightVisible = visibleOn('right');
-  return {
+  const workspace = {
     version: NOTES_WORKSPACE_VERSION,
     root,
     activeLeafId:active,
     left: {
       open:left.open !== false,
       width:safeNumber(left.width, 224, 150, 420),
-      tab:leftVisible.includes(left.tab) ? left.tab : leftVisible[0] || null,
+      tab:leftVisible.includes(left.tab) ? left.tab : 'files',
       sort:FILE_SORTS.has(left.sort) ? left.sort : 'name',
       expanded:uniqueStrings(left.expanded),
       selected:uniqueStrings(left.selected).filter((id) => docsById.has(id)),
       showDotFolders:left.showDotFolders === true,
       resourceRoot:left.resourceRoot && typeof left.resourceRoot === 'object' ? left.resourceRoot : null,
       folderWorkspaceRoot:left.folderWorkspaceRoot && typeof left.folderWorkspaceRoot === 'object' ? left.folderWorkspaceRoot : null,
+      copalWorkspacePinned:left.copalWorkspacePinned === true,
+      copalFolderRoot:Array.isArray(left.copalFolderRoot) ? left.copalFolderRoot.filter(part=>typeof part==='string' && part && !part.includes('/')).slice(0,64) : [],
+      folderWorkspaceExplicit:left.folderWorkspaceExplicit === true,
       folderWorkspaceId:typeof left.folderWorkspaceId === 'string' ? left.folderWorkspaceId.trim() : '',
+      binderContext:left.binderContext && typeof left.binderContext === 'object' && typeof left.binderContext.accountId === 'string' && typeof left.binderContext.workspace === 'string' && Number.isSafeInteger(left.binderContext.catalogRevision) && left.binderContext.catalogRevision >= 0 && left.binderContext.descriptor && typeof left.binderContext.descriptor === 'object' && typeof left.binderContext.descriptor.id === 'string' ? structuredClone(left.binderContext) : null,
       resourceRows:Array.isArray(left.resourceRows) ? left.resourceRows.slice(0, 5001) : [],
       resourceCursor:left.resourceCursor || null,
       resourceQuery:typeof left.resourceQuery === 'string' ? left.resourceQuery : '',
@@ -293,15 +358,21 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
     right: {
       open:right.open === true,
       width:safeNumber(right.width, 280, 190, 480),
-      tab:rightVisible.includes(right.tab) ? right.tab : rightVisible[0] || null,
+      tab:rightVisible.includes(right.tab) ? right.tab : right.tab==='tags' && rightVisible.includes('properties') ? 'properties' : rightVisible[0] || null,
       pinnedDocId:typeof right.pinnedDocId === 'string' && docsById.has(right.pinnedDocId) ? right.pinnedDocId : null,
     },
     panels,
     settings,
-    bookmarks:uniqueStrings(raw.bookmarks).filter((id) => docsById.has(id)),
+    bookmarks:uniqueStrings(raw.bookmarks),
     recent:uniqueStrings(raw.recent).filter((id) => docsById.has(id)).slice(0, 40),
     closed:uniqueStrings(raw.closed).filter((id) => docsById.has(id)).slice(0, 20),
+    closedImageRecovery,
   };
+  if (!leaves.length && !workspace.left.folderWorkspaceExplicit) clearExplorerBinding(workspace.left);
+  if (hasFutureImage || preserved) {
+    try { Object.defineProperty(workspace, UNKNOWN_WORKSPACE_STATE, { value:preserved || JSON.stringify(raw), configurable:true }); } catch (_) {}
+  }
+  return workspace;
 }
 
 export function workspaceGroups(workspace) {
@@ -396,6 +467,8 @@ export function openWorkspaceDocument(workspace, doc, options = {}) {
       active.selection = null;
       active.scrollTop = 0;
       active.rawSource = false;
+      delete active.image;
+      if (doc.kind === 'image-session' && doc.imageRecovery) active.image = makeLeaf(doc).image;
       activateWorkspaceLeaf(workspace, group.id, active.id);
       return active;
     }
@@ -408,6 +481,39 @@ export function openWorkspaceDocument(workspace, doc, options = {}) {
   }
   activateWorkspaceLeaf(workspace, group.id, leaf.id);
   return leaf;
+}
+
+/** Add an image session to the existing leaf/split tree; mounting stays with the adapter. */
+export function refreshWorkspaceImage(workspace, session) {
+  const recovery = normalizeImageRecovery(session.serializeRecovery());
+  for (const leaf of workspaceLeaves(workspace)) {
+    if (leaf.image?.sessionId === recovery.sessionId) leaf.image.recovery = recovery;
+  }
+  return recovery;
+}
+
+export function openWorkspaceImage(workspace, session, options = {}) {
+  const recovery = refreshWorkspaceImage(workspace, session);
+  return openWorkspaceDocument(workspace, { id:`image-session:${recovery.sessionId}`, kind:'image-session', imageRecovery:recovery }, options);
+}
+
+/** Restore one adapter per source and map each saved split to that session. */
+export function restoreWorkspaceImageSessions(workspace, registry) {
+  const remapped = new Map();
+  for (const leaf of workspaceLeaves(workspace)) {
+    if (!leaf.image) continue;
+    const oldDocId = leaf.docId;
+    const session = registry.restore(leaf.image.recovery);
+    const recovery = session.serializeRecovery();
+    leaf.docId = `image-session:${recovery.sessionId}`;
+    leaf.image.sessionId = recovery.sessionId;
+    leaf.image.recovery = recovery;
+    remapped.set(oldDocId, leaf.docId);
+  }
+  for (const field of ['recent', 'closed', 'bookmarks']) {
+    workspace[field] = uniqueStrings((workspace[field] || []).map(id => remapped.get(id) || id));
+  }
+  return registry;
 }
 
 function replaceNode(node, wantedId, replacement) {
@@ -444,16 +550,18 @@ function pruneNode(node) {
   return node;
 }
 
-export function closeWorkspaceLeaf(workspace, leafId) {
+export function closeWorkspaceLeaf(workspace, leafId, {remember = true, pruneRecovery = true} = {}) {
   const group = groupForLeaf(workspace, leafId);
   const leaf = group?.tabs.find((item) => item.id === leafId);
   if (!group || !leaf || leaf.pinned) return null;
   const index = group.tabs.indexOf(leaf);
   group.tabs.splice(index, 1);
-  workspace.closed = [leaf.docId, ...workspace.closed.filter((id) => id !== leaf.docId)].slice(0, 20);
+  if (remember) workspace.closed = [leaf.docId, ...workspace.closed.filter((id) => id !== leaf.docId)].slice(0, 20);
+  if (pruneRecovery) pruneClosedImageRecovery(workspace);
   if (group.activeLeafId === leafId) group.activeLeafId = group.tabs[Math.min(index, group.tabs.length - 1)]?.id || null;
   workspace.root = pruneNode(workspace.root);
   if (workspace.activeLeafId === leafId) workspace.activeLeafId = group.activeLeafId || workspaceLeaves(workspace)[0]?.id || null;
+  if (!workspace.activeLeafId) clearExplorerBinding(workspace.left);
   return leaf;
 }
 
@@ -517,8 +625,158 @@ export function setWorkspaceLeafMode(workspace, leafId, mode) {
   return true;
 }
 
+function pruneClosedImageRecovery(workspace) {
+  if (workspace[UNKNOWN_WORKSPACE_STATE] || !workspace.closedImageRecovery) return;
+  const keep=new Set(workspace.closed);
+  for (const id of Object.keys(workspace.closedImageRecovery)) if (!keep.has(id)) delete workspace.closedImageRecovery[id];
+}
+
+function preserveRawWorkspace(workspace, raw) {
+  Object.defineProperty(workspace, UNKNOWN_WORKSPACE_STATE, {value:JSON.stringify(raw),configurable:true});
+}
+
+export function canRetainClosedImageRecovery(workspace) {
+  const preserved=workspace?.[UNKNOWN_WORKSPACE_STATE];
+  return !!workspace && (!preserved || JSON.parse(preserved).version === NOTES_WORKSPACE_VERSION);
+}
+
+export function retainClosedImageRecovery(workspace,value,{pruneRecovery=true}={}) {
+  if (!canRetainClosedImageRecovery(workspace)) return false;
+  const recovery=normalizeImageRecovery(value);
+  const id=`image-session:${recovery.sessionId}`;
+  workspace.closed=[id,...workspace.closed.filter(item=>item!==id)].slice(0,20);
+  workspace.closedImageRecovery ||= {};
+  workspace.closedImageRecovery[id]=recovery;
+  if (pruneRecovery) pruneClosedImageRecovery(workspace);
+  return true;
+}
+
+export function removeClosedImageRecovery(workspace,id) {
+  if (workspace?.[UNKNOWN_WORKSPACE_STATE]) return false;
+  if (workspace?.closedImageRecovery) delete workspace.closedImageRecovery[id];
+  return true;
+}
+
+function copyWorkspaceLayout(workspace) {
+  const next={...workspace,left:{...workspace.left},root:structuredClone(workspace.root),recent:[...workspace.recent],closed:[...workspace.closed],
+    closedImageRecovery:{...workspace.closedImageRecovery}};
+  const preserved=workspace[UNKNOWN_WORKSPACE_STATE];
+  if (preserved) Object.defineProperty(next, UNKNOWN_WORKSPACE_STATE, {value:preserved,configurable:true});
+  return next;
+}
+
+/** Edit only addressed known leaves and recovery records in a preserved current-format layout. */
+export function stageWorkspaceClose(workspace, {remove, retain, forget, refresh = []}) {
+  const next=copyWorkspaceLayout(workspace);
+  const latest=new Map(refresh.map(recovery=>[recovery.sessionId,recovery]));
+  for (const leaf of workspaceLeaves(next)) {
+    if (latest.has(leaf.image?.sessionId)) leaf.image.recovery=latest.get(leaf.image.sessionId);
+  }
+  const preserved=workspace[UNKNOWN_WORKSPACE_STATE];
+  for (const leaf of remove) {
+    const hasSibling=leaf.image && workspaceLeaves(workspace).some(other=>other.docId===leaf.docId && !remove.some(item=>item.id===other.id));
+    if (!closeWorkspaceLeaf(next,leaf.id,{remember:!hasSibling && leaf.remember !== false,pruneRecovery:false})) throw new Error('The selected tab changed. Reopen Close and try again.');
+  }
+  for (const id of forget) delete next.closedImageRecovery[id];
+  for (const value of retain) if (!retainClosedImageRecovery(next,value,{pruneRecovery:false})) throw new Error('This layout requires a newer Editor to retain recovery.');
+  if (!preserved || !remove.length && !retain.length && !forget.length && !refresh.length) return next;
+
+  const raw=JSON.parse(preserved);
+  if (raw.version!==NOTES_WORKSPACE_VERSION) throw new Error('This layout requires a newer Editor to close these tabs.');
+  const requested=new Map(remove.map(leaf=>[leaf.id,leaf]));
+  const removed=new Set();
+  const visit=node=>{
+    if (!node || typeof node!=='object') return;
+    if (node.type==='split') {
+      if (Array.isArray(node.children)) node.children.forEach(visit);
+      return;
+    }
+    if (node.type!=='group' || !Array.isArray(node.tabs)) return;
+    node.tabs=node.tabs.filter(leaf=>{
+      const match=requested.get(leaf?.id);
+      if (!match) {
+        const recovery=latest.get(leaf?.image?.sessionId);
+        if (recovery && leaf.image.version===1 && leaf.image.recovery?.version===1 &&
+            leaf.docId===`image-session:${recovery.sessionId}`) leaf.image.recovery={...leaf.image.recovery,...recovery};
+        return true;
+      }
+      if (removed.has(match.id) || leaf.docId!==match.docId || leaf.pinned===true ||
+          (leaf.image?.sessionId || null)!==(match.image?.sessionId || null) ||
+          (leaf.image && (leaf.image.version!==1 || leaf.image.recovery?.version!==1))) {
+        throw new Error('The preserved layout has a different tab identity.');
+      }
+      removed.add(match.id);
+      return false;
+    });
+    if (removed.has(node.activeLeafId)) node.activeLeafId=node.tabs[0]?.id || null;
+  };
+  visit(raw.root);
+  if (removed.has(raw.activeLeafId)) raw.activeLeafId=next.activeLeafId;
+  if (remove.length && !next.activeLeafId && raw.left && typeof raw.left==='object') clearExplorerBinding(raw.left);
+  const retainedIds=new Set(retain.map(item=>`image-session:${item.sessionId}`));
+  const newlyClosed=next.closed.filter(id=>retainedIds.has(id) || remove.some(leaf=>leaf.docId===id && leaf.remember!==false));
+  if (newlyClosed.length) raw.closed=uniqueStrings([...newlyClosed,...(Array.isArray(raw.closed) ? raw.closed : [])]);
+  if (retain.length || forget.length) {
+    if (raw.closedImageRecovery==null) raw.closedImageRecovery={};
+    if (typeof raw.closedImageRecovery!=='object' || Array.isArray(raw.closedImageRecovery)) throw new Error('Existing image recovery records need a newer Editor.');
+    for (const id of [...retainedIds,...forget]) {
+      const prior=raw.closedImageRecovery[id];
+      if (prior && prior.version!==1) throw new Error('An image recovery record needs a newer Editor.');
+    }
+    for (const id of forget) delete raw.closedImageRecovery[id];
+    for (const id of retainedIds) raw.closedImageRecovery[id]={...raw.closedImageRecovery[id],...next.closedImageRecovery[id]};
+  }
+  preserveRawWorkspace(next,raw);
+  return next;
+}
+
+export function stageWorkspaceImageReopen(workspace, doc) {
+  const next=copyWorkspaceLayout(workspace);
+  const prior=next.closedImageRecovery[doc.id];
+  if (!prior || prior.unavailable || !doc.imageRecovery || prior!==doc.imageRecovery) throw new Error('Saved image recovery is unavailable.');
+  const existing=workspaceLeaves(next).find(leaf=>leaf.docId===doc.id);
+  const leaf=existing || openWorkspaceDocument(next,doc,{intent:'newTab'});
+  const group=groupForLeaf(next,leaf.id);
+  if (existing) activateWorkspaceLeaf(next,group.id,leaf.id);
+  next.closed=next.closed.filter(id=>id!==doc.id);
+  delete next.closedImageRecovery[doc.id];
+  const preserved=workspace[UNKNOWN_WORKSPACE_STATE];
+  if (preserved) {
+    const raw=JSON.parse(preserved);
+    const source=raw.closedImageRecovery?.[doc.id];
+    const target=findWorkspaceGroup(raw,group.id);
+    if (raw.version!==NOTES_WORKSPACE_VERSION || source?.version!==1 || source.sessionId!==prior.sessionId || !Array.isArray(target?.tabs)) {
+      throw new Error('A newer Editor is required to reopen the preserved image recovery.');
+    }
+    if (!existing) target.tabs.push({...leaf,image:{...leaf.image,recovery:source}});
+    else if (!target.tabs.some(candidate=>candidate.id===leaf.id && candidate.docId===doc.id)) throw new Error('The preserved image view changed.');
+    target.activeLeafId=leaf.id;
+    raw.activeLeafId=leaf.id;
+    if (Array.isArray(raw.closed)) raw.closed=raw.closed.filter(id=>id!==doc.id);
+    delete raw.closedImageRecovery[doc.id];
+    preserveRawWorkspace(next,raw);
+  }
+  return next;
+}
+
+export function commitWorkspaceClose(workspace,next) {
+  const surviving=new Map(workspaceLeaves(workspace).map(leaf=>[leaf.id,leaf]));
+  for (const group of workspaceGroups(next)) group.tabs=group.tabs.map(staged=>{
+    const leaf=surviving.get(staged.id);
+    if (!leaf || leaf.docId!==staged.docId) return staged;
+    if (leaf.image && staged.image && JSON.stringify(leaf.image.recovery)!==JSON.stringify(staged.image.recovery)) {
+      leaf.image.recovery=staged.image.recovery;
+    }
+    return leaf;
+  });
+  for (const field of ['root','activeLeafId','recent','closed','closedImageRecovery']) workspace[field]=next[field];
+  if (!next.activeLeafId) clearExplorerBinding(workspace.left);
+  if (next[UNKNOWN_WORKSPACE_STATE]) Object.defineProperty(workspace, UNKNOWN_WORKSPACE_STATE,
+    {value:next[UNKNOWN_WORKSPACE_STATE],configurable:true});
+}
+
 export function serializeNotesWorkspace(workspace) {
-  return JSON.stringify(workspace);
+  return workspace?.[UNKNOWN_WORKSPACE_STATE] || JSON.stringify(workspace);
 }
 
 function normalizePanels(rawPanels, left, right) {

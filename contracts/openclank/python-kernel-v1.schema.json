@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.local/contracts/python-kernel-v1.schema.json",
+  "title": "Python kernel request",
+  "description": "Scope and workspace directory are supplied by authenticated host admission, never by these arguments.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation"
+      ],
+      "properties": {
+        "operation": {
+          "const": "start"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "kernel_id"
+      ],
+      "properties": {
+        "operation": {
+          "const": "status"
+        },
+        "kernel_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "kernel_id",
+        "generation",
+        "cell_id",
+        "code"
+      ],
+      "properties": {
+        "operation": {
+          "const": "execute"
+        },
+        "kernel_id": {
+          "$ref": "#/$defs/id"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/id"
+        },
+        "code": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "timeout": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 120
+        },
+        "output_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 262144
+        },
+        "artifact_output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "destination_ref",
+            "name"
+          ],
+          "properties": {
+            "destination_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "kernel_id",
+        "generation",
+        "cell_id"
+      ],
+      "properties": {
+        "operation": {
+          "const": "interrupt"
+        },
+        "kernel_id": {
+          "$ref": "#/$defs/id"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "kernel_id",
+        "generation"
+      ],
+      "properties": {
+        "operation": {
+          "enum": [
+            "reset",
+            "close"
+          ]
+        },
+        "kernel_id": {
+          "$ref": "#/$defs/id"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

@@ -593,7 +593,7 @@ def google_pse_search(query: str, count: Optional[int] = None, time_filter: Opti
     Or env vars GOOGLE_API_KEY and GOOGLE_PSE_CX.
     """
     count = count if count is not None else _get_result_count()
-    settings = _get_search_settings()
+    settings = _get_search_settings() if route is None else {}
     api_key = (getattr(route, "credential", "") if route is not None else _get_provider_key("google_pse") or os.environ.get("GOOGLE_API_KEY", ""))
     cx = (getattr(route, "google_cx", "") if route is not None else (settings.get("google_pse_cx") or "").strip() or os.environ.get("GOOGLE_PSE_CX", ""))
 

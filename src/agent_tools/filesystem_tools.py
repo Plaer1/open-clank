@@ -1,7 +1,7 @@
 import asyncio
 import codecs
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import functools
 import json
 import os
@@ -60,8 +60,14 @@ async def _agent_request(ctx: dict, tool: str, operation: str, path: str, payloa
     if not owner:
         return {"error": f"{tool}: authenticated owner is required", "exit_code": 1, "blocked": True, "code": "denied"}
     try:
-        response = await agent_client_for(owner, get_active_workspace(), workspace_id=str(ctx.get("authority_workspace_id") or ""),
-            chat_id=str(ctx.get("session_id") or "")).request(operation, path, payload)
+        client = agent_client_for(owner, get_active_workspace(), workspace_id=str(ctx.get("authority_workspace_id") or ""),
+            chat_id=str(ctx.get("session_id") or ""))
+        authority = ctx.get('file_approval_authority')
+        if authority is not None and tool == 'manage_files' and operation in ('move', 'trash'):
+            await _assert_file_approval_current(ctx, owner=owner, session_id=str(ctx.get('session_id') or ''),
+                workspace_id=str(ctx.get('authority_workspace_id') or '').strip())
+            authority.issued[0] = True
+        response = await client.request(operation, path, payload)
     except FilesServiceError as error:
         return {
             "error": f"{tool}: {error}",
@@ -208,6 +214,50 @@ async def _agent_write_file(content: str, ctx: dict) -> Optional[dict]:
         path = _agent_target_path(raw_path)
     except ValueError as error:
         return {"error": f"write_file: {error}", "exit_code": 1}
+    if args and args.get('create_only') is True:
+        from src.openclank.files_service_client import agent_client_for
+        from src.openclank.ordinary_create import ordinary_create_once
+        from src.tool_execution import _copal_account_id, get_active_workspace
+        try:
+            key, parent_revision = args.get('operation_id'), args.get('parent_revision')
+            owner = str(ctx.get('owner') or '').strip()
+            resolved_owner, account, error = _copal_account_id(owner)
+            if error or resolved_owner != owner or not account: raise ValueError('actor account unavailable')
+            workspace = str(ctx.get('authority_workspace_id') or get_active_workspace() or '').strip()
+            session = str(ctx.get('session_id') or '')
+            client = agent_client_for(owner, get_active_workspace(), workspace_id=str(ctx.get('authority_workspace_id') or ''), chat_id=session)
+            repository = client._registry().repository
+            generation = int(repository.generation())
+            async def before_issue():
+                current_owner, current_account, current_error = _copal_account_id(owner)
+                return (not current_error and current_owner == owner and current_account == account
+                        and int(repository.generation()) == generation)
+            result = await ordinary_create_once(client=client, repository=repository, account=account,
+                workspace=workspace, session=session, lane='agent', key=key, path=path,
+                parent_revision=parent_revision, content=body.encode('utf-8'), generation=generation,
+                before_issue=before_issue, status_only=args.get('status_only') is True)
+            if result.get('state') == 'not_applied':
+                return {'error':'Original create was not applied.', 'code':'not_applied', 'reason':result['reason'],
+                        'operation_id':key, 'receipt_operation_id':result['operation_id'], 'exit_code':1}
+            if result.get('state') != 'committed':
+                return {'error':'Original create outcome is unknown; check the same operation.', 'code':'mutation_outcome_unknown',
+                        'operation_id':key, 'receipt_operation_id':result['operation_id'], 'exit_code':1}
+            import mimetypes
+            byte_count = len(body.encode('utf-8'))
+            newline = _dominant_newline(body)
+            result_data = {'output':f'Original create committed for {path}; current file has not been rechecked.',
+                           'exit_code':0, 'path':path, 'operation_id':key,
+                           'receipt_operation_id':result['operation_id'], 'fingerprint':result['fingerprint']}
+            return _with_file_result(result_data, operation='write', path=path, kind='text',
+                range={'unit':'byte','start':0,'end':max(0,byte_count-1)},
+                page={'unit':'byte','cursor':0,'next_cursor':None,'has_more':False,'returned':byte_count,'total':byte_count},
+                bytes_considered=byte_count, lines_considered=len(body.splitlines()), encoding='utf-8',
+                newline={'\n':'lf','\r\n':'crlf','\r':'cr'}.get(newline),
+                media_type=mimetypes.guess_type(path)[0] or 'text/plain', fingerprint=result['fingerprint'],
+                diagnostics=[{'code':'original_create_receipt','message':'Fingerprint identifies the original committed bytes; current file was not rechecked.'}])
+        except Exception as error:
+            return {'error':f'write_file: {error}', 'code':getattr(error,'code','create_unavailable'),
+                    'operation_id':args.get('operation_id'), 'exit_code':1}
     snapshot = await _agent_request(ctx, "write_file", "read_lines", path, {})
     if snapshot is not None and snapshot.get("code"):
         # A missing final file is represented as ``invalid_path`` by the Rust
@@ -288,6 +338,51 @@ async def _agent_ls(content: str, ctx: dict) -> Optional[dict]:
     return _with_file_result(result, operation="list", path=root, kind="directory", page={"unit": "entry", "cursor": payload.get("cursor"), "next_cursor": next_cursor, "has_more": next_cursor is not None, "returned": len(entries), "total": None}, media_type="inode/directory", items=entries)
 
 
+def _qualify_search_hit_links(ctx: dict, generation: int | None, items: list[dict]) -> None:
+    if generation is None:
+        return
+    from src.openclank.file_policy import FilePolicyRepository
+    from src.openclank.files_host_provider import _origin
+    from src.openclank.resource_refs import issue_resource_ref
+    workspace_id = str(ctx.get("authority_workspace_id") or "")
+    owner = str(ctx.get("owner") or "")
+    try:
+        repository = FilePolicyRepository()
+        account = repository.subject_for_username(owner)
+        workspace = repository.get_workspace(workspace_id)
+        location = repository.get_location(workspace.location_id)
+    except Exception:
+        return
+    if not account or workspace.archived or workspace.owner_subject_id != account:
+        return
+    for item in [row for row in items if "line" in row][:12]:
+        try:
+            relative = os.path.relpath(item["path"], location.canonical_path)
+            if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+                continue
+            decision = repository.resolve(
+                subject_id=account, is_admin=False, origin="app", location_id=location.id,
+                workspace_id=workspace.id, capability="read", relative_resource=relative.replace(os.sep, "/"),
+                observation_only=True,
+            )
+            if not decision.allowed or decision.policy_generation != generation:
+                continue
+            ref = issue_resource_ref(
+                owner_subject_id=account, provider="host", origin_id=_origin(item["path"]),
+                kind="file", capabilities=("open", "stat"), policy_generation=generation,
+                workspace_id=workspace.id, location_id=location.id,
+            )
+            item["search_hit"] = {
+                "label": os.path.basename(item["path"]),
+                "ref": ref.token,
+                "revision": item["revision"],
+                "line": item["line"],
+            }
+        except Exception:
+            # Present the proven match even when an App navigation ref is unavailable.
+            continue
+
+
 async def _agent_search(content: str, ctx: dict, *, content_search: bool) -> Optional[dict]:
     if not _agent_service_enabled(ctx):
         return None
@@ -314,29 +409,81 @@ async def _agent_search(content: str, ctx: dict, *, content_search: bool) -> Opt
             raise ValueError("limit must be between 1 and 200")
     except (TypeError, ValueError) as error:
         return {"error": f"search: invalid limit: {error}", "exit_code": 1, "code": "invalid"}
+    depth = args.get("max_depth", 32)
+    excludes = args.get("exclude", [])
+    if (type(depth) is not int or not 0 <= depth <= 32 or type(excludes) is not list
+            or len(excludes) > 8 or any(type(value) is not str or not value or len(value) > 512 for value in excludes)):
+        return {"error": "search: invalid depth or exclusions", "exit_code": 1, "code": "invalid"}
     mode = "literal" if content_search else "glob"
-    payload = {"query": pattern, "mode": mode, "max_results": limit, "max_entries": 10000, "max_depth": 32, "max_bytes_per_file": 1024 * 1024, "include_hidden": bool(args.get("include_hidden")) if args else False, "case_sensitive": not bool(args.get("ignore_case")) if args else True}
+    label = "grep" if content_search else "glob"
+    payload = {
+        "query": pattern, "mode": mode, "max_results": limit, "max_entries": 10000,
+        "max_depth": depth, "max_bytes_per_file": 1024 * 1024, "deadline_ms": 5000,
+        "include_hidden": bool(args.get("include_hidden")),
+        "case_sensitive": not bool(args.get("ignore_case")),
+        "exclude": excludes, "locations": content_search,
+    }
     if content_search and args.get("glob") is not None:
         payload["file_glob"] = args["glob"]
-    response = await _agent_request(ctx, "grep" if content_search else "glob", "content_search" if content_search else "filename_search", root, payload)
+    generation = None
+    if content_search and ctx.get("authority_workspace_id"):
+        from src.openclank.file_policy import FilePolicyRepository
+        try:
+            generation = FilePolicyRepository().generation()
+        except Exception:
+            pass
+    response = await _agent_request(ctx, label, "content_search" if content_search else "filename_search", root, payload)
     if response is None or response.get("code"):
         return response
     data = _agent_data(response)
-    matches = [str(item) for item in (data.get("matches") or [])]
-    label = "grep" if content_search else "glob"
-    output = "\n".join(matches) or f"No matches for {pattern!r} under {root}"
-    items = [{"path": item, "kind": "match"} for item in matches]
-    complete = bool(data.get("complete", False))
+    matches = [item for item in (data.get("matches") or []) if isinstance(item, str)]
+    locations = {}
+    for location in data.get("locations") or []:
+        if not isinstance(location, dict):
+            continue
+        revision = location.get("revision")
+        line, start, end = (location.get(key) for key in ("line", "start_byte", "end_byte"))
+        if (isinstance(location.get("path"), str) and type(line) is int and line > 0
+                and type(start) is int and type(end) is int and 0 <= start < end <= 1024 * 1024
+                and isinstance(revision, dict) and revision.get("algorithm") == "sha256"
+                and isinstance(revision.get("value"), str)
+                and re.fullmatch("sha256:[a-f0-9]{64}:[0-9]{1,7}", revision["value"])):
+            locations[location["path"]] = {"line": line, "start_byte": start, "end_byte": end,
+                                           "encoding": "utf-8",
+                                           "revision": {"kind": "hostFingerprint", "value": revision["value"]}}
+    items = [{"path": item, "kind": "match", **locations.get(item, {})} for item in matches]
+    _qualify_search_hit_links(ctx, generation, items)
+    lines = [f"{item['path']}:{item['line']}" if "line" in item else item["path"] for item in items]
+    complete = data.get("complete") is True
+    reasons = [reason for reason in (data.get("partial_reasons") or []) if reason in {
+        "timeout", "result_limit", "depth_limit", "entry_limit", "file_byte_limit",
+        "descendant_unavailable", "file_changed",
+    }]
     if not complete:
-        output = ("\n".join(matches) or f"No matches in the scanned portion for {pattern!r} under {root}")
-        output += "\n[Partial bounded search; total unknown; continuation is unavailable.]"
+        search_state = "partial"
+        if not lines:
+            lines.append("No matches in the scanned portion.")
+        reasons_text = ", ".join(reason.replace("_", " ") for reason in reasons)
+        lines.append(f"[Partial search{': ' + reasons_text if reasons_text else ''}; total unknown.]")
+    elif data.get("eligible_files") == 0:
+        search_state = "empty"
+        lines.append("No eligible files under the selected search filters.")
+    elif not items:
+        search_state = "no_matches"
+        lines.append(f"No matches for {pattern!r} under {root}")
+    else:
+        search_state = "complete"
     page = {"unit": "file", "cursor": 0, "next_cursor": None, "has_more": not complete,
             "resumable": False, "complete": complete, "returned": len(matches),
             "total": len(matches) if complete else None}
-    result = {"output": output, "exit_code": 0, "path": root, "matches": items if content_search else None, "paths": matches if not content_search else None, "search_mode": mode, "page": page, "work": data.get("work"), "continuation": {"supported": False, "reason": "bounded_nonresumable"}}
+    result = {"output": "\n".join(lines), "exit_code": 0, "path": root,
+              "matches": items if content_search else None, "paths": matches if not content_search else None,
+              "search_mode": mode, "search_state": search_state, "partial_reasons": reasons,
+              "page": page, "work": data.get("work"),
+              "continuation": {"supported": False, "reason": "bounded_nonresumable"}}
     return _with_file_result(result, operation=label, path=root, kind="search", page=page,
                             search_mode=mode, items=items,
-                            truncation_reason=None if complete else "native_scan_limit_or_partial_coverage")
+                            truncation_reason=(reasons[0] if reasons else "native_scan_limit_or_partial_coverage") if not complete else None)
 
 
 class ProjectPolicyBlocked(PermissionError):
@@ -794,6 +941,31 @@ class PublishFileTool:
                 return {"error": f"publish_file: {confined_error}", "exit_code": 1}
 
         owner = str(ctx.get("owner") or "").strip().lower()
+        requirement_note = {}
+        # Same normalisation as PublishedFileService.publish, so no spelling skips the check.
+        if str(args.get("audience") or "owner").strip().lower() == "public":
+            checker = ctx.get("publish_requirement_check")  # Host-set only, never from tool arguments
+            try:
+                answer = await checker() if callable(checker) else None
+            except Exception:
+                answer = None
+            if not (type(answer) is dict and answer.get("version") == 1
+                    and set(answer) <= {"version", "store", "deny_public", "receipt"}
+                    and type(answer.get("deny_public")) is bool and type(answer.get("receipt", "")) is str
+                    and answer.get("store") in (None, "none")
+                    and not (answer.get("store") == "none" and answer["deny_public"])):
+                answer = None
+            if answer is None:
+                return {"error": "Public link not created: the standing requirement check could not be completed, so nothing was published.",
+                        "outcome": "requirement_check_unavailable", "exit_code": 1}
+            if answer["deny_public"]:
+                receipt = answer.get("receipt", "")
+                return {"error": f"Public link blocked by your standing requirement {receipt}. Ask the user with the question tool whether to share it another way or to change the requirement.",
+                        "outcome": "blocked_by_requirement",
+                        "requirement": {"effect": "publish_file", "deny": {"audience": "public"}, "receipt": receipt},
+                        "exit_code": 1}
+            if answer.get("store") == "none":
+                requirement_note = {"requirement_check": "no_requirement_store"}
         try:
             result = await asyncio.to_thread(
                 PublishedFileService().publish,
@@ -815,6 +987,7 @@ class PublishFileTool:
             "download_url": url,
             "audience": result["audience"],
             "expires_at": result["expires_at"],
+            **requirement_note,
         }
 
 
@@ -839,12 +1012,28 @@ _FILE_MUTATION_PERMISSION = "native-file-mutation"
 
 
 @dataclass(frozen=True)
+class FileApprovalAuthority:
+    """Private managed caller's live authority; never accepted from tool arguments."""
+    owner: str
+    account_id: str
+    session_id: str
+    workspace_id: str
+    source: tuple
+    current: object
+    issued: list[bool] = field(default_factory=lambda: [False], compare=False, repr=False)
+
+
+@dataclass(frozen=True)
 class _PendingFileApproval:
     owner: str
     session_id: str
     workspace: str
     authority_workspace_id: str
     future: asyncio.Future
+    binding: str = ''
+    detail: tuple = ()
+    authority: FileApprovalAuthority | None = None
+    claimed: list[bool] = field(default_factory=lambda: [False], compare=False, repr=False)
 
 
 _PENDING_FILE_APPROVALS: Dict[str, _PendingFileApproval] = {}
@@ -879,6 +1068,19 @@ def file_approval_binding(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+async def _assert_file_approval_current(ctx: dict, *, owner: str, session_id: str, workspace_id: str) -> None:
+    authority = ctx.get('file_approval_authority')
+    if authority is None:
+        return
+    from src.openclank.operation_approvals import canonical_workspace_id
+    workspace_id = canonical_workspace_id(owner, workspace_id)
+    if (type(authority) is not FileApprovalAuthority or authority.owner != owner
+            or authority.session_id != session_id or authority.workspace_id != workspace_id
+            or not authority.account_id or not isinstance(authority.source, tuple)
+            or not callable(authority.current) or await authority.current() is not True):
+        raise PermissionError('file approval authority changed')
+
+
 async def _require_file_approval(
     action: str,
     *,
@@ -899,6 +1101,7 @@ async def _require_file_approval(
     authority_workspace_id = canonical_workspace_id(owner, authority_workspace_id)
     if not session_id:
         raise PermissionError("file mutations require a trusted session")
+    await _assert_file_approval_current(ctx, owner=owner, session_id=session_id, workspace_id=authority_workspace_id)
     binding = file_approval_binding(
         action,
         workspace=workspace,
@@ -911,26 +1114,30 @@ async def _require_file_approval(
     try:
         from src.openclank.operation_approvals import match_operation_approval
 
-        if match_operation_approval(
+        matched = match_operation_approval(
             owner=owner,
             permission_type=_FILE_MUTATION_PERMISSION,
             resource=binding,
             session_id=session_id,
             workspace_id=authority_workspace_id,
             workspace_path=workspace,
-        ):
-            return binding
+        )
     except Exception:
-        pass
+        matched = False
+    if matched:
+        await _assert_file_approval_current(ctx, owner=owner, session_id=session_id, workspace_id=authority_workspace_id)
+        return binding
     # Owner permission mode (yolo/auto): approve with once semantics — no
     # durable grant is written.
     try:
         from src.permission_mode import auto_approves
 
-        if auto_approves(owner):
-            return binding
+        auto_approved = auto_approves(owner)
     except Exception:
-        pass
+        auto_approved = False
+    if auto_approved:
+        await _assert_file_approval_current(ctx, owner=owner, session_id=session_id, workspace_id=authority_workspace_id)
+        return binding
 
     progress_cb = ctx.get("progress_cb")
     if not callable(progress_cb):
@@ -938,15 +1145,6 @@ async def _require_file_approval(
 
     request_id = "file_perm_" + uuid.uuid4().hex[:20]
     future = asyncio.get_running_loop().create_future()
-    pending = _PendingFileApproval(
-        owner=owner,
-        session_id=session_id,
-        workspace=workspace,
-        authority_workspace_id=authority_workspace_id,
-        future=future,
-    )
-    with _PENDING_FILE_APPROVALS_LOCK:
-        _PENDING_FILE_APPROVALS[request_id] = pending
     detail = {
         key: value
         for key, value in {
@@ -959,6 +1157,13 @@ async def _require_file_approval(
         }.items()
         if value
     }
+    pending = _PendingFileApproval(
+        owner=owner, session_id=session_id, workspace=workspace,
+        authority_workspace_id=authority_workspace_id, future=future,
+        binding=binding, detail=tuple(detail.items()), authority=ctx.get('file_approval_authority'),
+    )
+    with _PENDING_FILE_APPROVALS_LOCK:
+        _PENDING_FILE_APPROVALS[request_id] = pending
     try:
         await progress_cb({
             "type": "permission_request",
@@ -972,6 +1177,7 @@ async def _require_file_approval(
             },
         })
         option_id = await future
+        await _assert_file_approval_current(ctx, owner=owner, session_id=session_id, workspace_id=authority_workspace_id)
         if option_id in {"chat", "workspace", "always"}:
             try:
                 from src.openclank.permission_grants import grant_scope_for_lifetime
@@ -1021,12 +1227,26 @@ async def _require_file_approval(
             _PENDING_FILE_APPROVALS.pop(request_id, None)
 
 
+def current_file_approval(request_id: str, *, owner: str, session_id: str, account_id: str):
+    """Read an exact current managed pending object; it is not an approval grant."""
+    with _PENDING_FILE_APPROVALS_LOCK:
+        pending = _PENDING_FILE_APPROVALS.get(str(request_id))
+        authority = pending.authority if pending is not None else None
+        if (pending is None or type(authority) is not FileApprovalAuthority
+                or not account_id or authority.account_id != account_id or pending.owner != owner
+                or pending.session_id != session_id or pending.claimed[0] or pending.future.done()):
+            return None
+        return pending
+
+
 def resolve_file_approval(
     request_id: str,
     option_id: str,
     *,
     owner: str,
     session_id: str,
+    account_id: str = '',
+    expected_pending=None,
 ) -> bool:
     if option_id not in {"once", "chat", "workspace", "always", "reject"}:
         return False
@@ -1034,12 +1254,18 @@ def resolve_file_approval(
         pending = _PENDING_FILE_APPROVALS.get(str(request_id))
         if (
             pending is None
+            or (expected_pending is not None and pending is not expected_pending)
             or pending.owner != str(owner or "")
             or pending.session_id != str(session_id or "")
-            or pending.future.done()
+            or pending.claimed[0] or pending.future.done()
+            or (pending.authority is not None and
+                (type(pending.authority) is not FileApprovalAuthority
+                 or not account_id or pending.authority.account_id != account_id
+                 or pending is not expected_pending))
         ):
             return False
         future = pending.future
+        pending.claimed[0] = True
 
     def finish() -> None:
         if not future.done():
@@ -1068,9 +1294,10 @@ def reject_file_approval_scope(
     matches: list[asyncio.Future] = []
     with _PENDING_FILE_APPROVALS_LOCK:
         for pending in _PENDING_FILE_APPROVALS.values():
-            if pending.owner != str(owner or "") or pending.future.done():
+            if pending.owner != str(owner or "") or pending.future.done() or pending.claimed[0]:
                 continue
             if all_pending:
+                pending.claimed[0] = True
                 matches.append(pending.future)
                 continue
             if session_id and pending.session_id != str(session_id):
@@ -1088,6 +1315,7 @@ def reject_file_approval_scope(
                 and pending.authority_workspace_id != authority_workspace_id
             ):
                 continue
+            pending.claimed[0] = True
             matches.append(pending.future)
     for future in matches:
         future.get_loop().call_soon_threadsafe(
@@ -1160,6 +1388,8 @@ class ManageFilesTool:
                             destination=destination,
                             source_fingerprint=fingerprint or "",
                         )
+                        await _assert_file_approval_current(ctx, owner=owner, session_id=str(ctx.get('session_id') or ''),
+                            workspace_id=str(ctx.get('authority_workspace_id') or '').strip())
                         response = await _agent_request(ctx, "manage_files", "move", source, {
                             "destination": destination,
                             "expected_fingerprint": expected,
@@ -1175,6 +1405,8 @@ class ManageFilesTool:
                         source=source,
                         source_fingerprint=fingerprint or "",
                     )
+                    await _assert_file_approval_current(ctx, owner=owner, session_id=str(ctx.get('session_id') or ''),
+                        workspace_id=str(ctx.get('authority_workspace_id') or '').strip())
                     response = await _agent_request(ctx, "manage_files", "trash", source, {
                         "expected_fingerprint": expected,
                     })

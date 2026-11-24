@@ -1,0 +1,196 @@
+import { recallCarrier, bindRecallCarrier } from "@/memory/mcp-client"
+import z from "zod"
+import { Effect } from "effect"
+import type { MessageV2 } from "../session/message-v2"
+import type { Permission } from "../permission"
+import type { SessionID, MessageID } from "../session/schema"
+import * as Truncate from "./truncate"
+import { RecoverableError } from "./recoverable"
+import { Agent } from "@/agent/agent"
+import { SessionCwd } from "./session-cwd"
+import { AppFileSystem } from "@mimo-ai/shared/filesystem"
+import { ManagedProvider } from "@/acp/managed-provider"
+import { transferWebfetchHtml } from "./webfetch-view"
+import { transferStructuredSearch } from "../session/tool-view-structured-search"
+
+export interface Metadata {
+  [key: string]: any
+}
+
+// TODO: remove this hack
+export type DynamicDescription = (agent: Agent.Info) => Effect.Effect<string>
+
+export type Context<M extends Metadata = Metadata> = {
+  sessionID: SessionID
+  messageID: MessageID
+  agent: string
+  actorID?: string
+  taskId?: string
+  abort: AbortSignal
+  callID?: string
+  extra?: { [key: string]: unknown }
+  messages: MessageV2.WithParts[]
+  metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
+  ask(input: Omit<Permission.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
+  // Whether this instance currently exempts irreversible deletes from the extra
+  // bash_delete confirmation. Supplied by the caller (which holds the Permission
+  // service) instead of read from a process-global, so it stays instance-scoped:
+  // one server process serves many directories with independent permission state,
+  // and a global carrier would let a permissive directory silently auto-approve
+  // deletes in a strict one.
+  // Optional so the handful of synthetic contexts need not care; absent means
+  // "not exempt" — i.e. keep asking, which is the fail-closed direction.
+  autoApproveDelete?(): Effect.Effect<boolean>
+}
+
+export interface ExecuteResult<M extends Metadata = Metadata> {
+  title: string
+  metadata: M
+  output: string
+  attachments?: Omit<MessageV2.FilePart, "id" | "sessionID" | "messageID">[]
+}
+
+export interface Def<Parameters extends z.ZodType = z.ZodType, M extends Metadata = Metadata> {
+  id: string
+  description: string
+  parameters: Parameters
+  resources?(args: z.infer<Parameters>, ctx: Context): AppFileSystem.FileResources
+  execute(args: z.infer<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>
+  formatValidationError?(error: z.ZodError): string
+}
+export type DefWithoutID<Parameters extends z.ZodType = z.ZodType, M extends Metadata = Metadata> = Omit<
+  Def<Parameters, M>,
+  "id"
+>
+
+export interface Info<Parameters extends z.ZodType = z.ZodType, M extends Metadata = Metadata> {
+  id: string
+  init: () => Effect.Effect<DefWithoutID<Parameters, M>>
+}
+
+type Init<Parameters extends z.ZodType, M extends Metadata> =
+  | DefWithoutID<Parameters, M>
+  | (() => Effect.Effect<DefWithoutID<Parameters, M>>)
+
+export type InferParameters<T> =
+  T extends Info<infer P, any> ? z.infer<P> : T extends Effect.Effect<Info<infer P, any>, any, any> ? z.infer<P> : never
+export type InferMetadata<T> =
+  T extends Info<any, infer M> ? M : T extends Effect.Effect<Info<any, infer M>, any, any> ? M : never
+
+export type InferDef<T> =
+  T extends Info<infer P, infer M>
+    ? Def<P, M>
+    : T extends Effect.Effect<Info<infer P, infer M>, any, any>
+      ? Def<P, M>
+      : never
+
+// Builds the agent-facing message for an argument-validation failure. zod v4's
+// prettifyError gives a precise, path-annotated breakdown (which field, what was
+// expected vs received) — far more actionable than dumping the raw issue JSON —
+// so we surface that directly for ZodErrors and keep a generic fallback for
+// anything else.
+export function validationErrorMessage(id: string, error: unknown): string {
+  if (error instanceof z.ZodError) {
+    return `Invalid arguments for the ${id} tool:\n${z.prettifyError(error)}`
+  }
+  return `The ${id} tool was called with invalid arguments: ${error}.\nPlease rewrite the input so it satisfies the expected schema.`
+}
+
+function wrap<Parameters extends z.ZodType, Result extends Metadata>(
+  id: string,
+  init: Init<Parameters, Result>,
+  truncate: Truncate.Interface,
+  agents: Agent.Interface,
+) {
+  return () =>
+    Effect.gen(function* () {
+      const toolInfo = typeof init === "function" ? { ...(yield* init()) } : { ...init }
+      const execute = toolInfo.execute
+      toolInfo.execute = (args, ctx) => {
+        const attrs = {
+          "tool.name": id,
+          "session.id": ctx.sessionID,
+          "message.id": ctx.messageID,
+          ...(ctx.callID ? { "tool.call_id": ctx.callID } : {}),
+        }
+        return Effect.gen(function* () {
+          const managed = yield* Effect.tryPromise({
+            try: () => ManagedProvider.admitManagedSessionBinding(ctx.sessionID),
+            catch: () => new RecoverableError("managed session binding is unavailable or reconciling"),
+          })
+          if (ManagedProvider.enabled() && (!managed || managed.transition)) {
+            throw new Error("managed session binding is unavailable or reconciling")
+          }
+          const normalized = yield* Effect.try({
+            try: () => toolInfo.parameters.parse(args),
+            catch: (error) => {
+              // Bad arguments are always agent-recoverable: the model sees the
+              // message and rewrites the call next turn. Mark it so the TUI
+              // renders it muted instead of alarming the user with a red block.
+              if (error instanceof z.ZodError && toolInfo.formatValidationError) {
+                return new RecoverableError(toolInfo.formatValidationError(error), { cause: error })
+              }
+              return new RecoverableError(validationErrorMessage(id, error), { cause: error })
+            },
+          })
+          const execution = execute(normalized, ctx)
+          const resources = toolInfo.resources?.(normalized, ctx)
+          const result = yield* resources
+            ? AppFileSystem.scheduleFileResources(resources, execution, ctx.abort)
+            : execution
+          if (result.metadata.truncated !== undefined) {
+            return result
+          }
+          const agent = yield* agents.get(ctx.agent)
+          const truncated = yield* truncate.output(result.output, {}, agent, {
+            owner: managed?.owner ?? process.env.OPEN_CLANK_OWNER ?? "",
+            workspace: SessionCwd.get(ctx.sessionID),
+            sessionID: ctx.sessionID,
+            ...(ctx.callID ? { callID: ctx.callID } : {}),
+          })
+          const wrapped = {
+            ...result,
+            output: truncated.content,
+            metadata: {
+              ...result.metadata,
+              truncated: truncated.truncated,
+              ...(truncated.truncated && { outputPath: truncated.outputPath }),
+            },
+          }
+          const recall = id === "memory" ? recallCarrier(result) : undefined
+          if (recall && !ctx.abort.aborted && recall.current() && recall.toolCallID === ctx.callID &&
+              !truncated.truncated && wrapped.output === recall.text && !(result.attachments?.length))
+            bindRecallCarrier(wrapped,recall)
+          if (id === 'webfetch') transferWebfetchHtml(result,wrapped)
+          if (id === 'mcp_tool_search') transferStructuredSearch(result,wrapped)
+          return wrapped
+        }).pipe(Effect.orDie, Effect.withSpan("Tool.execute", { attributes: attrs }))
+      }
+      return toolInfo
+    })
+}
+
+export function define<Parameters extends z.ZodType, Result extends Metadata, R, ID extends string = string>(
+  id: ID,
+  init: Effect.Effect<Init<Parameters, Result>, never, R>,
+): Effect.Effect<Info<Parameters, Result>, never, R | Truncate.Service | Agent.Service> & { id: ID } {
+  return Object.assign(
+    Effect.gen(function* () {
+      const resolved = yield* init
+      const truncate = yield* Truncate.Service
+      const agents = yield* Agent.Service
+      return { id, init: wrap(id, resolved, truncate, agents) }
+    }),
+    { id },
+  )
+}
+
+export function init<P extends z.ZodType, M extends Metadata>(info: Info<P, M>): Effect.Effect<Def<P, M>> {
+  return Effect.gen(function* () {
+    const init = yield* info.init()
+    return {
+      ...init,
+      id: info.id,
+    }
+  })
+}

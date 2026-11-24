@@ -1,9 +1,67 @@
 import asyncio
 import inspect
 import json
+import re
+import time
+from secrets import token_urlsafe
+from threading import Lock
+from urllib.parse import urlsplit, urlunsplit
 from typing import Dict, Any
 
 from src.constants import MAX_OUTPUT_CHARS
+
+_WEB_PAGE_CHARS = 7000
+_WEB_CAPTURE_LIMIT = 2_000_000
+_WEB_CAPTURE_COUNT = 8
+_WEB_CAPTURE_TTL = 300
+_WEB_CAPTURE_LOCK = Lock()
+_WEB_CAPTURE = {}
+
+
+def _public_source_url(value):
+    if not isinstance(value, str) or len(value) > 2048:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", ""))
+
+
+def _web_scope(ctx):
+    owner = ctx.get("owner")
+    session = ctx.get("session_id")
+    if not isinstance(owner, str) or not owner or not isinstance(session, str) or not session:
+        return None
+    return (owner, session, ctx.get("actor_id") or "main")
+
+
+def _web_page(capture, offset):
+    text = capture["text"]
+    end = min(len(text), offset + _WEB_PAGE_CHARS, offset + max(1, MAX_OUTPUT_CHARS - 1800))
+    next_page = f"{capture['id']}.{end}" if capture["retained"] and end < len(text) else None
+    complete = end == len(text) and not capture["truncated"]
+    evidence = {
+        **capture["provenance"], "response_id": capture["id"], "offset": offset,
+        "next": next_page, "complete": complete, "source_truncated": capture["truncated"],
+    }
+    notices = []
+    if capture["truncated"]:
+        notices.append("The original response reached its download budget.")
+    if next_page:
+        notices.append(f"Continue this response with web_fetch continuation {next_page}.")
+    elif end < len(text):
+        notices.append("The remaining text is unavailable for paging.")
+    title = capture["title"]
+    final_url = evidence.get("final_url") or capture["display_url"]
+    heading = "\n".join(part for part in (
+        *notices, f"# {title}" if title else "", f"Source: {final_url}" if final_url else "",
+    ) if part)
+    return {"output": heading + "\n\n" + text[offset:end], "exit_code": 0,
+            "metadata": {"webfetch": evidence}}
+
 
 class WebSearchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
@@ -86,7 +144,17 @@ class WebSearchTool:
         output = text[:MAX_OUTPUT_CHARS] if len(text) > MAX_OUTPUT_CHARS else text
         if sources:
             output += "\n\n<!-- SOURCES:" + json.dumps(sources) + " -->"
-        return {"output": output, "exit_code": 0}
+        evidence = {
+            "kind": "image_search" if intent == "image" else "web_search",
+            "selected_provider": response.selected_provider,
+            "actual_provider": response.actual_provider,
+            "state": response.status, "mode": response.mode,
+            "cached": response.cached, "truncated": len(text) > MAX_OUTPUT_CHARS,
+            "sources": [{"url": url, "title": result.title[:300], "kind": "image" if result.image_url else "web",
+                         "fetched_state": result.fetched_status}
+                        for result in response.results if (url := _public_source_url(result.url))],
+        }
+        return {"output": output, "exit_code": 0, "metadata": {"search": evidence}}
 
 class WebFetchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
@@ -95,11 +163,13 @@ class WebFetchTool:
         raw = content.strip()
         url = ""
         max_bytes = None
+        continuation = None
         if raw.startswith("{"):
             try:
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
                     url = str(parsed.get("url") or "").strip()
+                    continuation = parsed.get("continuation")
                     # Download-budget override (#3812): "full": true raises the
                     # budget to the hard cap; an explicit max_bytes is clamped
                     # to the hard cap downstream. Default stays the soft cap.
@@ -110,6 +180,22 @@ class WebFetchTool:
                         max_bytes = mb
             except json.JSONDecodeError:
                 url = ""
+        if continuation is not None:
+            matched = re.fullmatch(r"([A-Za-z0-9_-]{32})\.([1-9][0-9]{0,6})", continuation) if isinstance(continuation, str) else None
+            scope = _web_scope(ctx)
+            if matched is None or scope is None:
+                return {"error": "Web response continuation is unavailable.", "exit_code": 1}
+            response_id, offset_text = matched.groups()
+            with _WEB_CAPTURE_LOCK:
+                capture = _WEB_CAPTURE.get(response_id)
+                if capture is not None and capture["expires"] <= time.monotonic():
+                    _WEB_CAPTURE.pop(response_id, None)
+                    capture = None
+            offset = int(offset_text)
+            if capture is None or capture["scope"] != scope or not 0 < offset < len(capture["text"]):
+                return {"error": "Web response continuation expired or is unavailable.", "exit_code": 1}
+            return _web_page(capture, offset)
+
         if not url:
             url = raw.split("\n")[0].strip()
         if not url or url.startswith("{") or any(c in url for c in (" ", "\t", "\n")):
@@ -150,28 +236,29 @@ class WebFetchTool:
                 return {"error": f"web_fetch: {url}: {err}", "exit_code": 1}
             return {"error": f"web_fetch: {url}: no readable text content (not HTML, or the page needs JS/login)", "exit_code": 1}
 
-        # Tell the model when the download budget cut the body short and how
-        # to get the rest, instead of silently presenting a partial page as
-        # the whole thing.
-        size_note = ""
-        if result.get("truncated"):
-            fetched = result.get("fetched_bytes") or 0
-            total = result.get("total_bytes")
-            total_txt = f" of {total:,} bytes" if total else ""
-            size_note = (
-                f"[partial content: download stopped at {fetched:,} bytes{total_txt}. "
-                f'Re-call with {{"url": "{url}", "full": true}} to fetch up to '
-                f"{WEB_FETCH_HARD_MAX_BYTES:,} bytes.]\n\n"
-            )
-
-        # The notice must lead the output so the MAX_OUTPUT_CHARS trim below can
-        # never drop it. The title is untrusted, uncapped page content, so a
-        # giant title ahead of the notice could push it out of range; keep the
-        # notice first and cap the title as a second guard.
-        if len(title) > 300:
-            title = title[:300] + "..."
-        header = (f"# {title}\n" if title else "") + f"Source: {url}\n\n"
-        output = size_note + header + text
-        if len(output) > MAX_OUTPUT_CHARS:
-            output = output[:MAX_OUTPUT_CHARS] + "\n\n[...truncated]"
-        return {"output": output, "exit_code": 0}
+        scope = _web_scope(ctx)
+        observed = result.get("provenance")
+        observed = observed if isinstance(observed, dict) else {}
+        keep = bool(scope and _WEB_PAGE_CHARS < len(text) and len(text.encode("utf-8")) <= _WEB_CAPTURE_LIMIT)
+        response_id = token_urlsafe(24)
+        capture = {
+            "id": response_id, "scope": scope, "text": text, "title": title[:300],
+            "display_url": _public_source_url(url),
+            "expires": time.monotonic() + _WEB_CAPTURE_TTL,
+            "retained": keep, "truncated": result.get("truncated") is True,
+            "provenance": {
+                "final_url": _public_source_url(observed.get("final_url")),
+                "fetched_at": observed.get("fetched_at"),
+                "result_kind": observed.get("result_kind") or "unavailable",
+                "content_type": observed.get("content_type"),
+                "url_parameters_omitted": observed.get("url_parameters_omitted") is True,
+            },
+        }
+        if keep:
+            with _WEB_CAPTURE_LOCK:
+                for expired in [key for key, entry in _WEB_CAPTURE.items() if entry["expires"] <= time.monotonic()]:
+                    _WEB_CAPTURE.pop(expired, None)
+                if len(_WEB_CAPTURE) >= _WEB_CAPTURE_COUNT:
+                    _WEB_CAPTURE.pop(next(iter(_WEB_CAPTURE)))
+                _WEB_CAPTURE[response_id] = capture
+        return _web_page(capture, 0)

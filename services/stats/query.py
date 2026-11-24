@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy.exc import OperationalError
 
 from core.stats_models import StatsEvent
-from services.stats.ledger import project_admitted_events
+from services.stats.ledger import COUNT_METRICS, project_admitted_events
 from services.stats.privacy import IdentityCatalog, identity_handle, owner_scope, safe_scope
 
 MAX_FACTS = 100_000
@@ -382,7 +382,7 @@ def _install_progress_handler(db, cancel_event, deadline):
 
 def _event_query(db, scope: StatsScope, filters: dict[str, str] | None = None):
     # Owner is the first predicate before time, dimensions, or aggregation.
-    query = db.query(StatsEvent).filter(StatsEvent.owner == scope.owner)
+    query = db.query(StatsEvent).filter(StatsEvent.owner == scope.owner, StatsEvent.event_kind != "context_receipt")
     if scope.start_utc is not None:
         query = query.filter(StatsEvent.event_time >= scope.start_utc, StatsEvent.event_time < scope.end_utc)
     filters = _resolve_filter_handles(db, scope.owner, filters or {})
@@ -436,8 +436,12 @@ def query_summary(db, scope: StatsScope, *, filters: dict[str, str] | None = Non
     billable_known = all(event is not None and event.billable is not None for event in dispatches.values())
     other_metrics = {}
     for key in sorted({key for event in events for key in event.event_metadata.get("extra_metrics", {})}):
-        aggregate = _aggregate([(getattr(event,key,None),getattr(event,key + "_state","unavailable")) for event in events])
-        other_metrics[key] = _typed(aggregate["value"], unit="requests" if key == "searchRequests" else "tokens", state=aggregate["state"])
+        if key in COUNT_METRICS:   # an older row or a turn without images has no such count: it counts zero
+            aggregate = _aggregate([(getattr(event, key, None) or 0, "reported") for event in events])
+        else:
+            aggregate = _aggregate([(getattr(event,key,None),getattr(event,key + "_state","unavailable")) for event in events])
+        other_metrics[key] = _typed(aggregate["value"], unit={"searchRequests": "requests", "mediaInputsEvaluated": "inputs", "mediaInputsNotSent": "inputs"}.get(key, "tokens"), state=aggregate["state"])
+        if key in {"mediaInputsEvaluated", "mediaInputsNotSent"}: other_metrics[key]["coverage"] = "preparation_only"
     return _public_report({
         "schema": "open-clank.stats.v1",
         "owner_scope": _owner_scope(scope.owner),
@@ -459,9 +463,16 @@ def query_summary(db, scope: StatsScope, *, filters: dict[str, str] | None = Non
                              "method": "distinct_observed_and_explicitly_covered_dispatch_ids"},
         "_identity_values": {field: sorted({getattr(event, field, None) for event in events if getattr(event, field, None)}) for field in _PUBLIC_ID_FIELDS},
         "rows": [{"id": event.id, "event_time": event.event_time.isoformat() + "Z",
-                  "session_id": event.session_id, "scope": event.observation_scope,
+                  "session_id": event.session_id, "root_operation_id": event.root_operation_id, "scope": event.observation_scope,
+                  "host_stage_timing": (event.event_metadata or {}).get("host_stage_timing"),
+                  "host_stage_as_of": (event.event_metadata or {}).get("host_stage_as_of"),
+                  "wire_timing": (event.event_metadata or {}).get("wire_timing"),
+                  "wire_timing_as_of": (event.event_metadata or {}).get("wire_timing_as_of"),
                   "conversation_state": "deleted" if event.event_metadata.get("conversation_deleted") else "active",
                   "actual_model": event.actual_model, "status": event.status,
+                  "operation_purpose": (event.event_metadata or {}).get("operation_purpose"),
+                  "actual_model_state": (event.event_metadata or {}).get("actual_model_state"),
+                  "actual_model_options": (event.event_metadata or {}).get("actual_model_options"),
                   "output_tokens": _typed(event.output_tokens, unit="tokens",
                                            state=event.output_tokens_state)} for event in selected],
         "pagination": {"page": page, "page_size": len(selected) if all_rows else page_size, "pages": 1 if all_rows else total_pages},

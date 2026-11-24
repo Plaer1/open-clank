@@ -1,4 +1,4 @@
-"""Explicit owner-owned General Hex revisions in Frankenmemory's SQLite authority.
+"""Explicit owner-owned General Hex revisions in Memery's SQLite authority.
 
 This library is declarative data; it neither publishes workspace policy nor
 infers applicability. Callers supply authenticated owners and explicit tags.
@@ -67,35 +67,39 @@ def _revision(value):
 
 
 def ensure_general_hex_schema(db_path):
-    """Initialize a fresh policy store or validate current schema without upgrades."""
-    expected = {'fm_general_hex_heads': ['owner_id', 'hex_id', 'revision', 'deleted'], 'fm_general_hex_revisions': ['owner_id', 'hex_id', 'revision', 'record_json'], 'fm_general_hex_context_tags': ['owner_id', 'context_kind', 'context_id', 'revision', 'tags_json', 'updated_at']}
-    with sqlite3.connect(db_path, timeout=30) as conn:
-        present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if present.intersection(expected):
-            for table, columns in expected.items():
-                found = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-                if not set(columns).issubset(found):
-                    raise GeneralHexError("Legacy Hex schema requires .clanker/tools/migrations/python/secondary.py general-hex-schema")
-            return
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS fm_general_hex_heads (
-            owner_id TEXT NOT NULL, hex_id TEXT NOT NULL,
-            revision INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(owner_id,hex_id));
-        CREATE TABLE IF NOT EXISTS fm_general_hex_revisions (
-            owner_id TEXT NOT NULL, hex_id TEXT NOT NULL, revision INTEGER NOT NULL,
-            record_json TEXT NOT NULL,
-            PRIMARY KEY(owner_id,hex_id,revision));
-        CREATE TABLE IF NOT EXISTS fm_general_hex_context_tags (
-            owner_id TEXT NOT NULL, context_kind TEXT NOT NULL,
-            context_id TEXT NOT NULL, revision INTEGER NOT NULL, tags_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(owner_id,context_kind,context_id),
-            CHECK(context_kind IN ('workspace','task')));
-        
-        """)
+    """Validate the public five-table profile or initialize a legacy store.
 
+    Guarded v17 never runs schema DDL here; a missing or changed profile is
+    available only after explicit stopped-writer preparation.
+    """
+    from pathlib import Path
+    from src.runtime_paths import get_app_root
+    resource = Path(get_app_root()) / 'native/memery/crates/memery-core/src/store/schema-v17-general-hex.sql'
+    try:
+        sql = resource.read_text(encoding='utf-8')
+        with sqlite3.connect(':memory:') as template:
+            template.executescript(sql)
+            expected = {(kind, name, table): definition for kind, name, table, definition in template.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND (name GLOB 'fm_general_hex_*' OR tbl_name GLOB 'fm_general_hex_*')")}
+        if len(expected) != 5 or any(key[0] != 'table' for key in expected):
+            raise GeneralHexError('General Hex schema resource unavailable')
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            version = conn.execute('PRAGMA user_version').fetchone()[0]
+            actual = {(kind, name, table): definition for kind, name, table, definition in conn.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND (name GLOB 'fm_general_hex_*' OR tbl_name GLOB 'fm_general_hex_*')")}
+            normalize = lambda value: ' '.join(value.split())
+            if any(key not in expected or normalize(value) != normalize(expected[key]) for key, value in actual.items()):
+                raise GeneralHexError('General Hex schema differs from the supported profile')
+            if version in (17, 18):
+                marker = conn.execute("SELECT value FROM fm_meta WHERE key='openclank.general_hex.v1'").fetchone()
+                if set(actual) != set(expected) or marker not in (None, ('1',)):
+                    raise GeneralHexError('General Hex schema requires stopped-writer preparation')
+                return
+            # Compatible legacy subsets are preserved; IF NOT EXISTS only adds
+            # absent canonical tables. Never replace rows or upgrade tables.
+            conn.executescript(sql)
+    except (OSError, UnicodeError, sqlite3.Error) as exc:
+        raise GeneralHexError('General Hex schema resource or store unavailable') from exc
 
 
 def erase_general_hex_owner(conn, owner_id):

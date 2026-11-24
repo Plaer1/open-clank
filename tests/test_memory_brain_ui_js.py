@@ -7,7 +7,6 @@ as "trusted" and what injection actually trusts is a bug.
 """
 import itertools
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -126,62 +125,6 @@ def test_chip_semantics():
     assert "archived" in labels and "no-decay" in labels
 
 
-def test_brain_markup_carries_trust_panel_and_filters():
-    html = (_REPO / "static" / "index.html").read_text()
-    assert 'id="memory-mode-select"' in html
-    assert 'value="automatic"' in html
-    assert 'value="manual"' in html
-    assert 'value="off"' in html
-    assert 'id="memory-trust-auto-toggle"' in html
-    assert 'id="memory-trust-kinds"' in html
-    assert 'id="memory-filter-kind"' in html
-    assert 'id="memory-filter-provenance"' in html
-    assert 'id="memory-filter-trust"' in html
-    # Filters live INSIDE toolbar row 1 — a fourth toolbar row blows the
-    # .memory-toolbar 120px cap and overlaps the list (e's screenshot).
-    row_start = html.index('class="memory-toolbar-row"')
-    search_at = html.index('id="memory-search"')
-    filters_at = html.index('id="memory-signal-filters"')
-    assert row_start < filters_at < search_at
-    assert 'id="memory-digest-stamp"' in html
-
-
-def test_memory_js_wires_prefs_and_chips():
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    assert "syncMemoryMode()" in source
-    assert "/api/prefs/memory_mode" in source
-    assert "memory_trust_auto" in source
-    assert "memory_trust_auto_kinds" in source
-    assert "memoryChips(" in source
-    assert "_buildMemoryDetails" in source
-    assert "_passesSignalFilters" in source
-    assert "How much do I trust this information?" in source
-    assert "/trust`" in source
-    assert "Save Trust" in source
-
-
-def test_brain_handler_profile_controls_are_explicit_and_opt_in():
-    html = (_REPO / "static" / "index.html").read_text()
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    assert 'id="memory-handler-profile-card"' in html
-    assert 'id="memory-mobile-control-side"' in html
-    assert 'value="system"' in html
-    assert 'value="left"' in html and 'value="right"' in html
-    assert 'id="memory-add-profile-questions"' in html
-    assert 'id="memory-profile-question-status"' in html
-    assert "syncMobileControlSide()" in source
-    assert "/api/prefs/mobile_control_side" in source
-    assert "_wireHandlerProfileControls()" in source
-    assert "/api/memory/principals" in source
-    assert "handler-preferred-name" in source
-    assert "handler-mobile-control-side" in source
-    assert "preferred_name" in source
-    assert "mobile_control_side" in source
-    # Profile questions are only written from the explicit button handler.
-    assert "_addHandlerProfileQuestions" in source
-    assert "Nothing is added until you choose this button." in html
-
-
 @needs_node
 def test_unknown_kind_chips_read_as_open_question():
     js = f"""
@@ -197,20 +140,6 @@ def test_unknown_kind_chips_read_as_open_question():
     assert "open question" in labels, "kind chip reads as a question, not 'unknown'"
     assert "unknown" not in labels
     assert data["smuggled"] is False, "non-human unknown can never auto-trust"
-
-
-def test_memory_js_wires_question_lifecycle():
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    assert "'unknown'" in source and "open question" in source
-    assert "resolveQuestion" in source
-    assert "/resolve" in source
-    assert "answer: answer.trim()" in source
-    assert "expected_revision" in source
-    assert "_runVersionedAction(item, 'reopen')" in source
-    assert "_runVersionedAction(item, 'revert'" in source
-    assert "/api/memory/candidate/" in source and "Save candidate" in source
-    html = (_REPO / "static" / "index.html").read_text()
-    assert '<option value="history">History</option>' in html
 
 
 @needs_node
@@ -295,114 +224,6 @@ def test_memory_import_error_preserves_backend_details_without_duplicate_prefix(
     ]
 
 
-def test_memory_import_uses_response_error_decoder():
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    assert "responseError(res, 'Import failed')" in source
-    assert "contextualErrorMessage('Import failed', error?.message)" in source
-    assert "showError('Import failed — ' + error.message)" not in source
-
-
-def test_memory_import_uses_one_multi_file_batch_with_stable_review_errors():
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    html = (_REPO / "static" / "index.html").read_text()
-    assert 'id="memory-import-file" multiple' in html
-    assert "formData.append('files', file)" in source
-    assert "/api/memory/import-batches" in source
-    assert "Saved ${saved}; ${failed} still need attention" in source
-    assert "memoryImportRetrying" in source
-    assert "MEMORY_ROUTE_UNCONFIGURED" in source
-    assert "/api/v1/providers/bindings/memory" in source
-    assert "'If-Match'" in source and "'Idempotency-Key'" in source
-    assert "pendingMemoryImportFile" in source
-    assert "Use ${label}" in source
-    handle_start = source.index("async function handleImportFiles")
-    legacy_start = source.index("async function handleImportFileLegacy", handle_start)
-    interactive_path = source[handle_start:legacy_start]
-    assert "handleImportFileLegacy(selected[0])" not in interactive_path
-    assert "/api/memory/import-batches" in interactive_path
-    ui_source = (_REPO / "static" / "js" / "ui.js").read_text()
-    assert "export function showError(msg, options = {})" in ui_source
-    assert "options.action" in ui_source and "options.onAction" in ui_source
-
-
-def test_batch_review_keeps_server_owned_import_provenance_and_failed_item_retry():
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    start = source.index("function _batchReviewItems")
-    end = source.index("async function handleImportFiles", start)
-    batch = source[start:end]
-    assert "suggestionId" in batch
-    assert "Idempotency-Key" in batch
-    assert "/api/memory/import-batches/${encodeURIComponent(item.batchId)}/review" in batch
-    assert "action," in batch
-    assert "proposal," in batch
-    assert "retry file" in batch
-    assert "/retry" in batch
-    assert "/api/memory/add" not in batch
-
-
-def test_import_recovers_batches_severed_by_proxy_timeout():
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    html = (_REPO / "static" / "index.html").read_text()
-    assert 'id="memory-import-pending"' in html
-    assert "_fetchPendingImportBatches" in source
-    assert "'/api/memory/import-batches'" in source
-    assert "_recoverImportBatchAfterTimeout" in source
-    assert "_refreshPendingImportNotice" in source
-    assert "Import is still processing" in source
-    assert "waiting for review" in source
-    handle_start = source.index("async function handleImportFiles")
-    legacy_start = source.index("async function handleImportFileLegacy", handle_start)
-    interactive_path = source[handle_start:legacy_start]
-    assert "await _recoverImportBatchAfterTimeout()" in interactive_path
-
-
-def test_tidy_ui_requires_typed_success_before_treating_counts_as_clean():
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    assert "responseError(res, 'Tidy failed')" in source
-    assert "data?.ok !== true" in source
-    assert "data.status === 'unchanged'" in source
-    assert "data.status !== 'applied'" in source
-    assert "Tidy failed — check console" not in source
-
-
-def test_brain_settings_has_accessible_owner_nuke_controls():
-    html = (_REPO / "static" / "index.html").read_text()
-    assert 'class="admin-card admin-danger-card" id="memory-nuke-card"' in html
-    assert '<fieldset id="memory-nuke-components"' in html
-    assert '<legend' in html and 'Select what to delete</legend>' in html
-    assert re.findall(r'data-memory-nuke-component="([^"]+)"', html) == [
-        "memories", "graph", "ingest", "skills",
-    ]
-    for component in ("memories", "graph", "ingest", "skills"):
-        assert f'<label for="memory-nuke-{component}">' in html
-        assert f'type="checkbox" id="memory-nuke-{component}"' in html
-    assert '<button type="button" id="memory-nuke-all"' in html
-    assert '<button type="button" id="memory-nuke-none"' in html
-    assert html.count('aria-controls="memory-nuke-component-list"') == 2
-    assert '<button type="button" id="memory-nuke-btn" class="admin-btn-delete" disabled>' in html
-    assert 'id="memory-nuke-status"' in html
-    assert 'role="status" aria-live="polite" aria-atomic="true"' in html
-    assert "RAG documents, chunks, indexes, exports, backups, and source files are retained." in html
-    assert "Memory photos, and their associated text" in html
-    assert "RAG documents and indexes stay" in html
-    assert "Other users and built-in or shared skills stay untouched." in html
-
-
-def test_admin_danger_zone_routes_brain_reset_to_existing_flow_without_memory_wipe():
-    html = (_REPO / "static" / "index.html").read_text(encoding="utf-8")
-    admin = (_REPO / "static" / "js" / "admin.js").read_text(encoding="utf-8")
-    assert 'id="adm-open-brain-reset"' in html
-    assert 'data-wipe-kind="memory"' not in html
-    assert "el('tool-memory-btn')?.click()" in admin
-    labels_start = admin.index("const _LABELS = {")
-    labels_end = admin.index("};", labels_start)
-    assert "memory" not in admin[labels_start:labels_end]
-    assert "data across every remaining category" in admin
-    assert "Delete all seven global categories" in html
-    assert "Across all accounts: chats, skills, notes, tasks, documents, gallery, and calendar." in html
-    assert "Memories, graph, and ingest data are excluded;" in html
-
-
 @needs_node
 def test_admin_danger_zone_runtime_all_and_brain_navigation():
     source = (_REPO / "static" / "js" / "admin.js").read_text(encoding="utf-8")
@@ -460,35 +281,3 @@ def test_memory_nuke_ui_uses_two_phase_owner_contract_and_fails_closed():
     assert "if (result.complete === true)" in source
     assert "_setMemoryNukeSelection(false)" in source
     assert "detail.error" in source
-
-
-def test_memory_nuke_ui_refreshes_every_brain_surface_after_commit():
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    refresh_start = source.index("async function _refreshMemoryNukeSurfaces()")
-    refresh_end = source.index("async function _nukeSelectedMemoryData()", refresh_start)
-    refresh = source[refresh_start:refresh_end]
-    for operation in (
-        "loadMemories()",
-        "loadMemoryInspect()",
-        "loadMemoryGraph()",
-        "loadDigestPreview()",
-        "loadSkills(false)",
-    ):
-        assert operation in refresh
-    assert "Promise.allSettled(refreshes)" in refresh
-    assert source.index("await _refreshMemoryNukeSurfaces();") < source.index(
-        "if (result.complete === true)",
-        source.index("async function _nukeSelectedMemoryData()"),
-    )
-
-
-def test_memory_editors_round_trip_raw_text_not_display_projection():
-    """S01: display payloads render %USER% → Handler label; every edit buffer
-    and change check must use the raw companion so the stored token survives."""
-    source = (_REPO / "static" / "js" / "memory.js").read_text()
-    assert "input.value = memory.raw_text || memory.text;" in source
-    assert "input.value = memory.raw_text || memory.text || '';" in source
-    assert "const storedText = memory ? (memory.raw_text || memory.text) : null;" in source
-    assert "const storedText = memory.raw_text || memory.text;" in source
-    assert "text.value = item.raw_content || item.content || '';" in source
-    assert "raw_text: full?.raw_text || full?.text || item.raw_content || item.raw_headline || item.content || item.headline || ''," in source

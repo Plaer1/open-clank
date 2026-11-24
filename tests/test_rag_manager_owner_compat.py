@@ -99,7 +99,7 @@ def test_rag_manager_cannot_select_chroma_from_environment(monkeypatch):
     created = []
 
     class _Canonical:
-        backend = "frankenmemory"
+        backend = "memery"
 
         def __init__(self):
             created.append(True)
@@ -110,7 +110,7 @@ def test_rag_manager_cannot_select_chroma_from_environment(monkeypatch):
     manager = module.RAGManager(persist_directory="/tmp/legacy-chroma")
 
     assert created == [True]
-    assert manager.vector_rag.backend == "frankenmemory"
+    assert manager.vector_rag.backend == "memery"
 
 
 def test_live_stack_has_no_chroma_backend_selector():
@@ -122,8 +122,6 @@ def test_live_stack_has_no_chroma_backend_selector():
             "src/tool_index.py",
             "src/app_initializer.py",
             "routes/embedding_routes.py",
-            "mcp_servers/memory_server.py",
-            "mcp_servers/rag_server.py",
             "scripts/index_documents.py",
             "start-macos.sh",
         )
@@ -135,12 +133,6 @@ def test_live_stack_has_no_chroma_backend_selector():
     assert "MemoryVectorStore" not in runtime
     assert "MemoryVectorStore(" not in (ROOT / "src/app_initializer.py").read_text(encoding="utf-8")
     assert "chromadb_health" not in (ROOT / "src/service_health.py").read_text(encoding="utf-8")
-    # The app still has a provider-compatibility selector, but it cannot
-    # resurrect Chroma because app initialization never constructs the retired
-    # vector store.  The standalone memory MCP path was the unsafe selector.
-    memory_server = (ROOT / "mcp_servers/memory_server.py").read_text(encoding="utf-8")
-    assert "MEMORY_PROVIDER" not in memory_server
-    assert "MemoryVectorStore" not in memory_server
 
 
 def test_index_documents_cli_requires_owner():

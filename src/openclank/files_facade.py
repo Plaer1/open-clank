@@ -10,9 +10,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
+import sys
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 import stat
@@ -242,6 +245,7 @@ class ProviderContent:
     etag: str | None = None
     expected_identity: tuple[int, int, int, int] | None = None
     stream: Callable[[int, int], AsyncIterator[bytes]] | None = None
+    preview_evidence: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -371,6 +375,13 @@ def _public_action_receipt(value: Mapping[str, Any] | None, *, _depth: int = 0) 
         raw = value.get(key)
         if isinstance(raw, (str, int, float, bool)):
             result[key] = str(raw)[:256] if isinstance(raw, str) else raw
+    raw_history = value.get("history")
+    if isinstance(raw_history, Mapping) and raw_history.get("state") in {"complete", "incomplete", "unavailable"}:
+        history = {"state": raw_history["state"]}
+        action_id = raw_history.get("actionId")
+        if isinstance(action_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", action_id):
+            history["actionId"] = action_id
+        result["history"] = history
     raw_revision = value.get("revision")
     if isinstance(raw_revision, Mapping) and raw_revision.get("kind") and raw_revision.get("value") is not None:
         result["revision"] = {"kind": str(raw_revision["kind"])[:128], "value": str(raw_revision["value"])[:256]}
@@ -391,7 +402,7 @@ def _validated_receipt(
         raise FilesFacadeError("provider returned an invalid operation receipt", code="provider_unavailable")
     allowed_item_keys = {
         "item_id", "outcome", "code", "resource_ref", "resource_key",
-        "receipt_id", "revision", "provenance", "action_receipt", "history",
+        "receipt_id", "revision", "provenance", "action_receipt", "history", "cleanup", "undo",
     }
     safe_items = []
     seen_ids: set[str] = set()
@@ -414,6 +425,14 @@ def _validated_receipt(
             raise FilesFacadeError("provider returned duplicate operation items", code="provider_unavailable")
         seen_ids.add(item_id_value)
         item = {"item_id": item_id_value, "outcome": outcome}
+        if raw.get("cleanup") is not None:
+            if raw["cleanup"] not in {"pending", "complete"} or outcome != "committed":
+                raise FilesFacadeError("provider returned an invalid cleanup receipt", code="provider_unavailable")
+            item["cleanup"] = raw["cleanup"]
+        if raw.get("undo") is not None:
+            if raw["undo"] != "available" or outcome != "committed":
+                raise FilesFacadeError("provider returned an invalid undo receipt", code="provider_unavailable")
+            item["undo"] = "available"
         if raw.get("code") is not None:
             if not isinstance(raw["code"], str) or not raw["code"].strip():
                 raise FilesFacadeError("provider returned an invalid operation receipt", code="provider_unavailable")
@@ -456,7 +475,7 @@ def _validated_preparation(value: Mapping[str, Any], *, operation_id: str, expec
     allowed_keys = {
         "operation_id", "generation", "preparation_receipt_id", "source_revision", "target_identity", "target_revision",
         "insertion", "asset", "source_digest", "request_digest", "asset_size", "account_id", "workspace_id",
-        "source_identity", "mode", "action_receipt", "receipt", "history", "provenance",
+        "source_identity", "mode", "action_receipt", "receipt", "history", "provenance", "layout_version",
     }
     if set(value) - allowed_keys:
         raise FilesFacadeError("provider returned an invalid preparation", code="provider_unavailable")
@@ -519,14 +538,26 @@ def _validated_preparation(value: Mapping[str, Any], *, operation_id: str, expec
     source_identity = value.get("source_identity")
     safe_source_identity = None
     if source_identity is not None:
-        if not isinstance(source_identity, Mapping) or set(source_identity) - {"resource_ref", "provider"}:
+        if not isinstance(source_identity, Mapping):
             raise FilesFacadeError("provider preparation source identity is invalid", code="provider_unavailable")
-        safe_source_identity = {}
-        for key in ("resource_ref", "provider"):
-            if source_identity.get(key) is not None:
-                if not isinstance(source_identity[key], str) or not source_identity[key].strip() or len(source_identity[key].encode("utf-8")) > 16_384 or "\x00" in source_identity[key]:
-                    raise FilesFacadeError("provider preparation source identity is invalid", code="provider_unavailable")
-                safe_source_identity[key] = source_identity[key].strip()
+        if source_identity.get('kind') == 'client_upload':
+            if (set(source_identity) != {'kind','name','mime','sha256','size'} or not isinstance(source_identity.get('name'), str)
+                or not source_identity['name'] or len(source_identity['name'].encode('utf-8')) > 240 or any(c in source_identity['name'] for c in ('/', '\\', '\x00'))
+                or not isinstance(source_identity.get('mime'), str) or not source_identity['mime'] or len(source_identity['mime'].encode('utf-8')) > 128
+                or any(ord(c) < 32 or ord(c) == 127 for c in source_identity['name'] + source_identity['mime'])
+                or not re.fullmatch(r'[a-f0-9]{64}', str(source_identity.get('sha256') or ''))
+                or type(source_identity.get('size')) is not int or not 0 < source_identity['size'] <= min(FILES_IMPORT_MAX_BYTES, 10 * 1024 * 1024)):
+                raise FilesFacadeError("provider preparation source identity is invalid", code="provider_unavailable")
+            safe_source_identity = dict(source_identity)
+        else:
+            if set(source_identity) - {"resource_ref", "provider"}:
+                raise FilesFacadeError("provider preparation source identity is invalid", code="provider_unavailable")
+            safe_source_identity = {}
+            for key in ("resource_ref", "provider"):
+                if source_identity.get(key) is not None:
+                    if not isinstance(source_identity[key], str) or not source_identity[key].strip() or len(source_identity[key].encode("utf-8")) > 16_384 or "\x00" in source_identity[key]:
+                        raise FilesFacadeError("provider preparation source identity is invalid", code="provider_unavailable")
+                    safe_source_identity[key] = source_identity[key].strip()
     mode = value.get("mode")
     if mode is not None and (not isinstance(mode, str) or mode.strip().lower() not in {"link", "embed"}):
         raise FilesFacadeError("provider preparation mode is invalid", code="provider_unavailable")
@@ -540,12 +571,12 @@ def _validated_preparation(value: Mapping[str, Any], *, operation_id: str, expec
             raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
         provenance_allowed = {
             "canonical_root", "origin", "owner_subject_id", "workspace_id", "document_id", "document_path",
-            "asset_name", "asset_id", "asset_digest", "references", "created_unix_ms",
+            "asset_name", "asset_id", "asset_digest", "references", "created_unix_ms", "layout_version", "media_dir",
         }
         if set(provenance) - provenance_allowed:
             raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
         origin = str(provenance.get("origin") or "").strip()
-        if origin not in {"workspace", "loose"}:
+        if origin not in {"workspace", "loose", "selected_root"}:
             raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
         digest_value = str(provenance.get("asset_digest") or "")
         if not digest_value.startswith("sha256:") or len(digest_value) > 128:
@@ -556,17 +587,20 @@ def _validated_preparation(value: Mapping[str, Any], *, operation_id: str, expec
             or any(not isinstance(item, str) or not item.strip() or len(item) > 1024 for item in references)
         ):
             raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
-        safe_provenance = dict(provenance)
-        safe_provenance["origin"] = origin
-        safe_provenance["asset_digest"] = digest_value
-        safe_provenance["references"] = [str(item) for item in (references or ())]
+        version = provenance.get("layout_version", 1)
+        if type(version) is not int or version not in (1, 2):
+            raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
+        safe_provenance = {"origin":origin, "asset_digest":digest_value, "layout_version":version}
     target_identity = value.get("target_identity")
     if not isinstance(target_identity, Mapping):
         raise FilesFacadeError("provider preparation target identity is invalid", code="provider_unavailable")
-    if set(target_identity) - {"resource_key", "resource_ref", "kind", "course_id", "lesson_id", "assignment_id"}:
+    if set(target_identity) - {"resource_key", "resource_ref", "kind", "course_id", "lesson_id", "assignment_id", "root_ref", "root_revision"}:
         raise FilesFacadeError("provider preparation target identity is invalid", code="provider_unavailable")
     safe_target: dict[str, str] = {}
     for key, raw in target_identity.items():
+        if key == "root_revision":
+            safe_target[key] = revision(raw, "root revision")
+            continue
         if key == "resource_key":
             safe_target[key] = resource_key(raw, "target identity")
             continue
@@ -576,6 +610,8 @@ def _validated_preparation(value: Mapping[str, Any], *, operation_id: str, expec
         if not token or len(token.encode("utf-8")) > 16_384 or "\x00" in token or "/" in token or "\\" in token:
             raise FilesFacadeError("provider preparation target identity is invalid", code="provider_unavailable")
         safe_target[key] = token
+    if ("root_ref" in safe_target) != ("root_revision" in safe_target) or ("root_ref" in safe_target and safe_target.get("kind") != "host_document"):
+        raise FilesFacadeError("provider root identity is invalid", code="provider_unavailable")
     insertion = value.get("insertion")
     if not isinstance(insertion, Mapping) or set(insertion) != {"format", "link_target", "label", "media_kind"}:
         raise FilesFacadeError("provider preparation insertion is invalid", code="provider_unavailable")
@@ -739,7 +775,20 @@ def _open_cursor(
     )
 
 
+_UNDO_MESSAGES = {
+    "managed_undo_journal_missing": "This move can no longer be undone: its record is gone.",
+    "resource_changed": "Something at the new place changed since the move, so nothing was touched.",
+    "managed_undo_of_undo_unsupported": "An undo cannot be undone again.",
+    "managed_undo_move_not_complete": "The move has not finished yet.",
+    "managed_undo_requires_cross_root": "Only a move between two folders roots can be undone this way.",
+    "managed_undo_journal_unreadable": "The record of this move cannot be read, so nothing was touched.",
+    "managed_undo_unavailable_platform": "Undo is not available on this platform.",
+    "managed_undo_unavailable": "This move cannot be undone right now; nothing was changed.",
+}
+
+
 class FilesFacade:
+    _MANAGED_BATCH_READY = sys.platform == "linux"
     def __init__(
         self,
         providers: Sequence[FilesProvider] = (),
@@ -1145,6 +1194,61 @@ class FilesFacade:
             raise FilesFacadeError("resource key is unavailable", code="resource_unavailable")
         return self._resource(context, provider_name, current, parent_stable_id=None)
 
+    async def resolve_binder_folder(self, context: ProviderContext, *, source: Mapping[str, Any]) -> dict[str, Any]:
+        provider = self._providers.get("copal")
+        resolver = getattr(provider, "resolve_binder_folder", None)
+        if not callable(resolver):
+            raise FilesFacadeError("Binder provider is unavailable", code="provider_unavailable")
+        entry = await resolver(context, workspace=source["workspaceId"], corpus=source["corpus"], root=tuple(source["root"]))
+        return self._resource(context, "copal", entry)
+
+    async def describe_binder_folder(self, context: ProviderContext, *, resource_ref: str) -> dict[str, Any]:
+        provider, ref = self._provider_for_ref(context, resource_ref, capability="stat")
+        resolver = getattr(provider, "describe_binder_folder", None)
+        if ref.provider != "copal" or not callable(resolver):
+            raise FilesFacadeError("Choose an active folder under Workspace collections.", code="resource_unavailable")
+        return await resolver(context, origin_id=ref.origin_id)
+
+    async def transfer_root_requirement(self, context: ProviderContext, *, generation: int,
+                                        sources: Sequence[Mapping[str, Any]], destination_ref: str) -> dict[str, bool]:
+        """Classify a captured move without reserving or mutating it."""
+        if int(context.policy_generation) != _strict_nonnegative_int(generation, "generation") or not self._generation_current(context):
+            raise FilesFacadeError("File policy generation changed", code="policy_generation_changed")
+        destination_provider, destination = self._provider_for_ref(context, destination_ref, capability="write")
+        destination_entry = await destination_provider.stat(context, origin_id=destination.origin_id)
+        if destination_entry.origin_id != destination.origin_id or destination_entry.kind not in _DIRECTORY_KINDS or "write" not in destination_entry.capabilities:
+            raise FilesFacadeError("Transfer destination is unavailable", code="resource_unavailable")
+        required = False
+        destination_required = False
+        for source in sources:
+            provider, ref = self._provider_for_ref(context, str(source.get("resource_ref") or ""), capability="stat")
+            if provider is not destination_provider:
+                raise FilesFacadeError("Cross-provider transfer is unavailable", code="unsupported_provider_kind")
+            entry = await provider.stat(context, origin_id=ref.origin_id)
+            if entry.origin_id != ref.origin_id or entry.kind != ref.kind or not ({"move", "write"} & set(entry.capabilities)):
+                raise FilesFacadeError("Transfer source is unavailable", code="resource_unavailable")
+            self._check_revision(entry, source.get("expected_revision"))
+            classifier = getattr(provider, "managed_root_required", None)
+            if callable(classifier):
+                item_required = bool(classifier(context, source_origin_id=ref.origin_id, destination_origin_id=destination.origin_id,
+                                                source_is_directory=entry.kind in _DIRECTORY_KINDS))
+                selected_classifier = getattr(provider, "selected_folder_required", None)
+                selected_directory = entry.kind in _DIRECTORY_KINDS and callable(selected_classifier) and selected_classifier(context, source_origin_id=ref.origin_id, source_is_directory=True)
+                folder_cross_root = getattr(provider, "managed_cross_root_folder_available", None)
+                cross_folder_available = (entry.kind in _DIRECTORY_KINDS and callable(folder_cross_root)
+                    and folder_cross_root(context, source_origin_id=ref.origin_id, destination_origin_id=destination.origin_id))
+                if item_required and entry.kind in _DIRECTORY_KINDS and not selected_directory and not cross_folder_available:
+                    raise FilesFacadeError("Managed folder moves are unavailable", code="unsupported_operation")
+                required |= item_required
+            # A managed document leaving its root needs a second, explicitly chosen destination root.
+            destination_classifier = getattr(provider, "managed_destination_root_required", None)
+            if callable(destination_classifier):
+                destination_required |= bool(destination_classifier(context, source_origin_id=ref.origin_id,
+                    destination_origin_id=destination.origin_id, source_is_directory=entry.kind in _DIRECTORY_KINDS))
+        if not self._generation_current(context):
+            raise FilesFacadeError("File policy generation changed", code="policy_generation_changed")
+        return {"root_required": required, "destination_root_required": destination_required}
+
     async def transfer_resources(
         self,
         context: ProviderContext,
@@ -1155,6 +1259,8 @@ class FilesFacade:
         destination_ref: str,
         collision: str = "fail",
         generation: int | None = None,
+        managed_root: Mapping[str, Any] | None = None,
+        destination_root: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Move/copy bounded source refs to an authorized folder ref.
 
@@ -1177,6 +1283,10 @@ class FilesFacade:
             raise FilesFacadeError("transfer collision policy is unsupported", code="unsupported_operation")
         if not isinstance(sources, Sequence) or isinstance(sources, (str, bytes)) or not sources or len(sources) > 200:
             raise FilesFacadeError("transfer source count is outside the allowed bound", code="invalid_resource_request")
+        if managed_root is not None and (normalized_kind != "move" or (len(sources) != 1 and not self._MANAGED_BATCH_READY)):
+            raise FilesFacadeError("Choose one loose document for this root", code="unsupported_operation")
+        if destination_root is not None and (normalized_kind != "move" or len(sources) != 1):
+            raise FilesFacadeError("Choose one document for a destination root", code="unsupported_operation")
         normalized_sources: list[dict[str, Any]] = []
         seen_items: set[str] = set()
         seen_refs: set[str] = set()
@@ -1201,32 +1311,91 @@ class FilesFacade:
             "sources": normalized_sources, "destination_ref": str(destination_ref or ""),
             "collision": normalized_collision,
         }
+        if managed_root is not None:
+            if set(managed_root) - {"resource_ref", "expected_revision"} or not str(managed_root.get("resource_ref") or "").strip():
+                raise FilesFacadeError("Selected root is invalid", code="invalid_resource_request")
+            digest_payload["managed_root"] = dict(managed_root)
+        if destination_root is not None:
+            if set(destination_root) - {"resource_ref", "expected_revision"} or not str(destination_root.get("resource_ref") or "").strip():
+                raise FilesFacadeError("Destination root is invalid", code="invalid_resource_request")
+            digest_payload["destination_root"] = dict(destination_root)
         digest = self._digest(digest_payload)
+        batch_preparing = managed_root is not None and len(normalized_sources) > 1
+        stored = self._load_operation(context, operation) if batch_preparing else None
+        if stored and (stored.get("digest") != digest or int(stored.get("generation", -1)) != int(context.policy_generation)):
+            raise FilesFacadeError("Operation identity changed", code="idempotency_conflict")
+        if stored and (stored.get("receipt") or {}).get("_managed_batch_ready") is not False:
+            return await self.operation_receipt(context, operation_id=operation)
+        resume_historical = bool(stored)
+
+        def transfer_ref(token: str, capability: str) -> tuple[FilesProvider, ResourceRef]:
+            if not resume_historical:
+                return self._provider_for_ref(context, token, capability=capability)
+            try:
+                ref = resolve_resource_ref_for_reissue(token, expected_owner_subject_id=context.owner_subject_id,
+                                                       required_capability=capability)
+                if ref.provider != "host" or ref.policy_generation != int(context.policy_generation):
+                    raise ValueError("historical identity changed")
+                provider = self._providers.get(ref.provider)
+                if provider is None:
+                    raise ValueError("provider unavailable")
+                return provider, ref
+            except Exception as exc:
+                raise FilesFacadeError("Transfer identity is unavailable", code="resource_unavailable") from exc
+
+        selected_root = None
+        if managed_root is not None:
+            # A historical token may identify a reservation but cannot grant
+            # a new selected-folder mutation.
+            root_provider, root_ref = self._provider_for_ref(context, str(managed_root["resource_ref"]), capability="write")
+            source_provider, source_ref = transfer_ref(normalized_sources[0]["resource_ref"], "stat")
+            classifier = getattr(source_provider, "selected_folder_required", None)
+            selected_profile = len(normalized_sources) == 1 and callable(classifier) and classifier(context, source_origin_id=source_ref.origin_id, source_is_directory=source_ref.kind in _DIRECTORY_KINDS)
+            resolver = getattr(root_provider, "authorize_selected_folder" if selected_profile else "authorize_managed_root", None)
+            if root_ref.provider != "host" or not callable(resolver):
+                raise FilesFacadeError("Selected root is unavailable", code="resource_unavailable")
+            selected_root = await resolver(context, origin_id=root_ref.origin_id, expected_revision=managed_root.get("expected_revision"))
+        authorized_destination = None
+        if destination_root is not None:
+            # Same authorisation as a managed root, through the provider's destination rule.
+            destination_root_provider, destination_root_ref = self._provider_for_ref(context, str(destination_root["resource_ref"]), capability="write")
+            destination_resolver = getattr(destination_root_provider, "authorize_destination_root", None)
+            if destination_root_ref.provider != "host" or not callable(destination_resolver):
+                raise FilesFacadeError("Destination root is unavailable", code="resource_unavailable")
+            authorized_destination = await destination_resolver(context, origin_id=destination_root_ref.origin_id,
+                                                                expected_revision=destination_root.get("expected_revision"))
         pending_receipt = {
             "operation_id": operation, "generation": int(context.policy_generation),
             "state": "pending",
             "items": [{"item_id": item["item_id"], "outcome": "pending", "code": "operation_in_progress"} for item in normalized_sources],
         }
+        if batch_preparing:
+            pending_receipt["_managed_batch_ready"] = False
         # Resolve the destination before reserving so the durable pending row
         # records exactly which provider may reconcile it.
-        destination_provider, destination = self._provider_for_ref(context, destination_ref, capability="write")
+        destination_provider, destination = transfer_ref(destination_ref, "write")
         pending_receipt["_provider_names"] = [str(getattr(destination_provider, "name", ""))]
         pending_receipt["_request_kind"] = "transfer"
         pending_receipt["_item_ids"] = [item["item_id"] for item in normalized_sources]
         owner, previous_receipt = self._reserve_operation(context, operation, digest, context.policy_generation, pending_receipt)
-        if not owner:
+        if not owner and not (batch_preparing and isinstance(previous_receipt, Mapping) and previous_receipt.get("_managed_batch_ready") is False):
             return _public_operation(previous_receipt or pending_receipt)
 
         try:
             if not self._generation_current(context):
                 raise FilesFacadeError("file policy generation changed", code="policy_generation_changed")
-            destination_provider, destination = self._provider_for_ref(context, destination_ref, capability="write")
+            destination_provider, destination = transfer_ref(destination_ref, "write")
             destination_entry = await destination_provider.stat(context, origin_id=destination.origin_id)
             if not self._generation_current(context):
                 raise FilesFacadeError("file policy generation changed", code="policy_generation_changed")
             if destination_entry.origin_id != destination.origin_id or destination_entry.kind != destination.kind or destination_entry.kind not in _DIRECTORY_KINDS or "children" not in destination_entry.capabilities or "write" not in destination_entry.capabilities:
                 raise FilesFacadeError("transfer destination is unavailable", code="resource_unavailable")
         except FilesFacadeError as error:
+            if batch_preparing:
+                try:
+                    self._operation_store.abort_managed_transfer_batch(owner_subject_id=context.owner_subject_id, operation_id=operation, claim_tokens={})
+                except Exception:
+                    return _public_operation(previous_receipt or pending_receipt)
             if error.code == "policy_generation_changed":
                 failed_items = [{"item_id": normalized_sources[0]["item_id"], "outcome": "stale", "code": error.code}]
                 failed_items.extend({"item_id": item["item_id"], "outcome": "pending", "code": error.code} for item in normalized_sources[1:])
@@ -1236,9 +1405,57 @@ class FilesFacade:
             self._save_operation(context, operation, digest, context.policy_generation, failed)
             return failed
         except Exception:
+            if batch_preparing:
+                try:
+                    self._operation_store.abort_managed_transfer_batch(owner_subject_id=context.owner_subject_id, operation_id=operation, claim_tokens={})
+                except Exception:
+                    return _public_operation(previous_receipt or pending_receipt)
             failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": item["item_id"], "outcome": "failed", "code": "provider_unavailable"} for item in normalized_sources]}
             self._save_operation(context, operation, digest, context.policy_generation, failed)
             return failed
+        if batch_preparing:
+            claim_tokens: dict[str, str] = {}
+            try:
+                prepare = getattr(destination_provider, "prepare_managed_loose_item", None)
+                if destination_provider is not root_provider or not callable(prepare) or not getattr(destination_provider, "_LOOSE_MANAGED_MOVE_READY", False):
+                    raise FilesFacadeError("Managed batch is unavailable", code="unsupported_operation")
+                frozen = []
+                reserved_targets: set[str] = set()
+                for source in normalized_sources:
+                    provider, ref = transfer_ref(source["resource_ref"], "stat")
+                    if provider is not destination_provider:
+                        raise FilesFacadeError("Managed batch providers differ", code="unsupported_provider_kind")
+                    entry = await provider.stat(context, origin_id=ref.origin_id)
+                    if entry.origin_id != ref.origin_id or entry.kind != ref.kind or entry.kind != "file" or "move" not in entry.capabilities:
+                        raise FilesFacadeError("Managed batch source is unavailable", code="resource_unavailable")
+                    self._check_revision(entry, source.get("expected_revision"))
+                    item = await prepare(context, source_origin_id=ref.origin_id, destination_origin_id=destination.origin_id,
+                        expected_revision=source.get("expected_revision"), operation_id=operation, item_id=source["item_id"],
+                        collision=normalized_collision, managed_root=selected_root, reserved_targets=reserved_targets)
+                    frozen.append((source["item_id"], item["plan"]))
+                for item_id, plan in frozen:
+                    claim = self._operation_store.claim_managed_transfer_item(owner_subject_id=context.owner_subject_id,
+                        operation_id=operation, item_id=item_id, native_operation_id=plan["native_operation_id"], generation=context.policy_generation)
+                    if not claim.get("acquired"):
+                        raise FilesFacadeError("Managed batch is already executing", code="operation_pending")
+                    claim_tokens[item_id] = str(claim["claim_token"])
+                for _item_id, plan in frozen:
+                    await destination_provider.verify_managed_loose_item_proofs(context, plan)
+                renewed = await root_provider.authorize_managed_root(context, origin_id=root_ref.origin_id, expected_revision=managed_root.get("expected_revision"))
+                if dict(renewed) != dict(selected_root):
+                    raise FilesFacadeError("Selected root changed", code="resource_changed")
+                self._operation_store.activate_managed_transfer_batch(owner_subject_id=context.owner_subject_id,
+                    operation_id=operation, generation=context.policy_generation, claim_tokens=claim_tokens)
+            except Exception as error:
+                try:
+                    self._operation_store.abort_managed_transfer_batch(owner_subject_id=context.owner_subject_id, operation_id=operation, claim_tokens=claim_tokens)
+                except Exception:
+                    return _public_operation(previous_receipt or pending_receipt)
+                code = str(getattr(error, "code", "provider_unavailable"))
+                failed = {"operation_id":operation, "generation":int(context.policy_generation), "state":"partial",
+                          "items":[{"item_id":item["item_id"], "outcome":"failed", "code":code} for item in normalized_sources]}
+                self._save_operation(context, operation, digest, context.policy_generation, failed)
+                return failed
         items: list[dict[str, Any]] = []
         for source in normalized_sources:
             item = {"item_id": source["item_id"], "outcome": "failed", "code": "provider_unavailable"}
@@ -1255,7 +1472,7 @@ class FilesFacade:
                 # legacy file rows advertise download (the read contract)
                 # while writable directories advertise write, so requiring a
                 # synthetic `copy` capability here would lie to consumers.
-                source_provider, source_ref = self._provider_for_ref(context, source["resource_ref"], capability="stat")
+                source_provider, source_ref = transfer_ref(source["resource_ref"], "stat")
                 current = await source_provider.stat(context, origin_id=source_ref.origin_id)
                 if not self._generation_current(context):
                     raise FilesFacadeError("file policy generation changed", code="policy_generation_changed")
@@ -1273,7 +1490,18 @@ class FilesFacade:
                 if source_ref.stable_id == destination.stable_id:
                     raise FilesFacadeError("resource cannot be moved into itself", code="invalid_destination")
                 if normalized_kind == "move" and current.kind in _DIRECTORY_KINDS:
-                    parent_origin = destination_entry.parent_origin_id
+                    boundary = None
+                    cross_available = getattr(source_provider, "managed_cross_root_folder_available", None)
+                    if (authorized_destination is not None and selected_root is not None
+                            and source_provider is destination_root_provider and callable(cross_available)
+                            and cross_available(context, source_origin_id=source_ref.origin_id, destination_origin_id=destination.origin_id)):
+                        from src.openclank.files_host_provider import host_origin_for_path
+                        selected = authorized_destination.get("selected_folder")
+                        bound_path = selected.get("path") if isinstance(selected, Mapping) else authorized_destination.get("root")
+                        if not isinstance(bound_path, str) or host_origin_for_path(bound_path) != destination_root_ref.origin_id:
+                            raise FilesFacadeError("Destination root identity changed", code="resource_unavailable")
+                        boundary = destination_root_ref.origin_id
+                    parent_origin = None if boundary == destination.origin_id else destination_entry.parent_origin_id
                     seen: set[str] = set()
                     while parent_origin:
                         if parent_origin in seen:
@@ -1281,6 +1509,8 @@ class FilesFacade:
                         seen.add(parent_origin)
                         if parent_origin == source_ref.origin_id:
                             raise FilesFacadeError("resource cannot be moved into a descendant", code="invalid_destination")
+                        if (selected_root is not None and parent_origin == root_ref.origin_id) or parent_origin == boundary:
+                            break
                         parent_entry = await destination_provider.stat(context, origin_id=parent_origin)
                         parent_origin = parent_entry.parent_origin_id
                         if len(seen) > MAX_REVEAL_ANCESTORS:
@@ -1288,8 +1518,7 @@ class FilesFacade:
                 transfer = getattr(source_provider, "transfer", None)
                 if not callable(transfer):
                     raise FilesFacadeError("provider transfer is unavailable", code="unsupported_provider_kind")
-                result = await transfer(
-                    context,
+                transfer_args = dict(
                     source_origin_id=source_ref.origin_id,
                     destination_origin_id=destination.origin_id,
                     operation=normalized_kind,
@@ -1298,6 +1527,17 @@ class FilesFacade:
                     item_id=source["item_id"],
                     operation_id=operation,
                 )
+                if selected_root is not None:
+                    if source_provider is not root_provider:
+                        raise FilesFacadeError("Selected root does not match this provider", code="resource_unavailable")
+                    transfer_args["managed_root"] = selected_root
+                    if batch_preparing:
+                        transfer_args["prepared_managed"] = True
+                if authorized_destination is not None:
+                    if source_provider is not destination_root_provider:
+                        raise FilesFacadeError("Destination root does not match this provider", code="resource_unavailable")
+                    transfer_args["destination_root"] = authorized_destination
+                result = await transfer(context, **transfer_args)
                 if not self._generation_current(context):
                     raise FilesFacadeError("file policy generation changed", code="policy_generation_changed")
                 provider_history = None
@@ -1381,7 +1621,12 @@ class FilesFacade:
         if stored is None or stored.get("owner") != context.owner_subject_id:
             raise FilesFacadeError("operation is unavailable", code="resource_unavailable")
         receipt = dict(stored["receipt"])
-        if str(receipt.get("state") or "").lower() == "pending":
+        managed_items = receipt.get("_managed_items")
+        managed_pending = isinstance(managed_items, Mapping) and any(
+            isinstance(item, Mapping) and item.get("phase") != "complete"
+            for item in managed_items.values()
+        )
+        if str(receipt.get("state") or "").lower() == "pending" or managed_pending:
             item_ids = [str(item.get("item_id")) for item in receipt.get("items", []) if isinstance(item, Mapping)]
             expected_ids = receipt.get("_item_ids") or item_ids
             provider_names = receipt.get("_provider_names") or []
@@ -1414,8 +1659,11 @@ class FilesFacade:
                     original_generation = int(stored.get("generation", receipt.get("generation", -1)))
                     if original_generation == int(context.policy_generation) and self._generation_current(context):
                         reconciled["generation"] = original_generation
+                        for private_key in ("_import_binding", "_workspace_id", "_provider_names", "_request_kind", "_item_ids"):
+                            if private_key in receipt:
+                                reconciled[private_key] = receipt[private_key]
                         self._save_operation(context, operation, str(stored.get("digest") or ""), original_generation, reconciled)
-                        return reconciled
+                        return _public_operation(reconciled)
                     # Status may be reconciled after a revocation, but the
                     # old generation's references and provider history stay
                     # hidden and the durable original row is untouched.
@@ -1426,7 +1674,92 @@ class FilesFacade:
         # disclose refs from a generation that is no longer authorized.
         if int(stored.get("generation", -1)) != int(context.policy_generation):
             return {"operation_id": operation, "generation": int(stored.get("generation", -1)), "state": receipt.get("state", "partial"), "items": [{"item_id": item["item_id"], "outcome": item.get("outcome", "pending"), "code": item.get("code")} for item in receipt.get("items", []) if isinstance(item, Mapping)]}
+        if isinstance(managed_items, Mapping) and isinstance(receipt.get("items"), list):
+            public_items = []
+            for value in receipt["items"]:
+                if not isinstance(value, Mapping):
+                    continue
+                public = dict(value)
+                private = managed_items.get(str(value.get("item_id") or ""))
+                from src.openclank.file_policy import is_closed_managed_file_plan
+                if (isinstance(private, Mapping) and private.get("phase") == "complete"
+                        and isinstance(private.get("plan"), Mapping) and (private["plan"].get("kind") == "folder" or is_closed_managed_file_plan(private["plan"]))):
+                    public["cleanup"] = "complete" if private.get("cleanup_phase") == "complete" else "pending"
+                    plan = private["plan"]
+                    if (plan.get("kind") != "folder" and plan.get("destination_frame") is not None and plan.get("selected_folder") is None
+                            and public.get("outcome") == "committed"):
+                        public["undo"] = "available"
+                public_items.append(public)
+            receipt["items"] = public_items
         return {key: value for key, value in receipt.items() if not str(key).startswith("_")}
+
+    async def cleanup_managed_folder(self, context: ProviderContext, *, operation_id: str, item_id: str,
+                                     managed_root: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        operation = self._bounded_id(operation_id, "operation_id")
+        item = self._bounded_id(item_id, "item_id")
+        stored = self._load_operation(context, operation)
+        receipt = stored.get("receipt") if isinstance(stored, Mapping) else None
+        managed = receipt.get("_managed_items") if isinstance(receipt, Mapping) else None
+        selected = managed.get(item) if isinstance(managed, Mapping) else None
+        from src.openclank.file_policy import is_closed_managed_file_plan
+        if (not isinstance(stored, Mapping) or stored.get("owner") != context.owner_subject_id
+                or int(stored.get("generation", -1)) != int(context.policy_generation) or not self._generation_current(context)
+                or not isinstance(selected, Mapping) or not ((selected.get("plan") or {}).get("kind") == "folder" or is_closed_managed_file_plan(selected.get("plan")))):
+            raise FilesFacadeError("Managed folder cleanup is unavailable", code="resource_unavailable")
+        provider = self._providers.get("host")
+        cleanup = getattr(provider, "cleanup_managed_folder_item", None)
+        if not callable(cleanup):
+            raise FilesFacadeError("Managed folder cleanup is unavailable", code="provider_unavailable")
+        selected_witness = (selected.get("plan") or {}).get("selected_folder")
+        fresh_root = None
+        if selected_witness is not None:
+            if (not isinstance(managed_root, Mapping) or set(managed_root) != {"resource_ref", "expected_revision"}
+                    or not isinstance(managed_root.get("expected_revision"), Mapping)):
+                raise FilesFacadeError("Selected folder cleanup requires fresh authority", code="operation_pending")
+            async def fresh_root():
+                root_provider, root_ref = self._provider_for_ref(context, str(managed_root["resource_ref"]), capability="write")
+                if root_provider is not provider or root_ref.provider != "host" or not self._generation_current(context):
+                    raise FilesFacadeError("Selected folder is unavailable", code="resource_unavailable")
+                return await provider.authorize_selected_folder(context, origin_id=root_ref.origin_id,
+                                                                expected_revision=managed_root["expected_revision"])
+            await fresh_root()
+        elif managed_root is not None:
+            raise FilesFacadeError("Unexpected cleanup root", code="invalid_resource_request")
+        result = await cleanup(context, operation_id=operation, item_id=item, fresh_root=fresh_root)
+        return {"operation_id":operation, "item_id":item, "outcome":"committed",
+                "cleanup":"complete" if result.get("cleanup") == "complete" else "pending"}
+
+    async def undo_managed_move(self, context: ProviderContext, *, operation_id: str, item_id: str) -> dict[str, Any]:
+        """Undo one completed cross-root file move (BQ-23). The undo operation id is derived from the account, the move and the item,
+        so a retry is the SAME undo (Native replays it) and the answer is read back by calling this again."""
+        operation = self._bounded_id(operation_id, "operation_id")
+        item = self._bounded_id(item_id, "item_id")
+        stored = self._load_operation(context, operation)
+        receipt = stored.get("receipt") if isinstance(stored, Mapping) else None
+        managed = receipt.get("_managed_items") if isinstance(receipt, Mapping) else None
+        selected = managed.get(item) if isinstance(managed, Mapping) else None
+        plan = (selected or {}).get("plan") if isinstance(selected, Mapping) else None
+        if (not isinstance(stored, Mapping) or stored.get("owner") != context.owner_subject_id
+                or int(stored.get("generation", -1)) != int(context.policy_generation) or not self._generation_current(context)
+                or not isinstance(plan, Mapping) or selected.get("phase") != "complete"
+                or plan.get("destination_frame") is None or plan.get("selected_folder") is not None):
+            raise FilesFacadeError("This move cannot be undone", code="resource_unavailable")
+        provider = self._providers.get("host")
+        undo = getattr(provider, "undo_managed_cross_root_move", None)
+        if not callable(undo):
+            raise FilesFacadeError("Undo is unavailable", code="provider_unavailable")
+        import hashlib
+        undo_id = "undo_" + hashlib.sha256(f"{context.owner_subject_id}|{operation}|{item}".encode()).hexdigest()[:48]
+        result = await undo(context, operation_id=operation, item_id=item, undo_native_operation_id=undo_id)
+        outcome, code = str(result.get("outcome") or ""), str(result.get("code") or "")
+        if outcome == "committed":
+            return {"operation_id": operation, "item_id": item, "undo": "committed"}
+        if outcome == "pending":
+            pending = {"operation_id": operation, "item_id": item, "undo": "pending"}
+            if code == "managed_partial_needs_review": pending["code"] = code
+            return pending
+        raise FilesFacadeError(_UNDO_MESSAGES.get(code, "This move could not be undone; nothing was changed."),
+                               code=code if code in _UNDO_MESSAGES else "resource_unavailable")
 
     async def attachment_receipt(self, context: ProviderContext, *, operation_id: str) -> dict[str, Any]:
         """Return a typed, owner-scoped preparation descriptor for recovery."""
@@ -1499,7 +1832,93 @@ class FilesFacade:
             return {"operation_id": operation, "generation": original_generation, "state": "pending", "preparation": None}
         return {"operation_id": operation, "generation": original_generation, "state": "complete", "preparation": validated}
 
-    async def import_file(self, context: ProviderContext, *, upload: Any, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    async def _video_frame_source(self, context: ProviderContext, value: Any, current: Callable[[], Any]):
+        """Validate frame-copy metadata; source bytes do not attest pixel correspondence."""
+        fields = {'version','kind','sourceRef','expectedRevision','timeHintMs'}
+        if (not isinstance(value,dict) or set(value) != fields or value.get('version') != 1 or type(value.get('version')) is not int
+            or value.get('kind') != 'video_frame_copy' or not isinstance(value.get('sourceRef'),str)
+            or not 8 <= len(value['sourceRef']) <= 16384 or type(value.get('timeHintMs')) is not int
+            or not 0 <= value['timeHintMs'] <= 2**53-1 or not callable(current)):
+            raise FilesFacadeError('Video frame source is invalid',code='invalid_resource_request')
+        source, still_current = await self._host_video_source(context,source_ref=value['sourceRef'],
+            expected_revision=value['expectedRevision'],current=current)
+        evidence={'version':1,'kind':'video_frame_copy','source_resource_id':source['source_resource_id'],
+            'source_revision':source['source_revision'],'source_sha256':source['source_sha256'],'source_size':source['source_size'],
+            'time_hint_ms':value['timeHintMs'],'correspondence':'unverified'}
+        return evidence, still_current
+
+    async def _host_video_source(self, context: ProviderContext, *, source_ref: str, expected_revision: Mapping[str, Any],
+                                 current: Callable[[], Any], snapshot_fd: int | None = None):
+        """Bounded current Host-video stream and optional privately owned snapshot sink."""
+        if not isinstance(source_ref,str) or not 8 <= len(source_ref) <= 16384 or not callable(current):
+            raise FilesFacadeError('Video source is invalid',code='invalid_resource_request')
+        revision = expected_revision
+        if (not isinstance(revision,dict) or set(revision) != {'kind','value'} or revision.get('kind') != 'hostFingerprint'
+            or not isinstance(revision.get('value'),str) or not re.fullmatch(r'(?:[0-9a-f]{64}|sha256:[0-9a-f]{64}:[0-9]{1,9})',revision['value'])):
+            raise FilesFacadeError('Video source revision is unavailable',code='resource_changed')
+        ref_token = source_ref
+        async def authorize():
+            if not await current() or not self._generation_current(context):
+                raise FilesFacadeError('Video source authority changed',code='resource_changed')
+            provider, ref = self._provider_for_ref(context,ref_token,capability='download')
+            if (ref.provider != 'host' or ref.kind != 'file' or (ref.workspace_id and ref.workspace_id != context.workspace_id)
+                or not callable(getattr(provider,'stat_inspection',None))):
+                raise FilesFacadeError('Video source unavailable',code='resource_unavailable')
+            return provider, ref
+        try:
+            async with asyncio.timeout(30):
+                provider, ref = await authorize()
+                observed = await provider.stat_inspection(context,origin_id=ref.origin_id)
+                tag = (observed.revision or {}).get('value') if isinstance(observed.revision,Mapping) else None
+                if (observed.origin_id != ref.origin_id or observed.kind != 'file' or not str(observed.name).lower().endswith('.webm')
+                    or type(observed.size) is not int or not 0 < observed.size <= 64*1024*1024
+                    or (observed.revision or {}).get('kind') != 'hostObjectIdentity' or not isinstance(tag,str)
+                    or not re.fullmatch(r'[0-9a-f]{64}',tag)):
+                    raise FilesFacadeError('Video source unavailable',code='resource_unavailable')
+                source = await provider.content(context,origin_id=ref.origin_id)
+                if (source.origin_id != ref.origin_id or source.size != observed.size or source.etag != tag
+                    or source.stream is None or source.data is not None or source.path is not None):
+                    raise FilesFacadeError('Video source changed',code='resource_changed')
+                digest=hashlib.sha256(); total=0
+                async for chunk in source.stream(0,observed.size):
+                    if not isinstance(chunk,bytes): raise FilesFacadeError('Video source stream is invalid',code='provider_unavailable')
+                    total += len(chunk)
+                    if total > observed.size or total > 64*1024*1024: raise FilesFacadeError('Video source exceeds limit',code='resource_changed')
+                    digest.update(chunk)
+                    if snapshot_fd is not None:
+                        def write_all():
+                            import os
+                            view=memoryview(chunk)
+                            while view:
+                                written=os.write(snapshot_fd,view)
+                                if written <= 0: raise OSError('snapshot write failed')
+                                view=view[written:]
+                        task=asyncio.create_task(asyncio.to_thread(write_all)); cancelled=False
+                        while not task.done():
+                            try: await asyncio.shield(task)
+                            except asyncio.CancelledError: cancelled=True
+                        task.result()
+                        if cancelled: raise asyncio.CancelledError
+                sha=digest.hexdigest()
+                if total != observed.size or revision['value'] not in (sha,f'sha256:{sha}:{total}'):
+                    raise FilesFacadeError('Video source changed',code='resource_changed')
+                async def still_current():
+                    try:
+                        p,r=await authorize()
+                        if p is not provider or r.origin_id != ref.origin_id or r.stable_id != ref.stable_id: return False
+                        latest=await provider.stat_inspection(context,origin_id=ref.origin_id)
+                        return bool(latest.origin_id == ref.origin_id and latest.kind == 'file' and latest.size == total
+                            and latest.revision == observed.revision and await current() and self._generation_current(context))
+                    except Exception: return False
+                if not await still_current(): raise FilesFacadeError('Video source changed',code='resource_changed')
+                evidence={'source_resource_id':stable_resource_id(owner_subject_id=context.owner_subject_id,provider='host',origin_id=ref.origin_id),
+                    'source_revision':dict(revision),'source_sha256':sha,'source_size':total,'source_object_tag':tag}
+                return evidence, still_current
+        except TimeoutError as exc:
+            raise FilesFacadeError('Video source read timed out',code='provider_unavailable') from exc
+
+
+    async def import_file(self, context: ProviderContext, *, upload: Any, metadata: Mapping[str, Any], source_evidence: Mapping[str, Any] | None = None, before_commit: Callable[[], Any] | None = None, expected_destination_revision: Mapping[str, Any] | None = None, video_current: Callable[[], Any] | None = None) -> dict[str, Any]:
         """Stream one upload through a provider-owned staging adapter."""
         if not isinstance(metadata, Mapping):
             raise FilesFacadeError("import metadata is invalid", code="invalid_resource_request")
@@ -1508,6 +1927,14 @@ class FilesFacade:
         generation = _strict_nonnegative_int(metadata.get("generation"), "generation")
         if generation != int(context.policy_generation):
             raise FilesFacadeError("file policy generation is stale", code="resource_ref_stale")
+        frame_source = metadata.get('videoFrameSource')
+        frame_check = None
+        if frame_source is not None:
+            if source_evidence is not None or before_commit is not None or not callable(video_current):
+                raise FilesFacadeError('Video frame import authority is unavailable',code='invalid_resource_request')
+            source_evidence, frame_check = await self._video_frame_source(context,frame_source,video_current)
+        elif 'videoFrameSource' in metadata:
+            raise FilesFacadeError('Video frame source is invalid',code='invalid_resource_request')
         import_fields = ("operation_id", "item_id", "destination_ref", "name", "collision")
         if any(not isinstance(metadata.get(field), str) for field in import_fields):
             raise FilesFacadeError("import metadata is invalid", code="invalid_resource_request")
@@ -1551,8 +1978,17 @@ class FilesFacade:
             if len(declared_type.encode("utf-8")) > 256 or any(ord(ch) < 32 for ch in declared_type):
                 raise FilesFacadeError("import MIME metadata is invalid", code="invalid_resource_request")
             await spooled.copy_from(upload, limit=FILES_IMPORT_MAX_BYTES, generation_check=lambda: self._generation_current(context))
+            if frame_check is not None:
+                if not name.lower().endswith('.png') or declared_type != 'image/png' or spooled.length > 32*1024*1024:
+                    raise FilesFacadeError('Video frame PNG is invalid',code='invalid_resource_request')
+                signature = await spooled.read(8)
+                spooled._file.seek(0)
+                if signature != b'\x89PNG\r\n\x1a\n':
+                    raise FilesFacadeError('Video frame PNG is invalid',code='invalid_resource_request')
             content_digest = "sha256:" + spooled.digest.hexdigest()
             destination_revision = self._provider_revision(destination_entry)
+            if expected_destination_revision is not None and destination_revision != dict(expected_destination_revision):
+                raise FilesFacadeError("import destination changed", code="resource_changed")
             binding = {
                 "account_id": str(context.owner_subject_id),
                 "workspace_id": str(context.workspace_id or "default"),
@@ -1568,6 +2004,8 @@ class FilesFacade:
                 "upload_size": int(spooled.length),
                 "declared_type": declared_type or None,
             }
+            if source_evidence is not None:
+                binding["derived_source"] = dict(source_evidence)
             digest = self._digest({"kind": "import", "binding": binding})
             pending_receipt["_import_binding"] = binding
             pending_receipt["_provider_names"] = [str(getattr(provider, "name", ""))]
@@ -1646,18 +2084,30 @@ class FilesFacade:
                     raise FilesFacadeError("import destination changed", code="resource_changed")
                 if self._provider_revision(current_destination) != destination_revision:
                     raise FilesFacadeError("import destination changed", code="resource_changed")
+                # A trusted derived-output producer can reauthorize its source
+                # and session after staging, immediately before publication.
+                # The provider still owns its destination CAS and receipt.
+                if frame_check is not None and not await frame_check():
+                    raise FilesFacadeError('Video source changed',code='resource_changed')
+                if before_commit is not None:
+                    if not await before_commit():
+                        raise FilesFacadeError("import source changed", code="resource_changed")
+                    if not self._generation_current(context):
+                        raise FilesFacadeError("file policy generation changed", code="policy_generation_changed")
                 result = await finisher(context, destination_origin_id=destination.origin_id, destination_revision=destination_revision, name=name, collision=collision, stage=stage, operation_id=operation, item_id=item_id, request_digest=digest)
                 if not self._generation_current(context):
                     raise FilesFacadeError("file policy generation changed", code="policy_generation_changed")
             else:
                 raise FilesFacadeError("provider lacks the required staged import contract", code="unsupported_provider_kind")
         except FilesFacadeError as error:
-            if stage is not None and provider is not None:
+            uncertain = error.code == "mutation_outcome_unknown"
+            if not uncertain and stage is not None and provider is not None:
                 abort = getattr(provider, "abort_import", None)
                 if callable(abort):
                     try: await abort(context, stage=stage)
                     except Exception: pass
-            failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": item_id, "outcome": "failed", "code": error.code}]}
+            failed = ({**pending_receipt, "items": [{"item_id": item_id, "outcome": "pending", "code": error.code}]}
+                      if uncertain else {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": item_id, "outcome": "failed", "code": error.code}]})
             if digest is not None:
                 self._save_operation(context, operation, digest, context.policy_generation, retain_import_binding(failed))
             raise
@@ -1714,7 +2164,7 @@ class FilesFacade:
         self._save_operation(context, operation, digest, context.policy_generation, receipt)
         return _public_operation(receipt)
 
-    async def prepare_attachment(self, context: ProviderContext, *, operation_id: str, generation: int, source: Mapping[str, Any], target: Mapping[str, Any], mode: str) -> dict[str, Any]:
+    async def prepare_attachment(self, context: ProviderContext, *, operation_id: str, generation: int, source: Mapping[str, Any], target: Mapping[str, Any], mode: str, upload_bytes: bytes | None = None) -> dict[str, Any]:
         requested_generation = _strict_nonnegative_int(generation, "generation")
         if requested_generation != int(context.policy_generation):
             raise FilesFacadeError("file policy generation is stale", code="resource_ref_stale")
@@ -1725,7 +2175,19 @@ class FilesFacade:
         if normalized_mode not in {"link", "embed"}:
             raise FilesFacadeError("attachment mode is invalid", code="invalid_resource_request")
         source_keys = set(source)
-        if "resource_ref" in source:
+        if source.get('kind') == 'client_upload':
+            if (set(source) != {'kind','name','mime','sha256','size'} or not isinstance(upload_bytes, bytes)
+                or not 0 < len(upload_bytes) <= min(FILES_IMPORT_MAX_BYTES, 10 * 1024 * 1024)
+                or type(source.get('size')) is not int or source['size'] != len(upload_bytes)
+                or not isinstance(source.get('name'), str) or not source['name'] or len(source['name'].encode('utf-8')) > 240
+                or any(c in source['name'] for c in ('/', '\\', '\x00')) or source['name'] in ('.','..')
+                or not isinstance(source.get('mime'), str) or not source['mime'] or len(source['mime'].encode('utf-8')) > 128
+                or any(ord(c) < 32 or ord(c) == 127 for c in source['name'] + source['mime'])
+                or source.get('sha256') != hashlib.sha256(upload_bytes).hexdigest() or target.get('kind') != 'host_document'):
+                raise FilesFacadeError('attachment upload is invalid', code='invalid_resource_request')
+        elif upload_bytes is not None:
+            raise FilesFacadeError('attachment source is invalid', code='invalid_resource_request')
+        elif "resource_ref" in source:
             if source_keys - {"resource_ref", "expected_revision"} or not str(source.get("resource_ref") or "").strip():
                 raise FilesFacadeError("attachment source descriptor is invalid", code="invalid_resource_request")
         elif "import_receipt_id" in source:
@@ -1735,8 +2197,11 @@ class FilesFacade:
             raise FilesFacadeError("attachment source must have exactly one variant", code="invalid_resource_request")
         target_kind = str(target.get("kind") or "").strip()
         if target_kind in {"copal_document", "host_document"}:
-            if set(target) - {"kind", "resource_ref", "expected_revision"} or not str(target.get("resource_ref") or "").strip():
+            permitted = {"kind", "resource_ref", "expected_revision"} | ({"root_ref", "expected_root_revision"} if target_kind == "host_document" else set())
+            if set(target) - permitted or not str(target.get("resource_ref") or "").strip():
                 raise FilesFacadeError("attachment target descriptor is invalid", code="invalid_resource_request")
+            if (target.get("root_ref") is None) != (target.get("expected_root_revision") is None) or (target.get("root_ref") is not None and target.get("expected_revision") is None):
+                raise FilesFacadeError("selected root requires current revisions", code="invalid_resource_request")
         elif target_kind in {"treehouse_lesson", "treehouse_submission"}:
             if set(target) - {"kind", "course_id", "lesson_id", "assignment_id", "expected_revision"} or not str(target.get("course_id") or "").strip() or not str(target.get("assignment_id" if target_kind == "treehouse_submission" else "lesson_id") or "").strip():
                 raise FilesFacadeError("attachment target descriptor is invalid", code="invalid_resource_request")
@@ -1746,6 +2211,22 @@ class FilesFacade:
             expected = descriptor.get("expected_revision")
             if expected is not None and (not isinstance(expected, Mapping) or set(expected) != {"kind", "value"} or not expected.get("kind") or expected.get("value") is None):
                 raise FilesFacadeError("attachment revision is invalid", code="invalid_resource_request")
+        root_revision = target.get("expected_root_revision")
+        if root_revision is not None and (not isinstance(root_revision, Mapping) or set(root_revision) != {"kind", "value"} or not root_revision.get("kind") or not root_revision.get("value")):
+            raise FilesFacadeError("attachment root revision is invalid", code="invalid_resource_request")
+        async def selected_root_current():
+            root_provider, root_ref = self._provider_for_ref(context, str(target["root_ref"]), capability="write")
+            if root_ref.provider != "host" or (root_ref.workspace_id and root_ref.workspace_id != str(context.workspace_id or "default")):
+                raise FilesFacadeError("attachment root unavailable", code="resource_unavailable")
+            root = await root_provider.stat(context, origin_id=root_ref.origin_id)
+            if (root.origin_id != root_ref.origin_id or root.kind not in _DIRECTORY_KINDS
+                    or not {"write", "children"}.issubset(root.capabilities) or not self._generation_current(context)
+                    or self._provider_revision(root) is None):
+                raise FilesFacadeError("attachment root unavailable", code="resource_unavailable")
+            self._check_revision(root, root_revision)
+            return root_provider, root_ref, root
+        if root_revision is not None:
+            await selected_root_current()
         target_provider = None
         target_adapter = None
         target_ref = None
@@ -1829,6 +2310,20 @@ class FilesFacade:
         source_entry = None
         resolved_source: dict[str, Any] = dict(source)
         try:
+            if source.get('kind') == 'client_upload':
+                upload_revision = {'kind':'contentDigest','value':source['sha256']}
+                class UploadSource:
+                    name = 'client_upload'
+                    async def stat(self, _context, *, origin_id):
+                        return ProviderResource(origin_id, source['name'], 'file', ('stat','read'), mime_type=source['mime'], size=source['size'], revision=upload_revision)
+                    async def content(self, _context, *, origin_id):
+                        return ProviderContent(origin_id, source['name'], source['mime'], data=upload_bytes, size=source['size'])
+                source_provider = UploadSource()
+                class UploadRef:
+                    origin_id = 'client-upload'
+                source_ref = UploadRef()
+                source_entry = await source_provider.stat(context, origin_id=source_ref.origin_id)
+                resolved_source = {**source, 'expected_revision':upload_revision}
             if source.get("import_receipt_id"):
                 imported = self._load_operation(context, str(source["import_receipt_id"]).strip())
                 if imported is None or imported.get("owner") != context.owner_subject_id:
@@ -1885,6 +2380,7 @@ class FilesFacade:
                     source_origin_id=source_ref.origin_id if source_ref is not None else None,
                     source_entry=source_entry,
                     target_origin_id=target_ref.origin_id if target_ref is not None else None,
+                    **({"selected_root_current":selected_root_current} if target_kind == "host_document" and root_revision is not None else {}),
                 )
             elif target_provider is not None and (
                 target_provider is not source_provider
@@ -1904,26 +2400,36 @@ class FilesFacade:
             else:
                 result = await preparer(context, source=resolved_source, target=target, mode=normalized_mode, operation_id=operation)
             if not self._generation_current(context):
-                raise FilesFacadeError("file policy generation changed", code="policy_generation_changed")
+                raise FilesFacadeError("attachment outcome requires reconciliation", code="operation_pending" if target_kind == "host_document" else "policy_generation_changed")
         except FilesFacadeError as error:
+            if error.code == "operation_pending":
+                raise
             failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": operation, "outcome": "failed", "code": error.code}]}
             self._save_operation(context, operation, digest, context.policy_generation, failed)
             raise
         except Exception:
+            if target_kind == "host_document":
+                raise FilesFacadeError("attachment outcome requires reconciliation", code="operation_pending")
             failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": operation, "outcome": "failed", "code": "provider_unavailable"}]}
             self._save_operation(context, operation, digest, context.policy_generation, failed)
             return failed
         if not isinstance(result, Mapping):
+            if target_kind == "host_document":
+                raise FilesFacadeError("attachment outcome requires reconciliation", code="operation_pending")
             failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": operation, "outcome": "failed", "code": "provider_unavailable"}]}
             self._save_operation(context, operation, digest, context.policy_generation, failed)
             raise FilesFacadeError("provider returned an invalid attachment preparation", code="provider_unavailable")
         try:
             receipt = _validated_preparation(result, operation_id=operation, expected_generation=context.policy_generation)
         except FilesFacadeError as error:
+            if target_kind == "host_document":
+                raise FilesFacadeError("attachment outcome requires reconciliation", code="operation_pending") from error
             failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": operation, "outcome": "failed", "code": error.code}]}
             self._save_operation(context, operation, digest, context.policy_generation, failed)
             raise
         if not self._generation_current(context):
+            if target_kind == "host_document":
+                raise FilesFacadeError("attachment outcome requires reconciliation", code="operation_pending")
             failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": operation, "outcome": "stale", "code": "policy_generation_changed"}]}
             self._save_operation(context, operation, digest, context.policy_generation, failed)
             raise FilesFacadeError("file policy generation changed", code="policy_generation_changed")
@@ -2054,7 +2560,286 @@ class FilesFacade:
         revision = self._provider_revision(entry)
         if revision is not None:
             public["revision"] = dict(revision)
+        from src.openclank.format_capabilities import project_format_capability
+        public["format"] = project_format_capability(
+            resource_ref=ref.token, policy_generation=context.policy_generation,
+            provider_revision=revision, kind=entry.kind, name=entry.name,
+            mime_type=entry.mime_type, preview_kind=entry.preview_kind,
+            capabilities=entry.capabilities, native_thumbnail_available=entry.native_thumbnail_available, provider=provider,
+        )
         return public
+
+    async def retained_checkpoint_restore_source(self, context: ProviderContext, *, request_id: str, resource_id: str,
+                                                 auth, barrier, history_supervisor, current):
+        """Reauthorize one exact saved checkpoint without old browser refs."""
+        from src.openclank.checkpoint_restore_source import retained_checkpoint_source
+        return await retained_checkpoint_source(self, context, request_id=request_id, resource_id=resource_id,
+            auth=auth, barrier=barrier, history_supervisor=history_supervisor, current=current)
+
+    async def checkpoint_comparison_source(self, context: ProviderContext, *, root_ref: str, original_root_revision: Mapping[str, Any],
+            items: Sequence[Mapping[str, Any]], request_id: str, resource_id: str, auth, barrier, history_supervisor, current):
+        """Private request-local handoff, bound to the original complete action."""
+        from src.openclank.history_client import HistoryClient
+        async def checked():
+            private=[]
+            summary=await self.selected_checkpoint_operation(context,root_ref=root_ref,root_revision=original_root_revision,
+                items=items,request_id=request_id,auth=auth,barrier=barrier,history_supervisor=history_supervisor,current=current,
+                status_only=True,persist_status=False,receipt_out=private)
+            return summary,private[0] if private else None
+        summary,receipt=await checked()
+        if summary.get("state")!="complete" or summary.get("current_mapping")!="current":raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+        positions=[i for i,row in enumerate(summary.get("items") or []) if row.get("resource_id")==resource_id]
+        if len(positions)!=1:raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+        index=positions[0]
+        binding=receipt.get("_binding") if isinstance(receipt,Mapping) else None
+        native=receipt.get("_native") if isinstance(receipt,Mapping) else None
+        if (not isinstance(binding,Mapping) or not isinstance(binding.get("items"),list) or index>=len(binding["items"])
+            or not isinstance(native,Mapping) or native.get("state")!="complete" or not isinstance(native.get("items"),list) or index>=len(native["items"])):
+            raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+        original=dict(binding["items"][index]);version=dict(native["items"][index])
+        if (set(original)!={"resource_id","fingerprint"} or set(version)!={"resource_id","version_ref","fingerprint","size"}
+            or version["resource_id"]!=original["resource_id"] or version["fingerprint"]!=original["fingerprint"]):
+            raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+        provider,root=self._provider_for_ref(context,root_ref,capability="children")
+        selected_provider,selected=self._provider_for_ref(context,items[index]["resource_ref"],capability="download")
+        if selected_provider is not provider or selected.provider!="host" or selected.kind!="file":raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+        current_root=await provider.stat(context,origin_id=root.origin_id)
+        if current_root.origin_id!=root.origin_id or not current_root.revision:raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+        authorized=await provider.authorize_checkpoint_root(context,origin_id=root.origin_id,expected_revision=current_root.revision)
+        if any(binding.get(k)!=authorized.get(k) for k in ("root_id","history_actor","history_workspace")):raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+        process=history_supervisor.process
+        history=HistoryClient(authorized["history_socket"],actor_id=authorized["history_actor"],account_id=context.owner_subject_id,
+            token=history_supervisor.credential_token(authorized["history_actor"],context.owner_subject_id),timeout=1.5)
+        async def still_current():
+            try:
+                if (not await current() or auth.account_id(context.owner_username)!=context.owner_subject_id
+                    or auth.username_for_account_id(context.owner_subject_id)!=context.owner_username or not self._generation_current(context)
+                    or process is None or history_supervisor.process is not process or process.poll() is not None):return False
+                p,r=self._provider_for_ref(context,root_ref,capability="children")
+                if p is not provider or r.origin_id!=root.origin_id:return False
+                for item in items:
+                    candidate,ref=self._provider_for_ref(context,item["resource_ref"],capability="download")
+                    if candidate is not provider or ref.provider!="host" or ref.kind!="file":return False
+                observed_root=await provider.stat(context,origin_id=root.origin_id)
+                if observed_root.origin_id!=root.origin_id or not observed_root.revision:return False
+                current_root=await provider.authorize_checkpoint_root(context,origin_id=root.origin_id,expected_revision=observed_root.revision)
+                return all(binding.get(k)==current_root.get(k) for k in ("root_id","history_actor","history_workspace"))
+            except Exception:return False
+        async def source_current():
+            try:
+                if not await still_current():return False
+                value,latest_receipt=await checked()
+                if value.get("state")!="complete" or value.get("current_mapping")!="current":return False
+                return bool(isinstance(latest_receipt,Mapping) and latest_receipt.get("_binding")==binding and latest_receipt.get("_native")==native and await still_current())
+            except Exception:return False
+        async def open_current():
+            if not await still_current():raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+            p,ref=self._provider_for_ref(context,items[index]["resource_ref"],capability="download")
+            if p is not provider or ref.origin_id!=selected.origin_id:raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+            observed=await provider.stat_inspection(context,origin_id=ref.origin_id)
+            if (observed.origin_id!=ref.origin_id or observed.kind!="file" or type(observed.size) is not int or observed.size<0
+                or not isinstance(observed.revision,Mapping) or observed.revision.get("kind")!="hostObjectIdentity"
+                or not re.fullmatch(r"[0-9a-f]{64}",str(observed.revision.get("value") or ""))):raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+            if observed.size>256*1024:
+                return {"oversize":True,"origin_id":ref.origin_id,"size":observed.size,"etag":observed.revision["value"]}
+            content=await provider.content(context,origin_id=ref.origin_id)
+            if content.origin_id!=ref.origin_id or content.size!=observed.size or content.etag!=observed.revision["value"]:
+                raise FilesFacadeError("Checkpoint comparison unavailable",code="resource_unavailable")
+            return content
+        async def current_file(content):
+            try:
+                if isinstance(content,Mapping):
+                    if set(content)!={"oversize","origin_id","size","etag"} or content.get("oversize") is not True:return False
+                    origin,size,tag=content.get("origin_id"),content.get("size"),content.get("etag")
+                else:origin,size,tag=content.origin_id,content.size,content.etag
+                if not await still_current() or origin!=selected.origin_id or not re.fullmatch(r"[0-9a-f]{64}",str(tag or "")) or type(size) is not int:return False
+                observed=await provider.stat_inspection(context,origin_id=selected.origin_id)
+                return bool(observed.origin_id==selected.origin_id and observed.kind=="file" and isinstance(observed.revision,Mapping)
+                    and observed.revision.get("kind")=="hostObjectIdentity" and observed.revision.get("value")==tag
+                    and observed.size==size and await still_current())
+            except Exception:return False
+        return {"resource_id":resource_id,"request_id":request_id,"native_resource_id":version["resource_id"],"version_ref":version["version_ref"],
+            "fingerprint":version["fingerprint"],"size":version["size"],"history":history,"open_current":open_current,"current":still_current,"source_current":source_current,"current_file":current_file}
+
+    async def selected_checkpoint_operation(self, context: ProviderContext, *, root_ref: str, root_revision: Mapping[str, Any],
+            items: Sequence[Mapping[str, Any]], request_id: str, auth, barrier, history_supervisor, current, status_only: bool=False,
+            persist_status: bool=True, receipt_out=None):
+        """One public operation identity; native binding and receipt remain private."""
+        if (not isinstance(request_id,str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,80}",request_id)
+            or not isinstance(items,(list,tuple)) or not 1<=len(items)<=16 or not callable(current)
+            or auth is None or barrier is None or history_supervisor is None):raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+        if auth.account_id(context.owner_username)!=context.owner_subject_id or auth.username_for_account_id(context.owner_subject_id)!=context.owner_username:
+            raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+        provider,root=self._provider_for_ref(context,root_ref,capability="children")
+        if root.provider!="host" or root.kind not in {"folder","directory"}:raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+        selected=[];public=[];original=[]
+        for item in items:
+            if type(item) is not dict or set(item)!={"resource_ref","expected_revision"} or not isinstance(item["expected_revision"],Mapping):raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+            p,ref=self._provider_for_ref(context,item["resource_ref"],capability="download")
+            if p is not provider or ref.provider!="host" or ref.kind!="file" or any(row["origin_id"]==ref.origin_id for row in selected):raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+            selected.append({"origin_id":ref.origin_id,"expected_revision":dict(item["expected_revision"])})
+            public.append(stable_resource_id(owner_subject_id=context.owner_subject_id,provider="host",origin_id=ref.origin_id));original.append((item["resource_ref"],ref.origin_id))
+        async def current_refs():
+            if not await current():return False
+            try:
+                p,r=self._provider_for_ref(context,root_ref,capability="children")
+                if p is not provider or r.origin_id!=root.origin_id:return False
+                return all((lambda pair:pair[0] is provider and pair[1].origin_id==origin)(self._provider_for_ref(context,token,capability="download")) for token,origin in original)
+            except Exception:return False
+        if not await current_refs():raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+        canonical={"version":1,"kind":"selected_checkpoint_v1","owner":context.owner_subject_id,"workspace":context.workspace_id,
+            "generation":context.policy_generation,"root":root.origin_id,"root_revision":dict(root_revision),"items":selected}
+        def hash_request():return hashlib.sha256(json.dumps(canonical,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
+        digest=hash_request();store=self._operation_store
+        if store is None:raise FilesFacadeError("Checkpoint unavailable",code="provider_unavailable")
+        def project(receipt, mapping=None):
+            if not isinstance(receipt,Mapping) or receipt.get("kind")!="selected_checkpoint_v1":raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+            native=receipt.get("_native") or {}; state=native.get("state") if isinstance(native,Mapping) else None
+            if state not in {"pending","failed","complete"}:state="pending"
+            out={"request_id":request_id,"state":state,"items":[{"resource_id":value} for value in public],"current_mapping":"current" if mapping is True else "unavailable"}
+            if state=="complete":
+                out.update(consistency=native.get("consistency"),quiescence=native.get("quiescence"),started_millis=native.get("started_millis"),finished_millis=native.get("finished_millis"))
+            return out
+        async def status(saved):
+            receipt=dict(saved.get("receipt") or {});binding=receipt.get("_binding");mapping=None
+            if binding:
+                try:
+                    native,mapping=await provider.read_selected_checkpoint_status(context,root_origin_id=root.origin_id,root_revision=root_revision,
+                        items=selected,request_id=request_id,binding=binding,auth=auth,barrier=barrier,history_supervisor=history_supervisor,current=current_refs)
+                    if native.get("state") in {"complete","failed"}:
+                        receipt["_native"]=dict(native)
+                        if persist_status:
+                            store.record_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id,request_digest=saved["digest"],generation=saved["generation"],receipt=receipt,phase="selected_checkpoint")
+                except Exception:pass
+            if not await current_refs():raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+            if receipt_out is not None:receipt_out.append(dict(receipt))
+            return project(receipt,mapping)
+        if status_only:
+            saved=store.get_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id)
+            if not saved:raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+            canonical["generation"]=saved.get("generation")
+            if saved.get("digest")!=hash_request():raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+            return await status(saved)
+        initial={"kind":"selected_checkpoint_v1","_native":{"state":"pending"}}
+        try:existing=store.reserve_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id,request_digest=digest,generation=context.policy_generation,receipt=initial,phase="selected_checkpoint")
+        except Exception as exc:raise FilesFacadeError("Checkpoint unavailable",code=getattr(exc,"code","provider_unavailable")) from exc
+        if existing is not None:return await status(existing)
+        async def bind(binding):
+            initial["_binding"]=dict(binding)
+            store.record_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id,request_digest=digest,generation=context.policy_generation,receipt=initial,phase="selected_checkpoint")
+        async def run():
+            native=await self.capture_selected_checkpoint(context,root_ref=root_ref,root_revision=root_revision,items=items,request_id=request_id,
+                auth=auth,barrier=barrier,history_supervisor=history_supervisor,current=current,bind=bind)
+            if native.get("state") in {"complete","failed"}:
+                initial["_native"]=dict(native)
+                store.record_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id,request_digest=digest,generation=context.policy_generation,receipt=initial,phase="selected_checkpoint")
+            return native
+        task=asyncio.create_task(run())
+        try:await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(lambda done:done.exception() if not done.cancelled() else None);raise
+        except Exception:pass
+        saved=store.get_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id)
+        return await status(saved) if saved else project(initial)
+
+    async def register_selected_checkpoint_files(self, context: ProviderContext, *, root_ref: str,
+            root_revision: Mapping[str, Any], items: Sequence[Mapping[str, Any]], request_id: str,
+            auth, barrier, history_supervisor, current, status_only: bool = False) -> Mapping[str, Any]:
+        """Reserve one explicit set; repeat requests can observe only the original receipt."""
+        if (not isinstance(request_id,str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,80}",request_id)
+            or not isinstance(items,(list,tuple)) or not 1<=len(items)<=16 or not callable(current)
+            or auth is None or barrier is None or history_supervisor is None):
+            raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+        if auth.account_id(context.owner_username)!=context.owner_subject_id or auth.username_for_account_id(context.owner_subject_id)!=context.owner_username:
+            raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+        provider,root=self._provider_for_ref(context,root_ref,capability="children")
+        if root.provider!="host" or root.kind not in {"folder","directory"} or not callable(getattr(provider,"register_selected_checkpoint_files",None)):
+            raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+        selected=[];public=[];original=[]
+        for item in items:
+            if type(item) is not dict or set(item)!={"resource_ref","expected_revision"}:
+                raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+            child_provider,ref=self._provider_for_ref(context,item["resource_ref"],capability="download")
+            if child_provider is not provider or ref.provider!="host" or ref.kind!="file" or any(x["origin_id"]==ref.origin_id for x in selected):
+                raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+            selected.append({"origin_id":ref.origin_id,"expected_revision":dict(item["expected_revision"])})
+            public.append(stable_resource_id(owner_subject_id=context.owner_subject_id,provider="host",origin_id=ref.origin_id))
+            original.append((item["resource_ref"],ref.origin_id))
+        async def current_refs():
+            if not await current():return False
+            try:
+                p,r=self._provider_for_ref(context,root_ref,capability="children")
+                if p is not provider or r.origin_id!=root.origin_id:return False
+                return all((lambda pair:pair[0] is provider and pair[1].origin_id==origin)(self._provider_for_ref(context,token,capability="download")) for token,origin in original)
+            except Exception:return False
+        if not await current_refs():raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+        canonical={"version":1,"owner":context.owner_subject_id,"workspace":context.workspace_id,"generation":context.policy_generation,
+            "root":root.origin_id,"root_revision":dict(root_revision),"items":selected}
+        digest=hashlib.sha256(json.dumps(canonical,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8")).hexdigest()
+        store=self._operation_store
+        if store is None:raise FilesFacadeError("Registration unavailable",code="provider_unavailable")
+        def project(receipt):
+            if not isinstance(receipt,Mapping) or receipt.get("kind")!="checkpoint_registration_v1":raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+            rows=receipt.get("items") or []
+            if not isinstance(rows,list) or len(rows)>len(public):raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+            return {"request_id":request_id,"state":str(receipt.get("state") or "pending"),"items":[{"resource_id":public[i],"state":str(rows[i].get("state") or "pending") if i<len(rows) and isinstance(rows[i],Mapping) else "pending"} for i in range(len(public))]}
+        if status_only:
+            saved=store.get_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id)
+            if not saved:raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+            canonical["generation"]=saved.get("generation")
+            original_digest=hashlib.sha256(json.dumps(canonical,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8")).hexdigest()
+            if saved.get("digest")!=original_digest:raise FilesFacadeError("Registration unavailable",code="resource_unavailable")
+            result=project(saved.get("receipt"))
+            try:
+                observed=await provider.observe_selected_checkpoint_registration(context,root_origin_id=root.origin_id,root_revision=root_revision,items=selected,
+                    auth=auth,barrier=barrier,history_supervisor=history_supervisor,current=current_refs)
+                result["observed"]=[{"resource_id":public[i],"state":value} for i,value in enumerate(observed)]
+            except Exception:
+                result["observed"]=None
+            return result
+        initial={"kind":"checkpoint_registration_v1","state":"pending","items":[]}
+        try: existing=store.reserve_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id,request_digest=digest,
+            generation=context.policy_generation,receipt=initial,phase="checkpoint_registration")
+        except Exception as exc:raise FilesFacadeError("Registration unavailable",code=getattr(exc,"code","provider_unavailable")) from exc
+        if existing is not None:return project(existing.get("receipt"))
+        async def update(rows, *, state="pending"):
+            store.record_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id,request_digest=digest,
+                generation=context.policy_generation,receipt={"kind":"checkpoint_registration_v1","state":state,"items":[dict(row) for row in rows]},phase="checkpoint_registration")
+        await provider.register_selected_checkpoint_files(context,root_origin_id=root.origin_id,root_revision=root_revision,items=selected,
+            auth=auth,barrier=barrier,history_supervisor=history_supervisor,current=current_refs,update=update)
+        saved=store.get_operation(owner_subject_id=context.owner_subject_id,operation_id=request_id)
+        return project(saved.get("receipt") if saved else None)
+
+    async def capture_selected_checkpoint(self, context: ProviderContext, *, root_ref: str,
+            root_revision: Mapping[str, Any], items: Sequence[Mapping[str, Any]], request_id: str,
+            auth, barrier, history_supervisor, current, bind=None) -> Mapping[str, Any]:
+        """Internal selected capture: sealed Files refs select; they never grant extra authority."""
+        if not callable(current) or not isinstance(items,(list,tuple)) or not 1<=len(items)<=16:
+            raise FilesFacadeError("Checkpoint unavailable",code="resource_unavailable")
+        provider,root=self._provider_for_ref(context,root_ref,capability="children")
+        if root.provider!="host" or root.kind not in {"folder","directory"} or not callable(getattr(provider,"capture_selected_checkpoint",None)):
+            raise FilesFacadeError("Checkpoint root unavailable",code="resource_unavailable")
+        selected=[];original=[]
+        for item in items:
+            if type(item) is not dict or set(item)!={"resource_ref","expected_revision"}:
+                raise FilesFacadeError("Checkpoint selection unavailable",code="resource_unavailable")
+            child_provider,ref=self._provider_for_ref(context,item["resource_ref"],capability="download")
+            if child_provider is not provider or ref.provider!="host" or ref.kind!="file":
+                raise FilesFacadeError("Checkpoint selection unavailable",code="resource_unavailable")
+            selected.append({"origin_id":ref.origin_id,"expected_revision":item["expected_revision"]})
+            original.append((item["resource_ref"],ref.origin_id))
+        async def current_refs():
+            if not await current():return False
+            try:
+                fresh_provider,fresh_root=self._provider_for_ref(context,root_ref,capability="children")
+                if fresh_provider is not provider or fresh_root.origin_id!=root.origin_id:return False
+                for token,origin in original:
+                    child_provider,child=self._provider_for_ref(context,token,capability="download")
+                    if child_provider is not provider or child.origin_id!=origin:return False
+                return True
+            except Exception:return False
+        return await provider.capture_selected_checkpoint(context,root_origin_id=root.origin_id,root_revision=root_revision,
+            items=selected,request_id=request_id,auth=auth,barrier=barrier,history_supervisor=history_supervisor,current=current_refs,bind=bind)
 
     def _provider_for_ref(
         self,
@@ -2151,12 +2936,25 @@ class FilesFacade:
             except Exception:
                 # A broken provider cannot erase or disclose counts for peers.
                 health[name] = {"available": False, "code": "provider_unavailable"}
+        try:
+            # Cheap gate only (pref on + helper is an executable regular file, same path as recording_child.readiness); prepare_recording still runs the full probe.
+            from src.desktop_capture import capture_enabled
+            if getattr(sys, "frozen", False):
+                from src.runtime_paths import get_app_root
+                helper = Path(get_app_root()) / "bin" / "openclank-native-capture-frame"
+            else:
+                helper = Path(__file__).resolve().parents[2] / "native/capture/target/release/openclank-native-capture-frame"
+            helper_stat = helper.stat()
+            screen_record = bool(capture_enabled(context.owner_username)) and stat.S_ISREG(helper_stat.st_mode) and bool(helper_stat.st_mode & 0o111)
+        except Exception:
+            screen_record = False
         return {
             "version": FACADE_VERSION,
             "policy_generation": context.policy_generation,
             "entries": entries,
             "providers": health,
             "import_capabilities": {
+                "screen_record": screen_record,
                 "host": {
                     "available": True,
                     "create_directory": True,
@@ -2462,14 +3260,34 @@ class FilesFacade:
             result["search_complete"] = page.complete
         return result
 
-    async def stat(self, context: ProviderContext, *, resource_ref: str) -> dict[str, Any]:
+    async def stat(self, context: ProviderContext, *, resource_ref: str, purpose: str | None = None) -> dict[str, Any]:
         provider, ref = self._provider_for_ref(context, resource_ref, capability="stat")
-        entry = await provider.stat(context, origin_id=ref.origin_id)
+        if purpose == 'checkpoint':
+            self._provider_for_ref(context,resource_ref,capability='download')
+            method=getattr(provider,'stat_checkpoint',None)
+            if ref.provider!='host' or not callable(method):raise FilesFacadeError('Checkpoint identity unavailable',code='resource_unavailable')
+            entry=await method(context,origin_id=ref.origin_id)
+        elif purpose == 'snapshot':
+            self._provider_for_ref(context, resource_ref, capability='download')
+            method=getattr(provider,'stat_inspection',None)
+            if ref.provider!='host' or not callable(method):raise FilesFacadeError('Snapshot identity unavailable',code='resource_unavailable')
+            entry=await method(context,origin_id=ref.origin_id)
+            if entry.kind!='file':raise FilesFacadeError('Snapshot file unavailable',code='resource_unavailable')
+        else:
+            entry = await self._inspection_stat(provider, ref, context, allow_elf=purpose in {'inspect_elf','inspect_pe','inspect_macho','inspect_sqlite'}) if purpose in {'inspect', 'inspect_elf', 'inspect_pe', 'inspect_macho', 'inspect_sqlite'} else await provider.stat(context, origin_id=ref.origin_id)
         if entry.origin_id != ref.origin_id:
             raise FilesFacadeError("provider returned a mismatched resource", code="provider_unavailable")
+        if purpose in {'inspect', 'inspect_elf', 'inspect_pe', 'inspect_macho', 'inspect_sqlite','snapshot','checkpoint'}:
+            if not self._generation_current(context):
+                raise FilesFacadeError('Inspection access changed', code='resource_changed')
+            self._provider_for_ref(context, resource_ref, capability='stat')
+            if purpose in {'snapshot','checkpoint'}:self._provider_for_ref(context,resource_ref,capability='download')
         return self._resource(context, ref.provider, entry, parent_stable_id=ref.parent_stable_id)
 
-    async def reveal(self, context: ProviderContext, *, resource_ref: str) -> dict[str, Any]:
+    async def reveal(
+        self, context: ProviderContext, *, resource_ref: str,
+        expected_revision: Mapping[str, str] | None = None, workspace_root: Path | None = None,
+    ) -> dict[str, Any]:
         """Re-stat a resource and its containing provider folder for Files.
 
         Provider origin IDs remain inside this process.  The caller receives
@@ -2478,11 +3296,28 @@ class FilesFacade:
         """
 
         provider, ref = self._provider_for_ref(context, resource_ref, capability="stat")
+        stop_origin = None
+        if expected_revision is not None:
+            from src.openclank.files_host_provider import _path, host_origin_for_path
+
+            if (workspace_root is None or ref.provider != "host" or ref.kind != "file"
+                    or ref.workspace_id != context.workspace_id or not ref.location_id or context.is_admin):
+                raise FilesFacadeError("Workspace match is unavailable", code="resource_unavailable")
+            stop_origin = host_origin_for_path(str(workspace_root))
+            native_root = Path(_path(stop_origin))
+            native_path = Path(_path(ref.origin_id))
+            if native_path == native_root or not native_path.is_relative_to(native_root):
+                raise FilesFacadeError("Workspace match is unavailable", code="resource_unavailable")
+
         entry = await provider.stat(context, origin_id=ref.origin_id)
         if entry.origin_id != ref.origin_id or "stat" not in entry.capabilities:
             raise FilesFacadeError("provider returned a mismatched resource", code="provider_unavailable")
+        if stop_origin and (entry.kind != "file" or self._provider_revision(entry) != expected_revision):
+            raise FilesFacadeError("The captured match changed", code="resource_changed")
         parent_origin = entry.parent_origin_id
         if not parent_origin:
+            if stop_origin:
+                raise FilesFacadeError("Workspace match is unavailable", code="resource_unavailable")
             if "children" not in entry.capabilities:
                 raise FilesFacadeError("resource parent is unavailable", code="resource_unavailable")
             public = self._resource(context, ref.provider, entry)
@@ -2500,6 +3335,8 @@ class FilesFacade:
         ancestor_entries: list[ProviderResource] = []
         seen = {entry.origin_id}
         while parent_origin:
+            if stop_origin and not Path(_path(parent_origin)).is_relative_to(native_root):
+                raise FilesFacadeError("Workspace match is unavailable", code="resource_unavailable")
             if parent_origin in seen or len(ancestor_entries) >= MAX_REVEAL_ANCESTORS:
                 raise FilesFacadeError("resource ancestry is invalid", code="provider_unavailable")
             seen.add(parent_origin)
@@ -2507,8 +3344,12 @@ class FilesFacade:
             if parent_entry.origin_id != parent_origin or "children" not in parent_entry.capabilities:
                 raise FilesFacadeError("resource parent is unavailable", code="resource_unavailable")
             ancestor_entries.append(parent_entry)
+            if parent_origin == stop_origin:
+                break
             parent_origin = parent_entry.parent_origin_id
 
+        if stop_origin and ancestor_entries[-1].origin_id != stop_origin:
+            raise FilesFacadeError("Workspace match is unavailable", code="resource_unavailable")
         ancestors: list[dict[str, Any]] = []
         parent_stable_id: str | None = None
         for ancestor_entry in reversed(ancestor_entries):
@@ -2615,7 +3456,7 @@ class FilesFacade:
             "sort_keys": list(SORT_KEYS),
         }
 
-    async def open(self, context: ProviderContext, *, resource_ref: str) -> dict[str, Any]:
+    async def open(self, context: ProviderContext, *, resource_ref: str, purpose: str | None = None) -> dict[str, Any]:
         """Resolve a resource to one trusted first-party application.
 
         The sealed reference is owner, generation, and capability checked before
@@ -2625,13 +3466,22 @@ class FilesFacade:
         deliberately discarded.
         """
         provider, ref = self._provider_for_ref(context, resource_ref, capability="open")
-        entry = await provider.stat(context, origin_id=ref.origin_id)
+        entry = await self._inspection_stat(provider, ref, context) if purpose == "inspect" else await provider.stat(context, origin_id=ref.origin_id)
         if entry.origin_id != ref.origin_id:
             raise FilesFacadeError("provider returned a mismatched resource", code="provider_unavailable")
+        if purpose == 'inspect':
+            if not self._generation_current(context):
+                raise FilesFacadeError('Inspection access changed', code='resource_changed')
+            self._provider_for_ref(context, resource_ref, capability='open')
         if "open" not in entry.capabilities:
             raise FilesFacadeError("resource capability is unavailable", code="resource_unavailable")
         target = entry.open_target if isinstance(entry.open_target, Mapping) else {}
         app = str(target.get("app") or "").strip().lower()
+        iwi_preview = ref.provider == "host" and self._is_iwi_preview(entry)
+        model_inspect = ref.provider == "host" and self._inspection_format(entry) is not None
+        host_image = ref.provider == "host" and self._is_host_image_open(entry)
+        if iwi_preview or model_inspect or host_image:
+            app = "editor"
         if app not in OPEN_TARGET_APPS:
             raise FilesFacadeError("resource open target is unavailable", code="provider_unavailable")
 
@@ -2647,7 +3497,7 @@ class FilesFacade:
         )
         resource.pop("provenance", None)
         provider_open = getattr(provider, "open_resource", None)
-        exact = bool(callable(provider_open) and self._is_exact_open(entry))
+        exact = iwi_preview or model_inspect or host_image or bool(callable(provider_open) and self._is_exact_open(entry))
         await self._touch_recent(
             context,
             ref=ref,
@@ -2765,6 +3615,62 @@ class FilesFacade:
             raise FilesFacadeError("Workspace resource is unavailable", code="resource_unavailable")
         return self._resource(context, "host", entry)
 
+    async def action_root_requirement(self, context: ProviderContext, *, generation: int, resource_ref: str,
+                                      name: str, expected_revision: Mapping[str, Any] | None) -> dict[str, bool]:
+        if int(context.policy_generation) != _strict_nonnegative_int(generation, "generation") or not self._generation_current(context):
+            raise FilesFacadeError("File policy generation changed", code="policy_generation_changed")
+        if not isinstance(name, str) or not name.strip() or "/" in name or "\\" in name or name.strip() in {".", ".."}:
+            raise FilesFacadeError("Resource name is invalid", code="invalid_resource_request")
+        provider, ref = self._provider_for_ref(context, resource_ref, capability="rename")
+        entry = await provider.stat(context, origin_id=ref.origin_id)
+        if entry.origin_id != ref.origin_id or entry.kind != ref.kind or entry.kind not in ({"file"} | _DIRECTORY_KINDS) or "rename" not in entry.capabilities:
+            raise FilesFacadeError("Resource is unavailable", code="resource_unavailable")
+        self._check_revision(entry, expected_revision)
+        classifier = getattr(provider, "managed_rename_root_required", None)
+        required = bool(classifier(context, source_origin_id=ref.origin_id, name=name.strip(), source_is_directory=entry.kind in _DIRECTORY_KINDS)) if callable(classifier) else False
+        if not self._generation_current(context):
+            raise FilesFacadeError("File policy generation changed", code="policy_generation_changed")
+        return {"root_required":required}
+
+    _TRASH_ENTRY_LIMITS = {"id": 128, "root_id": 128, "fingerprint": 128, "original_path": 4096, "trashed_path": 4096}
+
+    async def _host_restore(self, context: ProviderContext, *, resource_ref: str, args: Mapping[str, Any],
+                            action_id: str | None, expected_revision: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Undo a Host trash: authorised by the entry the trash returned, not by an entry capability.
+
+        The trashed file is gone, so the origin is NOT statted. The ref must still be this owner's
+        current-generation Host ref carrying `trash` and naming the entry's original path; the parent
+        folder must still be writable (the same check create applies). The provider then verifies the
+        entry against Native and the root. Not idempotency-replayed: a lost reply is mutation_outcome_unknown.
+        """
+        entry = args.get("entry") if set(args) == {"entry"} else None
+        if (not isinstance(entry, Mapping) or set(entry) != set(self._TRASH_ENTRY_LIMITS)
+                or any(not isinstance(entry[key], str) or not entry[key] or len(entry[key]) > limit or "\x00" in entry[key]
+                       for key, limit in self._TRASH_ENTRY_LIMITS.items())):
+            raise FilesFacadeError("resource action arguments are invalid")
+        provider, ref = self._provider_for_ref(context, resource_ref, capability="trash")
+        from src.openclank.files_host_provider import _origin  # lazy: the provider module imports this one
+        original = entry["original_path"]
+        if ref.provider != "host" or not Path(original).is_absolute() or ref.origin_id != _origin(original):
+            raise FilesFacadeError("resource action arguments are invalid")
+        parent = await provider.stat(context, origin_id=_origin(str(Path(original).parent)))
+        if parent.kind not in _DIRECTORY_KINDS or "write" not in parent.capabilities or not self._generation_current(context):
+            raise FilesFacadeError("resource capability is unavailable", code="resource_unavailable")
+        kwargs: dict[str, Any] = {}
+        if action_id is not None:
+            kwargs["action_id"] = self._bounded_id(action_id, "action_id")
+        if expected_revision is not None:
+            kwargs["expected_revision"] = expected_revision
+        updated = await provider.action(context, origin_id=ref.origin_id, action="restore",
+                                        args={"entry": {key: entry[key] for key in self._TRASH_ENTRY_LIMITS}}, **kwargs)
+        if not isinstance(updated, ProviderResource) or updated.origin_id != ref.origin_id:
+            raise FilesFacadeError("provider returned a mismatched resource", code="provider_unavailable")
+        resource = self._resource(context, "host", replace(updated, provenance=dict(updated.provenance), thumbnail_url=None),
+                                  parent_stable_id=ref.parent_stable_id)
+        return {"version": FACADE_VERSION, "action": "restore", "resource": resource,
+                **({"history": dict(updated.action_receipt)} if updated.action_receipt else {}),
+                "state": {"trashed": False}}
+
     async def action(
         self,
         context: ProviderContext,
@@ -2773,6 +3679,8 @@ class FilesFacade:
         action: str,
         args: Mapping[str, Any] | None = None,
         action_id: str | None = None,
+        expected_revision: Mapping[str, Any] | None = None,
+        managed_root: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one closed, idempotent provider action through an opaque ref.
 
@@ -2784,10 +3692,12 @@ class FilesFacade:
         """
         normalized_action = str(action or "").strip().lower()
         normalized_args = dict(args or {})
+        if managed_root is not None and (normalized_action != "rename" or not expected_revision):
+            raise FilesFacadeError("Managed rename requires a source revision", code="invalid_resource_request")
         if normalized_action == "open":
-            if normalized_args:
+            if normalized_args not in ({}, {"purpose": "inspect"}):
                 raise FilesFacadeError("open does not accept arguments")
-            return await self.open(context, resource_ref=resource_ref)
+            return await self.open(context, resource_ref=resource_ref, purpose=normalized_args.get('purpose'))
         if normalized_action == "favorite.set":
             capability = "favorite"
             state_key = "favorite"
@@ -2809,18 +3719,125 @@ class FilesFacade:
             raise FilesFacadeError("resource action arguments are invalid")
         if normalized_action in {"rename", "move"} and (set(normalized_args) != {"name"} or not isinstance(normalized_args.get("name"), str) or not normalized_args["name"].strip()):
             raise FilesFacadeError("resource action arguments are invalid")
-        if normalized_action in {"trash", "restore"} and normalized_args:
+        if normalized_action == "trash" and normalized_args:
             raise FilesFacadeError("resource action arguments are invalid")
+        if normalized_action == "restore" and normalized_args:
+            # Only a Host undo of a trash carries args; any other provider still takes none.
+            return await self._host_restore(context, resource_ref=resource_ref, args=normalized_args,
+                                            action_id=action_id, expected_revision=expected_revision)
+
+        # An exact managed rename retry must find its existing owner-bound
+        # operation before attempting to resolve an expired old source ref.
+        if managed_root is not None and action_id is not None:
+            operation = self._bounded_id(action_id, "action_id")
+            digest = self._digest({"kind":"host-action", "resource_ref":resource_ref, "action":normalized_action,
+                "args":normalized_args, "generation":int(context.policy_generation),
+                "workspace_id":str(context.workspace_id or "default"), "expected_revision":dict(expected_revision or {}),
+                "managed_root":dict(managed_root)})
+            existing = self._load_operation(context, operation)
+            if existing is not None:
+                if existing.get("digest") != digest or int(existing.get("generation", -1)) != int(context.policy_generation):
+                    raise FilesFacadeError("Action ID was already used for a different request", code="idempotency_conflict")
+                status = await self.operation_receipt(context, operation_id=operation)
+                item = next((value for value in status.get("items", []) if value.get("item_id") == "action"), {})
+                if item.get("outcome") in {"committed", "unchanged"} and item.get("resource_ref"):
+                    try:
+                        private = (existing.get("receipt") or {}).get("_managed_items", {}).get("action", {})
+                        frozen_root = (private.get("plan") or {}).get("managed_root")
+                        old_root = resolve_resource_ref_for_reissue(str(managed_root["resource_ref"]),
+                            expected_owner_subject_id=context.owner_subject_id, required_capability="write")
+                        host = self._providers["host"]
+                        if old_root.provider != "host" or old_root.policy_generation != int(context.policy_generation) or not isinstance(frozen_root, Mapping):
+                            raise ValueError("root identity changed")
+                        renewed_root = await host.authorize_managed_root(context, origin_id=old_root.origin_id, expected_revision=None)
+                        if dict(renewed_root) != dict(frozen_root):
+                            raise ValueError("root authority changed")
+                    except Exception as error:
+                        raise FilesFacadeError("Committed action root is unavailable", code="resource_unavailable") from error
+                    try:
+                        target_provider, target_ref = self._provider_for_ref(context, str(item["resource_ref"]), capability="stat")
+                    except FilesFacadeError as exc:
+                        if exc.code != "resource_ref_stale":
+                            raise
+                        try:
+                            target_ref = resolve_resource_ref_for_reissue(str(item["resource_ref"]),
+                                expected_owner_subject_id=context.owner_subject_id, required_capability="stat")
+                            if target_ref.provider != "host" or target_ref.policy_generation != int(context.policy_generation):
+                                raise ValueError("result scope changed")
+                            target_provider = self._providers["host"]
+                        except Exception as error:
+                            raise FilesFacadeError("Committed action resource is unavailable", code="resource_unavailable") from error
+                    target = await target_provider.stat(context, origin_id=target_ref.origin_id)
+                    if target.origin_id != target_ref.origin_id or "stat" not in target.capabilities:
+                        raise FilesFacadeError("Committed action resource is unavailable", code="resource_unavailable")
+                    resource = self._resource(context, target_ref.provider, target, parent_stable_id=target_ref.parent_stable_id)
+                    return {"version":FACADE_VERSION, "action":normalized_action, "resource":resource,
+                            "state":{state_key:normalized_args.get("name")}}
+                if item.get("outcome") in {"failed", "denied", "conflict", "stale"}:
+                    raise FilesFacadeError(f"Action {operation} did not complete", code="resource_changed")
+                raise FilesFacadeError(f"Action {operation} requires reconciliation", code="operation_pending")
 
         provider, ref = self._provider_for_ref(context, resource_ref, capability=capability)
+        action_operation = None
+        action_digest = None
+        action_pending = None
+        if ref.provider == "host" and normalized_action in {"rename", "move"}:
+            action_operation = self._bounded_id(action_id or f"files-action-{uuid.uuid4().hex}", "action_id")
+            action_digest_payload = {"kind": "host-action", "resource_ref": resource_ref,
+                "action": normalized_action, "args": normalized_args, "generation": int(context.policy_generation),
+                "workspace_id": str(context.workspace_id or "default")}
+            if expected_revision is not None: action_digest_payload["expected_revision"] = dict(expected_revision)
+            if managed_root is not None: action_digest_payload["managed_root"] = dict(managed_root)
+            action_digest = self._digest(action_digest_payload)
+            previous = self._load_operation(context, action_operation)
+            if previous is not None:
+                if previous.get("digest") != action_digest:
+                    raise FilesFacadeError("Action ID was already used for a different request", code="idempotency_conflict")
+                status = await self.operation_receipt(context, operation_id=action_operation)
+                item = next((value for value in status.get("items", []) if value.get("item_id") == "action"), {})
+                if item.get("outcome") in {"committed", "unchanged"} and item.get("resource_ref"):
+                    target_provider, target_ref = self._provider_for_ref(context, str(item["resource_ref"]), capability="stat")
+                    target = await target_provider.stat(context, origin_id=target_ref.origin_id)
+                    if target.origin_id != target_ref.origin_id:
+                        raise FilesFacadeError("Committed action resource is unavailable", code="resource_unavailable")
+                    resource = self._resource(context, target_ref.provider, target, parent_stable_id=target_ref.parent_stable_id)
+                    return {"version": FACADE_VERSION, "action": normalized_action, "resource": resource,
+                            "state": {state_key: normalized_args.get("name")}}
+                if item.get("outcome") in {"failed", "denied", "conflict", "stale"}:
+                    raise FilesFacadeError(f"Action {action_operation} did not complete", code="resource_changed")
+                raise FilesFacadeError(f"Action {action_operation} requires reconciliation", code="operation_pending")
         current = await provider.stat(context, origin_id=ref.origin_id)
         if current.origin_id != ref.origin_id or capability not in current.capabilities:
             raise FilesFacadeError("resource capability is unavailable", code="resource_unavailable")
+        self._check_revision(current, expected_revision)
+        selected_root = None
+        if managed_root is not None:
+            if set(managed_root) - {"resource_ref", "expected_revision"} or not str(managed_root.get("resource_ref") or "").strip():
+                raise FilesFacadeError("Selected root is invalid", code="invalid_resource_request")
+            root_provider, root_ref = self._provider_for_ref(context, str(managed_root["resource_ref"]), capability="write")
+            classifier = getattr(provider, "selected_folder_required", None)
+            selected_profile = callable(classifier) and classifier(context, source_origin_id=ref.origin_id, source_is_directory=ref.kind in _DIRECTORY_KINDS)
+            resolver = getattr(root_provider, "authorize_selected_folder" if selected_profile else "authorize_managed_root", None)
+            if root_provider is not provider or root_ref.provider != "host" or not callable(resolver):
+                raise FilesFacadeError("Selected root is unavailable", code="resource_unavailable")
+            selected_root = await resolver(context, origin_id=root_ref.origin_id, expected_revision=managed_root.get("expected_revision"))
         provider_action = getattr(provider, "action", None)
         if not callable(provider_action):
             raise FilesFacadeError("resource action is unavailable", code="resource_unavailable")
+        if action_operation is not None:
+            action_pending = {"operation_id": action_operation, "generation": int(context.policy_generation),
+                "state": "pending", "items": [{"item_id": "action", "outcome": "pending", "code": "operation_in_progress"}],
+                "_provider_names": ["host"], "_request_kind": "action", "_item_ids": ["action"],
+                "_workspace_id": str(context.workspace_id or "default")}
+            owner, _existing = self._reserve_operation(context, action_operation, action_digest, context.policy_generation, action_pending)
+            if not owner:
+                raise FilesFacadeError(f"Action {action_operation} requires reconciliation", code="operation_pending")
         provider_kwargs = {"context": context, "origin_id": ref.origin_id, "action": normalized_action, "args": normalized_args}
-        if action_id is not None: provider_kwargs["action_id"] = action_id
+        if action_operation is not None: provider_kwargs["action_id"] = action_operation
+        elif action_id is not None: provider_kwargs["action_id"] = action_id
+        if selected_root is not None:
+            provider_kwargs["managed_root"] = selected_root
+            provider_kwargs["expected_revision"] = expected_revision
         try:
             updated = await provider_action(**provider_kwargs)
         except TypeError as error:
@@ -2828,6 +3845,24 @@ class FilesFacade:
                 updated = await provider_action(context, origin_id=ref.origin_id, action=normalized_action, args=normalized_args)
             else:
                 raise
+        except FilesFacadeError as error:
+            if action_operation is not None:
+                uncertain = error.code in {"mutation_outcome_unknown", "operation_pending"}
+                saved = ({**action_pending, "items": [{"item_id": "action", "outcome": "pending", "code": error.code}]} if uncertain
+                         else {**action_pending, "state": "partial", "items": [{"item_id": "action", "outcome": "failed", "code": error.code}]})
+                self._save_operation(context, action_operation, action_digest, context.policy_generation, saved)
+                if uncertain:
+                    raise FilesFacadeError(f"Action {action_operation} requires reconciliation", code="operation_pending") from error
+            raise
+        if action_operation is not None and isinstance(updated, Mapping):
+            outcome = str(updated.get("outcome") or "pending")
+            code = str(updated.get("code") or "managed_reconciliation_required")
+            saved = {**action_pending, "state": "pending" if outcome == "pending" else "partial",
+                     "items": [{"item_id": "action", "outcome": "pending" if outcome == "pending" else "failed", "code": code}]}
+            self._save_operation(context, action_operation, action_digest, context.policy_generation, saved)
+            if outcome == "pending":
+                raise FilesFacadeError(f"Action {action_operation} requires reconciliation", code="operation_pending")
+            raise FilesFacadeError(f"Action {action_operation} did not complete", code="resource_changed")
         if (
             not isinstance(updated, ProviderResource)
             or not str(updated.origin_id or "").strip()
@@ -2840,6 +3875,9 @@ class FilesFacade:
             replace(updated, provenance=dict(updated.provenance), thumbnail_url=None),
             parent_stable_id=ref.parent_stable_id,
         )
+        if action_operation is not None:
+            completed = {**action_pending, "state": "complete", "items": [{"item_id": "action", "outcome": "committed", "resource_ref": resource["ref"]}]}
+            self._save_operation(context, action_operation, action_digest, context.policy_generation, completed)
         return {
             "version": FACADE_VERSION,
             "action": normalized_action,
@@ -2856,8 +3894,39 @@ class FilesFacade:
         name: str,
         text: str,
         action_id: str | None = None,
+        before_dispatch: Callable[..., Any] | None = None,
+        operation_id: str | None = None,
+        expected_parent_revision: Mapping[str, Any] | None = None,
+        status_only: bool = False,
     ) -> dict[str, Any]:
         """Create a provider-owned ordinary document beneath an opaque folder ref."""
+        if operation_id is not None or expected_parent_revision is not None or status_only:
+            if not operation_id or expected_parent_revision is None:
+                raise FilesFacadeError('Ordinary create identity unavailable',code='invalid_resource_request')
+            from src.openclank.ordinary_create import _identity
+            if not isinstance(operation_id,str) or not operation_id or operation_id != operation_id.strip():
+                raise FilesFacadeError('Ordinary create identity unavailable',code='invalid_resource_request')
+            original_id = _identity(str(context.owner_subject_id),str(context.workspace_id),'','human',operation_id)
+            getter = getattr(self._operation_store,'get_operation',None)
+            if not callable(getter): raise FilesFacadeError('Ordinary create authority unavailable',code='provider_unavailable')
+            previous = getter(owner_subject_id=context.owner_subject_id,operation_id=original_id)
+            read_only = status_only or previous is not None
+            provider, parent = self._provider_for_ref(context, parent_ref, capability='stat' if read_only else 'write')
+            if parent.provider != 'host' or not callable(getattr(provider,'ordinary_create_resource',None)):
+                raise FilesFacadeError('Ordinary create unavailable',code='unsupported_operation')
+            current = await provider.stat(context,origin_id=parent.origin_id)
+            if current.origin_id != parent.origin_id or current.kind not in _DIRECTORY_KINDS or 'children' not in current.capabilities:
+                raise FilesFacadeError('Ordinary create parent unavailable',code='resource_unavailable')
+            if not read_only:
+                if 'write' not in current.capabilities: raise FilesFacadeError('Ordinary create parent unavailable',code='resource_unavailable')
+                self._check_revision(current,expected_parent_revision)
+            result = dict(await provider.ordinary_create_resource(context,parent_origin_id=parent.origin_id,name=name,text=text,
+                operation_id=operation_id,expected_revision=expected_parent_revision,status_only=read_only,before_dispatch=before_dispatch))
+            observed=result.pop('resource',None)
+            if observed is not None:
+                if not isinstance(observed,ProviderResource): raise FilesFacadeError('Ordinary create receipt unavailable',code='provider_unavailable')
+                result['resource']=self._resource(context,parent.provider,observed,parent_stable_id=parent.stable_id)
+            return {'version':FACADE_VERSION,'action':'create',**result}
         provider, parent = self._provider_for_ref(context, parent_ref, capability="write")
         current = await provider.stat(context, origin_id=parent.origin_id)
         if current.origin_id != parent.origin_id or "children" not in current.capabilities or "write" not in current.capabilities:
@@ -2868,18 +3937,49 @@ class FilesFacade:
         if not isinstance(name, str) or not name.strip() or not isinstance(text, str):
             raise FilesFacadeError("resource creation arguments are invalid", code="invalid_resource_request")
         try:
+            extra = {'before_dispatch': before_dispatch} if before_dispatch is not None and parent.provider == 'host' else {}
+            if before_dispatch is not None and parent.provider != 'host':
+                raise FilesFacadeError('provider cannot enforce source currentness', code='unsupported_operation')
             created = await creator(
                 context,
                 parent_origin_id=parent.origin_id,
                 name=name,
                 text=text,
                 action_id=action_id,
+                **extra,
             )
         except TypeError as error:
             if action_id is not None and "action_id" in str(error):
                 created = await creator(context, parent_origin_id=parent.origin_id, name=name, text=text)
             else:
                 raise
+        if parent.provider == 'host' and isinstance(created, Mapping):
+            allowed = {'outcome', 'revision', 'history', 'readback', 'changedAfterCreate', 'resource'}
+            revision, history = created.get('revision'), created.get('history')
+            if (set(created) - allowed or created.get('outcome') != 'created'
+                or not isinstance(revision, Mapping) or set(revision) != {'kind', 'value'} or revision.get('kind') != 'hostFingerprint'
+                or not isinstance(revision.get('value'), str) or not re.fullmatch(r'sha256:[0-9a-f]{64}:[0-9]+', revision['value'])
+                or not isinstance(history, Mapping) or set(history) - {'state', 'actionId'} or history.get('state') not in {'complete', 'incomplete', 'unavailable'}
+                or created.get('readback') not in {'current', 'unavailable', 'changed'}):
+                raise FilesFacadeError('Host create receipt is unavailable', code='mutation_outcome_unknown')
+            action = history.get('actionId')
+            if (history['state'] in {'complete', 'incomplete'}) != (isinstance(action, str) and bool(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', action))):
+                raise FilesFacadeError('Host create receipt is unavailable', code='mutation_outcome_unknown')
+            observed = created.get('resource')
+            if ((created['readback'] == 'current') != isinstance(observed, ProviderResource)
+                or (created['readback'] != 'current' and observed is not None)
+                or (created['readback'] == 'changed') != (created.get('changedAfterCreate') is True)):
+                raise FilesFacadeError('Host create receipt is unavailable', code='mutation_outcome_unknown')
+            if observed is not None and (observed.kind != 'file' or observed.parent_origin_id != parent.origin_id
+                    or observed.name != name.strip() or self._provider_revision(observed) != dict(revision)):
+                raise FilesFacadeError('Host create receipt is unavailable', code='mutation_outcome_unknown')
+            result = {'version': FACADE_VERSION, 'action': 'create', 'outcome':'created', 'revision':dict(revision),
+                      'history':dict(history), 'readback':created['readback']}
+            if created.get('changedAfterCreate') is True:
+                result['changedAfterCreate'] = True
+            if observed is not None:
+                result['resource'] = self._resource(context, parent.provider, observed, parent_stable_id=parent.stable_id)
+            return result
         if not isinstance(created, ProviderResource) or not str(created.origin_id or "").strip():
             raise FilesFacadeError("provider returned an invalid created resource", code="provider_unavailable")
         resource = self._resource(
@@ -3039,7 +4139,8 @@ class FilesFacade:
         except Exception as error:
             raise FilesFacadeError("directory creation failed", code="provider_unavailable") from error
 
-    async def open_payload(self, context: ProviderContext, *, resource_ref: str) -> dict[str, Any]:
+    async def open_payload(self, context: ProviderContext, *, resource_ref: str,
+                           expected_revision: Mapping[str, Any] | None = None, purpose: str | None = None) -> dict[str, Any]:
         """Load the exact item for a trusted first-party app via its opaque ref.
 
         The browser never supplies or receives a provider origin ID. The sealed
@@ -3047,15 +4148,51 @@ class FilesFacade:
         and the provider's app payload is admitted through a narrow vocabulary.
         """
         provider, ref = self._provider_for_ref(context, resource_ref, capability="open")
-        entry = await provider.stat(context, origin_id=ref.origin_id)
+        entry = await self._inspection_stat(provider, ref, context) if purpose == "inspect" else await provider.stat(context, origin_id=ref.origin_id)
         if entry.origin_id != ref.origin_id:
             raise FilesFacadeError("provider returned a mismatched resource", code="provider_unavailable")
+        if purpose == 'inspect':
+            if not self._generation_current(context):
+                raise FilesFacadeError('Inspection access changed', code='resource_changed')
+            self._provider_for_ref(context, resource_ref, capability='open')
         if "open" not in entry.capabilities:
             raise FilesFacadeError("resource capability is unavailable", code="resource_unavailable")
+        if expected_revision is not None and self._provider_revision(entry) != dict(expected_revision):
+            raise FilesFacadeError("Resource changed before Editor opened it", code="resource_changed")
         target = entry.open_target if isinstance(entry.open_target, Mapping) else {}
         app = str(target.get("app") or "").strip().lower()
+        iwi_preview = ref.provider == "host" and self._is_iwi_preview(entry)
+        model_inspect = ref.provider == "host" and self._inspection_format(entry) is not None
+        video_preview = ref.provider == 'host' and entry.kind == 'file' and str(entry.name).lower().endswith('.webm') and str(entry.mime_type or '').lower() == 'video/webm' and 'preview' in entry.capabilities
+        if ref.provider == "host" and self._is_host_image_open(entry):
+            revision = self._provider_revision(entry)
+            if not revision or revision.get("kind") != "hostFingerprint" or not self._generation_current(context):
+                raise FilesFacadeError("Image requires a current stable source revision", code="resource_unavailable")
+            resource = self._resource(
+                context, ref.provider, replace(entry, open_target={"app": "editor"}, provenance={}, thumbnail_url=None),
+                parent_stable_id=ref.parent_stable_id,
+            )
+            return {"version": FACADE_VERSION, "target": {"app": "editor"}, "resource": resource,
+                    "payload": {"kind": "host-image", "read_only": True}}
+        if iwi_preview or model_inspect or video_preview:
+            app = "editor"
         if app not in OPEN_TARGET_APPS:
             raise FilesFacadeError("resource open target is unavailable", code="provider_unavailable")
+        if iwi_preview or model_inspect or video_preview:
+            revision = self._provider_revision(entry)
+            if revision is None or not self._generation_current(context):
+                raise FilesFacadeError("Inspection requires a current stable source revision", code="resource_unavailable")
+            resource = self._resource(context, ref.provider, replace(entry, open_target={"app": "editor"}, provenance={}, thumbnail_url=None), parent_stable_id=ref.parent_stable_id)
+            handle = {
+                "key": {"accountId": str(context.owner_subject_id), "workspaceId": "host" if ref.provider == "host" else str(context.workspace_id or "default"),
+                        "provider": ref.provider, "resourceId": resource["id"]},
+                "revision": dict(revision), "representation": "asset" if video_preview else "text",
+                "locator": {"displayName": str(entry.name), "locationLabel": str(entry.name), "opaqueRef": resource["ref"]},
+                "capabilities": {"read": True, "edit": False, "write": False, "preview": True},
+            }
+            return {"version": FACADE_VERSION, "target": {"app": "editor"}, "resource": resource,
+                    "payload": {"name": str(entry.name), "kind": "video-preview" if video_preview else "derived-iwi-preview" if iwi_preview else "model-header-inspect", "corpus": ref.provider,
+                                "text": "", "read_only": True, "resource": handle, "format": resource["format"]}}
         provider_open = getattr(provider, "open_resource", None)
         if not callable(provider_open):
             raise FilesFacadeError("exact resource open is unavailable", code="resource_unavailable")
@@ -3139,6 +4276,7 @@ class FilesFacade:
         resource_ref: str,
         expected_revision: Mapping[str, Any],
         text: str,
+        before_dispatch: Callable[..., Any] | None = None,
     ) -> Mapping[str, Any]:
         """CAS-save an Editor resource behind its owner-bound opaque ref."""
         provider, ref = self._provider_for_ref(context, resource_ref, capability="open")
@@ -3154,15 +4292,356 @@ class FilesFacade:
             raise FilesFacadeError("resource save is unavailable", code="resource_unavailable")
         if not isinstance(expected_revision, Mapping):
             raise FilesFacadeError("resource save revision is invalid", code="invalid_resource_request")
+        if before_dispatch is not None and ref.provider != 'host':
+            raise FilesFacadeError('provider cannot enforce source currentness', code='unsupported_operation')
+        extra = {'before_dispatch': before_dispatch} if before_dispatch is not None else {}
         result = await saver(
             context,
             origin_id=ref.origin_id,
             expected_revision=expected_revision,
             text=text,
+            **extra,
         )
         if not isinstance(result, Mapping) or str(result.get("outcome") or "") not in {"applied", "conflict"}:
             raise FilesFacadeError("provider returned an invalid save result", code="provider_unavailable")
+        if ref.provider == 'host' and result.get('outcome') == 'applied':
+            history = result.get('history')
+            if not isinstance(history, Mapping) or set(history) - {'state', 'actionId'} or history.get('state') not in {'complete', 'incomplete', 'unavailable', 'not_applicable'}:
+                raise FilesFacadeError('Host save receipt is unavailable', code='mutation_outcome_unknown')
+            action = history.get('actionId')
+            if (history['state'] in {'complete', 'incomplete'}) != (isinstance(action, str) and bool(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', action))):
+                raise FilesFacadeError('Host save receipt is unavailable', code='mutation_outcome_unknown')
         return dict(result)
+
+    @staticmethod
+    def _is_host_image_open(entry: ProviderResource) -> bool:
+        return (
+            entry.kind == "file"
+            and str(entry.mime_type or "").lower() in {"image/png", "image/jpeg", "image/gif", "image/webp"}
+            and "download" in entry.capabilities
+        )
+
+    @staticmethod
+    def _is_iwi_preview(entry: ProviderResource) -> bool:
+        return entry.kind == "file" and str(entry.name or "").lower().endswith(".iwi") and "preview" in entry.capabilities
+
+    async def _iwi_preview(self, context: ProviderContext, *, resource_ref: str,
+                           expected_revision: Mapping[str, Any] | None = None,
+                           thumbnail: tuple[int, int, float] | None = None) -> ProviderContent:
+        from src.openclank.format_adapters import iwi
+        provider, ref = self._provider_for_ref(context, resource_ref, capability="preview")
+        try:
+            async with asyncio.timeout(15):
+                entry = await provider.stat(context, origin_id=ref.origin_id)
+                revision = self._provider_revision(entry)
+                if entry.origin_id != ref.origin_id or not self._is_iwi_preview(entry) or revision is None:
+                    raise FilesFacadeError("IWI source is unavailable", code="resource_unavailable")
+                if expected_revision is not None and dict(revision) != dict(expected_revision):
+                    raise FilesFacadeError("IWI source changed; reopen its preview", code="resource_changed")
+                if entry.size is None or not (0 < int(entry.size) <= iwi.MAX_INPUT_BYTES):
+                    raise FilesFacadeError("IWI input exceeds the supported preview bounds", code="resource_unavailable")
+                source = await provider.content(context, origin_id=ref.origin_id)
+                if source.origin_id != ref.origin_id or source.size is None or not (0 < int(source.size) <= iwi.MAX_INPUT_BYTES):
+                    raise FilesFacadeError("IWI input exceeds the supported preview bounds", code="resource_unavailable")
+                if source.data is not None and source.path is None and source.stream is None:
+                    if not isinstance(source.data, bytes):
+                        raise FilesFacadeError("IWI provider returned invalid bytes", code="provider_unavailable")
+                    data = source.data
+                elif source.stream is not None and source.data is None and source.path is None:
+                    chunks = []
+                    total = 0
+                    async for chunk in source.stream(0, int(source.size) + 1):
+                        if not isinstance(chunk, bytes):
+                            raise FilesFacadeError("IWI provider returned invalid bytes", code="provider_unavailable")
+                        total += len(chunk)
+                        if total > int(source.size) or total > iwi.MAX_INPUT_BYTES:
+                            raise FilesFacadeError("IWI source changed or exceeds preview bounds", code="resource_changed")
+                        chunks.append(bytes(chunk))
+                    data = b"".join(chunks)
+                else:
+                    raise FilesFacadeError("IWI provider cannot supply a bounded authorized stream", code="provider_unavailable")
+                if len(data) != int(source.size) or len(data) != int(entry.size):
+                    raise FilesFacadeError("IWI source changed during preview", code="resource_changed")
+                decode = iwi.preview_png if thumbnail is None else lambda value: iwi.thumbnail_png(value, *thumbnail)
+                info, png = await asyncio.to_thread(decode, data)
+                current = await provider.stat(context, origin_id=ref.origin_id)
+                if (current.origin_id != ref.origin_id or not self._is_iwi_preview(current)
+                    or self._provider_revision(current) != revision or not self._generation_current(context)):
+                    raise FilesFacadeError("IWI source or access changed during preview", code="resource_changed")
+                self._provider_for_ref(context, resource_ref, capability="preview")
+                import re
+                if not re.fullmatch(r"[A-Za-z0-9:_-]{1,64}", str(revision["kind"])) or not re.fullmatch(r"[A-Za-z0-9:._-]{1,256}", str(revision["value"])):
+                    raise FilesFacadeError("IWI revision cannot be represented safely", code="provider_unavailable")
+                evidence = {"source_sha256": info.source_sha256, "decoder": info.decoder_generation,
+                            "variant": info.variant, "revision_kind": str(revision["kind"]), "revision_value": str(revision["value"])}
+                etag = hashlib.sha256(json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                return ProviderContent(origin_id=ref.origin_id, filename=f"{entry.name}.png", media_type="image/png",
+                                       data=png, size=len(png), etag=f"iwi-{etag}", preview_evidence=evidence)
+        except TimeoutError as exc:
+            raise FilesFacadeError("IWI preview exceeded its time limit", code="provider_unavailable") from exc
+        except iwi.IwiUnsupported as exc:
+            raise FilesFacadeError(str(exc), code="resource_unavailable") from exc
+
+    @staticmethod
+    def _inspection_format(entry: ProviderResource) -> str | None:
+        from src.openclank.format_capabilities import inspection_hint
+        if entry.kind != 'file' or 'preview' not in entry.capabilities:
+            return None
+        hint = inspection_hint(entry.name)
+        return hint[0] if hint is not None else None
+
+    async def _inspection_stat(self, provider, ref, context, *, allow_elf=False):
+        method = getattr(provider, 'stat_inspection', None)
+        if ref.provider != 'host' or not callable(method):
+            raise FilesFacadeError('Bounded inspection identity unavailable', code='provider_unavailable')
+        entry = await method(context, origin_id=ref.origin_id)
+        if entry.origin_id != ref.origin_id or not (allow_elf and entry.kind == 'file' and 'preview' in entry.capabilities) and self._inspection_format(entry) is None:
+            raise FilesFacadeError('Inspection source unavailable', code='resource_unavailable')
+        return entry
+
+    async def inspect_safetensors(self, context: ProviderContext, *, resource_ref: str, expected_revision: Mapping[str, Any], format_id: str = 'safetensors') -> dict[str, Any]:
+        from src.openclank.format_adapters import safetensors, gguf, asar, fastfile, wasm, elf, pe, macho, sqlite_metadata
+        if format_id not in {'safetensors', 'gguf', 'asar', 'fastfile', 'wasm', 'elf', 'pe', 'macho', 'sqlite'}:
+            raise FilesFacadeError("Unknown inspection format", code="resource_unavailable")
+        matches = lambda entry: (entry.kind == 'file' and 'preview' in entry.capabilities and (format_id in {'elf', 'pe', 'macho', 'sqlite'} or self._inspection_format(entry) == format_id))
+        provider, ref = self._provider_for_ref(context, resource_ref, capability="preview")
+        if ref.provider != "host":
+            raise FilesFacadeError("Provider range semantics are unavailable", code="provider_unavailable")
+        try:
+            async with asyncio.timeout(15):
+                entry = await self._inspection_stat(provider, ref, context, allow_elf=format_id in {'elf','pe','macho','sqlite'})
+                revision = self._provider_revision(entry)
+                if entry.origin_id != ref.origin_id or not matches(entry) or revision is None or revision != dict(expected_revision):
+                    raise FilesFacadeError("Inspection source changed", code="resource_changed")
+                if type(entry.size) is not int or entry.size < 0:
+                    raise FilesFacadeError("Source size is unavailable", code="provider_unavailable")
+                source = await provider.content(context, origin_id=ref.origin_id)
+                if source.origin_id != ref.origin_id or source.size != entry.size or source.stream is None or source.data is not None or source.path is not None:
+                    raise FilesFacadeError("Provider does not support bounded ranges", code="provider_unavailable")
+                if revision.get('kind') != 'hostObjectIdentity' or source.etag != revision.get('value'):
+                    raise FilesFacadeError('Inspection stream identity changed', code='resource_changed')
+                async def read_range(offset: int, length: int) -> bytes:
+                    chunks = []; total = 0
+                    async for chunk in source.stream(offset, length):
+                        if not isinstance(chunk, bytes):
+                            raise FilesFacadeError("Provider returned invalid range", code="provider_unavailable")
+                        total += len(chunk)
+                        if total > length:
+                            raise FilesFacadeError("Provider exceeded requested range", code="provider_unavailable")
+                        chunks.append(chunk)
+                    if total != length:
+                        raise FilesFacadeError("Source range is truncated", code="resource_changed")
+                    return b"".join(chunks)
+                if format_id == 'safetensors':
+                    prefix = await read_range(0, 8)
+                    length = safetensors.header_length(prefix, entry.size)
+                    header = await read_range(8, length)
+                    result = safetensors.inspect(prefix, header, entry.size)
+                elif format_id == 'asar':
+                    prefix = await read_range(0, 8)
+                    length = asar.header_length(prefix, entry.size)
+                    header = await read_range(8, length)
+                    result = asar.inspect(prefix, header, entry.size)
+                elif format_id == 'fastfile':
+                    result = await fastfile.inspect(read_range, entry.size)
+                elif format_id == 'wasm':
+                    result = await wasm.inspect(read_range, entry.size)
+                elif format_id == 'elf':
+                    result = await elf.inspect(read_range, entry.size)
+                elif format_id == 'pe':
+                    result = await pe.inspect(read_range, entry.size)
+                elif format_id == 'macho':
+                    result = await macho.inspect(read_range, entry.size)
+                elif format_id == 'sqlite':
+                    result = await sqlite_metadata.inspect(read_range, entry.size)
+                else:
+                    result = await gguf.inspect(read_range, entry.size)
+                current = await self._inspection_stat(provider, ref, context, allow_elf=format_id in {'elf','pe','macho','sqlite'})
+                if current.origin_id != ref.origin_id or not matches(current) or self._provider_revision(current) != revision or not self._generation_current(context):
+                    raise FilesFacadeError("Inspection source or access changed", code="resource_changed")
+                self._provider_for_ref(context, resource_ref, capability="preview")
+                receipt = {"version":1, "resourceRef":resource_ref, "providerRevision":dict(revision), "policyGeneration":context.policy_generation, **result}
+                if format_id == 'sqlite' and len(json.dumps(receipt, ensure_ascii=True, separators=(',', ':')).encode('ascii')) > sqlite_metadata.MAX_OUTPUT:
+                    raise FilesFacadeError('SQLite inspection receipt limit exceeded', code='resource_unavailable')
+                return receipt
+        except (safetensors.Unsupported, gguf.Unsupported, asar.AsarUnsupported, fastfile.FastfileUnsupported, wasm.WasmUnsupported, elf.ElfUnsupported, pe.PeUnsupported, macho.MachoUnsupported, sqlite_metadata.SqliteUnsupported, TimeoutError) as exc:
+            raise FilesFacadeError(str(exc) or "Inspection deadline exceeded", code="resource_unavailable") from exc
+
+    async def save_iwi_png_copy(self, context: ProviderContext, *, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Revalidate the captured preview, then use the existing staged import receipt."""
+        import re
+        required = {"operation_id", "item_id", "generation", "source_ref", "revision", "source_sha256", "decoder", "png_sha256", "destination_ref", "name"}
+        if set(request) != required or request.get("generation") != context.policy_generation:
+            raise FilesFacadeError("Conversion request or policy is invalid", code="invalid_resource_request")
+        operation = self._bounded_id(request.get("operation_id"), "operation_id")
+        self._bounded_id(request.get("item_id"), "item_id")
+        if (not isinstance(request.get("revision"), Mapping) or set(request["revision"]) != {"kind", "value"}
+            or any(not isinstance(request.get(key), str) or not re.fullmatch(r"[a-f0-9]{64}", request[key]) for key in ("source_sha256", "png_sha256"))
+            or not isinstance(request.get("decoder"), str) or not re.fullmatch(r"[A-Za-z0-9:._-]{1,128}", request["decoder"])
+            or not isinstance(request.get("name"), str) or not request["name"].lower().endswith(".png")
+            or not isinstance(request.get("source_ref"), str) or not isinstance(request.get("destination_ref"), str)):
+            raise FilesFacadeError("Conversion evidence is invalid", code="invalid_resource_request")
+        evidence = {key: request[key] for key in ("source_ref", "revision", "source_sha256", "decoder", "png_sha256", "destination_ref", "name", "item_id", "generation")}
+        existing = self._load_operation(context, operation)
+        if existing is not None:
+            prior = (existing.get("receipt") or {}).get("_import_binding", {}).get("derived_source")
+            if prior != evidence or existing.get("generation") != context.policy_generation:
+                raise FilesFacadeError("Operation identity was already used for another request", code="idempotency_conflict")
+            return await self.operation_receipt(context, operation_id=operation)
+        preview = await self._iwi_preview(context, resource_ref=request["source_ref"], expected_revision=request["revision"])
+        actual = preview.preview_evidence or {}
+        if (actual.get("source_sha256") != request["source_sha256"] or actual.get("decoder") != request["decoder"]
+            or hashlib.sha256(preview.data or b"").hexdigest() != request["png_sha256"]):
+            raise FilesFacadeError("The captured preview changed; reopen it", code="resource_changed")
+        class Upload:
+            filename = request["name"]
+            content_type = "image/png"
+            def __init__(self, data): self.data, self.offset = data, 0
+            async def read(self, size):
+                chunk = self.data[self.offset:self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+        return await self.import_file(context, upload=Upload(preview.data), source_evidence=evidence,
+            metadata={"operation_id": operation, "item_id": request["item_id"], "generation": context.policy_generation,
+                      "destination_ref": request["destination_ref"], "name": request["name"], "collision": "fail"})
+
+    async def capture_media_destination(self, context: ProviderContext, *, resource_ref: str) -> dict[str, Any]:
+        provider, ref = self._provider_for_ref(context, resource_ref, capability="write")
+        entry = await provider.stat(context, origin_id=ref.origin_id)
+        revision = self._provider_revision(entry)
+        if (entry.origin_id != ref.origin_id or entry.kind not in _DIRECTORY_KINDS
+            or "write" not in entry.capabilities or "children" not in entry.capabilities
+            or revision is None or not self._generation_current(context)):
+            raise FilesFacadeError("media destination is unavailable", code="resource_unavailable")
+        return {"destination_ref": resource_ref, "destination_revision": dict(revision), "destination_label":str(entry.name)[:240]}
+
+    async def capture_media_recipe(self, context: ProviderContext, *, resource_ref: str,
+                                   expected_revision: Mapping[str, Any] | None = None, include_resource_id: bool = False) -> tuple[dict[str, Any], bytes]:
+        """Capture a bounded, current Files recipe for a private media submission."""
+        if type(include_resource_id) is not bool: raise FilesFacadeError('invalid media source', code='resource_unavailable')
+        if not include_resource_id:
+            return await self._capture_media_source(context, resource_ref=resource_ref, expected_revision=expected_revision, limit=1024 * 1024)
+        provider, ref = self._provider_for_ref(context, resource_ref, capability='download')
+        evidence, data = await self._capture_media_source(context, resource_ref=resource_ref, expected_revision=expected_revision, limit=1024 * 1024)
+        current_provider, current = self._provider_for_ref(context, resource_ref, capability='download')
+        if (current.provider != ref.provider or current.stable_id != ref.stable_id or current.origin_id != ref.origin_id
+                or not isinstance(ref.stable_id,str) or not ref.stable_id or len(ref.stable_id.encode('utf-8'))>256
+                or current_provider is not provider or not self._generation_current(context)):
+            raise FilesFacadeError('media source changed', code='resource_changed')
+        return {**evidence, 'recipe_resource_id':ref.stable_id}, data
+
+    async def capture_sprite_frame(self, context: ProviderContext, *, resource_ref: str,
+                                   expected_revision: Mapping[str, Any] | None = None):
+        _provider, ref = self._provider_for_ref(context, resource_ref, capability='download')
+        evidence, data = await self._capture_media_source(context, resource_ref=resource_ref, expected_revision=expected_revision, limit=8 * 1024 * 1024)
+        _current_provider, current = self._provider_for_ref(context, resource_ref, capability='download')
+        if current.stable_id != ref.stable_id or current.provider != ref.provider:
+            raise FilesFacadeError('sprite source changed', code='resource_changed')
+        return {'ref':resource_ref,'resourceID':ref.stable_id,'revision':evidence['recipe_revision'],
+                'sha256':evidence['recipe_sha256']}, data
+
+    async def capture_media_image(self, context: ProviderContext, *, resource_ref: str,
+                                  expected_revision: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], bytes]:
+        """Capture one exact PNG/JPEG through the existing bounded Files owner."""
+        import io
+        import warnings
+        from PIL import Image
+        def valid_text(value, limit):
+            return (type(value) is str and bool(value) and len(value.encode('utf-8')) <= limit
+                    and not any(ord(c) < 32 for c in value) and '://' not in value)
+        provider, ref = self._provider_for_ref(context, resource_ref, capability='download')
+        evidence, data = await self._capture_media_source(context, resource_ref=resource_ref,
+            expected_revision=expected_revision, limit=4 * 1024 * 1024)
+        revision = evidence['recipe_revision']
+        if (not valid_text(resource_ref, 16384) or not valid_text(ref.stable_id, 512)
+                or not valid_text(evidence['recipe_name'], 240) or type(revision) is not dict
+                or set(revision) != {'kind','value'} or any(not valid_text(revision[k], 512) for k in revision)):
+            raise FilesFacadeError('image source unavailable', code='resource_unavailable')
+        def decode():
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(data)) as image:
+                    kind, (width, height) = image.format, image.size
+                    if (kind not in ('PNG','JPEG') or not 1 <= width <= 4096 or not 1 <= height <= 4096
+                            or width * height > 16777216 or getattr(image, 'n_frames', 1) != 1
+                            or getattr(image, 'is_animated', False)):
+                        raise ValueError('unsupported image')
+                    image.verify()
+                with Image.open(io.BytesIO(data)) as image:
+                    image.load()
+                return ('image/png' if kind == 'PNG' else 'image/jpeg'), width, height
+        task = asyncio.create_task(asyncio.to_thread(decode)); cancelled = False
+        while True:
+            try:
+                mime, width, height = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                if task.done():
+                    try: task.result()
+                    except Exception: pass
+                    raise
+            except Exception as exc:
+                if cancelled: raise asyncio.CancelledError from None
+                raise FilesFacadeError('unsupported image', code='resource_unavailable') from exc
+        if cancelled: raise asyncio.CancelledError
+        current_provider, current = self._provider_for_ref(context, resource_ref, capability='download')
+        current_entry = await current_provider.stat(context, origin_id=current.origin_id)
+        if (current.provider != ref.provider or current.stable_id != ref.stable_id or current.origin_id != ref.origin_id
+                or current_entry.origin_id != ref.origin_id or self._provider_revision(current_entry) != revision
+                or not self._generation_current(context)):
+            raise FilesFacadeError('image source changed', code='resource_changed')
+        return {'ref':resource_ref, 'resourceID':ref.stable_id, 'revision':revision,
+                'sha256':evidence['recipe_sha256'], 'mime_type':mime, 'width':width, 'height':height,
+                'name':evidence['recipe_name']}, data
+
+    async def capture_media_glb(self, context: ProviderContext, *, resource_ref: str,
+                                expected_revision: Mapping[str, Any] | None = None, textured: bool = False) -> tuple[dict[str, Any], bytes]:
+        """Capture the exact bounded GLB under the same Files authority."""
+        if type(textured) is not bool:
+            raise FilesFacadeError('unsupported GLB', code='resource_unavailable')
+        from src.openclank.blender_child import validate_glb
+        evidence, data = await self._capture_media_source(context, resource_ref=resource_ref,
+            expected_revision=expected_revision, limit=64 * 1024 * 1024)
+        try:
+            validate_glb(data, textured=textured)
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            raise FilesFacadeError('unsupported GLB', code='resource_unavailable') from exc
+        return evidence, data
+
+    async def _capture_media_source(self, context: ProviderContext, *, resource_ref: str,
+                                    expected_revision: Mapping[str, Any] | None, limit: int) -> tuple[dict[str, Any], bytes]:
+        provider, ref = self._provider_for_ref(context, resource_ref, capability="download")
+        entry = await provider.stat(context, origin_id=ref.origin_id)
+        revision = self._provider_revision(entry)
+        if (entry.origin_id != ref.origin_id or entry.kind != "file" or revision is None
+            or entry.size is None or type(entry.size) is not int or not 0 < entry.size <= limit
+            or (expected_revision is not None and dict(expected_revision) != dict(revision))):
+            raise FilesFacadeError("media recipe is unavailable or changed", code="resource_changed")
+        source = await provider.content(context, origin_id=ref.origin_id)
+        if source.origin_id != ref.origin_id or source.size != entry.size:
+            raise FilesFacadeError("media recipe changed", code="resource_changed")
+        if isinstance(source.data, bytes) and source.path is None and source.stream is None:
+            data = source.data
+        elif source.stream is not None and source.data is None and source.path is None:
+            chunks = []
+            total = 0
+            async for chunk in source.stream(0, entry.size + 1):
+                if not isinstance(chunk, bytes):
+                    raise FilesFacadeError("invalid media recipe stream", code="provider_unavailable")
+                total += len(chunk)
+                if total > entry.size:
+                    raise FilesFacadeError("media recipe changed", code="resource_changed")
+                chunks.append(chunk)
+            data = b"".join(chunks)
+        else:
+            raise FilesFacadeError("bounded media recipe read unavailable", code="unsupported_provider_kind")
+        current = await provider.stat(context, origin_id=ref.origin_id)
+        if (len(data) != entry.size or current.origin_id != ref.origin_id
+            or self._provider_revision(current) != revision or not self._generation_current(context)):
+            raise FilesFacadeError("media recipe or access changed", code="resource_changed")
+        return {"recipe_ref": resource_ref, "recipe_name": str(entry.name)[:240], "recipe_revision": dict(revision),
+                "recipe_sha256": hashlib.sha256(data).hexdigest()}, data
 
     async def content(
         self,
@@ -3170,16 +4649,33 @@ class FilesFacade:
         *,
         resource_ref: str,
         capability: str = "download",
+        expected_revision: Mapping[str, Any] | None = None,
     ) -> ProviderContent:
         if capability not in {"preview", "download"}:
             raise FilesFacadeError("unsupported content purpose")
         provider, ref = self._provider_for_ref(context, resource_ref, capability=capability)
+        if capability == "preview":
+            entry = await provider.stat(context, origin_id=ref.origin_id)
+            if self._is_iwi_preview(entry):
+                return await self._iwi_preview(context, resource_ref=resource_ref, expected_revision=expected_revision)
         try:
             content = await provider.content(context, origin_id=ref.origin_id)
         except AttributeError as exc:
             raise FilesFacadeError("resource content is unavailable", code="provider_unavailable") from exc
         if content.origin_id != ref.origin_id:
             raise FilesFacadeError("provider returned mismatched content", code="provider_unavailable")
+        # WebM range playback needs the opened stream and revision observation
+        # to describe the same Host object, not merely the same path.
+        if expected_revision is not None and str(content.filename or '').lower().endswith('.webm'):
+            if ref.provider != 'host' or not callable(getattr(provider,'stat_inspection',None)):
+                raise FilesFacadeError('Revision-bound video stream is unavailable', code='resource_unavailable')
+            first = await provider.stat_inspection(context, origin_id=ref.origin_id)
+            current = await provider.stat(context, origin_id=ref.origin_id)
+            after = await provider.stat_inspection(context, origin_id=ref.origin_id)
+            if (content.origin_id != first.origin_id or content.size != first.size or content.etag != (first.revision or {}).get('value')
+                or first.revision != after.revision or first.size != after.size or self._provider_revision(current) != dict(expected_revision)
+                or not self._generation_current(context)):
+                raise FilesFacadeError('Revision-bound video stream changed', code='resource_changed')
         sources = sum(value is not None for value in (content.data, content.path, content.stream))
         if sources != 1:
             raise FilesFacadeError("provider returned an invalid content source", code="provider_unavailable")
@@ -3204,15 +4700,20 @@ class FilesFacade:
         height: int,
         scale: float,
         icon: bool = False,
+        expected_revision: Mapping[str, Any] | None = None,
     ) -> bytes:
         provider, ref = self._provider_for_ref(context, resource_ref, capability="preview")
+        thumbnail_stat = getattr(provider, "stat_for_thumbnail", provider.stat)
+        entry = await thumbnail_stat(context, origin_id=ref.origin_id)
+        if entry.origin_id != ref.origin_id or "preview" not in entry.capabilities:
+            raise FilesFacadeError("Preview source is unavailable", code="resource_unavailable")
+        if not icon and self._is_iwi_preview(entry):
+            return (await self._iwi_preview(context, resource_ref=resource_ref, expected_revision=expected_revision,
+                                            thumbnail=(width, height, scale))).data or b""
         render = getattr(provider, "thumbnail", None)
-        if not callable(render):
-            raise FilesFacadeError("native content thumbnail is unavailable", code="provider_unavailable")
-        if icon:
-            current = await provider.stat(context, origin_id=ref.origin_id)
-            if current.kind != "file" or not current.native_icon_available:
-                raise FilesFacadeError("native file icon is unavailable", code="provider_unavailable")
+        available = bool(entry.native_icon_available) if icon else entry.native_thumbnail_available is not False
+        if entry.kind != "file" or not callable(render) or not available:
+            raise FilesFacadeError("Native preview is unavailable", code="resource_unavailable")
         png = await render(
             context,
             origin_id=ref.origin_id,

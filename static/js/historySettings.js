@@ -42,12 +42,12 @@
     return response.json();
   }
 
-  async function save(policy, revision) {
+  async function save(policy, revision, accountId) {
     const response = await fetch(endpoint, {
       method: "PUT",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expected_revision: revision, policy }),
+      body: JSON.stringify({ expected_revision: revision, expected_account_id: accountId, policy }),
     });
     if (!response.ok) throw await responseError(response, `History settings rejected (${response.status})`);
     const body = await response.json().catch(() => ({}));
@@ -104,6 +104,72 @@
       status.textContent = message || "";
       status.dataset.state = error ? "error" : "ok";
     };
+    const recorded = container.querySelector("[data-memery-recorded]");
+    const versions = container.querySelector("[data-memery-versions]");
+    if (recorded && versions) {
+      versions.replaceChildren();
+      let offset = 0;
+      const show = async () => {
+        recorded.disabled = true;
+        try {
+          const response = await fetch(`/api/history/memery/recorded?offset=${offset}`, { signal: abort.signal });
+          if (!response.ok) throw Error();
+          const page = await response.json();
+          if (!isCurrent()) return;
+          for (const item of page.items) {
+            const row = document.createElement("p");
+            const labels = { memery_records: "Record", memery_evidence: "Evidence", memery_artifacts: "Artifact" };
+            row.append(`${labels[item.category] || "Memery"} · ${item.resource_id} · revision ${item.revision} · ${new Date(item.recorded_at_millis).toLocaleString()} `);
+            const url = new URL(item.detail_url, location.origin);
+            const allowedPath = item.category === "memery_artifacts" ? "/api/memory/assets/" : "/api/history/memery/";
+            if (url.origin === location.origin && url.pathname.startsWith(allowedPath)) {
+              if (item.category === "memery_artifacts") {
+                const link = document.createElement("a");
+                link.href = url.href;
+                link.download = "";
+                link.textContent = "Download";
+                row.append(link);
+              } else {
+                const view = document.createElement("button");
+                view.type = "button";
+                view.textContent = "Read revision";
+                view.onclick = async () => {
+                  view.disabled = true;
+                  try {
+                    const response = await fetch(url, { signal: abort.signal });
+                    if (!response.ok) throw Error();
+                    const detail = await response.json();
+                    const revision = detail.history?.find(entry => entry.revision === item.revision);
+                    if (isCurrent()) view.replaceWith(document.createTextNode(
+                      revision?.history_reference === "retained" ? revision.text : "This recorded revision is unavailable."
+                    ));
+                  } catch {
+                    if (isCurrent()) view.replaceWith(document.createTextNode("Revision unavailable"));
+                  }
+                };
+                row.append(view);
+              }
+            }
+            versions.append(row);
+          }
+          if (!offset && !page.items.length) versions.textContent = "No recorded Memery changes.";
+          const next = page.next_offset;
+          if (Number.isSafeInteger(next) && next > offset) {
+            offset = next;
+            recorded.textContent = "More recorded Memery changes";
+            recorded.disabled = false;
+          }
+        } catch {
+          if (isCurrent()) {
+            setStatus("Could not load recorded Memery changes.", true);
+            recorded.disabled = false;
+          }
+        }
+      };
+      recorded.textContent = "Recorded Memery changes";
+      recorded.disabled = false;
+      recorded.onclick = show;
+    }
     const ensureRetryButton = () => {
       let button = container.querySelector("[data-history-retry]");
       if (!button) {
@@ -122,6 +188,56 @@
       const policy = state.policy || {};
       const globalPolicy = policy.global || {};
       const measured = state.usage || {};
+      const fieldset = container.querySelector("[data-capture-settings]");
+      const capture = policy.capture;
+      const target = container.querySelector("[data-capture-target]");
+      const service = container.querySelector("[data-service-history]");
+      if (target && service) {
+        target.parentElement.hidden = Boolean(globalPolicy.inherited);
+        if (globalPolicy.inherited) target.value = "account";
+        service.parentElement.hidden = Boolean(globalPolicy.inherited);
+        service.checked = globalPolicy.enabled !== false;
+      }
+      if (fieldset && capture) {
+        fieldset.disabled = false;
+        const inherit = fieldset.querySelector("[data-capture-inherit]");
+        const controls = Array.from(fieldset.querySelectorAll("[data-capture]"));
+        const populate = (values) => {
+          for (const input of controls) {
+            const key = input.dataset.capture;
+            if (input.type === "checkbox") input.checked = values[key] === true;
+            else input.value = values[key] ?? "";
+          }
+        };
+        const frequency = fieldset.querySelector('[data-capture="frequency"]');
+        const intervalRow = fieldset.querySelector("[data-interval-row]");
+        const updateInterval = () => { intervalRow.hidden = frequency.value !== "interval"; };
+        const selectScope = () => {
+          const installation = target?.value === "installation";
+          populate(installation ? policy.capture_defaults : capture);
+          inherit.parentElement.hidden = installation;
+          inherit.checked = !installation && policy.capture_inherited;
+          updateInterval();
+          fieldset.querySelector("[data-capture-scope]").textContent = installation
+            ? "These defaults apply to accounts that inherit their capture settings."
+            : (policy.capture_inherited ? "Using installation defaults. " : "Using your account settings. ") +
+              (globalPolicy.enabled === false ? "The installation has disabled capture." : "Changes apply to this account.");
+        };
+        if (target) target.onchange = selectScope;
+        selectScope();
+        inherit.onchange = () => {
+          if (inherit.checked) populate(policy.capture_defaults);
+          updateInterval();
+        };
+        fieldset.onchange = event => {
+          if (event.target.dataset.capture) inherit.checked = false;
+          updateInterval();
+        };
+        updateInterval();
+
+      }
+      const last = container.querySelector("[data-history-last-capture]");
+      if (last) last.textContent = state.status?.last_capture || state.status?.reason || "No recent capture reported.";
       if (usage) usage.textContent = `${formatBytes(measured.physical_allocated_bytes)} allocated of ${formatBytes(globalPolicy.total_bytes)} target; ${formatBytes(measured.logical_retained_bytes)} logical retained (${measured.measurement_quality || "unavailable"} measurement)`;
       if (total) {
         total.value = globalPolicy.total_bytes || "";
@@ -268,11 +384,33 @@
         if (!Number.isFinite(value) || value <= 0) { setStatus("Directory limit must be greater than zero.", true); return; }
         scopes.push({ kind: "directory", root_id: newDirectory.querySelector("[data-history-directory]").value, limit_bytes: value, enabled: true });
       }
-      const patch = { scopes };
+      const patch = {};
+      if (JSON.stringify(scopes) !== JSON.stringify(policy.scopes || [])) patch.scopes = scopes;
+      const fieldset = container.querySelector("[data-capture-settings]");
+      if (fieldset && !fieldset.disabled) {
+        patch.capture = null;
+        if (!fieldset.querySelector("[data-capture-inherit]").checked) {
+          patch.capture = {};
+          for (const input of fieldset.querySelectorAll("[data-capture]")) {
+            const key = input.dataset.capture;
+            const optional = key === "max_age_days" && input.value === "";
+            if (input.type === "number" && !optional && (!input.value || !input.reportValidity())) {
+              setStatus("Enter a valid retention or frequency value.", true);
+              return;
+            }
+            patch.capture[key] = input.type === "checkbox" ? input.checked :
+              input.type === "number" ? (optional ? null : Number(input.value)) : input.value;
+          }
+        }
+      }
+      if (container.querySelector("[data-capture-target]")?.value === "installation" && patch.capture) {
+        patch.capture_defaults = patch.capture;
+        delete patch.capture;
+      }
       if (!total?.disabled) {
         const value = Number(total.value);
         if (!Number.isFinite(value) || value <= 0) { setStatus("Global limit must be greater than zero.", true); return; }
-        patch.global = { total_bytes: value };
+        patch.global = { total_bytes: value, enabled: container.querySelector("[data-service-history]")?.checked ?? state.policy.global.enabled };
       }
       if (!state || state.status?.available === false) {
         setStatus("History service is unavailable. Retry before saving settings.", true);
@@ -283,7 +421,7 @@
       if (saveButton) saveButton.disabled = true;
       setStatus("Saving…", false);
       try {
-        const loaded = await save(patch, state.policy.revision);
+        const loaded = await save(patch, state.policy.revision, state.account_id);
         if (!isCurrent()) return;
         state = loaded;
         sync();

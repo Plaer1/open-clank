@@ -11,9 +11,9 @@ A successful archive can still omit important state outside that tree.
 | Material | Covered by this helper? | Operator action |
 | --- | --- | --- |
 | App SQLite/auth/session/settings, `.app_key`, vault/provider credentials, managed uploads and resources | Only when physically inside repository `data/` | Preserve DBs and matching encryption keys together; inventory actual paths |
-| Native `OPEN_CLANK_DATA_DIR` / legacy `ODYSSEUS_DATA_DIR`; frozen `~/.open-clank/data` | Only if it is that same repository `data/` tree | Back up the actual root independently; helper has no data-root flag |
+| Native `OPEN_CLANK_DATA_DIR`; frozen `~/.open-clank/data` | Only if it is that same repository `data/` tree | Back up the actual root independently; helper has no data-root flag |
 | `DATABASE_URL` store | Only a file inside the snapshot tree | Preserve independent/historical DBs separately; current validated startup requires installation SQLite `app.db` |
-| Frankenmemory `FM_DB_PATH` | Yes when inside the tree | Back up independent overrides separately |
+| Memery `OPEN_CLANK_MEMERY_DB_PATH` | Yes when inside the tree | Back up independent overrides separately |
 | History `OPENCLANK_HISTORY_ROOT` / History settings override | Only when inside the tree | Preserve the complete actual History root and its policy/state |
 | Hosted Copal Editor/Wiki Files-backed vault | Yes when its root is inside repository `data/`; source default is `DATA_DIR/copal-vaults` | Preserve the complete vault, including document files, `.copal` identity/revision/history/trash metadata and associated media; stop writers for a coherent copy |
 | TreeHouse `TREEHOUSE_REPOSITORY_PATH` or `DATA_DIR/treehouse.sqlite3` | Only when physically inside the snapshot tree | Preserve the whole repository DB: private definitions/grants, global personal progress, saved drafts, attempts, reset generations and historical receipts; retain the matching shipped curriculum revision and retirement archives. A catalogue update is not a database backup or a transfer of Files grants |
@@ -189,7 +189,7 @@ is rollback for repository `data/`, not for other roots or external services.
 
 Chroma is retired as a live memory/vector authority. Preserve historical Chroma
 payloads separately for explicit reviewed migration; they are not an optional
-current backend. Frankenmemory defaults to a SQLite store under the resolved
+current backend. Memery defaults to a SQLite store under the resolved
 data root. `NativeMemoryProvider` selection remains compatibility code in source
 and does not re-enable Chroma. See [memory architecture](memory-architecture.md)
 and explicit conversions (private evidence, kept locally).

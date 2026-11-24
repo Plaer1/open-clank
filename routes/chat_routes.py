@@ -33,16 +33,21 @@ from routes.research_routes import _resolve_research_endpoint
 from routes.prefs_routes import _load_for_user as _load_prefs_for_user
 from routes.chat_helpers import (
     build_chat_context,
+    media_input_counts,
     save_assistant_response,
     run_post_response_tasks,
     _enforce_chat_privileges,
+    _is_casual_low_signal,
+    _session_is_research_spinoff,
 )
 from src.action_intents import classify_tool_intent as _classify_tool_intent
 from src.image_model_ids import looks_like_image_generation_model
 from src.tool_policy import (
+    BROWSER_TOOL_NAMES,
     WEB_TOOL_NAMES,
     build_effective_tool_policy,
-    is_web_search_explicitly_denied,
+    normalize_turn_policy_snapshot,
+    resolve_turn_policy,
     web_search_enabled_for_turn,
 )
 from src.openclank.chat_routing import (
@@ -95,7 +100,7 @@ def _server_approved_plan(session_id: str, owner: str) -> str:
     return "\n".join(lines)[:8192]
 
 
-def _resolved_session_target(sess):
+def _resolved_session_target(sess, *, lifecycle):
     try:
         route = resolve_chat_route(
             owner=getattr(sess, "owner", None),
@@ -120,7 +125,7 @@ def _resolved_session_target(sess):
             provider_id=route.connection_id,
             headers={},
             capabilities=capabilities,
-            lifecycle="ephemeral",
+            lifecycle=lifecycle,
         )
     except ChatRouteUnavailable as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -169,16 +174,6 @@ def _transcript_revision(session_id: str) -> int:
         return int(row.transcript_revision or 0) if row else 0
     finally:
         db.close()
-
-
-def _request_owner_is_admin(request: Request, owner: str | None) -> bool:
-    check = getattr(getattr(request.app.state, "auth_manager", None), "is_admin", None)
-    if not owner or not callable(check):
-        return False
-    try:
-        return bool(check(owner))
-    except Exception:
-        return False
 
 
 def _immutable_account_id(request: Request, owner: str | None) -> str | None:
@@ -242,6 +237,7 @@ def _turn_envelope(
     active_copal_help_context: dict | None = None,
     provider_grant_id: str | None = None,
     root_operation_id: str | None = None,
+    _factory_account_id: str | None = None,
 ) -> dict:
     document = None
     if active_document is not None:
@@ -290,6 +286,12 @@ def _turn_envelope(
             "copal_help": dict(active_copal_help_context) if active_copal_help_context else None,
         },
     }
+    if _factory_account_id and preset is not None and not incognito and not no_memory and not compare_mode:
+        from src.default_persona import bind_factory_envelope
+        proof = bind_factory_envelope(getattr(preset, '_factory_session', None), owner=owner, account_id=_factory_account_id,
+            chat_id=session_id, root_operation_id=root_operation_id, system_prompt=envelope['system_prompt'])
+        if proof is not None:
+            envelope['_private_factory_persona'] = proof
     if provider_grant_id:
         envelope["provider_grant_id"] = provider_grant_id
     if root_operation_id:
@@ -747,12 +749,12 @@ def _resolve_request_workspace(request, raw_value, *, owner: str | None = None) 
     requested = (raw_value or "").strip()
     if not requested:
         return "", ""
-    from src.tool_security import owner_is_admin_or_single_user
     owner = str(owner or get_current_user(request) or "")
-    if not owner_is_admin_or_single_user(owner):
+    account = _immutable_account_id(request, owner)
+    registry = FilesystemRootRegistry()
+    if not account or not registry.full_filesystem_choices(owner, account)["agent"]:
         candidate = os.path.abspath(os.path.expanduser(requested))
         try:
-            registry = FilesystemRootRegistry()
             assignments = registry.visibility_for_subject(owner)
             visible = [
                 item for item in assignments
@@ -1064,6 +1066,93 @@ def _reconcile_selected_route_from_request(
     return True
 
 
+def _owned_incognito_ghost(manager, sess, owner: str) -> bool:
+    if not (getattr(sess, "incognito", False) and getattr(sess, "owner", None) == owner
+            and getattr(manager, "sessions", {}).get(getattr(sess, "id", None)) is sess):
+        return False
+    db = SessionLocal()
+    try:
+        return db.query(DBSession.id).filter(DBSession.id == sess.id).first() is None
+    finally:
+        db.close()
+
+
+def _resolve_turn_model_request_options(sess, owner: str, raw_selection: Any, *, incognito: bool = False):
+    """Validate one turn's Thinking choice against its current authorized route."""
+    route_id = str(getattr(sess, "provider_model_route_id", None) or "").strip()
+    if not route_id:
+        if raw_selection not in (None, ""):
+            raise HTTPException(409, "Model options are unavailable for this chat route")
+        return None
+    try:
+        route = resolve_chat_route(
+            owner=owner,
+            endpoint_id=getattr(sess, "endpoint_id", None),
+            model_id=getattr(sess, "model", None),
+            model_route_id=route_id,
+        )
+        from src.openclank.chat_routing import request_option_route_id
+        from src.openclank.provider_request_options import (
+            ProviderRequestOptionError,
+            persist_session_request_options,
+            project_request_options,
+            restore_session_request_options,
+            validate_request_option_selection,
+        )
+
+        option_route_id = request_option_route_id(route)
+        descriptors = project_request_options(
+            route.capabilities,
+            catalog_revision=route.catalog_revision,
+            source="engine-catalog",
+        )
+        selection = None
+        if raw_selection not in (None, ""):
+            if isinstance(raw_selection, str):
+                try:
+                    raw_selection = json.loads(raw_selection)
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise HTTPException(400, "Invalid model option selection") from exc
+            if not isinstance(raw_selection, dict):
+                raise HTTPException(400, "Invalid model option selection")
+            options = validate_request_option_selection(
+                route_id=option_route_id,
+                catalog_revision=route.catalog_revision,
+                descriptors=descriptors,
+                selection=raw_selection,
+            )
+            if not incognito:
+                persist_session_request_options(
+                    sess.id, owner, route_id=route.model_route_id, option_route_id=option_route_id,
+                    catalog_revision=route.catalog_revision, descriptors=descriptors, selection=raw_selection,
+                )
+        else:
+            options = {} if incognito else restore_session_request_options(
+                sess.id,
+                owner,
+                route_id=route.model_route_id,
+                option_route_id=option_route_id,
+                catalog_revision=route.catalog_revision,
+                descriptors=descriptors,
+            )
+        selection = {
+            "route_id": option_route_id,
+            "catalog_revision": route.catalog_revision,
+            "options": options,
+            "provider_model_route_id": route.model_route_id,
+            "provider_model_id": route.provider_model_id,
+        }
+        return selection
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from src.openclank.provider_request_options import ProviderRequestOptionError
+        if isinstance(exc, (ChatRouteUnavailable, ProviderRequestOptionError)):
+            raise HTTPException(409, str(exc)) from exc
+        logger.warning("Could not resolve turn model options: %s", type(exc).__name__)
+        raise HTTPException(409, "Model options are unavailable for the current route") from exc
+
+
 def _set_user_time_from_request(request: Request) -> None:
     """Copy browser timezone headers into the per-request context.
 
@@ -1097,11 +1186,180 @@ def setup_chat_routes(
 ) -> APIRouter:
     router = APIRouter(tags=["chat"])
 
+    def _model_option_view(session_id: str, request: Request):
+        _verify_session_owner(request, session_id)
+        sess = session_manager.get_session(session_id)
+        owner = effective_user(request) or ""
+        route_id = str(getattr(sess, "provider_model_route_id", None) or "").strip()
+        if not route_id:
+            raise HTTPException(409, "This chat has no authorized model route yet")
+        try:
+            route = resolve_chat_route(
+                owner=owner,
+                endpoint_id=getattr(sess, "endpoint_id", None),
+                model_id=getattr(sess, "model", None),
+                model_route_id=route_id,
+            )
+            from src.openclank.chat_routing import request_option_route_id
+            from src.openclank.provider_request_options import (
+                ProviderRequestOptionError,
+                project_request_options,
+                restore_session_request_options,
+                validate_request_option_selection,
+            )
+            public_route_id = request_option_route_id(route)
+            descriptors = project_request_options(
+                route.capabilities,
+                catalog_revision=route.catalog_revision,
+                source="engine-catalog",
+            )
+            if not descriptors:
+                return {"route_id": public_route_id, "catalog_revision": route.catalog_revision,
+                        "descriptors": [], "selection": None}
+            if getattr(sess, "incognito", False):
+                manager = getattr(request.app.state, "session_manager", None)
+                if not _owned_incognito_ghost(manager, sess, owner):
+                    raise HTTPException(404, "Session not found")
+                return {"route_id": public_route_id, "catalog_revision": route.catalog_revision,
+                        "descriptors": descriptors, "selection": None}
+            options = restore_session_request_options(
+                session_id, owner, route_id=route.model_route_id,
+                option_route_id=public_route_id, catalog_revision=route.catalog_revision,
+                descriptors=descriptors,
+            )
+            db = SessionLocal()
+            try:
+                db_row = db.query(DBSession).filter(
+                    DBSession.id == session_id, DBSession.owner == owner
+                ).first()
+                stored_state = dict(getattr(db_row, "mimo_state", None) or {}) if db_row else {}
+            finally:
+                db.close()
+            stored = stored_state.get("model_request_options")
+            selection = None if stored is None else {
+                "route_id": public_route_id,
+                "catalog_revision": route.catalog_revision,
+                "options": options,
+            }
+            return {"route_id": public_route_id, "catalog_revision": route.catalog_revision,
+                    "descriptors": descriptors, "selection": selection}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from src.openclank.provider_request_options import ProviderRequestOptionError
+            if isinstance(exc, (ChatRouteUnavailable, ProviderRequestOptionError)):
+                raise HTTPException(409, str(exc)) from exc
+            logger.warning("Model option projection unavailable: %s", type(exc).__name__)
+            raise HTTPException(409, "Model options are unavailable for this chat route") from exc
+
+    @router.get("/api/session/{session_id}/model-options")
+    async def get_chat_model_options(session_id: str, request: Request):
+        return _model_option_view(session_id, request)
+
+    @router.patch("/api/session/{session_id}/model-options")
+    async def set_chat_model_options(session_id: str, request: Request):
+        view = _model_option_view(session_id, request)
+        if not view["descriptors"]:
+            raise HTTPException(409, "Thinking options are unavailable for this model")
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "Invalid model option selection") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("selection"), dict):
+            raise HTTPException(400, "A route-bound model option selection is required")
+        sess = session_manager.get_session(session_id)
+        owner = effective_user(request) or ""
+        if getattr(sess, "incognito", False):
+            validated = _resolve_turn_model_request_options(sess, owner, payload["selection"], incognito=True)
+            return {**view, "selection": {key: validated[key] for key in ("route_id", "catalog_revision", "options")}}
+        route = resolve_chat_route(
+            owner=owner,
+            endpoint_id=getattr(sess, "endpoint_id", None),
+            model_id=getattr(sess, "model", None),
+            model_route_id=str(getattr(sess, "provider_model_route_id", None) or ""),
+        )
+        from src.openclank.chat_routing import request_option_route_id
+        from src.openclank.provider_request_options import persist_session_request_options
+        try:
+            persist_session_request_options(
+                session_id, owner, route_id=route.model_route_id,
+                option_route_id=request_option_route_id(route),
+                catalog_revision=route.catalog_revision,
+                descriptors=view["descriptors"], selection=payload["selection"],
+            )
+        except Exception as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return _model_option_view(session_id, request)
+
     # ------------------------------------------------------------------ #
     # POST /api/chat_stream
     # ------------------------------------------------------------------ #
     @router.post("/api/chat_stream")
     async def chat_stream(request: Request) -> StreamingResponse:
+        # This handler is entered inside the middleware's account admission.
+        # Freeze before the first await; a later lookup must not adopt a new
+        # account that happens to reuse the same username.
+        _tui_guard = getattr(request.state, 'tui_turn_guard', None)
+        if _tui_guard is not None:
+            from src.openclank.tui_turns import TuiTurnGuard
+            if type(_tui_guard) is not TuiTurnGuard:
+                raise HTTPException(403, 'TUI turn unavailable')
+        _connector_guard = getattr(request.state, 'connector_turn_guard', None)
+        if _connector_guard is not None and _tui_guard is not None:
+            raise HTTPException(403, 'Conflicting turn authorities')
+        if _connector_guard is not None:
+            from src.openclank.connector_turns import ConnectorTurnGuard
+            if type(_connector_guard) is not ConnectorTurnGuard:
+                raise HTTPException(403, 'Connector turn unavailable')
+        _channel_guard = None
+        if getattr(request.state, 'api_token', False) and getattr(request.state, 'api_token_client_kind', None) == 'channel':
+            from src.openclank.channels.turn_guard import ChannelTurnGuard
+            _channel_owner = effective_user(request)
+            _auth = getattr(request.app.state, 'auth_manager', None)
+            _account = _auth.account_id(_channel_owner) if _auth and _channel_owner else None
+            try:
+                _current = request.app.state.capture_original_credential(request, _channel_owner, _account)
+                _channel_guard = ChannelTurnGuard(_channel_owner, _account, _current)
+                _channel_guard.assert_current()
+            except Exception as exc:
+                raise HTTPException(403, 'Channel credential unavailable') from exc
+        _input_owner = (_connector_guard.owner if _connector_guard is not None else
+                        _tui_guard.owner if _tui_guard is not None else getattr(request.state, 'current_user', None))
+        _input_account = None
+        from src.openclank.account_request_barrier import _current_admission
+        _input_admission = _current_admission.get()
+        _input_barrier = getattr(request.app.state, 'account_request_barrier', None)
+        try:
+            auth = getattr(request.app.state, 'auth_manager', None)
+            if getattr(request.state, 'authenticated', False) and auth is not None and isinstance(_input_owner, str):
+                candidate = auth.account_id(_input_owner)
+                if candidate and auth.username_for_account_id(candidate) == _input_owner:
+                    _input_account = candidate
+        except Exception:
+            pass
+        # Retain the actual ingress credential only as a private in-process check.
+        _original_credential_current = None
+        _original_credential_factory = getattr(request.app.state, 'capture_original_credential', None)
+        try:
+            capture = _original_credential_factory
+            if _input_account and callable(capture):
+                candidate = capture(request, _input_owner, _input_account)
+                if callable(candidate) and candidate():
+                    _original_credential_current = candidate
+        except Exception:
+            pass
+        if _tui_guard is not None and (_input_owner != _tui_guard.owner or _input_account != _tui_guard.account
+                or _original_credential_current is None or _tui_guard.current() is not True):
+            raise HTTPException(403, 'Original TUI admission unavailable')
+        # Capture the original human account admission before any await.  A
+        # missing private profile keeps the ordinary chat path unchanged.
+        _provider_policy_admission = None
+        _provider_policy_store = getattr(request.app.state, 'provider_store', None)
+        if (_connector_guard is None and _provider_policy_store is not None and getattr(request.state, 'authenticated', False)
+                and not getattr(request.state, 'api_token', False)
+                and not getattr(request.state, 'internal_tool_authenticated', False)):
+            from src.openclank.provider_human_policy import capture_human_provider_policy
+            _provider_policy_admission = capture_human_provider_policy(request, _provider_policy_store)
         body = None
         try:
             if request.headers.get("content-type", "").startswith("application/json"):
@@ -1131,14 +1389,39 @@ def setup_chat_routes(
         allow_web_search = form_data.get("allow_web_search") or (body or {}).get("allow_web_search")
         use_rag = form_data.get("use_rag")
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
+        raw_model_options = form_data.get("model_options")
+        if raw_model_options in (None, "") and isinstance(body, dict):
+            raw_model_options = body.get("model_options")
+        buddy_help = form_data.get("buddy_help")
+        buddy_system_prompt = ""
+        if buddy_help is not None:
+            from src.openclank.official_docs import buddy_help_prompt
+            if not _input_account or getattr(request.state, "api_token", False) or _connector_guard or _tui_guard:
+                raise HTTPException(403, "Buddy help requires an active browser account.")
+            try:
+                buddy_system_prompt = buddy_help_prompt(buddy_help)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            message = f"Buddy help · {buddy_help}"
+            use_web = use_research = attachments = search_context = preset_id = None
+            allow_bash = allow_web_search = use_rag = "false"
         active_copal_context = _parse_active_copal_context(
             form_data.get("active_copal_context") or (body or {}).get("active_copal_context")
         )
         active_copal_help_context = _parse_active_copal_help_context(
             form_data.get("active_help_context") or (body or {}).get("active_help_context")
         )
+        raw_appearance = form_data.get("deliverable_appearance")
+        if raw_appearance in (None, "") and isinstance(body, dict):
+            raw_appearance = body.get("deliverable_appearance")
+        deliverable_appearance = None
+        if raw_appearance not in (None, ""):
+            from src.openclank.deliverable_appearance import validate_deliverable_appearance
+            try: deliverable_appearance = validate_deliverable_appearance(raw_appearance)
+            except (TypeError, ValueError): raise HTTPException(400, "Invalid deliverable appearance")
         compare_mode = str(form_data.get("compare_mode") or (body or {}).get("compare_mode") or "").lower() == "true"
         incognito = str(form_data.get("incognito") or (body or {}).get("incognito") or "").lower() == "true"
+        observe_code_activity = str(form_data.get('observe_code_activity') or (body or {}).get('observe_code_activity') or '').lower() == 'true'
         plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
         requested_mode = str(form_data.get("mode") or (body or {}).get("mode") or "").lower()
         # "plan" as a mode value is the modern spelling of the legacy
@@ -1150,7 +1433,14 @@ def setup_chat_routes(
         # chat = read-only tool surface with no plan machinery; plan = the
         # same surface plus the plan directive and plan files; agent = full
         # tool scope.
-        chat_mode = "plan" if plan_mode else (requested_mode or "agent")
+        if buddy_help and (incognito or compare_mode or not session):
+            raise HTTPException(400, "Buddy help requires a regular chat.")
+        plan_mode = plan_mode and not buddy_help
+        chat_mode = "chat" if buddy_help else ("plan" if plan_mode else (requested_mode or "agent"))
+        if buddy_help:
+            active_copal_context = active_copal_help_context = None
+            observe_code_activity = False
+            deliverable_appearance = None
         # Capture the stable Workspace assertion now, but resolve it only after
         # session ownership and the stored session binding are known below.
         workspace_id_supplied = (
@@ -1175,14 +1465,14 @@ def setup_chat_routes(
         _tool_intent = None
         _explicit_web_intent = False
         _explicit_browser_intent = False
-        active_doc_id = form_data.get("active_doc_id", "").strip()
+        active_doc_id = "" if buddy_help else form_data.get("active_doc_id", "").strip()
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
 
         # Active email reader — when the user has an email open in the UI, the
         # frontend passes its uid/folder/account so "reply", "summarize this",
         # etc. resolve to the real email instead of the agent inventing a
         # fake markdown draft.
-        active_email_uid = form_data.get("active_email_uid", "").strip()
+        active_email_uid = "" if buddy_help else form_data.get("active_email_uid", "").strip()
         active_email_folder = form_data.get("active_email_folder", "INBOX").strip() or "INBOX"
         active_email_account = form_data.get("active_email_account", "").strip()
         active_email_ctx: Optional[Dict[str, str]] = None
@@ -1259,6 +1549,12 @@ def setup_chat_routes(
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            if _tui_guard is not None and (session != _tui_guard.session_id or owner != _tui_guard.owner
+                    or incognito or compare_mode or _tui_guard.current() is not True):
+                raise HTTPException(403, 'Original TUI turn changed')
+            is_ghost = bool(getattr(sess, "incognito", False))
+            if is_ghost != incognito or (is_ghost and not _owned_incognito_ghost(session_manager, sess, owner)):
+                raise HTTPException(409, "Session privacy mode changed; select the matching chat")
             if not plan_mode:
                 approved_plan = _server_approved_plan(session, owner or "")
             stored_workspace_id = str(
@@ -1291,7 +1587,8 @@ def setup_chat_routes(
             )
             _reconcile_selected_route_from_request(request, sess, session, form_data, owner=owner)
             if _clear_orphaned_session_endpoint(sess, owner=owner):
-                raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
+                raise HTTPException(400, {"code": "selection_invalid",
+                    "message": "Selected model endpoint was removed. Pick another model in Settings."})
             # Issue #587: picker shows a model from the endpoint cache but
             # s.model never made it onto the DB row (first-send race after
             # endpoint setup, or a previous endpoint delete/recreate). Pull
@@ -1302,7 +1599,8 @@ def setup_chat_routes(
             if not getattr(sess, "model", "").strip():
                 raise HTTPException(
                     400,
-                    "No model selected for this chat. Open the model picker and choose one before sending.",
+                    {"code": "selection_invalid",
+                     "message": "No model selected for this chat. Open the model picker and choose one before sending."},
                 )
         except SessionNotFoundError as e:
             raise HTTPException(404, str(e))
@@ -1315,24 +1613,44 @@ def setup_chat_routes(
         #      configured allowlist (empty list = "no restriction").
         #   2. max_messages_per_day — count user-role ChatMessage rows owned
         #      by this user in the last UTC day; 429 if at/over the cap.
-        # Admins always have full privileges via get_privileges (returns
-        # ADMIN_PRIVILEGES wholesale) so this is a no-op for them.
+        auth = getattr(request.app.state, "auth_manager", None)
+        if not owner or auth is None or auth.get_privileges(owner).get("can_use_agent") is not True:
+            raise HTTPException(403, {"code": "agent_disabled", "message": "Agent access is disabled for this account."})
         _enforce_chat_privileges(request, sess)
 
         # Provider credentials are leased only inside the managed engine. A
         # canonical chat session never reconstructs or persists auth headers.
         sess.headers = {}
-        model_target = _resolved_session_target(sess)
+        try:
+            model_target = _resolved_session_target(sess, lifecycle="ephemeral" if incognito else "persistent")
+        except HTTPException as exc:
+            raise HTTPException(exc.status_code, {"code": "selection_invalid", "message": exc.detail}) from exc
+        model_request_options = _resolve_turn_model_request_options(
+            sess, owner or "", raw_model_options, incognito=incognito
+        ) if model_target.transport == "acp" else None
         # One root identity spans the main chat operation and every model
         # child/tool operation it launches. It is persisted in the user
         # message metadata by build_chat_context; a session ID is never used
         # as an operation ID because sessions contain many independent roots.
-        root_operation_id = f"root_{uuid.uuid4().hex}"
+        root_operation_id = (_connector_guard.root_id if _connector_guard is not None else
+                             _tui_guard.root_id if _tui_guard is not None else f"root_{uuid.uuid4().hex}")
+        _style_turn = None
+        if not incognito and _input_account and _input_owner == owner:
+            # Capture the canonical row once for this root, under its original named account.
+            from src.default_persona import capture_style_turn
+            with SessionLocal() as _style_db:
+                _style_row = _style_db.query(DBSession).filter(DBSession.id == session, DBSession.owner == owner).first()
+                if _style_row is None:
+                    raise HTTPException(409, 'Chat style is unavailable')
+                _style_turn = capture_style_turn(owner=owner, account_id=_input_account, chat_id=session,
+                    root_operation_id=root_operation_id, mode=_style_row.response_style, revision=_style_row.response_style_revision)
 
         # Check for research_pending BEFORE mode persist overwrites it
         do_research = str(use_research).lower() == "true"
-        if not do_research:
+        if not do_research and not buddy_help:
             if get_session_mode(session) == 'research_pending':
+                if _connector_guard is not None:
+                    raise HTTPException(409, 'Connector turn cannot start a pending research workflow')
                 do_research = True
                 logger.info(f"Session {session} in research_pending — auto-triggering research")
 
@@ -1346,7 +1664,45 @@ def setup_chat_routes(
                 logger.warning("Failed to parse attachments JSON, ignoring attachments", exc_info=e)
 
         image_generation_session = _is_image_generation_session(sess, owner=effective_user(request))
-        no_memory = str(form_data.get("no_memory", "")).lower() == "true"
+        if buddy_help and image_generation_session:
+            raise HTTPException(400, "Buddy needs a chat model to explain this.")
+        no_memory = bool(buddy_help) or str(form_data.get("no_memory") or (body or {}).get("no_memory") or (body or {}).get("noMemory") or "").lower() == "true"
+        turn_policy_snapshot = normalize_turn_policy_snapshot({
+            "version": 1,
+            "mode": chat_mode,
+            "allowBash": None if allow_bash is None else str(allow_bash).lower() == "true",
+            "allowWebSearch": None if allow_web_search is None else str(allow_web_search).lower() == "true",
+            "useWeb": str(use_web).lower() == "true",
+            "useResearch": do_research,
+            "compareMode": compare_mode,
+            "incognito": incognito,
+            "noMemory": no_memory,
+        })
+        # Freeze the authenticated root identity and choices independently of
+        # optional capture. Missing identity leaves only seed bootstrap unavailable.
+        _seed_account = None
+        _seed_target = None
+        _seed_pool = None
+        _seed_owner = effective_user(request) or owner
+        if not incognito and not no_memory and not compare_mode:
+            try:
+                from src.openclank.chat_source_bridge import canonical_source_provider
+                from src.openclank.memory_job_admission import SingleHostProfile, TargetAuthority
+                _seed_auth = getattr(request.app.state, "auth_manager", None)
+                _seed_supervisor = getattr(request.app.state, "mimo_supervisor", None)
+                _seed_profile = getattr(request.app.state, "s05_profile", None)
+                _seed_provider = canonical_source_provider(request.app.state)
+                _seed_account = _seed_auth.account_id(_seed_owner) if _seed_auth else None
+                if (not _seed_account or _seed_auth.username_for_account_id(_seed_account) != _seed_owner
+                        or _seed_supervisor is None or type(_seed_profile) is not SingleHostProfile
+                        or _seed_provider is None or _seed_profile.provider is not _seed_provider
+                        or not _seed_provider._host_bounded_write_available()):
+                    raise ValueError("seed root authority unavailable")
+                _seed_pool = _seed_supervisor.owner_lifecycle_pool()
+                _seed_target = await asyncio.wait_for(asyncio.to_thread(
+                    TargetAuthority(auth_manager=_seed_auth,supervisor=_seed_pool).resolve,_seed_account), timeout=0.05)
+            except Exception:
+                _seed_account = _seed_target = _seed_pool = None
         _turn_memory_prefs = _load_prefs_for_user(owner) or {}
         memory_read_allowed = _agent_memory_read_allowed(
             _turn_memory_prefs,
@@ -1356,8 +1712,10 @@ def setup_chat_routes(
         pre_context_tool_policy = build_effective_tool_policy(
             last_user_message=message,
         )
-        allow_tool_preprocessing = not incognito and not pre_context_tool_policy.block_all_tool_calls
+        allow_tool_preprocessing = not buddy_help and not incognito and not pre_context_tool_policy.block_all_tool_calls and _connector_guard is None and _channel_guard is None
 
+        if (_connector_guard is not None or _channel_guard is not None) and memory_manager.process_inline_memory_command(message)[0]:
+            raise HTTPException(409, 'Inline memory commands are unavailable for this external turn')
         memory_response = None
         if not pre_context_tool_policy.blocks("manage_memory"):
             is_memory_cmd, _ = memory_manager.process_inline_memory_command(message)
@@ -1378,6 +1736,134 @@ def setup_chat_routes(
 
             return StreamingResponse(inline_memory_stream(), media_type="text/event-stream")
 
+        # Optional origin evidence is captured before message persistence.
+        # Missing schema/policy leaves normal chat working with unknown origin.
+        origin_admission = None
+        if not incognito and _channel_guard is None:
+            try:
+                from src.openclank.chat_source_bridge import HostOriginAdmission, origin_available
+                from src.openclank.conversation_archive import get_conversation_archive
+                from src.openclank.memory_policy import STORE
+                with SessionLocal() as origin_db:
+                    if origin_available(origin_db):
+                        origin_owner = effective_user(request) or owner
+                        auth = getattr(request.app.state, "auth_manager", None)
+                        privileges = auth.get_privileges(origin_owner) if auth else {}
+                        memory_privilege = bool(privileges.get("can_manage_memory", True))
+                        snapshot = STORE.effective_snapshot(origin_owner, read_privilege=memory_privilege,
+                            write_privilege=memory_privilege, incognito=incognito, no_memory=no_memory, compare_mode=compare_mode)
+                        if snapshot.get("eligibility_state") != "available" or type(snapshot.get("capture_allowed")) is not bool or not isinstance(snapshot.get("fingerprint"), str) or not re.fullmatch(r"[0-9a-f]{64}", snapshot["fingerprint"]):
+                            raise ValueError("memory policy snapshot unavailable")
+                        account = get_conversation_archive().resolve_owner(origin_owner)
+                        origin_admission = HostOriginAdmission(account, session, root_operation_id,
+                            json.dumps(turn_policy_snapshot, sort_keys=True, separators=(",", ":")),
+                            snapshot["fingerprint"], snapshot["capture_allowed"])
+            except Exception:
+                logger.warning("host origin admission unavailable")
+        # Build disabled-tools set from frontend toggles + user privileges
+        disabled_tools = set()
+        # The shared resolver applies the frozen request toggles after all
+        # live authority denies have been assembled below.
+        _explicit_web_intent = _explicit_web_intent or bool(_tool_intent and _tool_intent.category == "web")
+        if _explicit_web_intent:
+            # A direct lookup/search request should not drift into personal
+            # tools or shell fallbacks. It can only use web_search/web_fetch
+            # when the request's explicit web setting enabled them.
+            disabled_tools.update({
+                "bash", "python",
+                "search_chats", "manage_skills", "manage_memory", "recall_memory",
+                "read_file", "write_file", "edit_file",
+                "create_document", "edit_document", "update_document",
+                "send_email", "reply_to_email",
+                "manage_notes", "manage_calendar", "manage_tasks",
+                "api_call",
+            })
+
+        # Active email reader open → strip the tools that let the agent drift
+        # away from the visible email or skip review. The only allowed compose
+        # path is ui_control open_email_reply, which opens the same draft editor
+        # as the Reply button with the generated body pre-filled. This prevents
+        # the model from falling back to direct SMTP when it botches a draft
+        # call, and prevents fake email-shaped documents.
+        if active_email_ctx and active_email_ctx.get("uid"):
+            disabled_tools.update({
+                "create_document",
+                "send_email",
+                "reply_to_email",
+                "mcp__email__send_email",
+                "mcp__email__reply_to_email",
+            })
+
+        # Every optional capability is explicitly granted by the active account policy.
+        _user = owner
+        auth = getattr(request.app.state, "auth_manager", None)
+        _privs = auth.get_privileges(_user) if auth and _user else {}
+        if _privs.get("can_use_agent") is not True:
+            raise HTTPException(403, {"code": "agent_disabled", "message": "Agent access is disabled for this account."})
+        if _privs.get("can_use_bash") is not True:
+            disabled_tools.update({"bash", "python"})
+        if _privs.get("can_use_browser") is not True:
+            disabled_tools.update({"browser", "builtin_browser"})
+        if _privs.get("can_use_documents") is not True:
+            disabled_tools.update({"create_document", "edit_document", "update_document", "suggest_document"})
+        if _privs.get("can_generate_images") is not True:
+            disabled_tools.add("generate_image")
+        if _privs.get("can_manage_memory") is not True:
+            disabled_tools.update({"manage_memory", "recall_memory", "manage_skills"})
+
+        # Native OpenCode file/search tools never inherit authority from
+        # the child process CWD. The current owner/workspace projection exposes
+        # only Rust-backed private file lifetools. Process execution retains its
+        # OS boundary and interactive approval policy.
+        from src.tool_security import unavailable_strict_agent_tools
+        disabled_tools.update(unavailable_strict_agent_tools(_user, workspace, workspace_id=selected_workspace_id, chat_id=session))
+
+        # Global admin disabled tools
+        from src.settings import get_setting
+        _global_disabled = get_setting("disabled_tools", [])
+        if _global_disabled and isinstance(_global_disabled, list):
+            disabled_tools.update(_global_disabled)
+        if "browser" in disabled_tools:
+            disabled_tools.update(BROWSER_TOOL_NAMES)
+
+        _nonmode_policy = build_effective_tool_policy(disabled_tools=disabled_tools, last_user_message=message)
+        _theme_status_only = bool(not buddy_help and (chat_mode in ('plan','chat') or compare_mode) and not incognito
+            and not _nonmode_policy.block_all_tool_calls and not _nonmode_policy.blocks('theme_emoji_assets'))
+        _theme_native_resolution = resolve_turn_policy(turn_policy_snapshot, disabled_tools=disabled_tools,
+            last_user_message=message, memory_read_allowed=memory_read_allowed, theme_status_only=True) if _theme_status_only else None
+        policy_resolution = resolve_turn_policy(
+            turn_policy_snapshot,
+            disabled_tools=disabled_tools,
+            last_user_message=message,
+            memory_read_allowed=memory_read_allowed,
+        )
+        allowed_tools = [] if buddy_help else (set(policy_resolution.allowed_tools) if policy_resolution.allowed_tools is not None else None)
+        tool_policy = policy_resolution.policy
+        disabled_tools = tool_policy.all_disabled_names()
+        research_blocked_by_policy = bool(
+            tool_policy.blocks("trigger_research")
+            or tool_policy.blocks("manage_research")
+        )
+        effective_do_research = bool(
+            do_research and _privs.get("can_use_research") is True
+            and policy_resolution.research_requested
+            and not research_blocked_by_policy
+        )
+
+        intent_tools = set(WEB_TOOL_NAMES) if _search_enabled else set()
+        if _explicit_browser_intent:
+            intent_tools.update(BROWSER_TOOL_NAMES)
+        intent_tools = {
+            name for name in intent_tools
+            if not tool_policy.blocks(name) and (allowed_tools is None or name in allowed_tools)
+        }
+
+        personal_context_allowed = bool(
+            memory_read_allowed and allow_tool_preprocessing and not compare_mode
+            and not _is_casual_low_signal(message) and not _session_is_research_spinoff(sess)
+            and not tool_policy.blocks("recall_memory")
+            and (allowed_tools is None or "recall_memory" in allowed_tools)
+        )
         # Build shared context (stream path uses enhanced_message for context preface)
         ctx = await build_chat_context(
             sess, request, chat_handler, chat_processor,
@@ -1401,15 +1887,23 @@ def setup_chat_routes(
             allow_tool_preprocessing=allow_tool_preprocessing,
             structured_resources=model_target.transport == "acp",
             root_operation_id=root_operation_id,
+            origin_admission=origin_admission,
+            model_request_options=model_request_options,
             provider_grant_id=getattr(sess, "provider_grant_id", None),
             # Protocol binding, not UI mode: ACP persistent sessions compact
             # in MiMo; host pre-dispatch compaction is skipped for them.
             has_persistent_engine=model_target.transport == "acp",
             hex_workspace=workspace,
             hex_workspace_id=selected_workspace_id,
+            deliverable_appearance=deliverable_appearance,
+            connector_guard=_connector_guard,
+            channel_guard=_channel_guard,
+            tui_guard=_tui_guard,
+            buddy_help=buddy_help,
         )
 
-        _research_flags = {"do": do_research}  # Mutable container for generator scope
+        if ctx.user != _user or auth.get_privileges(_user).get("can_use_agent") is not True:
+            raise HTTPException(403, "Agent access changed while preparing this turn.")
 
         # Query active document — prefer explicit ID from frontend, fall back to session lookup
         active_doc = None
@@ -1456,7 +1950,7 @@ def setup_chat_routes(
                         logger.info(f"[doc-inject] found by ID: title={active_doc.title!r}, lang={active_doc.language!r}, is_active={active_doc.is_active}, content_len={len(active_doc.current_content or '')}")
                 else:
                     logger.warning(f"[doc-inject] NOT FOUND by ID {active_doc_id}")
-            if not active_doc:
+            if not buddy_help and not active_doc:
                 _email_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True,
@@ -1465,7 +1959,7 @@ def setup_chat_routes(
                 active_doc = _owner_session_filter(_email_doc_q, ctx.user).order_by(DBDocument.updated_at.desc()).first()
                 if active_doc:
                     logger.info(f"[doc-inject] found email draft by session fallback: title={active_doc.title!r}")
-            if not active_doc:
+            if not buddy_help and not active_doc:
                 _session_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True
@@ -1479,7 +1973,7 @@ def setup_chat_routes(
             # neither lookup above can associate them with this conversation,
             # so the agent never sees what it just wrote. Guarded so we never
             # leak a doc that belongs to a DIFFERENT session.
-            if not active_doc:
+            if not buddy_help and not active_doc:
                 try:
                     from src.agent_tools.document_tools import get_active_document
                     _mem_id = get_active_document()
@@ -1491,7 +1985,7 @@ def setup_chat_routes(
                             logger.info(f"[doc-inject] found by in-memory active id: title={active_doc.title!r} (session_id={cand.session_id!r})")
                 except Exception as _e:
                     logger.debug(f"[doc-inject] in-memory fallback failed: {_e}")
-            if not active_doc:
+            if not buddy_help and not active_doc:
                 logger.info(f"[doc-inject] no active doc for session {session}")
             if active_doc:
                 _doc_db.expunge(active_doc)
@@ -1500,144 +1994,31 @@ def setup_chat_routes(
         finally:
             _doc_db.close()
 
-        # Build disabled-tools set from frontend toggles + user privileges
-        disabled_tools = set()
-        allowed_tools = None
-        # Only disable bash when the caller *explicitly* set it to a falsy
-        # value. When unset (None), defer to per-user privilege checks below.
-        # Web search is per-turn opt-in: either the chat pre-search setting
-        # (`use_web=true`) or agent web toggle (`allow_web_search=true`) must
-        # explicitly enable it.
-        if allow_bash is not None and str(allow_bash).lower() != "true":
-            disabled_tools.add("bash")
-        _explicit_web_intent = _explicit_web_intent or bool(_tool_intent and _tool_intent.category == "web")
-        if is_web_search_explicitly_denied(allow_web_search) or not _search_enabled:
-            disabled_tools.update(WEB_TOOL_NAMES)
-        if _explicit_web_intent:
-            # A direct lookup/search request should not drift into personal
-            # tools or shell fallbacks. It can only use web_search/web_fetch
-            # when the request's explicit web setting enabled them.
-            disabled_tools.update({
-                "bash", "python",
-                "search_chats", "manage_skills", "manage_memory", "recall_memory",
-                "read_file", "write_file", "edit_file",
-                "create_document", "edit_document", "update_document",
-                "send_email", "reply_to_email",
-                "manage_notes", "manage_calendar", "manage_tasks",
-                "api_call",
-            })
-            if _search_enabled:
-                disabled_tools.difference_update(WEB_TOOL_NAMES)
-            else:
-                disabled_tools.update(WEB_TOOL_NAMES)
-        elif _search_enabled:
-            disabled_tools.difference_update(WEB_TOOL_NAMES)
-
-        # Nobody/incognito mode: deny tools that would expose the user's
-        # persistent memory, past chats, or other identity-linked data.
-        if incognito:
-            disabled_tools.update({
-                "manage_memory",      # persistent memory store
-                "recall_memory",      # persistent memory reads
-                "search_chats",       # past chat history
-                "manage_skills",      # skill presets tied to user
-                "create_session",
-                "list_sessions",
-                "manage_session",
-                "send_to_session",
-                "chat_with_model",
-            })
-        if not memory_read_allowed:
-            disabled_tools.update({"manage_memory", "recall_memory"})
-
-        # Active email reader open → strip the tools that let the agent drift
-        # away from the visible email or skip review. The only allowed compose
-        # path is ui_control open_email_reply, which opens the same draft editor
-        # as the Reply button with the generated body pre-filled. This prevents
-        # the model from falling back to direct SMTP when it botches a draft
-        # call, and prevents fake email-shaped documents.
-        if active_email_ctx and active_email_ctx.get("uid"):
-            disabled_tools.update({
-                "create_document",
-                "send_email",
-                "reply_to_email",
-                "mcp__email__send_email",
-                "mcp__email__reply_to_email",
-            })
-
-        # Enforce per-user privileges
-        _privs = {}
-        _user = ctx.user
-        if _user and hasattr(request.app.state, 'auth_manager') and request.app.state.auth_manager:
-            _privs = request.app.state.auth_manager.get_privileges(_user)
-        if _privs:
-            if not _privs.get("can_use_bash", True):
-                disabled_tools.update({"bash", "python", "read_file", "write_file"})
-            if not _privs.get("can_use_browser", True):
-                disabled_tools.update(_BROWSER_MCP_TOOLS)
-            if not _privs.get("can_use_documents", True):
-                disabled_tools.update({"create_document", "edit_document", "update_document", "suggest_document"})
-            if not _privs.get("can_generate_images", True):
-                disabled_tools.add("generate_image")
-            if not _privs.get("can_manage_memory", True):
-                disabled_tools.update({"manage_memory", "recall_memory", "manage_skills"})
-            if not _privs.get("can_use_research", True):
-                _research_flags["do"] = False
-            if not _privs.get("can_use_agent", True):
-                raise HTTPException(403, "Agent access is disabled for this account.")
-
-        # Native OpenCode file/search tools never inherit authority from
-        # the child process CWD. The current owner/workspace projection exposes
-        # only Rust-backed private file lifetools. Process execution retains its
-        # OS boundary and interactive approval policy.
-        from src.tool_security import unavailable_strict_agent_tools
-        disabled_tools.update(unavailable_strict_agent_tools(_user, workspace, workspace_id=selected_workspace_id, chat_id=session))
-
-        # Global admin disabled tools
-        from src.settings import get_setting
-        _global_disabled = get_setting("disabled_tools", [])
-        if _global_disabled and isinstance(_global_disabled, list):
-            disabled_tools.update(_global_disabled)
-
-        # Compare is a server-owned positive read-only capability gate. Client
-        # flags can narrow it through disabled_tools, never widen it.
-        if compare_mode:
-            from src.tool_security import (
-                COMPARE_READONLY_TOOLS,
-                compare_mode_disabled_tools,
-            )
-
-            allowed_tools = set(COMPARE_READONLY_TOOLS)
-            disabled_tools.update(compare_mode_disabled_tools())
-
-        # Plan and chat modes are read-only: block every tool not on the
-        # read-only allowlist; the ACP envelope enforces the same authority
-        # server-side. Plan mode additionally gets the plan directive; chat
-        # mode is the same surface with no plan machinery.
-        if plan_mode:
-            from src.tool_security import plan_mode_disabled_tools
-            disabled_tools.update(plan_mode_disabled_tools())
-        elif chat_mode == "chat":
-            from src.tool_security import chat_mode_disabled_tools
-            disabled_tools.update(chat_mode_disabled_tools())
-
-        tool_policy = build_effective_tool_policy(
-            disabled_tools=disabled_tools,
-            last_user_message=message,
-        )
-        disabled_tools = tool_policy.all_disabled_names()
-        research_blocked_by_policy = bool(
-            tool_policy.blocks("trigger_research")
-            or tool_policy.blocks("manage_research")
-        )
-        effective_do_research = bool(
-            do_research and _research_flags["do"] and not research_blocked_by_policy
-        )
-
         _effective_mode = 'research' if effective_do_research else chat_mode
         set_session_mode(session, _effective_mode)
 
+        _bind_run_admission = bool(not compare_mode and (_connector_guard is not None or _tui_guard is not None or (
+            _provider_policy_admission is not None and _original_credential_current is not None
+            and model_target.transport == 'acp' and not incognito and not do_research
+            and not getattr(sess, 'provider_grant_id', None) and model_request_options is not None
+            and _input_owner == owner)))
+
         async def stream_with_save() -> AsyncGenerator[str, None]:
+            nonlocal _input_admission, _provider_policy_admission
+            if _bind_run_admission:
+                # Detached work owns its account admission, but keeps the exact
+                # original ingress credential and never substitutes a later request.
+                _input_admission = _current_admission.get()
+                if (_input_barrier is None or _input_admission is None
+                        or not await _input_barrier.is_live(_input_owner, _input_admission)
+                        or getattr(request.app.state, 'capture_original_credential', None) is not _original_credential_factory
+                        or not callable(_original_credential_current) or _original_credential_current() is not True
+                        or (_connector_guard is not None and _connector_guard.current() is not True)):
+                    raise ValueError('Original run admission unavailable')
+                if (_provider_policy_store is not None and not getattr(request.state, 'api_token', False)
+                        and not getattr(request.state, 'internal_tool_authenticated', False)):
+                    from src.openclank.provider_human_policy import capture_human_provider_policy
+                    _provider_policy_admission = capture_human_provider_policy(request, _provider_policy_store)
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
             research_sources = None
@@ -1808,6 +2189,11 @@ def setup_chat_routes(
                     return
 
             messages = list(_ensure_current_request_is_latest_user(ctx.messages, message))
+            buddy_help_link = None
+            if buddy_help:
+                from src.openclank.official_docs import run_buddy_help_tool
+                evidence, buddy_help_link = await asyncio.to_thread(run_buddy_help_tool, buddy_help)
+                _insert_acp_resource_context(messages, "Open Clank Instruction Manual", evidence)
             if active_copal_context:
                 # Copal context is a bounded, server-revalidated pointer.  It
                 # must reach classic Agent as well as ACP; the latter has an
@@ -1849,13 +2235,41 @@ def setup_chat_routes(
 
             # Auto-compact notification
             if ctx.was_compacted:
-                yield f"data: {json.dumps({'type': 'compacted', 'context_length': ctx.context_length})}\n\n"
+                yield f"data: {json.dumps({'type': 'compacted', 'context_length': ctx.context_length, 'observed_at': int(time.time()*1000)})}\n\n"
             if ctx.context_trimmed and not ctx.was_compacted:
                 yield f"data: {json.dumps({'type': 'context_trimmed', 'data': {'context_length': ctx.context_length, 'messages_before': ctx.context_messages_before_trim, 'messages_after': ctx.context_messages_after_trim, 'tokens_before': ctx.context_tokens_before_trim, 'tokens_after': ctx.context_tokens_after_trim}})}\n\n"
 
             full_response = ""
             thinking_response = ""
             last_metrics = None
+            _execution_proofs = []
+            _forward_pair_proofs = []
+            _terminal_error_proofs = []
+            _capture_privacy = []
+            def _capture_execution_proof(proof):
+                if isinstance(proof, dict) and proof.get('kind') == 'managed_terminal_error':
+                    if proof.get('rootOperationID') == root_operation_id:
+                        _terminal_error_proofs.append(proof.get('witness'))
+                    return
+                if isinstance(proof, dict) and proof.get('kind') == 'managed_forward_pair':
+                    if proof.get('rootOperationID') == root_operation_id:
+                        _forward_pair_proofs.append(proof.get('witness'))
+                    return
+                if isinstance(proof, dict) and proof.get("kind") == "managed_capture_privacy":
+                    if proof.get("rootOperationID") == root_operation_id and type(proof.get("captureVeto")) is bool:
+                        _capture_privacy.append(proof["captureVeto"])
+                    return
+                if (origin_admission is None or not origin_admission.capture_eligible or incognito or no_memory or compare_mode
+                    or not isinstance(proof, dict) or proof.get("rootOperationID") != root_operation_id):
+                    return
+                from src.openclank.conversation_archive import get_conversation_archive
+                if get_conversation_archive().resolve_owner(_user) != origin_admission.owner:
+                    return
+                encoded = json.dumps(proof, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                if not _execution_proofs:
+                    _execution_proofs.append(encoded)
+                elif _execution_proofs[0] != encoded:
+                    _execution_proofs.append(None)  # conflicting proof must not be selected
 
             # Send model name early so the frontend can show it during streaming
             _model_suffix = "Research" if effective_do_research else None
@@ -2005,13 +2419,7 @@ def setup_chat_routes(
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
 
-                    _forced_tools = None
-                    if _search_enabled:
-                        _forced_tools = set(WEB_TOOL_NAMES)
-                        if _explicit_browser_intent:
-                            _forced_tools |= set(_BROWSER_MCP_TOOLS)
-                    elif _explicit_browser_intent:
-                        _forced_tools = set(_BROWSER_MCP_TOOLS)
+                    _forced_tools = intent_tools or None
                     copal_intent = bool(active_copal_context or active_copal_help_context) or bool(re.search(
                         r"\b(?:copal|timeline|wiki|galaxy|graph|mind|bases?|treehouse|meatbag tasks)\b",
                         str(message or ""),
@@ -2020,28 +2428,30 @@ def setup_chat_routes(
                     if copal_intent:
                         _forced_tools = set(_forced_tools or ()) | {"read_copal"}
 
-                    # Plan approval boundary: the user executed an approved
-                    # plan — materialize it into the workspace per the
-                    # canonical .clanker/futures/<metaplan>.md convention.
-                    # Legacy bindings are translated once at this boundary.
-                    # Best-effort; a write
-                    # failure never blocks the turn.
+                    # Approval remains the plan owner's revision/digest decision.
+                    # The admitted workflow owns artifact creation separately.
                     if approved_plan and workspace:
-                        try:
-                            from src.plan_files import materialize_plan, metaplan_relpath
-                            from src.plan_approval import bind_artifact_path
+                        _plan_state = _server_approved_plan_state(session, _user)
+                        if not isinstance(_plan_state.get("artifact_association"), dict):
+                            yield f'data: {json.dumps({"delta": "Plan artifact is unavailable until the workspace Files and History workflow is set up.\n"})}\n\n'
 
-                            plan_state = _server_approved_plan_state(session, _user)
-                            relpath = str(plan_state.get("artifact_relpath") or "").strip()
-                            relpath = bind_artifact_path(
-                                session,
-                                _user,
-                                relpath or metaplan_relpath(approved_plan),
-                            )
-                            materialize_plan(workspace, approved_plan, relative_path=relpath)
-                        except Exception as _plan_exc:
-                            logger.warning("approved_plan materialize failed: %s", _plan_exc)
-
+                    # Seal the authenticated input before using its narrow
+                    # status-only native projection. A missing key/proof leaves
+                    # the ordinary, more restrictive tool policy in place.
+                    auth = getattr(request.app.state, 'auth_manager', None)
+                    _input_owner_proof = None
+                    try:
+                        if (model_target.transport == 'acp' and auth is not None and _input_account
+                                and _input_owner == _user and auth.account_id(_user) == _input_account
+                                and auth.username_for_account_id(_input_account) == _user):
+                            from src.openclank.transcript_projection import make_current_input_owner_receipt
+                            _input_owner_proof = make_current_input_owner_receipt(
+                                _user, _input_account, session, root_operation_id, theme_status_only=_theme_status_only,
+                                code_activity_workspace_id=(selected_workspace_id if observe_code_activity and not incognito
+                                    and selected_workspace_id else None))
+                    except Exception:
+                        logger.warning('current input owner proof unavailable')
+                    _theme_input_current = bool(_theme_status_only and _input_owner_proof)
                     _agent_envelope = _turn_envelope(
                         session_id=session,
                         owner=_user,
@@ -2050,8 +2460,8 @@ def setup_chat_routes(
                         model=sess.model,
                         mode=chat_mode,
                         incognito=incognito,
-                        disabled_tools=disabled_tools,
-                        allowed_tools=allowed_tools,
+                        disabled_tools=_theme_native_resolution.policy.all_disabled_names() if _theme_input_current else disabled_tools,
+                        allowed_tools=_theme_native_resolution.allowed_tools if _theme_input_current else allowed_tools,
                         forced_tools=_forced_tools,
                         max_tool_calls=_tool_budget,
                         max_rounds=_max_rounds,
@@ -2061,12 +2471,45 @@ def setup_chat_routes(
                         no_memory=no_memory,
                         memory_read_allowed=memory_read_allowed,
                         compare_mode=compare_mode,
-                        is_admin=_request_owner_is_admin(request, _user),
+                        is_admin=False,
                         active_copal_context=active_copal_context,
                         active_copal_help_context=active_copal_help_context,
                         provider_grant_id=getattr(sess, "provider_grant_id", None),
                         root_operation_id=root_operation_id,
+                        _factory_account_id=_input_account if _input_owner_proof is not None else None,
                     )
+                    _agent_envelope["_private_personal_context_allowed"] = personal_context_allowed
+                    if buddy_help:
+                        _agent_envelope["system_prompt"] = buddy_system_prompt
+                        _agent_envelope["interaction_policy"] = "guide_only"
+                    if _input_owner_proof is not None and _original_credential_current is not None:
+                        _agent_envelope['_private_original_credential_current'] = _original_credential_current
+                        if not incognito and not no_memory and not compare_mode and getattr(ctx.preprocessed, "media_witnesses", None):
+                            from src.openclank.media_source_evidence import _seal_turn
+                            _media_source = _seal_turn(ctx.preprocessed.media_witnesses, owner=_user, account=_input_account,
+                                chat=session, root=root_operation_id, current=_original_credential_current)
+                            if _media_source is not None:
+                                _agent_envelope['_private_media_source'] = _media_source
+                                from src.openclank.media_source_evidence import _candidates_for_reads, _seal_image_views
+                                _views = _candidates_for_reads(ctx.preprocessed.media_witnesses)
+                                _media_views = _seal_image_views(_media_source, _views, owner=_user, account=_input_account,
+                                    chat=session, root=root_operation_id, current=_original_credential_current)
+                                if _media_views is not None: _agent_envelope['_private_media_views'] = _media_views
+                    if _style_turn is not None:
+                        _agent_envelope['_private_style_turn'] = _style_turn
+                    _agent_envelope["turn_policy_snapshot"] = dict(turn_policy_snapshot)
+                    # This proves the current input only, not prior chat history.
+                    if _input_owner_proof is not None:
+                        _agent_envelope['_host_current_input_owner'] = _input_owner_proof
+                    supervisor = getattr(request.app.state, "mimo_supervisor", None)
+                    install = getattr(supervisor, "set_managed_policy_installer", None)
+                    if callable(install):
+                        from routes.orchestration_routes import install_input_policy_resolver
+                        from types import SimpleNamespace
+                        policy_app = request.app
+                        install(_user, lambda bridge: install_input_policy_resolver(SimpleNamespace(app=policy_app), bridge, session_manager))
+                    if model_request_options is not None:
+                        _agent_envelope["model_request_options"] = model_request_options
                     _agent_envelope["general_hex_snapshot_ref"] = {
                         "boundary_id": root_operation_id,
                         "snapshot_hash": ctx.general_hex_snapshot.get("snapshot_hash"),
@@ -2078,6 +2521,28 @@ def setup_chat_routes(
                     # converts expected preflight failures into terminal typed
                     # SSE results. Keeping a second route-level rewrite here
                     # bypassed that contract and turned admissions into 500s.
+                    _provider_policy_selection = None
+                    _provider_policy_intent = None
+                    if (_provider_policy_admission is not None and model_target.transport == 'acp'
+                            and not incognito and not compare_mode and not do_research
+                            and not getattr(sess, 'provider_grant_id', None)
+                            and model_request_options is not None and _input_owner == _user):
+                        from src.openclank.provider_human_policy import run_human_provider_policy
+                        _policy_route = resolve_chat_route(owner=_user, endpoint_id=getattr(sess, 'endpoint_id', None),
+                            model_id=getattr(sess, 'model', None), model_route_id=getattr(sess, 'provider_model_route_id', None))
+                        if not _policy_route.shared:
+                            _provider_policy_selection = await run_human_provider_policy(_provider_policy_admission,
+                                lambda held: _provider_policy_store.capture_human_cross_model_selection(
+                                    held, session, _policy_route, model_request_options))
+                            _provider_policy_admission.assert_current()
+                            from src.openclank.provider_human_policy import _captured_provider_policy_intent
+                            _provider_policy_intent = _captured_provider_policy_intent(_provider_policy_admission, _provider_policy_selection)
+                    if _channel_guard is not None:
+                        _channel_guard.assert_current()
+                    if _connector_guard is not None:
+                        if _input_owner_proof is None or _original_credential_current is None:
+                            raise ValueError('Connector original credential proof unavailable')
+                        _agent_envelope['_private_connector_guard'] = _connector_guard
                     _chunk_source = stream_agent_target(
                         model_target,
                         messages,
@@ -2093,12 +2558,17 @@ def setup_chat_routes(
                         context_length=ctx.context_length,
                         active_document=active_doc,
                         active_email=active_email_ctx,
-                        disabled_tools=disabled_tools if disabled_tools else None,
-                        tool_policy=tool_policy,
+                        disabled_tools=(_theme_native_resolution.policy.all_disabled_names() if _theme_input_current else disabled_tools) or None,
+                        tool_policy=_theme_native_resolution.policy if _theme_input_current else tool_policy,
                         plan_mode=plan_mode,
                         approved_plan=approved_plan or None,
                         forced_tools=_forced_tools,
                         turn_envelope=_agent_envelope,
+                        execution_proof_callback=_capture_execution_proof,
+                        _foreground_account_context=(_input_account, auth, _input_barrier, _input_admission),
+                        _provider_policy_selection=_provider_policy_selection,
+                        _provider_policy_intent=_provider_policy_intent,
+                        _direct_account_only=_provider_policy_intent is not None,
                         uploaded_files=ctx.uploaded_files,
                     )
                     async for chunk in _chunk_source:
@@ -2149,6 +2619,10 @@ def setup_chat_routes(
                                             "exit_code": 0 if data.get("status") == "completed" else 1,
                                             "structured": raw,
                                         }
+                                        # This field is attached by the Host callback/event owner;
+                                        # imported rows are never trusted by the Files resolver.
+                                        if isinstance(data.get("resourceResult"), dict):
+                                            event["resourceResult"] = data["resourceResult"]
                                         for block in raw.get("content") or []:
                                             if isinstance(block, dict) and block.get("type") == "diff":
                                                 event["diff"] = {
@@ -2184,7 +2658,15 @@ def setup_chat_routes(
                                     last_metrics = data.get("data", {})
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = last_metrics.get("requested_model") or _requested_model
-                                    last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
+                                    if last_metrics.get("actual_model_state") == "unknown":
+                                        _actual_model = None
+                                        last_metrics["model"] = None
+                                        last_metrics["actual_model"] = None
+                                    elif last_metrics.get("actual_model_state") == "verified_alternative":
+                                        _actual_model = last_metrics.get("actual_model")
+                                        last_metrics["model"] = _actual_model
+                                    else:
+                                        last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
                                     if ctx.context_trimmed:
                                         last_metrics["context_trimmed"] = True
                                         last_metrics["context_messages_before_trim"] = ctx.context_messages_before_trim
@@ -2206,7 +2688,8 @@ def setup_chat_routes(
                                 _metrics_to_save = {
                                     "agent_status": "error",
                                     "error": _agent_error,
-                                    "model": _actual_model or _requested_model,
+                                    "model": None if (last_metrics or {}).get("actual_model_state") == "unknown" else (_actual_model or _requested_model),
+                                    "actual_model_state": (last_metrics or {}).get("actual_model_state"),
                                     "requested_model": _requested_model,
                                 }
                                 _response_to_save = f"Agent could not start: {_agent_error.get('error') or 'Unknown admission error.'}"
@@ -2219,12 +2702,28 @@ def setup_chat_routes(
                                     character_name=ctx.preset.character_name,
                                     incognito=incognito,
                                 )
+                                if (_saved_id and origin_admission is not None and origin_admission.capture_eligible
+                                        and _input_owner == _user and _input_account == origin_admission.owner
+                                        and not incognito and not no_memory and not compare_mode
+                                        and len(_capture_privacy) == 1 and not _capture_privacy[0]
+                                        and len(_terminal_error_proofs) == 1):
+                                    try:
+                                        from src.openclank.chat_source_bridge import associate_terminal_error
+                                        await associate_terminal_error(state=request.app.state, owner=_user, account=_input_account,
+                                            chat_id=session, root_id=root_operation_id, host_assistant_id=_saved_id,
+                                            admission=_input_admission, barrier=_input_barrier, origin=origin_admission,
+                                            credential_current=_original_credential_current, witness=_terminal_error_proofs[0])
+                                    except Exception:
+                                        logger.debug("terminal diagnostic association unavailable")
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
                                 _stream_set(session, status="error", error=_agent_error)
                             elif full_response or _agent_tool_events or _has_tool_events:
                                 _response_to_save = full_response or "Done."
                                 _metrics_to_save = dict(last_metrics or {})
+                                _metrics_to_save.update(media_input_counts(ctx.preprocessed.attachment_meta))
+                                if buddy_help_link:
+                                    _metrics_to_save["buddy_help_link"] = buddy_help_link
                                 if thinking_response.strip() and not _metrics_to_save.get("thinking"):
                                     _metrics_to_save["thinking"] = thinking_response.strip()
                                 _saved_id = save_assistant_response(
@@ -2236,7 +2735,113 @@ def setup_chat_routes(
                                     tool_events=_agent_tool_events or None,
                                     incognito=incognito,
                                 )
+                                _user_body_candidate = None
                                 if _saved_id:
+                                    if origin_admission is not None and len(_capture_privacy) == 1 and not _capture_privacy[0] and not _metrics_to_save.get("stopped") and not _metrics_to_save.get("error"):
+                                        try:
+                                            from src.openclank.chat_source_bridge import complete_user_origin, deliver
+                                            from src.openclank.conversation_archive import get_conversation_archive
+                                            with SessionLocal() as origin_db:
+                                                archive = get_conversation_archive()
+                                                execution_snapshot = json.loads(_execution_proofs[0]) if len(_execution_proofs) == 1 and _execution_proofs[0] else None
+                                                if complete_user_origin(origin_db, archive, owner=origin_admission.owner, chat_id=session, root_operation_id=root_operation_id, assistant_message_id=_saved_id,
+                                                    execution_snapshot=execution_snapshot, provider_owner=_user,
+                                                    forward_witness=_forward_pair_proofs[0] if len(_forward_pair_proofs) == 1 else None):
+                                                    deliver(origin_db, archive, owner=origin_admission.owner, chat_id=session, message_id=root_operation_id, revision=1)
+                                                    try:
+                                                        scheduler = getattr(request.app.state, 'task_scheduler', None)
+                                                        wake = getattr(scheduler, 'request_completed_turn_wake', None)
+                                                        if callable(wake):
+                                                            wake()
+                                                    except Exception:
+                                                        logger.warning('completed-turn wake unavailable')
+                                                    # Keep only an exact reference and a deferred authority factory.
+                                                    # Hydration happens after future S05 job admission, never here.
+                                                    from src.memery_external_sources import CurrentHostUserSource, SourceRef
+                                                    from src.openclank.memory_policy import STORE
+                                                    from sqlalchemy import text
+                                                    row = origin_db.execute(text("SELECT m.source_body_revision,m.source_body_hash,s.workspace_id FROM chat_messages m JOIN sessions s ON s.id=m.session_id WHERE m.id=:message AND m.session_id=:chat AND m.role='user' AND s.owner=:owner AND s.workspace_id IS :workspace"), {'message':root_operation_id, 'chat':session, 'owner':_user, 'workspace':None if selected_workspace_id == '' else selected_workspace_id}).first()
+                                                    if row is not None and row[0] == 1 and row[1]:
+                                                        ref = SourceRef(2 if row[2] is None else 1, "host_user_body", origin_admission.owner, session, "main", root_operation_id, "body", row[0], row[1], row[2], None)
+                                                        def reader_factory():
+                                                            return CurrentHostUserSource(owner=_user, auth_manager=getattr(request.app.state, "auth_manager", None), session_factory=SessionLocal, archive=archive, workspace_repository=getattr(request.app.state, "files_policy_repository", None), policy_store=STORE, guarded_preparation=getattr(getattr(getattr(request.app.state,'s05_profile',None),'provider',None),'_guarded_preparation',None))
+                                                        _user_body_candidate = (ref, reader_factory)
+
+                                        except Exception:
+                                            logger.warning("host origin completion unavailable")
+                                    if (origin_admission is not None and origin_admission.capture_eligible
+                                            and _input_owner == _user and _input_account == origin_admission.owner
+                                            and len(_capture_privacy) == 1 and not _capture_privacy[0]
+                                            and not _metrics_to_save.get("stopped") and not _metrics_to_save.get("error")):
+                                        try:
+                                            from src.openclank.chat_source_bridge import associate_original_host_component
+                                            await associate_original_host_component(state=request.app.state, owner=_user,
+                                                account=_input_account, chat_id=session, root_id=root_operation_id,
+                                                admission=_input_admission, barrier=_input_barrier, origin=origin_admission)
+                                        except Exception:
+                                            logger.debug("assistant component association unavailable")
+                                    # Best effort, after the real root answer. This is
+                                    # independent of source capture and never delays the stream.
+                                    if (_saved_id and _seed_account and not incognito and not no_memory and not compare_mode
+                                            and len(_capture_privacy) == 1 and not _capture_privacy[0]
+                                            and not _metrics_to_save.get("stopped") and not _metrics_to_save.get("error")):
+                                        async def _seed_questions_after_turn():
+                                            try:
+                                                from sqlalchemy import text as sql_text
+                                                from src.openclank.chat_source_bridge import canonical_source_provider
+                                                from src.openclank.memory_job_admission import SingleHostProfile, TargetAuthority
+                                                from src.openclank.memory_policy_projection import policy_coordinator
+                                                from src.openclank.session_map import OwnerSessionMap
+                                                state=request.app.state
+                                                supervisor=getattr(state,"mimo_supervisor",None)
+                                                profile=getattr(state,"s05_profile",None)
+                                                provider=canonical_source_provider(state)
+                                                coordinator=policy_coordinator()
+                                                barrier=getattr(state,"account_request_barrier",None)
+                                                if (supervisor is None or type(profile) is not SingleHostProfile or provider is not _seed_provider
+                                                        or profile.provider is not provider or barrier is None or coordinator is None
+                                                        or not provider._host_bounded_write_available()):
+                                                    return
+                                                pool=supervisor.owner_lifecycle_pool()
+                                                if pool is not _seed_pool or profile is not _seed_profile or supervisor is not _seed_supervisor:
+                                                    return
+                                                authority=TargetAuthority(auth_manager=_seed_auth,supervisor=pool)
+                                                target=_seed_target
+                                                if target is None or await asyncio.to_thread(authority.resolve,_seed_account)!=target:
+                                                    return
+                                                if target.memory_owner!=provider._scope(_seed_owner).owner or target.memory_workspace!=provider._workspace_id:
+                                                    return
+                                                mapping=OwnerSessionMap(pool._runtime_home(_seed_owner)/"session-map.json",_seed_owner)
+                                                deadline=asyncio.get_running_loop().time()+2.0
+                                                async with asyncio.timeout_at(deadline):
+                                                    async with barrier.admitted(_seed_owner):
+                                                        async with mapping.async_chat_admission_lock(session) as guard:
+                                                            def current():
+                                                                mapping.validate_chat_guard(session,guard)
+                                                                profile.assert_current()
+                                                                privileges=_seed_auth.get_privileges(_seed_owner)
+                                                                if (canonical_source_provider(state) is not provider or profile.provider is not provider
+                                                                        or getattr(state,"mimo_supervisor",None) is not supervisor
+                                                                        or type(privileges) is not dict or privileges.get("can_manage_memory") is not True
+                                                                        or _seed_auth.account_id(_seed_owner)!=_seed_account
+                                                                        or _seed_auth.username_for_account_id(_seed_account)!=_seed_owner
+                                                                        or authority.resolve(_seed_account)!=target):
+                                                                    return False
+                                                                with SessionLocal() as db:
+                                                                    row=db.execute(sql_text("SELECT owner, EXISTS(SELECT 1 FROM chat_messages m WHERE m.session_id=sessions.id AND m.id=:root AND m.role='user'), EXISTS(SELECT 1 FROM chat_messages m WHERE m.session_id=sessions.id AND m.id=:answer AND m.role='assistant') FROM sessions WHERE id=:chat"),{"chat":session,"root":root_operation_id,"answer":_saved_id}).first()
+                                                                return bool(row and row[0]==_seed_owner and row[1] and row[2])
+                                                            if current():
+                                                                seed_task=asyncio.create_task(provider._host_question_seed_bootstrap(owner=_seed_owner,account_id=_seed_account,request_key=root_operation_id,
+                                                                    coordinator=coordinator,current=current,incognito=False,no_memory=False,write_deadline=deadline))
+                                                                cancelled=False
+                                                                while not seed_task.done():
+                                                                    try: await asyncio.shield(seed_task)
+                                                                    except asyncio.CancelledError: cancelled=True
+                                                                seed_task.result()
+                                                                if cancelled: raise asyncio.CancelledError
+                                            except Exception:
+                                                logger.debug("question seed bootstrap unavailable",exc_info=True)
+                                        _seed_pool._schedule_background(_seed_questions_after_turn(), owner=_seed_owner)
                                     # Successful terminal answer only; the error and interrupted
                                     # save branches never enter this receipt producer.
                                     try:
@@ -2257,7 +2862,10 @@ def setup_chat_routes(
                                             }, workspace_id=selected_workspace_id)
                                     except Exception:
                                         logger.warning("Completed chat achievement receipt unavailable")
-                                    yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                                    saved_event = {"type": "message_saved", "id": _saved_id}
+                                    if buddy_help_link:
+                                        saved_event["buddy_help_link"] = buddy_help_link
+                                    yield f"data: {json.dumps(saved_event)}\n\n"
                                     _root_turn_id = str(_metrics_to_save.get("root_turn_id") or "")
                                     if _root_turn_id:
                                         from src.agent_actor_accounting import close_agent_turn
@@ -2275,11 +2883,12 @@ def setup_chat_routes(
                                     agent_tool_calls=_agent_tool_calls,
                                     skills_manager=skills_manager,
                                     owner=_user,
-                                    extract_skills=user_requested_agent,
+                                    extract_skills=(user_requested_agent and not no_memory and len(_capture_privacy) == 1 and not _capture_privacy[0]),
                                     allow_background_extraction=(not tool_policy.block_all_tool_calls),
                                     memory_provider=chat_processor.memory_provider,
-                                    no_memory=no_memory,
+                                    no_memory=(no_memory or len(_capture_privacy) != 1 or _capture_privacy[0]),
                                     root_operation_id=root_operation_id,
+                                    user_body_candidate=_user_body_candidate,
                                 )
                             if _agent_error is None:
                                 _stream_set(session, status="done")
@@ -2301,7 +2910,8 @@ def setup_chat_routes(
                                 full_response,
                                 {
                                     "stopped": True,
-                                    "model": _actual_model or _answered_by or _requested_model,
+                                    "model": None if (last_metrics or {}).get("actual_model_state") == "unknown" else (_actual_model or _answered_by or _requested_model),
+                                    "actual_model_state": (last_metrics or {}).get("actual_model_state"),
                                     "requested_model": _requested_model,
                                 },
                                 tool_events=_agent_tool_events or None,
@@ -2343,13 +2953,40 @@ def setup_chat_routes(
         # the run keeps going and saves the assistant message on completion
         # regardless. Reconnect via /api/chat/resume.
         if compare_mode:
-            return StreamingResponse(_safe_stream(), media_type="text/event-stream")
+            headers = {}
+            if model_request_options is not None:
+                headers["X-Model-Request-Options"] = json.dumps({
+                    "route_id": model_request_options["route_id"],
+                    "catalog_revision": model_request_options["catalog_revision"],
+                    "options": model_request_options["options"],
+                }, separators=(",", ":"))
+            return StreamingResponse(_safe_stream(), media_type="text/event-stream", headers=headers)
 
-        run = agent_runs.start(session, _safe_stream(), owner=_user)
+        stream = _safe_stream()
+        try:
+            if _tui_guard is not None and (_tui_guard.current() is not True or _user != _tui_guard.owner):
+                raise ValueError('Original TUI turn unavailable')
+            run_options = ({'run_id':_connector_guard.run_id, 'replace_existing':False, 'bind_admission':True}
+                if _connector_guard is not None else
+                {'run_id':_tui_guard.run_id, 'replace_existing':False, 'bind_admission':True, 'tui_origin':_tui_guard}
+                if _tui_guard is not None else {'bind_admission':True} if _bind_run_admission else {})
+            run = agent_runs.start(session, stream, owner=_user, **run_options)
+            if _tui_guard is not None:
+                _tui_guard.publish_started(run)
+        except BaseException:
+            await stream.aclose()
+            raise
+        headers = {"X-Agent-Run-ID": run.run_id}
+        if model_request_options is not None:
+            headers["X-Model-Request-Options"] = json.dumps({
+                "route_id": model_request_options["route_id"],
+                "catalog_revision": model_request_options["catalog_revision"],
+                "options": model_request_options["options"],
+            }, separators=(",", ":"))
         return StreamingResponse(
             agent_runs.subscribe(session, expected_run=run),
             media_type="text/event-stream",
-            headers={"X-Agent-Run-ID": run.run_id},
+            headers=headers,
         )
 
     # The TUI control plane invokes this exact canonical handler in-process.
@@ -2365,9 +3002,13 @@ def setup_chat_routes(
     @router.get("/api/chat/resume/{session_id}")
     async def chat_resume(request: Request, session_id: str) -> StreamingResponse:
         _verify_session_owner(request, session_id)
+        expected_run_id = request.headers.get("X-Agent-Run-ID")
         run = agent_runs.get_run(session_id)
         if run is None:
             raise HTTPException(404, "No retained run for this session")
+        if expected_run_id is not None and (run.run_id != expected_run_id or
+                run.owner != str(effective_user(request) or "").strip().lower()):
+            raise HTTPException(409, "Original run is no longer retained for this session")
         raw_cursor = request.headers.get("last-event-id") or request.query_params.get("after") or "0"
         try:
             cursor = max(0, int(raw_cursor))
@@ -2449,22 +3090,42 @@ def setup_chat_routes(
             else:
                 resolved = handler.resolve(request_id, option_id)
         if not resolved:
-            from src.agent_tools.filesystem_tools import resolve_file_approval
-
-            resolved = resolve_file_approval(
-                request_id,
-                option_id,
-                owner=owner,
-                session_id=session_id,
-            )
+            from src.agent_tools.filesystem_tools import current_file_approval, resolve_file_approval
+            # Managed pending requests carry an immutable account and exact
+            # live source; legacy browser requests retain their prior scope.
+            auth = getattr(request.app.state, 'auth_manager', None)
+            try:
+                account = auth.account_id(owner) if auth else None
+                pending = current_file_approval(request_id, owner=owner, session_id=session_id, account_id=account or '')
+                if pending is not None:
+                    from src.openclank.account_request_barrier import _current_admission
+                    barrier = getattr(request.app.state, 'account_request_barrier', None)
+                    admission = _current_admission.get()
+                    barrier.assert_live_admission(owner, admission)
+                    credential = request.app.state.capture_original_credential(request, owner, account)
+                    if not callable(credential) or credential() is not True or not await pending.authority.current():
+                        raise ValueError('approval authority unavailable')
+                    barrier.assert_live_admission(owner, admission)
+                    if credential() is not True: raise ValueError('credential changed')
+                    resolved = resolve_file_approval(request_id, option_id, owner=owner, session_id=session_id,
+                                                     account_id=account, expected_pending=pending)
+                else:
+                    resolved = resolve_file_approval(request_id, option_id, owner=owner, session_id=session_id)
+            except Exception:
+                resolved = False
         if not resolved:
             from src.shell_policy import resolve_shell_approval
-
+            try:
+                auth = getattr(request.app.state, 'auth_manager', None)
+                shell_account = auth.account_id(owner) if auth else ""
+            except Exception:
+                shell_account = ""
             resolved = resolve_shell_approval(
                 request_id,
                 option_id,
                 owner=owner,
                 session_id=session_id,
+                account_id=shell_account,
             )
         if not resolved:
             raise HTTPException(409, "permission request is stale, foreign, or already answered")
@@ -2474,8 +3135,6 @@ def setup_chat_routes(
     async def list_permission_grants(request: Request) -> Dict[str, Any]:
         owner = effective_user(request) or ""
         sup = getattr(request.app.state, "mimo_supervisor", None)
-        if sup and hasattr(sup, "for_owner"):
-            await sup.for_owner(owner)
         store = sup.grant_store_for(owner) if sup and hasattr(sup, "grant_store_for") else getattr(sup, "grant_store", None)
         if store is None:
             raise HTTPException(503, "permission grant store unavailable")
@@ -2708,7 +3367,36 @@ def setup_chat_routes(
         if not session_id or not original_text or not instruction:
             raise HTTPException(400, "session_id, original_text, and instruction are required")
 
-        _verify_session_owner(request, session_id)
+        rewrite_owner = _verify_session_owner(request, session_id)
+        from src.openclank.chat_source_bridge import canonical_source_provider
+        guarded_rewrite = canonical_source_provider(request.app.state) is not None
+        rewrite_message_id = body.get('message_id')
+        if guarded_rewrite and (not isinstance(rewrite_message_id,str) or not rewrite_message_id):
+            raise HTTPException(400, 'Message identity is required')
+        targeted_rewrite = isinstance(rewrite_message_id,str) and bool(rewrite_message_id)
+        initial_roots = ()
+        if targeted_rewrite:
+            from src.openclank.chat_source_bridge import origin_available
+            from src.openclank.conversation_archive import get_conversation_archive
+            from sqlalchemy import text
+            def rewrite_selection(db):
+                target = db.query(DBChatMessage).join(DBSession, DBSession.id == DBChatMessage.session_id).filter(
+                    DBChatMessage.id == rewrite_message_id, DBChatMessage.session_id == session_id,
+                    DBChatMessage.role == 'assistant', DBSession.owner == rewrite_owner).first()
+                if target is None or target.content != original_text:
+                    raise ValueError('Message changed; refresh and try again')
+                roots = ()
+                if origin_available(db):
+                    account = get_conversation_archive().resolve_owner(rewrite_owner)
+                    roots = tuple(sorted(item[0] for item in db.execute(text("SELECT message_id FROM host_source_delivery_intent WHERE owner=:owner AND chat_id=:chat AND part_id='body' AND revision=1 AND origin_assistant_id=:message"), {'owner':account,'chat':session_id,'message':rewrite_message_id})))
+                return roots
+            def read_selection():
+                with SessionLocal() as db:
+                    return rewrite_selection(db)
+            try:
+                initial_roots = await asyncio.to_thread(read_selection)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
 
         try:
             sess = session_manager.get_session(session_id)
@@ -2726,7 +3414,7 @@ def setup_chat_routes(
                 f"Instruction: {instruction}"
             )},
         ]
-        rewrite_target = _resolved_session_target(sess)
+        rewrite_target = _resolved_session_target(sess, lifecycle="ephemeral")
         rewrite_root_operation_id = f"root_{uuid.uuid4().hex}"
         rewrite_envelope = {
             "root_operation_id": rewrite_root_operation_id,
@@ -2776,7 +3464,63 @@ def setup_chat_routes(
                         # rewrite is just the rewritten text, not its scratchpad.
                         from src.research_utils import strip_thinking
                         full_response = strip_thinking(full_response).strip() or full_response
-                        if full_response:
+                        if full_response and targeted_rewrite:
+                            from src.openclank.chat_source_bridge import guarded_source_mutation, withdraw_deleted_messages
+                            from core.session_manager import _await_guarded_writer
+                            def check_selection():
+                                if read_selection() != initial_roots:
+                                    raise ValueError('Message source changed; refresh and try again')
+                            def commit_rewrite():
+                                if source_guard is not None:
+                                    source_guard.validate(provider=source_guard.provider,owner=rewrite_owner,chat_id=session_id)
+                                    if canonical_source_provider(request.app.state) is not source_guard.provider:
+                                        raise ValueError('Memory source authority changed')
+                                elif canonical_source_provider(request.app.state) is not None:
+                                    raise ValueError('Memory source authority changed')
+                                with SessionLocal() as db:
+                                    if db.get_bind().dialect.name == 'sqlite':
+                                        db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+                                    db.query(DBSession).filter(DBSession.id == session_id, DBSession.owner == rewrite_owner).with_for_update().first()
+                                    session_manager._lock_source_intents(db,session_id)
+                                    if rewrite_selection(db) != initial_roots:
+                                        raise ValueError('Message source changed; refresh and try again')
+                                    target = db.query(DBChatMessage).filter_by(id=rewrite_message_id,session_id=session_id,role='assistant').first()
+                                    archive = get_conversation_archive()
+                                    account = archive.resolve_owner(rewrite_owner)
+                                    if origin_available(db):
+                                        withdraw_deleted_messages(db,archive,owner=account,chat_id=session_id,message_ids=(rewrite_message_id,))
+                                    target.content = full_response
+                                    if source_guard is not None:
+                                        source_guard.validate(provider=source_guard.provider,owner=rewrite_owner,chat_id=session_id)
+                                        if canonical_source_provider(request.app.state) is not source_guard.provider:
+                                            raise ValueError('Memory source authority changed')
+                                    elif canonical_source_provider(request.app.state) is not None:
+                                        raise ValueError('Memory source authority changed')
+                                    db.commit()
+                            async with guarded_source_mutation(request,owner=rewrite_owner,chat_id=session_id,
+                                    message_ids=tuple(sorted({rewrite_message_id,*initial_roots})),pre_fence=check_selection,
+                                    _bulk=True,_pre_fence_offloop=True) as source_guard:
+                                if guarded_rewrite and (source_guard is None or canonical_source_provider(request.app.state) is not source_guard.provider):
+                                    raise ValueError('Memory source authority changed')
+                                try:
+                                    await _await_guarded_writer(commit_rewrite)
+                                except asyncio.CancelledError:
+                                    if session_manager.sessions.get(session_id) is sess:
+                                        session_manager.sessions.pop(session_id,None)
+                                    raise
+                                current = session_manager.sessions.get(session_id)
+                                if current is sess:
+                                    matching = [item for item in sess.history if ((item.metadata or {}).get('_db_id') if isinstance(item,ChatMessage) else (item.get('metadata') or {}).get('_db_id')) == rewrite_message_id]
+                                    if len(matching) == 1 and (matching[0].content if isinstance(matching[0],ChatMessage) else matching[0].get('content')) == original_text:
+                                        if isinstance(matching[0],ChatMessage): matching[0].content = full_response
+                                        else: matching[0]['content'] = full_response
+                                    else:
+                                        session_manager.sessions.pop(session_id,None)
+                            from src.openclank.chat_source_bridge import digest
+                            yield 'data: ' + json.dumps({'rewrite_commit':{'message_id':rewrite_message_id,'content_hash':digest(full_response),'content':full_response}}) + '\n\n'
+                        elif full_response:
+                            if canonical_source_provider(request.app.state) is not None:
+                                raise ValueError('Memory source authority changed; refresh and try again')
                             for msg in reversed(sess.history):
                                 if (isinstance(msg, ChatMessage) and msg.role == 'assistant') or \
                                    (isinstance(msg, dict) and msg.get('role') == 'assistant'):
@@ -2805,8 +3549,13 @@ def setup_chat_routes(
                             session_manager.save_sessions()
                         yield chunk
             except Exception as e:
-                logger.error("Rewrite stream error: %s", e)
-                yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 500})}\n\n'
+                if targeted_rewrite:
+                    logger.warning("Targeted rewrite did not complete")
+                    error = {"error": "Rewrite could not be committed; refresh and try again", "status": 409}
+                else:
+                    logger.error("Rewrite stream error: %s", e)
+                    error = {"error": str(e), "status": 500}
+                yield f'event: error\ndata: {json.dumps(error)}\n\n'
 
         return StreamingResponse(stream_rewrite(), media_type="text/event-stream")
 

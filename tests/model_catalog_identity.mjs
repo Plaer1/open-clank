@@ -15,8 +15,11 @@ assert.notEqual(modelChoiceKey(first), modelChoiceKey(second));
 assert.equal(modelChoiceKey(first), modelChoiceKey(repeated));
 assert.deepEqual(
   resolveStoredModelChoices(['shared-model'], [first, second]),
-  [modelChoiceKey(first)],
+  [],
 );
+assert.deepEqual(resolveStoredModelChoices(['shared-model'], [first]), [modelChoiceKey(first)]);
+assert.deepEqual(resolveStoredModelChoices([modelChoiceKey(first)], [first, repeated]), [modelChoiceKey(first)]);
+assert.deepEqual(resolveStoredModelChoices([modelChoiceKey(first)], [first, {...first, providerModelId:'different'}]), []);
 assert.deepEqual(
   resolveStoredModelChoices([modelChoiceKey(second)], [first, second]),
   [modelChoiceKey(second)],
@@ -76,23 +79,20 @@ assert.equal(
   'the automatic MiMo selector cannot silently adopt a shared route',
 );
 
-const state = new Map([['odysseus-model-favorites', '["shared-model"]']]);
+const state = new Map([['openclank-model-favorites', '["shared-model"]']]);
 globalThis.localStorage = {
   getItem: key => state.has(key) ? state.get(key) : null,
   setItem: (key, value) => state.set(key, String(value)),
   removeItem: key => state.delete(key),
 };
 bindModelStateOwner('Alice', 'alice');
-assert.equal(
-  state.get(modelStateKey('odysseus-model-favorites', 'alice')),
-  '["shared-model"]',
-);
-assert.equal(state.has('odysseus-model-favorites'), false);
+assert.equal(state.has(modelStateKey('openclank-model-favorites', 'alice')), false);
+assert.equal(state.get('openclank-model-favorites'), '["shared-model"]');
 bindModelStateOwner('Bob', 'alice');
 assert.notEqual(
-  modelStateKey('odysseus-model-favorites', 'alice'),
-  modelStateKey('odysseus-model-favorites', 'bob'),
+  modelStateKey('openclank-model-favorites', 'alice'),
+  modelStateKey('openclank-model-favorites', 'bob'),
 );
-assert.equal(state.has(modelStateKey('odysseus-model-favorites', 'bob')), false);
+assert.equal(state.has(modelStateKey('openclank-model-favorites', 'bob')), false);
 
 console.log('model catalog identity checks passed');

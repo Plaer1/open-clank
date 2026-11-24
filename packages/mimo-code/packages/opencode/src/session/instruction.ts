@@ -11,6 +11,7 @@ import { Global } from "../global"
 import { Log } from "../util"
 import type { MessageV2 } from "./message-v2"
 import type { MessageID } from "./schema"
+import { digest, type InstructionSource } from "./prefix-provenance"
 
 const log = Log.create({ service: "instruction" })
 
@@ -53,10 +54,23 @@ function extract(messages: MessageV2.WithParts[]) {
   return paths
 }
 
+export type InstructionResult = {paths:Set<string>;content:string[];manifest?:InstructionSource[];discoveryComplete?:boolean}
+type InstructionSnapshot = Readonly<{constructor:"instruction.local-snapshot.v1";manifest:readonly InstructionSource[];contentSHA256:readonly string[]}>
+const instructionWitnesses = new WeakMap<InstructionResult,{snapshot:string;record:InstructionSnapshot}>()
+/** Assembly-time local source observation only; this is not a File grant. */
+export function readInstructionProvenance(result:InstructionResult):InstructionSnapshot | undefined {
+  try {
+    const witness=instructionWitnesses.get(result)
+    if (!witness || JSON.stringify([Array.from(result.paths),result.content,result.manifest,result.discoveryComplete])!==witness.snapshot) return
+    return witness.record
+  } catch { return }
+}
+
 export interface Interface {
   readonly clear: (messageID: MessageID) => Effect.Effect<void>
   readonly systemPaths: () => Effect.Effect<Set<string>, AppFileSystem.Error>
-  readonly system: () => Effect.Effect<{ paths: Set<string>; content: string[] }, AppFileSystem.Error>
+  readonly system: () => Effect.Effect<InstructionResult, AppFileSystem.Error>
+  readonly systemWithProvenance?: () => Effect.Effect<InstructionResult, AppFileSystem.Error>
   readonly find: (dir: string) => Effect.Effect<string | undefined, AppFileSystem.Error>
   readonly resolve: (
     messages: MessageV2.WithParts[],
@@ -106,25 +120,16 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | Config.S
         return yield* fs.readFileString(filepath).pipe(Effect.catch(() => Effect.succeed("")))
       })
 
-      const fetch = Effect.fnUntraced(function* (url: string) {
-        const res = yield* http.execute(HttpClientRequest.get(url)).pipe(
-          Effect.timeout(5000),
-          Effect.catch(() => Effect.succeed(null)),
-        )
-        if (!res) return ""
-        const body = yield* res.arrayBuffer.pipe(Effect.catch(() => Effect.succeed(new ArrayBuffer(0))))
-        return new TextDecoder().decode(body)
-      })
-
       const clear = Effect.fn("Instruction.clear")(function* (messageID: MessageID) {
         const s = yield* InstanceState.get(state)
         s.claims.delete(messageID)
       })
 
-      const systemPaths = Effect.fn("Instruction.systemPaths")(function* () {
+      const collectSystemPaths = Effect.fn("Instruction.collectSystemPaths")(function* () {
         const config = yield* cfg.get()
         const ctx = yield* InstanceState.context
         const paths = new Set<string>()
+        let complete = true
 
         // The first project-level match wins so we don't stack AGENTS.md/CLAUDE.md from every ancestor.
         if (!Flag.MIMOCODE_DISABLE_PROJECT_CONFIG) {
@@ -133,7 +138,8 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | Config.S
             agents.forEach((item) => paths.add(path.resolve(item)))
             // A sparse AGENTS.md likely doesn't carry the full project guidance, so pull in CLAUDE.md too.
             if (!Flag.MIMOCODE_DISABLE_CLAUDE_CODE_PROMPT) {
-              const content = (yield* Effect.forEach(agents, read, { concurrency: 8 })).join("").trim()
+              const content = (yield* Effect.forEach(agents, (item) => fs.readFileString(item).pipe(
+                Effect.catch(() => { complete = false; return Effect.succeed("") })), { concurrency: 8 })).join("").trim()
               if (content.length < CLAUDE_FALLBACK_MAX_CHARS) {
                 const claude = yield* fs.findUp("CLAUDE.md", ctx.directory, ctx.worktree)
                 claude.forEach((item) => paths.add(path.resolve(item)))
@@ -152,7 +158,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | Config.S
         }
 
         for (const file of globalFiles()) {
-          if (yield* fs.existsSafe(file)) {
+          if (yield* fs.exists(file).pipe(Effect.catch(() => { complete = false; return Effect.succeed(false) }))) {
             paths.add(path.resolve(file))
             break
           }
@@ -161,6 +167,9 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | Config.S
         if (config.instructions) {
           for (const raw of config.instructions) {
             if (raw.startsWith("https://") || raw.startsWith("http://")) continue
+            // Existing glob helpers intentionally suppress errors, so they do
+            // not prove complete discovery for configured local patterns.
+            complete = false
             const instruction = raw.startsWith("~/") ? path.join(os.homedir(), raw.slice(2)) : raw
             const matches = yield* (
               path.isAbsolute(instruction)
@@ -175,26 +184,55 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | Config.S
           }
         }
 
-        return paths
+        return { paths, complete }
       })
+
+      const systemPaths = Effect.fn("Instruction.systemPaths")(function* () { return (yield* collectSystemPaths()).paths })
 
       const system = Effect.fn("Instruction.system")(function* () {
         const config = yield* cfg.get()
-        const paths = yield* systemPaths()
+        const discovered = yield* collectSystemPaths()
+        const paths = discovered.paths
         const urls = (config.instructions ?? []).filter(
           (item) => item.startsWith("https://") || item.startsWith("http://"),
         )
 
-        const files = yield* Effect.forEach(Array.from(paths), read, { concurrency: 8 })
-        const remote = yield* Effect.forEach(urls, fetch, { concurrency: 4 })
+        const files = yield* Effect.forEach(Array.from(paths), (item) => fs.readFileString(item).pipe(
+          Effect.map((value) => ({ value, available: true })), Effect.catch(() => Effect.succeed({ value: "", available: false }))), { concurrency: 8 })
+        const remote = yield* Effect.forEach(urls, (item) => http.execute(HttpClientRequest.get(item)).pipe(
+          Effect.timeout(5000), Effect.flatMap((response) => response.arrayBuffer),
+          Effect.map((body) => ({ value: new TextDecoder().decode(body), available: true })),
+          Effect.catch(() => Effect.succeed({ value: "", available: false }))), { concurrency: 4 })
 
         return {
           paths,
+          discoveryComplete: discovered.complete,
           content: [
-            ...Array.from(paths).flatMap((item, i) => (files[i] ? [`Instructions from: ${item}\n${files[i]}`] : [])),
-            ...urls.flatMap((item, i) => (remote[i] ? [`Instructions from: ${item}\n${remote[i]}`] : [])),
+            ...Array.from(paths).flatMap((item, i) => (files[i]?.value ? [`Instructions from: ${item}\n${files[i]!.value}`] : [])),
+            ...urls.flatMap((item, i) => (remote[i]?.value ? [`Instructions from: ${item}\n${remote[i]!.value}`] : [])),
           ],
+          manifest: [...Array.from(paths).map((item, i) => ({kind:"file" as const, id:digest(item), digest:files[i]?.available ? digest(files[i]!.value) : null,
+            state:files[i]?.available ? (files[i]!.value ? "present" as const : "empty" as const) : "unavailable" as const})),
+            ...urls.map((item, i) => ({kind:"remote" as const, id:digest(item), digest:remote[i]?.available ? digest(remote[i]!.value) : null,
+              state:remote[i]?.available ? (remote[i]!.value ? "present" as const : "empty" as const) : "unavailable" as const}))],
         }
+      })
+
+      const systemWithProvenance = Effect.fn("Instruction.systemWithProvenance")(function* () {
+        // The real loader performs a fresh discovery and read for each admission.
+        const result = yield* system()
+        try {
+          const manifest = result.manifest
+          if (result.discoveryComplete === true && manifest && manifest.length <= 128 && result.content.length <= 128 &&
+              manifest.every(item => item.kind === "file" && item.state !== "unavailable" && item.digest !== null) &&
+              Buffer.byteLength(JSON.stringify([Array.from(result.paths),result.content,manifest]),"utf8") <= 262144) {
+            const snapshot=JSON.stringify([Array.from(result.paths),result.content,manifest,result.discoveryComplete])
+            const record:InstructionSnapshot=Object.freeze({constructor:"instruction.local-snapshot.v1" as const,manifest:Object.freeze(manifest.map(item=>Object.freeze({...item}))),
+              contentSHA256:Object.freeze(result.content.map(digest))})
+            instructionWitnesses.set(result,{snapshot,record})
+          }
+        } catch { /* unavailable source evidence never changes normal instructions */ }
+        return result
       })
 
       const find = Effect.fn("Instruction.find")(function* (dir: string) {
@@ -248,7 +286,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | Config.S
         return results
       })
 
-      return Service.of({ clear, systemPaths, system, find, resolve })
+      return Service.of({ clear, systemPaths, system, systemWithProvenance, find, resolve })
     }),
   )
 

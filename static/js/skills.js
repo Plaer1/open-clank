@@ -1,3 +1,4 @@
+import { bindCardActionMenu } from './cardActionMenu.js';
 import { uiIcon } from './uiIcons.js';
 // skills.js — Skills tab in the Memory modal.
 //
@@ -8,9 +9,9 @@ import { uiIcon } from './uiIcons.js';
 
 import uiModule from './ui.js';
 import * as spinnerModule from './spinner.js';
-import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
-import { topPortalZ } from './toolWindowZOrder.js';
 import { refreshReadyNativeCommands } from './nativeCatalogRefresh.js';
+import { openSkillMarketplace } from './skillMarketplace.js';
+import { openSkillSnapshot } from './skillSnapshot.js';
 
 const API = window.location.origin;
 async function _skillMutationFetch(url, options) {
@@ -87,6 +88,7 @@ function _applySectionCollapse(container) {
 }
 
 export async function loadSkills(cascade = false) {
+  _syncProtectedDeleteStatus();
   // Play the domino-in entrance on this load (set when the tab is opened,
   // not for the silent re-loads after an edit/delete).
   if (cascade) _cascadeNext = true;
@@ -218,6 +220,21 @@ function _sourcePill(sk) {
   if (sk.source === 'teacher-escalation') {
     const teacher = sk.teacher_model || 'teacher';
     return `<span class="memory-cat-badge" title="Created by teacher escalation: ${esc(teacher)}" style="background:color-mix(in srgb, var(--color-warning, #f0ad4e) 22%, transparent);">teacher-created</span>`;
+  }
+  if (sk.source === 'repeated-workflow-inference') {
+    let description='Inferred from a claimed conversation selection; source availability has not been rechecked.';
+    try {
+      const prefix='data:application/vnd.openclank.conversation-selection+json;base64,';
+      if (typeof sk.source_uri==='string' && sk.source_uri.startsWith(prefix) && sk.source_uri.length<40000) {
+        const raw=atob(sk.source_uri.slice(prefix.length));
+        const parsed=JSON.parse(new TextDecoder().decode(Uint8Array.from(raw,c=>c.charCodeAt(0))));
+        if (parsed.version===1 && Array.isArray(parsed.sources) && parsed.sources.length<=8) {
+          const roots=parsed.sources.map(x=>`${String(x.chatID || '').slice(0,256)} / ${String(x.rootMessageID || '').slice(0,256)} (${Array.isArray(x.parts)?x.parts.length:0} parts)`);
+          description+=` Claimed sources: ${roots.join('; ')}.`;
+        }
+      }
+    } catch (_) {}
+    return `<span class="memory-cat-badge" title="${esc(description)}">inferred</span>`;
   }
   if (sk.source === 'memory-promotion') {
     return '<span class="memory-cat-badge" title="Drafted from cited curated memories">memory-backed</span>';
@@ -440,74 +457,29 @@ function _svg(id, { size = 13 } = {}) {
 
 // Kebab dropdown for a collapsed skill card — same actions + icons as the
 // expanded footer (Publish/Unpublish · Edit · Delete).
-function _openSkillMenu(btn, card, sk, name, isPublished) {
-  document.querySelectorAll('.skill-kebab-menu').forEach(dismissOrRemove);
-  const menu = document.createElement('div');
-  menu.className = 'skill-kebab-menu';
-  const mk = (paths, label, opts, onClick) => {
-    const item = document.createElement('button');
-    item.className = 'skill-kebab-item' + (opts && opts.danger ? ' danger' : '');
-    item.innerHTML = _svg(paths, opts) + `<span>${label}</span>`;
-    item.addEventListener('click', (e) => { e.stopPropagation(); close(); onClick(); });
-    menu.appendChild(item);
-  };
-  if (isPublished) mk(_ICON.unpublish, 'Unpublish', {}, () => _setSkillStatus(name, 'draft'));
-  else mk(_ICON.approve, 'Publish', {}, () => _setSkillStatus(name, 'published'));
-  // Select — moved up to 2nd so it sits next to Publish/Unpublish
-  // (bulk actions cluster at the top of the menu).
-  const selItem = document.createElement('button');
-  selItem.className = 'skill-kebab-item';
-  selItem.innerHTML = uiIcon("select", 14, {"className":"memory-select-btn-icon","style":"flex-shrink:0;"}) + "<span>Select</span>";
-  selItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    close();
-    if (!_selectMode) _enterSelectMode();
-    _selectedNames.add(name);
-    renderSkillsList();
-  });
-  menu.appendChild(selItem);
-
-  mk(_ICON.edit, 'Edit', {}, async () => {
-    if (!card.classList.contains('doclib-card-expanded')) await _expandSkillCard(card, name);
-    _toggleSkillEdit(card, name);
-  });
-  mk(_ICON.test, 'Test', {}, () => _testSkill(card, name));
-  // Audit kicks off the bulk audit-all loop (test → judge → fix → retry → demote).
-  mk(_ICON.test, 'Audit', {}, () => _auditAllSkills());
-  mk(_ICON.del, 'Delete', { danger: true }, () => _deleteSkill(name, card));
-
-  // Mobile-only Cancel — mirrors the email/documents/brain popup pattern.
-  // CSS hides `.dropdown-cancel-mobile` on desktop where outside-click
-  // already dismisses cleanly.
-  const cancelItem = document.createElement('button');
-  cancelItem.className = 'skill-kebab-item dropdown-cancel-mobile';
-  cancelItem.innerHTML = uiIcon("close", 14) + "<span>Cancel</span>";
-  cancelItem.addEventListener('click', (e) => { e.stopPropagation(); close(); });
-  menu.appendChild(cancelItem);
-
-  document.body.appendChild(menu);
-  // Override the CSS z-index (100002) with a value derived from the live
-  // tool-window stack so the kebab menu stays above its modal even after the
-  // bring-to-front counter climbs past the static value (#4720).
-  menu.style.zIndex = String(topPortalZ());
-  const r = btn.getBoundingClientRect();
-  menu.style.top = (r.bottom + 4) + 'px';
-  menu.style.right = Math.max(6, window.innerWidth - r.right) + 'px';
-  // Keep it on-screen (mobile): flip above the button if it would overflow the
-  // bottom, clamp the left edge, and cap the height as a last resort.
-  const mr = menu.getBoundingClientRect();
-  if (mr.bottom > window.innerHeight - 6) {
-    menu.style.top = Math.max(6, r.top - mr.height - 4) + 'px';
+function _skillActions(card, sk, name, isPublished, valid) {
+  const items = [
+    isPublished
+      ? { id: 'unpublish', label: 'Unpublish', icon: _ICON.unpublish, run: () => _setSkillStatus(name, 'draft') }
+      : { id: 'publish', label: 'Publish', icon: _ICON.approve, run: () => _setSkillStatus(name, 'published') },
+    { id: 'select', label: 'Select', icon: 'select', run: () => {
+      if (!_selectMode) _enterSelectMode();
+      _selectedNames.add(name);
+      renderSkillsList();
+    } },
+    { id: 'edit', label: 'Edit', icon: _ICON.edit, run: async () => {
+      if (!card.classList.contains('doclib-card-expanded')) await _expandSkillCard(card, name);
+      if (valid()) _toggleSkillEdit(card, name);
+    } },
+    { id: 'test', label: 'Test', icon: _ICON.test, run: () => _testSkill(card, name) },
+    { id: 'audit', label: 'Audit', icon: _ICON.test, run: () => _auditAllSkills() },
+    { id: 'review', label: 'Reviewed metadata', icon: _ICON.edit, run: () => _skillMetadataReview(sk.skill_id || sk.id) },
+  ];
+  if (sk.resource_metadata_claim) {
+    items.push({ id: 'delete-reviewed', label: 'Delete reviewed skill', icon: _ICON.del, destructive: true, dialog: true, run: () => _protectedDeleteSkill(sk.skill_id || sk.id, valid) });
   }
-  if (mr.left < 6) {
-    menu.style.right = Math.max(6, window.innerWidth - 6 - mr.width) + 'px';
-  }
-  const mr2 = menu.getBoundingClientRect();
-  if (mr2.bottom > window.innerHeight - 6) {
-    menu.style.maxHeight = Math.max(80, window.innerHeight - 12 - mr2.top) + 'px';
-    menu.style.overflowY = 'auto';
-  }
-  const close = bindMenuDismiss(menu, () => { menu.remove(); }, (ev) => !menu.contains(ev.target));
+  items.push({ id: 'delete', label: 'Delete', icon: _ICON.del, destructive: true, dialog: true, run: () => _deleteSkill(name, card, valid) });
+  return items;
 }
 
 // Cards for the agent's built-in tool capabilities (from
@@ -764,11 +736,11 @@ function renderSkillsList() {
     `;
     card.appendChild(header);
 
-    // Kebab dropdown (collapsed-bar quick actions: same set + icons as the
-    // expanded footer). Clicking the kebab opens it; it doesn't expand.
-    header.querySelector('.skill-kebab-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      _openSkillMenu(e.currentTarget, card, sk, name, isPublished);
+    bindCardActionMenu(card, {
+      button: header.querySelector('.skill-kebab-btn'),
+      current: () => !_selectMode,
+      exclude: '.skill-select-cb, .skill-md-editor',
+      items: valid => _skillActions(card, sk, name, isPublished, valid),
     });
 
     // Preview (hidden until expanded) — SKILL.md goes here + footer.
@@ -868,6 +840,11 @@ function renderSkillsList() {
     rightGroup.className = 'doclib-action-group';
     const btnRow = document.createElement('div');
     btnRow.className = 'doclib-action-btn-row';
+    if (isPublished && (sk.skill_id || sk.id)) {
+      const snapshotBtn = document.createElement('button'); snapshotBtn.className = 'doclib-card-text-btn doclib-card-action-btn'; snapshotBtn.textContent = 'Export snapshot…';
+      snapshotBtn.addEventListener('click', e => { e.stopPropagation(); openSkillSnapshot({skillID:sk.skill_id || sk.id,isSelectionCurrent:()=>card.isConnected && card.classList.contains('doclib-card-expanded') && card.dataset.skillStatus==='published'}); });
+      btnRow.appendChild(snapshotBtn);
+    }
     btnRow.appendChild(testBtn);
     btnRow.appendChild(editBtn);
     btnRow.appendChild(delBtn);
@@ -881,7 +858,6 @@ function renderSkillsList() {
 
     // Click to expand/collapse (unless in select mode → toggle checkbox).
     card.addEventListener('click', (e) => {
-      if (card._suppressNextClick) { card._suppressNextClick = false; return; }
       if (e.target.closest('button, input, textarea')) return;
       // While editing, a click on the card body (outside the textarea) must
       // NOT collapse the card — that silently discards unsaved edits. Only
@@ -894,33 +870,6 @@ function renderSkillsList() {
       }
       _expandSkillCard(card, name);
     });
-
-    // Long-press anywhere on the card opens the kebab dropdown — mirrors the
-    // documents library + brain memory pattern. Skip when touch starts on a
-    // button/input so per-control handlers keep working.
-    {
-      const kebab = header.querySelector('.skill-kebab-btn');
-      let hold = null;
-      let start = null;
-      const _lpCancel = () => { if (hold) { clearTimeout(hold); hold = null; } start = null; };
-      card.addEventListener('pointerdown', (e) => {
-        if (e.target.closest('.skill-kebab-btn, .skill-select-cb, button, input, textarea')) return;
-        start = { x: e.clientX, y: e.clientY };
-        hold = setTimeout(() => {
-          hold = null;
-          card._suppressNextClick = true;
-          setTimeout(() => { card._suppressNextClick = false; }, 400);
-          if (navigator.vibrate) try { navigator.vibrate(15); } catch {}
-          if (kebab) kebab.click();
-        }, 500);
-      });
-      card.addEventListener('pointermove', (e) => {
-        if (!start) return;
-        if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) _lpCancel();
-      });
-      card.addEventListener('pointerup', _lpCancel);
-      card.addEventListener('pointercancel', _lpCancel);
-    }
 
     cards.push(card);
   }
@@ -1088,6 +1037,21 @@ async function _expandSkillCard(card, name) {
   card._fillH();
   window.addEventListener('resize', card._fillH);
 
+  const preview = card.querySelector('.skill-card-preview');
+  preview?.querySelector('.skill-recording-citation')?.remove();
+  try {
+    const response = await fetch(`${API}/api/skills/${encodeURIComponent(name)}?include_recording_citation=1`, {credentials:'same-origin'});
+    const detail = response.ok ? await response.json() : null;
+    if (card.isConnected && card.classList.contains('doclib-card-expanded') && card.dataset.skillName === name && detail?.recording_citation) {
+      const c = detail.recording_citation, line = document.createElement('p');
+      line.className = 'skill-recording-citation';
+      if (c.state === 'available' && c.scope === 'historical_initial_revision') {
+        const a = c.anchor, hint = a?.kind === 'frame' ? `${a.timeMs} ms` : `${a?.startMs}–${a?.endMs} ms`;
+        line.textContent = `Historical recording evidence for initial revision ${c.initial_revision} (${c.initial_hash}). Source SHA-256: ${c.source_sha256}. Playback selection ${hint} is unverified; this is not current source access.`;
+      } else line.textContent = 'Historical recording evidence is unavailable.';
+      preview?.insertBefore(line, preview.querySelector('.skill-md-pre')); card._fillH?.();
+    }
+  } catch (_) { /* Detail remains usable when historical evidence is unavailable. */ }
   const pre = card.querySelector('.skill-md-pre');
   if (pre && !card._mdLoaded) {
     // Use the cache when available (the bg preload usually has it already),
@@ -1156,8 +1120,164 @@ async function _saveSkillEdit(card, name) {
   }
 }
 
-async function _deleteSkill(name, card = null) {
-  if (!(await uiModule.styledConfirm(`Delete skill "${name}"? This removes the SKILL.md.`, { confirmText: 'Delete', danger: true }))) return;
+// One active issued review blocks further effects until it is completed or the
+// user explicitly keeps it for status-only review in this tab.
+let _protectedDeleteBusy = false;
+function _protectedDeleteScope() {
+  const scope = window.chatModule?.ratingAccountScope?.();
+  return scope && typeof scope.owner === 'string' && scope.owner && document.body?.dataset?.accountId === scope.owner ? { owner: scope.owner, authEpoch: scope.authEpoch } : null;
+}
+function _protectedDeleteCurrent(scope) {
+  const now = _protectedDeleteScope();
+  return !!scope && !!now && now.owner === scope.owner && now.authEpoch === scope.authEpoch;
+}
+function _protectedDeleteKey(scope) {
+  return `skills:protected-delete:${encodeURIComponent(scope.owner)}`;
+}
+function _protectedDeleteHistoryKey(scope) { return `${_protectedDeleteKey(scope)}:history`; }
+function _validProtectedDeleteRecord(record, scope) {
+  return !!record && record.owner === scope.owner && typeof record.skillID === 'string'
+    && typeof record.requestKey === 'string' && !!record.requestKey && typeof record.name === 'string'
+    && !!record.review && typeof record.review === 'object' && record.review.skill_id === record.skillID;
+}
+function _protectedDeletePending(scope) {
+  try {
+    const value = sessionStorage.getItem(_protectedDeleteKey(scope));
+    if (!value) return null;
+    const record = JSON.parse(value);
+    return _validProtectedDeleteRecord(record, scope) ? record : { invalid: true };
+  } catch (_) { return { invalid: true }; }
+}
+function _protectedDeleteHistory(scope) {
+  try {
+    const value = sessionStorage.getItem(_protectedDeleteHistoryKey(scope));
+    if (!value) return [];
+    const records = JSON.parse(value);
+    return Array.isArray(records) && records.every(record => _validProtectedDeleteRecord(record, scope)) ? records : null;
+  } catch (_) { return null; }
+}
+function _sameProtectedDelete(a, b) {
+  return !!a && !!b && a.skillID === b.skillID && a.requestKey === b.requestKey
+    && JSON.stringify(a.review) === JSON.stringify(b.review);
+}
+function _writeProtectedDeleteHistory(scope, records) {
+  const encoded = JSON.stringify(records);
+  sessionStorage.setItem(_protectedDeleteHistoryKey(scope), encoded);
+  if (sessionStorage.getItem(_protectedDeleteHistoryKey(scope)) !== encoded) throw new Error('status history unavailable');
+}
+function _syncProtectedDeleteStatus() {
+  const scope = _protectedDeleteScope();
+  const pending = scope ? _protectedDeletePending(scope) : null;
+  const history = scope ? _protectedDeleteHistory(scope) : [];
+  let panel = document.getElementById('skills-protected-delete-status');
+  if (!pending && history && !history.length) { panel?.remove(); return; }
+  const list = document.getElementById('skills-list');
+  if (!list?.parentElement) return;
+  if (!panel) {
+    panel = document.createElement('div'); panel.id = 'skills-protected-delete-status';
+    list.parentElement.insertBefore(panel, list);
+  }
+  panel.replaceChildren();
+  if (pending?.invalid || history === null) {
+    const label = document.createElement('span'); label.textContent = 'Protected delete status history is unavailable.'; panel.appendChild(label);
+  }
+  const addStatus = (record, active) => {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'memory-toolbar-btn';
+    button.textContent = `Check delete status: ${record.name} (${record.requestKey.slice(0, 8)})`;
+    button.onclick = () => _checkProtectedDeleteStatus(scope, record); panel.appendChild(button);
+    if (active) {
+      const stop = document.createElement('button'); stop.type = 'button'; stop.className = 'memory-toolbar-btn';
+      stop.textContent = 'Stop tracking'; stop.onclick = () => _stopTrackingProtectedDelete(scope, record); panel.appendChild(stop);
+    }
+  };
+  if (pending && !pending.invalid) addStatus(pending, true);
+  if (history) for (const record of history) if (!pending || !_sameProtectedDelete(pending, record)) addStatus(record, false);
+}
+async function _stopTrackingProtectedDelete(scope, record) {
+  if (_protectedDeleteBusy || !_protectedDeleteCurrent(scope) || !record || record.invalid) return;
+  _protectedDeleteBusy = true;
+  try {
+    const confirmed = await uiModule.styledConfirm('The outcome is still unknown. Stop blocking new reviews and keep this original request for status checks? A new deletion requires a new review and confirmation.', { title: 'Stop tracking delete', confirmText: 'Keep for status' });
+    if (!confirmed || !valid() || !_protectedDeleteCurrent(scope)) return;
+    const pending = _protectedDeletePending(scope), history = _protectedDeleteHistory(scope);
+    if (!pending || pending.invalid || !_sameProtectedDelete(pending, record) || history === null) throw new Error('Original request changed or status history is unavailable');
+    if (!history.some(item => _sameProtectedDelete(item, record))) _writeProtectedDeleteHistory(scope, [...history, record]);
+    sessionStorage.removeItem(_protectedDeleteKey(scope));
+    if (sessionStorage.getItem(_protectedDeleteKey(scope)) !== null) throw new Error('Original request could not be retained safely');
+    _syncProtectedDeleteStatus(); uiModule.showToast('Original request kept for status');
+  } catch (error) { if (_protectedDeleteCurrent(scope)) uiModule.showError(error.message); }
+  finally { _protectedDeleteBusy = false; }
+}
+function _clearCompletedProtectedDelete(scope, record) {
+  const history = _protectedDeleteHistory(scope), pending = _protectedDeletePending(scope);
+  if (history === null || pending?.invalid) throw new Error('Status history unavailable');
+  const remaining = history.filter(item => !_sameProtectedDelete(item, record));
+  if (remaining.length !== history.length) _writeProtectedDeleteHistory(scope, remaining);
+  if (pending && _sameProtectedDelete(pending, record)) sessionStorage.removeItem(_protectedDeleteKey(scope));
+}
+async function _checkProtectedDeleteStatus(scope, record) {
+  if (_protectedDeleteBusy || !_protectedDeleteCurrent(scope) || !record || record.invalid) return;
+  _protectedDeleteBusy = true;
+  try {
+    const base = `${API}/api/skills/${encodeURIComponent(record.skillID)}/protected-delete/status`;
+    const response = await fetch(base, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request_key: record.requestKey, review: record.review }) });
+    if (!_protectedDeleteCurrent(scope)) return;
+    const result = response.ok ? await response.json() : null;
+    if (!_protectedDeleteCurrent(scope)) return;
+    if (result?.state === 'complete') {
+      _clearCompletedProtectedDelete(scope, record); _syncProtectedDeleteStatus();
+      _mdCache.delete(record.name); await loadSkills(); uiModule.showToast('Reviewed skill deleted');
+    } else {
+      uiModule.showError('Delete status is still unknown. You can keep the original request for status and start a new review.');
+    }
+  } catch (_) {
+    if (_protectedDeleteCurrent(scope)) uiModule.showError('Delete status is unavailable. The original request is retained.');
+  } finally { _protectedDeleteBusy = false; }
+}
+async function _protectedDeleteSkill(skillID, valid = () => true) {
+  const scope = _protectedDeleteScope();
+  if (!skillID || !scope || _protectedDeleteBusy) return;
+  const pending = _protectedDeletePending(scope);
+  if (pending) { _syncProtectedDeleteStatus(); if (!pending.invalid) await _checkProtectedDeleteStatus(scope, pending); return; }
+  _protectedDeleteBusy = true;
+  try {
+    const base = `${API}/api/skills/${encodeURIComponent(skillID)}/protected-delete`;
+    const response = await fetch(base, { credentials: 'same-origin', cache: 'no-store' });
+    if (!_protectedDeleteCurrent(scope)) return;
+    if (!response.ok) throw new Error('Reviewed deletion is unavailable');
+    const preview = await response.json();
+    if (!_protectedDeleteCurrent(scope)) return;
+    const review = preview?.review;
+    if (preview?.state !== 'ready' || typeof preview.name !== 'string' || !review || review.skill_id !== skillID || !Number.isInteger(review.revision)) throw new Error('Reviewed deletion is unavailable');
+    const published = review.published?.revision;
+    const impact = Number.isInteger(published) ? `Published revision ${published} will also be removed from use.` : 'The published skill will also be removed from use.';
+    const confirmed = await uiModule.styledConfirm(`Delete reviewed skill “${preview.name}”, revision ${review.revision}? ${impact} A History preimage will be retained.`, { title: 'Delete reviewed skill', confirmText: 'Delete', danger: true });
+    if (!confirmed || !_protectedDeleteCurrent(scope)) return;
+    const record = { owner: scope.owner, authEpoch: scope.authEpoch, skillID, name: preview.name, requestKey: crypto.randomUUID(), review };
+    try {
+      const encoded = JSON.stringify(record);
+      sessionStorage.setItem(_protectedDeleteKey(scope), encoded);
+      if (sessionStorage.getItem(_protectedDeleteKey(scope)) !== encoded) throw new Error('unavailable');
+    } catch (_) { throw new Error('Cannot retain the original delete request in this tab'); }
+    _syncProtectedDeleteStatus();
+    try {
+      const resultResponse = await _skillMutationFetch(base, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request_key: record.requestKey, review: record.review }) });
+      if (!_protectedDeleteCurrent(scope)) return;
+      const result = resultResponse.ok ? await resultResponse.json() : null;
+      if (!_protectedDeleteCurrent(scope)) return;
+      if (result?.state === 'complete') {
+        _clearCompletedProtectedDelete(scope, record); _syncProtectedDeleteStatus();
+        _mdCache.delete(record.name); await loadSkills(); uiModule.showToast('Reviewed skill deleted');
+      } else uiModule.showError('Delete outcome is unknown. Check the original request from Skills.');
+    } catch (_) {
+      if (_protectedDeleteCurrent(scope)) uiModule.showError('Delete outcome is unknown. Check the original request from Skills.');
+    }
+  } catch (error) { if (_protectedDeleteCurrent(scope)) uiModule.showError(error.message); }
+  finally { _protectedDeleteBusy = false; }
+}
+
+async function _deleteSkill(name, card = null, valid = () => true) {
+  if (!(await uiModule.styledConfirm(`Delete skill "${name}"? This removes the SKILL.md.`, { confirmText: 'Delete', danger: true })) || !valid()) return;
   // Locate the card if the caller didn't hand one over, so we can collapse it
   // away gracefully (same fade+shrink as the document library) instead of
   // re-rendering the whole list.
@@ -1888,6 +2008,84 @@ async function _bulkAudit() {
   await _auditAllSkills({ names: ordered });
 }
 
+function _skillMetadataStageBody(snapshot, name, aliases, domainRefs, requestKey) {
+  const metadata = { aliases: aliases.split('\n').map(value => value.trim()).filter(Boolean), domain_refs: domainRefs };
+  if (name.trim()) metadata.name = name.trim();
+  return { revision: snapshot.revision, content_hash: snapshot.content_hash, published: snapshot.published, request_key: requestKey, metadata };
+}
+
+function _skillMetadataValues(preview) {
+  const metadata = preview.snapshot.metadata || {};
+  return { name: metadata.name || '', aliases: (metadata.aliases || []).join('\n'), domainRefs: metadata.domain_refs || [] };
+}
+
+async function _skillMetadataReview(skillID) {
+  if (!skillID) return;
+  const scope = window.chatModule?.ratingAccountScope?.();
+  const current = () => { const now = window.chatModule?.ratingAccountScope?.(); return !!scope && !!now && scope.owner === now.owner && scope.authEpoch === now.authEpoch && document.body.dataset.accountId === scope.owner; };
+  if (!current()) return;
+  const base = `${API}/api/skills/${encodeURIComponent(skillID)}`;
+  let preview;
+  try {
+    const response = await fetch(`${base}/metadata-review`, { credentials: 'same-origin', cache: 'no-store' });
+    if (!response.ok) throw new Error('Reviewed metadata is unavailable');
+    preview = await response.json();
+    if (!current()) return;
+    if (preview.state !== 'ready') throw new Error('Reviewed metadata is unavailable');
+  } catch (error) { uiModule.showError(error.message); return; }
+  const wrap = document.createElement('div');
+  wrap.className = 'modal'; wrap.style.display = 'block';
+  wrap.innerHTML = `<div class="modal-content"><div class="modal-header"><h4>Reviewed metadata</h4><span style="flex:1"></span><button class="close-btn" aria-label="Close">✖</button></div><div class="modal-body"><p>Stage a new revision, then audit and explicitly publish it. Existing published content stays active until publication. Content editing remains unavailable for this protected revision.</p><label>Display name (leave blank to keep existing)<input class="skill-meta-name" type="text"></label><label>Aliases, one per line<textarea class="skill-meta-aliases" rows="4" style="width:100%"></textarea></label><fieldset class="skill-meta-domains"><legend>Reviewed domains</legend></fieldset><p class="skill-meta-status" role="status"></p><button data-action="stage">Stage metadata</button> <button data-action="audit">Audit revision</button> <button data-action="publish">Publish revision</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.querySelector('.close-btn').onclick = () => wrap.remove();
+  const status = wrap.querySelector('.skill-meta-status');
+  const domains = wrap.querySelector('.skill-meta-domains');
+  const populate = () => {
+    const values = _skillMetadataValues(preview);
+    wrap.querySelector('.skill-meta-name').value = values.name;
+    wrap.querySelector('.skill-meta-aliases').value = values.aliases;
+    domains.replaceChildren(Object.assign(document.createElement('legend'), { textContent: 'Reviewed domains' }));
+    for (const domain of preview.domains || []) {
+      const label = document.createElement('label');
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
+      checkbox.dataset.blockId = domain.block_id; checkbox.dataset.revision = String(domain.revision);
+      checkbox.checked = values.domainRefs.some(ref => ref.block_id === domain.block_id && ref.revision === domain.revision);
+      label.append(checkbox, document.createTextNode(` ${domain.name}`)); domains.appendChild(label);
+    }
+    if (!(preview.domains || []).length) domains.appendChild(document.createTextNode('No reviewed domains available.'));
+  };
+  populate();
+  let busy = false;
+  wrap.querySelectorAll('[data-action]').forEach(button => button.onclick = async () => {
+    if (busy || !current() || !wrap.isConnected) return; busy = true;
+    wrap.querySelectorAll('[data-action]').forEach(b => b.disabled = true);
+    try {
+      const action = button.dataset.action;
+      let body;
+      if (action === 'stage') {
+        const refs = [...domains.querySelectorAll('input:checked')].map(input => ({ block_id: input.dataset.blockId, revision: Number(input.dataset.revision) }));
+        body = _skillMetadataStageBody(preview.snapshot, wrap.querySelector('.skill-meta-name').value, wrap.querySelector('.skill-meta-aliases').value, refs, crypto.randomUUID());
+      }
+      if (action === 'publish' || action === 'audit') body = { revision: preview.snapshot.revision, content_hash: preview.snapshot.content_hash };
+      if (!current() || !wrap.isConnected) return;
+      const response = await _skillMutationFetch(`${base}/metadata-${action === 'stage' ? 'review' : action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+      if (!current() || !wrap.isConnected) return;
+      if (!response.ok) throw new Error(`Operation unavailable or revision changed (HTTP ${response.status})`);
+      const result = await response.json();
+      if (!current() || !wrap.isConnected) return;
+      status.textContent = `${result.state}${result.verdict ? `: ${result.verdict}` : ''}`;
+      const refresh = await fetch(`${base}/metadata-review`, { credentials: 'same-origin', cache: 'no-store' });
+      if (!current() || !wrap.isConnected) return;
+      if (!refresh.ok) throw new Error('Current metadata is unavailable');
+      preview = await refresh.json();
+      if (!current() || !wrap.isConnected) return;
+      populate();
+      await loadSkills();
+    } catch (error) { if (current() && wrap.isConnected) status.textContent = error.message; }
+    finally { busy = false; wrap.querySelectorAll('[data-action]').forEach(b => b.disabled = false); }
+  });
+}
+
 async function _showSkillSource(name) {
   let md = '';
   try {
@@ -1974,7 +2172,62 @@ async function importSkillFromUrl() {
   }
 }
 
+// The manual form owns one explicit recording review and its original request.
+let _recordingDraftReview = null;
+const _manualSkillFields = ['new-skill-name', 'new-skill-title', 'new-skill-description',
+  'new-skill-when', 'new-skill-problem', 'new-skill-procedure', 'new-skill-solution',
+  'new-skill-tags', 'new-skill-category'];
+
+export function reviewRecordingSkillDraft({ sourceLabel, target, isCurrent, statusCurrent }) {
+  const button = document.getElementById('add-skill-btn');
+  const titleField = document.getElementById('new-skill-title');
+  if (_recordingDraftReview || !button?.parentElement || !titleField || typeof isCurrent !== 'function'
+      || typeof statusCurrent !== 'function' || !isCurrent() || !target?.resourceRef || !target?.expectedRevision
+      || _manualSkillFields.some(id => (document.getElementById(id)?.value || '').trim())) return false;
+  const anchor = target.anchor;
+  if (typeof sourceLabel !== 'string' || !sourceLabel.trim() || sourceLabel.length > 512 ||
+      !anchor || !((anchor.kind === 'frame' && Number.isSafeInteger(anchor.timeMs) && anchor.timeMs >= 0) ||
+        (anchor.kind === 'time_range' && Number.isSafeInteger(anchor.startMs) &&
+         Number.isSafeInteger(anchor.endMs) && anchor.startMs >= 0 && anchor.endMs > anchor.startMs))) return false;
+  const panel = document.createElement('div'), message = document.createElement('p');
+  const outcome = document.createElement('input'), prerequisites = document.createElement('textarea');
+  const exceptions = document.createElement('textarea'), verification = document.createElement('textarea');
+  const discard = document.createElement('button'), check = document.createElement('button');
+  outcome.placeholder = 'Intended outcome'; outcome.setAttribute('aria-label','Intended outcome');
+  prerequisites.placeholder = 'Prerequisites'; prerequisites.setAttribute('aria-label','Prerequisites');
+  exceptions.placeholder = 'Exceptions or pitfalls'; exceptions.setAttribute('aria-label','Exceptions or pitfalls');
+  verification.placeholder = 'How to verify'; verification.setAttribute('aria-label','How to verify');
+  const time = anchor.kind === 'frame' ? `${anchor.timeMs} ms` : `${anchor.startMs}–${anchor.endMs} ms`;
+  message.textContent = `Recording: ${sourceLabel}. Selected ${time}; playback position and source correspondence are unverified. Review and write the skill before saving.`;
+  discard.type = check.type = 'button'; discard.textContent = 'Discard recording link'; check.textContent = 'Check original save status'; check.hidden = true;
+  panel.setAttribute('role','status'); panel.append(message,outcome,prerequisites,exceptions,verification,discard,check);
+  button.parentElement.before(panel);
+  const review = {panel,message,outcome,prerequisites,exceptions,verification,discard,check,isCurrent,statusCurrent,
+    target:JSON.parse(JSON.stringify(target)),requestKey:crypto.randomUUID().replaceAll('-',''),pending:false,busy:false,sourceChanged:false};
+  review.listeners = new AbortController();
+  window.addEventListener('openclank-files-resource-mutated', event => {
+    if (String(event.detail?.resourceRef || '') === review.target.resourceRef) {
+      review.sourceChanged = true; review.message.textContent = 'The recording changed. Your draft is preserved; choose the source again before saving.';
+    }
+  }, {signal:review.listeners.signal});
+  _recordingDraftReview = review;
+  discard.addEventListener('click', () => { if (_recordingDraftReview !== review || review.pending || review.busy) return;
+    _recordingDraftReview = null; review.listeners.abort(); panel.remove(); button.disabled = false; });
+  check.addEventListener('click', async () => { if (!review.pending || review.busy || !review.statusCurrent()) return;
+    review.busy = true; check.disabled = true;
+    try { const res = await fetch(`${API}/api/skills/recording-draft-status?request_key=${encodeURIComponent(review.requestKey)}`, {credentials:'same-origin'});
+      const data = await res.json(); if (!review.statusCurrent()) throw Error('Original account changed.');
+      if (res.ok && data.state === 'complete') { review.pending = false; review.completed = true; review.message.textContent = 'Original draft saved. You can discard the recording link or edit the form.'; review.discard.disabled = false; review.check.hidden = true; }
+      else review.message.textContent = 'Original save outcome is unknown. Check status again; do not submit another copy.';
+    } catch { review.message.textContent = 'Original save outcome is unknown. Check status again; do not submit another copy.'; }
+    finally { review.busy = false; check.disabled = false; }
+  });
+  return true;
+}
+
 async function addSkill() {
+  const recording = _recordingDraftReview;
+  if (recording && (recording.pending || recording.completed || recording.busy || recording.sourceChanged || !recording.isCurrent())) { uiModule.showError('Recording source or original save is unavailable'); return; }
   const name = document.getElementById('new-skill-name')?.value.trim()
     || document.getElementById('new-skill-title')?.value.trim();
   const description = document.getElementById('new-skill-description')?.value.trim()
@@ -1996,20 +2249,25 @@ async function addSkill() {
   const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
 
   try {
+    if (recording) { recording.busy = true; recording.pending = true; recording.discard.disabled = true; recording.check.hidden = false; }
     const res = await _skillMutationFetch(`${API}/api/skills/add`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: name || undefined,
-        description,
+        description: recording ? (recording.outcome.value.trim() || description) : description,
         category,
-        when_to_use: whenToUse,
+        when_to_use: recording ? [whenToUse,recording.prerequisites.value.trim()].filter(Boolean).join('\n') : whenToUse,
         procedure,
+        pitfalls: recording ? recording.exceptions.value.split('\n').map(x=>x.trim()).filter(Boolean) : [],
+        verification: recording ? recording.verification.value.split('\n').map(x=>x.trim()).filter(Boolean) : [],
+        ...(recording ? {recordingTarget:recording.target,recordingRequestKey:recording.requestKey} : {}),
         tags,
         status: 'draft',
       }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (recording) { recording.pending = false; recording.listeners.abort(); recording.panel.remove(); _recordingDraftReview = null; }
     ['new-skill-name', 'new-skill-title', 'new-skill-description', 'new-skill-when',
      'new-skill-problem', 'new-skill-procedure', 'new-skill-solution', 'new-skill-tags',
      'new-skill-category']
@@ -2017,11 +2275,67 @@ async function addSkill() {
     await loadSkills();
     uiModule.showToast('Skill added (draft)');
   } catch (err) {
-    uiModule.showError('Failed to add skill: ' + err.message);
-  }
+    if (recording) recording.message.textContent = 'Original save outcome is unknown. Check status; do not submit another copy.';
+    else uiModule.showError('Failed to add skill: ' + err.message);
+  } finally { if (recording) recording.busy = false; }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  const distill=document.getElementById('skills-distill');
+  const chats=document.getElementById('skills-distill-chats');
+  const preview=document.getElementById('skills-distill-preview');
+  const run=document.getElementById('skills-distill-run');
+  const status=document.getElementById('skills-distill-status');
+  let selected=null; let selectionVersion=0;
+  const retireDistill=()=>{selectionVersion++;selected=null;if(chats)chats.replaceChildren();if(run)run.disabled=true;if(preview)preview.disabled=false;if(status)status.textContent='';};
+  for (const event of ['openclank:auth-context-changed','openclank-account-changed','workspace-change']) {
+    window.addEventListener(event,retireDistill);document.addEventListener(event,retireDistill);
+  }
+  distill?.addEventListener('toggle', async () => {
+    if (!distill.open || chats.options.length) return;
+    const scope=_protectedDeleteScope();const version=selectionVersion;if (!scope) return;
+    try {
+      const response=await fetch(`${API}/api/sessions`,{credentials:'same-origin'});
+      if (!response.ok) throw new Error();
+      const body=await response.json();
+      if (version!==selectionVersion || !_protectedDeleteCurrent(scope)) return;
+      const sessions=Array.isArray(body)?body:(body.sessions||[]);
+      for (const item of sessions.filter(s=>s && !s.archived && typeof s.id==='string')) {
+        const option=document.createElement('option'); option.value=item.id; option.textContent=item.name || 'Untitled chat'; chats.appendChild(option);
+      }
+    } catch (_) { if (version===selectionVersion && _protectedDeleteCurrent(scope)) status.textContent='Chats could not be loaded.'; }
+  });
+  chats?.addEventListener('change',()=>{selectionVersion++;selected=null;run.disabled=true;status.textContent='';});
+  preview?.addEventListener('click',async()=>{
+    const scope=_protectedDeleteScope();if (!scope) return;
+    const version=++selectionVersion;selected=null;run.disabled=true;preview.disabled=true;status.textContent='Checking selected chats…';
+    try {
+      const ids=Array.from(chats.selectedOptions,option=>option.value);
+      if (ids.length<2 || ids.length>8) {status.textContent='Select 2–8 chats.';return;}
+      const response=await fetch(`${API}/api/memory/distill-preview`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_ids:ids})});
+      const data=await response.json();
+      if (version!==selectionVersion || !_protectedDeleteCurrent(scope)) return;
+      if (!response.ok || data.state!=='available') {status.textContent='No qualified repeated pattern found in this bounded check, or some sources were unavailable.';return;}
+      selected=data.occurrences;run.disabled=false;status.textContent=`Found a repeated pattern in ${selected.length} chats. This bounded check may omit other sources.`;
+    } catch (_) {if (_protectedDeleteCurrent(scope)) status.textContent='The preview was unavailable.';} finally {if (_protectedDeleteCurrent(scope)) preview.disabled=false;}
+  });
+  run?.addEventListener('click',async()=>{
+    const scope=_protectedDeleteScope();if (!scope || !selected) return; const occurrences=selected;selected=null;run.disabled=true;preview.disabled=true;status.textContent='Asking the configured teacher…';
+    try {
+      const response=await fetch(`${API}/api/memory/distill-selected`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({occurrences})});
+      const data=await response.json();
+      if (!_protectedDeleteCurrent(scope)) return;
+      if (!response.ok || data.state==='unavailable') status.textContent='The run was unavailable; no result was confirmed.';
+      else if (data.state==='no_draft') status.textContent='The teacher did not propose a draft.';
+      else {status.textContent='The teacher result was processed. Review any draft in Skills.';await loadSkills();}
+    } catch (_) {if (_protectedDeleteCurrent(scope)) status.textContent='The run was unavailable; no result was confirmed.';} finally {if (_protectedDeleteCurrent(scope)) preview.disabled=false;}
+  });
+  document.getElementById('skill-snapshot-import-btn')?.addEventListener('click', () => {
+    if (!openSkillSnapshot({onComplete:async (_skill,isCurrent)=>{if(!isCurrent())return;await refreshReadyNativeCommands({reloadSkills:true,changedEvent:'odysseus:skills-changed'});if(isCurrent())await loadSkills();}})) uiModule.showError('Snapshot import is unavailable for the current account.');
+  });
+  document.getElementById('skill-marketplace-btn')?.addEventListener('click', () => {
+    if (!openSkillMarketplace({onComplete:async (_skill,isCurrent) => { if (!isCurrent()) return; await refreshReadyNativeCommands({reloadSkills:true,changedEvent:'odysseus:skills-changed'}); if (isCurrent()) await loadSkills(); }})) uiModule.showError('Marketplace is unavailable for the current account.');
+  });
   document.getElementById('skill-import-url-btn')?.addEventListener('click', importSkillFromUrl);
   document.getElementById('skill-import-url')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') importSkillFromUrl();

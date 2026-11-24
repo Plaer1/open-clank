@@ -1,0 +1,1 @@
+CREATE INDEX s06_context_admitted_marker ON fm_v2_outbox(owner_id,event_id) WHERE kind='s06_admitted' AND json_valid(payload_json) AND json_extract(payload_json,'$.version')='s06.context-admitted.v1';

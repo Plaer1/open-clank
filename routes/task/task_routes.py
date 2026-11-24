@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from core.database import SessionLocal, ScheduledTask, TaskRun
@@ -29,6 +30,21 @@ from src.task_scheduler import compute_next_run, HOUSEKEEPING_DEFAULTS
 from routes.prefs_routes import _load_for_user, _save_for_user
 
 logger = logging.getLogger(__name__)
+
+
+def _observation_policy_generation(repository) -> int:
+    """Read the existing Files policy epoch without expiration or DDL."""
+    import sqlite3
+    from pathlib import Path
+    path = Path(repository.db_path)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ValueError('Files policy source unavailable')
+    with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=.1) as connection:
+        connection.execute('PRAGMA query_only=ON')
+        row = connection.execute('SELECT generation FROM file_policy_meta WHERE singleton=1').fetchone()
+    if not row or type(row[0]) is not int or row[0] < 0:
+        raise ValueError('Files policy epoch unavailable')
+    return row[0]
 
 
 def _json_string_list(raw) -> list[str]:
@@ -229,6 +245,8 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
     defs = HOUSEKEEPING_DEFAULTS.get(t.action) if t.action else None
     d = {
         "id": t.id,
+        "account_provenance": "bound" if t.host_account_id else "legacy_unverified",
+        "cache_clear_capability": {"available": False, "reason": "Cache ownership cannot be confirmed; nothing will be cleared"},
         "name": _display_task_name(t),
         "prompt": t.prompt,
         "task_type": t.task_type or "llm",
@@ -333,6 +351,29 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         if not owner:
             raise HTTPException(401, "Authenticated task owner is required")
         return owner
+
+    async def _task_scope(request: Request):
+        from src.openclank.account_request_barrier import _current_admission
+        owner = _owner(request)
+        auth = getattr(request.app.state, 'auth_manager', None)
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        admission = _current_admission.get()
+        account = auth.account_id(owner) if auth is not None and getattr(request.state, 'authenticated', False) else None
+        if (not account or barrier is None or not await barrier.is_live(owner, admission)
+                or auth.account_id(owner) != account or auth.username_for_account_id(account) != owner):
+            raise HTTPException(409, 'Task account unavailable')
+        return owner, account
+
+    def _task_scope_filter(owner, account):
+        from src.openclank.task_observations import task_account_scope
+        if account is None:
+            return (ScheduledTask.owner == owner, ScheduledTask.host_account_id.is_(None))
+        return task_account_scope(owner, account, include_legacy=True)
+
+    def _task_expected(task, owner, account):
+        from src.openclank.task_execution_context import manual_task_sha256
+        return {'owner': owner, 'account': account, 'bound_account': task.host_account_id,
+                'status': task.status, 'spec': manual_task_sha256(task)}
 
     def _task_agent_contract(
         db,
@@ -558,26 +599,10 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     @router.get("")
     async def list_tasks(request: Request, status: Optional[str] = None,
                          include_last_run: bool = False):
-        user = _owner(request)
-        if user:
-            await task_scheduler.ensure_defaults(user)
-        else:
-            db_seed = SessionLocal()
-            try:
-                owners = {
-                    row[0] for row in db_seed.query(ScheduledTask.owner)
-                    .filter(ScheduledTask.task_type == "action")
-                    .filter(ScheduledTask.action.in_(list(HOUSEKEEPING_DEFAULTS.keys())))
-                    .all()
-                    if row[0]
-                }
-            finally:
-                db_seed.close()
-            for owner in owners:
-                await task_scheduler.ensure_defaults(owner)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            q = db.query(ScheduledTask)
+            q = db.query(ScheduledTask).filter(*_task_scope_filter(user, account))
             if user:
                 q = q.filter(ScheduledTask.owner == user)
             if status:
@@ -586,6 +611,67 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             return {"tasks": [_task_to_dict(t, include_last_run_result=include_last_run) for t in tasks]}
         finally:
             db.close()
+
+    @router.get("/observations/{source}")
+    async def observe_tasks(request: Request, source: str, limit: int = 50,
+                            cursor: str | None = None, workspace_id: str | None = None):
+        """Read owner-qualified routine/run/wait metadata without scheduler maintenance."""
+        owner = _owner(request)
+        if source not in {"scheduler_routine", "scheduler_run", "scheduler_wait"} or not 1 <= limit <= 100:
+            raise HTTPException(400, {"code": "INVALID_OBSERVATION_REQUEST", "message": "Invalid source or page limit"})
+        auth_manager = getattr(request.app.state, 'auth_manager', None)
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        account = auth_manager.account_id(owner) if auth_manager and getattr(request.state, 'authenticated', False) else None
+        if (not account or not barrier or auth_manager.username_for_account_id(account) != owner
+                or not workspace_id):
+            raise HTTPException(503, {"code": "OBSERVATION_UNAVAILABLE", "message": "Account or workspace authority is unavailable"})
+        canonical_workspace = None
+        if workspace_id is not None:
+            if not workspace_id.strip() or workspace_id != workspace_id.strip() or len(workspace_id) > 256:
+                raise HTTPException(400, {"code": "INVALID_OBSERVATION_REQUEST", "message": "Invalid workspace"})
+            repository = getattr(request.app.state, "files_policy_repository", None)
+            auth_manager = getattr(request.app.state, "auth_manager", None)
+            if repository is None or auth_manager is None:
+                raise HTTPException(503, {"code": "WORKSPACE_SCOPE_UNAVAILABLE", "message": "Workspace authority is unavailable"})
+            try:
+                binding = resolve_owned_workspace(repository, workspace_id=workspace_id, owner_username=owner,
+                    auth_manager=auth_manager, purpose="app_folder", observation_only=True)
+                canonical_workspace = binding.workspace.id
+            except WorkspacePolicyServiceError as exc:
+                raise HTTPException(403, {"code": "WORKSPACE_SCOPE_UNAVAILABLE", "message": "Workspace is unavailable"}) from exc
+            except Exception as exc:
+                raise HTTPException(503, {"code": "WORKSPACE_SCOPE_UNAVAILABLE", "message": "Workspace authority is unavailable"}) from exc
+        from src.openclank.orchestration_projection import ProjectionError
+        from src.openclank.task_observations import scheduler_observations
+        async with barrier.admitted(owner):
+            if auth_manager.account_id(owner) != account or auth_manager.username_for_account_id(account) != owner:
+                raise HTTPException(409, {"code": "OBSERVATION_STALE", "message": "Account changed"})
+            try:
+                generation = _observation_policy_generation(repository)
+            except Exception as exc:
+                raise HTTPException(503, {"code": "OBSERVATION_UNAVAILABLE", "message": "Files policy is unavailable"}) from exc
+            db = SessionLocal()
+            try:
+                page = scheduler_observations(db, owner=owner, source=source, limit=limit, cursor=cursor,
+                                              workspace_id=canonical_workspace, account_id=account,
+                                              policy_generation=generation)
+            except ProjectionError as exc:
+                raise HTTPException(exc.status, {"code": exc.code, "message": str(exc)}) from exc
+            finally:
+                db.close()
+            if canonical_workspace is not None:
+                try:
+                    current = resolve_owned_workspace(repository, workspace_id=workspace_id, owner_username=owner,
+                        auth_manager=auth_manager, purpose="app_folder", observation_only=True)
+                    if (current != binding or _observation_policy_generation(repository) != generation
+                            or auth_manager.account_id(owner) != account
+                            or auth_manager.username_for_account_id(account) != owner):
+                        raise WorkspacePolicyServiceError("Workspace changed during observation")
+                except WorkspacePolicyServiceError as exc:
+                    raise HTTPException(403, {"code": "WORKSPACE_SCOPE_UNAVAILABLE", "message": "Workspace is unavailable"}) from exc
+                except Exception as exc:
+                    raise HTTPException(503, {"code": "WORKSPACE_SCOPE_UNAVAILABLE", "message": "Workspace authority is unavailable"}) from exc
+            return JSONResponse(page, headers={'Cache-Control': 'private, no-store'})
 
     @router.get("/onboarding")
     async def get_tasks_onboarding(request: Request):
@@ -598,7 +684,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.post("/onboarding")
     async def update_tasks_onboarding(request: Request, body: dict):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         prefs = _load_for_user(user) or {}
         prefs["tasks_opened"] = True
         enable = bool(body.get("enabled"))
@@ -606,14 +692,14 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             prefs["tasks_enabled"] = True
         _save_for_user(user, prefs)
         if user:
-            await task_scheduler.ensure_defaults(user)
+            await task_scheduler.ensure_defaults(user, account_id=account)
 
         resumed = 0
         if enable:
             db = SessionLocal()
             try:
                 tasks = db.query(ScheduledTask).filter(
-                    ScheduledTask.owner == user,
+                    *_task_scope_filter(user, account),
                     ScheduledTask.task_type == "action",
                     ScheduledTask.action.in_(list(HOUSEKEEPING_DEFAULTS.keys())),
                 ).all()
@@ -651,7 +737,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         if is_admin_only_task_action(task_type, action) and not _is_admin(user):
             raise HTTPException(403, f"Action '{action}' requires admin privileges")
 
-    def _validate_then_task_id(db, then_task_id: Optional[str], user: Optional[str], current_task_id: Optional[str] = None) -> Optional[str]:
+    def _validate_then_task_id(db, then_task_id: Optional[str], user: Optional[str], account: Optional[str], current_task_id: Optional[str] = None) -> Optional[str]:
         target_id = (then_task_id or "").strip()
         if not target_id:
             return None
@@ -659,7 +745,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             raise HTTPException(400, "Task cannot chain to itself")
         q = db.query(ScheduledTask).filter(ScheduledTask.id == target_id)
         if user:
-            q = q.filter(ScheduledTask.owner == user)
+            q = q.filter(*_task_scope_filter(user, account))
         target = q.first()
         if not target:
             raise HTTPException(404, "Chained task not found")
@@ -668,6 +754,13 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     @router.post("")
     async def create_task(request: Request, req: TaskCreate):
         user = _owner(request)
+        from src.openclank.account_request_barrier import _current_admission
+        auth = getattr(request.app.state, 'auth_manager', None)
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        admission = _current_admission.get()
+        account = auth.account_id(user) if auth is not None and getattr(request.state, 'authenticated', False) else None
+        if account and auth.username_for_account_id(account) != user:
+            raise HTTPException(409, 'Task account changed')
 
         # Validate
         if req.task_type in ("llm", "research") and not req.prompt:
@@ -725,9 +818,12 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             webhook_token = secrets.token_urlsafe(32)
 
         task_id = str(uuid.uuid4())
+        if account and (barrier is None or not await barrier.is_live(user, admission)
+                or auth.account_id(user) != account or auth.username_for_account_id(account) != user):
+            raise HTTPException(409, 'Task account changed')
         db = SessionLocal()
         try:
-            then_task_id = _validate_then_task_id(db, req.then_task_id, user)
+            then_task_id = _validate_then_task_id(db, req.then_task_id, user, account)
             agent_contract = (
                 _task_agent_contract(db, req, user, request)
                 if req.task_type in ("llm", "research")
@@ -751,7 +847,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             # Validate chained task belongs to same owner
             if req.then_task_id:
                 chain_target = db.query(ScheduledTask).filter(
-                    ScheduledTask.id == req.then_task_id
+                    ScheduledTask.id == req.then_task_id, *_task_scope_filter(user, account)
                 ).first()
                 if not chain_target:
                     raise HTTPException(400, "Chained task not found")
@@ -760,6 +856,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             task = ScheduledTask(
                 id=task_id,
                 owner=user,
+                host_account_id=account,
                 name=name,
                 prompt=req.prompt,
                 task_type=req.task_type,
@@ -791,15 +888,23 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             db.close()
 
     @router.get("/notifications")
-    async def get_notifications(request: Request):
+    async def get_notifications(request: Request, include_wait_badge: bool = False):
         """Return and clear pending task-run notifications for the
         current user. Anonymous callers get nothing (prevents
         cross-tenant drain — see review CRIT-B)."""
-        user = _owner(request)
+        user, account = await _task_scope(request)
         if not user:
             return {"notifications": []}
-        notes = task_scheduler.pop_notifications(owner=user)
-        return {"notifications": notes}
+        with SessionLocal() as db:
+            def permitted(note):
+                task_id = note.get('task_id')
+                return bool(task_id and db.query(ScheduledTask.id).filter(
+                    ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first())
+            notes = task_scheduler.pop_notifications(owner=user, predicate=permitted)
+        result = {"notifications": notes}
+        if include_wait_badge:
+            result["wait_pending"] = bool(_task_waits(user, account, first_only=True))
+        return result
 
     @router.get("/waits")
     async def list_task_waits(request: Request):
@@ -808,16 +913,22 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         Surfaces waiting questions/permissions so the toast/badge can open
         the original task chat and the user can answer there.
         """
-        user = _owner(request)
+        user, account = await _task_scope(request)
+        return {"waits": _task_waits(user, account)}
+
+    def _task_waits(user, account, *, first_only=False):
         if not user:
-            return {"waits": []}
+            return []
         try:
             from core.database import SessionLocal as _SL, TaskWaitRequest
             db = _SL()
             try:
                 rows = (
                     db.query(TaskWaitRequest)
-                    .filter(TaskWaitRequest.owner == user, TaskWaitRequest.state == "waiting")
+                    .join(ScheduledTask, ScheduledTask.id == TaskWaitRequest.task_id)
+                    .join(TaskRun, (TaskRun.id == TaskWaitRequest.run_id) & (TaskRun.task_id == ScheduledTask.id))
+                    .filter(TaskWaitRequest.owner == user, TaskWaitRequest.state == "waiting",
+                            ScheduledTask.owner == user, ScheduledTask.host_account_id == account)
                     .order_by(TaskWaitRequest.created_at.desc())
                     .all()
                 )
@@ -828,6 +939,20 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                         payload = _json.loads(r.payload or "{}")
                     except Exception:
                         payload = {}
+                    binding = payload.get('_openclank_native_wait') if isinstance(payload, dict) else None
+                    live = None
+                    if isinstance(binding, dict) and account:
+                        try:
+                            live = task_scheduler._task_live_pending(owner=user, session_id=r.session_id,
+                                account_id=account, kind=r.kind, request_id=binding.get('request_id'),
+                                root_operation_id=f'turn-task-run:{r.run_id}')
+                        except Exception:
+                            live = None
+                    available = bool(live and live[0] == binding)
+                    if not available:
+                        continue
+                    display = {key:payload[key] for key in ('question','questions','options','permission_type','detail','blocking') if isinstance(payload, dict) and key in payload}
+                    display.update(request_id=r.id, session_id=r.session_id)
                     waits.append({
                         "id": r.id,
                         "task_id": r.task_id,
@@ -835,15 +960,19 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                         "session_id": r.session_id,
                         "kind": r.kind,
                         "state": r.state,
+                        "available": available,
+                        "display": display,
                         "question": payload.get("question") or payload.get("title") or "Task needs your answer",
                         "created_at": r.created_at.isoformat() if r.created_at else None,
                     })
-                return {"waits": waits}
+                    if first_only:
+                        break
+                return waits
             finally:
                 db.close()
         except Exception:
             logger.exception("Failed to list task waits")
-            return {"waits": []}
+            return []
 
     @router.post("/waits/{wait_id}/answer")
     async def answer_task_wait(request: Request, wait_id: str):
@@ -856,14 +985,28 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         user = _owner(request)
         if not user:
             raise HTTPException(401, "Authentication required")
+        from src.openclank.account_request_barrier import _current_admission
+        auth = getattr(request.app.state, 'auth_manager', None)
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        admission = _current_admission.get()
+        account = auth.account_id(user) if auth is not None else None
+        if not account or auth.username_for_account_id(account) != user:
+            raise HTTPException(401, 'Account unavailable')
         body = await request.json()
+        if (barrier is None or not await barrier.is_live(user, admission)
+                or auth.account_id(user) != account or auth.username_for_account_id(account) != user):
+            raise HTTPException(409, 'Account changed')
         session_id = str(body.get("session_id") or "")
         answers = body.get("answers")
         rejected = bool(body.get("rejected"))
         from core.database import SessionLocal as _SL, TaskWaitRequest
         db = _SL()
         try:
-            row = db.query(TaskWaitRequest).filter(TaskWaitRequest.id == wait_id).first()
+            row = (db.query(TaskWaitRequest)
+                   .join(ScheduledTask, ScheduledTask.id == TaskWaitRequest.task_id)
+                   .join(TaskRun, (TaskRun.id == TaskWaitRequest.run_id) & (TaskRun.task_id == ScheduledTask.id))
+                   .filter(TaskWaitRequest.id == wait_id, TaskWaitRequest.owner == user,
+                           ScheduledTask.owner == user, ScheduledTask.host_account_id == account).first())
             if not row:
                 raise HTTPException(404, "Wait request not found")
             if row.owner != user:
@@ -884,102 +1027,33 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             wait_id=wait_id,
             owner=user,
             session_id=row_session,
-            answer_payload={"answers": answers, "rejected": rejected},
+            answer_payload={"answers": answers, "rejected": rejected, "option_id": body.get("option_id")},
         )
+        if ok == 'resolved_unrecorded':
+            raise HTTPException(503, 'Answer accepted; task wait bookkeeping is unavailable')
         if not ok:
             raise HTTPException(409, "Wait request is stale, invalid, or already answered")
         return {"ok": True}
 
     @router.post("/{task_id}/clear-cache")
     async def clear_task_cache(request: Request, task_id: str):
-        """Clear derived cache for one built-in task."""
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        """Refuse caches lacking immutable host-account provenance."""
+        user, account = await _task_scope(request)
+        with SessionLocal() as db:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            action = task.action or ""
-        finally:
-            db.close()
-
-        cache_tables = {
-            "summarize_emails": ("email_summaries",),
-            "draft_email_replies": ("email_ai_replies",),
-            "email_auto_translate": ("email_translations",),
-            "extract_email_events": ("email_calendar_extractions",),
-            "learn_sender_signatures": ("sender_signatures",),
-            "check_email_urgency": ("email_tags", "email_urgency_alerts"),
-        }
-        tables = cache_tables.get(action)
-        if not tables:
-            raise HTTPException(400, "This task has no clearable cache")
-        if not user:
-            # All email caches are owner-scoped. An ownerless request must
-            # never fall through to a table-wide DELETE.
-            raise HTTPException(403, "Authenticated owner required")
-
-        import sqlite3
-        from pathlib import Path
-        from routes.email_helpers import SCHEDULED_DB, OWNER_SCOPED_EMAIL_CACHE_TABLES, _email_cache_owner_clause
-
-        cleared = {}
-        conn = sqlite3.connect(SCHEDULED_DB)
-        try:
-            for table in tables:
-                try:
-                    if table == "email_tags" and user:
-                        before = conn.execute(
-                            "SELECT COUNT(*) FROM email_tags WHERE owner = ? OR owner = ''",
-                            (user,),
-                        ).fetchone()[0]
-                        conn.execute("DELETE FROM email_tags WHERE owner = ? OR owner = ''", (user,))
-                    elif table in OWNER_SCOPED_EMAIL_CACHE_TABLES and user:
-                        owner_clause, owner_params = _email_cache_owner_clause(user)
-                        before = conn.execute(
-                            f"SELECT COUNT(*) FROM {table} WHERE {owner_clause}",
-                            owner_params,
-                        ).fetchone()[0]
-                        conn.execute(f"DELETE FROM {table} WHERE {owner_clause}", owner_params)
-                    else:
-                        before = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                        conn.execute(f"DELETE FROM {table}")
-                    cleared[table] = int(before or 0)
-                except sqlite3.OperationalError:
-                    cleared[table] = 0
-            conn.commit()
-        finally:
-            conn.close()
-
-        removed_files = 0
-        if action == "check_email_urgency":
-            cache_dir = Path(EMAIL_URGENCY_CACHE_DIR)
-            if cache_dir.exists():
-                for child in cache_dir.glob("*.json"):
-                    try:
-                        child.unlink()
-                        removed_files += 1
-                    except Exception:
-                        pass
-            owner_slug = "".join(c if (c.isalnum() or c in "-_.@") else "_" for c in (user or "default"))
-            for state_path in [Path(DATA_DIR) / f"email_urgency_state_{owner_slug}.json"]:
-                try:
-                    if state_path.exists():
-                        state_path.unlink()
-                        removed_files += 1
-                except Exception:
-                    pass
-
-        return {"ok": True, "action": action, "cleared": cleared, "files": removed_files}
+            if task.action not in {"summarize_emails", "draft_email_replies", "email_auto_translate",
+                                   "extract_email_events", "learn_sender_signatures", "check_email_urgency"}:
+                raise HTTPException(400, "This task has no clearable cache")
+        raise HTTPException(503, "Cache cannot be cleared because its account provenance is unavailable")
 
     @router.get("/{task_id}")
     async def get_task(request: Request, task_id: str):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:
@@ -990,14 +1064,21 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.put("/{task_id}")
     async def update_task(request: Request, task_id: str, req: TaskUpdate):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if db.get_bind().dialect.name == 'sqlite':
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:
                 raise HTTPException(403, "Access denied")
+            if task.host_account_id:
+                auth = getattr(request.app.state, 'auth_manager', None)
+                if (auth is None or auth.account_id(user) != task.host_account_id
+                        or auth.username_for_account_id(task.host_account_id) != user):
+                    raise HTTPException(409, "Task account changed")
 
             next_task_type = req.task_type if req.task_type is not None else task.task_type
             next_action = req.action if req.action is not None else task.action
@@ -1036,7 +1117,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             if req.trigger_count is not None:
                 task.trigger_count = req.trigger_count
             if req.then_task_id is not None:
-                task.then_task_id = _validate_then_task_id(db, req.then_task_id, user, current_task_id=task.id)
+                task.then_task_id = _validate_then_task_id(db, req.then_task_id, user, account, current_task_id=task.id)
             if req.notifications_enabled is not None:
                 task.notifications_enabled = bool(req.notifications_enabled)
             if req.character_id is not None:
@@ -1089,21 +1170,31 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.delete("/{task_id}")
     async def delete_task(request: Request, task_id: str):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:
                 raise HTTPException(403, "Access denied")
+            expected, revision = _task_expected(task, user, account), task.updated_at
+            db.expunge(task)
+            db.rollback()
             # Cascade: cookbook_serve tasks may have a linked calendar
             # event (created via the "Create event in calendar" toggle
             # in the schedule modal). If so, delete the calendar event
             # too so the calendar doesn't end up holding a phantom event
             # for a task that no longer exists.
             _maybe_cascade_calendar_event(task)
-            db.delete(task)
+            if db.get_bind().dialect.name == 'sqlite':
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+            current = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
+            auth = getattr(request.app.state, 'auth_manager', None)
+            if (not current or current.updated_at != revision or _task_expected(current, user, account) != expected
+                    or not auth or auth.account_id(user) != account or auth.username_for_account_id(account) != user):
+                raise HTTPException(409, 'Task changed; calendar cascade may already have completed')
+            db.delete(current)
             db.commit()
             return {"ok": True}
         finally:
@@ -1111,15 +1202,19 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.post("/{task_id}/pause")
     async def pause_task(request: Request, task_id: str):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if db.get_bind().dialect.name == 'sqlite':
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:
                 raise HTTPException(403, "Access denied")
-            task.status = "paused"
+            from src.openclank.task_schedule_control import apply_schedule
+            apply_schedule(db, owner=user, account=account, task_id=task_id,
+                           action="pause", include_legacy=True)
             db.commit()
             return {"ok": True, "status": "paused"}
         finally:
@@ -1127,22 +1222,23 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.post("/{task_id}/resume")
     async def resume_task(request: Request, task_id: str):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if db.get_bind().dialect.name == 'sqlite':
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:
                 raise HTTPException(403, "Access denied")
             _require_admin_for_task_action(user, task.task_type, task.action)
-            task.status = "active"
-            if (task.trigger_type or "schedule") == "schedule":
-                task.next_run = compute_next_run(
-                    task.schedule, task.scheduled_time,
-                    task.scheduled_day, task.scheduled_date,
-                    cron_expression=task.cron_expression,
-                )
+            from src.openclank.task_schedule_control import apply_schedule
+            try:
+                task = apply_schedule(db, owner=user, account=account, task_id=task_id,
+                                      action="resume", include_legacy=True)
+            except ValueError:
+                raise HTTPException(409, "Schedule has no available future occurrence")
             db.commit()
             return {"ok": True, "status": "active", "next_run": task.next_run.isoformat() + "Z" if task.next_run else None}
         finally:
@@ -1151,10 +1247,12 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     @router.post("/{task_id}/revert")
     async def revert_task(request: Request, task_id: str):
         """Reset a built-in (housekeeping) task to its default config."""
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if db.get_bind().dialect.name == 'sqlite':
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:
@@ -1192,43 +1290,49 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.post("/{task_id}/run")
     async def run_task_now(request: Request, task_id: str, force: bool = False):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:
                 raise HTTPException(403, "Access denied")
             _require_admin_for_task_action(user, task.task_type, task.action)
+            expected = _task_expected(task, user, account)
         finally:
             db.close()
-        started = await task_scheduler.run_task_now(task_id, force=force)
+        started = await task_scheduler.run_task_now(task_id, force=force, manual_expected=expected)
         if not started:
             raise HTTPException(409, "Task is already running")
-        return {"ok": True, "message": "Task triggered" + (" in parallel" if force else "")}
+        return {"ok": True, "message": "Task queued for admission; it may be skipped if account or configuration changes"}
 
     @router.post("/{task_id}/stop")
     async def stop_task_now(request: Request, task_id: str):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:
                 raise HTTPException(403, "Access denied")
+            unresolved = db.query(TaskRun.id).filter(TaskRun.task_id == task_id,
+                TaskRun.status.in_(('outcome_unknown', 'issued_waiting', 'issued_resuming'))).first()
+            if unresolved:
+                raise HTTPException(409, 'Task outcome is unknown; stop cannot confirm settlement')
+            expected = _task_expected(task, user, account)
         finally:
             db.close()
-        stopped = await task_scheduler.stop_task(task_id)
+        stopped = await task_scheduler.stop_task(task_id, manual_expected=expected)
         if not stopped:
-            raise HTTPException(404, "Task is not running")
-        return {"ok": True, "message": "Task stopped"}
+            raise HTTPException(409, "Task stop unavailable or changed; outcome may be unknown")
+        return {"ok": True, "message": "Task stop requested; remote or detached work may remain unknown"}
 
     @router.get("/runs/recent")
     async def list_recent_runs(request: Request, limit: int = 50, max_result_chars: int = 6000):
         """Recent task runs across ALL tasks for this owner. Drives the Activity view."""
-        user = _owner(request)
+        user, account = await _task_scope(request)
         limit = max(1, min(limit, 200))
         max_result_chars = max(500, min(max_result_chars, 20000))
         db = SessionLocal()
@@ -1243,7 +1347,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 # user. _migrate_assign_legacy_owner runs on startup to claim
                 # legacy rows for the admin, so the OR-NULL path is no longer
                 # needed for any sane deploy.
-                q = q.filter(ScheduledTask.owner == user)
+                q = q.filter(*_task_scope_filter(user, account))
             # Pull a little extra before de-duping. When auth is bypassed on a
             # local browser session, legacy/default tasks from multiple owners
             # can be visible together; the built-in urgent-email scanner then
@@ -1281,6 +1385,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                         "task_name": _display_task_name(t),
                         "task_type": t.task_type or "llm",
                         "action": t.action,
+                        "cache_clear_capability": {"available": False, "reason": "Cache ownership cannot be confirmed; nothing will be cleared"},
                         # Model + endpoint the task ran on, so the Activity
                         # view's "Open in chat" can reuse the same model.
                         "model": r.model or t.model or "",
@@ -1299,10 +1404,10 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.get("/{task_id}/runs")
     async def list_runs(request: Request, task_id: str, limit: int = 20, offset: int = 0):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:
@@ -1314,6 +1419,27 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             return {"runs": [_run_to_dict(r) for r in runs], "total": total}
         finally:
             db.close()
+
+    @router.get("/{task_id}/runs/{run_id}/usage")
+    async def read_run_usage(request: Request, task_id: str, run_id: str):
+        owner, account = await _task_scope(request)
+        if any(not value.strip() or len(value) > 512 for value in (task_id, run_id)):
+            raise HTTPException(404, "Task run not found")
+
+        from routes.stats_routes import _run_bounded
+        from services.stats.task_usage import task_run_usage
+
+        def read(cancel_event, deadline):
+            with SessionLocal() as db:
+                return task_run_usage(db, owner=owner, account=account, task_id=task_id, run_id=run_id,
+                                      cancel_event=cancel_event, deadline=deadline)
+
+        result = await _run_bounded(read)
+        if await _task_scope(request) != (owner, account):
+            raise HTTPException(409, "Task account changed")
+        if result is None:
+            raise HTTPException(404, "Task run not found")
+        return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
 
     @router.get("/meta/output-targets")
     async def list_output_targets(request: Request):
@@ -1379,38 +1505,51 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         ]}
 
     @router.post("/{task_id}/webhook/{token}")
-    async def webhook_trigger(task_id: str, token: str):
-        """Unauthenticated endpoint — the token IS the auth."""
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(
-                ScheduledTask.id == task_id,
-                ScheduledTask.webhook_token == token,
-                ScheduledTask.status == "active",
-            ).first()
+    async def webhook_trigger(request: Request, task_id: str, token: str):
+        """Bearer request still requires the task's original bound account."""
+        with SessionLocal() as db:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id,
+                ScheduledTask.webhook_token == token, ScheduledTask.status == "active").first()
             if not task:
                 raise HTTPException(404, "Not found")
-            if (
-                is_admin_only_task_action(task.task_type, task.action)
-                and not owner_has_admin_task_privileges(task.owner)
-            ):
-                task.status = "paused"
-                task.next_run = None
-                db.commit()
-                raise HTTPException(403, f"Action '{task.action}' requires admin privileges")
-        finally:
-            db.close()
-        started = await task_scheduler.run_task_now(task_id)
-        if not started:
-            raise HTTPException(409, "Task is already running")
-        return {"ok": True, "message": "Task triggered via webhook"}
+            owner, account = task.owner, task.host_account_id
+        auth = getattr(request.app.state, 'auth_manager', None)
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        if not owner or not account or auth is None or barrier is None:
+            raise HTTPException(503, 'Webhook task account unavailable')
+        from src.openclank.account_request_barrier import AccountRequestFenced
+        try:
+            async with barrier.admitted(owner):
+                with SessionLocal() as db:
+                    if db.get_bind().dialect.name == 'sqlite':
+                        db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+                    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id,
+                        ScheduledTask.webhook_token == token, ScheduledTask.status == "active").first()
+                    if (not task or task.owner != owner or task.host_account_id != account
+                            or auth.account_id(owner) != account or auth.username_for_account_id(account) != owner):
+                        raise HTTPException(503, 'Webhook task account unavailable')
+                    if (is_admin_only_task_action(task.task_type, task.action)
+                            and not owner_has_admin_task_privileges(owner)):
+                        task.status = "paused"
+                        task.next_run = None
+                        db.commit()
+                        raise HTTPException(403, f"Action '{task.action}' requires admin privileges")
+                    expected = _task_expected(task, owner, account)
+                started = await task_scheduler.run_task_now(task_id, manual_expected=expected)
+                if not started:
+                    raise HTTPException(409, "Task is already running or changed")
+                return {"ok": True, "message": "Task queued for account admission; it may be skipped if authority changes"}
+        except AccountRequestFenced as exc:
+            raise HTTPException(503, 'Webhook task account unavailable') from exc
 
     @router.post("/{task_id}/webhook-regenerate")
     async def regenerate_webhook(request: Request, task_id: str):
-        user = _owner(request)
+        user, account = await _task_scope(request)
         db = SessionLocal()
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if db.get_bind().dialect.name == 'sqlite':
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, *_task_scope_filter(user, account)).first()
             if not task:
                 raise HTTPException(404, "Task not found")
             if user and task.owner != user:

@@ -7,6 +7,7 @@ import { Agent } from "../../src/agent/agent"
 import { Memory } from "../../src/memory"
 import { ActorRegistry } from "../../src/actor/registry"
 import { Actor, type AgentOutcome } from "../../src/actor/spawn"
+import { prefixCaptureRef } from "../../src/session/prefix-capture-ref"
 import { spawnRef } from "../../src/actor/spawn-ref"
 import { TaskRegistry } from "../../src/task/registry"
 import { SessionCheckpoint } from "../../src/session/checkpoint"
@@ -27,18 +28,29 @@ const ref = {
   modelID: ModelID.make("test-model"),
 }
 
+let preparationGate: Deferred.Deferred<void> | undefined
+let preparationReached: Deferred.Deferred<void> | undefined
+const raceOutcomes: Deferred.Deferred<AgentOutcome>[] = []
+
 // Actor stub whose outcome Deferred never resolves — a writer still grinding
 // through LLM round-trips when the caller's bounded wait expires.
 const hangingActor = Layer.effect(
   Actor.Service,
   Effect.gen(function* () {
     const prevSpawnRef = spawnRef.current
+    const prevPrefix = prefixCaptureRef.current
+    prefixCaptureRef.current = () => Effect.succeed({ system: [], tools: {}, inheritedMessages: [{ role: "user" as const, content: "seed" }], parentPermission: [] })
     let counter = 0
     const impl = Actor.Service.of({
       spawn: (input) =>
         Effect.gen(function* () {
           counter += 1
+          if (preparationGate && counter === 1) {
+            yield* Deferred.succeed(preparationReached!, undefined)
+            yield* Deferred.await(preparationGate)
+          }
           const outcome = yield* Deferred.make<AgentOutcome>()
+          raceOutcomes.push(outcome)
           return { actorID: `${input.agentType}-${counter}`, sessionID: input.sessionID, outcome }
         }),
       cancel: () => Effect.void,
@@ -49,6 +61,7 @@ const hangingActor = Layer.effect(
       () =>
         Effect.sync(() => {
           if (spawnRef.current === impl) spawnRef.current = prevSpawnRef
+          prefixCaptureRef.current = prevPrefix
         }),
     )
     return impl
@@ -76,6 +89,34 @@ const env = Layer.mergeAll(
 const it = testEffect(env)
 
 describe("SessionCheckpoint.waitForWriter", () => {
+  it.live("holds the busy guard through preparation and newest queued handoff", provideTmpdirInstance(() =>
+    Effect.gen(function* () {
+      const svc = yield* SessionCheckpoint.Service
+      const ssn = yield* SessionNs.Service
+      const info = yield* ssn.create({})
+      const user = yield* ssn.updateMessage({ id: MessageID.ascending(), role: "user", sessionID: info.id,
+        agent: "build", model: ref, time: { created: Date.now() } })
+      yield* ssn.updatePart({ id: PartID.ascending(), messageID: user.id, sessionID: info.id, type: "text", text: "seed" })
+      preparationGate = yield* Deferred.make<void>()
+      preparationReached = yield* Deferred.make<void>()
+      raceOutcomes.length = 0
+      const request = { sessionID: info.id, model: { providerID: "test", modelID: "test-model" }, promptOps: {} as never }
+      const first = yield* Effect.forkChild(svc.tryStartCheckpointWriter(request))
+      yield* Deferred.await(preparationReached)
+      expect(svc.busyGuard!(info.id)()).toBe(true)
+      expect(yield* svc.tryStartCheckpointWriter(request)).toBe("queued")
+      expect(yield* svc.tryStartCheckpointWriter(request)).toBe("queued")
+      yield* Deferred.succeed(preparationGate, undefined)
+      expect(yield* Fiber.join(first)).toBe("started")
+      yield* Deferred.succeed(raceOutcomes[0], { status: "failure", error: "test" })
+      yield* Effect.sleep("500 millis")
+      expect(svc.busyGuard!(info.id)()).toBe(true)
+      expect(raceOutcomes.length).toBe(2)
+      yield* Deferred.succeed(raceOutcomes[1], { status: "failure", error: "test" })
+      yield* Effect.sleep("500 millis")
+      expect(svc.busyGuard!(info.id)()).toBe(false)
+      preparationGate = undefined; preparationReached = undefined
+    })))
   it.effect(
     "in-flight writer past the wait bound reports 'timeout', never 'failure'",
     provideTmpdirInstance(() =>

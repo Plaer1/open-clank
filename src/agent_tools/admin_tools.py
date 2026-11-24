@@ -84,7 +84,7 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
 #
 # Commands that can execute arbitrary code regardless of their arguments. These
 # are NEVER accepted on the manage_mcp agent path, even if an operator lists one
-# in ODYSSEUS_MCP_ALLOWED_COMMANDS -- a stdio server that genuinely needs an
+# in OPEN_CLANK_MCP_ALLOWED_COMMANDS -- a stdio server that genuinely needs an
 # interpreter or package runner must be registered via the trusted admin route.
 _MCP_DENIED_COMMANDS = frozenset({
     "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "ash", "busybox",
@@ -126,10 +126,10 @@ _MCP_DANGEROUS_ENV = frozenset({
 
 def _mcp_allowed_commands() -> set:
     """Operator-configured allowlist of safe MCP launcher basenames for the agent
-    path. Empty by default; set ODYSSEUS_MCP_ALLOWED_COMMANDS (comma-separated)
+    path. Empty by default; set OPEN_CLANK_MCP_ALLOWED_COMMANDS (comma-separated)
     to opt specific trusted binaries in. Denied commands are rejected even if
     listed here."""
-    raw = os.environ.get("ODYSSEUS_MCP_ALLOWED_COMMANDS", "")
+    raw = os.environ.get("OPEN_CLANK_MCP_ALLOWED_COMMANDS", "")
     return {c.strip().lower() for c in raw.split(",") if c.strip()}
 
 
@@ -166,7 +166,7 @@ def _validate_mcp_command(command, args, env) -> Optional[str]:
     if base not in _mcp_allowed_commands():
         return (
             f"command '{command}' is not in the MCP allowlist. Add it to "
-            "ODYSSEUS_MCP_ALLOWED_COMMANDS if you trust it, or register the "
+            "OPEN_CLANK_MCP_ALLOWED_COMMANDS if you trust it, or register the "
             "server via the admin route."
         )
 
@@ -522,10 +522,8 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             changed_keys = set(changed_keys)
             personal_keys = changed_keys & PER_USER_MODEL_SETTING_KEYS
             if owner and personal_keys:
-                from routes.prefs_routes import _load_for_user, _save_for_user
-                prefs = _load_for_user(owner)
-                prefs.update({key: settings[key] for key in personal_keys})
-                _save_for_user(owner, prefs)
+                from routes.prefs_routes import _update_for_user
+                _update_for_user(owner, {key: settings[key] for key in personal_keys})
             global_keys = changed_keys - personal_keys if owner else changed_keys
             if global_keys:
                 global_settings = load_settings()

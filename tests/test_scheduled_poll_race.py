@@ -1,7 +1,7 @@
 """Regression: two concurrent callers of `_scheduled_poll_once` (the
 in-process 30s poller and the `odysseus-mail poll-scheduled` CLI, which the
 project's own docstrings warn can race on the same SQLite when
-ODYSSEUS_INPROCESS_POLLERS is left enabled alongside an external cron/systemd
+OPEN_CLANK_INPROCESS_POLLERS is left enabled alongside an external cron/systemd
 driver) must not both send the same scheduled email.
 
 The old code selected pending rows, then only updated their status to 'sent'

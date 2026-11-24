@@ -2,16 +2,16 @@
   "id": "bs",
   "name": "Bosanski",
   "dir": "ltr",
-  "catalog": "en",
-  "html_lang": "en",
-  "kind": "english-fallback",
+  "catalog": "bs",
+  "html_lang": "bs",
+  "kind": "dedicated",
   "alias_of": null,
   "advertised": true,
-  "english_fallback": true,
+  "english_fallback": false,
   "counts": {
-    "keys": 9622,
-    "translated": 0,
-    "english_fallback": 9622
+    "keys": 9759,
+    "translated": 1784,
+    "english_fallback": 7975
   },
   "missing_keys": 0,
   "extra_keys": 0,

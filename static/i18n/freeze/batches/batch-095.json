@@ -1,0 +1,35 @@
+{
+  "id": "batch-095",
+  "group": "docs.openclank-docs-setup",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1712,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-setup.title",
+      "source": "Setup and First Run",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-setup.body",
+      "source": "# Setup and First Run\n\nCheck [[Limits and Platform Support]] for your target.\n\n## Start a fresh installation\n\n- **macOS** · Copy the packaged **OpenClank.app** to Applications. Use the menu-bar icon’s **Open** to show the app and **Quit** to stop its service.\n- **Windows** · Use the matching release installer. Start menu **Open Clank** opens the app and **Stop Open Clank** stops its service.\n- **Source** · Follow the platform steps for Python, Rust, native workers and matching offline artwork. Start the service with `openclank server start`. [Setup guide and artwork instructions](https://github.com/Plaer1/open-clank/blob/main/docs/setup.md).\n\nThe default local address is `http://127.0.0.1:7777`.\n\n## Sign in\n\nA fresh package asks you to create the first administrator in the browser. A source installation uses the administrator configured during setup. Change any generated temporary password in **Settings → Account**.\n\nTo use Chat, connect a model in **Settings → Add Provider**. Signing into Open Clank and signing into a model provider are separate. See [[Accounts and Models]].\n\n## Update an existing installation\n\nBack up the configured stores and workspaces and stop the owning service. Follow the migration steps for your starting version before restarting. [Upgrade guide](https://github.com/Plaer1/open-clank/blob/main/docs/upgrading.md).\n\n## When startup fails\n\nCheck the package error or run `openclank server status` for your source installation. If startup refuses an existing store, preserve it and follow the upgrade guide. See [[Recovery]].\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

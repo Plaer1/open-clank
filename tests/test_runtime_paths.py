@@ -58,16 +58,16 @@ def test_get_default_data_dir_frozen():
         assert res == expected
 
 
-def test_get_default_data_dir_migrates_legacy_frozen_root(tmp_path):
+def test_get_default_data_dir_preserves_legacy_frozen_root_for_explicit_migration(tmp_path):
     legacy = tmp_path / ".odysseus"
     (legacy / "data").mkdir(parents=True)
     (legacy / "data" / "proof.txt").write_text("kept")
     with mock.patch.object(sys, "frozen", True, create=True), \
          mock.patch("src.runtime_paths.os.path.expanduser", return_value=str(tmp_path)):
-        result = Path(get_default_data_dir())
-    assert result == tmp_path / ".open-clank" / "data"
-    assert (result / "proof.txt").read_text() == "kept"
-    assert not legacy.exists()
+        with pytest.raises(RuntimeError, match="home-root"):
+            get_default_data_dir()
+    assert (legacy / "data" / "proof.txt").read_text() == "kept"
+    assert not (tmp_path / ".open-clank").exists()
 
 
 def test_resolve_python_uses_bootstrap_probe(monkeypatch):
@@ -105,4 +105,4 @@ def test_resolve_runtime_bundle_has_admitted_components(tmp_path):
     bundle = resolve_runtime_bundle(Path(__file__).resolve().parents[1])
     assert bundle["python"]["path"]
     assert bundle["lifetools"]["path"].endswith("src/openclank/lifetools_server.py")
-    assert bundle["fm_mcp"]["path"].endswith(("fm-mcp", "fm-mcp.exe"))
+    assert bundle["memery_worker"]["path"].endswith(("memery-worker", "memery-worker.exe"))

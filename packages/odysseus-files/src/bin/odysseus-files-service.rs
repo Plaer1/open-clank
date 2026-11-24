@@ -13,12 +13,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn main() -> io::Result<()> {
-    let owner_id = env::var("ODYSSEUS_FILES_OWNER_ID").unwrap_or_else(|_| "default-owner".into());
+    let owner_id = env::var("OPEN_CLANK_FILES_OWNER_ID").unwrap_or_else(|_| "default-owner".into());
     let principal_id =
-        env::var("ODYSSEUS_FILES_PRINCIPAL_ID").unwrap_or_else(|_| "odysseus-app".into());
+        env::var("OPEN_CLANK_FILES_PRINCIPAL_ID").unwrap_or_else(|_| "odysseus-app".into());
     let session_id =
-        env::var("ODYSSEUS_FILES_SESSION_ID").unwrap_or_else(|_| "service-session".into());
-    let lane = match env::var("ODYSSEUS_FILES_LANE")
+        env::var("OPEN_CLANK_FILES_SESSION_ID").unwrap_or_else(|_| "service-session".into());
+    let lane = match env::var("OPEN_CLANK_FILES_LANE")
         .unwrap_or_else(|_| "app".into())
         .as_str()
     {
@@ -27,7 +27,7 @@ fn main() -> io::Result<()> {
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unknown ODYSSEUS_FILES_LANE: {other}"),
+                format!("unknown OPEN_CLANK_FILES_LANE: {other}"),
             ));
         }
     };
@@ -89,8 +89,44 @@ fn main() -> io::Result<()> {
             }
         }
     });
+    // The Host injects this only into a fresh one-invocation agent process.
+    // It describes capture authorship; the existing scope remains authority.
+    match env::var("OPENCLANK_WORKFLOW_WRITER_CONTEXT") {
+        Ok(raw) => {
+            if lane != TrustLane::Agent || !history_required || identity.principal_id() != "odysseus-agent" {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied,"workflow writer unavailable"));
+            }
+            let hook=history_hook.as_ref().ok_or_else(||io::Error::new(io::ErrorKind::PermissionDenied,"workflow writer unavailable"))?;
+            hook.set_workflow_writer_context(&raw,&format!("agent:{}",identity.owner_id()))
+                .map_err(|_|io::Error::new(io::ErrorKind::PermissionDenied,"workflow writer unavailable"))?;
+        },
+        Err(env::VarError::NotPresent) => {},
+        Err(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput,"workflow writer unavailable")),
+    }
+    match env::var("OPENCLANK_ORDINARY_WRITER_CONTEXT") {
+        Ok(raw) => {
+            if lane != TrustLane::Agent || !history_required || identity.principal_id() != "odysseus-agent" || env::var_os("OPENCLANK_WORKFLOW_WRITER_CONTEXT").is_some() {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied,"ordinary writer unavailable"));
+            }
+            let hook=history_hook.as_ref().ok_or_else(||io::Error::new(io::ErrorKind::PermissionDenied,"ordinary writer unavailable"))?;
+            hook.set_ordinary_writer_context(&raw,&format!("agent:{}",identity.owner_id()))
+                .map_err(|_|io::Error::new(io::ErrorKind::PermissionDenied,"ordinary writer unavailable"))?;
+        },
+        Err(env::VarError::NotPresent) => {},
+        Err(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput,"ordinary writer unavailable")),
+    }
+    match env::var("OPENCLANK_GRAPH_CAPTURE_CONTEXT") {
+        Ok(raw) => {
+            if lane != TrustLane::App || !history_required || (env::var_os("OPENCLANK_WORKFLOW_WRITER_CONTEXT").is_some() || env::var_os("OPENCLANK_ORDINARY_WRITER_CONTEXT").is_some()) {return Err(io::Error::new(io::ErrorKind::PermissionDenied,"graph capture unavailable"));}
+            let hook=history_hook.as_ref().ok_or_else(||io::Error::new(io::ErrorKind::PermissionDenied,"graph capture unavailable"))?;
+            hook.set_graph_capture_context(&raw).map_err(|_|io::Error::new(io::ErrorKind::PermissionDenied,"graph capture unavailable"))?;
+        },
+        Err(env::VarError::NotPresent) => {},
+        Err(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput,"graph capture unavailable")),
+    }
     let mut service =
-        FileService::new(FileEngine::new(EngineConfig::default(), registry).require_capture(history_required), identity);
+        FileService::new(FileEngine::new(EngineConfig::default(), registry).require_capture(history_required)
+            .with_managed_journal_root(env::var_os("OPEN_CLANK_FILES_MANAGED_JOURNAL_ROOT").map(PathBuf::from)), identity);
     if let Some(history_hook) = history_hook {
         service = service.with_history_capture(history_hook);
     }
@@ -117,7 +153,7 @@ fn main() -> io::Result<()> {
     }
     let service = Arc::new(service);
 
-    if let Some(socket_path) = env::var_os("ODYSSEUS_FILES_GRPC_SOCKET") {
+    if let Some(socket_path) = env::var_os("OPEN_CLANK_FILES_GRPC_SOCKET") {
         #[cfg(all(feature = "tonic-transport", any(target_os = "macos", target_os = "linux", windows)))]
         {
             return run_grpc(service, socket_path.into());
@@ -131,7 +167,7 @@ fn main() -> io::Result<()> {
             ));
         }
     }
-    if let Ok(socket_path) = env::var("ODYSSEUS_FILES_SOCKET") {
+    if let Ok(socket_path) = env::var("OPEN_CLANK_FILES_SOCKET") {
         #[cfg(unix)]
         {
             return run_socket(service, socket_path);
@@ -153,14 +189,13 @@ fn linux_thumbnail_helper_path() -> io::Result<Option<PathBuf>> {
     use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
-    let candidate = env::var_os("ODYSSEUS_LINUX_THUMBNAIL_HELPER_BIN").map(PathBuf::from)
+    let candidate = env::var_os("OPEN_CLANK_LINUX_THUMBNAIL_HELPER_BIN").map(PathBuf::from)
         .or_else(|| env::current_exe().ok()?.parent().map(|parent| parent.join("odysseus-linux-thumbnail-helper")));
     let Some(path) = candidate.filter(|path| path.metadata().map(|metadata|
         metadata.is_file() && metadata.permissions().mode() & 0o111 != 0).unwrap_or(false)) else {
         return Ok(None);
     };
-    // A broken/missing optional desktop renderer must not disable ordinary Files
-    // or advertise native thumbnails that cannot be generated from a cold cache.
+    // Enable the broker when its worker can read desktop previews or generate them.
     let Ok(mut probe) = Command::new(&path).arg("--probe")
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
         return Ok(None);
@@ -177,7 +212,7 @@ fn linux_thumbnail_helper_path() -> io::Result<Option<PathBuf>> {
 
 #[cfg(target_os = "macos")]
 fn quicklook_helper_path() -> io::Result<Option<PathBuf>> {
-    if let Some(configured) = env::var_os("ODYSSEUS_QUICKLOOK_HELPER_BIN") {
+    if let Some(configured) = env::var_os("OPEN_CLANK_QUICKLOOK_HELPER_BIN") {
         let path = PathBuf::from(configured);
         if !path.is_file() {
             return Err(io::Error::new(
@@ -215,7 +250,7 @@ fn run_grpc(service: Arc<FileService>, socket_path: std::path::PathBuf) -> io::R
 }
 
 fn load_registry() -> io::Result<RootRegistry> {
-    let Some(path) = env::var_os("ODYSSEUS_FILES_REGISTRY") else {
+    let Some(path) = env::var_os("OPEN_CLANK_FILES_REGISTRY") else {
         return Ok(RootRegistry::default());
     };
     let file = File::open(path)?;
@@ -223,7 +258,7 @@ fn load_registry() -> io::Result<RootRegistry> {
 }
 
 fn load_scope() -> io::Result<AgentScope> {
-    let Some(raw) = env::var_os("ODYSSEUS_FILES_SCOPE") else {
+    let Some(raw) = env::var_os("OPEN_CLANK_FILES_SCOPE") else {
         return Ok(AgentScope::default());
     };
     serde_json::from_str(&raw.to_string_lossy())
@@ -231,10 +266,10 @@ fn load_scope() -> io::Result<AgentScope> {
 }
 
 fn load_app_scope() -> io::Result<AppScope> {
-    let raw = env::var_os("ODYSSEUS_FILES_APP_SCOPE").ok_or_else(|| {
+    let raw = env::var_os("OPEN_CLANK_FILES_APP_SCOPE").ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "ODYSSEUS_FILES_APP_SCOPE is required for app lane",
+            "OPEN_CLANK_FILES_APP_SCOPE is required for app lane",
         )
     })?;
     serde_json::from_str(&raw.to_string_lossy())
@@ -243,6 +278,7 @@ fn load_app_scope() -> io::Result<AppScope> {
 
 fn dispatch(service: &FileService, bytes: &[u8]) -> Vec<u8> {
     let response: Value = match serde_json::from_slice::<ClientRequest>(bytes) {
+        Ok(request) if request.operation.is_worktree_stage() && bytes.len()>4*1024*1024 => serde_json::json!({"code":"malformed_request","message":"worktree stage frame exceeds limit"}),
         Ok(request) => match service.dispatch(request) {
             Ok(value) => value,
             Err(error) => serde_json::to_value(error).unwrap_or_else(
@@ -311,7 +347,7 @@ fn run_socket(service: Arc<FileService>, socket_path: String) -> io::Result<()> 
 
 #[cfg(windows)]
 fn shell_thumbnail_helper_path() -> io::Result<Option<PathBuf>> {
-    if let Some(configured) = env::var_os("ODYSSEUS_SHELL_THUMBNAIL_HELPER_BIN") {
+    if let Some(configured) = env::var_os("OPEN_CLANK_SHELL_THUMBNAIL_HELPER_BIN") {
         let path = PathBuf::from(configured);
         if !path.is_file() { return Err(io::Error::new(io::ErrorKind::NotFound, "configured Shell thumbnail helper unavailable")); }
         return Ok(Some(path));

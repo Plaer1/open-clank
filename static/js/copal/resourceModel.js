@@ -1,7 +1,7 @@
 /** Shared, authority-neutral Copal resource and revision DTOs. */
 
-const PROVIDERS = new Set(['copal', 'host', 'treehouse']);
-const REPRESENTATIONS = new Set(['nativeNote', 'markdown', 'text', 'base', 'wikiArticle', 'meme', 'asset', 'courseDraft']);
+const PROVIDERS = new Set(['copal', 'host', 'treehouse', 'files']);
+const REPRESENTATIONS = new Set(['nativeNote', 'markdown', 'text', 'base', 'wikiArticle', 'meme', 'asset', 'courseDraft', 'image']);
 // `meme` is a compatibility ingress alias for the typed Wiki article
 // representation. New code writes `wikiArticle`; handles normalize at the
 // boundary so existing callers and saved DTOs keep loading.
@@ -43,6 +43,16 @@ export function normalizeRevision(value = {}) {
   return Object.freeze({ kind, value: string(source.value, 'revision value') });
 }
 
+// Files image/content revisions are distinct from text-document revision kinds.
+export function normalizeImageRevision(value = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  const kind = string(source.kind, 'revision kind');
+  if (!new Set(['copalHead', 'hostFingerprint', 'domain', 'filesImageRevision', 'imageSha256', 'contentDigest']).has(kind)) {
+    throw new TypeError(`unsupported image revision kind: ${kind}`);
+  }
+  return Object.freeze({ kind, value:string(source.value, 'revision value') });
+}
+
 function capabilities(value = {}) {
   const source = value && typeof value === 'object' ? value : {};
   return Object.freeze(Object.fromEntries(['read', 'edit', 'rename', 'move', 'trash', 'attach', 'reveal']
@@ -63,11 +73,13 @@ export function normalizeResourceHandle(value = {}) {
   const rawRepresentation = string(source.representation, 'representation');
   if (!REPRESENTATIONS.has(rawRepresentation)) throw new TypeError(`unsupported representation: ${rawRepresentation}`);
   const representation = REPRESENTATION_ALIASES.get(rawRepresentation) || rawRepresentation;
+  const key = normalizeResourceKey(source.key);
+  if (key.provider === 'files' && representation !== 'image') throw new TypeError('Files resources require the image representation');
   const location = source.locator && typeof source.locator === 'object' ? source.locator : {};
   const metadata = resourceMetadata(source.metadata);
   return Object.freeze({
-    key: normalizeResourceKey(source.key),
-    revision: normalizeRevision(source.revision),
+    key,
+    revision: representation === 'image' ? normalizeImageRevision(source.revision) : normalizeRevision(source.revision),
     locator: Object.freeze({
       displayName: string(location.displayName, 'displayName'),
       locationLabel: string(location.locationLabel, 'locationLabel'),

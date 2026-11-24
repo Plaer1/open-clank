@@ -24,7 +24,7 @@ def setup_general_hex_routes(*, db_path=None, db_path_resolver=None, owner_resol
                 from src.general_hex_runtime import prepare_hex_authority
                 path = db_path_resolver()
                 if not path:
-                    raise HTTPException(503, 'General Hex authority unavailable: no pinned local Frankenmemory store')
+                    raise HTTPException(503, 'General Hex authority unavailable: no pinned local Memery store')
                 prepare_hex_authority(path)
                 operation = getattr(GeneralHexRepository(path), operation.__name__)
             return operation(*args, **kwargs)

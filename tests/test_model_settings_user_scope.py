@@ -21,6 +21,9 @@ class _AuthManager:
     def is_admin(self, user):
         return user == "alice"
 
+    def account_id(self, user):
+        return 'account-' + user
+
 
 class _Request:
     def __init__(self, token=None, body=None):
@@ -58,6 +61,8 @@ def settings_routes(monkeypatch):
     monkeypatch.setattr(auth_routes, "_load_settings", lambda: dict(global_settings))
     monkeypatch.setattr(auth_routes, "_save_settings", lambda value: saved_global.append(dict(value)))
     monkeypatch.setattr(auth_routes, "_load_for_user", lambda user: dict(prefs.get(user, {})))
+    monkeypatch.setattr(prefs_routes, "_load_for_user", lambda user: dict(prefs.get(user, {})))
+    monkeypatch.setattr(prefs_routes, "_save_for_user", lambda user, value, **kwargs: prefs.__setitem__(user, dict(value)))
     monkeypatch.setattr(
         auth_routes,
         "_save_for_user",
@@ -318,3 +323,25 @@ def test_whole_legacy_null_is_observational_inherit_and_field_null_resets(settin
     settings_routes["prefs"]["bob"]["agent_settings"] = {"compaction": {"max_context": "300K", "auto": False}}
     result = asyncio.run(settings_routes["post"](_Request("bob-token", {"agent_settings": {"compaction": {"max_context": None}}})))
     assert result["agent_settings_saved"] == {"compaction": {"auto": False}}
+
+
+def test_explicit_distill_settings_use_policy_fence(settings_routes, monkeypatch):
+    import src.openclank.memory_policy_projection as projection
+    events=[]
+    class Coordinator:
+        def begin(self,user,before): events.append(('begin',user)); return object()
+        def finish(self,token,user,after): events.append(('finish',user,after['agent_settings']['distill']))
+        def close(self,token): events.append(('close',))
+    monkeypatch.setattr(projection,'policy_coordinator',lambda: Coordinator())
+    settings_routes['prefs']['bob']['agent_settings']={'distill':{'auto':True,'interval_days':30}}
+    baseline=projection.preference_inputs({})
+    assert projection.preference_inputs(settings_routes['prefs']['bob']) == baseline
+    assert '_skill_draft_policy_version' not in prefs_routes._protected_preferences({}, {'_skill_draft_policy_version':1})
+    asyncio.run(settings_routes['post'](_Request('bob-token',{'agent_settings':{'compaction':{'auto':False}}})))
+    assert events==[] and projection.preference_inputs(settings_routes['prefs']['bob']) == baseline
+    result=asyncio.run(settings_routes['post'](_Request('bob-token',{'agent_settings':{'distill':{'interval_days':7}}})))
+    assert result['agent_settings_saved']['distill']=={'interval_days':7}
+    assert [event[0] for event in events]==['begin','finish','close']
+    projected=projection.preference_inputs(settings_routes['prefs']['bob'])
+    assert projected['agent_settings_distill']==[True,{'interval_days':7}]
+    assert projected['agent_settings_distill_version']==[True,1]

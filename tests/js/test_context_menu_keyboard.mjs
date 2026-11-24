@@ -7,7 +7,7 @@ const start=source.indexOf('function onKeyboardContextMenu(event) {'),end=source
 assert(start>=0&&end>start);
 function fixture(){
  class Element{closest(){return null;}}
- const target=new Element(),body=new Element(),request={owner:'captured'},calls=[],scope={Element,document:{activeElement:target,body,documentElement:new Element()},MENU_ID:'openclank-context-menu',active:null,enabled:()=>true,capture:e=>{calls.push(['capture',e.target===target,e.detail]);return request;},isCapturedContextCurrent:r=>r===request,renderMenu:r=>{calls.push(['render',r===request]);return true;},closeMenu:o=>calls.push(['close',o.restore])};
+ const target=new Element(),body=new Element(),request={owner:'captured'},calls=[],scope={Element,document:{activeElement:target,body,documentElement:new Element()},MENU_ID:'openclank-context-menu',active:null,enabled:()=>true,capture:e=>{calls.push(['capture',e.target===target,e.detail]);return request;},isCapturedContextCurrent:r=>r===request,renderMenu:r=>{calls.push(['render',r===request]);if(!scope.isCapturedContextCurrent(r))return false;scope.active=r;return true;},closeMenu:o=>{calls.push(['close',o.restore]);scope.active=null;}};
  vm.createContext(scope);vm.runInContext(source.slice(start,end)+'\nthis.invoke=onKeyboardContextMenu;',scope);
  const event={key:'F10',shiftKey:true,ctrlKey:false,altKey:false,metaKey:false,defaultPrevented:false,isComposing:false,keyCode:121,repeat:false,preventDefault(){this.defaultPrevented=true;}};
  return {scope,event,calls,target,request};

@@ -22,8 +22,8 @@ import { clampFloatingWindow, windowViewportBounds, observeWindowWorkspace } fro
 const SNAP_PX = 60;
 const UNSNAP_PX = 80;
 const MIN_CHAT_WIDTH = 380;
-const EMAIL_DOC_SPLIT_WIDTH_KEY = 'odysseus-email-doc-split-width';
-const EDGE_DOCK_WIDTH_KEY_PREFIX = 'odysseus-edge-dock-width';
+const EMAIL_DOC_SPLIT_WIDTH_KEY = 'openclank-email-doc-split-width';
+const EDGE_DOCK_WIDTH_KEY_PREFIX = 'openclank-edge-dock-width';
 const MIN_EDGE_DOCK_WIDTH = 320;
 
 function _chatWidthFloor() {
@@ -343,17 +343,33 @@ function _visibleDockOccupied(side, owner) {
     && !modal.classList.contains('modal-minimized') && modal.style.display !== 'none'
     && !_resolveDockNodes(modal)?.content?._dockSuspended);
 }
+export function inlineDesktopChat() {
+  const chat = document.getElementById('chat-container');
+  return window.innerWidth > 768 && chat?.parentElement === document.body
+    && !document.body.matches('.chat-workspace-hidden,.chat-workspace-popout')
+    && !chat.matches('.chat-popout,[hidden]') && chat.getClientRects().length > 0
+    && getComputedStyle(chat).visibility !== 'hidden' ? chat : null;
+}
+
 export function chatVisiblePlacementRect(modal, side = 'right', maximized = false) {
   if (maximized && _visibleDockOccupied(side, modal)) side = side === 'left' ? 'right' : 'left';
   const bounds = windowViewportBounds();
   const opposite = side === 'left' ? 'right' : 'left';
   const available = Math.max(1, bounds.width - _activeDockWidth(opposite));
   const minimum = Math.max(MIN_EDGE_DOCK_WIDTH, Number(modal?.dataset.chatPaneMinWidth) || 560);
-  const single = available < minimum + MIN_CHAT_WIDTH;
+  const desktop = window.innerWidth > 768;
+  const inline = !!inlineDesktopChat();
+  const single = !inline && (available < minimum + MIN_CHAT_WIDTH || (desktop && maximized));
+  // On compact desktops both panes reflow. Keep the wider legacy chat floor
+  // wherever it fits, with a proportional split in the remaining narrower lane.
   const content = _resolveDockNodes(modal)?.content;
-  const requested = maximized ? available - MIN_CHAT_WIDTH
+  const chatFloor = !maximized && content?._userDockWidth ? 260 : MIN_CHAT_WIDTH;
+  const chatWidth = inline ? Math.min(chatFloor, Math.floor(available * .58))
+    : desktop ? 0 : MIN_CHAT_WIDTH;
+  const maximum = Math.max(1, available - chatWidth);
+  const requested = maximized ? maximum
     : content?._userDockWidth || _storedDockWidth(modal, content, side) || Math.round(available * .55);
-  const width = single ? available : Math.min(available - MIN_CHAT_WIDTH, Math.max(minimum, requested));
+  const width = single ? available : Math.min(maximum, Math.max(minimum, requested));
   return {left:side === 'left' ? bounds.left : bounds.right - width, top:bounds.top,
     width, height:bounds.height, single};
 }
@@ -396,7 +412,8 @@ export function applyEdgeDock(modal, side = 'right', dockClass, options = {}) {
   // minimizes through its established lifecycle instead of sharing one variable.
   if (!_chatVisibleOwner(modal)) {
     for (const peer of document.querySelectorAll(`.${_dockClassForSide(side)}[data-chat-visible-maximize="true"]`)) {
-      if (peer === modal || peer.classList.contains('hidden') || peer.classList.contains('modal-minimized')) continue;
+      if (peer === modal || peer.classList.contains('hidden') || peer.classList.contains('modal-minimized')
+          || _resolveDockNodes(peer)?.content?._dockSuspended) continue;
       const opposite = side === 'left' ? 'right' : 'left';
       if (!_visibleDockOccupied(opposite, peer)) _applyDockInternal(peer, opposite, _dockClassForSide(opposite));
       else peer.__openClankWindow?.minimize?.();
@@ -805,7 +822,7 @@ export function resumeDock(modal) {
   if (!nodes || !nodes.content) return false;
   const content = nodes.content;
   const side = content._dockSuspended;
-  if (!side) return false;
+  if (!side || content.dataset._tileZone === 'full-workspace') return false;
   delete content._dockSuspended;
   try {
     const width = applyEdgeDock(modal, side, undefined, {maximized:content._chatVisibleMaximized === true, fallbackSide:true});
@@ -911,7 +928,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     if (owner.style?.display === 'none') return false;
     const nodes = _resolveDockNodes(owner);
     const content = nodes?.content;
-    if (!content || !content.isConnected) return false;
+    if (!content || !content.isConnected || content._dockSuspended) return false;
     if (content.classList?.contains('hidden')) return false;
     if (content.style?.display === 'none') return false;
     const r = content.getBoundingClientRect();
@@ -938,6 +955,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     return all.some((modal) => {
       if (!modal || modal === owner) return false;
       if (owner?.contains?.(modal) || modal.contains?.(owner)) return false;
+      if (modal.querySelector('.oc-applet-frame[data-_tile-zone]')) return false;
       if (modal.classList.contains('modal-left-docked')
           || modal.classList.contains('modal-right-docked')
           || modal.classList.contains('email-snap-left')) return false;
@@ -1170,6 +1188,9 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
   window.addEventListener('resize', _position);
   _position();
 })();
+
+// Chat can reattach or disappear while navigation and viewport bounds stay fixed.
+if (typeof window !== 'undefined') window.addEventListener('chat-workspace-change', _positionEdgeDockResizeHandles);
 
 // Both dock sides follow the same workspace changes as tiles and floating frames.
 if (typeof document !== 'undefined') observeWindowWorkspace(bounds => {

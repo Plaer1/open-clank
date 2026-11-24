@@ -5,7 +5,7 @@ import os from "os"
 import path from "path"
 import { Database } from "../../src/storage"
 import { MemoryFtsTable } from "../../src/memory/fts.sql"
-import { splitSections } from "../../src/memory/authored-ingest"
+import { ingestAuthoredFile, splitSections } from "../../src/memory/authored-ingest"
 import { reconcileMemory } from "../../src/memory/reconcile"
 import {
   bindMemorySessionClient,
@@ -46,6 +46,19 @@ async function tmpRoot() {
 function ingestCalls() {
   return toolCalls.filter((c) => c.name === "ingest_authored")
 }
+
+test("managed authored mirror withholds unproven writes", async () => {
+  const previous = process.env.OPEN_CLANK_MANAGED
+  process.env.OPEN_CLANK_MANAGED = "1"
+  try {
+    expect(await ingestAuthoredFile("/untrusted/MEMORY.md", "private", SCOPE)).toBe(false)
+    expect(await ingestAuthoredFile("/untrusted/MEMORY.md", null, SCOPE)).toBe(false)
+    expect(ingestCalls()).toHaveLength(0)
+  } finally {
+    if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+    else process.env.OPEN_CLANK_MANAGED = previous
+  }
+})
 
 describe("splitSections", () => {
   test("splits on ## headings, heading carried into content", () => {

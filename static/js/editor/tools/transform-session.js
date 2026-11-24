@@ -30,20 +30,28 @@
  *   reapplyTransform, confirmTransform, cancelTransform,
  * }}
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 import {
   transformPopupHTML,
   attachSpinRepeat,
 } from '../build/transform-popup.js';
 
-export function createTransformSession({
-  activeLayer, saveState, composite, fitZoom, drawTransformHandles,
-  showCanvasLoading, hideCanvasLoading, undo, uiModule,
+export function createTransformSession({ state = legacyState, root = null, lifetime = null,
+  scopeIds = node => node, activeLayer, saveState, composite, fitZoom, drawTransformHandles,
+  showCanvasLoading, hideCanvasLoading, undo, uiModule, markSceneChanged = () => {}, sceneRevision = () => state.sceneRevision, gesture = {begin:() => true, owns:() => true, end:() => {}},
 }) {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated transform requires root and lifetime');
+  let popupCleanup = () => {};
+  let disposed = false;
+  let original = null;
+  lifetime?.add(() => { if (state.transformActive) cancelTransform(); else closeTransformPopup(); disposed = true; });
   function startTransform() {
+    if (disposed) return;
     const layer = activeLayer();
     if (!layer || layer.locked) { uiModule.showToast('Select an unlocked layer'); return; }
     if (state.transformActive) { cancelTransform(); return; } // toggle off
+    if (!gesture.begin()) return;
+    try {
     state.transformActive = true;
     state.transformLayer = layer;
     state.transformOrigW = layer.canvas.width;
@@ -56,12 +64,16 @@ export function createTransformSession({
     // Snapshot the layer so live preview can re-derive from the
     // original pixels on every keystroke instead of stacking
     // destructive edits.
-    state.transformOrigCanvas = document.createElement('canvas');
+    state.transformOrigCanvas = (state.container?.ownerDocument || document).createElement('canvas');
     state.transformOrigCanvas.width = state.transformOrigW;
     state.transformOrigCanvas.height = state.transformOrigH;
     state.transformOrigCanvas.getContext('2d').drawImage(layer.canvas, 0, 0);
     state.transformOrigOffset = { ...(state.layerOffsets.get(layer.id) || { x: 0, y: 0 }) };
+    const offset = { ...state.transformOrigOffset };
+    const previousHistory = state.undoStack?.at(-1);
     saveState();
+    const history = state.undoStack?.at(-1);
+    original = { layer, canvas: state.transformOrigCanvas, offset, history: history !== previousHistory ? history : null, revision: sceneRevision() };
     // Fit canvas to viewport so the corner handles are visible —
     // without this, a layer larger than the viewport leaves the grab
     // markers off-screen.
@@ -69,13 +81,23 @@ export function createTransformSession({
     composite();
     drawTransformHandles();
     openTransformPopup();
+    } catch (error) { cancelTransform(); throw error; }
   }
 
   function closeTransformPopup() {
+    popupCleanup();
+    popupCleanup = () => {};
     if (state.transformPopup) {
       try { state.transformPopup.remove(); } catch {}
       state.transformPopup = null;
     }
+  }
+
+  function borrowMove(layer) {
+    if (!original || state.transformLayer!==layer || !gesture.owns() || sceneRevision()!==original.revision) return null;
+    const base={...state.transformOrigOffset};
+    return Object.freeze({owns:() => !!original && state.transformLayer===layer && gesture.owns() && sceneRevision()===original.revision,
+      move:(dx,dy) => {state.transformOrigOffset={x:base.x+dx,y:base.y+dy};}});
   }
 
   // Floating Transform popup — horizontal layout, draggable via its
@@ -85,16 +107,23 @@ export function createTransformSession({
   function openTransformPopup() {
     closeTransformPopup();
     if (!state.container) return;
-    const pop = document.createElement('div');
+    const pop = (state.container?.ownerDocument || document).createElement('div');
     pop.className = 'ge-transform-popup';
     pop.innerHTML = transformPopupHTML();
+    scopeIds(pop);
     state.container.appendChild(pop);
     state.transformPopup = pop;
-    wireTransformDrag(pop);
-    const wInput = pop.querySelector('#ge-transform-w');
-    const hInput = pop.querySelector('#ge-transform-h');
-    const rotInput = pop.querySelector('#ge-transform-rot');
-    const aspectBtn = pop.querySelector('#ge-transform-aspect');
+    const stopDrag = wireTransformDrag(pop);
+    const removers = [];
+    const frames = new Set();
+    const win = pop.ownerDocument.defaultView;
+    const listen = (target, type, fn) => { if (!target) return; const guarded = (...args) => { if (!disposed && state.transformPopup === pop) fn(...args); }; target.addEventListener(type, guarded); removers.push(() => target.removeEventListener(type, guarded)); };
+    const stopPopup = () => { for (const id of frames) win.cancelAnimationFrame(id); if (frames.size) hideCanvasLoading(); frames.clear(); for (const remove of removers.splice(0)) remove(); stopDrag(); };
+    popupCleanup = stopPopup;
+    const wInput = pop.querySelector(':is(#ge-transform-w,[data-ge-id="ge-transform-w"])');
+    const hInput = pop.querySelector(':is(#ge-transform-h,[data-ge-id="ge-transform-h"])');
+    const rotInput = pop.querySelector(':is(#ge-transform-rot,[data-ge-id="ge-transform-rot"])');
+    const aspectBtn = pop.querySelector(':is(#ge-transform-aspect,[data-ge-id="ge-transform-aspect"])');
     wInput.value = String(state.transformOrigW);
     hInput.value = String(state.transformOrigH);
     rotInput.value = '0';
@@ -134,7 +163,7 @@ export function createTransformSession({
       state.transformPendingRot = rot;
       reapplyTransform();
     };
-    wInput.addEventListener('input', () => {
+    listen(wInput, 'input', () => {
       if (state.transformAspectLock) {
         driver = 'w';
         const w = parseInt(wInput.value, 10);
@@ -147,7 +176,7 @@ export function createTransformSession({
       }
       refresh();
     });
-    hInput.addEventListener('input', () => {
+    listen(hInput, 'input', () => {
       if (state.transformAspectLock) {
         driver = 'h';
         const h = parseInt(hInput.value, 10);
@@ -160,8 +189,8 @@ export function createTransformSession({
       }
       refresh();
     });
-    rotInput.addEventListener('input', refresh);
-    aspectBtn.addEventListener('click', () => {
+    listen(rotInput, 'input', refresh);
+    listen(aspectBtn, 'click', () => {
       state.transformAspectLock = !state.transformAspectLock;
       aspectBtn.classList.toggle('active', state.transformAspectLock);
       aspectBtn.setAttribute('aria-pressed', state.transformAspectLock ? 'true' : 'false');
@@ -170,30 +199,30 @@ export function createTransformSession({
       driver = null;
       applyAspectVisuals();
     });
-    pop.querySelector('#ge-transform-apply').addEventListener('click', () => confirmTransform());
-    pop.querySelector('#ge-transform-cancel').addEventListener('click', () => cancelTransform());
-    pop.querySelector('#ge-transform-cancel-btn')?.addEventListener('click', () => cancelTransform());
+    listen(pop.querySelector(':is(#ge-transform-apply,[data-ge-id="ge-transform-apply"])'), 'click', () => confirmTransform());
+    listen(pop.querySelector(':is(#ge-transform-cancel,[data-ge-id="ge-transform-cancel"])'), 'click', () => cancelTransform());
+    listen(pop.querySelector(':is(#ge-transform-cancel-btn,[data-ge-id="ge-transform-cancel-btn"])'), 'click', () => cancelTransform());
     // Minimise — collapses the body so only the header is visible.
-    pop.querySelector('#ge-transform-min')?.addEventListener('click', (e) => {
+    listen(pop.querySelector(':is(#ge-transform-min,[data-ge-id="ge-transform-min"])'), 'click', (e) => {
       e.stopPropagation();
       pop.classList.toggle('ge-transform-popup-minimised');
     });
     // Quick actions: flip W/H via sign so the reapply pipeline picks
     // up the new orientation. Rotate-90 nudges rotation ±90°.
-    pop.querySelector('#ge-transform-flip-h')?.addEventListener('click', () => {
-      const wIn = pop.querySelector('#ge-transform-w');
+    listen(pop.querySelector(':is(#ge-transform-flip-h,[data-ge-id="ge-transform-flip-h"])'), 'click', () => {
+      const wIn = pop.querySelector(':is(#ge-transform-w,[data-ge-id="ge-transform-w"])');
       const cur = parseInt(wIn.value, 10) || state.transformOrigW;
       wIn.value = String(-cur);
       wIn.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    pop.querySelector('#ge-transform-flip-v')?.addEventListener('click', () => {
-      const hIn = pop.querySelector('#ge-transform-h');
+    listen(pop.querySelector(':is(#ge-transform-flip-v,[data-ge-id="ge-transform-flip-v"])'), 'click', () => {
+      const hIn = pop.querySelector(':is(#ge-transform-h,[data-ge-id="ge-transform-h"])');
       const cur = parseInt(hIn.value, 10) || state.transformOrigH;
       hIn.value = String(-cur);
       hIn.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    pop.querySelector('#ge-transform-rot-90')?.addEventListener('click', (e) => {
-      const rIn = pop.querySelector('#ge-transform-rot');
+    listen(pop.querySelector(':is(#ge-transform-rot-90,[data-ge-id="ge-transform-rot-90"])'), 'click', (e) => {
+      const rIn = pop.querySelector(':is(#ge-transform-rot,[data-ge-id="ge-transform-rot"])');
       const cur = parseInt(rIn.value, 10) || 0;
       const delta = e.shiftKey ? -90 : 90;
       let next = cur + delta;
@@ -204,19 +233,26 @@ export function createTransformSession({
       // so the user sees something happen. rAF defers the heavy work
       // past the current frame so the overlay paints first.
       showCanvasLoading('Rotating…');
-      requestAnimationFrame(() => {
-        try { rIn.dispatchEvent(new Event('input', { bubbles: true })); }
+      const frame = win.requestAnimationFrame(() => {
+        frames.delete(frame);
+        try { if (!disposed && state.transformPopup === pop) rIn.dispatchEvent(new Event('input', { bubbles: true })); }
         finally { hideCanvasLoading(); }
       });
+      frames.add(frame);
     });
-    attachSpinRepeat(pop);
+    const stopSpin = attachSpinRepeat(pop);
+    popupCleanup = () => { stopPopup(); stopSpin(); };
   }
 
   // Header-drag for the Transform popup. Default position: over the
   // right panel (layers area). Mobile pins via stylesheet so we use
   // setProperty 'important' to override during drag.
   function wireTransformDrag(pop) {
-    const isMobile = window.matchMedia('(max-width: 820px)').matches;
+    const doc = pop.ownerDocument;
+    const win = doc.defaultView;
+    const isMobile = win.matchMedia('(max-width: 820px)').matches;
+    const removers = [];
+    const listen = (target, type, fn, options) => { target.addEventListener(type, fn, options); removers.push(() => target.removeEventListener(type, fn, options)); };
     const defaultRight = 20;
     const defaultTop = 60;
     if (isMobile) {
@@ -262,7 +298,7 @@ export function createTransformSession({
       startY = clientY;
       setPos(originLeft, originTop);
       pop.classList.add('ge-transform-popup-dragging');
-      document.body.style.userSelect = 'none';
+      doc.body.style.userSelect = 'none';
     };
 
     const moveDrag = (clientX, clientY) => {
@@ -273,8 +309,8 @@ export function createTransformSession({
       let ny = originTop + dy;
       if (isMobile) {
         const rect = pop.getBoundingClientRect();
-        nx = Math.max(0, Math.min(window.innerWidth - rect.width, nx));
-        ny = Math.max(0, Math.min(window.innerHeight - rect.height, ny));
+        nx = Math.max(0, Math.min(win.innerWidth - rect.width, nx));
+        ny = Math.max(0, Math.min(win.innerHeight - rect.height, ny));
       }
       setPos(nx, ny);
     };
@@ -282,38 +318,40 @@ export function createTransformSession({
     const endDrag = () => {
       if (!dragging) return;
       dragging = false;
-      document.body.style.userSelect = '';
+      doc.body.style.userSelect = '';
       pop.classList.remove('ge-transform-popup-dragging');
     };
 
-    dragSource.addEventListener('mousedown', (e) => {
+    listen(dragSource, 'mousedown', (e) => {
       if (e.target.closest(NON_DRAG)) return;
       e.preventDefault();
       beginDrag(e.clientX, e.clientY);
     });
-    document.addEventListener('mousemove', (e) => moveDrag(e.clientX, e.clientY));
-    document.addEventListener('mouseup', endDrag);
+    listen(doc, 'mousemove', (e) => moveDrag(e.clientX, e.clientY));
+    listen(doc, 'mouseup', endDrag);
 
-    dragSource.addEventListener('touchstart', (e) => {
+    listen(dragSource, 'touchstart', (e) => {
       if (e.target.closest(NON_DRAG)) return;
       if (!e.touches || e.touches.length !== 1) return;
       e.preventDefault();
       beginDrag(e.touches[0].clientX, e.touches[0].clientY);
     }, { passive: false });
-    document.addEventListener('touchmove', (e) => {
+    listen(doc, 'touchmove', (e) => {
       if (!dragging) return;
       if (!e.touches || e.touches.length !== 1) return;
       e.preventDefault();
       moveDrag(e.touches[0].clientX, e.touches[0].clientY);
     }, { passive: false });
-    document.addEventListener('touchend', endDrag);
-    document.addEventListener('touchcancel', endDrag);
+    listen(doc, 'touchend', endDrag);
+    listen(doc, 'touchcancel', endDrag);
+    return () => { endDrag(); for (const remove of removers.splice(0)) remove(); };
   }
 
   // Re-derive the active layer's pixels from the original snapshot
   // with the popup's current W/H/flip/rotation applied. Cheap —
   // paints into an off-screen canvas of the final size.
   function reapplyTransform() {
+    if (!original || !gesture.owns() || sceneRevision() !== original.revision) { cancelTransform(); return; }
     const layer = state.transformLayer;
     if (!layer || !state.transformOrigCanvas) return;
     const w = state.transformPendingW;
@@ -326,7 +364,7 @@ export function createTransformSession({
     // don't clip.
     const finalW = Math.max(1, Math.round(w * cos + h * sin));
     const finalH = Math.max(1, Math.round(w * sin + h * cos));
-    const tmp = document.createElement('canvas');
+    const tmp = (state.container?.ownerDocument || document).createElement('canvas');
     tmp.width = finalW; tmp.height = finalH;
     const tCtx = tmp.getContext('2d');
     tCtx.imageSmoothingEnabled = true;
@@ -348,34 +386,50 @@ export function createTransformSession({
       x: Math.round(origCenterX - finalW / 2),
       y: Math.round(origCenterY - finalH / 2),
     });
+    markSceneChanged();
+    original.revision = sceneRevision();
     composite();
     drawTransformHandles();
   }
 
   function confirmTransform() {
+    if (original && (!gesture.owns() || sceneRevision() !== original.revision)) { cancelTransform(); return; }
+    if (state.transformActive) markSceneChanged();
     closeTransformPopup();
+    original = null;
     state.transformOrigCanvas = null;
     state.transformOrigOffset = null;
     state.transformActive = false;
     state.transformLayer = null;
     state.transformHandle = null;
+    gesture.end();
     composite();
     uiModule.showToast('Transform applied');
   }
 
   function cancelTransform() {
     closeTransformPopup();
+    const stale = original && (!gesture.owns() || sceneRevision() !== original.revision);
+    if (original && !stale && state.layers.includes(original.layer)) {
+      const { layer, canvas, offset, history } = original;
+      layer.canvas.width = canvas.width; layer.canvas.height = canvas.height;
+      layer.ctx.clearRect(0, 0, canvas.width, canvas.height);
+      layer.ctx.drawImage(canvas, 0, 0);
+      state.layerOffsets.set(layer.id, { ...offset });
+      markSceneChanged();
+      if (history && state.undoStack?.at(-1) === history) state.undoStack.pop();
+    }
+    original = null;
     state.transformOrigCanvas = null;
     state.transformOrigOffset = null;
-    if (state.transformLayer) undo(); // restore saved state
     state.transformActive = false;
     state.transformLayer = null;
     state.transformHandle = null;
+    gesture.end();
     composite();
+    if (stale) uiModule.showToast('Transform ended because the image changed');
   }
 
-  return {
-    startTransform, openTransformPopup, closeTransformPopup,
-    reapplyTransform, confirmTransform, cancelTransform,
-  };
+  const methods = { startTransform, openTransformPopup, closeTransformPopup, reapplyTransform, confirmTransform, cancelTransform, borrowMove };
+  return Object.fromEntries(Object.entries(methods).map(([name, fn]) => [name, (...args) => disposed ? undefined : fn(...args)]));
 }

@@ -164,3 +164,94 @@ def test_hung_owner_close_is_bounded_and_idempotent(monkeypatch):
         assert not manager._sessions
 
     asyncio.run(scenario())
+
+
+def test_protected_browser_client_is_hidden_and_cannot_use_generic_calls():
+    async def scenario():
+        manager = McpManager()
+        manager._sessions["builtin_browser"] = object()
+        manager._tools["builtin_browser"] = [{"name": "browser_navigate", "description": "nav"}]
+        assert manager.get_all_tools() == []
+        assert manager.get_all_openai_schemas() == []
+        assert "builtin_browser" not in manager.get_all_statuses()
+        assert (await manager.call_tool(
+            "mcp__builtin_browser__browser_navigate", {"url": "https://example.test"}
+        ))["exit_code"] == 1
+        with pytest.raises(PermissionError):
+            await manager.disconnect_server("builtin_browser")
+        assert await manager.connect_server(
+            "builtin_browser", "Browser", "stdio", command="npx", args=[]
+        ) is False
+
+    asyncio.run(scenario())
+
+
+def test_private_browser_dispatch_is_allowlisted_and_never_retries():
+    async def scenario():
+        manager = McpManager()
+        async def fake_connect(server_id, name, command, args, env):
+            manager._sessions[server_id] = object()
+            manager._tools[server_id] = [
+                {"name": "browser_click", "description": "click"},
+                {"name": "browser_run_code_unsafe", "description": "unsafe"},
+                {"name": "browser_network_request", "description": "body"},
+            ]
+            manager._connections[server_id] = {"status": "connected", "name": name}
+            return True
+
+        with patch.object(manager, "_connect_stdio", side_effect=fake_connect):
+            handle = await manager.open_browser_client(
+                name="Browser", command="npx", args=["private"], env={},
+            )
+        connection_id = handle["connection_id"]
+        assert connection_id not in manager.get_all_statuses()
+        assert all(tool["name"] != "browser_run_code_unsafe" for tool in handle["tools"])
+        session = manager._sessions[connection_id]
+        calls = []
+
+        async def fail_once(_session, name, arguments):
+            calls.append((name, arguments))
+            raise TimeoutError("unknown remote outcome")
+
+        manager._do_call = fail_once
+        result = await manager.call_browser_tool_once(
+            connection_id, "browser_click", {"target": "e1"},
+        )
+        assert result["outcome_unknown"] is True
+        assert len(calls) == 1
+        rejected = await manager.call_browser_tool_once(
+            connection_id, "browser_run_code_unsafe", {"code": ""},
+        )
+        assert rejected["exit_code"] == 1
+        assert len(calls) == 1
+        assert (await manager.call_browser_tool_once(
+            connection_id, "browser_network_request", {"index": 1},
+        ))["exit_code"] == 1
+        assert len(calls) == 1
+        await manager.close_browser_client(connection_id)
+        assert connection_id not in manager._protected_browser_clients
+
+    asyncio.run(scenario())
+
+
+def test_builtin_lost_response_repairs_connection_without_replaying_action():
+    async def scenario():
+        manager = McpManager()
+        original, replacement = object(), object()
+        manager._sessions['synthetic'] = original
+        effects = []
+        async def call(session, name, arguments):
+            if session is original:
+                effects.append(arguments['value'])
+                raise ConnectionError('response lost after commit')
+            return {'stdout': 'available', 'exit_code': 0}
+        async def reconnect(server_id):
+            manager._sessions[server_id] = replacement
+            return True
+        with patch.object(manager, 'is_builtin', return_value=True), patch.object(manager, '_do_call', side_effect=call), patch.object(manager, '_reconnect_builtin', side_effect=reconnect):
+            result = await manager.call_tool('mcp__synthetic__write', {'value': 'one'})
+            assert result['outcome_unknown'] is True
+            assert effects == ['one'] and manager._sessions['synthetic'] is original
+            assert await manager._reconnect_builtin('synthetic')
+            assert (await manager.call_tool('mcp__synthetic__read', {}))['stdout'] == 'available'
+    asyncio.run(scenario())

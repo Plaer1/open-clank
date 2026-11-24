@@ -123,11 +123,63 @@ def _active_seconds(times: list[datetime]) -> float | None:
                for left, right in zip(ordered, ordered[1:]))
 
 
+def _tool_usage_links(db, owner, scope, projection, truncated, *, cancel_event=None, deadline=None):
+    """Match only uniquely attributed admitted usage; incomplete input refuses links."""
+    if truncated or projection.coverage != "complete":
+        return {"links": {}, "reason": "usage_incomplete"}
+    from core.stats_models import StatsEvent
+    from services.logging.projection import tool_usage_join_handle
+    from services.stats.query import MAX_FACTS, _install_progress_handler
+    raw = _install_progress_handler(db, cancel_event, deadline)
+    try:
+        query = db.query(StatsEvent).filter(StatsEvent.owner == owner, StatsEvent.event_kind == "context_receipt")
+        if scope.start_utc is not None: query = query.filter(StatsEvent.event_time >= scope.start_utc)
+        if scope.end_utc is not None: query = query.filter(StatsEvent.event_time < scope.end_utc)
+        receipts = query.limit(MAX_FACTS + 1).all()
+    finally:
+        if raw is not None: raw.set_progress_handler(None, 0)
+    if len(receipts) > MAX_FACTS: return {"links": {}, "reason": "receipt_cap"}
+    candidates = defaultdict(set)
+    main_usage = defaultdict(list)
+    for event in projection.events:
+        _check(cancel_event, deadline)
+        if event.source == "acp_final_usage" and event.actor_kind == "foreground":
+            main_usage[(event.owner,event.operation_id,event.session_id,event.root_operation_id,(event.event_metadata or {}).get("instance_id"))].append(event)
+    def add(attribution, event, kind, origin):
+        _check(cancel_event, deadline)
+        keys = {"version","account","chat","holder","session","root","actor","execution","binding","binding_revision"}
+        if not isinstance(attribution, dict) or set(attribution) != keys or attribution.get("version") != 1: return
+        if (event.session_id != attribution["chat"] or event.root_operation_id != attribution["root"]
+                or (event.event_metadata or {}).get("instance_id") != attribution["holder"]
+                or not isinstance(attribution["binding"],str) or not attribution["binding"]
+                or type(attribution["binding_revision"]) is not int or attribution["binding_revision"] < 1): return
+        handle = tool_usage_join_handle(owner, attribution["account"], attribution["chat"], attribution["holder"],
+                    attribution["session"], attribution["root"], attribution["actor"], attribution["execution"])
+        if handle and event.operation_id:
+            candidates[handle].add((event.operation_id,attribution["binding"],attribution["binding_revision"],kind,origin))
+    for event in projection.events:
+        attribution=(event.event_metadata or {}).get("tool_usage_attribution")
+        if (event.actor_kind == "subagent" and isinstance(attribution,dict)
+                and event.operation_id == "actor-binding:" + str(attribution.get("binding") or "")):
+            add(attribution,event,"child",event.id)
+    for receipt in receipts:
+        payload=(receipt.event_metadata or {}).get("context_receipt") or {}
+        attribution=payload.get("tool_usage_attribution") if isinstance(payload,dict) else None
+        if not isinstance(attribution,dict) or attribution.get("actor") != "main": continue
+        identity=payload.get("identity")
+        if (not isinstance(identity,dict) or identity != {"sessionID":attribution.get("session"),"rootOperationID":attribution.get("root"),"actorID":attribution.get("actor"),"executionRevision":attribution.get("execution")}
+                or payload.get("binding_id") != attribution.get("binding") or payload.get("binding_revision") != attribution.get("binding_revision")
+                or payload.get("instance_id") != attribution.get("holder")): continue
+        matches=main_usage.get((owner,receipt.operation_id,receipt.session_id,receipt.root_operation_id,attribution.get("holder")), ())
+        if len(matches) == 1: add(attribution,matches[0],"main",receipt.id)
+    return {"links": {key:"linked" for key,values in candidates.items() if len(values)==1}, "reason": None}
+
+
 def project_activity(*, owner: str, messages: list[dict], sessions: list[dict], events: list[dict], actors: list[dict],
                      timezone_name: str = "UTC", resolution: str = "day", page: int = 1,
                      page_size: int = 50, sort: str = "messages", direction: str = "desc",
                      cancel_event=None, deadline=None, truncated: bool = False, scope: dict | None = None,
-                     display_end=None, tool_evidence: dict | None = None) -> dict:
+                     display_end=None, tool_evidence: dict | None = None, tool_usage_links: dict | None = None) -> dict:
     if not str(owner or "").strip():
         raise ActivityError("owner is required")
     _check(cancel_event, deadline)
@@ -349,7 +401,7 @@ def project_activity(*, owner: str, messages: list[dict], sessions: list[dict], 
         "actor_comparison": actor_comparison,
         "concurrency": {"state": "estimated", "active_sessions": active, "peak": peak,
                          "idle_sessions": max(0, len(session_rows) - active),
-                         "measured_tools": measured_concurrency(owner, tool_facts),
+                         "measured_tools": measured_concurrency(owner, tool_facts, tool_usage_links),
                          "coverage": {"state": "partial" if truncated else "complete"}},
         "capabilities": {**{name: {"state": "unavailable", "reason": "canonical_evidence_unavailable"}
                          for name in ("machine", "git_branch", "peak_context", "cost")},
@@ -380,7 +432,7 @@ def _load_activity(db, *, owner: str, timezone_name="UTC", resolution="day", pag
     request_filters.update(timezone=timezone_name, period="all")
     if start_utc is not None: request_filters["start"] = start_utc.replace(tzinfo=timezone.utc).isoformat()
     if end_utc is not None: request_filters["end"] = end_utc.replace(tzinfo=timezone.utc).isoformat()
-    _, projection, event_truncated, selected_ids = event_cohort(db, owner, request_filters,
+    usage_scope, projection, event_truncated, selected_ids = event_cohort(db, owner, request_filters,
         cancel_event=cancel_event, deadline=deadline)
     labels = canonical_labels(db, owner)
     _install_progress_handler(db, cancel_event, deadline)
@@ -396,6 +448,9 @@ def _load_activity(db, *, owner: str, timezone_name="UTC", resolution="day", pag
     rows = message_query.order_by(ChatMessage.timestamp.desc(), ChatMessage.id.desc()).limit(MAX_ROWS + 1).all()
     messages = [{"session_id": row[0], "role": row[1], "timestamp": row[2]} for row in reversed(rows[:MAX_ROWS])]
     admitted_events = projection.events
+    tool_usage_links = _tool_usage_links(db, owner, usage_scope, projection, event_truncated,
+                                         cancel_event=cancel_event, deadline=deadline)
+    _install_progress_handler(db, cancel_event, deadline)
     events = [{"duration_ms": row.duration_ms, "output_tokens": row.output_tokens,
                "output_tokens_state": row.output_tokens_state, "event_time": row.event_time,
                "session_id": row.session_id, "actor_kind": row.actor_kind,
@@ -448,7 +503,8 @@ def _load_activity(db, *, owner: str, timezone_name="UTC", resolution="day", pag
     result = project_activity(owner=owner, messages=messages, sessions=session_values, events=events, actors=actors,
                             timezone_name=timezone_name, resolution=resolution, page=page, page_size=page_size,
                             sort=sort, direction=direction, cancel_event=cancel_event, deadline=deadline,
-                            truncated=truncated, scope=scope, display_end=display_end, tool_evidence=evidence)
+                            truncated=truncated, scope=scope, display_end=display_end, tool_evidence=evidence,
+                            tool_usage_links=tool_usage_links if evidence.get("coverage",{}).get("state") == "reported" else {"links": {}, "reason": "archive_incomplete"})
     # Canonical observed model attribution and workspace handles can drive the
     # shared filter bar; configured session model is not historical usage.
     models = Counter(event.actual_model for event in admitted_events if event.actual_model)

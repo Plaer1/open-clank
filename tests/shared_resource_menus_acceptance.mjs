@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {withCopalBrowser} from './helpers/copal_browser_fixture.mjs';
 const output=fs.mkdtempSync(path.join(os.tmpdir(),'openclank-shared-menus-'));
-const golden=JSON.parse(fs.readFileSync('mcp_servers/frankenmemory/crates/fm-core/tests/fixtures/code_map_published.json','utf8'));
+const golden=JSON.parse(fs.readFileSync('native/memery/crates/memery-core/tests/fixtures/code_map_published.json','utf8'));
 const result={class:'synthetic-static-actual-consumer',groups:[],failures:[],output};
 const page=`<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/static/style.css"><body class="theme-clanker-dark"><main id="app"></main>
 <script type="module">

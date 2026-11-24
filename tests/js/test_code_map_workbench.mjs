@@ -10,6 +10,7 @@ import {mountCodeGraphWorkbench} from '../../static/js/copal/codeGraphWorkbench.
 globalThis.crypto??=webcrypto;
 class MiniNode {
  constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.attributes=new Map();this.dataset={};this.style={};this.listeners=new Map();this.parentNode=null;this.hidden=false;this.disabled=false;this.value='';this._text='';this.classList={add:(...names)=>{this.className=[...(this.className||'').split(' '),...names].filter(Boolean).join(' ');}};}
+ closest(selector){for(let node=this;node;node=node.parentNode)if(node.matches(selector))return node;return null;}
  get isConnected(){return this._connected===true||this.parentNode?.isConnected===true;}
  set textContent(value){this.replaceChildren();this._text=String(value);}
  get textContent(){return this._text+this.children.map(n=>typeof n==='string'?n:n.textContent).join('');}
@@ -27,9 +28,9 @@ class MiniNode {
  focus(){if(this.isConnected)document.activeElement=this;}
  getBoundingClientRect(){return {left:0,top:0,width:900,height:600};}
 }
-function dom(){const body=new MiniNode('body');body._connected=true;globalThis.document={body,activeElement:body,createElement:tag=>new MiniNode(tag),createElementNS:(_ns,tag)=>new MiniNode(tag)};globalThis.window={devicePixelRatio:1};globalThis.ResizeObserver=class{observe(){}disconnect(){this.closed=true;}};globalThis.MutationObserver=class{observe(){}disconnect(){this.closed=true;}};const root=new MiniNode('main');body.append(root);return root;}
+function dom(){globalThis.Element=MiniNode;const body=new MiniNode('body');body._connected=true;globalThis.document=Object.assign(new EventTarget(),{body,activeElement:body,createElement:tag=>new MiniNode(tag),createElementNS:(_ns,tag)=>new MiniNode(tag)});globalThis.window=Object.assign(new EventTarget(),{devicePixelRatio:1});globalThis.ResizeObserver=class{observe(){}disconnect(){this.closed=true;}};globalThis.MutationObserver=class{observe(){}disconnect(){this.closed=true;}};const root=new MiniNode('main');body.append(root);return root;}
 const tick=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
-const base=new URL('../../mcp_servers/frankenmemory/crates/fm-core/tests/fixtures/',import.meta.url);
+const base=new URL('../../native/memery/crates/memery-core/tests/fixtures/',import.meta.url);
 const golden=name=>JSON.parse(fs.readFileSync(new URL(`code_map_${name}.json`,base),'utf8'));
 function measure(v){for(let i=0;i<8;i++){const n=Buffer.byteLength(JSON.stringify(v));if(v.cost.serialized_bytes===n)return v;v.cost.serialized_bytes=n;}throw Error('fixture size');}
 const pending={lifecycle:'building',registration_id:'fixture-registration',admission_epoch:1,policy_generation:1};
@@ -110,7 +111,7 @@ test('retained published map explicitly reports pending verification instead of 
  const map={...golden('published'),status:'ready'};
  for(const lifecycle of ['starting','admitted','queued','building','running']){
   const status=codeMapStatus({...ready,lifecycle,progress:{completed_files:23,total_files:100}},map);
-  assert.match(status,/Previous index/);assert.match(status,/checking files/);assert.match(status,/23\/100/);assert.doesNotMatch(status,/map ready/);
+  assert.match(status,/Previous published index/);assert.match(status,/files processed/);assert.match(status,/23\/100/);assert.doesNotMatch(status,/map ready/);
  }
  assert.match(codeMapStatus({...ready,lifecycle:'cancelled'},map),/Previous index.*cancelled/);
  assert.match(codeMapStatus({...ready,lifecycle:'failed'},map),/Previous index.*failed/);
@@ -165,7 +166,9 @@ test('workspace switch rejects old subscriber and pending visual request without
 test('Copal visual transport is separate and source actions retain current resource verification',()=>{
  const source=fs.readFileSync(new URL('../../static/js/copal.js',import.meta.url),'utf8');
  assert(source.includes('`${state.api}/api/memory/code/map`'));assert(source.includes('JSON.stringify({workspace_id:workspaceId,visual_request})'));assert(source.includes("if(!(response.headers.get('content-type')||'').includes('application/json'))"));
- const action=source.slice(source.indexOf('onEvidenceAction:async(kind,selection)=>'),source.indexOf('onEvidenceAction:async(kind,selection)=>')+5000);assert(action.includes('current_source_verified!==true'));assert(action.includes("validation_kind!=='current_source'"));assert(action.includes('codeReceiptKey(result.receipt)!==codeReceiptKey(selection.receipt)'));assert(action.includes('!selection.isCurrent()'));assert(action.includes('result.reference?.id!==selection.node.id'));assert(action.includes('handoffCurrent:'));
+ const start=source.indexOf('onEvidenceAction:async(kind,selection)=>');
+ assert(start>=0);
+ const action=source.slice(start,source.indexOf('\n    }',start));assert(action.includes('current_source_verified!==true'));assert(action.includes("validation_kind!=='current_source'"));assert(action.includes('codeReceiptKey(result.receipt)!==codeReceiptKey(selection.receipt)'));assert(action.includes('!selection.isCurrent()'));assert(action.includes('result.reference?.id!==selection.node.id'));assert(action.includes('handoffCurrent:'));
 });
 test('exact requested path re-resolves preview IDs into published IDs without widening workspace or evidence action',async()=>{
  let published=false;

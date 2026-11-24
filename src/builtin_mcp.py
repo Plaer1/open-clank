@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 from core.platform_compat import IS_WINDOWS, which_tool
-from src.runtime_paths import get_app_root
+from src.runtime_paths import get_app_root, resolve_python
 from src.constants import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -84,11 +84,8 @@ def _browser_node_env(npx_path: str) -> dict[str, str]:
 # Image generation runs in the main process through the owner-bound managed
 # operation router. A standalone stdio child cannot inherit the supervisor's
 # capability binding, so it is deliberately not auto-registered here.
-# RAG / email remain separate non-model integration MCP servers.
+# Email remains a separate integration MCP server.
 _BUILTIN_SERVERS = {
-    # Memory is owner-scoped through the active provider / Agent ACP bridge.
-    # Starting memory_server.py here creates a second, unscoped provider path.
-    "rag":        ("mcp_servers/rag_server.py",        "Built-in: RAG"),
     "email":      ("mcp_servers/email_server.py",      "Built-in: Email"),
 }
 
@@ -97,13 +94,13 @@ _BUILTIN_NPX_SERVERS = {
     "builtin_browser": {
         "name": "Built-in: Browser",
         "command": "npx",
-        "args": ["-y", "@playwright/mcp@latest", "--headless", "--caps", "vision"],
+        "args": ["-y", "@playwright/mcp@0.0.83", "--headless", "--caps", "vision"],
     }
 }
 
 # Global flag to disable MCP if there are compatibility issues
-MCP_DISABLED = os.environ.get("ODYSSEUS_DISABLE_MCP", "").lower() in ("1", "true", "yes")
-BROWSER_MCP_REQUIRE_CACHE = os.environ.get("ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE", "").lower() in ("1", "true", "yes")
+MCP_DISABLED = os.environ.get("OPEN_CLANK_DISABLE_MCP", "").lower() in ("1", "true", "yes")
+BROWSER_MCP_REQUIRE_CACHE = os.environ.get("OPEN_CLANK_BROWSER_MCP_REQUIRE_CACHE", "").lower() in ("1", "true", "yes")
 
 
 # Strong references to the fire-and-forget startup tasks scheduled below.
@@ -127,7 +124,7 @@ def _find_browser_executable() -> str:
     Chrome/Chromium in a conventional location. If nothing is found, return an
     empty string and let Playwright MCP use its own default browser/channel.
     """
-    configured = os.environ.get("ODYSSEUS_BROWSER_EXECUTABLE", "").strip()
+    configured = os.environ.get("OPEN_CLANK_BROWSER_EXECUTABLE", "").strip()
     if configured:
         return configured
     for name in ("google-chrome", "chromium", "chromium-browser"):
@@ -145,6 +142,48 @@ def _find_browser_executable() -> str:
     return ""
 
 
+def build_browser_mcp_startup(
+    mode: str,
+    *,
+    profile_dir_name: str | None = None,
+) -> dict[str, object]:
+    """Build a pinned Playwright MCP command for explicit browser admission.
+
+    ``isolated`` starts a managed headless context. ``extension`` requires a
+    user-selected Chrome profile directory name and never falls back to the
+    last-used profile. This builder does not start the process or install the
+    extension; connection approval remains in the Playwright extension UI.
+    """
+    selected_mode = str(mode or "").strip().lower()
+    if selected_mode not in {"isolated", "extension"}:
+        raise ValueError("Browser mode must be isolated or extension")
+
+    args = ["-y", "@playwright/mcp@0.0.83", "--caps", "vision"]
+    if selected_mode == "isolated":
+        args.extend(["--headless", "--isolated"])
+        if os.environ.get("OPEN_CLANK_BROWSER_NO_SANDBOX", "1").lower() not in ("0", "false", "no"):
+            args.append("--no-sandbox")
+        browser = _find_browser_executable()
+        if browser:
+            args.extend(["--executable-path", browser])
+    else:
+        profile = str(profile_dir_name or "").strip()
+        if not profile or len(profile) > 128 or any(ord(char) < 32 for char in profile):
+            raise ValueError("Extension mode requires a selected Chrome profile directory name")
+        args.extend(["--extension", "--profile-dir-name", profile])
+
+    npx_path = _find_npx()
+    cache_home = os.environ.get("OPEN_CLANK_BROWSER_MCP_CACHE") or os.path.join(
+        DATA_DIR, "local", "playwright-mcp-cache",
+    )
+    env = {
+        **_browser_node_env(npx_path),
+        "XDG_CACHE_HOME": cache_home,
+        "PLAYWRIGHT_BROWSERS_PATH": os.path.join(cache_home, "browsers"),
+    }
+    return {"command": npx_path, "args": args, "env": env, "mode": selected_mode}
+
+
 def _browser_mcp_args(args: list[str]) -> list[str]:
     """Return Playwright MCP args with a concrete browser executable when found."""
     out = list(args or [])
@@ -152,10 +191,10 @@ def _browser_mcp_args(args: list[str]) -> list[str]:
         browser = _find_browser_executable()
         if browser:
             out.extend(["--executable-path", browser])
-    if os.environ.get("ODYSSEUS_BROWSER_ISOLATED", "1").lower() not in ("0", "false", "no"):
+    if os.environ.get("OPEN_CLANK_BROWSER_ISOLATED", "1").lower() not in ("0", "false", "no"):
         if "--isolated" not in out and "--user-data-dir" not in out:
             out.append("--isolated")
-    if os.environ.get("ODYSSEUS_BROWSER_NO_SANDBOX", "1").lower() not in ("0", "false", "no"):
+    if os.environ.get("OPEN_CLANK_BROWSER_NO_SANDBOX", "1").lower() not in ("0", "false", "no"):
         if "--no-sandbox" not in out and "--sandbox" not in out:
             out.append("--no-sandbox")
     return out
@@ -179,20 +218,21 @@ def builtin_python_env(base_dir: str) -> dict[str, str]:
 async def register_builtin_servers(mcp_manager):
     """Connect all built-in MCP servers to the manager."""
     if MCP_DISABLED:
-        logger.info("Built-in MCP servers disabled via ODYSSEUS_DISABLE_MCP")
+        logger.info("Built-in MCP servers disabled via OPEN_CLANK_DISABLE_MCP")
         return
 
     base_dir = get_app_root()
-    python = sys.executable
 
     async def _connect_python_server(server_id: str, script_path: str, name: str):
         try:
+            frozen = getattr(sys, "frozen", False)
+            python = (await asyncio.to_thread(resolve_python, base_dir)).path if frozen else sys.executable
             ok = await mcp_manager.connect_server(
                 server_id=server_id,
                 name=name,
                 transport="stdio",
                 command=python,
-                args=[script_path],
+                args=["-I", "-B", script_path] if frozen else [script_path],
                 env=builtin_python_env(base_dir),
             )
             if ok:
@@ -219,10 +259,13 @@ async def register_builtin_servers(mcp_manager):
     async def _start_npx_servers():
         await asyncio.sleep(3)  # let Python servers finish first
         for server_id, cfg in _BUILTIN_NPX_SERVERS.items():
+            if server_id == "builtin_browser":
+                logger.info("Built-in Browser MCP remains disconnected until an explicit Browser target is admitted")
+                continue
             # Browser automation is a shipped built-in, so the default path
             # lets `npx -y` install @playwright/mcp on first start. Locked-down
             # installs can opt back into the old no-network startup behavior
-            # with ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE=1.
+            # with OPEN_CLANK_BROWSER_MCP_REQUIRE_CACHE=1.
             args = _browser_mcp_args(cfg["args"]) if server_id == "builtin_browser" else list(cfg["args"])
             pkg_spec = _npx_package_from_args(args)
             browser_env = _browser_node_env(npx_path) if server_id == "builtin_browser" else None
@@ -233,7 +276,7 @@ async def register_builtin_servers(mcp_manager):
                     f"  Impact: tools provided by this MCP server will be unavailable.\n"
                     f"  Fix:    {os.path.basename(npx_path)} -y {pkg_spec} --version\n"
                     f"          (run once, then restart Open Clank)\n"
-                    f"  Notes:  ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE=1 is set, "
+                    f"  Notes:  OPEN_CLANK_BROWSER_MCP_REQUIRE_CACHE=1 is set, "
                     f"so Open Clank will not install browser automation on startup."
                 )
                 continue
@@ -244,7 +287,7 @@ async def register_builtin_servers(mcp_manager):
                 if server_id == "builtin_browser":
                     # Writable caches follow the canonical data authority;
                     # resource discovery above still belongs to the app root.
-                    cache_home = os.environ.get("ODYSSEUS_BROWSER_MCP_CACHE") or os.path.join(
+                    cache_home = os.environ.get("OPEN_CLANK_BROWSER_MCP_CACHE") or os.path.join(
                         DATA_DIR, "local", "playwright-mcp-cache",
                     )
                     try:
@@ -252,7 +295,7 @@ async def register_builtin_servers(mcp_manager):
                     except OSError as error:
                         raise RuntimeError(
                             f"Browser cache is unavailable at {cache_home!r}. "
-                            "Check directory permissions or set ODYSSEUS_BROWSER_MCP_CACHE "
+                            "Check directory permissions or set OPEN_CLANK_BROWSER_MCP_CACHE "
                             "to a writable destination. Existing caches were left in place."
                         ) from error
                     env = {

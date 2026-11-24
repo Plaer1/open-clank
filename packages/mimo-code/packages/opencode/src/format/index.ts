@@ -23,6 +23,7 @@ export const Status = z
 export type Status = z.infer<typeof Status>
 
 export interface Interface {
+  readonly recoveryWitness?: () => Effect.Effect<import("../session/recovery-profile").FormatterWitness>
   readonly init: () => Effect.Effect<void>
   readonly status: () => Effect.Effect<Status[]>
   readonly file: (filepath: string) => Effect.Effect<void, Error>
@@ -194,7 +195,18 @@ export const layer = Layer.effect(
       yield* formatFile(filepath)
     })
 
-    return Service.of({ init, status, file })
+    const recoveryWitness: NonNullable<Interface["recoveryWitness"]> = Effect.fn("Format.recoveryWitness")(function* () {
+      const captured = yield* InstanceState.get(state)
+      const configured = yield* config.get()
+      const explicitlyDisabled = configured.formatter === false && Object.keys(captured.formatters).length === 0
+      const current = () => Effect.gen(function* () {
+        const now = yield* InstanceState.get(state)
+        const cfg = yield* config.get()
+        return now === captured && cfg.formatter === false && Object.keys(now.formatters).length === 0
+      })
+      return Object.freeze({ explicitlyDisabled, current })
+    })
+    return Service.of({ init, status, file, recoveryWitness })
   }),
 )
 

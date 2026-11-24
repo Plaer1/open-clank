@@ -32,7 +32,7 @@ const port = await new Promise((resolve, reject) => {
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openclank-models-'));
 const browserExecutable = process.env.OPENCLANK_CHROME_BIN
   || process.env.CHROME_BIN
-  || process.env.ODYSSEUS_BROWSER_EXECUTABLE
+  || process.env.OPEN_CLANK_BROWSER_EXECUTABLE
   || ['/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
     .find(candidate => fs.existsSync(candidate));
 assert(browserExecutable, 'Chromium or Google Chrome is required for this browser acceptance test');
@@ -98,11 +98,13 @@ try {
     const originalFetch = window.fetch.bind(window);
     const html = await originalFetch('/static/index.html').then(r => r.text());
     document.body.replaceChildren(...new DOMParser().parseFromString(html, 'text/html').body.childNodes);
+    document.body.dataset.accountId = 'alice';
     window.__errors = [];
     window.addEventListener('error', e => window.__errors.push(e.error?.message || e.message));
     window.addEventListener('unhandledrejection', e => window.__errors.push(e.reason?.message || String(e.reason)));
     window.__posts = [];
     window.__stored = [];
+    window.__inputCalls = [];
     window.__patchMode = 'ok';
     window.__chatMode = 'ok';
     const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers:{'Content-Type':'application/json'}});
@@ -144,6 +146,19 @@ try {
         if(window.__sessionsWait) await window.__sessionsWait; return json(rows);
       }
       if (url.includes('/api/models')) return json({items:window.__catalogItems || []});
+      if (url.includes('/api/orchestration/')) {
+        const parsed = new URL(url, location.href);
+        if (parsed.pathname.endsWith('/actors/main/input') && options.method === 'POST') {
+          const body = JSON.parse(options.body); window.__inputCalls.push({url, body});
+          return json({receipt:{requestID:body.requestID,state:'persisted'},deliveryState:'unavailable',deliveryReason:'fixture unavailable'});
+        }
+        if (parsed.pathname.endsWith('/actors/main/input')) return json({actorSessionId:'native-main',receipts:window.__inputCalls.map(call=>({
+          requestID:call.body.requestID,text:'"Which path?"="B"',attachmentUploadIDs:[],questionRefs:call.body.questionRefs,
+          questionAnswers:call.body.questionAnswers,mode:call.body.mode,state:'persisted',createdAt:1,
+        }))});
+        if (parsed.pathname.endsWith('/actors/main/questions')) return json({actorSessionId:'native-main',items:window.__optionalQuestion?[window.__optionalQuestion]:[],nextCursor:null});
+        return json({mapRevision:1,engineSessionId:'native-main',actors:[{actorID:'main',sessionID:'native-main'}]});
+      }
       if (url.includes('/mimo-state')) {
         const state = window.__state || {pending_question:null};
         if (window.__stateWait) await window.__stateWait;
@@ -289,7 +304,7 @@ try {
   await evaluate(`(async()=>{
     window.__catalogItems=[]; await window.modelsModule.refreshModels(true);
     window.__odysseusLastSelectedSessionId=''; location.hash=''; __sessions.setCurrentSessionId(null); __sessions.clearPendingChat();
-    __defaultChat={}; window.__odysseusDefaultChat=null; localStorage.removeItem('odysseus-default-chat-cache');
+    __defaultChat={}; window.__odysseusDefaultChat=null; localStorage.removeItem('openclank-default-chat-cache');
     await __send('missing default draft');
   })()`);
   assert.equal(await evaluate('document.getElementById("message").value'),'missing default draft','missing default leaves unsent draft');
@@ -362,7 +377,7 @@ try {
     __state={pending_question:__question('q-newer')}; await __chat.restoreSessionState('chat-2');
     __releaseReply(); __replyWait=null;
   })()`);
-  assert.equal(await evaluate('JSON.parse(sessionStorage.getItem("odysseus-mimo-question-chat-2"))?.request_id'), 'q-newer', 'new request survives old acknowledgement');
+  assert.equal(await evaluate('JSON.parse(sessionStorage.getItem("openclank-agent-question-chat-2"))?.request_id'), 'q-newer', 'new request survives old acknowledgement');
   assert.equal(await evaluate('Boolean(__card("q-newer"))'),true);
   await evaluate(`(async()=>{
     __state={pending_question:null}; __stateWait=new Promise(resolve=>window.__releaseState=resolve);
@@ -373,6 +388,35 @@ try {
   assert.equal(await evaluate('Boolean(__card("q-other-view"))'),true,'navigation fences delayed state readback');
   await evaluate(`(()=>{__renderer.renderAskUserCard(__question('q-history'),{interactive:false,focus:false,scroll:false});})()`);
   assert.equal(await evaluate('__card("q-history").querySelectorAll("input:not(:disabled),button:not(:disabled)").length'),0,'historical request does not imply live controls');
+  await evaluate(`(async()=>{
+    __sessions.setCurrentSessionId('chat-1');
+    const question={request_id:'question-native-1@1',native_request_id:'question-native-1',question_ref:'question-native-1@1',session_id:'chat-1',actor_id:'main',actor_session_id:'native-main',question_revision:1,blocking:false,questions:[{question:'Which path?',options:[{label:'A'},{label:'B'}],multiple:false,custom:false}]};
+    window.__optionalQuestion={requestID:'question-native-1',questionRef:'question-native-1@1',sessionID:'native-main',actorID:'main',originTurnID:'origin-a',questionRevision:1,blocking:false,questions:question.questions,state:'pending'};
+    __renderer.renderAskUserCard(question,{scroll:false,focus:false});
+    const card=document.querySelector('.mimo-question-card[data-request-id="question-native-1"]');
+    card.querySelector('input[type=radio][value="B"]').checked=true;
+    card.requestSubmit();
+  })()`);
+  await waitFor('__inputCalls.length===1','optional answer receipt submission');
+  assert.equal(await evaluate('__inputCalls[0].body.questionRefs[0]'),'question-native-1@1');
+  assert.deepEqual(await evaluate('__inputCalls[0].body.questionAnswers[0].answers'), [['B']]);
+  assert.match(await evaluate('document.querySelector(".mimo-question-card[data-request-id=question-native-1]").querySelector("[role=status]").textContent'), /unavailable/i);
+  assert.equal(await evaluate('!document.querySelector(".mimo-question-card[data-request-id=question-native-1] button[type=button].confirm-btn").hidden'),true,'unavailable saved answer exposes retry');
+  await evaluate(`(async()=>{document.querySelector('.mimo-question-card[data-request-id="question-native-1"] button[type=button].confirm-btn').click();})()`);
+  await waitFor('__inputCalls.length===2','same answer retry');
+  assert.equal(await evaluate('__inputCalls[0].body.requestID===__inputCalls[1].body.requestID'),true,'retry reuses request ID');
+  await evaluate(`(async()=>{await __chat.restoreSessionState('chat-1');})()`);
+  await waitFor('document.querySelector(".mimo-question-card[data-request-id=question-native-1]")?.querySelector("input[value=B]")?.checked','question reload with saved answer');
+  await evaluate(`(async()=>{document.querySelector('.mimo-question-card[data-request-id="question-native-1"]')?.requestSubmit();})()`);
+  await waitFor('__inputCalls.length===3','reloaded saved answer retry');
+  assert.equal(await evaluate('__inputCalls[0].body.requestID===__inputCalls[2].body.requestID'),true,'reload retry preserves the same answer receipt');
+  await evaluate(`(async()=>{
+    __sessions.setCurrentSessionId('chat-2');
+    try { await __chat.submitOptionalQuestionAnswer({session_id:'chat-1',native_request_id:'question-native-1',question_ref:'question-native-1@1',actor_id:'main',actor_session_id:'native-main',question_revision:1},[['B']]); }
+    catch(error){ window.__crossChatRejected=true; }
+  })()`);
+  assert.equal(await evaluate('__crossChatRejected'),true,'question card from another chat cannot create a receipt');
+  assert.equal(await evaluate('__inputCalls.length'),3);
   assert.deepEqual(await evaluate('__errors'), [], 'mounted shipped modules produce no browser errors');
   if (process.argv.includes('--with-existing-model-picker')) {
     const check = spawn(process.execPath, [path.join(sourceRoot,'tests/model_catalog_browser_acceptance.mjs'), base], {stdio:'inherit'});

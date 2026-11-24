@@ -1,0 +1,818 @@
+{
+  "fixture_version": "s00.recall.v1",
+  "status": "authored_labels_no_benchmark_executed",
+  "scope": {
+    "owner": "owner-a",
+    "workspace": "work-a"
+  },
+  "split_policy": "IDs 01-24 calibration; 25-48 holdout; labels frozen before tuning",
+  "records": [
+    {
+      "id": "r01",
+      "revision": 1,
+      "owner": "owner-a",
+      "workspace": "work-a",
+      "text": "Old deployment note: the release uses the blue harbor endpoint.",
+      "created_at": "2024-01-10T12:00:00Z"
+    },
+    {
+      "id": "r02",
+      "revision": 2,
+      "owner": "owner-a",
+      "workspace": "work-a",
+      "text": "Recent lunch note: pasta near the harbor.",
+      "created_at": "2026-10-28T12:00:00Z"
+    },
+    {
+      "id": "r03",
+      "revision": 1,
+      "owner": "owner-a",
+      "workspace": "work-a",
+      "text": "The archival key is ORBIT-17."
+    },
+    {
+      "id": "r04",
+      "revision": 3,
+      "owner": "owner-a",
+      "workspace": "work-a",
+      "text": "Mira owns the Beacon project."
+    },
+    {
+      "id": "r05",
+      "revision": 2,
+      "owner": "owner-a",
+      "workspace": "work-a",
+      "text": "Beacon depends on the Lumen service."
+    },
+    {
+      "id": "r06",
+      "revision": 1,
+      "owner": "owner-a",
+      "workspace": "work-a",
+      "text": "The launch review is scheduled for Tuesday."
+    },
+    {
+      "id": "r07",
+      "revision": 1,
+      "owner": "owner-b",
+      "workspace": "work-a",
+      "text": "Private token name is ORBIT-17."
+    },
+    {
+      "id": "r08",
+      "revision": 2,
+      "owner": "owner-a",
+      "workspace": "work-b",
+      "text": "The warehouse door is green."
+    },
+    {
+      "id": "r09",
+      "revision": 1,
+      "owner": "owner-a",
+      "workspace": null,
+      "text": "Global preference: use short meeting notes."
+    },
+    {
+      "id": "r10",
+      "revision": 2,
+      "owner": "owner-a",
+      "workspace": "work-a",
+      "text": "The language Java is used for the parser."
+    },
+    {
+      "id": "r11",
+      "revision": 1,
+      "owner": "owner-a",
+      "workspace": "work-a",
+      "text": "Java island is a travel destination."
+    },
+    {
+      "id": "r12",
+      "revision": 4,
+      "owner": "owner-a",
+      "workspace": "work-a",
+      "text": "The retry limit is three attempts."
+    }
+  ],
+  "cases": [
+    {
+      "id": "recall-01",
+      "split": "calibration",
+      "query": "Where is the release endpoint?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r01",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Old relevant endpoint beats unrelated recent lunch."
+    },
+    {
+      "id": "recall-02",
+      "split": "calibration",
+      "query": "What was the harbor endpoint?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r01",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Endpoint intent selects deployment note."
+    },
+    {
+      "id": "recall-03",
+      "split": "calibration",
+      "query": "Find ORBIT-17",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r03",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Exact identifier matches owner-a record."
+    },
+    {
+      "id": "recall-04",
+      "split": "calibration",
+      "query": "Who owns Beacon?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r04",
+          "revision": 3
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Exact ownership fact is relevant."
+    },
+    {
+      "id": "recall-05",
+      "split": "calibration",
+      "query": "What service does Beacon depend on?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r05",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Dependency is a relationship candidate."
+    },
+    {
+      "id": "recall-06",
+      "split": "calibration",
+      "query": "When is launch review?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r06",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Exact event date is relevant."
+    },
+    {
+      "id": "recall-07",
+      "split": "calibration",
+      "query": "What is our retry limit?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r12",
+          "revision": 4
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Current revision supplies the limit."
+    },
+    {
+      "id": "recall-08",
+      "split": "calibration",
+      "query": "What note style do I prefer?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r09",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Same-owner global preference is visible."
+    },
+    {
+      "id": "recall-09",
+      "split": "calibration",
+      "query": "Which programming language powers the parser?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r10",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Semantic paraphrase selects the language."
+    },
+    {
+      "id": "recall-10",
+      "split": "calibration",
+      "query": "Where is Java a travel destination?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r11",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Entity sense distinguishes island from language."
+    },
+    {
+      "id": "recall-11",
+      "split": "calibration",
+      "query": "What color is the warehouse door?",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "no_hit"
+      ],
+      "explanation": "The matching workspace-b fact is out of scope."
+    },
+    {
+      "id": "recall-12",
+      "split": "calibration",
+      "query": "Who owns the Moon?",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "no_hit"
+      ],
+      "explanation": "No synthetic record supports that claim."
+    },
+    {
+      "id": "recall-13",
+      "split": "calibration",
+      "query": "Find launch review date",
+      "context": "Launch review is scheduled for Tuesday.",
+      "relevant": [
+        {
+          "record_id": "r06",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "suppress_duplicate"
+      ],
+      "explanation": "Already admitted context contains the exact fact."
+    },
+    {
+      "id": "recall-14",
+      "split": "calibration",
+      "query": "Find the release endpoint",
+      "context": "The release uses the blue harbor endpoint.",
+      "relevant": [
+        {
+          "record_id": "r01",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "suppress_duplicate"
+      ],
+      "explanation": "Exact context duplicate need not be reinserted."
+    },
+    {
+      "id": "recall-15",
+      "split": "calibration",
+      "query": "Search with backend timeout",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "timeout"
+      ],
+      "explanation": "A timeout is unavailable, not a fabricated empty success."
+    },
+    {
+      "id": "recall-16",
+      "split": "calibration",
+      "query": "Cancel a shared retrieval transport",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "uncancellable"
+      ],
+      "explanation": "A non-cancellable shared request must not be reported cancelled."
+    },
+    {
+      "id": "recall-17",
+      "split": "calibration",
+      "query": "Which team owns Beacon?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r04",
+          "revision": 3
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Fuzzy phrasing retains the ownership target."
+    },
+    {
+      "id": "recall-18",
+      "split": "calibration",
+      "query": "Trace Beacon to Lumen",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r05",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Relationship candidate is visible."
+    },
+    {
+      "id": "recall-19",
+      "split": "calibration",
+      "query": "What recent lunch was recorded?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r02",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Recent record is relevant for this different query."
+    },
+    {
+      "id": "recall-20",
+      "split": "calibration",
+      "query": "What is the private token name?",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "no_hit"
+      ],
+      "explanation": "Other owner record must not resolve."
+    },
+    {
+      "id": "recall-21",
+      "split": "calibration",
+      "query": "How many retry attempts?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r12",
+          "revision": 4
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Numerical limit is explicit."
+    },
+    {
+      "id": "recall-22",
+      "split": "calibration",
+      "query": "Find short notes preference",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r09",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Global preference can be admitted in workspace-a."
+    },
+    {
+      "id": "recall-23",
+      "split": "calibration",
+      "query": "What is the archive key?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r03",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Key name paraphrase selects exact record."
+    },
+    {
+      "id": "recall-24",
+      "split": "calibration",
+      "query": "What does Lumen support?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r05",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Reverse relation may retrieve the Beacon dependency."
+    },
+    {
+      "id": "recall-25",
+      "split": "holdout",
+      "query": "Which endpoint shipped the release?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r01",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Holdout paraphrase targets the old deployment note."
+    },
+    {
+      "id": "recall-26",
+      "split": "holdout",
+      "query": "Was pasta the release endpoint?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r01",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Recent lexical overlap is irrelevant to endpoint identity."
+    },
+    {
+      "id": "recall-27",
+      "split": "holdout",
+      "query": "Locate orbit 17 archival identifier",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r03",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Fuzzy punctuation should find the same identifier."
+    },
+    {
+      "id": "recall-28",
+      "split": "holdout",
+      "query": "Name the Beacon owner",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r04",
+          "revision": 3
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "A named entity and role identify the fact."
+    },
+    {
+      "id": "recall-29",
+      "split": "holdout",
+      "query": "List Beacon service dependencies",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r05",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Plural paraphrase targets the relation."
+    },
+    {
+      "id": "recall-30",
+      "split": "holdout",
+      "query": "What weekday is the review?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r06",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Date answer is explicitly Tuesday."
+    },
+    {
+      "id": "recall-31",
+      "split": "holdout",
+      "query": "How often may a call retry?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r12",
+          "revision": 4
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Retry count is represented at revision four."
+    },
+    {
+      "id": "recall-32",
+      "split": "holdout",
+      "query": "Should meeting notes be long?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r09",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Preference answers the opposite wording."
+    },
+    {
+      "id": "recall-33",
+      "split": "holdout",
+      "query": "Java parser technology?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r10",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Parser context selects language sense."
+    },
+    {
+      "id": "recall-34",
+      "split": "holdout",
+      "query": "Java trip location?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r11",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Trip context selects island sense."
+    },
+    {
+      "id": "recall-35",
+      "split": "holdout",
+      "query": "Find green door",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "no_hit"
+      ],
+      "explanation": "The matching record belongs to another workspace."
+    },
+    {
+      "id": "recall-36",
+      "split": "holdout",
+      "query": "What is the orbital launch mass?",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "no_hit"
+      ],
+      "explanation": "The identifier overlap does not support launch mass."
+    },
+    {
+      "id": "recall-37",
+      "split": "holdout",
+      "query": "Repeat the Beacon owner",
+      "context": "Mira owns the Beacon project.",
+      "relevant": [
+        {
+          "record_id": "r04",
+          "revision": 3
+        }
+      ],
+      "permitted_outcomes": [
+        "suppress_duplicate"
+      ],
+      "explanation": "Visible exact ownership should not be repeated."
+    },
+    {
+      "id": "recall-38",
+      "split": "holdout",
+      "query": "Repeat the retry count",
+      "context": "The retry limit is three attempts.",
+      "relevant": [
+        {
+          "record_id": "r12",
+          "revision": 4
+        }
+      ],
+      "permitted_outcomes": [
+        "suppress_duplicate"
+      ],
+      "explanation": "Visible exact limit is a duplicate."
+    },
+    {
+      "id": "recall-39",
+      "split": "holdout",
+      "query": "Recall after a deadline",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "timeout"
+      ],
+      "explanation": "Deadline expiry must preserve unavailable state."
+    },
+    {
+      "id": "recall-40",
+      "split": "holdout",
+      "query": "Stop a shared in-flight lookup",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "uncancellable"
+      ],
+      "explanation": "A shared non-cancellable transport cannot claim cancellation."
+    },
+    {
+      "id": "recall-41",
+      "split": "holdout",
+      "query": "Who is accountable for the beacon work?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r04",
+          "revision": 3
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Fuzzy actor-role match is admissible."
+    },
+    {
+      "id": "recall-42",
+      "split": "holdout",
+      "query": "Follow the Beacon service link",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r05",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Relationship lookup retains source revision."
+    },
+    {
+      "id": "recall-43",
+      "split": "holdout",
+      "query": "What meal was near the harbor?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r02",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Here the recent lunch fact is relevant."
+    },
+    {
+      "id": "recall-44",
+      "split": "holdout",
+      "query": "Retrieve another owner’s ORBIT note",
+      "context": "",
+      "relevant": [],
+      "permitted_outcomes": [
+        "no_hit"
+      ],
+      "explanation": "Cross-owner request never discloses the private record."
+    },
+    {
+      "id": "recall-45",
+      "split": "holdout",
+      "query": "What count caps retries?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r12",
+          "revision": 4
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Exact current revision carries a count."
+    },
+    {
+      "id": "recall-46",
+      "split": "holdout",
+      "query": "Preferred length for meeting notes?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r09",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Owner-global preference remains visible."
+    },
+    {
+      "id": "recall-47",
+      "split": "holdout",
+      "query": "Which key is used for the archive?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r03",
+          "revision": 1
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Paraphrase targets the synthetic archival key."
+    },
+    {
+      "id": "recall-48",
+      "split": "holdout",
+      "query": "Which project relies on Lumen?",
+      "context": "",
+      "relevant": [
+        {
+          "record_id": "r05",
+          "revision": 2
+        }
+      ],
+      "permitted_outcomes": [
+        "admit"
+      ],
+      "explanation": "Reverse relation returns the same exact evidence."
+    }
+  ],
+  "recency_fixture": "r01 is old and r02 is recent by authored timestamps; missing timestamps are unspecified, not inferred."
+}

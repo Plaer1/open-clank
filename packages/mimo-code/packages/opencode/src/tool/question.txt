@@ -5,6 +5,8 @@ Use this tool when you need to ask the user questions during execution. This all
 4. Offer choices to the user about what direction to take.
 
 Usage notes:
+- Keep questions blocking by default. Set `blocking: false` only when the user can answer later and the agent can safely continue independent work without assuming a choice, permission, or approval.
+- A saved optional question is not an answer. Continue without treating silence or dismissal as approval.
 - When `custom` is enabled (default), a "Type your own answer" option is added automatically; don't include "Other" or catch-all options
 - Answers are returned as arrays of labels; set `multiple: true` to allow selecting more than one
 - If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end of the label

@@ -34,6 +34,30 @@ pub struct ControlEnvelope {
     pub action_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CrossOriginCandidate {pub position:String,pub resource:crate::catalog::ResourceKey,pub action_id:String,pub recorded_millis:Option<String>,pub state:String,pub availability:String,pub locator:Option<String>,pub registration:Option<crate::registry::ResourceRegistration>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub graph_witness:Option<WorkspaceActivityWitness>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceActivityWitness {
+    pub after_version_id:String,
+    pub after_fingerprint:String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CrossOriginCandidatePage {pub incarnation:String,pub origin_revision:u64,pub registry_revision:u64,pub authority_generation:u64,pub items:Vec<CrossOriginCandidate>,pub next:Option<String>}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceActivityPage {pub incarnation:String,pub scopes_digest:String,pub registry_revision:u64,pub authority_generation:u64,pub root_id:String,pub workspace_id:String,pub items:Vec<CrossOriginCandidate>,pub next:Option<String>}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub enum RegularFileSourceV1 { Selected {version_ref:String}, Inverse {restore_id:String} }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegularFilePreviewV1 {pub version:u8,pub consistency:String,pub source_action_id:String,pub source_version_id:String,pub desired:crate::restore::RegularFileStateV1,pub expected:crate::restore::RegularFileObservationV1}
+
 /// Public response for registry operations.  The service keeps the canonical
 /// root and path private; callers receive only the opaque handle and its scope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,8 +137,108 @@ pub struct BatchCompleteEntry {
     pub outcome: ResourceOutcome,
 }
 
+/// Exact registry pre/post identity for one participant in a captured batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryBatchMove {
+    pub resource_id: String,
+    pub expected_generation: u64,
+    pub expected_root_id: String,
+    pub expected_relative_path: String,
+    pub destination_root_id: String,
+    pub destination_root_path: String,
+    pub destination_relative_path: String,
+    pub replaced_resource_id: Option<String>,
+    pub replaced_generation: Option<u64>,
+}
+
+/// Folder moves bind the complete registered source and destination subtrees
+/// to the same captured batch; this is private to the authenticated provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegistrySubtreeGuard {
+    pub root_id: String,
+    pub root_path: String,
+    pub source_relative_path: String,
+    pub destination_relative_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_root_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_root_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root_identity: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_root_identity: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegistrySubtreeEntry {
+    pub resource_id: String,
+    pub generation: u64,
+    pub relative_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointSelection {
+    pub resource_id: String,
+    pub expected_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointBinding {
+    pub resource_id: String,
+    pub root_id: String,
+    pub workspace_id: String,
+    pub registry_generation: u64,
+    pub relative_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub staged_upload_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointStaged {
+    pub resource_id: String,
+    pub staged_upload_id: String,
+    pub fingerprint: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointVersion {
+    pub resource_id: String,
+    pub version_ref: String,
+    pub fingerprint: String,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServiceRequest {
+    /// Drain prior frames and acknowledge the exact published authority.
+    AuthorityBarrier { envelope: ControlEnvelope, expected_generation: u64, expected_process_id: u32 },
+    AgentAuthorityBarrier { envelope: ControlEnvelope, root_id: String, phase: String, drain_session_id: Option<String>, expected_generation: u64, expected_process_id: u32 },
+    FilesWorktreeCapabilities(ControlEnvelope),
+    LookupFilesWorktreeVersion { envelope: ControlEnvelope, root_id: String, operation_id: String },
+    ClaimFilesWorktree { envelope: ControlEnvelope, root_id: String },
+    CompleteFilesWorktree { envelope: ControlEnvelope, root_id: String, upload_id: String },
+    FinalizeFilesWorktree { envelope: ControlEnvelope, root_id: String },
+    PrepareFilesWorktreeInverse { envelope: RequestEnvelope, root_id: String, original_action_id: String, original_version_id: String },
+    PrepareFilesWorktreeRedo { envelope: RequestEnvelope, root_id: String, inverse_action_id: String, inverse_version_id: String },
+    FinalizeFilesWorktreeInverse { envelope: ControlEnvelope, root_id: String, journal_operation_id: String },
+    BeginFilesWorktreeRead { envelope: ControlEnvelope, root_id: String, version_id: String },
+    FilesWorktreeReadChunk { envelope: ControlEnvelope, root_id: String, read_id: String, offset: u64 },
+    ClaimSelectedCheckpoint { envelope: ControlEnvelope, request_id: String, workspace_id: String,
+        root_id: String, items: Vec<CheckpointSelection> },
+    FinalizeSelectedCheckpoint { envelope: ControlEnvelope, request_id: String, workspace_id: String,
+        root_id: String, items: Vec<CheckpointSelection>, staged: Vec<CheckpointStaged>,
+        started_millis: u64, finished_millis: u64 },
+    FailSelectedCheckpoint { envelope: ControlEnvelope, request_id: String, workspace_id: String,
+        root_id: String, items: Vec<CheckpointSelection> },
+    GetSelectedCheckpoint { envelope: ControlEnvelope, request_id: String },
     Prepare {
         envelope: RequestEnvelope,
         #[serde(with = "base64_content")]
@@ -122,6 +246,12 @@ pub enum ServiceRequest {
         fingerprint: String,
     },
     PrepareBatch {
+        envelope: RequestEnvelope,
+        #[serde(default = "default_batch_version")]
+        batch_version: u32,
+        entries: Vec<BatchPrepareEntry>,
+    },
+    PrepareBatchOnce {
         envelope: RequestEnvelope,
         #[serde(default = "default_batch_version")]
         batch_version: u32,
@@ -135,6 +265,9 @@ pub enum ServiceRequest {
     AfterUnavailable(ControlEnvelope),
     /// Selected capture metadata for the exact actor/account that owns it.
     GetCaptureAction(ControlEnvelope),
+    SettleRecovery(ControlEnvelope),
+    /// Scoped lookup for a deterministic managed Files action identity.
+    LookupManagedAction { envelope: ControlEnvelope, operation_id: String },
     Complete {
         envelope: ControlEnvelope,
         #[serde(with = "base64_content")]
@@ -217,6 +350,44 @@ pub enum ServiceRequest {
         cursor: Option<String>,
         limit: u16,
     },
+    ListResourceChanges {
+        envelope: ControlEnvelope,
+        resource_id: String,
+        #[serde(default)]
+        cursor: Option<String>,
+        limit: u16,
+    },
+    /// Resolve an exact completed managed batch under current read authority.
+    GetManagedActionBatch {
+        envelope: ControlEnvelope,
+        request_digest: String,
+        complete_digest: String,
+        origin: crate::catalog::ManagedToolOriginV1,
+    },
+    /// Return the catalog-generated locator for one exact authorized action/resource.
+    GetManagedActionLocator {
+        envelope: ControlEnvelope,
+        resource_id: String,
+        origin: crate::catalog::ManagedToolOriginV1,
+    },
+    GetResourceChange {
+        envelope: ControlEnvelope,
+        resource_id: String,
+        before_version_id: String,
+        after_version_id: String,
+        origin: crate::catalog::ManagedToolOriginV1,
+    },
+    ListManagedChangeFragments {
+        envelope: ControlEnvelope,
+        resource_id: String,
+        #[serde(default)] cursor: Option<String>,
+        limit: u16,
+    },
+    ListOrderedManagedChanges {envelope:ControlEnvelope,resource_id:String,#[serde(default)] origin_action_id:Option<String>,#[serde(default)] cursor:Option<String>,limit:u16},
+    ListCrossOriginChanges {envelope:ControlEnvelope,resource_id:String,origin_action_id:String,#[serde(default)] incarnation:Option<String>,#[serde(default)] origin_revision:Option<u64>,#[serde(default)] registry_revision:Option<u64>,#[serde(default)] authority_generation:Option<u64>,#[serde(default)] after:Option<String>},
+    CrossOriginFence {envelope:ControlEnvelope,resource_id:String,origin_action_id:String},
+    ListWorkspaceActivity {envelope:ControlEnvelope,resource_id:String,#[serde(default)] incarnation:Option<String>,#[serde(default)] scopes_digest:Option<String>,#[serde(default)] registry_revision:Option<u64>,#[serde(default)] authority_generation:Option<u64>,#[serde(default)] after:Option<String>,#[serde(default)] graph_activity:bool},
+    WorkspaceActivityFence {envelope:ControlEnvelope,resource_id:String},
     /// List private registrations for the authenticated account. This is an
     /// internal identity bridge; HTTP callers receive only public Files IDs.
     ListRegisteredResources {
@@ -224,6 +395,20 @@ pub enum ServiceRequest {
         #[serde(default)]
         cursor: Option<String>,
         limit: u16,
+    },
+    /// Atomic private folder identity snapshot, with generic alias conflicts.
+    RegisteredSubtreeSnapshot {
+        envelope: ControlEnvelope,
+        account_id: String,
+        workspace_id: String,
+        root_id: String,
+        root_path: String,
+        source_relative_path: String,
+        destination_relative_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination_root_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination_root_path: Option<String>,
     },
     /// Resolve one listed version to the existing RestoreHost receipt inside
     /// the service. This keeps Lore addresses out of the browser contract.
@@ -248,9 +433,22 @@ pub enum ServiceRequest {
         version_ref: String,
         expected_destination_fingerprint: String,
     },
+    /// Read only the exact original restore journal; missing never permits replay.
+    GetRestoreStatus {
+        envelope: ControlEnvelope,
+        restore_id: String,
+        resource_id: String,
+        source_action_id: String,
+        source_version_id: String,
+        expected_destination_fingerprint: String,
+    },
+    PreviewRegularFileV1 {envelope:ControlEnvelope,resource_id:String,source:RegularFileSourceV1},
+    ExecuteRegularFileV1 {envelope:ControlEnvelope,restore_id:String,resource_id:String,source:RegularFileSourceV1,expected:crate::restore::RegularFileObservationV1},
+    GetRegularFileStatusV1 {envelope:ControlEnvelope,restore_id:String,resource_id:String,source:RegularFileSourceV1,expected:crate::restore::RegularFileObservationV1},
     /// Read one bounded chunk using the stable opaque id returned by the
     /// resource-version listing. The exact action/version pair is resolved
     /// inside the service and checked against this resource again.
+    DigestResourceVersion { envelope: ControlEnvelope, resource_id: String, version_ref: String },
     ReadResourceVersionChunk {
         envelope: ControlEnvelope,
         resource_id: String,
@@ -263,7 +461,24 @@ pub enum ServiceRequest {
         receipt: crate::catalog::LiveReceipt,
     },
     /// Authenticated settings calls use the same single-writer Catalog as capture admission.
+    PutMemeryComponent { envelope: ControlEnvelope, change: String, digest: String, size: u64,
+                         upload_id: String, policy_revision: u64, resource: String, relative_path: String },
+    ReadMemeryComponent { envelope: ControlEnvelope, change: String, digest: String, resource: String, part: u16 },
+    InspectMemeryComponent { envelope: ControlEnvelope, change: String, digest: String, resource: String },
+    SweepMemeryComponents(ControlEnvelope),
+    GetMemeryManifest { envelope: ControlEnvelope, assets: bool },
+    SettleMemeryManifest {
+        envelope: ControlEnvelope,
+        assets: bool,
+        checkpoint: bool,
+        generation: u64,
+        position: u64,
+        witness: String,
+        add: Vec<crate::catalog::MemeryReference>,
+        remove: Vec<String>,
+    },
     GetPolicy(ControlEnvelope),
+    GetCapturePolicy(ControlEnvelope),
     SetPolicy {
         envelope: ControlEnvelope,
         expected_revision: u64,
@@ -296,6 +511,38 @@ pub enum ServiceRequest {
         #[serde(default)]
         resource_id: Option<String>,
     },
+    /// Register a managed media destination whose validated parent suffix is
+    /// not yet published. This records identity only; it creates no directory.
+    RegisterManagedMediaDestination {
+        envelope: ControlEnvelope,
+        account_id: String,
+        workspace_id: String,
+        root_id: Option<String>,
+        root_path: String,
+        relative_path: String,
+        resource_id: Option<String>,
+    },
+    /// Register one explicitly frozen absent checkout participant under an authorized root; no filesystem effects.
+    RegisterCheckoutAbsent { envelope: ControlEnvelope, account_id:String, workspace_id:String, root_id:String, root_path:String, relative_path:String, operation_id:String, paths:Vec<String>, directories:Vec<String> },
+    /// Internal folder coordinator destination, derived from one existing
+    /// source identity and the exact frozen subtree mapping.
+    RegisterManagedFolderDestination {
+        envelope: ControlEnvelope,
+        account_id: String,
+        workspace_id: String,
+        root_id: String,
+        root_path: String,
+        operation_id: String,
+        source_resource_id: String,
+        source_folder: String,
+        destination_folder: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination_root_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination_root_path: Option<String>,
+        #[serde(default)]
+        asset_proof: Option<serde_json::Value>,
+    },
     /// Move an existing opaque resource to a new provider path while retaining
     /// its identity through atomic rename/move.
     UpdateResource {
@@ -323,6 +570,17 @@ pub enum ServiceRequest {
         root_path: String,
         relative_path: String,
     },
+    /// Owner/action-bound all-participant registry commit; exact replay only.
+    MoveResourcesBatch {
+        envelope: ControlEnvelope,
+        account_id: String,
+        workspace_id: String,
+        moves: Vec<RegistryBatchMove>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtree_guard: Option<RegistrySubtreeGuard>,
+        #[serde(default)]
+        validate_only: bool,
+    },
     /// Retain a tombstone for a deleted resource so a later create at the same
     /// path receives a new identity.
     RevokeResource {
@@ -337,6 +595,7 @@ pub enum ServiceRequest {
         resource_id: String,
     },
     Health(ControlEnvelope),
+    CheckpointCapabilities(ControlEnvelope),
     Shutdown(ControlEnvelope),
 }
 
@@ -445,9 +704,29 @@ mod base64_content {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedBatchMember {
+    pub resource_id: String,
+    pub before_version_id: String,
+    pub after_version_id: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedActionBatch {
+    pub version: u8,
+    pub members: Vec<ManagedBatchMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServiceResponse {
+    AuthorityBarrier { authority_generation: u64, process_id: u32 },
+    AgentAuthorityBarrier { authority_generation: u64, process_id: u32 },
+    FilesWorktreeCapabilities { process_id: u32, authority_generation: u64, worktree_capture: bool },
+    FilesWorktreeSlot { upload_id: String, fingerprint: String, content_length: u64 },
+    FilesWorktreeRead { read_id: String, content_length: u64, fingerprint: String },
+    FilesWorktreeVersion { version_id: String },
+    FilesWorktreeRedoPrepared { action: crate::catalog::ActionRecord, read_id: String, content_length: u64, fingerprint: String },
     Accepted,
     Action(crate::catalog::ActionRecord),
+    BatchOnce { created: bool, action: crate::catalog::ActionRecord },
     #[serde(with = "base64_content")]
     Bytes(Option<Vec<u8>>),
     VersionInfo {
@@ -460,7 +739,19 @@ pub enum ServiceResponse {
         eof: bool,
     },
     Versions(crate::operations::ResourceVersionPage),
+    Changes(crate::operations::ResourceChangePage),
+    ResourceChange(crate::operations::ResourceChange),
+    ManagedActionLocator { locator: String },
+    ManagedActionBatch(ManagedActionBatch),
+    ManagedChangeFragments(crate::operations::ManagedChangePage),
+    OrderedManagedChanges(crate::operations::OrderedManagedPage),
+    CrossOriginChanges(CrossOriginCandidatePage),
+    CrossOriginFence {incarnation:String,origin_revision:u64,registry_revision:u64,authority_generation:u64},
+    WorkspaceActivity(WorkspaceActivityPage),
+    WorkspaceActivityFence {incarnation:String,scopes_digest:String,registry_revision:u64,authority_generation:u64,root_id:String,workspace_id:String},
     RegisteredResources(RegisteredResourcePage),
+    RegisteredSubtreeSnapshot { items: Vec<RegistrySubtreeEntry> },
+    ResourceVersionDigest { version: crate::operations::VersionDescriptor, sha256: String, size: u64 },
     ResourceVersionChunk {
         version: crate::operations::VersionDescriptor,
         offset: u64,
@@ -474,6 +765,9 @@ pub enum ServiceResponse {
         receipt: crate::catalog::VersionReceipt,
     },
     ResourceVersionRestorePreview(ResourceVersionRestorePreview),
+    RestoreStatus { state: String, outcome: Option<crate::restore::RestoreOutcome>, verified: bool },
+    RegularFilePreviewV1(RegularFilePreviewV1),
+    RegularFileStatusV1 {state:String,verified:bool,current_matches:Option<bool>,consistency:String},
     /// A typed, non-transport absence such as a pruned version or a resource
     /// whose Files permission was revoked after the browser opened it.
     Unavailable {
@@ -481,12 +775,17 @@ pub enum ServiceResponse {
         message: String,
     },
     Actions(Vec<crate::catalog::ActionRecord>),
+    MemeryManifest(crate::catalog::MemeryManifest),
+    MemeryComponentLocation(Option<String>),
     Policy(PolicySet),
+    CapturePolicy { capture: crate::retention::CapturePolicy, revision: u64 },
     Usage(HistoryUsage),
     Status {
         state: String,
         reason: Option<String>,
         history_paused: bool,
+        #[serde(default)]
+        last_capture: Option<String>,
         #[serde(default)]
         staged_bytes: u64,
     },
@@ -503,6 +802,27 @@ pub enum ServiceResponse {
         protocol_version: u16,
         account_id: String,
     },
+    CheckpointCapabilities {
+        schema_version: u32,
+        authority_generation: u64,
+        process_id: u32,
+        checkpoint_capture: bool,
+    },
+    CheckpointStatus {
+        state: String,
+        request_digest: Option<String>,
+        locator: Option<String>,
+        items: Vec<CheckpointVersion>,
+        consistency: Option<String>,
+        quiescence: Option<String>,
+        started_millis: Option<u64>,
+        finished_millis: Option<u64>,
+    },
+    CheckpointClaim {
+        state: String,
+        request_digest: String,
+        bindings: Vec<CheckpointBinding>,
+    },
     Error {
         code: String,
     },
@@ -517,6 +837,7 @@ pub enum ProtocolError {
     DigestMismatch,
     InvalidResourceKey,
     UntrustedPhysicalLeaseIdentity,
+    InvalidManagedToolOrigin,
 }
 
 pub fn validate(
@@ -550,6 +871,22 @@ pub fn validate(
     }
     if envelope.auth.actor_id != envelope.request.actor_id {
         return Err(ProtocolError::ActorMismatch);
+    }
+    if envelope.request.managed_tool_origin_v1.as_ref().is_some_and(|origin| {
+        let request = &envelope.request;
+        let mimo = request.tool_id.as_deref() == Some("mimo-filesystem")
+            && request.resource_key.provider == "mimo-filesystem"
+            && request.modified_resource_ids.iter().all(|resource| resource.provider == "mimo-filesystem");
+        // Ordinary model files are a distinct, strictly single-resource Files
+        // capture. The Files service supplies the origin; it grants no scope.
+        let ordinary = ((matches!(request.tool_id.as_deref(), Some("write_file" | "edit_file")) && request.operation == "replace")
+            || (request.tool_id.as_deref() == Some("write_file") && request.operation == "create"))
+            && request.resource_key.provider == "odysseus-files"
+            && request.modified_resource_ids.len() == 1
+            && request.modified_resource_ids[0] == request.resource_key;
+        !origin.is_valid() || request.actor_kind != "agent" || !(mimo || ordinary)
+    }) {
+        return Err(ProtocolError::InvalidManagedToolOrigin);
     }
     // The local service is the authority for the request digest.  A client may still send a
     // digest as an integrity hint, but an empty hint is valid so language clients do not need to

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -57,10 +56,3 @@ def test_normalized_and_read_only_model_routes_are_not_shadowed():
     client = TestClient(app)
     assert client.get("/api/v1/providers/families").status_code == 200
     assert client.get("/api/models").status_code == 200
-
-
-def test_app_registers_no_legacy_model_router():
-    source = Path("app.py").read_text(encoding="utf-8")
-    assert "routes.model_routes" not in source
-    assert "setup_model_routes" not in source
-    assert "backfill_api_endpoint_pins" not in source

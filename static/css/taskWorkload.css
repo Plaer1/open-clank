@@ -1,0 +1,8 @@
+.task-workload { overflow:auto; min-height:0; padding:4px; }
+.task-workload-header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.task-workload-header h3, .task-workload-source h4 { margin:8px 0; }
+.task-workload-sources { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr)); gap:10px; }
+.task-workload-source { border:1px solid var(--border-color, #555); border-radius:8px; padding:10px; }
+.task-workload-coverage, .task-workload-summary { opacity:.75; font-size:.85em; }
+.task-workload-row { display:flex; flex-wrap:wrap; justify-content:space-between; gap:6px; padding:7px 0; border-top:1px solid var(--border-color, #555); }
+.task-workload-row small { flex-basis:100%; opacity:.75; overflow-wrap:anywhere; }

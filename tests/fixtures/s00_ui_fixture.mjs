@@ -61,12 +61,12 @@ export function materializeFixture(parent='/private/tmp') {
 }
 
 export const NATIVE_GOLDEN_SHA256='c9c9277fcc345abb6e34615cea100156a041d48474bf7a601a0bc57b38aa9485';
-const nativeGoldenPath=fileURLToPath(new URL('../../mcp_servers/frankenmemory/crates/fm-core/tests/fixtures/s00_code_graph.json',import.meta.url));
+const nativeGoldenPath=fileURLToPath(new URL('../../native/memery/crates/memery-core/tests/fixtures/s00_code_graph.json',import.meta.url));
 export function readNativeGolden(){
   const bytes=fs.readFileSync(nativeGoldenPath);
   assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),NATIVE_GOLDEN_SHA256,'Native golden changed: review before fixture admission');
   const golden=JSON.parse(bytes);assert.equal(golden.partition_fillers,129);
-  return {golden,source:{path:'mcp_servers/frankenmemory/crates/fm-core/tests/fixtures/s00_code_graph.json',sha256:NATIVE_GOLDEN_SHA256,bytes:bytes.length}};
+  return {golden,source:{path:'native/memery/crates/memery-core/tests/fixtures/s00_code_graph.json',sha256:NATIVE_GOLDEN_SHA256,bytes:bytes.length}};
 }
 
 // Five fresh workspace roots, derived ONLY from the pinned native golden and

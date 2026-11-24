@@ -13,7 +13,6 @@ export interface CommentInsetOptions {
   getPending?:(id:string)=>PendingEdit|undefined;
   registerPending?:(edit:PendingEdit)=>void;
   removePending?:(id:string)=>void;
-  seeSource?:(region:SourceCommentRegion,event:Event)=>void;
   reveal?:(view:EditorView,region:SourceCommentRegion)=>void;
 }
 function regionEditId(region:SourceCommentRegion) {
@@ -25,6 +24,24 @@ function regionEditId(region:SourceCommentRegion) {
 /** Editable Markdown inset over an exact source region. Staging belongs to the
  * resource's dirty/recovery lifecycle; applying submits one guarded transaction.
  */
+const commentLabelCleanup = new WeakMap<HTMLElement, () => void>();
+
+export function bindCommentLabel(root: HTMLElement, label: string) {
+  const owner = root.ownerDocument;
+  const update = () => {
+    const host = owner.defaultView as (Window & {openClankI18n?: {t(value: string): string}}) | null;
+    root.setAttribute('aria-label', host?.openClankI18n?.t(label) ?? label);
+  };
+  update();
+  owner.addEventListener('openclank:languagechange', update);
+  commentLabelCleanup.set(root, () => owner.removeEventListener('openclank:languagechange', update));
+}
+
+export function disposeCommentLabel(root: HTMLElement) {
+  commentLabelCleanup.get(root)?.();
+  commentLabelCleanup.delete(root);
+}
+
 export class CommentInsetWidget extends WidgetType {
   private runtime={editor:null as BodyEditor|null,cleanup:()=>{}};
   private updateRegion:((region:SourceCommentRegion)=>void)|null=null;
@@ -46,7 +63,8 @@ export class CommentInsetWidget extends WidgetType {
     root.className=`cm-rich-comment-widget${region.sourceText.includes('\n')?' cm-rich-comment-block':''}`;
     root.dataset.commentSourceFrom=String(region.from);root.dataset.commentSourceTo=String(region.to);
     this.updateRegion=next=>{region=next;root.dataset.commentSourceFrom=String(next.from);root.dataset.commentSourceTo=String(next.to);};
-    root.setAttribute('aria-label',region.kind==='docstring'?'Editable rich docstring':'Editable rich comment');root.tabIndex=0;
+    bindCommentLabel(root, region.kind === 'docstring' ? 'Editable rich docstring' : 'Editable rich comment');
+    root.tabIndex=0;
     const content=document.createElement('span');content.className='cm-rich-comment-prose';
     const editorHost=document.createElement('div');editorHost.className='cm-rich-comment-body-edit';editorHost.hidden=true;
     const notice=document.createElement('p');notice.className='cm-rich-comment-notice';notice.setAttribute('role','status');notice.hidden=true;
@@ -90,11 +108,16 @@ export class CommentInsetWidget extends WidgetType {
       event.preventDefault();event.stopPropagation();activate(event);
     });
     root.addEventListener('keydown',rawEvent=>{const event=rawEvent as KeyboardEvent;if(event.target===root&&(event.key==='Enter'||event.key==='F2')){event.preventDefault();activate();}});
-    root.addEventListener('focusout',()=>queueMicrotask(()=>{if(editing&&root.isConnected&&!root.contains(root.ownerDocument.activeElement))commit();}));
-    const outside=(event:Event)=>{if(editing&&!root.contains(event.target as Node))commit();};
+    root.addEventListener('focusout',()=>queueMicrotask(()=>{
+      const focus=root.ownerDocument.activeElement;
+      if(editing&&root.isConnected&&!root.contains(focus)&&!focus?.closest('.openclank-context-menu'))commit();
+    }));
+    const outside=(event:PointerEvent)=>{if(event.button===0&&editing&&!root.contains(event.target as Node))commit();};
     root.ownerDocument.addEventListener('pointerdown',outside,true);
-    runtime.cleanup=()=>root.ownerDocument.removeEventListener('pointerdown',outside,true);
-    root.addEventListener('contextmenu',event=>this.options.seeSource?.(region,event));
+    runtime.cleanup=()=>{
+      root.ownerDocument.removeEventListener('pointerdown',outside,true);
+      disposeCommentLabel(root);
+    };
     // Reattach recovered bodies and expose them in place without another box.
     if(pending){register();queueMicrotask(()=>{if(root.isConnected)activate();});}
     return root;

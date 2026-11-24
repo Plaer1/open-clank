@@ -71,6 +71,7 @@ class ReadOnlyAuthSnapshot:
         users = document.get("users") if isinstance(document, dict) else None
         if not isinstance(users, dict):
             raise ValueError("authentication identity store is unavailable")
+        self._first_run_owner = document.get("first_run_owner")
         self._users = {
             str(username).strip().lower(): record
             for username, record in users.items()
@@ -85,6 +86,10 @@ class ReadOnlyAuthSnapshot:
     def is_admin(self, username: str) -> bool:
         record = self._users.get(str(username or "").strip().lower())
         return bool((record or {}).get("is_admin") is True)
+
+    def filesystem_access_eligible(self, username: str, account_id: str) -> bool:
+        return bool(account_id and self.account_id(username) == account_id and
+                    (self.is_admin(username) or self._first_run_owner == account_id))
 
 
 def _authority_paths() -> tuple[str, str]:

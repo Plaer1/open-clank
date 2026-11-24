@@ -1,15 +1,14 @@
 import z from "zod"
 import { Effect, Layer, Context } from "effect"
-import { Bus } from "../bus"
 import { Snapshot } from "../snapshot"
-import { Storage } from "@/storage"
 import { SyncEvent } from "../sync"
 import { Log } from "../util"
 import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID, PartID } from "./schema"
 import { SessionRunState } from "./run-state"
-import { SessionSummary } from "./summary"
+import { ActorRegistry } from "@/actor/registry"
+import { InstanceState } from "@/effect"
 
 const log = Log.create({ service: "session.revert" })
 
@@ -32,26 +31,46 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const sessions = yield* Session.Service
-    const snap = yield* Snapshot.Service
-    const storage = yield* Storage.Service
-    const bus = yield* Bus.Service
-    const summary = yield* SessionSummary.Service
     const state = yield* SessionRunState.Service
+    const registry = yield* ActorRegistry.Service
 
-    const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) {
+    // A child that does not reach its exit observation retains the lease.
+    const guarded = <A, E, R>(sessionID: SessionID, work: (snapshot: <B, F, Q>(op: Effect.Effect<B, F, Q>) => Effect.Effect<B, F, Q>) => Effect.Effect<A, E, R>) => {
+      let outstanding = 0
+      const observer = { begin: () => { outstanding++ }, settled: () => { outstanding-- } }
+      const snapshot = <B, F, Q>(op: Effect.Effect<B, F, Q>) => op.pipe(
+        Effect.provideService(Snapshot.ChildSettlement, observer),
+        Effect.uninterruptible,
+      )
+      return Effect.acquireUseRelease(
+        Effect.gen(function* () {
+          if (!(yield* registry.assertDirectoryActive(sessionID))) return yield* Effect.die(new Error("Execution directory is retired"))
+          const cwd = yield* InstanceState.directory
+          const directory = yield* Effect.tryPromise({ try: async () => (await import("node:fs/promises")).realpath(cwd), catch: () => new Error("Execution directory unavailable") }).pipe(Effect.orDie)
+          const lease = yield* registry.admitExecutionDirectory(directory)
+          if (!lease) return yield* Effect.die(new Error("Execution directory unavailable"))
+          return lease
+        }),
+        () => Effect.gen(function* () {
+          if (!(yield* registry.assertDirectoryActive(sessionID))) return yield* Effect.die(new Error("Execution directory is retired"))
+          return yield* work(snapshot)
+        }),
+        (lease) => Effect.sync(() => { if (outstanding === 0) lease.release() }),
+      )
+    }
+
+    const revert = Effect.fn("SessionRevert.revert")((input: RevertInput) => guarded(input.sessionID, () => Effect.gen(function* () {
       yield* state.assertNotBusy(input.sessionID)
       const all = yield* sessions.messages({ sessionID: input.sessionID, agentID: "*" })
       let lastUser: MessageV2.User | undefined
       const session = yield* sessions.get(input.sessionID)
 
       let rev: Session.Info["revert"]
-      const patches: Snapshot.Patch[] = []
       for (const msg of all) {
         if (msg.info.role === "user") lastUser = msg.info
         const remaining = []
         for (const part of msg.parts) {
           if (rev) {
-            if (part.type === "patch") patches.push(part)
             continue
           }
 
@@ -70,35 +89,20 @@ export const layer = Layer.effect(
 
       if (!rev) return session
 
-      rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
-      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot)
-      yield* snap.revert(patches)
-      if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot as string)
-      const range = all.filter((msg) => msg.info.id >= rev!.messageID)
-      const diffs = yield* summary.computeDiff({ messages: range })
-      yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
-      yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
-      yield* sessions.setRevert({
-        sessionID: input.sessionID,
-        revert: rev,
-        summary: {
-          additions: diffs.reduce((sum, x) => sum + x.additions, 0),
-          deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
-          files: diffs.length,
-        },
-      })
+      // Transcript position is independent of file recovery. Historical Git
+      // references remain readable, but are never applied by this operation.
+      yield* sessions.setRevert({ sessionID: input.sessionID, revert: rev, summary: undefined })
       return yield* sessions.get(input.sessionID)
-    })
+    })))
 
-    const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { sessionID: SessionID }) {
+    const unrevert = Effect.fn("SessionRevert.unrevert")((input: { sessionID: SessionID }) => guarded(input.sessionID, () => Effect.gen(function* () {
       log.info("unreverting", input)
       yield* state.assertNotBusy(input.sessionID)
       const session = yield* sessions.get(input.sessionID)
       if (!session.revert) return session
-      if (session.revert.snapshot) yield* snap.restore(session.revert!.snapshot!)
       yield* sessions.clearRevert(input.sessionID)
       return yield* sessions.get(input.sessionID)
-    })
+    })))
 
     const cleanup = Effect.fn("SessionRevert.cleanup")(function* (session: Session.Info) {
       if (!session.revert) return
@@ -150,11 +154,9 @@ export const layer = Layer.effect(
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
     Layer.provide(SessionRunState.defaultLayer),
+    Layer.provide(ActorRegistry.defaultLayer),
     Layer.provide(Session.defaultLayer),
     Layer.provide(Snapshot.defaultLayer),
-    Layer.provide(Storage.defaultLayer),
-    Layer.provide(Bus.layer),
-    Layer.provide(SessionSummary.defaultLayer),
   ),
 )
 

@@ -89,6 +89,12 @@ async def cleanup_old_sessions(session_manager, owner: Optional[str] = None) -> 
     Returns:
         Tuple of (number of sessions deleted, space freed in MB)
     """
+    from src import bg_jobs
+    from src.openclank.chat_source_bridge import canonical_source_provider
+    lifecycle_context = getattr(session_manager, 'lifecycle_context', None)
+    if lifecycle_context is not None and canonical_source_provider(lifecycle_context) is not None:
+        logger.warning("Chat cleanup deletion unavailable: guarded archive sources require chat lifecycle erasure")
+        return 0, 0.0
     cutoff_date = _utcnow() - timedelta(days=CleanupConfig.DELETE_AFTER_DAYS)
     deleted_count = 0
     space_freed = 0
@@ -137,8 +143,11 @@ async def cleanup_old_sessions(session_manager, owner: Optional[str] = None) -> 
 
         session_ids = [session.id for session in sessions_to_delete]
         if session_ids:
-            from src import bg_jobs
-
+            for session in sessions_to_delete:
+                bg_jobs.assert_session_owner_purge_ready(
+                    session_id=str(session.id),
+                    owner=str(getattr(session, "owner", None) or ""),
+                )
             for session in sessions_to_delete:
                 bg_jobs.delete_for_session_owner(
                     session_id=str(session.id),
@@ -157,6 +166,9 @@ async def cleanup_old_sessions(session_manager, owner: Optional[str] = None) -> 
             logger.info(f"Deleted {deleted_count} old sessions, freeing approximately {space_freed_mb:.2f} MB")
             return deleted_count, space_freed_mb
 
+    except bg_jobs.JobStoreError:
+        db.rollback()
+        raise
     except Exception as e:
         logger.error(f"Error cleaning up old sessions: {e}")
         db.rollback()
@@ -283,6 +295,7 @@ async def cleanup_sessions(session_manager, owner: Optional[str] = None) -> Tupl
     Returns:
         Tuple of (archived_count, deleted_count, space_freed_mb)
     """
+    from src import bg_jobs
     archived_count = 0
     deleted_count = 0
     space_freed_mb = 0.0
@@ -294,6 +307,10 @@ async def cleanup_sessions(session_manager, owner: Optional[str] = None) -> Tupl
 
     try:
         deleted_count, space_freed_mb = await cleanup_old_sessions(session_manager, owner=owner)
+    except bg_jobs.JobStoreError:
+        # Earlier archival may already be committed; report the incomplete
+        # cleanup rather than returning a successful deletion count.
+        raise
     except Exception as e:
         logger.error(f"Delete operation failed: {e}")
 

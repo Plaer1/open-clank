@@ -11,7 +11,9 @@
     "Imps",
     "MiMo",
     "Field Guide",
-    "Meatbag Tasks"
+    "Meatbag Tasks",
+    "Buddy",
+    "Clankshop"
   ],
   "brands": [
     "Open Clank",
@@ -46,7 +48,7 @@
     "Ollama",
     "llama.cpp",
     "TreeHouse",
-    "Frankenmemory",
+    "Memery",
     "FastAPI",
     "Next.js",
     "React",
@@ -81,7 +83,7 @@
     "ZIP"
   ],
   "rules": [
-    "Never translate product names (Open Clank, Copal, Clanker, Imps, Menmery, Lore, TreeHouse, MiMo, Field Guide).",
+    "Never translate the product names listed in this glossary.",
     "Keep locked brand and protocol tokens exactly as in the English source.",
     "Prefer real software terminology people meet in localized interfaces over textbook literalism.",
     "One voice: concise UI labels; complete sentences for errors and help.",

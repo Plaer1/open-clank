@@ -8,6 +8,75 @@ import themeModule from './theme.js';
 import markdownModule from './markdown.js';
 import sessionModule from './sessions.js';
 import documentModule from './document.js?v=20260722emailfastindex1';
+import { openBlankImage } from './copal.js';
+import { continuityScopeCurrent, focusCurrentQuestion } from './chatContinuityPanel.js';
+
+function notificationScopeCurrent(scope, sessionId) {
+  return !!scope && scope.chat === sessionId && continuityScopeCurrent(scope, {chat:false}) &&
+    !!sessionModule?.getSessions()?.some(s => s.id === sessionId);
+}
+function openNotificationChat(scope, sessionId) {
+  if (!notificationScopeCurrent(scope, sessionId)) return;
+  window.focus();
+  if (sessionModule.getCurrentSessionId() !== sessionId) sessionModule.selectSession(sessionId);
+}
+
+// Bounded presentation-only deduplication; these IDs confer no question authority.
+const questionNotices = new Map();
+function retireQuestionNotice(event) {
+  const value = event?.detail || {};
+  if (value.kind !== 'question' || typeof value.sessionId !== 'string' || typeof value.requestId !== 'string') return;
+  for (const item of questionNotices.values()) {
+    if (item.chat === value.sessionId && (item.requestID === value.requestId || item.cardID === value.requestId)) {
+      item.active = false;
+      try { item.notice.close(); } catch (_) {}
+    }
+  }
+}
+function clearQuestionNotices() {
+  for (const item of questionNotices.values()) { item.active = false; try { item.notice.close(); } catch (_) {} }
+  questionNotices.clear();
+}
+document.addEventListener('odysseus:interactive-resolved', retireQuestionNotice);
+document.addEventListener('openclank:auth-context-changed', clearQuestionNotices);
+window.addEventListener('openclank:auth-context-changed', clearQuestionNotices);
+
+/** An actual SSE can suggest attention; only the later current card can be focused. */
+export function notifyBackgroundQuestion(scope, hostChat, value) {
+  const valid = item => typeof item === 'string' && item.length > 0 && new TextEncoder().encode(item).length <= 256;
+  if (!scope || !continuityScopeCurrent(scope, {chat:false}) || scope.chat !== hostChat ||
+      value?.session_id !== hostChat || !valid(value?.request_id) ||
+      (value.native_request_id !== undefined && value.native_request_id !== null && !valid(value.native_request_id)) ||
+      !sessionModule?.getSessions()?.some(item => item.id === hostChat) ||
+      (!document.hidden && sessionModule.getCurrentSessionId() === hostChat) ||
+      !('Notification' in window) || Notification.permission !== 'granted') return;
+  const requestID = value.request_id, cardID = value.native_request_id || requestID;
+  const key = JSON.stringify([scope.account, scope.authEpoch, hostChat, requestID, cardID]);
+  if (questionNotices.has(key)) return;
+  let notice;
+  try { notice = new Notification('Chat needs attention', { body:'A chat has a question.' }); }
+  catch (_) { return; }
+  const item = { chat:hostChat, requestID, cardID, active:true, notice };
+  questionNotices.set(key,item);
+  if (questionNotices.size > 128) {
+    const oldest = questionNotices.keys().next().value, previous = questionNotices.get(oldest);
+    if (previous) { previous.active = false; try { previous.notice.close(); } catch (_) {} }
+    questionNotices.delete(oldest);
+  }
+  notice.onclick = () => { void (async () => {
+    try {
+      if (!item.active || !continuityScopeCurrent(scope,{chat:false}) || !sessionModule.getSessions()?.some(row => row.id === hostChat)) return;
+      window.focus();
+      if (sessionModule.getCurrentSessionId() !== hostChat &&
+          !(await sessionModule.selectSession(hostChat, {awaitSessionState:true}))) return;
+      if (!item.active || !continuityScopeCurrent(scope) || sessionModule.getCurrentSessionId() !== hostChat) return;
+      if (!focusCurrentQuestion(scope,hostChat,requestID,cardID)) uiModule.showToast('The question card is unavailable.', 3000);
+    } catch (_) {
+      if (continuityScopeCurrent(scope,{chat:false})) uiModule.showToast('The question card is unavailable.', 3000);
+    } finally { try { notice.close(); } catch (_) {} }
+  })(); };
+  setTimeout(() => { try { notice.close(); } catch (_) {} }, 10000);
+}
 
 /**
  * Handle a ui_control SSE event — AI-driven UI manipulation.
@@ -134,10 +203,9 @@ export function handleUIControl(uiData) {
           if (fn) fn();
         }).catch(function(){});
       } else if (panel === 'imps') {
-        import('./imps.js').then(function(mod) {
-          var fn = mod.openEditor || (mod.default && mod.default.openEditor);
-          if (fn) fn(null, null, null, 'Imps');
-        }).catch(function(){});
+        openBlankImage({name:'Imps'}).catch(function(error) {
+          uiModule.showToast?.(error.message || 'Unable to open the image editor');
+        });
       } else if (panel === 'email') {
         import('./emailLibrary.js?v=20260722emailfastindex1').then(function(mod) {
           var fn = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
@@ -203,7 +271,8 @@ export function handleUIControl(uiData) {
 /**
  * Notify user when a background stream completes.
  */
-export function notifyStreamComplete(sessionId, query) {
+export function notifyStreamComplete(sessionId, query, scope) {
+  if (!notificationScopeCurrent(scope, sessionId)) return;
   var isHidden = document.hidden;
   var isOtherSession = sessionModule && sessionModule.getCurrentSessionId() !== sessionId;
   if (!isHidden && !isOtherSession) return;
@@ -214,10 +283,7 @@ export function notifyStreamComplete(sessionId, query) {
     tag: 'stream-' + sessionId,
   });
   notification.onclick = function() {
-    window.focus();
-    if (isOtherSession && sessionModule) {
-      sessionModule.selectSession(sessionId);
-    }
+    openNotificationChat(scope, sessionId);
     notification.close();
   };
   setTimeout(function() { notification.close(); }, 10000);
@@ -226,7 +292,8 @@ export function notifyStreamComplete(sessionId, query) {
 /**
  * Insert a clickable in-chat toast when a background stream finishes.
  */
-export function insertStreamDoneToast(sessionId, query) {
+export function insertStreamDoneToast(sessionId, query, scope) {
+  if (!notificationScopeCurrent(scope, sessionId)) return;
   var box = document.getElementById('chat-history');
   if (!box) return;
   var sessions = sessionModule ? sessionModule.getSessions() : [];
@@ -242,7 +309,7 @@ export function insertStreamDoneToast(sessionId, query) {
     + '</span>'
     + '</div>';
   div.addEventListener('click', function() {
-    if (sessionModule) sessionModule.selectSession(sessionId);
+    if (notificationScopeCurrent(scope, sessionId)) sessionModule.selectSession(sessionId);
   });
   box.appendChild(div);
   uiModule.scrollHistory();
@@ -251,7 +318,8 @@ export function insertStreamDoneToast(sessionId, query) {
 /**
  * Notify when research completes (browser notification).
  */
-export function notifyResearchComplete(sessionId, query) {
+export function notifyResearchComplete(sessionId, query, scope) {
+  if (!notificationScopeCurrent(scope, sessionId)) return;
   var isHidden = document.hidden;
   var isOtherSession = sessionModule && sessionModule.getCurrentSessionId() !== sessionId;
   if (!isHidden && !isOtherSession) return;
@@ -262,10 +330,7 @@ export function notifyResearchComplete(sessionId, query) {
     tag: 'research-' + sessionId,
   });
   notification.onclick = function() {
-    window.focus();
-    if (isOtherSession && sessionModule) {
-      sessionModule.selectSession(sessionId);
-    }
+    openNotificationChat(scope, sessionId);
     notification.close();
   };
   setTimeout(function() { notification.close(); }, 10000);
@@ -274,6 +339,7 @@ export function notifyResearchComplete(sessionId, query) {
 const chatStream = {
   handleUIControl,
   notifyStreamComplete,
+  notifyBackgroundQuestion,
   insertStreamDoneToast,
   notifyResearchComplete,
 };

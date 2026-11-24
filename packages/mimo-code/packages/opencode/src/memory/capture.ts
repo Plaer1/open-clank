@@ -38,7 +38,7 @@ export const layer: Layer.Layer<CaptureService, never, Bus.Service | Config.Serv
     const init = () =>
       Effect.gen(function* () {
         const cfg = yield* config.get()
-        if (cfg.memory?.provider !== "frankenmemory") {
+        if (cfg.memory?.provider !== "memery") {
           log.info("memory scope lifecycle disabled", { provider: cfg.memory?.provider ?? "unset" })
           return
         }

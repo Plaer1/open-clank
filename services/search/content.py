@@ -9,9 +9,9 @@ import re
 import logging
 import socket
 import ssl
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, cast
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunsplit
 
 import httpx
 import httpcore
@@ -555,8 +555,20 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
         "total_bytes": getattr(response, "declared_bytes", None),
     }
 
-    # PDF handling
+    # The cached result keeps the original response observation. Redirect query
+    # values and credentials are unnecessary for the public provenance.
     content_type = response.headers.get("Content-Type", "").lower()
+    response_url = urlparse(str(getattr(response, "url", "") or ""))
+    final_url = urlunsplit((response_url.scheme, response_url.netloc.rsplit("@", 1)[-1],
+                            response_url.path, "", "")) if response_url.hostname else None
+    provenance = {
+        "final_url": final_url,
+        "url_parameters_omitted": bool(response_url.query or response_url.fragment or response_url.username),
+        "content_type": content_type.split(";", 1)[0] or None,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # PDF handling
     if "application/pdf" in content_type or url.lower().endswith(".pdf"):
         if _size_fields["truncated"]:
             # A PDF cut mid-stream is not parseable; unlike text there is no
@@ -591,6 +603,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
             "js_message": "",
             "success": bool(pdf_text),
             "error": "" if pdf_text else "Failed to extract PDF text",
+            "provenance": {**provenance, "result_kind": "pdf_text"},
             **_size_fields,
         }
         _cache_result(cache_file, cache_key, result, url, route=route)
@@ -626,6 +639,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
             "js_message": "",
             "success": bool(text_body),
             "error": "" if text_body else "Empty response body",
+            "provenance": {**provenance, "result_kind": "json" if is_json else "markdown" if "markdown" in content_type or url_path.endswith((".md", ".markdown")) else "text"},
             **_size_fields,
         }
         _cache_result(cache_file, cache_key, result, url, route=route)
@@ -689,6 +703,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
         "js_message": js_message,
         "success": True,
         "error": "",
+        "provenance": {**provenance, "result_kind": "html_text" if is_html else "extracted_text"},
         **_size_fields,
     }
     _cache_result(cache_file, cache_key, result, url, route=route)

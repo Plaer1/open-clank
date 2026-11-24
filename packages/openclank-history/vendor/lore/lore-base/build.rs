@@ -3,19 +3,13 @@
 use std::env;
 use std::path::Path;
 
-include!("../build-helper.rs");
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Populate environment with build details
-    vergen::Emitter::default()
-        .add_custom_instructions(&LoreVergen::default())?
-        .emit()?;
-
     let crate_dir = env::var("CARGO_MANIFEST_DIR").expect("No manifest dir set");
     let native_dir = Path::join(Path::new(&crate_dir), "native");
 
     let platform = env::var("CARGO_CFG_TARGET_OS").expect("No target OS set");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("No target arch set");
+    let neoverse_512tvb = env::var("CARGO_FEATURE_NEOVERSE_512TVB").is_ok();
 
     let mut cc_base_builder = cc::Build::new();
     let cc_builder = cc_base_builder
@@ -28,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .define("ENABLE_OVERRIDE", "0")
         .includes(Some(native_dir.join("thirdparty")));
 
-    if platform == "linux" && arch == "aarch64" {
+    if platform == "linux" && arch == "aarch64" && neoverse_512tvb {
         cc_builder.flag("-mcpu=neoverse-512tvb");
     }
 

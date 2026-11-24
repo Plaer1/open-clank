@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm"
 import { existsSync } from "fs"
 import { Log } from "../util"
 import { Database, eq, and, inArray } from "../storage"
@@ -6,6 +7,8 @@ import { ProjectTable } from "../project/project.sql"
 import { ProjectID } from "../project/schema"
 import { resolveMainGitDir, resolveProjectId } from "../project/project-id"
 import { SessionTable, MessageTable, PartTable } from "./session.sql"
+import { stripGcfReceipt } from "./gcf-source-proof"
+import { stripCaptureMembership } from "./capture-membership"
 import { ExternalImportTable } from "./external-import.sql"
 import type { SessionID, MessageID, PartID } from "./schema"
 
@@ -158,6 +161,7 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
         }
 
         Database.transaction((tx) => {
+        const hasStepRecovery = tx.all<{name:string}>(sql`PRAGMA table_info('part')`).some(column => column.name === 'openclank_step_recovery')
           tx.insert(ProjectTable)
             .values({
               id: project.id,
@@ -215,6 +219,7 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
           }
 
           for (const m of messages) {
+            if (hasStepRecovery) tx.run(sql`UPDATE part SET openclank_step_recovery=NULL WHERE message_id=${m.id} AND session_id=${sess.id} AND openclank_step_recovery IS NOT NULL`)
             const data = typeof m.data === "string" ? JSON.parse(m.data) : m.data
             tx.insert(MessageTable)
               .values({
@@ -232,7 +237,10 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
           }
 
           for (const p of parts) {
-            const data = typeof p.data === "string" ? JSON.parse(p.data) : p.data
+            const data = stripCaptureMembership(stripGcfReceipt(typeof p.data === "string" ? JSON.parse(p.data) : p.data))
+            // A replacement, even with identical data, cannot inherit local recovery issuance.
+            if (hasStepRecovery)
+              tx.run(sql`UPDATE part SET openclank_step_recovery=NULL WHERE id=${p.id}`)
             tx.insert(PartTable)
               .values({
                 id: p.id as PartID,

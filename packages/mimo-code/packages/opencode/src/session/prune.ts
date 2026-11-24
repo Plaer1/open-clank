@@ -144,6 +144,7 @@ export interface Interface {
       promptOps: ActorPromptOps
       agentID?: string
       cfg?: Config.Info
+      toolViewContext?: import('./tool-view-assembly').ToolViewContext
   }) => Effect.Effect<void>
   /** True when the current tokens have just crossed the max checkpoint threshold. */
   readonly maxThresholdCrossed: (sessionID: SessionID) => Effect.Effect<boolean>
@@ -208,15 +209,14 @@ export const layer: Layer.Layer<
           if (part.type === "file" && MessageV2.isMedia(part.mime)) {
             yield* session.updatePart({
               ...part,
-              url: "",
-              filename: `[stripped: ${part.filename ?? part.mime}]`,
+              contextSelection: { version: 1, action: "omit" },
             })
             stripped++
           }
           if (part.type === "reasoning" && msg.info.role === "assistant") {
             yield* session.updatePart({
               ...part,
-              text: "",
+              contextSelection: { version: 1, action: "omit" },
             })
             stripped++
           }
@@ -238,6 +238,7 @@ export const layer: Layer.Layer<
       promptOps: ActorPromptOps
       agentID?: string
       cfg?: Config.Info
+      toolViewContext?: import('./tool-view-assembly').ToolViewContext
     }) {
       // Checkpoint serves main/peer only; subagents use per-actor compaction
       // (independent layers — see 2026-05-22-checkpoint-v8-design.md:71), and
@@ -293,6 +294,7 @@ export const layer: Layer.Layer<
             sessionID: input.sessionID,
             model: { providerID: input.model.providerID, modelID: input.model.id },
             promptOps: input.promptOps,
+            toolViewContext: input.toolViewContext,
           })
           .pipe(Effect.catch(() => Effect.succeed<"started" | "queued" | "skipped">("skipped")))
 
@@ -411,12 +413,7 @@ export const layer: Layer.Layer<
           if (part.state.status === "completed") {
             const output = part.state.output
             if (output.length > SOFT_TRIM_THRESHOLD) {
-              part.state.output =
-                output.slice(0, SOFT_TRIM_KEEP_HEAD) +
-                "\n\n[... trimmed — kept first and last 1.5K of " +
-                output.length +
-                " chars ...]\n\n" +
-                output.slice(-SOFT_TRIM_KEEP_TAIL)
+              part.contextSelection = { version: 1, action: "trim", head: SOFT_TRIM_KEEP_HEAD, tail: SOFT_TRIM_KEEP_TAIL }
               yield* session.updatePart(part)
             }
           }

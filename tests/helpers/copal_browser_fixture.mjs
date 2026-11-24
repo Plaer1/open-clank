@@ -17,7 +17,10 @@ export async function withCopalBrowser({ page, overrides = {}, request = null, c
       const pathname = new URL(req.url, 'http://fixture').pathname;
       if (request && await request(req, res)) return;
       if (pathname === '/') { res.setHeader('content-type', 'text/html'); res.end(page); return; }
-      if (pathname in overrides) { res.setHeader('content-type', 'text/javascript'); res.end(overrides[pathname]); return; }
+      if (pathname in overrides) {
+        res.setHeader('content-type', pathname.endsWith('.css') ? 'text/css' : pathname.endsWith('.html') ? 'text/html' : 'text/javascript');
+        res.end(overrides[pathname]); return;
+      }
       const file = path.resolve(root, `.${pathname}`);
       if (pathname.startsWith('/static/') && file.startsWith(`${path.join(root, 'static')}${path.sep}`)) {
         res.setHeader('content-type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'application/octet-stream');
@@ -28,7 +31,7 @@ export async function withCopalBrowser({ page, overrides = {}, request = null, c
   });
   try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    const chrome = [process.env.OPENCLANK_CHROMIUM_BIN, process.env.CHROMIUM_BIN, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'].find(candidate => candidate && fs.existsSync(candidate));
+    const chrome = [process.env.OPENCLANK_CHROMIUM_BIN, process.env.CHROMIUM_BIN, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/usr/bin/brave'].find(candidate => candidate && fs.existsSync(candidate));
     assert(chrome, 'Chrome executable required');
     profile = fs.mkdtempSync(path.join(os.tmpdir(), 'copal-fixture-'));
     browser = spawn(chrome, ['--headless=new', ...(disableGpu ? ['--disable-gpu'] : []), '--no-sandbox', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio:['ignore', 'pipe', 'pipe'] });

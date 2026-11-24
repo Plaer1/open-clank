@@ -1,0 +1,812 @@
+{
+  "id": "batch-102",
+  "group": "menus",
+  "surface": "menus",
+  "entry_count": 64,
+  "character_count": 4794,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.rendered.source.comment.press.enter.or.choose.see.source.to.edit.raw.comment",
+      "source": "Rendered source comment; press Enter or choose See source to edit raw comment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/openclank-codemirror.ts:709"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.inspect.processes",
+      "source": "Inspect processes",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:2844"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.preset.f307af85",
+      "source": "Delete preset",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/group.js:399"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.export.knowledge.snapshot",
+      "source": "Export knowledge snapshot",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:4148"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reviewed.metadata",
+      "source": "Reviewed metadata",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/skills.js:476"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tip.right.click.a.session.to.see.its.actions",
+      "source": "Tip: Right-click a session to see its actions.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/index.html:1314",
+        "static/js/models.js:669"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tip.long.press.a.session.to.see.its.actions",
+      "source": "Tip: Long-press a session to see its actions.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/index.html:1317",
+        "static/js/models.js:659"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.context.actions",
+      "source": "Context actions",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:675"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.see.source",
+      "source": "See source",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:1009",
+        "static/js/custom-context-menu.js:980"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.link",
+      "source": "Open link",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:3922"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.make.editable.copy",
+      "source": "Make editable copy",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:1316",
+        "static/js/copal/notesFeature.js:3928",
+        "static/js/copal/notesFeature.js:5679",
+        "static/js/copal/notesFeature.js:6348",
+        "static/js/copal/wikiWorkspace.js:66"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.captured.documentation.region.is.available",
+      "source": "No captured documentation region is available.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:1009"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.original.menu.target.changed.reopen.its.menu",
+      "source": "The original menu target changed. Reopen its menu.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:322",
+        "static/js/custom-context-menu.js:556"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.context.menu.command.could.not.be.completed",
+      "source": "The context-menu command could not be completed.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:335",
+        "static/js/custom-context-menu.js:346",
+        "static/js/custom-context-menu.js:561"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.selected.spelling.locally",
+      "source": "Check selected spelling locally",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:299"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retry.spelling",
+      "source": "Retry spelling",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:1015",
+        "static/js/custom-context-menu.js:300"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.spelling",
+      "source": "Spelling",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:748",
+        "static/js/custom-context-menu.js:749"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.cursor.above",
+      "source": "Add cursor above",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:1010"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.cursor.below",
+      "source": "Add cursor below",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:1011"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.keep.primary.selection",
+      "source": "Keep primary selection",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:1012"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.spelling.locally",
+      "source": "Check spelling locally",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/custom-context-menu.js:1013"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.selected.files",
+      "source": "Download selected files",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:7905"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.paste.into.this.folder",
+      "source": "Paste into this folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8051"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.selected.items",
+      "source": "Copy selected items",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8036"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cut.selected.items",
+      "source": "Cut selected items",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8036"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archive.selected.items",
+      "source": "Archive selected items",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8061"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restore.selected.items",
+      "source": "Restore selected items",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8061"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.selected.items.to.favorites",
+      "source": "Add selected items to favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8062"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.selected.items.from.favorites",
+      "source": "Remove selected items from favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8062"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.duplicate.selected.files",
+      "source": "Duplicate selected files",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8063"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clone.selected.documents",
+      "source": "Clone selected documents",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8064"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.selected.documents",
+      "source": "Delete selected documents…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8065"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.folder.to.favorites",
+      "source": "Add folder to Favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8133"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.folder.from.favorites",
+      "source": "Remove folder from Favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:8133"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.library.document",
+      "source": "Create Library document",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:7892"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.library.documents",
+      "source": "Import Library documents…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:7893"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sort.by",
+      "source": "Sort by",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:7793"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.view.mode",
+      "source": "View mode",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/clankshop.js:1322",
+        "static/js/files.js:7794"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.icon.size",
+      "source": "Icon size",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:7350",
+        "static/js/files.js:7354",
+        "static/js/files.js:7795"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.transfer",
+      "source": "Transfer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:7801",
+        "static/js/files.js:7823"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.with",
+      "source": "Open with",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:7815"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.media",
+      "source": "Media",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/wikiAuthoring.js:134",
+        "static/js/files.js:7828"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.c7f93783",
+      "source": "Choose",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:7901"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.action.is.available.for.the.selection",
+      "source": "No action is available for the selection",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:5420"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.canvas",
+      "source": "Image canvas",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/imps.js:3376"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fit.image",
+      "source": "Fit image",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:8849",
+        "static/js/imps.js:1011"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.selection.to.layer",
+      "source": "Copy selection to layer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:8852",
+        "static/js/imps.js:1007"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.invert.selection",
+      "source": "Invert selection",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:8852",
+        "static/js/imps.js:1008"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.selected.pixels",
+      "source": "Delete selected pixels",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:8852",
+        "static/js/imps.js:1009"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.layer",
+      "source": "Rename layer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/layer-panel.js:441"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.column.type",
+      "source": "Column type",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:1502"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.alignment",
+      "source": "Alignment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:1514"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sort.bec69036",
+      "source": "Sort",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/index.html:593",
+        "static/js/copal.js:3958",
+        "static/js/copal/sheetView.js:17",
+        "static/js/copal/tableModel.js:1498",
+        "static/js/copal/tableModel.js:1499"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.task",
+      "source": "Open task",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/planning.js:1431",
+        "static/js/copal/treehouseLearner.js:140"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.course",
+      "source": "Open course",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:784",
+        "static/js/copal/treehouseLearner.js:107"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.module",
+      "source": "Edit module",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:843"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.quest",
+      "source": "Open Quest",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouseLearningExtensions.js:78",
+        "static/js/copal/treehouseProgression.js:192",
+        "static/js/copal/treehouseTopicWeb.js:244"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.inspect.code.node",
+      "source": "Inspect code node",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/codeMapWorkbench.js:1839"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.view",
+      "source": "Rename view",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:3996",
+        "static/js/copal/sheetView.js:239"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.duplicate.view",
+      "source": "Duplicate view",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/sheetView.js:240"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.cell",
+      "source": "Edit cell",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:3481",
+        "static/js/copal/sheetView.js:198"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.cell",
+      "source": "Clear cell",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/sheetView.js:199"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.cell",
+      "source": "Copy cell",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:3482",
+        "static/js/copal/sheetView.js:201"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.source.note",
+      "source": "Open source note",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:3483",
+        "static/js/copal/sheetView.js:202"
+      ],
+      "context": "Context menu label or action feedback",
+      "complexity": "label"
+    }
+  ]
+}

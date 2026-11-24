@@ -82,7 +82,7 @@ function startApp({ data, history, socket, registry, files, port }) {
     OPENCLANK_HISTORY_HOST_ROOT: files,
     OPENCLANK_HISTORY_RECEIPT_ROOT: path.join(history, 'restore-receipts'),
     OPENCLANK_HISTORY_RESOURCE_MAP: path.join(history, 'resource-map.json'),
-    ODYSSEUS_FILES_REGISTRY: registry,
+    OPEN_CLANK_FILES_REGISTRY: registry,
     COPAL_LOOSE_ROOT: path.join(data, 'copal'),
     PYTHONUNBUFFERED: '1',
   };
@@ -249,7 +249,7 @@ const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'openclank-history-produ
 const data = path.join(temporary, 'data');
 const history = path.join(data, 'history');
 const files = path.join(temporary, 'files');
-const registry = path.join(data, 'odysseus-file-roots.json');
+const registry = path.join(data, 'open-clank-file-roots.json');
 const socket = path.join(data, 'history.sock');
 const password = 'history-dogfood-password';
 let appHandle;

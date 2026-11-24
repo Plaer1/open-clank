@@ -211,11 +211,12 @@ def test_control_data_cannot_be_bound_as_workspace(monkeypatch, tmp_path):
 def test_runtime_xdg_config_is_control_data(monkeypatch, tmp_path):
     from src.tool_execution import _is_control_data_path
 
-    monkeypatch.setenv("MIMOCODE_HOME", str(tmp_path / "mimo-home"))
+    monkeypatch.setenv("OPENCLANK_HOME", str(tmp_path / "mimo-home"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
 
     assert _is_control_data_path(str(tmp_path / "mimo-home" / "auth.json"))
     assert _is_control_data_path(str(tmp_path / "config" / "mimocode" / "config.json"))
+    assert _is_control_data_path(str(tmp_path / "config" / "openclank-engine" / "config.json"))
 
 
 def test_external_frankenmemory_sidecars_are_control_data(monkeypatch, tmp_path):

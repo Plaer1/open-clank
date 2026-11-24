@@ -17,16 +17,21 @@ import * as Truncate from "./truncate"
 
 const log = Log.create({ service: "tool.exec" })
 
-const MAX_TOOL_CALLS_DEFAULT = 50
-const MAX_TOOL_CALLS_CEILING = 500
-const MAX_CONCURRENT = 8
-const ACTIVE_DEADLINE_S_DEFAULT = 60
-const ACTIVE_DEADLINE_S_CEILING = 600
-const WALL_DEADLINE_MS = 30 * 60 * 1000
-const MAX_RESULT_BYTES = 256 * 1024
-const MAX_LOG_BYTES = 64 * 1024
-const MAX_CODE_BYTES = 128 * 1024
-const MAX_FILE_BYTES = 10 * 1024 * 1024
+export const TOOL_SCRIPT_LIMITS = Object.freeze({
+  toolCallsDefault: 50, toolCallsMaximum: 500, concurrency: 8,
+  activeSecondsDefault: 60, activeSecondsMaximum: 600, wallMilliseconds: 30 * 60 * 1000,
+  resultBytes: 256 * 1024, logBytes: 64 * 1024, codeBytes: 128 * 1024, fileBytes: 10 * 1024 * 1024,
+})
+const MAX_TOOL_CALLS_DEFAULT = TOOL_SCRIPT_LIMITS.toolCallsDefault
+const MAX_TOOL_CALLS_CEILING = TOOL_SCRIPT_LIMITS.toolCallsMaximum
+const MAX_CONCURRENT = TOOL_SCRIPT_LIMITS.concurrency
+const ACTIVE_DEADLINE_S_DEFAULT = TOOL_SCRIPT_LIMITS.activeSecondsDefault
+const ACTIVE_DEADLINE_S_CEILING = TOOL_SCRIPT_LIMITS.activeSecondsMaximum
+const WALL_DEADLINE_MS = TOOL_SCRIPT_LIMITS.wallMilliseconds
+const MAX_RESULT_BYTES = TOOL_SCRIPT_LIMITS.resultBytes
+const MAX_LOG_BYTES = TOOL_SCRIPT_LIMITS.logBytes
+const MAX_CODE_BYTES = TOOL_SCRIPT_LIMITS.codeBytes
+const MAX_FILE_BYTES = TOOL_SCRIPT_LIMITS.fileBytes
 const TRACE_TAIL_ENTRIES = 20
 
 /** JSON Schema (zod v4 toJSONSchema output) → compact TS type text. Best-effort:
@@ -101,6 +106,24 @@ export function renderToolScriptDeclarations(defs: Tool.Def[]): string {
     "}",
     "```",
   ].join("\n")
+}
+
+/** Projection over the exact registry candidate set already selected for a turn.
+ * Candidate status is not proof of a model offer or permission to call. */
+export function projectExecCapabilities(defs: Tool.Def[]) {
+  const candidate = defs.some((def) => def.id === "exec")
+  const description = defs.find((def) => def.id === "exec")?.description
+  const declarationStart = description?.lastIndexOf("```ts\ntype ToolResult") ?? -1
+  const rendered = declarationStart >= 0 ? description?.slice(declarationStart) : undefined
+  const declarations = defs.length <= 256 && rendered && Buffer.byteLength(rendered, "utf8") <= 32768 ? rendered : null
+  return {
+    registryCandidate: candidate,
+    modelOffered: null,
+    callAdmissible: null,
+    limits: candidate ? TOOL_SCRIPT_LIMITS : null,
+    declarations,
+    declarationsOmitted: candidate && declarations === null,
+  }
 }
 
 export type ExecSubPartSnapshot = {

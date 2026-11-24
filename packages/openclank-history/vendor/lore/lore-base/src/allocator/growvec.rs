@@ -31,6 +31,15 @@ unsafe impl<T: Send> Send for GrowBox<T> {}
 unsafe impl<T: Sync> Sync for GrowBox<T> {}
 
 impl<T> GrowBox<T> {
+    /// A chunk for a zero-sized `T`. Neither allocator accepts a zero-sized layout, so the chunk
+    /// takes no allocation and `Drop` returns nothing.
+    fn dangling() -> Self {
+        Self {
+            ptr: NonNull::dangling(),
+            _marker: PhantomData,
+        }
+    }
+
     /// Allocates a chunk without zeroing it.
     ///
     /// # Safety
@@ -42,6 +51,9 @@ impl<T> GrowBox<T> {
         let Ok(layout) = Layout::from_size_align(size_of::<T>(), align_of::<T>()) else {
             panic!("Unable to construct memory layout for heap boxed item");
         };
+        if layout.size() == 0 {
+            return Self::dangling();
+        }
 
         // SAFETY: The allocator is safe, we check return and panic on OOM. The caller fills
         // every byte before the contents are read.
@@ -65,6 +77,9 @@ impl<T> GrowBox<T> {
         let Ok(layout) = Layout::from_size_align(size_of::<T>(), align_of::<T>()) else {
             panic!("Unable to construct memory layout for heap boxed item");
         };
+        if layout.size() == 0 {
+            return Self::dangling();
+        }
 
         // SAFETY: The allocator is safe, we check return and panic on OOM
         let block = unsafe { super::growvec_allocator().alloc_zeroed(layout) };
@@ -96,6 +111,10 @@ impl<T> Drop for GrowBox<T> {
         let Ok(layout) = Layout::from_size_align(size_of::<T>(), align_of::<T>()) else {
             panic!("Unable to construct memory layout for heap boxed item");
         };
+        // A zero-sized `T` was never allocated, so there is no pointer to return.
+        if layout.size() == 0 {
+            return;
+        }
 
         GROWVEC_MEMORY_USED.fetch_sub(layout.size() as u64, Ordering::Relaxed);
 
@@ -123,6 +142,9 @@ impl<T> Clone for GrowBox<T> {
         let Ok(layout) = Layout::from_size_align(size_of::<T>(), align_of::<T>()) else {
             panic!("Unable to construct memory layout for heap boxed item");
         };
+        if layout.size() == 0 {
+            return Self::dangling();
+        }
 
         // SAFETY: The allocator is safe, we panic on OOM and will overwrite the entire area on success
         let block = unsafe { super::growvec_allocator().alloc(layout) };
@@ -265,14 +287,9 @@ where
         let chunk = &mut self.chunks[start_chunk_index];
         let mut overflow = chunk.element[N - 1];
         if element_index < N - 1 {
-            // SAFETY: Ok, capped to the element array bounds
-            unsafe {
-                std::ptr::copy(
-                    chunk.element.as_ptr().add(element_index),
-                    chunk.element.as_mut_ptr().add(element_index + 1),
-                    N - (element_index + 1),
-                );
-            }
+            chunk
+                .element
+                .copy_within(element_index..N - 1, element_index + 1);
         }
 
         chunk.element[element_index] = item;
@@ -283,18 +300,72 @@ where
             for chunk_index in (start_chunk_index + 1)..self.chunks.len() {
                 let chunk = &mut self.chunks[chunk_index];
                 let next_overflow = chunk.element[N - 1];
-
-                // SAFETY: Ok, capped to the element array bounds
-                unsafe {
-                    std::ptr::copy(
-                        chunk.element.as_ptr(),
-                        chunk.element.as_mut_ptr().add(1),
-                        N - 1,
-                    );
-                }
+                // Shift right by one, carrying the last element into the next chunk.
+                chunk.element.copy_within(0..N - 1, 1);
 
                 chunk.element[0] = overflow;
                 overflow = next_overflow;
+            }
+        }
+    }
+
+    /// Removes the element at `index` and returns it, moving every element after it down one
+    /// place, or answers `None` and changes nothing when `index` is not below the length, as
+    /// `VecDeque::remove` does. Frees the last chunk once it holds nothing.
+    pub fn remove(&mut self, index: usize) -> Option<T> {
+        if index >= self.len() {
+            return None;
+        }
+
+        let (start_chunk_index, element_index) = Self::split_index(index);
+        let item = self.chunks[start_chunk_index].element[element_index];
+        let last_chunk_index = self.chunks.len() - 1;
+        for chunk_index in start_chunk_index..=last_chunk_index {
+            let from = if chunk_index == start_chunk_index {
+                element_index
+            } else {
+                0
+            };
+            let end = if chunk_index == last_chunk_index {
+                self.partial_len
+            } else {
+                N
+            };
+            self.chunks[chunk_index]
+                .element
+                .copy_within(from + 1..end, from);
+            if chunk_index < last_chunk_index {
+                let carry = self.chunks[chunk_index + 1].element[0];
+                self.chunks[chunk_index].element[N - 1] = carry;
+            }
+        }
+        self.truncate_last();
+        Some(item)
+    }
+
+    /// Removes the element at `index` and returns it, moving the last element into its place, or
+    /// answers `None` and changes nothing when `index` is not below the length, as
+    /// `VecDeque::swap_remove_back` does. Frees the last chunk once it holds nothing.
+    pub fn swap_remove(&mut self, index: usize) -> Option<T> {
+        let len = self.len();
+        if index >= len {
+            return None;
+        }
+
+        let item = self[index];
+        self[index] = self[len - 1];
+        self.truncate_last();
+        Some(item)
+    }
+
+    /// Drops the last element, and the last chunk with it once that chunk holds nothing, so that a
+    /// chunk is held only while it holds an element.
+    fn truncate_last(&mut self) {
+        self.partial_len -= 1;
+        if self.partial_len == 0 {
+            self.chunks.pop();
+            if !self.chunks.is_empty() {
+                self.partial_len = N;
             }
         }
     }
@@ -504,13 +575,11 @@ impl<'a, T, const N: usize> Iterator for GrowIterMut<'a, T, N> {
 
         // SAFETY: Pointer validity is guaranteed by lifetime, chunk index is guaranteed to be within range
         let chunk: *mut GrowBox<GrowChunk<T, N>> = unsafe { self.chunks.add(self.chunk_index) };
-        // SAFETY: Pointer validity is guaranteed by lifetime, element index is guaranteed to be within range
+        // SAFETY: The chunk pointer is valid for the iterator's lifetime, the element index is
+        // within range, and the projection is raw, so it creates no reference.
         let item: *mut T = unsafe {
-            (*chunk)
-                .ptr
-                .as_mut()
-                .element
-                .as_mut_ptr()
+            (&raw mut (*(*chunk).ptr.as_ptr()).element)
+                .cast::<T>()
                 .add(self.element_index)
         };
 
@@ -522,7 +591,8 @@ impl<'a, T, const N: usize> Iterator for GrowIterMut<'a, T, N> {
             self.chunk_index += 1;
         }
 
-        // SAFETY: Pointer validity is guaranteed by lifetime
+        // SAFETY: The reference covers only the element `item` names, so references handed out for
+        // its siblings stay valid.
         unsafe { Some(&mut *item) }
     }
 

@@ -21,14 +21,18 @@
  *   cursorForHandle:        (id: string | null) => string,
  * }} deps
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 import { canvasCoords } from '../canvas-coords.js';
 
-export function createTransformDragTool({
+export function createTransformDragTool({ state = legacyState, root = null, lifetime = null,
   beginMove, composite, drawTransformHandles, reapplyTransform,
   getTransformHandle, cursorForHandle,
 }) {
-  return {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated tool requires root and lifetime');
+  let disposed = false;
+  let dragW = 0, dragH = 0;
+  lifetime?.add(() => { disposed = true; state.transformHandle = null; });
+  const tool = {
     /**
      * Called on pointerdown. Returns true if the transform tool handled
      * the event (the dispatcher should NOT fall through to other tools).
@@ -47,8 +51,8 @@ export function createTransformDragTool({
         const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
         state.transformStartOffX = off.x;
         state.transformStartOffY = off.y;
-        state.transformOrigW = layer.canvas.width;
-        state.transformOrigH = layer.canvas.height;
+        dragW = layer.canvas.width;
+        dragH = layer.canvas.height;
         return true;
       }
       // No corner hit — if click inside the layer's bounding box, act
@@ -60,7 +64,7 @@ export function createTransformDragTool({
         const h = state.transformLayer.canvas.height;
         if (coords.x >= off.x && coords.x <= off.x + w &&
             coords.y >= off.y && coords.y <= off.y + h) {
-          beginMove(e);
+          beginMove(e,{borrowed:true});
           return true;
         }
       }
@@ -105,7 +109,7 @@ export function createTransformDragTool({
         state.transformPendingRot = deg;
         reapplyTransform();
         if (state.transformPopup) {
-          const rotIn = state.transformPopup.querySelector('#ge-transform-rot');
+          const rotIn = state.transformPopup.querySelector(':is(#ge-transform-rot,[data-ge-id="ge-transform-rot"])');
           if (rotIn) rotIn.value = String(deg);
         }
         return true;
@@ -116,16 +120,16 @@ export function createTransformDragTool({
       const layer = state.transformLayer;
       let newW = layer.canvas.width;
       let newH = layer.canvas.height;
-      if (state.transformHandle.includes('r')) newW = state.transformOrigW + dx;
-      if (state.transformHandle.includes('l')) newW = state.transformOrigW - dx;
-      if (state.transformHandle.includes('b')) newH = state.transformOrigH + dy;
-      if (state.transformHandle.includes('t')) newH = state.transformOrigH - dy;
+      if (state.transformHandle.includes('r')) newW = dragW + dx;
+      if (state.transformHandle.includes('l')) newW = dragW - dx;
+      if (state.transformHandle.includes('b')) newH = dragH + dy;
+      if (state.transformHandle.includes('t')) newH = dragH - dy;
       // Shift = lock aspect ratio. Use whichever axis moved more
       // (relative to the original) as the driver.
-      if (e.shiftKey && state.transformOrigW > 0 && state.transformOrigH > 0) {
-        const aspect = state.transformOrigW / state.transformOrigH;
-        const wDelta = Math.abs(newW - state.transformOrigW);
-        const hDelta = Math.abs(newH - state.transformOrigH);
+      if (e.shiftKey && dragW > 0 && dragH > 0) {
+        const aspect = dragW / dragH;
+        const wDelta = Math.abs(newW - dragW);
+        const hDelta = Math.abs(newH - dragH);
         if (wDelta >= hDelta) {
           newH = Math.max(1, Math.round(newW / aspect));
         } else {
@@ -140,9 +144,9 @@ export function createTransformDragTool({
       state.transformPendingW = newW;
       state.transformPendingH = newH;
       const anchorOffX = state.transformStartOffX +
-        (state.transformHandle.includes('l') ? (state.transformOrigW - newW) : 0);
+        (state.transformHandle.includes('l') ? (dragW - newW) : 0);
       const anchorOffY = state.transformStartOffY +
-        (state.transformHandle.includes('t') ? (state.transformOrigH - newH) : 0);
+        (state.transformHandle.includes('t') ? (dragH - newH) : 0);
       state.transformOrigOffset = {
         x: anchorOffX + newW / 2 - state.transformOrigW / 2,
         y: anchorOffY + newH / 2 - state.transformOrigH / 2,
@@ -150,8 +154,8 @@ export function createTransformDragTool({
       reapplyTransform();
       // Mirror the new W/H into the popup if it's open.
       if (state.transformPopup) {
-        const wIn = state.transformPopup.querySelector('#ge-transform-w');
-        const hIn = state.transformPopup.querySelector('#ge-transform-h');
+        const wIn = state.transformPopup.querySelector(':is(#ge-transform-w,[data-ge-id="ge-transform-w"])');
+        const hIn = state.transformPopup.querySelector(':is(#ge-transform-h,[data-ge-id="ge-transform-h"])');
         if (wIn) wIn.value = String(state.transformPendingFlipH ? -newW : newW);
         if (hIn) hIn.value = String(state.transformPendingFlipV ? -newH : newH);
       }
@@ -164,11 +168,14 @@ export function createTransformDragTool({
     tryEnd() {
       if (!(state.transformActive && state.transformHandle)) return false;
       state.transformHandle = null;
-      state.transformOrigW = state.transformLayer?.canvas.width || 0;
-      state.transformOrigH = state.transformLayer?.canvas.height || 0;
       composite();
       drawTransformHandles();
       return true;
     },
   };
+  for (const key of Object.keys(tool)) {
+    const invoke = tool[key];
+    tool[key] = (...args) => disposed ? false : invoke(...args);
+  }
+  return tool;
 }

@@ -1,4 +1,10 @@
+import { createToolTimingIssuer, installToolTimingIssuer } from "../session/tool-timing"
 import { captureScopeEvidence, captureSdkEvidence, flushCaptures } from "@/provider/logging-transport"
+import { generatedAttachmentCandidate } from "@/session/context-inspection"
+import { encodeGcfAdmission } from "@/session/gcf-policy"
+import { encodeToolViewAdmission } from "@/session/tool-view-source"
+import { encodeAdaptiveAdmission } from "@/session/adaptive-admission"
+import { encodeArgumentAdmission } from "@/session/gcf-arguments"
 import {
   RequestError,
   type Agent as ACPAgent,
@@ -39,10 +45,12 @@ import { Filesystem } from "../util"
 import { Hash } from "@mimo-ai/shared/util/hash"
 import { ACPSessionManager, reserveProvisionalSessionID } from "./session"
 import type { ACPConfig } from "./types"
-import { SessionID, MessageID } from "@/session/schema"
+import { SessionID, MessageID, PartID } from "@/session/schema"
 import { Session as NativeSession } from "@/session"
 import { hostSourceForMessage, type SourceMessage } from "@/session/fork-source"
 import { SessionRunState } from "@/session/run-state"
+import { ActorRegistry } from "@/actor/registry"
+import { Actor as ActorSpawn } from "@/actor/spawn"
 import { Instance } from "@/project/instance"
 import { Effect } from "effect"
 import { Provider } from "../provider"
@@ -51,11 +59,13 @@ import { Agent as AgentModule } from "../agent/agent"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Installation } from "@/installation"
 import { MessageV2 } from "@/session/message-v2"
+import * as UserInput from "@/session/user-input"
 import { Config } from "@/config"
 import { Question } from "@/question"
 import { Skill } from "@/skill"
 import { Flag } from "@/flag/flag"
 import { ConfigMCP } from "@/config/mcp"
+import { MCP } from "@/mcp"
 import { z } from "zod"
 import { LoadAPIKeyError } from "ai"
 import type { AssistantMessage, Event, OpencodeClient, SessionMessageResponse, ToolPart } from "@mimo-ai/sdk/v2"
@@ -77,6 +87,13 @@ export function parseCommandText(text: string) {
 }
 
 /** Durable host-to-native user anchors; content and attachments never leave this map. */
+// Persisted cross-model switch notice: forwarded once, live; replay (processMessage) shows it after reload.
+export function modelSwitchNoticeText(part: { type: string; id: string; text?: string; synthetic?: boolean; metadata?: Record<string, unknown> }, seen: Set<string>) {
+  if (part.type !== "text" || !part.synthetic || !part.text || (part.metadata?.origin as { kind?: string } | undefined)?.kind !== "model_switch" || seen.has(part.id)) return
+  seen.add(part.id)
+  return part.text + "\n\n"
+}
+
 export function sourceMessageAnchors(messages: SourceMessage[]) {
   const anchors = messages.filter((message) => message.info.role === "user" && (!message.info.agentID || message.info.agentID === "main")).flatMap((message) => {
     const source = hostSourceForMessage(message)
@@ -195,12 +212,15 @@ export async function init({ sdk: _sdk }: { sdk: OpencodeClient }) {
 }
 
 export class Agent implements ACPAgent {
+  private toolTiming?: ReturnType<typeof createToolTimingIssuer>
+  private gcfArtifact?: ReturnType<typeof import("../session/gcf-native").createGcfArtifact>
   private connection: AgentSideConnection
   private config: ACPConfig
   private sdk: OpencodeClient
   private sessionManager: ACPSessionManager
   private eventAbort = new AbortController()
   private eventStarted = false
+  private modelSwitchSeen = new Set<string>()
   private terminalDeliveries = new Map<string, { busy: boolean; finish: () => void; fail: (error: Error) => void }>()
   private bashSnapshots = new Map<string, string>()
   private toolStarts = new Set<string>()
@@ -225,6 +245,10 @@ export class Agent implements ACPAgent {
     this.connection = connection
     ManagedProvider.installHostConnection(connection)
     this.managedOperations = new ManagedOperations.Router(connection)
+    ManagedProvider.installManagedOperationDelegate({
+      execute: (request) => this.managedOperations.handle(request),
+      cancel: (request) => this.managedOperations.cancel(request),
+    })
     this.config = config
     this.sdk = config.sdk
     this.sessionManager = new ACPSessionManager(this.sdk)
@@ -244,6 +268,120 @@ export class Agent implements ACPAgent {
     if (method === "_openclank/operations/v1/cancel") {
       if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed operations require Open Clank managed mode")
       return (await this.managedOperations.cancel(params)) as unknown as Record<string, unknown>
+    }
+    if (method === "_openclank/session/v1/queued-source/retire-marker") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed queued source requires Open Clank managed mode")
+      const parsed=z.object({sessionID:SessionID.zod,messageID:MessageID.zod,partID:PartID.zod}).strict().safeParse(params)
+      if (!parsed.success) return {state:"unavailable"}
+      try {
+        const directory=this.sessionManager.get(parsed.data.sessionID).cwd
+        const observed=await Instance.provideIfReady({directory,fn:()=>UserInput.fenceQueuedPartForHolderRetirement(parsed.data)})
+        return observed.ready && await observed.value ? {state:"fenced"} : {state:"unavailable"}
+      } catch { return {state:"unavailable"} }
+    }
+    if (method === "_openclank/session/v1/queued-source/markers") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed queued source requires Open Clank managed mode")
+      const token=z.string().min(1).max(512)
+      const schema=z.object({owner:token,sessionID:SessionID.zod,after:z.tuple([token,token,token]).nullable(),limit:z.number().int().min(1).max(128)}).strict()
+      const parsed=schema.safeParse(params)
+      if (!parsed.success) return {state:"unavailable"}
+      try {
+        const directory=this.sessionManager.get(parsed.data.sessionID).cwd
+        const observed=await Instance.provideIfReady({directory,fn:()=>UserInput.pageQueuedSourceMarkers(parsed.data)})
+        return observed.ready ? observed.value : {state:"unavailable"}
+      } catch { return {state:"unavailable"} }
+    }
+    if (method === "_openclank/session/v1/queued-source/read") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed queued source requires Open Clank managed mode")
+      const schema=z.object({owner:z.string().min(1).max(512),stableChatID:z.string().min(1).max(512),
+        sessionID:SessionID.zod,requestID:z.string().min(1).max(200)}).strict()
+      const parsed=schema.safeParse(params)
+      if (!parsed.success) return {state:"unavailable"}
+      try {
+        const directory=this.sessionManager.get(parsed.data.sessionID).cwd
+        const observed=await Instance.provideIfReady({directory,fn:()=>UserInput.readQueuedSource(parsed.data)})
+        return observed.ready ? observed.value : {state:"unavailable"}
+      } catch { return {state:"unavailable"} }
+    }
+    if (method === "_openclank/session/v1/tools/capabilities") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed tool capabilities requires Open Clank managed mode")
+      const schema=z.object({sessionID:SessionID.zod,rootOperationID:z.string().min(1).max(256),actorID:z.string().min(1).max(200),executionRevision:z.number().int().nonnegative(),innerTurnID:z.string().min(1).max(256)}).strict()
+      const parsed=schema.safeParse(params)
+      if (!parsed.success || parsed.data.actorID !== "main") return {status:"unavailable",exec:null}
+      try {
+        const directory=this.sessionManager.get(parsed.data.sessionID).cwd
+        const observed=await Instance.provideIfReady({directory,fn:()=>AppRuntime.runPromise(Effect.gen(function* () {
+          const mcp=yield* MCP.Service
+          return mcp.toolsCapabilitiesSnapshot ? yield* mcp.toolsCapabilitiesSnapshot(parsed.data) : {status:"unavailable",exec:null}
+        }))})
+        return observed.ready ? observed.value : {status:"unavailable",exec:null}
+      } catch { return {status:"unavailable",exec:null} }
+    }
+    if (method === "_openclank/session/v1/mcp/health") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed MCP health requires Open Clank managed mode")
+      const schema=z.object({sessionID:SessionID.zod,rootOperationID:z.string().min(1).max(256),actorID:z.string().min(1).max(200),executionRevision:z.number().int().nonnegative(),innerTurnID:z.string().min(1).max(256)}).strict()
+      const parsed=schema.safeParse(params)
+      if (!parsed.success || parsed.data.actorID !== "main") return {status:"unavailable",servers:[],omittedServers:0}
+      try {
+        const directory=this.sessionManager.get(parsed.data.sessionID).cwd
+        const observed=await Instance.provideIfReady({directory,fn:()=>AppRuntime.runPromise(Effect.gen(function* () {
+          const mcp=yield* MCP.Service
+          return mcp.healthSnapshot ? yield* mcp.healthSnapshot(parsed.data) : {status:"unavailable",servers:[],omittedServers:0}
+        }))})
+        return observed.ready ? observed.value : {status:"unavailable",servers:[],omittedServers:0}
+      } catch { return {status:"unavailable",servers:[],omittedServers:0} }
+    }
+    if (method === "_openclank/session/v1/maintenance/summary-read") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed summary requires Open Clank managed mode")
+      const schema = z.object({directory:z.string().min(1).max(4096),rootSessionID:SessionID.zod,
+        sessionID:SessionID.zod,summaryMessageID:MessageID.zod}).strict()
+      const parsed = schema.safeParse(params)
+      if (!parsed.success || parsed.data.sessionID !== parsed.data.rootSessionID || !path.isAbsolute(parsed.data.directory) ||
+          path.resolve(this.sessionManager.get(parsed.data.rootSessionID).cwd) !== path.resolve(parsed.data.directory))
+        return {state:"unavailable"}
+      try {
+        const request = parsed.data
+        const message = await Instance.provide({directory:request.directory,fn:async()=>MessageV2.get({sessionID:request.sessionID,messageID:request.summaryMessageID})})
+        if (message.info.role !== "assistant" || message.info.agent !== "compaction" || message.info.summary !== true ||
+            (message.info.agentID && message.info.agentID !== "main") || !message.info.time.completed || message.info.error ||
+            message.info.finish !== "stop" || !message.parts.length || message.parts.length > 16 || message.parts.some((part) => part.type !== "text" || !part.text))
+          return {state:"unavailable"}
+        let total=0
+        const parts=message.parts.map((part) => {
+          if (part.type !== "text") throw new Error("unavailable")
+          total += Buffer.byteLength(part.text,"utf8")
+          return {partID:part.id,text:part.text,sha256:createHash("sha256").update(part.text,"utf8").digest("hex")}
+        })
+        if (total > 65536 || new Set(parts.map((part)=>part.partID)).size !== parts.length) return {state:"unavailable"}
+        return {state:"ready",sessionID:request.sessionID,summaryMessageID:request.summaryMessageID,
+          providerID:message.info.providerID,modelID:message.info.modelID,parts}
+      } catch { return {state:"unavailable"} }
+    }
+    if (method === "_openclank/session/v1/actor/settlement-read") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed actor settlement requires Open Clank managed mode")
+      const schema = z.object({ directory:z.string().min(1).max(4096), rootSessionID:SessionID.zod,
+        sessionID:SessionID.zod, actorID:z.string().min(1).max(200), executionRevision:z.number().int().nonnegative() }).strict()
+      const parsed = schema.safeParse(params)
+      if (!parsed.success || !path.isAbsolute(parsed.data.directory) ||
+          path.resolve(this.sessionManager.get(parsed.data.rootSessionID).cwd) !== path.resolve(parsed.data.directory))
+        throw RequestError.invalidParams("managed settlement target unavailable")
+      const request = parsed.data
+      const marker = await Instance.provide({ directory:request.directory, fn:() => AppRuntime.runPromise(Effect.gen(function* () {
+        const run = yield* SessionRunState.Service
+        yield* run.assertNotBusy(request.sessionID, request.actorID)
+        const actor = yield* ActorSpawn.Service
+        if (!actor.hasOuterExecution || (yield* actor.hasOuterExecution(request.sessionID, request.actorID, request.executionRevision))) return undefined
+        const registry = yield* ActorRegistry.Service
+        const uncertain = yield* registry.uncertainManagedExecution(request.sessionID, request.actorID)
+        if (uncertain) return {...uncertain, state:"uncertain" as const}
+        const pending = yield* registry.pendingManagedSettlement(request.sessionID, request.actorID)
+        return pending ? {...pending, state:"pending" as const} : undefined
+      })) })
+      if (!marker || marker.executionRevision !== request.executionRevision || !marker.turnOutcome || !marker.innerTurnID || marker.rootSessionID !== request.rootSessionID || (marker.state === "pending" && !marker.executionOutcome))
+        return { sessionID:request.sessionID, actorID:request.actorID, executionRevision:request.executionRevision, unresolved:null }
+      return { sessionID:request.sessionID, actorID:request.actorID, executionRevision:request.executionRevision,
+        unresolved:{state:marker.state, rootSessionID:marker.rootSessionID, rootOperationID:marker.rootOperationID,
+          innerTurnID:marker.innerTurnID, outcome:marker.turnOutcome, ...(marker.state === "pending" ? {executionOutcome:marker.executionOutcome} : {})} }
     }
     if (method === "_openclank/session/v1/fork/create") {
       if (!ManagedProvider.enabled()) throw RequestError.invalidParams("reserved forks require Open Clank managed mode")
@@ -447,20 +585,25 @@ export class Agent implements ACPAgent {
     this.terminalDeliveries.clear()
   }
 
-  private async withPromptDelivery<A extends { data?: { info?: unknown } }>(sessionID: string, run: () => Promise<A>): Promise<A> {
+  private async withPromptDelivery<A extends { data?: { info?: unknown } }>(sessionID: string, run: () => Promise<A>,
+      original?:{rootOperationID:string; context:()=>ManagedProvider.ManagedHostContext}): Promise<A> {
     if (this.terminalDeliveries.has(sessionID)) throw new Error("ACP prompt delivery is already active")
     let finish!: () => void
     let fail!: (error: Error) => void
     const terminal = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject })
     // A stream error may arrive while the SDK request is still settling.
     terminal.catch(() => undefined)
-    this.terminalDeliveries.set(sessionID, { busy: false, finish, fail })
+    const delivery = { busy: false, finish, fail }
+    this.terminalDeliveries.set(sessionID, delivery)
     try {
-      const response = await run()
-      // Early SDK admission errors have no turn or terminal event. A returned
-      // message (including cancellation/error) has an ordered busy→idle turn.
-      if (response.data?.info) await terminal
-      return response
+      const deliver = async () => {
+        const response = await run()
+        // A returned message has an ordered busy→idle terminal turn.
+        if (response.data?.info) await terminal
+        return response
+      }
+      return original ? await ManagedProvider.withOriginalPromptHostContext(sessionID,original.rootOperationID,this.connection,
+        () => this.terminalDeliveries.get(sessionID) === delivery,original.context,deliver) : await deliver()
     } finally {
       this.terminalDeliveries.delete(sessionID)
     }
@@ -510,7 +653,16 @@ export class Agent implements ACPAgent {
       }
 
       case "question.asked": {
-        const question = event.properties
+        const question = event.properties as unknown as {
+          id: string
+          sessionID: string
+          actorID?: string
+          originTurnID?: string
+          questionRevision?: number
+          blocking?: boolean
+          questions: Question.Info[]
+          tool?: Question.Tool
+        }
         const session = this.sessionManager.tryGet(question.sessionID)
         if (!session) return
         const previous = this.questionQueues.get(question.sessionID) ?? Promise.resolve()
@@ -519,9 +671,18 @@ export class Agent implements ACPAgent {
             const response = await this.connection.extMethod("_odysseus/question", {
               requestId: question.id,
               sessionId: question.sessionID,
+              actorID: question.actorID,
+              actorSessionID: question.sessionID,
+              originTurnID: question.originTurnID,
+              questionRevision: question.questionRevision,
+              blocking: question.blocking !== false,
               questions: question.questions,
               tool: question.tool,
             })
+            if (question.blocking === false) {
+              if (response.accepted !== true) log.warn("optional question was not acknowledged by host", { questionID: question.id })
+              return
+            }
             if (response.rejected === true) {
               await this.sdk.question.reject(
                 { requestID: question.id, directory: session.cwd },
@@ -537,12 +698,14 @@ export class Agent implements ACPAgent {
           })
           .catch(async (error) => {
             log.error("failed to handle ACP question", { error, questionID: question.id })
-            await this.sdk.question
-              .reject(
-                { requestID: question.id, directory: session.cwd },
-                { throwOnError: true },
-              )
-              .catch(() => undefined)
+            if (question.blocking !== false) {
+              await this.sdk.question
+                .reject(
+                  { requestID: question.id, directory: session.cwd },
+                  { throwOnError: true },
+                )
+                .catch(() => undefined)
+            }
           })
           .finally(() => {
             if (this.questionQueues.get(question.sessionID) === next) {
@@ -674,7 +837,7 @@ export class Agent implements ACPAgent {
       }
 
       case "message.part.updated": {
-        log.info("message part updated", { event: event.properties })
+        if (!Flag.OPEN_CLANK_PRIVATE_RUNTIME) log.info("message part updated", { event: event.properties })
         const props = event.properties
         const part = props.part
         const session = this.sessionManager.tryGet(part.sessionID)
@@ -827,6 +990,18 @@ export class Agent implements ACPAgent {
         // ACP clients already know the prompt they just submitted, so replaying
         // live user parts duplicates the message. We still replay user history in
         // loadSession() and forkSession() via processMessage().
+        const switchText = modelSwitchNoticeText(part, this.modelSwitchSeen)
+        if (switchText) {
+          await this.connection
+            .sessionUpdate({
+              sessionId,
+              update: { sessionUpdate: "agent_message_chunk", messageId: part.messageID, content: { type: "text", text: switchText } },
+            })
+            .catch((error) => {
+              log.error("failed to send model switch notice to ACP", { error })
+            })
+          return
+        }
         if (part.type !== "text" && part.type !== "file") return
 
         return
@@ -969,11 +1144,26 @@ export class Agent implements ACPAgent {
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     log.info("initialize", { protocolVersion: params.protocolVersion })
 
+    const { createGcfArtifact } = await import("../session/gcf-native")
+    this.gcfArtifact?.revoke()
+    this.gcfArtifact = createGcfArtifact(params.clientCapabilities?._meta?.openclankGcfArtifact)
+    process.stdin.once("end", () => this.gcfArtifact?.revoke())
+
     const managed = ManagedProvider.enabled()
+    if (Flag.OPEN_CLANK_PRIVATE_RUNTIME && (!managed || Flag.MIMOCODE_DB !== ":memory:"))
+      throw new Error("Private runtime requires managed mode and an in-memory database")
     if (managed) {
       OpenClankManagedProtocol.validatePeerCapabilities(
         params.clientCapabilities?._meta?.openclankManaged,
+        Flag.OPEN_CLANK_PRIVATE_RUNTIME,
       )
+    }
+
+    if (managed && !this.toolTiming) {
+      const timing=createToolTimingIssuer()
+      installToolTimingIssuer(this.connection,timing)
+      this.toolTiming=timing
+      process.stdin.once("end", () => timing.revoke())
     }
 
     const authMethod: AuthMethod = {
@@ -1016,7 +1206,7 @@ export class Agent implements ACPAgent {
         name: managed ? "Open Clank Engine" : "OpenCode",
         version: InstallationVersion,
       },
-      ...(managed ? { _meta: OpenClankManagedProtocol.initializeMeta } : {}),
+      ...(managed ? { _meta: { ...OpenClankManagedProtocol.initializeMetaFor(Flag.OPEN_CLANK_PRIVATE_RUNTIME), ...(this.toolTiming ? { openclankToolTiming: { version:1, algorithm:"ed25519", publicKey:this.toolTiming.publicKey, clockID:this.toolTiming.clockID } } : {}) } } : {}),
     } as InitializeResponse
   }
 
@@ -1122,7 +1312,7 @@ export class Agent implements ACPAgent {
       }
 
       for (const msg of messages ?? []) {
-        log.debug("replay message", msg)
+        if (!Flag.OPEN_CLANK_PRIVATE_RUNTIME) log.debug("replay message", msg)
         await this.processMessage(msg)
       }
 
@@ -1233,7 +1423,7 @@ export class Agent implements ACPAgent {
         })
 
       for (const msg of messages ?? []) {
-        log.debug("replay message", msg)
+        if (!Flag.OPEN_CLANK_PRIVATE_RUNTIME) log.debug("replay message", msg)
         await this.processMessage(msg)
       }
 
@@ -1283,7 +1473,7 @@ export class Agent implements ACPAgent {
   }
 
   private async processMessage(message: SessionMessageResponse) {
-    log.debug("process message", message)
+    if (!Flag.OPEN_CLANK_PRIVATE_RUNTIME) log.debug("process message", message)
     if (message.info.role !== "assistant" && message.info.role !== "user") return
     const sessionId = message.info.sessionID
 
@@ -1822,6 +2012,7 @@ export class Agent implements ACPAgent {
           workspace_id?: string
           goal_id?: string
           requested_model?: string
+          model_request_options?: { options?: Record<string, unknown> }
         }
         openclankProvider?: unknown
       }
@@ -1896,9 +2087,11 @@ export class Agent implements ACPAgent {
         case "resource": {
           const resource = part.resource
           if ("text" in resource && resource.text) {
+            const generated=generatedAttachmentCandidate(resource)
             parts.push({
               type: "text",
               text: resource.text,
+              ...(generated ? {metadata:{openclankGeneratedSummaryCandidate:generated}} : {}),
             })
           } else if ("blob" in resource && resource.blob && resource.mimeType) {
             // Binary resource (PDFs, etc.): store as file part with data URL
@@ -1968,14 +2161,50 @@ export class Agent implements ACPAgent {
       managedProvider && typeof managedProvider === "object"
         ? (managedProvider as Record<string, unknown>)
         : undefined
+    const shellRewriteAdmission = ManagedProvider.enabled() ? ManagedProvider.encodeShellRewriteAdmission(
+      (params._meta as Record<string, unknown> | undefined)?.openclankShellRewriteAdmission,
+    ) : undefined
+    const gcfAdmission = ManagedProvider.enabled() ? encodeGcfAdmission(
+      (params._meta as Record<string, unknown> | undefined)?.openclankGcfAdmission,
+      sessionID, managedRoute?.rootOperationID, {providerID:model.providerID,modelID:model.modelID},
+    ) : undefined
+    const jsonWhitespaceAdmission = ManagedProvider.enabled() ? encodeToolViewAdmission(
+      (params._meta as Record<string, unknown> | undefined)?.openclankJsonWhitespaceAdmission,
+      sessionID, managedRoute, {providerID:model.providerID,modelID:model.modelID},
+    ) : undefined
+    const toolViewAdmission = ManagedProvider.enabled() ? encodeToolViewAdmission(
+      (params._meta as Record<string, unknown> | undefined)?.openclankToolViewAdmission,
+      sessionID, managedRoute, {providerID:model.providerID,modelID:model.modelID},
+    ) : undefined
+    const adaptiveStyleAdmission = ManagedProvider.enabled() ? encodeAdaptiveAdmission(
+      (params._meta as Record<string, unknown> | undefined)?.openclankAdaptiveStyleAdmission,
+      sessionID, managedRoute, {providerID:model.providerID,modelID:model.modelID},
+    ) : undefined
+    const gcfArgumentAdmission = ManagedProvider.enabled() ? encodeArgumentAdmission(
+      (params._meta as Record<string, unknown> | undefined)?.openclankGcfArgumentAdmission,
+      sessionID, managedRoute, {providerID:model.providerID,modelID:model.modelID},
+    ) : undefined
     if (ManagedProvider.enabled() && typeof managedRoute?.rootOperationID === "string" && managedRoute.rootOperationID.length > 0 && managedRoute.rootOperationID.length <= 256) {
       // The managed lease authenticates this operation before any SDK write.
       // Ignored metadata survives native fork without entering model context.
-      parts.push({ type: "text", text: "", synthetic: true, ignored: true, metadata: { hostSourceMessageID: managedRoute.rootOperationID } })
+      parts.push({ type: "text", text: "", synthetic: true, ignored: true, metadata: {
+        hostSourceMessageID: managedRoute.rootOperationID,
+        ...(typeof managedRoute.modelRouteID === "string" ? { modelRouteID: managedRoute.modelRouteID } : {}),
+        ...(typeof managedRoute.connectionID === "string" ? { connectionID: managedRoute.connectionID } : {}),
+        ...(typeof managedRoute.grantID === "string" ? { grantID: managedRoute.grantID } : {}),
+        ...(typeof managedRoute.preferredAccountID === "string" ? { preferredAccountID: managedRoute.preferredAccountID } : {}),
+      } })
     }
     const hostContextForOperation = () => {
       const scope = ManagedProvider.currentScope(sessionID)
+      let ownerMetadataOffered = false
+      const ownerAccountID = ManagedProvider.enabled() ? ManagedProvider.actorOwnerFromPrompt(
+        (() => { const metadata=(params._meta as Record<string,unknown> | undefined)?.openclankActorOwner; ownerMetadataOffered=metadata !== undefined; return metadata })(),
+        sessionID, managedRoute?.rootOperationID, odysseus?.chat_id,
+      ) : undefined
+      try { log.debug("source_owner_prompt",{offered:ownerMetadataOffered,accepted:!!ownerAccountID}) } catch { /* diagnostic only */ }
       return {
+        ...(ownerAccountID ? { ownerAccountID } : {}),
         ...(scope?.accountID
           ? { accountID: scope.accountID }
           : typeof managedRoute?.preferredAccountID === "string" && managedRoute.preferredAccountID
@@ -1997,10 +2226,18 @@ export class Agent implements ACPAgent {
         ...(typeof odysseus?.goal_id === "string" && odysseus.goal_id
           ? { goalID: odysseus.goal_id }
           : {}),
+        ...(gcfAdmission ? { gcfAdmission } : {}),
+        ...(shellRewriteAdmission ? { shellRewriteAdmission } : {}),
+        ...(gcfArgumentAdmission ? { gcfArgumentAdmission } : {}),
+        ...(this.gcfArtifact ? { gcfArtifact: this.gcfArtifact } : {}),
+        ...(jsonWhitespaceAdmission ? { jsonWhitespaceAdmission } : {}),
+        ...(toolViewAdmission ? { toolViewAdmission } : {}),
+        ...(adaptiveStyleAdmission ? { adaptiveStyleAdmission } : {}),
         cwd: directory,
       }
     }
 
+    let mainExecutionProof: Record<string, unknown> | undefined
     let usageMeta: Record<string, unknown> = {
       normalizationProfile: "acp-separated-v1",
       identityCoverage: "partial",
@@ -2055,6 +2292,43 @@ export class Agent implements ACPAgent {
           }),
       )
 
+    const captureFinalActorEvidence = () => {
+      const root = typeof managedRoute?.rootOperationID === "string" ? managedRoute.rootOperationID : undefined
+      if (!ManagedProvider.enabled() || !root) return
+      const capture = ManagedProvider.consumeActorCaptureForRoot(sessionID, "main", root)
+      if (!capture) return
+      if (capture.modelRequestOptions) {
+        mainExecutionProof = { version: 1, sessionID: capture.sessionID, actorID: capture.actorID,
+          rootOperationID: capture.rootOperationID, executionRevision: capture.executionRevision,
+          bindingID: capture.binding.bindingID, bindingRevision: capture.binding.bindingRevision,
+          connectionID: capture.binding.connectionID, providerID: capture.binding.providerID,
+          billingLane: capture.binding.billingLane, modelID: capture.binding.modelID,
+          modelRouteID: capture.binding.modelRouteID, ...(capture.grantID ? { grantID: capture.grantID } : {}),
+          modelRequestOptions: capture.modelRequestOptions }
+      }
+      mainSdkUsage = capture.sdk
+      const coverage = Object.fromEntries(
+        ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens"].map((key) => [
+          key, capture.sdk?.metricCoverage[key] ?? { state: "unavailable", coverage: "unknown", source: "acp", reason: "sdk_category_absent" },
+        ]),
+      )
+      if (!capture.sdk?.metricCoverage.reasoning_tokens)
+        coverage.output_tokens = { state: "unavailable", coverage: "unknown", source: "acp", reason: "missing_normalization_subset" }
+      usageMeta = {
+        ...capture.scope,
+        bindingID: capture.binding.bindingID,
+        selectedAccountID: capture.binding.accountID,
+        connectionID: capture.binding.connectionID,
+        providerID: capture.binding.providerID,
+        modelID: capture.binding.modelID,
+        modelRouteID: capture.binding.modelRouteID,
+        billingLane: capture.binding.billingLane,
+        normalizationProfile: "acp-inclusive-input-separated-output-v1",
+        metricCoverage: coverage,
+        coveredDispatchIDs: capture.sdk?.coveredDispatchIDs ?? [],
+      }
+    }
+
     // The server resolves session.prompt 200 even when the turn died on a
     // provider error (it lands on info.error), and the SDK reports transport
     // rejections (e.g. session busy) via response.error without throwing.
@@ -2084,21 +2358,34 @@ export class Agent implements ACPAgent {
     }
 
     if (!cmd) {
-      const response = await runManaged(() => this.withPromptDelivery(sessionID, () =>
+      // An explicit managed Default is distinct from an absent option. The
+      // former clears an agent preset variant for this turn; the latter keeps
+      // the normal ACP/session inheritance behavior.
+      const requestOptions = odysseus?.model_request_options
+      const optionValues = requestOptions?.options
+      const explicitDefault = !!optionValues
+        && !Object.prototype.hasOwnProperty.call(optionValues, "reasoning_effort")
+      // Prompt lifecycle now owns the actor CAS and acquires an actor+revision
+      // provider lease only after that claim. Keep the ACP operation wrapper
+      // for non-prompt commands, but do not create a session-only lease here.
+      const response = await this.withPromptDelivery(sessionID, () =>
         this.sdk.session.prompt({
           sessionID,
           model: {
             providerID: model.providerID,
             modelID: model.modelID,
           },
-          variant: this.sessionManager.getVariant(sessionID),
+          variant: requestOptions
+            ? explicitDefault ? null : typeof optionValues?.reasoning_effort === "string" ? optionValues.reasoning_effort : null
+            : this.sessionManager.getVariant(sessionID),
           parts,
           agent,
           directory,
           tools: odysseus?.tools,
           system: hostSystem,
         } as any),
-      ))
+        ManagedProvider.enabled() ? {rootOperationID:typeof managedRoute?.rootOperationID === "string" ? managedRoute.rootOperationID : "",context:hostContextForOperation} : undefined,
+      ).finally(captureFinalActorEvidence)
       const msg = response.data?.info
 
       await sendUsageUpdate(this.connection, this.sdk, sessionID, directory)
@@ -2118,7 +2405,7 @@ export class Agent implements ACPAgent {
       return {
         stopReason: "end_turn" as const,
         usage: msg ? buildUsage(msg) : undefined,
-        _meta: usageMeta,
+        _meta: { ...usageMeta, ...(mainExecutionProof ? { mainExecutionProof } : {}) },
       }
     }
 

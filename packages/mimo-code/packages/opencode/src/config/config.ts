@@ -1,4 +1,5 @@
 import { Log } from "../util"
+import { captureWindowDeclarations } from "./model-window-declarations"
 import path from "path"
 import { pathToFileURL } from "url"
 import os from "os"
@@ -61,6 +62,9 @@ function mergeConfigConcatArrays(target: Info, source: Info): Info {
 function normalizeLoadedConfig(data: unknown, source: string) {
   if (!isRecord(data)) return data
   const copy = { ...data }
+  if (isRecord(copy.memory) && copy.memory.provider === "frankenmemory") {
+    copy.memory = { ...copy.memory, provider: "memery" }
+  }
   const hadLegacy = "theme" in copy || "keybinds" in copy || "tui" in copy
   if (!hadLegacy) return copy
   delete copy.theme
@@ -356,15 +360,15 @@ const InfoSchema = Schema.Struct({
         description:
           "Index Claude Code memory (~/.claude/projects/<slug>/memory) and expose under scope='cc'. Default: false. Note: when enabled, every mimocode agent (build/explore/subagents) can search these memories via the builtin `memory` tool — including CC's `type: user` (your role/preferences) and `type: feedback` (your guidance) categories. CC originally writes them for future CC sessions; flipping this on widens the consumer set to mimocode agents on the same machine. Leave disabled (default) if you don't want personal context recallable from a prompt-injection-vulnerable agent.",
       }),
-      provider: Schema.optional(Schema.Literals(["native", "frankenmemory"])).annotate({
+      provider: Schema.optional(Schema.Literals(["native", "memery"])).annotate({
         description:
-          "Memory search provider. 'native' uses the built-in FTS5 markdown index (default). 'frankenmemory' delegates to the fm-mcp Rust engine over MCP stdio.",
+          "Memory search provider. 'native' uses the built-in FTS5 markdown index (default). 'memery' uses the host-managed Memery service.",
       }),
       graph: Schema.optional(
         Schema.Struct({
           enabled: Schema.optional(Schema.Boolean).annotate({
             description:
-              "Extract a knowledge graph (entities/relations/cues) from each captured turn via one small LLM call and store it in frankenmemory. Requires memory.provider = 'frankenmemory'. Default: true.",
+              "Extract a knowledge graph (entities/relations/cues) from each captured turn via one small LLM call and store it in Memery. Requires memory.provider = 'memery'. Default: true.",
           }),
           model: Schema.optional(Schema.String).annotate({
             description:
@@ -453,7 +457,7 @@ const InfoSchema = Schema.Struct({
       }),
       predict_next_prompt: Schema.optional(Schema.Boolean).annotate({
         description:
-          "Predict the user's likely next prompt after each turn and show it as inline ghost text (Tab to accept). Enabled by default; set to false to disable.",
+          "Predict the user's likely next prompt after each turn and show it as inline ghost text (Tab to accept). Off by default; set to true to enable.",
       }),
       maxMode: Schema.optional(
         Schema.Struct({
@@ -596,8 +600,12 @@ type State = {
   consoleState: ConsoleState
 }
 
+const visionConfigLifetimes = new WeakMap<State, {alive:boolean}>()
+
 export interface Interface {
   readonly get: () => Effect.Effect<Info>
+  /** Non-secret vision selection and cache-lifetime evidence for source observation. */
+  readonly visionSelectionWithProvenance?: () => Effect.Effect<{vision_model:Info["vision_model"]; vision_group:NonNullable<Info["model_groups"]>["vision"] | undefined; current:()=>boolean}>
   readonly getGlobal: () => Effect.Effect<Info>
   readonly getConsoleState: () => Effect.Effect<ConsoleState>
   readonly update: (config: Info) => Effect.Effect<void>
@@ -1107,12 +1115,41 @@ export const layer = Layer.effect(
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Config.state")(function* (ctx) {
-        return yield* loadInstanceState(ctx).pipe(Effect.orDie)
+        const result = yield* loadInstanceState(ctx).pipe(Effect.orDie)
+        // Capture the private declaration fact before Config.get can expose
+        // this mutable root to plugin config hooks.
+        captureWindowDeclarations(result.config)
+        const lifetime = {alive:true}
+        visionConfigLifetimes.set(result, lifetime)
+        yield* Effect.addFinalizer(() => Effect.sync(() => { lifetime.alive = false }))
+        return result
       }),
     )
 
     const get = Effect.fn("Config.get")(function* () {
       return yield* InstanceState.use(state, (s) => s.config)
+    })
+
+    const visionSelectionWithProvenance = Effect.fn("Config.visionSelectionWithProvenance")(function* () {
+      const value = yield* InstanceState.get(state)
+      const lifetime = visionConfigLifetimes.get(value)
+      const fields = () => {
+        try {
+          const model=value.config.vision_model, group=value.config.model_groups?.vision
+          if (group !== undefined && typeof group !== "string" &&
+              (!group || typeof group !== "object" || Array.isArray(group) || Object.keys(group).some(key=>key !== "default" && key !== "models") ||
+                typeof group.default !== "string" || (group.models !== undefined && (!Array.isArray(group.models) || group.models.length > 128)))) return
+          const normalized = typeof group === "string" || group === undefined ? group :
+            {default:group.default,...(group.models === undefined ? {} : {models:[...group.models]})}
+          const refs = [model,...(typeof normalized === "string" ? [normalized] : normalized ? [normalized.default,...(normalized.models ?? [])] : [])]
+          if (refs.length > 130 || refs.some(ref=>ref !== undefined && (typeof ref !== "string" || Buffer.byteLength(ref,"utf8")>256))) return
+          return {model,group:normalized,snapshot:JSON.stringify([model,normalized])}
+        } catch { return }
+      }
+      const captured = fields()
+      return {vision_model:captured?.model, vision_group:captured?.group, current:()=> {
+        try { return !!lifetime?.alive && captured !== undefined && fields()?.snapshot === captured.snapshot } catch { return false }
+      }}
     })
 
     const directories = Effect.fn("Config.directories")(function* () {
@@ -1162,13 +1199,17 @@ export const layer = Layer.effect(
 
       let next: Info
       if (!file.endsWith(".jsonc")) {
-        const existing = ConfigParse.schema(Info, ConfigParse.jsonc(before, file), file)
+        const existing = ConfigParse.schema(Info, normalizeLoadedConfig(ConfigParse.jsonc(before, file), file), file)
         const merged = mergeDeep(writable(existing), writable(config))
         yield* fs.writeFileString(file, JSON.stringify(merged, null, 2)).pipe(Effect.orDie)
         next = merged
       } else {
-        const updated = patchJsonc(before, writable(config))
-        next = ConfigParse.schema(Info, ConfigParse.jsonc(updated, file), file)
+        let updated = patchJsonc(before, writable(config))
+        const patched = ConfigParse.jsonc(updated, file)
+        if (isRecord(patched) && isRecord(patched.memory) && patched.memory.provider === "frankenmemory") {
+          updated = patchJsonc(updated, "memery", ["memory", "provider"])
+        }
+        next = ConfigParse.schema(Info, normalizeLoadedConfig(ConfigParse.jsonc(updated, file), file), file)
         yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }
 
@@ -1178,6 +1219,7 @@ export const layer = Layer.effect(
 
     return Service.of({
       get,
+      visionSelectionWithProvenance,
       getGlobal,
       getConsoleState,
       update,

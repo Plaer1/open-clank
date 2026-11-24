@@ -2,21 +2,21 @@
   "id": "batch-026",
   "group": "docs.openclank-docs-formatting-demo",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 1518,
+  "entry_count": 3,
+  "character_count": 2520,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-formatting-demo.body",
-      "source": "# Markdown Formatting Demo\n\nThis page is the formatting demonstration. Click any rendered element below to\nreveal the exact Markdown source that produced it. The source inspector is\nread-only — you can select and copy from it, but it never edits this page and\nnever starts a save. Use **Back to rendered** to return.\n\n## Headings\n\n### A level-three heading\n\n#### A level-four heading\n\n## Emphasis and marks\n\nSome **bold text**, some *italic text*, some ~~struck-through text~~, and some\n==highlighted text==.\n\nInline `code spans` look like this.\n\n## Lists\n\n- First bullet\n- Second bullet\n  - A nested bullet\n- Third bullet\n\n1. First step\n2. Second step\n3. Third step\n\n## Task list\n\n- [x] A finished item\n- [ ] An open item\n\n## Quote\n\n> A quoted line.\n> It can span more than one line.\n\n## Code\n\n```\nfunction hello() {\n  return 'world';\n}\n```\n\n## Rule\n\n---\n\n## Table\n\n| Column | Meaning |\n| --- | --- |\n| Name | What it is called |\n| Value | What it holds |\n\n## Links and references\n\nA [standard link](clank://settings) opens a real app screen.\n\nA wikilink target such as [[Editor]] opens another document in this Editor.\n\n## Footnote-style note\n\nEverything on this page is ordinary Markdown. The only special behavior is\nthe read-only source reveal above, and it exists for this demonstration alone\n— normal documentation pages simply stay rendered.",
+      "source": "# Markdown Formatting Demo\n\nClick a rendered block on this page to reveal or copy its Markdown. **Back to rendered** shows the result again.\n\n## Task list\n\n- [x] Mark the region in the reference image.\n- [ ] Send the selected frame to the original chat.\n\n## Quote\n\n> Put the diagram beside the code that uses it.\n\n## Emphasis and marks\n\nKeep the **source**, mark the *draft*, cross out ~~superseded values~~ and ==highlight the change==.\n\n## Table\n\n| Keep editing | Share a copy |\n| --- | --- |\n| Layered image project | PNG |\n| Workbook or slide deck | PDF |\n\n## Links and references\n\n[[Editor]] opens a manual page. [Settings](clank://settings) opens a control in the app. [[Wiki Recipes]] includes a live section embed.\n\n## Code\n\n```markdown\n![[OpenClank/Editor#Source comments]]\n```\n\n## Footnote-style note\n\nA source can stay beside its claim.[^source]\n\n[^source]: Keep the version you used with the page.\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:311"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
@@ -26,10 +26,20 @@
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:311"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
       "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-formatting-demo.body.compat-10f3abdfbbd8",
+      "source": "# Markdown Formatting Demo\n\nThis page is the formatting demonstration. Click any rendered element below to\nreveal the exact Markdown source that produced it. The source inspector is\nread-only — you can select and copy from it, but it never edits this page and\nnever starts a save. Use **Back to rendered** to return.\n\n## Headings\n\n### A level-three heading\n\n#### A level-four heading\n\n## Emphasis and marks\n\nSome **bold text**, some *italic text*, some ~~struck-through text~~, and some\n==highlighted text==.\n\nInline `code spans` look like this.\n\n## Lists\n\n- First bullet\n- Second bullet\n  - A nested bullet\n- Third bullet\n\n1. First step\n2. Second step\n3. Third step\n\n## Task list\n\n- [x] A finished item\n- [ ] An open item\n\n## Quote\n\n> A quoted line.\n> It can span more than one line.\n\n## Code\n\n```\nfunction hello() {\n  return 'world';\n}\n```\n\n## Rule\n\n---\n\n## Table\n\n| Column | Meaning |\n| --- | --- |\n| Name | What it is called |\n| Value | What it holds |\n\n## Links and references\n\nA [standard link](clank://settings) opens a real app screen.\n\nA wikilink target such as [[Editor]] opens another document in this Editor.\n\n## Footnote-style note\n\nEverything on this page is ordinary Markdown. The only special behavior is\nthe read-only source reveal above, and it exists for this demonstration alone\n— normal documentation pages simply stay rendered.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
     }
   ]
 }

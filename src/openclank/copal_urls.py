@@ -14,6 +14,8 @@ _CANONICAL_APPLET_PATH: dict[str, str] = {
     "notes": "/editor",
     "editor": "/editor",
     "code": "/editor",
+    "imps": "/editor",
+    "image-editor": "/editor",
     "bases": "/editor?open=bases",
     "base": "/editor?open=bases",
     "wiki": "/wiki",

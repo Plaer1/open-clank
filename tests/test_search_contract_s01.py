@@ -94,6 +94,8 @@ def test_brave_freshness_alias_is_normalized(monkeypatch):
 
 
 def test_search_http_contract_validates_and_preserves_canonical_fields(monkeypatch):
+    monkeypatch.setattr(search_routes, "require_authenticated_request", lambda _request: None)
+    monkeypatch.setattr(search_routes, "effective_user", lambda _request: "alice")
     monkeypatch.setattr(search_routes, "_get_search_settings", lambda: {"google_pse_key": "key"})
     monkeypatch.setattr(search_routes, "_get_provider_key", lambda provider: "key" if provider == "google_pse" else "")
     app = FastAPI()
@@ -122,9 +124,10 @@ def test_search_http_contract_validates_and_preserves_canonical_fields(monkeypat
 
 
 def test_search_provider_status_uses_owner_binding_without_exposing_route(monkeypatch):
+    monkeypatch.setattr(search_routes, "require_authenticated_request", lambda _request: None)
+    monkeypatch.setattr(search_routes, "effective_user", lambda _request: "alice")
     monkeypatch.setattr(search_routes, "_get_search_settings", lambda: {"search_provider": "mimo"})
     monkeypatch.setattr(search_routes, "effective_user", lambda _request: "alice")
-    monkeypatch.setattr(search_routes, "_auth_disabled", lambda: False)
     import src.openclank.operation_router as operation_router
     class FakeRouter:
         def route_preflight(self, **kwargs):
@@ -132,7 +135,7 @@ def test_search_provider_status_uses_owner_binding_without_exposing_route(monkey
             assert kwargs["purpose"] == "search" and kwargs["operation"] == "web.search"
             assert kwargs["include_provider_family"] is True
             return {"configured": True, "selected_model_route_id": "hidden-route",
-                    "selected_provider_family": "mimo"}
+                    "selected_provider_family": "xiaomi"}
     monkeypatch.setattr(operation_router, "get_operation_router", lambda: FakeRouter())
     app = FastAPI(); app.include_router(search_routes.setup_search_routes(None))
     async def exercise():
@@ -147,6 +150,8 @@ def test_search_provider_status_uses_owner_binding_without_exposing_route(monkey
 
 
 def test_search_query_http_uses_configured_default_count(monkeypatch):
+    monkeypatch.setattr(search_routes, "require_authenticated_request", lambda _request: None)
+    monkeypatch.setattr(search_routes, "effective_user", lambda _request: "alice")
     seen = {}
     class FakeService:
         async def search(self, query, **kwargs):
@@ -171,6 +176,8 @@ def test_search_query_http_uses_configured_default_count(monkeypatch):
 
 
 def test_search_http_resolves_owner_search_binding_for_mimo(monkeypatch):
+    monkeypatch.setattr(search_routes, "require_authenticated_request", lambda _request: None)
+    monkeypatch.setattr(search_routes, "effective_user", lambda _request: "alice")
     seen = {}
     class FakeService:
         async def search(self, query, **kwargs):
@@ -300,7 +307,10 @@ def test_managed_mimo_search_does_not_cross_cache_unknown_binder_accounts(monkey
         def route_preflight(self, **_kwargs):
             return {"configured": True, "selected_model_route_id": "route-mimo"}
 
-        async def execute(self, request):
+        def prepare(self, request):
+            return request
+
+        async def execute_prepared(self, request):
             calls.append(request)
             return SimpleNamespace(selected_account_id="mimo-account", output={
                 "status": "complete", "results": [{"url": "https://mimo.example", "title": "MiMo", "snippet": "annotation"}],
@@ -327,7 +337,10 @@ def test_managed_mimo_answer_is_forwarded_and_fresh_operation_ids_are_not_replay
         def route_preflight(self, **_kwargs):
             return {"configured": True, "selected_model_route_id": "route-mimo"}
 
-        async def execute(self, request):
+        def prepare(self, request):
+            return request
+
+        async def execute_prepared(self, request):
             calls.append(request)
             return SimpleNamespace(selected_account_id="mimo-account", output={
                 "status": "complete", "answer": "grounded answer",
@@ -359,7 +372,10 @@ def test_managed_mimo_explicit_operation_id_replays_and_freshness_is_typed(monke
         def route_preflight(self, **_kwargs):
             return {"configured": True, "selected_model_route_id": "route-mimo"}
 
-        async def execute(self, request):
+        def prepare(self, request):
+            return request
+
+        async def execute_prepared(self, request):
             calls.append(request)
             return SimpleNamespace(selected_account_id="mimo-account", output={"status": "complete", "results": []})
 
@@ -388,6 +404,9 @@ def test_managed_mimo_without_owner_search_binding_is_actionable(monkeypatch):
     assert result.status == "unavailable"
     assert result.error["code"] == "unavailable"
     assert "Search provider binding" in result.error["message"]
+    assert result.account_scope == "subscription-unbound" and result.actual_provider == ""
+    no_owner = asyncio.run(service.SearchService(fetch_content=False).search("mimo", provider="mimo"))
+    assert no_owner.account_scope == "subscription-unbound" and no_owner.actual_provider == ""
 
 
 def test_forged_identity_and_invalid_limits_are_rejected(monkeypatch):
@@ -590,5 +609,26 @@ def test_antigravity_is_explicitly_unavailable_until_bound_adapter(monkeypatch):
     monkeypatch.setattr(service, "_get_search_settings", lambda: {"search_provider": "antigravity"})
     result = asyncio.run(service.SearchService(fetch_content=False).search("audit", mode="results"))
     assert result.status == "unavailable"
-    assert result.actual_provider == "antigravity"
+    assert result.actual_provider == ""
     assert result.error["code"] == "unsupported_capability"
+
+
+def test_prepared_fallback_captures_credentials_and_settings(monkeypatch):
+    service._CACHE.clear()
+    settings = {"search_provider": "searxng", "search_url": "https://old.test", "search_fallback_chain": ["brave", "mimo"]}
+    monkeypatch.setattr(service, "_get_search_settings", lambda: settings)
+    monkeypatch.setenv("DATA_BRAVE_API_KEY", "original")
+    calls = []
+    def provider(name, query, count, freshness, snapshot):
+        calls.append((name, snapshot.endpoint, snapshot.credential))
+        return [] if name == "searxng" else [{"url": "https://result.test"}]
+    monkeypatch.setattr(service, "_call_provider", provider)
+    svc = service.SearchService(fetch_content=False)
+    prepared = svc.prepare_search("capture", owner="alice", mode="results")
+    assert isinstance(prepared, service.PreparedSearch) and calls == []
+    settings.update(search_url="https://new.test", brave_api_key="changed")
+    monkeypatch.setenv("DATA_BRAVE_API_KEY", "changed-env")
+    result = asyncio.run(svc.execute_prepared_external(prepared))
+    assert [row[0] for row in calls] == ["searxng", "brave"]
+    assert calls[0][1] == "https://old.test" and calls[1][2] == "original"
+    assert result.selected_provider == "searxng" and result.actual_provider == "brave"

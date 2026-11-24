@@ -15,11 +15,11 @@
  * }} deps
  * @returns {{ begin: (e: Event) => void, drag: (e: Event) => void, end: () => void }}
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 import { canvasCoords } from '../canvas-coords.js';
 import { computeSnap as computeSnapImpl } from '../snap.js';
 
-export function createMoveTool({ activeLayer, saveState, composite }) {
+export function createMoveTool({ state = legacyState, root = null, lifetime = null, activeLayer, saveState, composite, markSceneChanged = () => {}, gesture = {begin:()=>true,owns:()=>true,end:()=>{}}, sceneRevision = () => state.sceneRevision, borrowTransform = () => null }) {
   function computeSnap(layer, nx, ny) {
     return computeSnapImpl(layer, nx, ny, {
       zoom: state.zoom,
@@ -34,24 +34,37 @@ export function createMoveTool({ activeLayer, saveState, composite }) {
     });
   }
 
-  return {
-    begin(e) {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated tool requires root and lifetime');
+  let disposed = false;
+  let moved = false;
+  let target=null, revision=null, borrowed=null;
+  const owned=() => borrowed ? borrowed.owns() : gesture.owns() && sceneRevision()===revision;
+  const finish=() => {if (state.moving && moved && !borrowed && owned()) markSceneChanged(); if (!borrowed) gesture.end(); borrowed=null; target=null; moved=false; state.moving=false; state.activeSnapGuides=null;};
+  lifetime?.add(() => { finish(); disposed = true; });
+  const tool = {
+    begin(e, options = {}) {
       const layer = activeLayer();
       if (!layer || layer.locked) return;
-      saveState();
+      if (state.moving) return;
+      borrowed=options.borrowed ? borrowTransform(layer) : null;
+      if (options.borrowed ? !borrowed : !gesture.begin()) {borrowed=null; return;}
+      target=layer; revision=sceneRevision();
+      try {
+      if (!borrowed) saveState();
       state.moving = true;
+      moved = false;
       const coords = canvasCoords(e, state.mainCanvas);
       const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
       state.moveStartX = coords.x;
       state.moveStartY = coords.y;
       state.moveLayerOffsetX = off.x;
       state.moveLayerOffsetY = off.y;
+      } catch(error) {finish(); throw error;}
     },
     drag(e) {
-      if (!state.moving) return;
+      if (!state.moving || !owned() || !state.layers.includes(target)) return;
       e.preventDefault();
-      const layer = activeLayer();
-      if (!layer) return;
+      const layer = target;
       const coords = canvasCoords(e, state.mainCanvas);
       const dx = coords.x - state.moveStartX;
       const dy = coords.y - state.moveStartY;
@@ -68,12 +81,19 @@ export function createMoveTool({ activeLayer, saveState, composite }) {
       } else {
         state.activeSnapGuides = null;
       }
+      const previous = state.layerOffsets.get(layer.id) || {x:0, y:0};
+      if (previous.x !== nx || previous.y !== ny) moved = true;
       state.layerOffsets.set(layer.id, { x: nx, y: ny });
+      borrowed?.move(nx - state.moveLayerOffsetX, ny - state.moveLayerOffsetY);
       composite();
     },
     end() {
-      state.moving = false;
-      state.activeSnapGuides = null;
+      finish();
     },
   };
+  for (const key of Object.keys(tool)) {
+    const invoke = tool[key];
+    tool[key] = (...args) => disposed ? false : invoke(...args);
+  }
+  return tool;
 }

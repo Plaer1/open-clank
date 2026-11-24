@@ -1,6 +1,9 @@
 import asyncio
 import os
-from pathlib import Path
+from functools import partial
+
+from starlette.applications import Starlette
+from starlette.requests import Request
 
 from routes import personal_routes
 
@@ -26,7 +29,7 @@ def _delete_endpoint(personal_docs):
     router = personal_routes.setup_personal_routes(personal_docs, None, True)
     for route in router.routes:
         if getattr(route, "path", "") == "/api/personal/file" and "DELETE" in getattr(route, "methods", set()):
-            return route.endpoint
+            return partial(route.endpoint, Request({"type": "http", "app": Starlette()}))
     raise AssertionError("DELETE /api/personal/file endpoint not found")
 
 
@@ -37,14 +40,16 @@ def test_delete_file_refuses_symlink_directory_escape(tmp_path, monkeypatch):
     outside.mkdir()
     victim = outside / "victim.txt"
     victim.write_text("keep me", encoding="utf-8")
-    os.symlink(outside, uploads / "linked")
+    owner_root = uploads / "alice"
+    owner_root.mkdir()
+    os.symlink(outside, owner_root / "linked")
 
     docs = _FakePersonalDocs()
     rag = _FakeRAG()
     monkeypatch.setattr(personal_routes, "UPLOADS_DIR", str(uploads))
     monkeypatch.setattr(personal_routes, "get_rag_manager", lambda: rag)
 
-    filepath = str(uploads / "linked" / "victim.txt")
+    filepath = str(owner_root / "linked" / "victim.txt")
     result = asyncio.run(_delete_endpoint(docs)(filepath=filepath, owner="alice", _admin=None))
 
     assert result["deleted_from_disk"] is False

@@ -15,13 +15,13 @@ from src.openclank.code_query import query_code
 from src.openclank.files_service_client import OdysseusFilesClient, close_all_clients
 
 _assert_isolated_startup()
-assert Path(os.environ["ODYSSEUS_FILES_SERVICE_BIN"]).is_file()
+assert Path(os.environ["OPEN_CLANK_FILES_SERVICE_BIN"]).is_file()
 scope = lifecycle.scope
 
 
 async def test_initial_query_observation_backoff_is_finite_cooperative_then_steady(monkeypatch):
-    from src.frankenmemory_provider import FrankenmemoryProvider
-    provider = FrankenmemoryProvider.__new__(FrankenmemoryProvider)
+    from src.memery_provider import MemeryProvider
+    provider = MemeryProvider.__new__(MemeryProvider)
     provider._broker_url = None
     provider._scope = lambda owner: None
     polls = 0

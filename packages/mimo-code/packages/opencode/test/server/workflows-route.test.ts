@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { Effect, Exit, Cause } from "effect"
 import { Log } from "../../src/util"
 import { Instance } from "../../src/project/instance"
@@ -8,15 +8,34 @@ import { Identifier } from "../../src/id/id"
 import { WorkflowPersistence } from "../../src/workflow/persistence"
 import { WorkflowRuntime } from "../../src/workflow/runtime"
 import { workflowRef } from "../../src/workflow/runtime-ref"
+import { workflowAvailability } from "../../src/server/routes/instance/workflows"
 import { provideTmpdirServer, tmpdir } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { makeLayer, ref, providerCfg } from "../workflow/lib"
 
 void Log.init({ print: false })
 
+let workflowTestTail: Promise<void> = Promise.resolve()
+let releaseWorkflowTest: (() => void) | undefined
+let priorWorkflowRuntime: typeof workflowRef.current
+
+beforeEach(async () => {
+  const previousTest = workflowTestTail
+  let release!: () => void
+  workflowTestTail = new Promise<void>((resolve) => (release = resolve))
+  await previousTest
+  releaseWorkflowTest = release
+  priorWorkflowRuntime = workflowRef.current
+})
+
 afterEach(async () => {
-  workflowRef.current = undefined
-  await Instance.disposeAll()
+  try {
+    workflowRef.current = priorWorkflowRuntime
+    await Instance.disposeAll()
+  } finally {
+    releaseWorkflowTest?.()
+    releaseWorkflowTest = undefined
+  }
 })
 
 describe("workflows routes", () => {
@@ -37,6 +56,14 @@ describe("workflows routes", () => {
         expect(await response.json()).toEqual([])
       },
     })
+  })
+
+  test("workflow availability distinguishes runtime absence from an empty live list", async () => {
+    const sessionID = "ses_16ec185f2ffexEGkbWeMqWSucv" as any
+    type Availability = { available: boolean; runs: unknown[] | null }
+    expect(await Effect.runPromise(workflowAvailability(undefined, sessionID) as Effect.Effect<Availability>)).toEqual({ available: false, runs: null })
+    const emptyLiveRuntime = { list: () => Effect.succeed([]) } as any
+    expect(await Effect.runPromise(workflowAvailability(emptyLiveRuntime, sessionID) as Effect.Effect<Availability>)).toEqual({ available: true, runs: [] })
   })
 
   test("POST /workflows/:runID/resume returns { resumed: false } when the runtime is not running", async () => {
@@ -331,6 +358,20 @@ describe("workflows routes — live runtime", () => {
         expect(row).toBeDefined()
         expect(row!.status).toBe("completed")
         expect(row!.succeeded).toBeGreaterThanOrEqual(1)
+
+        const availability = yield* Effect.promise(async () =>
+          Server.Default().app.request(`/workflows/availability?sessionID=${parent.id}`, {
+            method: "GET",
+            headers: { "x-mimocode-directory": dir },
+          }),
+        )
+        expect(availability.status).toBe(200)
+        const availableBody = (yield* Effect.promise(() => availability.json())) as {
+          available: boolean
+          runs: Array<{ runID: string }>
+        }
+        expect(availableBody.available).toBe(true)
+        expect(availableBody.runs.some((r) => r.runID === runID)).toBe(true)
       }),
       { git: true, config: providerCfg },
     ),

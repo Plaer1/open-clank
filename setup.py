@@ -100,8 +100,8 @@ def create_default_admin():
         from core.auth import AuthManager
 
         # Priority: env vars > interactive prompt > random password
-        username = (os.getenv("OPEN_CLANK_ADMIN_USER") or os.getenv("ODYSSEUS_ADMIN_USER") or "").strip().lower()
-        password = (os.getenv("OPEN_CLANK_ADMIN_PASSWORD") or os.getenv("ODYSSEUS_ADMIN_PASSWORD") or "").strip()
+        username = (os.getenv("OPEN_CLANK_ADMIN_USER") or "").strip().lower()
+        password = (os.getenv("OPEN_CLANK_ADMIN_PASSWORD") or "").strip()
 
         if username and password:
             # Both provided via env — validate before using
@@ -111,7 +111,7 @@ def create_default_admin():
             if len(password) < PASSWORD_MIN_LENGTH:
                 print(f"  [error] OPEN_CLANK_ADMIN_PASSWORD must be at least {PASSWORD_MIN_LENGTH} characters")
                 return "failed"
-        elif sys.stdin.isatty() and not (os.getenv("OPEN_CLANK_SKIP_ADMIN_PROMPT") or os.getenv("ODYSSEUS_SKIP_ADMIN_PROMPT")):
+        elif sys.stdin.isatty() and not os.getenv("OPEN_CLANK_SKIP_ADMIN_PROMPT"):
             # Interactive terminal — ask the user
             username, password = _prompt_admin_credentials()
         else:
@@ -124,11 +124,11 @@ def create_default_admin():
             print("  [error] Initial admin account could not be created")
             return "failed"
 
-        if sys.stdin.isatty() and not (os.getenv("OPEN_CLANK_ADMIN_PASSWORD") or os.getenv("ODYSSEUS_ADMIN_PASSWORD")):
+        if sys.stdin.isatty() and not os.getenv("OPEN_CLANK_ADMIN_PASSWORD"):
             print(f"  [ok] Admin account created ({username})")
         else:
             print(f"  [ok] Initial admin user created ({username})")
-            if not (os.getenv("OPEN_CLANK_ADMIN_PASSWORD") or os.getenv("ODYSSEUS_ADMIN_PASSWORD")):
+            if not os.getenv("OPEN_CLANK_ADMIN_PASSWORD"):
                 print(f"        Temporary password: {password}")
                 print(f"        ** Change it after first login. Set OPEN_CLANK_ADMIN_PASSWORD to choose your own. **")
         return "created"
@@ -294,9 +294,12 @@ def ensure_native_workers():
             "install the prerequisites in docs/setup.md and rerun setup"
         )
     root = Path(BASE_DIR)
+    history_tools = ("openclank-history-service",)
+    if sys.platform in {"darwin", "linux"}:
+        history_tools += ("openclank-history-prepare-copy", "openclank-history-index-copy")
     builds = [
-        (root / "mcp_servers/frankenmemory", ("fm-mcp",)),
-        (root / "packages/openclank-history", ("openclank-history-service",)),
+        (root / "native/memery", ("memery-worker", "memery-migrate")),
+        (root / "packages/openclank-history", history_tools),
     ]
     if sys.platform in {"darwin", "win32", "linux"}:
         thumbnail = {"darwin": "odysseus-quicklook-helper", "win32": "odysseus-shell-thumbnail-helper",
@@ -400,7 +403,7 @@ def main():
     print("\n=== Setup complete ===")
     # start-macos.sh launches the server itself (on its own port) right after
     # this, so suppress the manual hint there to avoid a contradictory URL.
-    if not (os.getenv("OPEN_CLANK_SKIP_RUN_HINT") or os.getenv("ODYSSEUS_SKIP_RUN_HINT")):
+    if not os.getenv("OPEN_CLANK_SKIP_RUN_HINT"):
         print(f"\nStart the server with:")
         print(f"  python scripts/openclank_bootstrap.py serve --host 127.0.0.1 --port 7777")
         print(f"\nThen open http://localhost:7777")

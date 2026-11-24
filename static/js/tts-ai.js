@@ -43,7 +43,12 @@ class AITTSManager {
 
             const response = await fetch('/api/tts/stats');
             const stats = await response.json();
-            this.available = stats.available && stats.ready;
+            // Configured local recipes report runtime readiness as unknown
+            // until an explicit synthesis attempt; keep the control usable so
+            // the request can return its truthful typed unavailable result.
+            this.available = Boolean(stats.available && (stats.ready || (
+                stats.configured && stats.runtime_status === 'unknown'
+            )));
             this.playbackSpeed = stats.speed || 1;
             this._provider = stats.provider || 'disabled';
 

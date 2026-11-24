@@ -1,3 +1,9 @@
+import { capturedResourceButton } from './chatCapturedResource.js';
+import { createCapturedHtmlPreview } from './chatHtmlPreview.js';
+import { renderSkillUseReceipt, currentSkillSourceButton } from './skillUseReceipt.js';
+import { searchHitButtons } from './toolResultReceipt.js';
+import { capturedChangeButton, capturedTurnButton } from './historyView.js';
+import { exactOperationDetails, verifiedOperationExplanation, hasAdditionalOperationDetails } from './operationExplanation.js';
 import { uiIcon } from './uiIcons.js';
 import { fileIcon } from './langIcons.js';
 // static/js/chatRenderer.js
@@ -13,6 +19,62 @@ import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
 import { normalizeAssistantTranscript } from './chatTranscript.js';
+import { openClankHandbook, openImageResource } from './copal.js';
+import { filesFacadeClient } from './filesFacadeClient.js';
+import { mediaInputNotice } from './mediaInputNotice.js';
+
+/** An untrusted selector is resolved against original custody and current Human Files. */
+export function resourceResultButton(selector) {
+  if (!selector || selector.version !== 1 || selector.kind !== 'workflow-member' || typeof selector.operationID !== 'string') return null;
+  const scope=window.chatModule?.ratingAccountScope?.(), session=window.sessionModule, navigation=session?.getSessionNavigationToken?.();
+  const button=document.createElement('button'); button.type='button'; button.className='copal-btn'; button.textContent='Open saved file'; button.dataset.chatArtifact='Saved file';
+  const current=()=>{const now=window.chatModule?.ratingAccountScope?.();return button.isConnected && !!scope?.sid && !!scope?.owner && navigation!==undefined && selector.chat===scope.sid && now?.sid===scope.sid && now.owner===scope.owner && now.authEpoch===scope.authEpoch && document.body.dataset.accountId===scope.owner && session?.getCurrentSessionId?.()===scope.sid && session?.getSessionNavigationToken?.()===navigation;};
+  button.addEventListener('click',async event=>{event.stopPropagation();if(button.disabled || !current())return;button.disabled=true;
+    try {
+      const response=await fetch('/api/files-v1/workflow-result/resolve',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(selector)});
+      if(!response.ok || !current())throw new Error('Saved file unavailable.');
+      const found=await response.json();if(!current() || typeof found?.resourceRef!=='string' || !found.resourceRef || found?.revision?.kind!==selector.revision?.kind || found?.revision?.value!==selector.revision?.value)throw new Error('Saved file unavailable.');
+      const editor=await import('./copal.js');if(!current())return;
+      try {if(typeof editor.openResource!=='function' || !await editor.openResource(found.resourceRef,{expectedRevision:found.revision,isCurrent:current}))throw new Error('Editor unavailable.');}
+      catch (_) {if(!current())return;const files=await import('./files.js');if(!current() || typeof files.revealResource!=='function' || !await files.revealResource(found.resourceRef,{expectedRevision:found.revision,isCurrent:current}))throw new Error('Saved file unavailable.');}
+    } catch (_) {if(current())button.textContent='Saved file unavailable';}
+    finally {if(button.isConnected)button.disabled=false;}
+  });
+  return button;
+}
+
+/** Offer the exact committed Files result from a completed media tool response. */
+export function mediaResultButton(raw) {
+  if (!raw || raw.status !== 'completed' || !['submit','status','collect'].includes(raw.rawInput?.action) || raw.rawOutput?.metadata?.truncated === true) return null;
+  const text = raw.rawOutput?.output;
+  if (typeof text !== 'string' || text.length > 16384) return null;
+  let value; try { value = JSON.parse(text); } catch { return null; }
+  const item = value?.result;
+  if (value?.ok !== true || value.state !== 'complete' || item?.partial !== false ||
+      !['image','mesh','archive','audio'].includes(item.kind) || typeof item.resource_ref !== 'string' ||
+      !item.resource_ref || item.resource_ref.length > 8192 || /[\u0000-\u001f\u007f]/.test(item.resource_ref) ||
+      !/^[a-f0-9]{64}$/.test(item.sha256 || '') || !Number.isSafeInteger(item.size_bytes) || item.size_bytes < 0 || item.size_bytes > 67108864) return null;
+  const ref=item.resource_ref, revision={kind:'hostFingerprint',value:`sha256:${item.sha256}:${item.size_bytes}`};
+  const scope=window.chatModule?.ratingAccountScope?.(), session=window.sessionModule;
+  const navigation=session?.getSessionNavigationToken?.();
+  const button=document.createElement('button'); button.type='button'; button.className='copal-btn'; button.textContent='Open saved result'; button.dataset.chatArtifact=item.kind + ' result';
+  const current=()=>{const now=window.chatModule?.ratingAccountScope?.(); return button.isConnected && !!scope?.sid && !!scope?.owner && navigation!==undefined && now?.sid===scope.sid && now.owner===scope.owner && now.authEpoch===scope.authEpoch && document.body.dataset.accountId===scope.owner && session?.getCurrentSessionId?.()===scope.sid && session?.getSessionNavigationToken?.()===navigation;};
+  button.addEventListener('click',async event=>{event.stopPropagation(); if(button.disabled || !current())return; button.disabled=true;
+    try {const editor=await import('./copal.js'); if(!current())return;
+      if(item.kind==='image') {
+        if (typeof editor.openRetainedHostImage !== 'function' ||
+            !await editor.openRetainedHostImage(ref,{expectedRevision:revision,isCurrent:current})) {
+          throw new Error('The exact saved image could not be opened.');
+        }
+      } else {
+        const files=await import('./files.js'); if(!current())return;
+        if(typeof files.revealResource!=='function' || !await files.revealResource(ref,{expectedRevision:revision,isCurrent:current})) throw new Error('Files result unavailable or changed.');
+      }
+    } catch(error) {if(current()){button.textContent='Saved result unavailable';button.title=String(error?.message || 'The result changed or is unavailable.');}}
+    finally {if(button.isConnected)button.disabled=false;}
+  });
+  return button;
+}
 
 const SEARCH_ICON = uiIcon("search", 14);
 const REPORT_ICON = uiIcon("document", 14);
@@ -175,6 +237,15 @@ export function buildAttachCards(attachments) {
         visionLabel.className = 'attach-vision-model';
         visionLabel.textContent = 'Vision: ' + String(att.vision_model).split('/').pop();
         imgWrap.appendChild(visionLabel);
+      }
+      const omitted = mediaInputNotice(att);
+      if (omitted) {
+        const note = document.createElement('div');
+        note.className = 'attach-media-omitted';
+        note.setAttribute('role', 'status');
+        note.style.cssText = 'font-size:12px;opacity:0.85;margin-top:4px;max-width:300px;';
+        note.textContent = omitted;
+        imgWrap.appendChild(note);
       }
       if (att.name) {
         const label = document.createElement('div');
@@ -992,6 +1063,53 @@ export function buildRagSourcesBox(sources) {
   return '<details class="rag-sources"><summary>Sources (' + sources.length + ' documents)</summary>' + items + '</details>';
 }
 
+/** Display the canonical handbook identity supplied by the Buddy tool. */
+export function addBuddyHandbookLink(body, source) {
+  if (!body || !/^openclank-docs-[a-z0-9-]+$/.test(source?.article_id || '')
+      || typeof source.term !== 'string' || !/^[A-Za-z ]{1,80}$/.test(source.term)
+      || typeof source.title !== 'string' || !source.title || source.title.length > 120) return;
+  if (body.querySelector('.buddy-handbook-link')) return;
+  const standalone = new RegExp('(?<![A-Za-z0-9_])' + source.term + '(?![A-Za-z0-9_])', 'i');
+  const text = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  let match, node;
+  while ((node = text.nextNode())) {
+    if (node.parentElement.closest('a,button,code,pre,.thinking-section,.rag-sources,.sources-section')) continue;
+    match = standalone.exec(node.data);
+    if (match) break;
+  }
+  const link = document.createElement('button');
+  link.type = 'button';
+  link.className = 'buddy-handbook-link';
+  link.textContent = match?.[0] || 'Instruction Manual · ' + source.title;
+  link.title = 'Open the Instruction Manual · ' + source.title;
+  link.addEventListener('click', async () => {
+    const session = window.sessionModule;
+    const navigation = session?.getSessionNavigationToken?.();
+    const account = document.body.dataset.accountId;
+    const current = () => link.isConnected && account && document.body.dataset.accountId === account
+      && session?.getSessionNavigationToken?.() === navigation;
+    if (!current() || link.disabled) return;
+    link.disabled = true;
+    try {
+      if (!await openClankHandbook({articleId:source.article_id, isCurrent:current}) && current())
+        uiModule.showToast('This handbook article is unavailable.');
+    } catch (_) {
+      if (current()) uiModule.showToast('Could not open the handbook article.');
+    } finally {
+      link.disabled = false;
+    }
+  });
+  if (match) {
+    const found = node.splitText(match.index);
+    found.splitText(match[0].length);
+    found.replaceWith(link);
+  } else {
+    const row = document.createElement('p');
+    row.append(link);
+    body.append(row);
+  }
+}
+
 /**
  * Build a collapsible "Raw collected findings" section, styled like the sources box.
  * @param {Array<{url, title, summary}>} findings
@@ -1212,11 +1330,15 @@ document.addEventListener('click', function(e) {
       } catch (_) {}
     }).catch(() => {});
   } else if (kind === 'image') {
-    import('./imps.js').then((mod) => {
-      const open = mod.openEditor || (mod.default && mod.default.openEditor);
-      if (open) open(null, null, { w: 1024, h: 1024 }, 'Image');
-      uiModule.showToast?.('Open the image from Files to edit its original');
-    }).catch(() => {});
+    const scope=window.chatModule?.ratingAccountScope?.(), session=window.sessionModule;
+    const navigation=session?.getSessionNavigationToken?.(), originalHref=rawHref;
+    const current=()=>{ const now=window.chatModule?.ratingAccountScope?.(); return a.isConnected && a.getAttribute('href')===originalHref && scope?.sid && scope?.owner && now?.sid===scope.sid && now.owner===scope.owner && now.authEpoch===scope.authEpoch && document.body.dataset.accountId===scope.owner && session?.getCurrentSessionId?.()===scope.sid && session?.getSessionNavigationToken?.()===navigation; };
+    (async()=>{
+      if (!/^[A-Za-z0-9._-]{1,240}$/.test(id) || navigation===undefined || !current()) throw new Error('Gallery image authority is unavailable.');
+      const resource=await filesFacadeClient.resolveResource({provider:'files',resource_id:`image:${id}`,account_id:scope.owner});
+      if (!current() || resource?.kind!=='image' || !resource.ref || resource.revision?.kind!=='imageSha256' || !/^sha256:[a-f0-9]{64}$/.test(resource.revision.value || '')) throw new Error('The Gallery image is unavailable or changed.');
+      await openImageResource(resource.ref,{expectedRevision:resource.revision,isCurrent:current});
+    })().catch(error => uiModule.showToast?.(error.message || 'The Gallery image is unavailable.'));
   } else if (kind === 'email') {
     import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
       const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
@@ -1375,12 +1497,12 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   editBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     try {
-      // Imps owns image open, so mount the editor directly.
-      const editorMod = await import('./imps.js');
-      const label = (prompt || '').trim().slice(0, 60) || 'Generated image';
-      editorMod.openEditor(imageUrl, imageId || null, null, label);
+      const parsed=new URL(imageUrl,window.location.origin), match=parsed.pathname.match(/^\/api\/generated-image\/([a-zA-Z0-9._-]{1,128})$/);
+      if (parsed.origin!==window.location.origin || parsed.search || parsed.hash || !match || !window.chatModule?.openAuthorizedImageSource) throw new Error('The authorized generated image is unavailable.');
+      await window.chatModule.openAuthorizedImageSource('generated',match[1],(prompt || '').trim().slice(0,60) || 'Generated image',()=>wrap.isConnected,null);
     } catch (err) {
       console.error('[chat] open in editor failed', err);
+      uiModule.showToast?.(err.message || 'The authorized image is unavailable.');
     }
   });
   actions.appendChild(editBtn);
@@ -1394,11 +1516,12 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     impsBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
-        // Open this image in Imps.
-        const editorMod = await import('./imps.js');
-        editorMod.openEditor(imageUrl, imageId || null, null, (prompt || '').trim().slice(0, 60) || 'Generated image');
+        const parsed=new URL(imageUrl,window.location.origin), match=parsed.pathname.match(/^\/api\/generated-image\/([a-zA-Z0-9._-]{1,128})$/);
+        if (parsed.origin!==window.location.origin || parsed.search || parsed.hash || !match || !window.chatModule?.openAuthorizedImageSource) throw new Error('The authorized generated image is unavailable.');
+        await window.chatModule.openAuthorizedImageSource('generated',match[1],(prompt || '').trim().slice(0,60) || 'Generated image',()=>wrap.isConnected,null);
       } catch (err) {
         console.error('[chat] open in Imps failed', err);
+        uiModule.showToast?.(err.message || 'The authorized image is unavailable.');
       }
     });
     actions.appendChild(impsBtn);
@@ -1492,7 +1615,7 @@ export function showWelcomeScreen() {
 }
 
 // ── Dynamic action buttons (show 3 most recent, rest under ···) ──
-const _ACTION_RECENTS_KEY = 'odysseus-msg-actions-recent';
+const _ACTION_RECENTS_KEY = 'openclank-msg-actions-recent';
 const _MAX_VISIBLE = 2;
 
 function _getRecentActions() {
@@ -1508,12 +1631,302 @@ function _trackAction(id) {
 /**
  * Create a footer row for an AI message with timestamp and action buttons.
  */
+// Ratings are explicit annotations on the committed canonical message body.
+// One read-only policy/profile qualification per authenticated chat view.
+let ratingCapability = null;
+const pendingRecallFeedback = new Map();
+function invalidateRatingCapability() {
+  ratingCapability = null;
+  document.querySelectorAll('.rating-action').forEach(button => { button.hidden=true; button.style.display='none'; button._qualifyRating?.(); });
+}
+for (const eventName of ['openclank:auth-context-changed', 'openclank:memory-policy-changed', 'odysseus:session-selected']) {
+  document.addEventListener(eventName, invalidateRatingCapability);
+}
+function ratingCapabilityFor(scope, navigation) {
+  const key = JSON.stringify([scope.owner,scope.sid,scope.authEpoch,navigation]);
+  if (ratingCapability?.key === key) return ratingCapability.promise;
+  const promise = fetch('/api/prefs/memory-policy/preview', {cache:'no-store'}).then(async response => {
+    if (!response.ok) return false;
+    const data=await response.json(), doc=data?.document;
+    const accepted=['openclank.memory-policy.v2','openclank.memory-policy.v3'].includes(doc?.schema) ? doc.accepted_policy : doc;
+    const ratings=data?.ratings || accepted?.policy?.ratings || data?.proposed_defaults?.ratings;
+    return data?.capabilities?.consumers?.ratings === true && ratings?.visible === true;
+  }).catch(() => false);
+  ratingCapability={key,promise}; return promise;
+}
+function appendRatingAction(actions, message) {
+  const button = document.createElement('button');
+  button.type = 'button'; button.className = 'msg-action-btn rating-action';
+  button.textContent = '☆'; button.title = 'Rate this message';
+  button.setAttribute('aria-label', 'Rate this message');
+  button.hidden = true; button.style.display = 'none';
+  let qualification = 0;
+  const qualify = async () => {
+    const attempt = ++qualification;
+    const scope = window.chatModule?.ratingAccountScope?.();
+    const navigation = window.sessionModule?.getSessionNavigationToken?.();
+    if (!scope?.sid || !scope.owner || document.body.dataset.accountId !== scope.owner || navigation === undefined) return;
+    const allowed=await ratingCapabilityFor(scope,navigation);
+    const now = window.chatModule?.ratingAccountScope?.();
+    if (attempt === qualification && message.isConnected && now?.sid === scope.sid && now.owner === scope.owner && now.authEpoch === scope.authEpoch && window.sessionModule?.getSessionNavigationToken?.() === navigation && document.body.dataset.accountId === scope.owner) {
+      button.hidden = !allowed; button.style.display = allowed ? '' : 'none';
+    }
+  };
+  requestAnimationFrame(qualify);
+  button._qualifyRating = qualify;
+  button.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const session = window.sessionModule;
+    const sid = session?.getCurrentSessionId();
+    const navigation = session?.getSessionNavigationToken();
+    const id = message.dataset.dbId;
+    const scope = window.chatModule?.ratingAccountScope?.();
+    if (!sid || !session || !scope?.owner || scope.sid !== sid || document.body.dataset.accountId !== scope.owner || typeof session.getSessionNavigationToken !== 'function') return;
+    const current = () => message.isConnected && message.dataset.dbId === id &&
+      session.getCurrentSessionId() === sid && session.getSessionNavigationToken() === navigation &&
+      document.body.dataset.accountId === scope.owner && (() => { const now = window.chatModule?.ratingAccountScope?.(); return now?.sid === sid && now.owner === scope.owner && now.authEpoch === scope.authEpoch; })();
+    const existing = message.querySelector('.message-rating-editor');
+    if (existing) { existing.remove(); return; }
+    const panel = document.createElement('div'); panel.className = 'message-rating-editor';
+    panel.setAttribute('role', 'group'); panel.setAttribute('aria-label', 'Message rating');
+    const status = document.createElement('p'); status.setAttribute('role', 'status'); status.textContent = 'Loading rating…';
+    panel.appendChild(status); message.appendChild(panel);
+    const url = `/api/session/${encodeURIComponent(sid)}/message-rating/${encodeURIComponent(id)}`;
+    let view=null;
+    if (id) { try { const response = await fetch(url); if (response.ok) view = await response.json(); } catch {} }
+    if (!current() || !panel.isConnected) return;
+    status.textContent = !view ? 'Host message rating unavailable; choose native text if available.' : view.state === 'stale' ? 'This rating refers to an earlier message revision.' :
+      view.state === 'rated' ? `Current rating: ${view.value / 2} stars.` : 'Unrated.';
+    if (view?.source?.role === 'user' && view.source.source_revision === 1) {
+      const group=document.createElement('details'), heading=document.createElement('summary'); heading.textContent='Recall feedback'; group.append(heading);
+      const notice=document.createElement('p'); notice.setAttribute('role','status'); notice.textContent='Load the memories that reached this turn to inspect or rate them.';
+      const load=document.createElement('button'); load.type='button'; load.textContent='Show memories sent to this turn';
+      const choice=document.createElement('select'); choice.setAttribute('aria-label','Admitted memory'); choice.disabled=true;
+      const polarity=document.createElement('select'); polarity.setAttribute('aria-label','Recall outcome');
+      for (const [value,label] of [['','Choose an outcome'],['positive','Helped'],['negative','Did not help']]) {const option=document.createElement('option');option.value=value;option.textContent=label;polarity.append(option)}
+      const submit=document.createElement('button'); submit.type='button'; submit.textContent='Submit feedback'; submit.disabled=true;
+      const reconcile=document.createElement('button'); reconcile.type='button'; reconcile.textContent='Check submission'; reconcile.hidden=true;
+      const pendingKey=JSON.stringify([scope.owner,scope.authEpoch,sid,id]);
+      let pending=pendingRecallFeedback.get(pendingKey) || null, generation=0, writeAllowed=false;
+      const base=`${url}/recall-feedback`;
+      const source={expected_source_revision:view.source.source_revision,expected_source_hash:view.source.source_hash};
+      load.addEventListener('click',async()=>{
+        if (!current() || pending) return; const ticket=++generation; load.disabled=true;
+        try {const response=await fetch(`${base}/preview`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(source)});
+          if (!response.ok) throw new Error(); const data=await response.json();
+          if (!current() || !panel.isConnected || ticket!==generation) return;
+          writeAllowed=data.write_allowed===true;choice.replaceChildren(); const empty=document.createElement('option');empty.value='';empty.textContent='Choose a memory';choice.append(empty);
+          const admissionLabels = { tool_admitted: 'delivered by recall tool', context_admitted: 'delivered in turn context' };
+          for (const item of data.items || []) {const option=document.createElement('option');option.value=item.selector;option.textContent = [item.display, admissionLabels[item.admission], Number.isSafeInteger(item.memory?.revision) ? `revision ${item.memory.revision}` : ''].filter(Boolean).join(' · ');option.dataset.positiveKey=item.keys?.positive || '';option.dataset.negativeKey=item.keys?.negative || '';option.dataset.positiveRecorded=String(item.recorded?.positive===true);option.dataset.negativeRecorded=String(item.recorded?.negative===true);choice.append(option)}
+          choice.disabled=choice.options.length<2; notice.textContent=!writeAllowed ? 'Recall feedback is read-only under current memory policy.' : data.partial ? 'Some memories are unavailable; the listed revisions can be selected.' : choice.disabled ? 'No admitted memories are available.' : 'Select the exact memory revision.';
+        } catch {if(current() && panel.isConnected) notice.textContent='Admitted memories are unavailable.'} finally {if(current() && panel.isConnected) load.disabled=!!pending}
+      });
+      const refresh=()=>{const recorded=choice.selectedOptions[0]?.dataset?.[`${polarity.value}Recorded`]==='true';submit.disabled=!!pending || !writeAllowed || !choice.value || !polarity.value || recorded;if(recorded)notice.textContent='This assessment is already recorded.'}; choice.addEventListener('change',refresh); polarity.addEventListener('change',refresh);
+      const send=async(check)=>{if (!pending || !current()) return; submit.disabled=true; reconcile.disabled=true;
+        try {const response=await fetch(`${base}/${check?'reconcile':'commit'}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(pending)});if(!response.ok) throw new Error();
+          const result=await response.json();if(!current() || !panel.isConnected)return;
+          if(result.state==='applied' || result.state==='replayed'){notice.textContent='Recall feedback recorded.';pending=null;pendingRecallFeedback.delete(pendingKey);reconcile.hidden=true;load.disabled=false;choice.disabled=false;polarity.disabled=false;refresh()}
+          else {notice.textContent='Submission outcome is unknown; check it without resubmitting.';reconcile.hidden=false}
+        } catch {if(current() && panel.isConnected){notice.textContent='Submission outcome is unknown; check it without resubmitting.';reconcile.hidden=false}} finally {if(current() && panel.isConnected)reconcile.disabled=false}
+      };
+      submit.addEventListener('click',()=>{if(!choice.value || !polarity.value || pending)return;const key=choice.selectedOptions[0]?.dataset?.[`${polarity.value}Key`];if(!key)return;pending={...source,selector:choice.value,polarity:polarity.value,request_key:key};pendingRecallFeedback.set(pendingKey,pending);load.disabled=true;choice.disabled=true;polarity.disabled=true;void send(false)});
+      reconcile.addEventListener('click',()=>void send(true));group.append(notice,load,choice,polarity,submit,reconcile);panel.append(group);
+      if(pending){group.open=true;notice.textContent='Submission outcome is unknown; check it without resubmitting.';load.disabled=true;choice.disabled=true;polarity.disabled=true;reconcile.hidden=false}
+    }
+    const target = document.createElement('select'); target.setAttribute('aria-label', 'Rating target');
+    for (const [v,t] of [['message','This message'],['chat','Chat text saved by Open Clank'],['complete_chat','Complete supported chat text'],['section','Select raw chat text'],['native_chat','Native session text'],['native_message','Native text part'],['native_section','Select raw native text'],['paired_section','Witnessed turn from this input']]) { const option=document.createElement('option'); option.value=v; option.textContent=t; if ((v==='message' && !view) || (v==='paired_section' && view?.source?.role!=='user')) option.disabled=true; target.appendChild(option); }
+    panel.appendChild(target);
+    const targetInfo=document.createElement('div'); panel.appendChild(targetInfo);
+    if (!view) target.value='native_chat';
+    let segments=null, targetView=null, selectedPart=null, selectionVersion=0, segmentVersion=0, activeDraftKey=view ? 'message' : null;
+    const drafts=new Map();
+    const rememberDraft=() => { if (activeDraftKey) drafts.set(activeDraftKey,{score:score.value,note:note.value}); };
+    const loadDraft=(key, source) => {
+      activeDraftKey=key;
+      const draft=drafts.get(key);
+      setRatingChoice(draft?.score ?? (source?.state==='rated' ? String(source.value) : ''));
+      note.value=draft?.note ?? source?.note ?? '';
+    };
+    const targetUrl=`/api/session/${encodeURIComponent(sid)}/rating-target`;
+    const nativeUrl=`/api/session/${encodeURIComponent(sid)}/native-rating`;
+    const pairedUrl=`/api/session/${encodeURIComponent(sid)}/paired-rating`;
+    const completeUrl=`/api/session/${encodeURIComponent(sid)}/complete-text-rating`;
+    const completePreview=async()=>{const response=await fetch(completeUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payload:null})});if(!response.ok)throw new Error();const result=await response.json();if(!['rated','unrated','stale'].includes(result?.state)||typeof result.descriptor_hash!=='string'||!Number.isSafeInteger(result.rating_revision)||result.rating_revision<0)throw new Error();return result;};
+    const pairedPreview=async values=>{const response=await fetch(pairedUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message_id:id,segments:values,payload:null})});if(!response.ok)throw new Error();return await response.json();};
+    const nativePreview=async (kind, values, part) => { const response=await fetch(nativeUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,segments:values,part_id:part,payload:null})}); if (!response.ok) throw new Error(); return await response.json(); };
+    const preview=async (kind, values) => {
+      const response=await fetch(targetUrl+'/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,segments:values})});
+      if (!response.ok) throw new Error(); return await response.json();
+    };
+    target.onchange=async () => {
+      rememberDraft(); activeDraftKey=null; score.value=''; note.value='';
+      const generation=++selectionVersion; targetInfo.replaceChildren(); targetView=null; segments=null; selectedPart=null; save.disabled=true;
+      if (target.value==='message') {loadDraft('message',view); save.disabled=false; status.textContent='This committed message.'; return;}
+      status.textContent='Loading saved chat text…';
+      try {
+        if (target.value==='complete_chat') {
+          const result=await completePreview();if(!current() || !panel.isConnected || generation!==selectionVersion)return;
+          targetView=result;loadDraft('complete_chat',result);save.disabled=false;status.textContent=result.scope_label || 'Complete supported committed text; currentness is an optimistic observation.';return;
+        }
+        if (target.value==='paired_section') {
+          const pair=await pairedPreview(null);if(!current() || !panel.isConnected || generation!==selectionVersion)return;
+          if(pair.state!=='ready' || !pair.choices)throw new Error();
+          status.textContent=pair.scope_label;segments=[];
+          for(const side of ['input','output']) {
+            const chooser=document.createElement('select');chooser.setAttribute('aria-label',`${side} representation`);
+            for(const source of ['host','native']){const option=document.createElement('option');option.value=source;option.textContent=`${side}: ${source}`;chooser.appendChild(option)}
+            const field=document.createElement('textarea');field.readOnly=true;field.setAttribute('aria-label',`${side} raw text`);field.value=pair.choices[side].host;
+            chooser.onchange=()=>{field.value=pair.choices[side][chooser.value];segments=[];segmentVersion++;targetView=null;save.disabled=true;status.textContent='Representation changed; select again.'};
+            const add=document.createElement('button');add.type='button';add.textContent=`Select or update ${side}`;
+            add.onclick=()=>{const source=pair.choices[side][chooser.value],boundaries=[0];let shown='';
+              for(let i=0;i<source.length;){if(source[i]==='\r'){i+=source[i+1]==='\n'?2:1;shown+='\n'}else{shown+=source[i];i++}boundaries.push(i)}
+              const start=boundaries[field.selectionStart],end=boundaries[field.selectionEnd],split=i=>i>0 && i<source.length && /[\uD800-\uDBFF]/.test(source[i-1]) && /[\uDC00-\uDFFF]/.test(source[i]);
+              if(field.value!==shown || start===undefined || end===undefined || end<=start || split(start) || split(end)){status.textContent='Select a nonempty complete text range.';return}
+              const encoder=new TextEncoder();segments=segments.filter(item=>item.side!==side);segments.push({side,source:chooser.value,start:encoder.encode(source.slice(0,start)).length,end:encoder.encode(source.slice(0,end)).length});segments.sort((a,b)=>a.side==='input' ? -1 : b.side==='input' ? 1 : 0);segmentVersion++;targetView=null;save.disabled=true;status.textContent=`${segments.length} selection(s); validate before saving.`;
+            };
+            targetInfo.append(chooser,field,add);
+          }
+          const validate=document.createElement('button');validate.type='button';validate.textContent='Validate selection';targetInfo.append(validate);
+          validate.onclick=async()=>{const version=segmentVersion,selectedSegments=structuredClone(segments);try{const checked=await pairedPreview(selectedSegments);if(!current() || !panel.isConnected || generation!==selectionVersion || version!==segmentVersion)return;targetView=checked;loadDraft(`paired:${checked.descriptor_hash}`,checked);save.disabled=false;status.textContent=checked.scope_label}catch{if(current())status.textContent='Selection unavailable or not consecutive; reselect.'}};
+          return;
+        }
+        const native=target.value.startsWith('native_');
+        const result=native ? await nativePreview('chat',null,null) : await preview('chat',null); if (!current() || !panel.isConnected || generation!==selectionVersion) return;
+        status.textContent=result.scope_label;
+        if (result.native_history?.length) {
+          const prior=document.createElement('details'), title=document.createElement('summary'); title.textContent='Earlier native ratings'; prior.appendChild(title);
+          for (const item of result.native_history) {const line=document.createElement('p'); line.textContent=`${item.kind} — ${item.state}: ${item.value === null ? 'unrated' : `${item.value / 2} stars`}${item.note ? ` — ${item.note}` : ''}`; prior.appendChild(line);}
+          targetInfo.appendChild(prior);
+        }
+        if (result.section_history?.length) {
+          const prior=document.createElement('details'); const title=document.createElement('summary'); title.textContent='Earlier text selections'; prior.appendChild(title);
+          for (const item of result.section_history) { const line=document.createElement('p'); line.textContent=`${item.state}: ${item.value === null ? 'unrated' : `${item.value / 2} stars`}${item.note ? ` — ${item.note}` : ''}`; prior.appendChild(line); }
+          targetInfo.appendChild(prior);
+        }
+        if (target.value==='chat' || target.value==='native_chat') {targetView=result; loadDraft(target.value,result); save.disabled=false; return;}
+        if (target.value==='native_message') {
+          const chooser=document.createElement('select'); chooser.setAttribute('aria-label','Native text part'); targetInfo.appendChild(chooser);
+          const blank=document.createElement('option'); blank.value=''; blank.textContent='Choose a native text part'; chooser.appendChild(blank);
+          for (const item of result.raw_messages) {const option=document.createElement('option'); option.value=item.part_id; option.textContent=`${item.role}: ${item.text.slice(0,80)}`; chooser.appendChild(option);}
+          chooser.onchange=async () => { const part=chooser.value; selectedPart=part; targetView=null; save.disabled=true; score.value=''; note.value=''; if (!part) return; try {const checked=await nativePreview('message',null,part); if (!current() || !panel.isConnected || generation!==selectionVersion || selectedPart!==part) return; targetView=checked; loadDraft(`native:${part}`,checked); save.disabled=false; status.textContent=checked.scope_label;} catch {if (current()) status.textContent='Native text part unavailable.';} };
+          return;
+        }
+        segments=[];
+        const instructions=document.createElement('p'); instructions.textContent='Select raw text in each consecutive message, then add each selection in order. Source line endings are preserved. Separately managed history is excluded.'; targetInfo.appendChild(instructions);
+        for (const item of result.raw_messages) {
+          const field=document.createElement('textarea'); field.readOnly=true; field.value=item.text; field.setAttribute('aria-label',`${item.role} raw canonical text`); targetInfo.appendChild(field);
+          const add=document.createElement('button'); add.type='button'; add.textContent='Add selected text'; targetInfo.appendChild(add);
+          add.onclick=() => {
+            // Textareas present CR/CRLF as LF. Map each displayed UTF-16
+            // boundary back to the untouched canonical source before encoding.
+            const source=item.text, boundaries=[0]; let shown='';
+            for (let i=0;i<source.length;) {
+              if (source[i]==='\r') { i += source[i+1]==='\n' ? 2 : 1; shown+='\n'; }
+              else { shown+=source[i]; i++; }
+              boundaries.push(i);
+            }
+            const start=field.selectionStart,end=field.selectionEnd;
+            const rawStart=boundaries[start],rawEnd=boundaries[end];
+            const split=i => i>0 && i<source.length && /[\uD800-\uDBFF]/.test(source[i-1]) && /[\uDC00-\uDFFF]/.test(source[i]);
+            if (field.value!==shown || end<=start || rawStart===undefined || rawEnd===undefined || split(rawStart) || split(rawEnd)) { status.textContent='Select a nonempty complete text range.'; return; }
+            rememberDraft(); activeDraftKey=null; score.value=''; note.value=''; segmentVersion++;
+            const encoder=new TextEncoder(); segments.push(native ? {partID:item.part_id,start:encoder.encode(source.slice(0,rawStart)).length,end:encoder.encode(source.slice(0,rawEnd)).length} : {message_id:item.message_id,start:encoder.encode(source.slice(0,rawStart)).length,end:encoder.encode(source.slice(0,rawEnd)).length});
+            targetView=null; save.disabled=true; status.textContent=`${segments.length} selection(s); validate before saving.`;
+          };
+        }
+        const validate=document.createElement('button'); validate.type='button'; validate.textContent='Validate selection'; targetInfo.appendChild(validate);
+        validate.onclick=async () => {const version=segmentVersion, selectedSegments=structuredClone(segments); try {const checked=native ? await nativePreview('section',selectedSegments,null) : await preview('section',selectedSegments); if (!current() || !panel.isConnected || generation!==selectionVersion || version!==segmentVersion) return; targetView=checked; loadDraft(`section:${checked.descriptor_hash}`,checked); save.disabled=false; status.textContent=checked.scope_label;} catch {if (current() && generation===selectionVersion && version===segmentVersion) status.textContent='Selection unavailable or not consecutive; close and reselect.';}};
+      } catch {if (current() && generation===selectionVersion) status.textContent=target.value==='complete_chat' ? 'Complete supported chat text is unavailable; no complete rating can be made.' : 'Saved chat text is unavailable for rating.';}
+    };
+    const label = document.createElement('label'); label.textContent = 'Rating (1 to 5 stars, in half-star steps) ';
+    const score = document.createElement('select'); score.setAttribute('aria-label', 'Rating');
+    const blank = document.createElement('option'); blank.value = ''; blank.textContent = 'Choose a rating'; score.appendChild(blank);
+    for (let value = 2; value <= 10; value++) {
+      const option=document.createElement('option');
+      option.value=String(value); option.textContent=value === 2 ? '1 star' : `${value / 2} stars`;
+      score.appendChild(option);
+    }
+    const clear=document.createElement('option'); clear.value='clear'; clear.textContent='Clear rating'; score.appendChild(clear);
+    let earlierScore=null;
+    function setRatingChoice(value) {
+      earlierScore?.remove(); earlierScore=null;
+      if (value === '0' || value === '1') {
+        earlierScore=document.createElement('option');
+        earlierScore.value=value; earlierScore.textContent=`Previously rated ${Number(value) / 2} stars`; earlierScore.disabled=true;
+        score.insertBefore(earlierScore,blank.nextSibling);
+      }
+      score.value=value;
+    }
+    if (view?.state === 'rated') setRatingChoice(String(view.value));
+    label.appendChild(score); panel.appendChild(label);
+    const noteLabel = document.createElement('label'); noteLabel.textContent = 'Why? (optional) ';
+    const note = document.createElement('textarea'); note.maxLength = 4096; note.value = view?.note || '';
+    noteLabel.appendChild(note); panel.appendChild(noteLabel);
+    const save = document.createElement('button'); save.type = 'button'; save.textContent = 'Save rating'; panel.appendChild(save);
+    const reconcilePair=document.createElement('button');reconcilePair.type='button';reconcilePair.textContent='Check paired rating';reconcilePair.hidden=true;panel.appendChild(reconcilePair);
+    const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.onclick = () => panel.remove(); panel.appendChild(close);
+    let previousPayload = null, requestKey = null, pendingPaired=null;
+    reconcilePair.onclick=async()=>{
+      if(!pendingPaired || !current() || !panel.isConnected)return;
+      reconcilePair.disabled=true;
+      try {const response=await fetch(pairedUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...pendingPaired,mode:'reconcile'})});
+        if(!response.ok)throw new Error();const result=await response.json();if(!current() || !panel.isConnected)return;
+        status.textContent=result.state==='recorded' ? `Rating recorded; current source state is ${result.current_state || 'unknown'}.` : 'Rating outcome remains unknown.';
+      } catch {if(current() && panel.isConnected)status.textContent='Rating outcome remains unknown.'}
+      finally {if(panel.isConnected)reconcilePair.disabled=false;}
+    };
+    if (!view) target.onchange();
+    save.addEventListener('click', async () => {
+      if (!current() || !panel.isConnected) return;
+      const frozenTarget=target.value, frozenVersion=selectionVersion;
+      const choice=score.value, value=choice === 'clear' ? null : Number(choice);
+      const selected=frozenTarget==='message' ? view : targetView;
+      if (!selected) return;
+      if (value !== null && (!Number.isInteger(value) || value < 2 || value > 10)) {
+        status.textContent='Choose 1 to 5 stars or Clear rating.';
+        return;
+      }
+      const reason=value === null ? null : note.value || null;
+      const mutation={expected_descriptor_hash:selected.descriptor_hash,expected_rating_revision:selected.rating_revision,action:value === null ? 'clear':'set',value,note:reason};
+      const native=frozenTarget.startsWith('native_');
+      const paired=frozenTarget==='paired_section';
+      const complete=frozenTarget==='complete_chat';
+      const payload = frozenTarget==='message' ? {expected_source_revision: view.source.source_revision, expected_source_hash: view.source.source_hash,
+        expected_rating_revision: view.rating_revision, action: value === null ? 'clear' : 'set', value, note:reason} :
+        complete ? {payload:mutation} : paired ? {message_id:id,segments:structuredClone(segments),payload:mutation} : native ? {kind:frozenTarget.slice(7),segments:frozenTarget==='native_section' ? structuredClone(segments) : null,part_id:frozenTarget==='native_message' ? selectedPart : null,payload:mutation} :
+        {kind:frozenTarget,segments:frozenTarget==='chat' ? null : structuredClone(segments),...mutation};
+      const signature = JSON.stringify(payload);
+      if (signature !== previousPayload) { previousPayload = signature; requestKey = crypto.randomUUID(); }
+      if(paired && pendingPaired)return;
+      if(paired)pendingPaired={...payload,payload:{...payload.payload,request_key:requestKey}};
+      save.disabled=true; target.disabled=true; score.disabled=true; note.disabled=true; targetInfo.inert=true; close.disabled=true; status.textContent = 'Saving…';
+      try {
+        const response = await fetch(frozenTarget==='message' ? url : complete ? completeUrl : paired ? pairedUrl : native ? nativeUrl : targetUrl, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(native || paired || complete ? {...payload,payload:{...payload.payload,request_key:requestKey}} : {...payload,request_key:requestKey})});
+        if (!current() || !panel.isConnected || target.value!==frozenTarget || selectionVersion!==frozenVersion) return;
+        if (response.status === 409) { if(paired)reconcilePair.hidden=false;status.textContent = paired ? 'Source or rating changed; check the original receipt.' : 'Message or rating changed. Your input is preserved; close and reopen to review the current revision.'; return; }
+        if (!response.ok) throw new Error();
+        const result = await response.json(); if (!current() || !panel.isConnected || target.value!==frozenTarget || selectionVersion!==frozenVersion) return;
+        if(paired && (!['applied','replayed'].includes(result?.state) || !Number.isSafeInteger(result.rating_revision) || !['current','stale','unknown','superseded'].includes(result.current_state)))throw new Error();
+        if(complete && (!['applied','replayed'].includes(result?.state) || !Number.isSafeInteger(result.rating_revision) || !['current','stale','unknown'].includes(result.current_state)))throw new Error();
+        if ((result.state === 'replayed' && result.current_state !== 'current') || ((paired || complete) && result.current_state && result.current_state!=='current')) { if(paired)reconcilePair.hidden=false;status.textContent = 'The save was recorded, but current source status is stale or unknown. Your input is preserved; check the original receipt.'; return; }
+        selected.rating_revision = result.rating_revision; selected.state = value === null ? 'unrated' : 'rated'; selected.value = value; selected.note=reason;
+        setRatingChoice(value === null ? '' : String(value));
+        if (value === null) note.value='';
+        previousPayload = null; requestKey = null;pendingPaired=null; status.textContent = value === null ? 'Rating cleared.' : `Saved ${value / 2} stars.`;
+      } catch { if (current() && panel.isConnected) {if(paired)reconcilePair.hidden=false;status.textContent = paired ? 'Outcome unknown; check the original receipt without resending.' : 'Could not save. Your input is preserved; retry to check the same request.';} }
+      finally { if (panel.isConnected) { target.disabled=!!pendingPaired; score.disabled=!!pendingPaired; note.disabled=!!pendingPaired; targetInfo.inert=!!pendingPaired; close.disabled=false; save.disabled=!!pendingPaired || target.value!==frozenTarget || selectionVersion!==frozenVersion; } }
+    });
+  });
+  actions.appendChild(button);
+}
+
 export function createMsgFooter(msgElement) {
   const footer = document.createElement('div');
   footer.className = 'msg-footer';
 
   const actions = document.createElement('span');
   actions.className = 'msg-actions';
+  appendRatingAction(actions, msgElement);
 
   // Define all available actions: { id, icon, title, className, handler }
   const allActions = [
@@ -1708,7 +2121,7 @@ export function createMsgFooter(msgElement) {
 /**
  * Create a footer row for a user message with action buttons (same system as AI footer).
  */
-const _USER_ACTION_RECENTS_KEY = 'odysseus-user-actions-recent';
+const _USER_ACTION_RECENTS_KEY = 'openclank-user-actions-recent';
 
 function _getUserRecentActions() {
   try { return JSON.parse(localStorage.getItem(_USER_ACTION_RECENTS_KEY) || '[]'); } catch { return []; }
@@ -1726,6 +2139,7 @@ export function createUserMsgFooter(msgElement) {
 
   const actions = document.createElement('span');
   actions.className = 'msg-actions';
+  appendRatingAction(actions, msgElement);
 
   const allActions = [
     { id: 'edit', icon: '\u270E', title: 'Edit message', cls: 'msg-action-btn', handler(e) {
@@ -1746,6 +2160,10 @@ export function createUserMsgFooter(msgElement) {
     { id: 'resend', icon: '\u21BB', title: 'Resend message', cls: 'msg-action-btn', handler(e) {
       e.stopPropagation();
       if (window.chatModule?.resendUserMessage) window.chatModule.resendUserMessage(msgElement);
+    }},
+    { id: 'fork', icon: '\u2ADD', title: 'Fork before this message', cls: 'msg-action-btn', handler(e) {
+      e.stopPropagation();
+      if (window.chatModule?.forkFrom) window.chatModule.forkFrom(msgElement);
     }},
   ];
 
@@ -2126,12 +2544,26 @@ function _renderMimoQuestionCard(aq, renderOptions) {
   const chatBox = document.getElementById('chat-history');
   const questions = Array.isArray(aq.questions) ? aq.questions : [];
   if (!chatBox || !aq.request_id || !aq.session_id || !questions.length) return null;
-  removeAskUserCards(chatBox);
+  if (aq.blocking === false) {
+    chatBox.querySelectorAll('.mimo-question-card').forEach(card => {
+      if (card.dataset.requestId === aq.native_request_id) card.remove();
+    });
+  } else {
+    chatBox.querySelectorAll('.mimo-question-card').forEach(card => {
+      if (card.dataset.blocking !== 'false') card.remove();
+    });
+  }
 
   const card = document.createElement('form');
   card.className = 'ask-user-card mimo-question-card';
-  card.dataset.requestId = aq.request_id;
+  card.dataset.requestId = aq.native_request_id || aq.request_id;
+  card.dataset.hostRequestId = aq.request_id;
   card.dataset.sessionId = aq.session_id;
+  if (typeof aq.actor_session_id === 'string' && typeof aq.actor_id === 'string' && typeof aq.question_ref === 'string' && Number.isSafeInteger(aq.question_revision)) {
+    card.dataset.actorSessionId = aq.actor_session_id; card.dataset.actorId = aq.actor_id;
+    card.dataset.questionRef = aq.question_ref; card.dataset.questionRevision = String(aq.question_revision);
+  }
+  card.dataset.blocking = aq.blocking === false ? 'false' : 'true';
   card.dataset.interactive = renderOptions.interactive === false ? 'false' : 'true';
   let sending = false;
   card.setAttribute('aria-label', 'Open Clank agent question');
@@ -2141,10 +2573,33 @@ function _renderMimoQuestionCard(aq, renderOptions) {
   status.setAttribute('aria-live', 'polite');
 
   const send = async (payload) => {
-    const response = await fetch(
-      `${window.API_BASE || ''}/api/session/${encodeURIComponent(aq.session_id)}/question`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request_id: aq.request_id, ...payload }) },
-    );
+    if (aq.blocking === false) {
+      const submitAnswer = window.chatModule?.submitOptionalQuestionAnswer;
+      if (typeof submitAnswer !== 'function') throw new Error('Question delivery is not available yet. Your answer was not sent.');
+      const result = await submitAnswer(aq, payload.answers || [], payload.rejected ? 'dismissed' : 'answered', payload.retry === true);
+      const delivery = result?.deliveryState || result?.delivery || '';
+      const state = delivery === 'unavailable' ? 'unavailable' : result?.receipt?.state || delivery || 'pending';
+      if (state === 'consumed') {
+        card.remove();
+        document.dispatchEvent(new CustomEvent('odysseus:interactive-resolved', {
+          detail: { sessionId: aq.session_id, kind: 'question', requestId: aq.native_request_id },
+        }));
+      } else {
+        status.textContent = state === 'unavailable'
+          ? 'Answer saved; delivery is unavailable. Retry the saved answer later.'
+          : 'Answer saved; waiting for the actor to reach a safe delivery point.';
+        submit.disabled = true;
+        close.disabled = true;
+        if (aq.saved_answer) retrySaved.hidden = false;
+      }
+      return result;
+    }
+    const response = renderOptions.submitTaskWait
+      ? await renderOptions.submitTaskWait(payload)
+      : await fetch(
+          `${window.API_BASE || ''}/api/session/${encodeURIComponent(aq.session_id)}/question`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request_id: aq.request_id, ...payload }) },
+        );
     let data = {};
     try { data = await response.json(); } catch (_) {}
     if (!response.ok) {
@@ -2172,8 +2627,15 @@ function _renderMimoQuestionCard(aq, renderOptions) {
   close.addEventListener('click', async () => {
     if (sending || renderOptions.interactive === false) return;
     sending = true; close.disabled = true; submit.disabled = true;
-    try { await send({ rejected: true }); }
-    catch (error) { status.textContent = error.message; close.disabled = false; submit.disabled = false; }
+    try {
+      if (aq.blocking === false) aq.saved_answer = { disposition: 'dismissed', answers: [] };
+      await send({ rejected: true });
+    }
+    catch (error) {
+      status.textContent = error.message;
+      if (aq.blocking === false) { close.disabled = true; submit.disabled = true; retrySaved.hidden = false; }
+      else { close.disabled = false; submit.disabled = false; }
+    }
     finally { sending = false; }
   });
   card.appendChild(close);
@@ -2195,6 +2657,8 @@ function _renderMimoQuestionCard(aq, renderOptions) {
       input.value = String(option.label || option);
       input.dataset.questionIndex = String(questionIndex);
       input.dataset.optionIndex = String(optionIndex);
+      const savedValues = aq.saved_answer?.answers?.[questionIndex] || [];
+      if (savedValues.includes(input.value)) input.checked = true;
       if (!question.multiple) input.addEventListener('change', () => {
         if (input.checked) {
           const custom = group.querySelector('[data-custom-question-index]');
@@ -2220,6 +2684,10 @@ function _renderMimoQuestionCard(aq, renderOptions) {
       custom.className = 'styled-prompt-input ask-user-other-input';
       custom.placeholder = 'Custom answer…';
       custom.dataset.customQuestionIndex = String(questionIndex);
+      const savedValues = aq.saved_answer?.answers?.[questionIndex] || [];
+      const optionLabels = options.map(option => String(option.label || option));
+      const savedCustom = savedValues.filter(value => !optionLabels.includes(value));
+      if (savedCustom.length) custom.value = savedCustom.join(', ');
       if (!question.multiple) custom.addEventListener('input', () => {
         if (custom.value.trim()) group.querySelectorAll('input[type=radio]').forEach(input => { input.checked = false; });
       });
@@ -2233,7 +2701,21 @@ function _renderMimoQuestionCard(aq, renderOptions) {
   submit.className = 'confirm-btn confirm-btn-primary';
   submit.textContent = 'Answer';
   card.appendChild(submit);
+  const retrySaved = document.createElement('button');
+  retrySaved.type = 'button';
+  retrySaved.className = 'confirm-btn';
+  retrySaved.textContent = 'Retry saved answer';
+  retrySaved.hidden = true;
+  card.appendChild(retrySaved);
   card.appendChild(status);
+  retrySaved.addEventListener('click', async () => {
+    if (sending || !aq.saved_answer) return;
+    sending = true; retrySaved.disabled = true;
+    status.textContent = 'Checking saved answer delivery…';
+    try { await send({ answers: aq.saved_answer.answers || [], rejected: aq.saved_answer.disposition === 'dismissed', retry: true }); }
+    catch (error) { status.textContent = `Saved answer is still unresolved: ${error.message}`; retrySaved.disabled = false; }
+    finally { sending = false; }
+  });
   card.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (sending || renderOptions.interactive === false) return;
@@ -2251,8 +2733,17 @@ function _renderMimoQuestionCard(aq, renderOptions) {
     }
     sending = true; submit.disabled = true; close.disabled = true;
     status.textContent = 'Sending…';
-    try { await send({ answers }); }
-    catch (error) { status.textContent = error.message; submit.disabled = false; close.disabled = false; }
+    try {
+      aq.saved_answer = { disposition: 'answered', answers };
+      await send({ answers });
+    }
+    catch (error) {
+      status.textContent = error.message;
+      if (aq.blocking === false) {
+        card.querySelectorAll('input').forEach(input => { input.disabled = true; });
+        submit.disabled = true; close.disabled = true; retrySaved.hidden = false;
+      } else { submit.disabled = false; close.disabled = false; }
+    }
     finally { sending = false; }
   });
 
@@ -2260,6 +2751,22 @@ function _renderMimoQuestionCard(aq, renderOptions) {
     card.querySelectorAll('input,button').forEach(input => { input.disabled = true; });
     close.hidden = true; submit.hidden = true;
     status.textContent = 'Question from this chat’s history.';
+  } else if (aq.blocking === false && aq.answer_state === 'answer-queued') {
+    card.querySelectorAll('input').forEach(input => { input.disabled = true; });
+    close.hidden = true; submit.hidden = true;
+    status.textContent = 'Your answer is saved and waiting for the actor to reach a safe delivery point.';
+    if (aq.saved_answer) retrySaved.hidden = false;
+  } else if (aq.blocking === false && aq.answer_state === 'stale') {
+    card.querySelectorAll('input,button').forEach(input => { input.disabled = true; });
+    close.hidden = true; submit.hidden = true;
+    status.textContent = 'This question is stale and cannot accept an answer.';
+  } else if (aq.blocking === false && aq.local_delivery_state === 'unavailable') {
+    card.querySelectorAll('input').forEach(input => { input.disabled = true; });
+    close.hidden = true; submit.hidden = true;
+    status.textContent = 'The saved answer could not be delivered. Retry the same answer when the actor is available.';
+    if (aq.saved_answer) retrySaved.hidden = false;
+  } else if (aq.blocking === false && aq.local_delivery_state === 'unknown') {
+    status.textContent = 'A saved answer has an unknown delivery outcome. Retry the same answer to check it.';
   }
   chatBox.appendChild(card);
   if (renderOptions.scroll !== false) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -2400,40 +2907,199 @@ export function renderAskUserCard(payload, options) {
   return card;
 }
 
+/** Pure view model for the real-desktop control approval; null for every other permission type. */
+export function controlPermissionView(pq) {
+  const kind = /^lifetools_.+_(control|inspect)_desktop$/.exec(String(pq?.permission_type || ''));
+  if (!kind) return null;
+  const reading = kind[1] === 'inspect';
+  const summary = typeof pq.detail?.summary === 'string' && pq.detail.summary ? pq.detail.summary : null;
+  return {
+    title: reading ? 'Read an application window' : 'Desktop control',
+    summary: summary ?? 'Details unavailable',
+    caution: reading ? 'This reads what that window shows. Secret-looking values are hidden, but the filter is not a guarantee.' : 'This acts on your real desktop. Effects are not verified automatically.',
+    // No remembered-choice options, and no Allow when the exact action cannot be shown.
+    options: summary === null
+      ? [{ id: 'reject', label: 'Reject' }]
+      : [{ id: 'once', label: 'Allow once' }, { id: 'reject', label: 'Reject' }],
+  };
+}
+
+/** Pure: is anything of desktop control running that a person could stop? */
+export function controlStopVisible(status) {
+  return !!status && (status.session_active === true || status.accessibility_active === true || status.busy === true);
+}
+
+let controlStopCard = null;
+let controlStopTimer = null;
+let controlStopQuiet = 0;
+let controlStopLimit = 3;
+
+function controlStopChat() {
+  return window.sessionModule?.getCurrentSessionId?.() || '';
+}
+
+async function controlStopStatus(fetchFn, sessionId) {
+  if (!sessionId) return null;
+  const response = await fetchFn(`/api/desktop-control/status?include_recording=false&session_id=${encodeURIComponent(sessionId)}`, {
+    credentials: 'same-origin', cache: 'no-store',
+  });
+  return response.ok ? response.json() : null;
+}
+
+/**
+ * While a desktop-control session may exist, keep one real "Stop control" button at the end of the chat. It calls the Host
+ * stop route directly (no model, no approval), is visible only while a session is active, and removes itself afterwards.
+ * The watch is bounded: it ends after `quietPolls` consecutive polls (2 s apart) with nothing running. Starting it again while
+ * it runs resets the quiet count (and may lengthen the window, e.g. after an Allow, to cover the time until the helper is active).
+ */
+export function watchControlStop(fetchFn = (...a) => window.fetch(...a), quietPolls = 3) {
+  controlStopQuiet = 0;
+  controlStopLimit = Math.max(controlStopLimit, quietPolls);
+  if (controlStopTimer) return;
+  const hide = () => { if (controlStopCard) { controlStopCard.remove(); controlStopCard = null; } };
+  const updateDetail = status => {
+    const activity = Array.isArray(status.activity) ? status.activity : [];
+    const lines = activity.map(item => {
+      const display = item.target?.kind === 'shared_display'
+        ? `Shared display ${item.target.width} × ${item.target.height}`
+        : 'Target details unavailable';
+      const label = item.kind === 'a11y' ? 'Accessibility' : 'Desktop input';
+      const shortcut = item.takeoverShortcut ? ` · Takeover key ${item.takeoverShortcut}` : '';
+      const overlay = item.cursorOverlayAtBegin === true ? ' · Cursor overlay available at start' : '';
+      return `${label} · ${item.platform} · ${item.actorId} · ${display}${shortcut}${overlay}`;
+    });
+    if (status.pending_stop_reconciliation) lines.push('Waiting for helper stop reconciliation.');
+    lines.push('Stop ends desktop control on this host.');
+    controlStopCard._controlStatus.textContent = lines.join(' ');
+  };
+  const show = status => {
+    const chatBox = document.getElementById('chat-history');
+    if (!chatBox) return;
+    if (controlStopCard?.isConnected) { updateDetail(status); return; }
+    controlStopCard = document.createElement('div');
+    controlStopCard.className = 'ask-user-card control-stop-card';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ask-user-option';
+    const label = document.createElement('span');
+    label.className = 'ask-user-option-label';
+    label.textContent = 'Stop desktop control on this host';
+    button.appendChild(label);
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        const response = await fetchFn('/api/desktop-control/stop', { method: 'POST', credentials: 'same-origin' });
+        const result = response.ok ? await response.json() : null;
+        if (result?.taken_over !== true || result.takeoverScope !== 'host') throw new Error('Stop unavailable');
+        hide();
+      } catch (_) {
+        button.disabled = false;
+        if (button.isConnected) controlStopCard._controlStatus.textContent = 'Stop could not be confirmed. Check desktop control status.';
+      }
+    });
+    controlStopCard.appendChild(button);
+    const detail = document.createElement('div');
+    detail.className = 'control-stop-status';
+    controlStopCard._controlStatus = detail;
+    controlStopCard.appendChild(detail);
+    chatBox.appendChild(controlStopCard);
+    updateDetail(status);
+  };
+  const poll = async () => {
+    const sessionId = controlStopChat();
+    let status = null;
+    try { status = await controlStopStatus(fetchFn, sessionId); } catch (_) {}
+    if (sessionId !== controlStopChat()) return;
+    if (controlStopVisible(status)) { controlStopQuiet = 0; controlStopLimit = 3; show(status); return; }
+    hide();
+    if (++controlStopQuiet >= controlStopLimit) { clearInterval(controlStopTimer); controlStopTimer = null; controlStopLimit = 3; }
+  };
+  controlStopTimer = setInterval(poll, 2000);
+  void poll();
+}
+
+/** One status read at page load: a session that is already running gets its Stop button (and the bounded watch). */
+export async function checkControlStopOnLoad(fetchFn = (...a) => window.fetch(...a)) {
+  const sessionId = controlStopChat();
+  try {
+    const status = await controlStopStatus(fetchFn, sessionId);
+    if (sessionId === controlStopChat() && controlStopVisible(status)) watchControlStop(fetchFn);
+  } catch (_) {}
+}
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && typeof window.fetch === 'function') {
+  void checkControlStopOnLoad();
+  document.addEventListener('odysseus:session-selected', () => {
+    if (controlStopCard) { controlStopCard.remove(); controlStopCard = null; }
+    void checkControlStopOnLoad();
+  });
+}
+
 /**
  * Inline permission prompt (C1). The agent's turn is blocked server-side
  * until one of the three buttons answers the request — there is no timeout.
  * Chat/workspace/always choices persist a grant at the selected lifetime;
  * once is consumed only by this request.
  */
-export function renderPermissionCard(payload, sessionId) {
+export function renderPermissionCard(payload, sessionId, renderOptions = {}) {
   const pq = payload || {};
-  const chatBox = document.getElementById('chat-history');
+  // renderOptions.container lets the Clankshop show the same card; onceOrReject limits it to Allow once and Reject.
+  const chatBox = renderOptions.container || document.getElementById('chat-history');
   if (!chatBox || !pq.request_id) return null;
 
   const card = document.createElement('div');
   card.className = 'ask-user-card permission-card';
   card.setAttribute('role', 'group');
   card.dataset.requestId = pq.request_id;
+  card.dataset.sessionId = sessionId;
 
   const title = document.createElement('div');
   title.className = 'ask-user-question';
+  const control = pq.sudo_password ? null : controlPermissionView(pq);
+  if (control && typeof watchControlStop === 'function') watchControlStop();
   title.textContent = pq.sudo_password
     ? 'Approved command needs your sudo password'
-    : `Agent requests permission: ${pq.permission_type || 'unknown'}`;
+    : control ? control.title : `Agent requests permission: ${pq.permission_type || 'unknown'}`;
   card.appendChild(title);
 
-  const d = pq.detail || {};
-  const detailText = d.filepath
-    || (d.command
-      ? [d.command, d.workdir ? `Working directory: ${d.workdir}` : ''].filter(Boolean).join('\n')
-      : (Object.keys(d).length ? JSON.stringify(d) : ''));
+  const d = control ? {} : (pq.detail || {});
+  const exactDetails = exactOperationDetails(d);
+  const detailText = control ? control.summary : exactDetails.length ? exactDetails.join('\n') : (Object.keys(d).length ? JSON.stringify(d) : '');
   if (detailText) {
     const detail = document.createElement('div');
     detail.className = 'permission-detail';
     detail.style.cssText = 'font-size:12px;opacity:0.75;word-break:break-all;white-space:pre-wrap;margin:2px 0 8px;font-family:inherit;';
     detail.textContent = detailText;
     card.appendChild(detail);
+  }
+  if (control) {
+    const caution = document.createElement('div');
+    caution.style.cssText = 'font-size:12px;opacity:0.75;margin:0 0 8px;';
+    caution.textContent = control.caution;
+    card.appendChild(caution);
+  }
+
+  if (exactDetails.length && hasAdditionalOperationDetails(d)) {
+    const extra = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Additional request fields';
+    const description = document.createElement('p');
+    description.textContent = 'Additional fields are present; their effects are unknown.';
+    extra.append(summary, description); card.appendChild(extra);
+  }
+
+  let answered = false;
+  if (!pq.sudo_password && !control) {
+    const effects = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Effect details unavailable';
+    const explanation = document.createElement('p');
+    explanation.textContent = 'Effects and recovery coverage are unknown. Approval scope depends on the choice below.';
+    effects.append(summary, explanation); card.appendChild(effects);
+    void verifiedOperationExplanation(pq, sessionId).then(value => {
+      const getSession = window.sessionModule?.getCurrentSessionId;
+      if (!value || answered || !card.isConnected || typeof getSession !== 'function' || getSession() !== sessionId || card.dataset.requestId !== pq.request_id) return;
+      summary.textContent = value.intent === 'requested_file_edit' ? 'Requested effect: edit the file' : 'Effects not determined';
+    });
   }
 
   const list = document.createElement('div');
@@ -2449,19 +3115,32 @@ export function renderPermissionCard(payload, sessionId) {
   };
 
   const answer = async (optionId, label, secret) => {
+    answered = true;
+    // An Allow on a control/read card starts (or restarts) the Stop watch with a long quiet window: the helper needs a moment to report active.
+    if (control && optionId === 'once' && typeof watchControlStop === 'function') watchControlStop(undefined, 15);
     list.querySelectorAll('button').forEach((b) => { b.disabled = true; });
     const body = new FormData();
     body.append('request_id', pq.request_id);
     body.append('option_id', optionId);
     if (secret) body.append('secret', secret);
     try {
-      const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/permission`, {
-        method: 'POST', body, credentials: 'same-origin',
-      });
+      const res = renderOptions.submitTaskWait
+        ? await renderOptions.submitTaskWait({ option_id: optionId })
+        : await fetch(`/api/session/${encodeURIComponent(sessionId)}/permission`, {
+            method: 'POST', body, credentials: 'same-origin',
+          });
+      if (renderOptions.submitTaskWait && res.status === 503) {
+        let detail = {};
+        try { detail = await res.json(); } catch (_) {}
+        if (detail.detail === 'Answer accepted; task wait bookkeeping is unavailable') {
+          finish('Answer accepted; task wait bookkeeping is unavailable', true);
+          return;
+        }
+      }
       finish(label, res.ok);
       if (res.ok) {
         document.dispatchEvent(new CustomEvent('odysseus:interactive-resolved', {
-          detail: { sessionId, kind: 'permission' },
+          detail: { sessionId, kind: 'permission', requestId: pq.request_id },
         }));
       }
     } catch (e) {
@@ -2506,13 +3185,33 @@ export function renderPermissionCard(payload, sessionId) {
   const alwaysDesc = pq.always_pattern && pq.always_pattern !== '*'
     ? `${pq.always_pattern}/**`
     : `all “${pq.permission_type || 'unknown'}” requests`;
+  if (control) {
+    control.options.forEach((b) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'ask-user-option';
+      row.dataset.optionId = b.id;
+      const labelText = document.createElement('span');
+      labelText.className = 'ask-user-option-label';
+      labelText.textContent = b.label;
+      row.appendChild(labelText);
+      row.addEventListener('click', () => answer(b.id, b.label));
+      list.appendChild(row);
+    });
+    chatBox.appendChild(card);
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    // Reject takes focus so a stray Enter or Space can never allow.
+    try { list.querySelector('[data-option-id="reject"]').focus(); } catch (_) {}
+    return card;
+  }
+
   [
     { id: 'once', label: 'Allow once', desc: '' },
     { id: 'chat', label: 'Allow in this chat', desc: 'Until this chat is reset' },
     { id: 'workspace', label: 'Allow in this workspace', desc: 'Shared by chats using this workspace' },
     { id: 'always', label: 'Always allow', desc: alwaysDesc },
     { id: 'reject', label: 'Reject', desc: '' },
-  ].forEach((b) => {
+  ].filter((b) => !renderOptions.onceOrReject || b.id === 'once' || b.id === 'reject').forEach((b) => {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'ask-user-option';
@@ -2540,9 +3239,9 @@ export function renderActorAccounting(wrap, accounting) {
   wrap.querySelector(':scope > .actor-accounting')?.remove();
   const state = String(accounting.state || 'not_recorded');
   const total = Number.isInteger(accounting.total) ? accounting.total : null;
-  const label = total === null
-    ? `Sub-agents: ${state === 'unavailable' ? 'unavailable' : 'not recorded'}`
-    : `Sub-agents: ${total}`;
+  const label = state === 'partial'
+    ? (total ? `Observed workers: ${total} (partial)` : 'Worker accounting: partial coverage')
+    : (total === null ? `Sub-agents: ${state === 'unavailable' ? 'unavailable' : 'not recorded'}` : `Sub-agents: ${total}`);
   let node;
   if (total > 0) {
     node = document.createElement('details');
@@ -2555,14 +3254,24 @@ export function renderActorAccounting(wrap, accounting) {
     for (const actor of accounting.actors || []) {
       const item = document.createElement('li');
       item.dataset.actorId = actor.id || '';
+      if (actor.session_id) item.dataset.actorSessionId = actor.session_id;
       if (actor.parent_id) item.dataset.parentActorId = actor.parent_id;
+      if (actor.parent_session_id) item.dataset.parentActorSessionId = actor.parent_session_id;
+      const revision = Number.isSafeInteger(actor.execution_revision) && actor.execution_revision >= 0
+        ? `revision ${actor.execution_revision}` : '';
+      if (revision) item.dataset.executionRevision = String(actor.execution_revision);
+      const identity = actor.session_id ? `actor ${actor.id} · session ${actor.session_id}` : '';
+      const parent = actor.parent_id && actor.parent_session_id
+        ? `parent ${actor.parent_id} (session ${actor.parent_session_id})` : '';
       const requested = actor.requested_model ? `requested ${actor.requested_model}` : '';
       const effective = actor.effective_model && typeof actor.effective_model === 'object'
-        ? `used ${[actor.effective_model.provider_id, actor.effective_model.model_id].filter(Boolean).join('/')}`
+        ? `effective ${[actor.effective_model.provider_id, actor.effective_model.model_id].filter(Boolean).join('/')}`
         : '';
-      const modelInfo = [requested, effective].filter(Boolean).join('; ');
-      item.textContent = `${actor.description || actor.agent || actor.id || 'Sub-agent'} — ${actor.status || 'unknown'}${modelInfo ? ` · ${modelInfo}` : ''}`;
-      if (actor.parent_id) item.title = `Child of ${actor.parent_id}`;
+      item.textContent = [
+        actor.description || actor.agent || actor.id || 'Sub-agent', actor.status || 'unknown',
+        identity, revision, parent, requested, effective,
+      ].filter(Boolean).join(' · ');
+      if (actor.parent_id && !actor.session_id) item.title = `Child of ${actor.parent_id}`;
       list.appendChild(item);
     }
     node.appendChild(list);
@@ -2589,6 +3298,17 @@ export function addMessage(role, content, modelName, metadata) {
     // answered.  This also removes the live card as soon as a manual reply is
     // appended, even when the user did not click one of its buttons.
     if (role === 'user') removeAskUserCards(box);
+    if (role === 'user' && typeof metadata?.buddy_help === 'string' && metadata.buddy_help) {
+      const entry = document.createElement('div');
+      entry.className = 'chat-buddy-system';
+      const label = document.createElement('strong');
+      label.textContent = 'System prompt · Buddy';
+      const action = document.createElement('span');
+      action.textContent = 'Explain ' + metadata.buddy_help;
+      entry.append(label, action);
+      box.appendChild(entry);
+      return entry;
+    }
 
     var esc = uiModule.esc;
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
@@ -2672,6 +3392,7 @@ export function addMessage(role, content, modelName, metadata) {
             thinkingRendered = true;
           }
           body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(displayText)) + agentFindingsSuffix;
+          if (isLastTextRound) addBuddyHandbookLink(body, metadata?.buddy_help_link);
           wrap.appendChild(body);
           wrap.dataset.raw = txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
@@ -2705,6 +3426,7 @@ export function addMessage(role, content, modelName, metadata) {
             if (screenshotSrc) {
               outHtml += `<details class="agent-tool-output"><summary>Screenshot</summary><img src="${esc(screenshotSrc)}" style="max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)" /></details>`;
             }
+            outHtml += renderSkillUseReceipt(ev, esc);
             // File-write/edit diff (persisted in the tool event) \u2014 re-render it
             // so it survives reload, matching the live stream.
             let evDiffHtml = '';
@@ -2732,6 +3454,22 @@ export function addMessage(role, content, modelName, metadata) {
             // Hide the raw JSON command when a diff says it better (same as live).
             const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
             node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
+            const resultButton=mediaResultButton(ev.structured);
+            if(resultButton)node.querySelector('.agent-thread-content')?.appendChild(resultButton);
+            const capturedResource=capturedResourceButton(ev.structured);
+            if(capturedResource)node.querySelector('.agent-thread-content')?.appendChild(capturedResource);
+            const htmlPreview=createCapturedHtmlPreview(ev.structured);
+            if(htmlPreview)node.querySelector('.agent-thread-content')?.appendChild(htmlPreview);
+            const savedFile=resourceResultButton(ev.resourceResult);
+            if(savedFile)node.querySelector('.agent-thread-content')?.appendChild(savedFile);
+            const capturedButton=capturedChangeButton(ev.structured?.rawOutput?.metadata?.history?.managed_action_ref);
+            if(capturedButton)node.querySelector('.agent-thread-content')?.appendChild(capturedButton);
+            const turnButton=capturedTurnButton(ev.structured?.rawOutput?.metadata?.history?.managed_action_ref);
+            if(turnButton)node.querySelector('.agent-thread-content')?.appendChild(turnButton);
+            const skillSourceButton=currentSkillSourceButton(ev);
+            if(skillSourceButton)node.querySelector('.agent-thread-content')?.appendChild(skillSourceButton);
+            const searchHits = searchHitButtons(ev);
+            if (searchHits) node.querySelector('.agent-thread-content')?.appendChild(searchHits);
             // Click handling is delegated globally \u2014 see chat.js init.
             threadWrap.appendChild(node);
           }
@@ -2863,6 +3601,9 @@ export function addMessage(role, content, modelName, metadata) {
     }
 
 	    wrap.dataset.raw = text;
+	    if (role === 'user' && metadata?.model_request_options) {
+	      wrap.dataset.modelRequestOptions = JSON.stringify(metadata.model_request_options);
+	    }
 	    if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
     // Prepend sources box if saved in metadata
     var sourcesPrefix = '';
@@ -2928,6 +3669,7 @@ export function addMessage(role, content, modelName, metadata) {
       }
     }
 
+    if (role === 'assistant') addBuddyHandbookLink(b, metadata?.buddy_help_link);
     wrap.appendChild(r);
     wrap.appendChild(b);
 
@@ -3095,6 +3837,76 @@ export function addMessage(role, content, modelName, metadata) {
   }
 }
 
+export function renderInputReceipt(receipt, actions = {}) {
+  const box = document.getElementById('chat-history');
+  if (!box || !receipt || typeof receipt.requestID !== 'string') return null;
+  const id = `chat-input-receipt-${encodeURIComponent(receipt.requestID)}`;
+  let card = document.getElementById(id);
+  if (!card) {
+    card = document.createElement('section');
+    card.className = 'chat-input-receipt';
+    card.id = id;
+    card.setAttribute('aria-live', 'polite');
+  } else {
+    card.replaceChildren();
+  }
+  card.dataset.state = String(receipt.state || 'persisted');
+  card.dataset.deliveryState = String(receipt.deliveryState || '');
+  const heading = document.createElement('div');
+  heading.className = 'chat-input-receipt-heading';
+  const title = document.createElement('strong');
+  title.textContent = 'Follow-up input';
+  const status = document.createElement('span');
+  status.className = 'chat-input-receipt-status';
+  const statusKey = String(receipt.deliveryState || receipt.state || 'unknown');
+  status.textContent = ({
+    consumed: 'Saved to queue; delivery unverified', queued: 'Saved to queue; delivery unverified',
+    'queue-delivered': 'Delivered to the queue (model use unverified)', persisted: 'Saved for a safe boundary',
+    'pending-boundary': 'Waiting for a safe boundary', unavailable: 'Delivery needs attention',
+    unknown: 'Outcome unknown', cancelled: 'Cancelled', failed: 'Unavailable',
+  })[statusKey] || statusKey;
+  heading.append(title, status);
+  const body = document.createElement('div');
+  body.className = 'chat-input-receipt-text';
+  body.textContent = String(receipt.text || '').slice(0, 200_000);
+  const details = document.createElement('div');
+  details.className = 'chat-input-receipt-details';
+  const uploadCount = Array.isArray(receipt.uploadIDs) ? receipt.uploadIDs.length
+    : Array.isArray(receipt.attachmentUploadIDs) ? receipt.attachmentUploadIDs.length
+      : Number(receipt.attachmentCount || 0);
+  const detailItems = [];
+  if (uploadCount) detailItems.push(`${uploadCount} attachment${uploadCount === 1 ? '' : 's'}`);
+  if (['unavailable', 'unknown'].includes(statusKey) && typeof receipt.deliveryReason === 'string' && receipt.deliveryReason) detailItems.push(receipt.deliveryReason.slice(0, 240));
+  details.textContent = detailItems.join(' · ');
+  const controls = document.createElement('div');
+  controls.className = 'chat-input-receipt-actions';
+  const addAction = (label, handler, action) => {
+    if (typeof handler !== 'function') return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.dataset.action = action;
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try { await handler(receipt); }
+      catch (error) { uiModule?.showError?.(error?.message || 'The follow-up action failed.'); }
+      finally { button.disabled = false; }
+    });
+    controls.appendChild(button);
+  };
+  const terminal = receipt.state === 'consumed' || receipt.state === 'cancelled';
+  if (!terminal) {
+    addAction('Retry', actions.onRetry, 'retry');
+    if (receipt.deliveryState === 'pending-boundary' || receipt.deliveryState === 'unavailable' || receipt.state === 'failed') {
+      addAction('Send now', actions.onSendNow, 'send-now');
+    }
+    addAction('Cancel', actions.onCancel, 'cancel');
+  }
+  card.append(heading, body, details, controls);
+  if (!card.isConnected) box.appendChild(card);
+  return card;
+}
+
 const chatRenderer = {
   shortModel,
   sameModelName,
@@ -3122,6 +3934,7 @@ const chatRenderer = {
   buildFindingsBox,
   appendReportButton,
   buildImageBubble,
+  renderInputReceipt,
   hideWelcomeScreen,
   showWelcomeScreen,
   createMsgFooter,
@@ -3132,3 +3945,7 @@ const chatRenderer = {
 };
 
 export default chatRenderer;
+
+export { createCapturedHtmlPreview };
+
+export { capturedResourceButton };

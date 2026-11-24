@@ -199,6 +199,78 @@ def test_projection_uses_normalized_connection_ids_and_never_credentials(normali
     assert "encrypted-secret-envelope" not in wire
 
 
+def test_projection_uses_only_explicit_copilot_and_codex_efforts_as_engine_variants(normalized_db):
+    with normalized_db() as db:
+        connection = _connection(
+            db,
+            "pcn_copilot_reasoning",
+            family="github-copilot",
+            adapter="copilot-chat",
+            lane="subscription",
+            kind="subscription",
+            url="https://api.githubcopilot.com",
+        )
+        _route(
+            db,
+            connection,
+            "pmr_copilot_explicit",
+            "copilot-explicit",
+            capabilities={"reasoning": True, "reasoning_effort": ["low", "none", "0"]},
+        )
+        _route(
+            db,
+            connection,
+            "pmr_copilot_unknown",
+            "copilot-unknown",
+            capabilities={"reasoning": True},
+        )
+        codex = _connection(
+            db,
+            "pcn_codex_reasoning",
+            family="openai",
+            adapter="openai-responses",
+            lane="metered_api",
+            kind="official",
+            url="https://api.openai.com/v1",
+        )
+        _route(
+            db,
+            codex,
+            "pmr_codex_terra",
+            "gpt-6.1-terra",
+            capabilities={
+                "reasoning": True,
+                "reasoning_effort": ["low", "medium", "high", "none"],
+                "reasoning_default_effort": "medium",
+            },
+        )
+        _route(
+            db,
+            codex,
+            "pmr_codex_unknown",
+            "codex-unknown",
+            capabilities={"reasoning": True},
+        )
+        db.commit()
+
+    snapshot = build_projection_snapshot("alice")
+    models = snapshot.providers["pcn_copilot_reasoning"]["models"]
+    assert models["copilot-explicit"]["variants"] == {
+        "low": {"reasoningEffort": "low"},
+        "none": {"reasoningEffort": "none"},
+        "0": {"reasoningEffort": "0"},
+    }
+    assert "variants" not in models["copilot-unknown"]
+    codex_models = snapshot.providers["pcn_codex_reasoning"]["models"]
+    assert codex_models["gpt-6.1-terra"]["variants"] == {
+        "low": {"reasoningEffort": "low"},
+        "medium": {"reasoningEffort": "medium"},
+        "high": {"reasoningEffort": "high"},
+        "none": {"reasoningEffort": "none"},
+    }
+    assert "variants" not in codex_models["codex-unknown"]
+
+
 def test_recipient_projection_contains_only_active_granted_topology(normalized_db):
     with normalized_db() as db:
         connection = _connection(
@@ -297,6 +369,50 @@ def test_adapter_metadata_matches_managed_engine(
     assert provider["models"]["model-a"]["provider"]["npm"] == expected_npm
     if family == "ollama":
         assert provider["api"] == "http://127.0.0.1:11434/v1"
+
+
+@pytest.mark.parametrize("lane, url, expected_pin", [
+    ("subscription", None, None),
+    ("subscription", "https://token-plan-ams.xiaomimimo.com/v1", "https://token-plan-ams.xiaomimimo.com/v1"),
+    ("subscription", "https://api.xiaomimimo.com/v1", "https://api.xiaomimimo.com/v1"),
+    ("metered_api", None, "https://api.xiaomimimo.com/v1"),
+])
+def test_xiaomi_projection_distinguishes_connection_pin_from_catalog_default(normalized_db, lane, url, expected_pin):
+    with normalized_db() as db:
+        connection = _connection(db, "pcn_mimo", family="xiaomi", adapter="mimo-native",
+                                 lane=lane, kind="subscription" if lane == "subscription" else "official", url=url)
+        _route(db, connection, "pmr_flash", "mimo-v2.6-flash")
+        db.commit()
+    provider = build_projection_snapshot("alice").providers["pcn_mimo"]
+    assert provider["options"].get("baseURL") == expected_pin
+    assert provider["models"]["mimo-v2.6-flash"]["provider"]["api"] == (url or "https://api.xiaomimimo.com/v1")
+
+
+def test_grok_subscription_projection_uses_only_the_cli_proxy_and_chat_adapter(normalized_db):
+    with normalized_db() as db:
+        connection = _connection(
+            db,
+            "pcn_grok",
+            family="grok",
+            adapter="grok-cli-chat",
+            lane="subscription",
+            kind="subscription",
+            url="https://cli-chat-proxy.grok.com/v1",
+        )
+        account = db.get(ProviderAccount, "pac_fixture_pcn_grok")
+        account.auth_method = "oauth"
+        account.auth_class = "subscription"
+        _route(db, connection, "pmr_grok", "account-discovered-model")
+        db.commit()
+
+    provider = build_projection_snapshot("alice").providers["pcn_grok"]
+    model = provider["models"]["account-discovered-model"]
+    assert provider["api"] == "https://cli-chat-proxy.grok.com/v1"
+    assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert model["provider"]["npm"] == "@ai-sdk/openai-compatible"
+    assert model["provider"]["api"] == "https://cli-chat-proxy.grok.com/v1"
+    assert model["options"]["_openclankFamilyID"] == "grok"
+    assert model["options"]["_openclankBillingLane"] == "subscription"
 
 
 @pytest.mark.parametrize(
@@ -632,3 +748,66 @@ def test_explicit_vision_binding_uses_existing_owner_and_fingerprints_projection
     assert after.profile_settings["vision_model"] == "pcn_vision/vision"
     assert after.small_model is None and before.fingerprint != after.fingerprint
     assert before.run_closure("pcn_vision", "vision") != after.run_closure("pcn_vision", "vision")
+
+
+def test_opencode_projection_selects_the_account_endpoint_and_native_api_per_model(normalized_db):
+    protocols = {
+        "openai-responses": ("gpt-6-luna", "@ai-sdk/openai", "https://opencode.ai/inference/openai/v1"),
+        "anthropic-messages": ("claude-haiku-5-5", "@ai-sdk/anthropic", "https://opencode.ai/inference/anthropic/v1"),
+        "openai-chat": ("glm-5.3", "@ai-sdk/openai-compatible", "https://opencode.ai/inference/openai/v1"),
+        "google-generative-ai": ("gemini-4-argon", "@ai-sdk/google", "https://opencode.ai/inference/google/v1beta"),
+    }
+    with normalized_db() as db:
+        connection = _connection(
+            db,
+            "pcn_opencode_console",
+            family="opencode-console",
+            adapter="opencode-native",
+            lane="metered_api",
+            url="https://opencode.ai/inference",
+        )
+        for index, (protocol, (model_id, npm, api)) in enumerate(protocols.items()):
+            _route(
+                db,
+                connection,
+                f"pmr_opencode_{index}",
+                model_id,
+                capabilities={"apiProtocol": protocol},
+            )
+        db.commit()
+
+    provider = build_projection_snapshot("alice").providers["pcn_opencode_console"]
+    assert "baseURL" not in provider["options"]
+    for protocol, (model_id, npm, api) in protocols.items():
+        model = provider["models"][model_id]
+        assert model["provider"] == {"npm": npm, "api": api}
+        assert model["options"]["_openclankApiProtocol"] == protocol
+
+
+def test_opencode_go_projection_keeps_subscription_endpoint(normalized_db):
+    with normalized_db() as db:
+        connection = _connection(
+            db,
+            "pcn_opencode_go",
+            family="opencode-go",
+            adapter="opencode-native",
+            lane="subscription",
+            kind="subscription",
+            url="https://opencode.ai/inference/go",
+        )
+        _route(
+            db,
+            connection,
+            "pmr_opencode_go",
+            "gpt-6-luna",
+            capabilities={"apiProtocol": "openai-responses"},
+        )
+        db.commit()
+
+    provider = build_projection_snapshot("alice").providers["pcn_opencode_go"]
+    model = provider["models"]["gpt-6-luna"]
+    assert "baseURL" not in provider["options"]
+    assert model["provider"] == {
+        "npm": "@ai-sdk/openai",
+        "api": "https://opencode.ai/inference/go/openai/v1",
+    }

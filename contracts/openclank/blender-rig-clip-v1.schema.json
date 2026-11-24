@@ -1,0 +1,431 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.local/contracts/blender-rig-clip-v1.schema.json",
+  "title": "Observed imported-bone pose clip metadata",
+  "$ref": "#/$defs/layout",
+  "$defs": {
+    "joint": {
+      "type": "object",
+      "properties": {
+        "nodeIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        },
+        "jointOrdinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "jointName": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,47}$"
+        },
+        "parentNode": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 127
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "nodeIndex",
+        "jointOrdinal",
+        "jointName",
+        "parentNode"
+      ],
+      "additionalProperties": false
+    },
+    "rig": {
+      "type": "object",
+      "properties": {
+        "sourceSHA256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "skinIndex": {
+          "const": 0
+        },
+        "hierarchy": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "properties": {
+              "nodeIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 127
+              },
+              "jointOrdinal": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 63
+              },
+              "jointName": {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9_]{0,47}$"
+              },
+              "parentNode": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 127
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "nodeIndex",
+              "jointOrdinal",
+              "jointName",
+              "parentNode"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "selected": {
+          "type": "object",
+          "properties": {
+            "nodeIndex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 127
+            },
+            "jointOrdinal": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 63
+            },
+            "jointName": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_]{0,47}$"
+            },
+            "parentNode": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 127
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "nodeIndex",
+            "jointOrdinal",
+            "jointName",
+            "parentNode"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "sourceSHA256",
+        "skinIndex",
+        "hierarchy",
+        "selected"
+      ],
+      "additionalProperties": false
+    },
+    "importer": {
+      "type": "object",
+      "properties": {
+        "blenderVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "operator": {
+          "const": "IMPORT_SCENE_OT_gltf"
+        },
+        "module": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "moduleVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sourceFileSHA256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settings": {
+          "const": "factory-default-gltf-v1"
+        }
+      },
+      "required": [
+        "blenderVersion",
+        "operator",
+        "module",
+        "moduleVersion",
+        "sourceFileSHA256",
+        "settings"
+      ],
+      "additionalProperties": false
+    },
+    "layout": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "coordinateFrame": {
+          "const": "imported-blender-bone-local-x"
+        },
+        "cellWidth": {
+          "const": 512
+        },
+        "cellHeight": {
+          "const": 512
+        },
+        "sheetWidth": {
+          "const": 1024
+        },
+        "sheetHeight": {
+          "const": 1024
+        },
+        "fps": {
+          "const": 6
+        },
+        "rig": {
+          "type": "object",
+          "properties": {
+            "sourceSHA256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "skinIndex": {
+              "const": 0
+            },
+            "hierarchy": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "nodeIndex": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 127
+                  },
+                  "jointOrdinal": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 63
+                  },
+                  "jointName": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_]{0,47}$"
+                  },
+                  "parentNode": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 127
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "nodeIndex",
+                  "jointOrdinal",
+                  "jointName",
+                  "parentNode"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "selected": {
+              "type": "object",
+              "properties": {
+                "nodeIndex": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 127
+                },
+                "jointOrdinal": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 63
+                },
+                "jointName": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_]{0,47}$"
+                },
+                "parentNode": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 127
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "nodeIndex",
+                "jointOrdinal",
+                "jointName",
+                "parentNode"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "sourceSHA256",
+            "skinIndex",
+            "hierarchy",
+            "selected"
+          ],
+          "additionalProperties": false
+        },
+        "importer": {
+          "type": "object",
+          "properties": {
+            "blenderVersion": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "operator": {
+              "const": "IMPORT_SCENE_OT_gltf"
+            },
+            "module": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "moduleVersion": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "sourceFileSHA256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "settings": {
+              "const": "factory-default-gltf-v1"
+            }
+          },
+          "required": [
+            "blenderVersion",
+            "operator",
+            "module",
+            "moduleVersion",
+            "sourceFileSHA256",
+            "settings"
+          ],
+          "additionalProperties": false
+        },
+        "frames": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "properties": {
+              "frameIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "degrees": {
+                "enum": [
+                  0,
+                  15,
+                  -15
+                ]
+              },
+              "x": {
+                "enum": [
+                  0,
+                  512
+                ]
+              },
+              "y": {
+                "enum": [
+                  0,
+                  512
+                ]
+              },
+              "width": {
+                "const": 512
+              },
+              "height": {
+                "const": 512
+              }
+            },
+            "required": [
+              "frameIndex",
+              "degrees",
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "version",
+        "coordinateFrame",
+        "cellWidth",
+        "cellHeight",
+        "sheetWidth",
+        "sheetHeight",
+        "fps",
+        "rig",
+        "importer",
+        "frames",
+        "sha256"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

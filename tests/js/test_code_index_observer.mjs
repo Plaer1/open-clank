@@ -17,6 +17,15 @@ function fixture(request){
   assert.equal(f.calls.filter(x=>x==='open').length,1);assert.equal(f.calls.filter(x=>x==='status').length,39);
   assert.equal(f.timers.size,0);assert(Math.max(...f.delays)<=10000);assert.equal(f.statuses.at(-1).lifecycle,'ready');f.release();await settle();assert.equal(f.calls.at(-1),'release');
 }
+// Source notifications and visibility changes cannot starve a pending poll.
+{
+  const f=fixture(async event=>event==='open'?{lifecycle:'building'}:{lifecycle:'ready',head_generation:'g'});
+  await settle();const deadline=[...f.timers.keys()];
+  for(let i=0;i<40;i++)f.release.dirty();
+  f.release.setVisible(false);f.release.setVisible(true);
+  assert.deepEqual([...f.timers.keys()],deadline);
+  await f.tick();assert.equal(f.statuses.at(-1).head_generation,'g');f.release();
+}
 // Disposal before ACK releases twice, neither ACK nor old polls repaint.
 {
   const open=deferred();const f=fixture(event=>event==='open'?open.promise:Promise.resolve({}));

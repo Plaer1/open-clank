@@ -29,6 +29,12 @@ class SessionMapCorrupt(ValueError):
 _EXPECTED_UNSET = object()
 
 
+class _ChatGuard:
+    def __init__(self, owner: str, path: Path, chat: str):
+        self.owner, self.path, self.chat, self.active = owner, path.resolve(), chat, True
+
+
+
 def _strict_identifier(value: object, label: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ValueError(f"managed session map {label} must be a nonempty canonical string")
@@ -148,6 +154,30 @@ class OwnerSessionMap:
             self._check_epoch(self._epoch())
             return data
 
+    def cleanup_inventory(self) -> dict[str, Any]:
+        """Bounded, complete current map metadata for the rare cleanup path."""
+        with self._lock(self.lifecycle_lock_path):
+            before_epoch = self._epoch()
+            self._check_epoch(before_epoch)
+            with self._lock(self.lock_path):
+                try:
+                    with self.path.open('rb') as stream:
+                        raw = stream.read(1024 * 1024 + 1)
+                    if len(raw) > 1024 * 1024:
+                        raise SessionMapCorrupt('managed session map exceeds cleanup bound')
+                    data = self._normalize(json.loads(raw.decode('utf-8', 'strict')))
+                except FileNotFoundError:
+                    data = self._empty()
+                except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                    raise SessionMapCorrupt('managed session map cannot be inventoried') from exc
+                if len(data['chats']) > 512 or len(data.get('quarantine', [])) > 512:
+                    raise SessionMapCorrupt('managed session map exceeds cleanup bound')
+                # A collision or quarantined entry must not disappear from the
+                # complete inventory and be mistaken for an absent scope.
+                self._inverse(data)
+            self._check_epoch(self._epoch())
+            return data
+
     @staticmethod
     def _inverse(data: dict[str, Any]) -> dict[str, str]:
         inverse: dict[str, str] = {}
@@ -181,21 +211,32 @@ class OwnerSessionMap:
                 os.unlink(name)
 
     @contextmanager
-    def _lock(self, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    def _lock(self, path: Path, *, blocking: bool = True, existing_only: bool = False):
+        if existing_only:
+            if fcntl is None:
+                raise SessionMapCorrupt("existing read lock unavailable on this platform")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             os.close(descriptor)
             raise SessionMapCorrupt("managed session lock is not a regular file")
         acquired = False
         try:
             if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
             else:  # pragma: no cover - Windows only
                 if os.fstat(descriptor).st_size == 0:
                     os.write(descriptor, b"\0")
                 os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+                try:
+                    msvcrt.locking(descriptor, msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+                except OSError as exc:
+                    if not blocking and (getattr(exc, "winerror", None) in (33, 36) or exc.errno in (13, 36)) :
+                        raise BlockingIOError("chat admission lock is busy") from exc
+                    raise
             acquired = True
             try:
                 yield
@@ -210,7 +251,7 @@ class OwnerSessionMap:
             os.close(descriptor)
 
     @contextmanager
-    def chat_admission_lock(self, chat: str):
+    def chat_admission_lock(self, chat: str, *, blocking: bool = True, existing_only: bool = False):
         """Serialize the cross-store binding/map admission for one chat.
 
         The lock is separate from ``session-map.lock`` so callers can hold it
@@ -224,11 +265,15 @@ class OwnerSessionMap:
             f".session-chat-{self.owner_hash}-"
             f"{hashlib.sha256(chat.encode('utf-8')).hexdigest()[:24]}.lock"
         )
-        with self._lock(lock_path):
-            yield
+        with self._lock(lock_path, blocking=blocking, existing_only=existing_only):
+            guard = _ChatGuard(self.owner, self.path, chat)
+            try:
+                yield guard
+            finally:
+                guard.active = False
 
     @asynccontextmanager
-    async def async_chat_admission_lock(self, chat: str):
+    async def async_chat_admission_lock(self, chat: str, *, blocking: bool = True, existing_only: bool = False):
         """Return an async-compatible stable chat guard.
 
         The filesystem lock is synchronous, so acquire and release it in a
@@ -246,19 +291,27 @@ class OwnerSessionMap:
                 except asyncio.CancelledError:
                     cancelled = True
 
-        guard = self.chat_admission_lock(chat)
-        acquire = asyncio.create_task(asyncio.to_thread(guard.__enter__))
+        guard = self.chat_admission_lock(chat, blocking=blocking, existing_only=existing_only)
+        def acquire_guard():
+            try:
+                return guard.__enter__()
+            except BlockingIOError:
+                if blocking:
+                    raise
+                return None
+        acquire = asyncio.create_task(asyncio.to_thread(acquire_guard))
         cancelled = await drain(acquire)
+        acquired = acquire.result()
         if cancelled:
-            # Do not strand a descriptor if cancellation arrives while a
-            # contended process lock is still waiting in the worker thread.
-            release = asyncio.create_task(
-                asyncio.to_thread(guard.__exit__, None, None, None)
-            )
-            await drain(release)
+            if acquired is not None:
+                release = asyncio.create_task(asyncio.to_thread(guard.__exit__, None, None, None))
+                await drain(release)
             raise asyncio.CancelledError
+        if acquired is None:
+            yield None
+            return
         try:
-            yield
+            yield acquired
         finally:
             release = asyncio.create_task(
                 asyncio.to_thread(guard.__exit__, None, None, None)
@@ -277,6 +330,24 @@ class OwnerSessionMap:
         """
         return await asyncio.to_thread(fn, *args, **kwargs)
 
+    async def _guarded_async_call(self, fn, /, *args, **kwargs):
+        # A cancelled waiter must retain its guard until the worker has
+        # finished the mutation; asyncio.to_thread itself cannot stop it.
+        task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                if task.done():
+                    result = task.result()
+                    break
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
     async def async_lookup(self, chat: str) -> dict[str, Any] | None:
         return await self.async_call(self.lookup, chat)
 
@@ -288,14 +359,19 @@ class OwnerSessionMap:
         expected_map_revision: int | None = None,
         expected_current: str | None | object = _EXPECTED_UNSET,
         expected_mapping_revision: int | None = None,
+        guard: _ChatGuard | None = None,
     ) -> dict[str, Any]:
-        return await self.async_call(
+        if guard is None:
+            async with self.async_chat_admission_lock(chat) as acquired:
+                return await self.async_bind(chat, engine, expected_map_revision=expected_map_revision, expected_current=expected_current, expected_mapping_revision=expected_mapping_revision, guard=acquired)
+        return await self._guarded_async_call(
             self.bind,
             chat,
             engine,
             expected_map_revision=expected_map_revision,
             expected_current=expected_current,
             expected_mapping_revision=expected_mapping_revision,
+            guard=guard,
         )
 
     async def async_forget(
@@ -305,13 +381,18 @@ class OwnerSessionMap:
         expected_map_revision: int | None = None,
         expected_current: str | None | object = _EXPECTED_UNSET,
         expected_mapping_revision: int | None = None,
+        guard: _ChatGuard | None = None,
     ) -> dict[str, int] | None:
-        return await self.async_call(
+        if guard is None:
+            async with self.async_chat_admission_lock(chat) as acquired:
+                return await self.async_forget(chat, expected_map_revision=expected_map_revision, expected_current=expected_current, expected_mapping_revision=expected_mapping_revision, guard=acquired)
+        return await self._guarded_async_call(
             self.forget,
             chat,
             expected_map_revision=expected_map_revision,
             expected_current=expected_current,
             expected_mapping_revision=expected_mapping_revision,
+            guard=guard,
         )
 
     async def async_revisions(self, chat: str) -> tuple[int, int]:
@@ -323,14 +404,29 @@ class OwnerSessionMap:
     async def async_flat_current(self) -> dict[str, str]:
         return await self.async_call(self.flat_current)
 
-    async def async_fence(self, chat: str) -> None:
-        await self.async_call(self.fence, chat)
+    async def async_fence(self, chat: str, *, guard: _ChatGuard | None = None) -> None:
+        if guard is None:
+            async with self.async_chat_admission_lock(chat) as acquired:
+                return await self.async_fence(chat, guard=acquired)
+        await self._guarded_async_call(self.fence, chat, guard=guard)
 
     def _epoch(self) -> str:
         try:
             return self.epoch_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return "0"
+
+    def validate_chat_guard(self, chat: str, guard: _ChatGuard) -> None:
+        chat = _strict_identifier(chat, "chat")
+        if not isinstance(guard, _ChatGuard) or not guard.active or guard.owner != self.owner or guard.path != self.path.resolve() or guard.chat != chat:
+            raise PermissionError("invalid chat admission guard")
+
+    def _guarded_mutate(self, chat: str, guard: _ChatGuard | None, callback):
+        if guard is None:
+            with self.chat_admission_lock(chat) as acquired:
+                return self._guarded_mutate(chat, acquired, callback)
+        self.validate_chat_guard(chat, guard)
+        return self._mutate(callback)
 
     def _mutate(self, callback):
         with self._lock(self.lifecycle_lock_path):
@@ -370,6 +466,7 @@ class OwnerSessionMap:
         expected_map_revision: int | None = None,
         expected_current: str | None | object = _EXPECTED_UNSET,
         expected_mapping_revision: int | None = None,
+        guard: _ChatGuard | None = None,
     ) -> dict[str, Any]:
         chat = _strict_identifier(chat, "chat")
         engine = _strict_identifier(engine, "engine session")
@@ -417,7 +514,7 @@ class OwnerSessionMap:
             result["mappingRevision"] = int(item.get("revision") or 0)
             return result, True
 
-        return self._mutate(mutate)
+        return self._guarded_mutate(chat, guard, mutate)
 
     def forget(
         self,
@@ -426,6 +523,7 @@ class OwnerSessionMap:
         expected_map_revision: int | None = None,
         expected_current: str | None | object = _EXPECTED_UNSET,
         expected_mapping_revision: int | None = None,
+        guard: _ChatGuard | None = None,
     ) -> dict[str, int] | None:
         chat = _strict_identifier(chat, "chat")
 
@@ -446,7 +544,7 @@ class OwnerSessionMap:
             data["chats"].pop(chat, None)
             data["mapRevision"] = int(data.get("mapRevision") or 0) + 1
             return {"mapRevision": int(data.get("mapRevision") or 0), "mappingRevision": 0}, True
-        return self._mutate(mutate)
+        return self._guarded_mutate(chat, guard, mutate)
 
     def flat_current(self) -> dict[str, str]:
         data = self.read()
@@ -463,7 +561,7 @@ class OwnerSessionMap:
     def map_revision(self) -> int:
         return int(self.read().get("mapRevision") or 0)
 
-    def fence(self, chat: str) -> None:
+    def fence(self, chat: str, *, guard: _ChatGuard | None = None) -> None:
         """Quarantine a chat after an unconfirmed cross-store compensation.
 
         The row remains available for forensic recovery, but lookup/routing is
@@ -480,4 +578,4 @@ class OwnerSessionMap:
             data["mapRevision"] = int(data.get("mapRevision") or 0) + 1
             return None, True
 
-        self._mutate(mutate)
+        self._guarded_mutate(chat, guard, mutate)

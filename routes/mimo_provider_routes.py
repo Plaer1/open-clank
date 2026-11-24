@@ -26,7 +26,7 @@ from src.auth_helpers import require_user
 
 _PROVIDER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _FLOW_ID = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
-_SESSION_COOKIE = "odysseus_session"
+_SESSION_COOKIE = "open_clank_session"
 _FLOW_TTL_SECONDS = 600
 _FLOW_SECRET = secrets.token_bytes(32)
 _AUTH_CAPABILITIES: dict[str, dict[int, str]] = {

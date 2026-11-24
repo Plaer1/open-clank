@@ -152,7 +152,7 @@ let _docModule = null;
 let _listSpinner = null;
 let _senderFilter = null;       // email address (lowercased) to filter by, or null
 let _senderFilterLabel = null;  // display label for the active filter chip
-let _showEmailTags = localStorage.getItem('odysseus.email.showTags') !== '0';
+let _showEmailTags = localStorage.getItem('openclank.email.showTags') !== '0';
 
 export function init(documentModule) {
   _docModule = documentModule;
@@ -192,7 +192,6 @@ export function init(documentModule) {
       }
     },
   });
-  prewarmEmailLibrary({ delay: 1800 });
   _watchDocOpenToReDockEmail();
 }
 
@@ -260,18 +259,21 @@ function _watchDocOpenToReDockEmail() {
 }
 
 function _bindEvents() {
-  // Clicking anywhere in the email section header opens the popup
-  // (except the compose button which has its own handler)
-  const section = document.getElementById('email-section');
-  const header = section?.querySelector('.section-header-flex');
-  if (header) {
-    header.style.cursor = 'pointer';
-    header.addEventListener('click', (e) => {
-      if (e.target.closest('#email-compose-btn')) return;
-      openEmailLibrary();
-      markInboxAsSeen();
-    });
+  const inboxButton = document.getElementById('email-section-title');
+  function prepareInbox() {
+    if (isLibOpen() || document.hidden) return;
+    if (document.getElementById('email-unread-dot')?.style.display === '') {
+      void prewarmUnreadEmails().catch(() => {});
+    } else {
+      prewarmEmailLibrary({delay:250});
+    }
   }
+  inboxButton?.addEventListener('pointerenter', prepareInbox);
+  inboxButton?.addEventListener('focus', prepareInbox);
+  inboxButton?.addEventListener('click', () => {
+    openEmailLibrary();
+    markInboxAsSeen();
+  });
 
   // Compose button creates a new email document
   const composeBtn = document.getElementById('email-compose-btn');
@@ -285,8 +287,21 @@ function _bindEvents() {
   // Delay the lightweight unread badge check so opening Odysseus doesn't
   // compete with the initial chat/session paint. The full email list now loads
   // only when the inbox is actually opened.
-  setTimeout(_refreshUnreadCount, 8000);
-  setInterval(_refreshUnreadCount, 60000);
+  let badgeTimer = null;
+  let badgeEpoch = 0;
+  let inFlight = null;
+  const schedule = delay => {
+    clearTimeout(badgeTimer);
+    const epoch = ++badgeEpoch;
+    const poll = async () => {
+      if (!inFlight) inFlight = _refreshUnreadCount().finally(() => { inFlight = null; });
+      await inFlight;
+      if (epoch === badgeEpoch && !document.hidden) badgeTimer = setTimeout(poll, 60000);
+    };
+    if (!document.hidden) badgeTimer = setTimeout(poll, delay);
+  };
+  document.addEventListener('visibilitychange', () => schedule(0));
+  schedule(8000);
 
   // Deep-link: #email=<folder>:<uid> opens the library and expands that card
   _maybeOpenFromHash();
@@ -319,15 +334,10 @@ async function _refreshUnreadCount() {
   const dot = document.getElementById('email-unread-dot');
   if (dot && !dot._stickyState) dot.style.display = 'none';
   try {
-    // Parallel: cheap unread state + urgency state.
-    const [stateRes, urgRes] = await Promise.all([
-      fetch(emailApiUrl('/api/email/unread-state', { folder: 'INBOX' })),
-      fetch(`${API_BASE}/api/email/urgency-state`, { credentials: 'same-origin' }).catch(() => null),
-    ]);
+    if (!dot) return;
+    const stateRes = await fetch(emailApiUrl('/api/email/unread-state', { folder: 'INBOX' }));
     if (!stateRes || !stateRes.ok) return;
     const data = await stateRes.json();
-    if (!dot) return;
-
     const unreadCount = Number(data.unread_count || 0);
     if (unreadCount <= 0) {
       dot.style.display = 'none';
@@ -335,15 +345,14 @@ async function _refreshUnreadCount() {
     }
 
     // Compare highest unread UID to the last-seen threshold in localStorage
-    const lastSeen = parseInt(localStorage.getItem('odysseus-email-last-seen-uid') || '0', 10);
+    const lastSeen = parseInt(localStorage.getItem('openclank-email-last-seen-uid') || '0', 10);
     const maxUid = parseInt(data.max_uid || '0', 10) || 0;
 
     // Only show dot if there's a new email above the threshold
     const hasNewUnread = maxUid > lastSeen;
     dot.style.display = hasNewUnread ? '' : 'none';
-    if (hasNewUnread && !isLibOpen()) {
-      prewarmUnreadEmails({ limit: Math.min(10, Math.max(1, unreadCount)), maxUid }).catch(() => {});
-    }
+    if (!hasNewUnread) return;
+    const urgRes = await fetch(`${API_BASE}/api/email/urgency-state`, {credentials:'same-origin'}).catch(() => null);
 
     // Color the dot by urgency tier. Cache the per-uid map so the per-row
     // renderer can reuse it without a second fetch.
@@ -373,7 +382,7 @@ export function markInboxAsSeen() {
       .then(data => {
         const maxUid = parseInt(data.max_uid || '0', 10) || 0;
         if (maxUid > 0) {
-          localStorage.setItem('odysseus-email-last-seen-uid', String(maxUid));
+          localStorage.setItem('openclank-email-last-seen-uid', String(maxUid));
         }
         const dot = document.getElementById('email-unread-dot');
         if (dot) dot.style.display = 'none';

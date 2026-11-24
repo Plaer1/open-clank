@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {layoutCodeMap,createCodeMapLayoutOwner,validateLayoutInput} from '../../static/js/copal/codeMapLayout.js';
 import {coldStructure} from '../fixtures/code_map_cold_structure.mjs';
+import {CODE_GRAPH_DISPLAY} from '../../static/js/copal/graphSettings.js';
 const job=(serial=1,namespace='preview')=>({serial,namespace,nodes:[{id:'repo',kind:'repository',parent:null},{id:'a',kind:'folder',parent:'repo'},{id:'b',kind:'file',parent:'a'},{id:'c',kind:'file',parent:'a'},{id:'island',kind:'file',parent:null}],edges:[{from:'a',to:'b'},{from:'b',to:'c'}],previous:[],anchor:null,viewport:{width:1280,height:700}});
 test('deterministic containment layout and real adjacency ordering; no fabricated edges',()=>{
  const a=layoutCodeMap(job()),b=layoutCodeMap({...job(),nodes:job().nodes.slice().reverse()});assert.deepEqual(a,b);assert.equal(a.positions.length,5);const p=new Map(a.positions.map(p=>[p.id,p]));assert(p.get('repo').x<p.get('a').x&&p.get('a').x<p.get('b').x);assert.equal(new Set(a.positions.map(p=>`${p.x},${p.y}`)).size,5);assert(!Object.hasOwn(a,'edges'));
@@ -38,7 +39,7 @@ test('internal logical viewport changes sibling shelves; expansion still preserv
  for(const viewport of [null,{width:0,height:10},{width:8193,height:1},{width:NaN,height:1},{width:1,height:1,extra:true}])assert.throws(()=>layoutCodeMap({...desktop,viewport}));const missing={...desktop};delete missing.viewport;assert.throws(()=>layoutCodeMap(missing));
 });
 test('bounded input rejects oversized, cyclic, foreign endpoint and malformed seed',()=>{
- for(const mutate of [j=>j.nodes.push(j.nodes[0]),j=>j.nodes[0].body='source',j=>j.extra='unknown',j=>j.nodes[0].parent='b',j=>j.edges[0].to='foreign',j=>j.previous=[{id:'foreign',x:0,y:0}],j=>j.previous=[{id:'a',x:NaN,y:0}],j=>j.anchor='foreign',j=>j.namespace='x'.repeat(16385),j=>j.nodes=Array(2001).fill(j.nodes[0]),j=>j.edges=Array(5001).fill(j.edges[0])]){const j=job();mutate(j);assert.throws(()=>layoutCodeMap(j));}
+ for(const mutate of [j=>j.nodes.push(j.nodes[0]),j=>j.nodes[0].body='source',j=>j.extra='unknown',j=>j.nodes[0].parent='b',j=>j.edges[0].to='foreign',j=>j.previous=[{id:'foreign',x:0,y:0}],j=>j.previous=[{id:'a',x:NaN,y:0}],j=>j.anchor='foreign',j=>j.namespace='x'.repeat(16385),j=>j.nodes=Array(CODE_GRAPH_DISPLAY.nodes+1).fill(j.nodes[0]),j=>j.edges=Array(CODE_GRAPH_DISPLAY.edges+1).fill(j.edges[0])]){const j=job();mutate(j);assert.throws(()=>layoutCodeMap(j));}
  const large={serial:1,namespace:'bounded',nodes:Array.from({length:2000},(_,i)=>({id:`n${i}`,parent:i?`n${i-1}`:null,kind:'folder'})),edges:[],previous:[],anchor:null,viewport:{width:1280,height:700}};assert.equal(layoutCodeMap(large).positions.length,2000);assert.equal(validateLayoutInput(large),large);
 });
 test('persistent owner bounds to one in-flight plus one coalesced pending job',()=>{

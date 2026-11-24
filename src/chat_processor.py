@@ -134,6 +134,7 @@ class ChatProcessor:
         incognito: bool = False,
         use_skills: bool = True,
         root_operation_id: Optional[str] = None,
+        document_vector_authority=None,
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
         """Build the context preface for LLM calls.
 
@@ -211,13 +212,23 @@ class ChatProcessor:
             elif self.memory_provider:
                 # Provider without digest support: legacy push-recall.
                 try:
-                    hits = await self.memory_provider.recall(message, owner=owner, top_k=3)
-                    if hits:
-                        handler_label = _handler_display_label(owner)
-                        ext_text = "\n".join([
-                            f"- {render_identity_template(h.memory.text, handler_label=handler_label)}"
-                            for h in hits
-                        ])
+                    from src.openclank.memery_preferences import owner_preferences
+                    recall = await asyncio.to_thread(owner_preferences, owner)
+                    if recall["memery_prompt_recall_enabled"]:
+                        hits = await self.memory_provider.recall(message, owner=owner, top_k=recall["memery_prompt_recall_limit"])
+                    else:
+                        hits = []
+                    handler_label = _handler_display_label(owner)
+                    chosen = []
+                    remaining = recall["memery_prompt_recall_chars"]
+                    for hit in hits[:recall["memery_prompt_recall_limit"]]:
+                        excerpt = render_identity_template(hit.memory.text, handler_label=handler_label)[:remaining]
+                        if excerpt:
+                            chosen.append((hit, excerpt))
+                            remaining -= len(excerpt)
+                        if not remaining: break
+                    if chosen and recall == await asyncio.to_thread(owner_preferences, owner):
+                        ext_text = "\n".join(f"- {excerpt}" for _, excerpt in chosen)
                         preface.append(untrusted_context_message(
                             "saved memory: retrieved context",
                             (
@@ -226,9 +237,9 @@ class ChatProcessor:
                             ),
                         ))
                         used_ids = []
-                        for h in hits:
+                        for h, excerpt in chosen:
                             self._last_used_memories.append({
-                                "text": render_identity_template(h.memory.text, handler_label=handler_label),
+                                "text": excerpt,
                                 "category": h.memory.category,
                                 "type": "pinned" if h.memory.pinned else "recalled",
                             })
@@ -242,7 +253,7 @@ class ChatProcessor:
                 except Exception as e:
                     logger.warning("Provider recall failed: %s", e)
             # No provider → no memory context. Every real boot has one: the
-            # registry always yields either frankenmemory or the native
+            # registry always yields either Memery or the native
             # provider (app_initializer), so a None here is a test fixture.
 
             # (skills index injection moved out — see below; only fires in
@@ -253,7 +264,13 @@ class ChatProcessor:
             try:
                 rag_manager = getattr(self.personal_docs_manager, 'rag_manager', None)
                 if rag_manager:
-                    results = rag_manager.search(message, k=5, owner=owner)
+                    if document_vector_authority is not None:
+                        try:
+                            results = await document_vector_authority.search(rag_manager,self.memory_provider,message,5)
+                        except Exception:
+                            results = await document_vector_authority.baseline(rag_manager,message,5)
+                    else:
+                        results = rag_manager.search(message, k=5, owner=owner)
                     # Filter by similarity threshold
                     relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]
                     if relevant:

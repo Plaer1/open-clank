@@ -23,10 +23,11 @@ No system installation, provider credentials or model download is required.
 
 Build from matching source using Rust 1.99.0, Bun 1.4.0, standalone CPython
 3.13.17, PyInstaller 6.16.0 and patchelf 0.17.2.4. Install requirements in that private Python;
-run `pip check`. Build locked release binaries `fm-mcp`,
-`openclank-history-service`, `odysseus-files-service`, and
+run `pip check`. Build locked release binaries `memery-worker`, `memery-migrate`,
+`openclank-history-service`, `openclank-history-prepare-copy`,
+`openclank-history-index-copy`, `odysseus-files-service`, and
 `odysseus-linux-thumbnail-helper`. Build `odysseus-kde-thumbnail-adapter` from
-`native/linux` with CMake, Qt6 and KF6KIO. Put all five
+`native/linux` with CMake, Qt6 and KF6KIO. Put all eight
 binaries in one staging directory. Build and verify the Engine using
 `scripts/openclank_engine.py --install-root ENGINE build --target linux-x64`.
 Then run:
@@ -38,6 +39,50 @@ OPENCLANK_BUILD_PYTHON=/private/python/bin/python3 ./build-linux-portable.sh \
   --notices /verified/component-notices
 python3 scripts/linux_package.py verify --bundle /extracted/openclank
 ```
+
+The optional Linux Screenshot portal helper is built separately from the pinned
+`native/capture/Cargo.lock` with `cargo build --locked --release --manifest-path
+native/capture/Cargo.toml --bin openclank-native-capture`, then staged as
+`openclank-native-capture` in `--native-bin` before a fresh package build. The
+notice collector includes its locked dependency closure. Omit the binary to
+leave screenshot capture unavailable without affecting startup. The artifact
+inventory records its target, binary hash and declared source inputs; these do
+not independently prove the binary was built from those inputs. Portal and
+compositor behavior remains unqualified until deliberately tested. The native
+refresh command refuses capture payloads; use a fresh package build so the
+binary and notices are reviewed together.
+
+The separate optional retained-frame helper is built from the same lock with
+`cargo build --locked --release --manifest-path native/capture/Cargo.toml
+--features frames --bin openclank-native-capture-frame` and staged as
+`openclank-native-capture-frame` in `--native-bin`. It is independently optional;
+missing it leaves retained frames unavailable and does not affect ordinary
+startup or the Screenshot helper. The notice collector resolves the `frames`
+feature and records the lock-bound feature closure. GStreamer and the PipeWire
+GStreamer plugin are system-provided runtime dependencies (GStreamer is
+LGPL-2.1-or-later; the PipeWire plugin declares MIT); this package does not
+install them or claim they are bundled or qualified. A missing compatible
+library, plugin, compositor or permission leaves frames unavailable. The optional
+VP8/WebM trim profile additionally requires system GStreamer core `fdsrc`,
+Good matroska (`matroskademux` and `webmmux`) and Good vpx (`vp8dec` and
+`vp8enc`) elements, and system libvpx. These GStreamer elements are LGPL-2.1-or-later;
+libvpx is BSD-3-Clause with an additional [upstream patent notice](https://chromium.googlesource.com/webm/libvpx/+/master/PATENTS).
+These declarations do not install, bundle or qualify those system components.
+A missing decoder or encoder leaves this optional profile unavailable. The native
+refresh command refuses either optional capture binary, requiring a fresh build
+with matching notices. Actual portal and frame behavior remains unqualified.
+
+An optional human-selected audio recording profile can be compiled into that
+same helper using `--features frames,audio-foundation`. Its explicit capability
+probe requires PipeWire 1.0.5 or newer and the installed GStreamer factories for
+the recording and audio pipelines. GStreamer base audio conversion, resampling
+and Opus elements are LGPL-2.1-or-later; system libopus is BSD-3-Clause (see its
+[license and patent notices](https://github.com/xiph/opus/blob/main/COPYING)).
+These system components are not installed or bundled by the package. A frames-only
+helper remains valid; absent audio support leaves the optional audio profile
+unavailable. The current controller polls the PipeWire loop at 1 ms, with CPU and
+real-device cadence limits. Discovery does not qualify portal, hardware, complete
+loss detection or physical A/V synchronization. No device is opened by the probe.
 
 The optional Copal native shell is outside this browser-app package. Builds,
 local tests and packaging do not deploy or publish anything. Root LICENSE

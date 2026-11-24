@@ -478,7 +478,7 @@ mod platform {
     use std::thread::{self, JoinHandle};
     use std::time::Instant;
 
-    const SESSION_ENV: &str = "ODYSSEUS_QUICKLOOK_SESSION_TOKEN";
+    const SESSION_ENV: &str = "OPEN_CLANK_QUICKLOOK_SESSION_TOKEN";
     const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
     pub struct PlatformBroker {
@@ -855,7 +855,7 @@ mod platform {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .env(SESSION_ENV, encode_token(&token))
-                .env("ODYSSEUS_SHELL_IMAGE_KIND", if shell_icons { "icon" } else { "thumbnail" })
+                .env("OPEN_CLANK_SHELL_IMAGE_KIND", if shell_icons { "icon" } else { "thumbnail" })
                 .spawn()
                 .map_err(|_| ThumbnailError::HelperUnavailable)?;
             let input = child

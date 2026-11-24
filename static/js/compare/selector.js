@@ -186,7 +186,7 @@ async function showModelSelector() {
       }
       for (let i = 0; i < selections.length; i++) {
         const m = pool[i % pool.length];
-        selections[i] = { model: m.id, endpoint: m.url, endpointId: m.endpointId, name: m.name, endpointName: m.endpointName || '' };
+        replaceLaneModel(i, { model: m.id, endpoint: m.url, endpointId: m.endpointId, name: m.name, endpointName: m.endpointName || '' });
       }
       _shuffled = true;
       // Auto-enable blind mode so picks stay hidden
@@ -387,13 +387,17 @@ async function showModelSelector() {
     listContainer.appendChild(_loadingDiv);
 
     // Restore last used selections from storage (per-mode)
-    const _selKey = 'odysseus-compare-selections-' + (state._compareMode || 'agent');
-    let selections = Storage.getJSON(_selKey) || Storage.getJSON('odysseus-compare-selections') || [];
+    const _selKey = 'openclank-compare-selections-' + (state._compareMode || 'agent');
+    let selections = Storage.getJSON(_selKey) || Storage.getJSON('openclank-compare-selections') || [];
     // Restore synthesis models for search/research
     if (state._compareMode === 'search' || state._compareMode === 'research') {
-      const savedSynth = Storage.getJSON('odysseus-compare-synth-' + state._compareMode);
+      const savedSynth = Storage.getJSON('openclank-compare-synth-' + state._compareMode);
       if (savedSynth) state._searchSynthModels = savedSynth;
     }
+    function replaceLaneModel(index, model) {
+      selections[index] = { ...model, appendNoMistakes: selections[index]?.appendNoMistakes === true };
+    }
+
     // Validate saved selections against available models (done after models load)
     let _needsValidation = selections.length > 0;
     let addBtn = null;
@@ -719,12 +723,12 @@ async function showModelSelector() {
           row.appendChild(mask);
         } else if (filtered.length >= 5) {
           const picker = _buildSearchablePicker(filtered, sel, idx, (chosen) => {
-            selections[idx] = chosen;
+            replaceLaneModel(idx, chosen);
             _remindShuffle();
           });
           if (!selections[idx]) {
             const fallback = filtered[Math.min(idx, filtered.length - 1)];
-            selections[idx] = { model: fallback.id, endpoint: fallback.url, endpointId: fallback.endpointId, name: fallback.name };
+            replaceLaneModel(idx, { model: fallback.id, endpoint: fallback.url, endpointId: fallback.endpointId, name: fallback.name });
           }
           row.appendChild(picker);
         } else {
@@ -741,11 +745,23 @@ async function showModelSelector() {
             select.appendChild(optEl);
           });
           select.addEventListener('change', () => {
-            try { selections[idx] = JSON.parse(select.value); } catch (e) { console.warn('Compare model select parse failed:', e); }
+            try { replaceLaneModel(idx, JSON.parse(select.value)); } catch (e) { console.warn('Compare model select parse failed:', e); }
             _remindShuffle();
           });
           try { if (!selections[idx]) selections[idx] = JSON.parse(select.value); } catch (e) { console.warn('Compare model init parse failed:', e); }
           row.appendChild(select);
+        }
+
+        if (state._compareMode === 'agent') {
+          const label = document.createElement('label');
+          label.style.cssText = 'display:inline-flex;align-items:center;gap:4px;cursor:pointer;';
+          const toggle = document.createElement('input');
+          toggle.type = 'checkbox';
+          toggle.checked = selections[idx]?.appendNoMistakes === true;
+          toggle.setAttribute('aria-label', 'Append “no mistakes.” to lane ' + _slotChar(idx));
+          toggle.addEventListener('change', () => { selections[idx].appendNoMistakes = toggle.checked; });
+          label.append(toggle, 'Append “no mistakes.”');
+          row.appendChild(label);
         }
 
         // Research mode: search provider picker next to model
@@ -1156,7 +1172,7 @@ async function showModelSelector() {
                 const timeoutPromise = new Promise(r => setTimeout(() => r({ status: 'timeout', error: 'Swap timed out' }), 10000));
                 const probeResult = await Promise.race([probePromise, timeoutPromise]);
                 if (probeResult.status === 'ok') {
-                  selections[i] = { model: replacement.id, endpoint: replacement.url, endpointId: replacement.endpointId, name: replacement.name };
+                  replaceLaneModel(i, { model: replacement.id, endpoint: replacement.url, endpointId: replacement.endpointId, name: replacement.name });
                   usedModels.add(replacement.id);
                   if (row && row._waveInterval) { clearInterval(row._waveInterval); row._waveInterval = null; }
                   _updateRow(i, probeResult);
@@ -1317,7 +1333,7 @@ async function showModelSelector() {
           const exact = models.find(m => m.id === sel.model && m.url === sel.endpoint);
           if (exact) return { ...sel, endpoint: exact.url, endpointId: exact.endpointId, endpointName: exact.endpointName || sel.endpointName || '' };
           const byId = models.find(m => m.id === sel.model);
-          if (byId) return { model: byId.id, endpoint: byId.url, endpointId: byId.endpointId, name: byId.name, endpointName: byId.endpointName || '' };
+          if (byId) return { ...sel, model: byId.id, endpoint: byId.url, endpointId: byId.endpointId, name: byId.name, endpointName: byId.endpointName || '' };
           return null;
         });
         // Keep nulls in place so slot positions are preserved

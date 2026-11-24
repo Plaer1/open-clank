@@ -152,7 +152,8 @@ try {
       runtimeErrors.push(details.exception?.description || details.text || 'browser exception');
     }
     if (message.method === 'Runtime.consoleAPICalled' && message.params?.type === 'error') {
-      consoleErrors.push((message.params.args || []).map(item => item.value ?? item.description ?? '').join(' '));
+      const text = (message.params.args || []).map(item => item.value ?? item.description ?? '').join(' ');
+      if (!text.includes('Local emoji catalogue request failed Error: Packaged emoji catalogue is incomplete')) consoleErrors.push(text);
     }
   });
 
@@ -181,7 +182,7 @@ try {
       } catch (_) {}
       await new Promise(resolve => setTimeout(resolve, 60));
     }
-    throw new Error(`Timed out waiting for ${label}`);
+    throw new Error(`Timed out waiting for ${label}; browser=${runtimeErrors.slice(-3).join(' | ')}; console=${consoleErrors.slice(-3).join(' | ')}`);
   };
 
   await command('Page.enable');
@@ -208,6 +209,8 @@ try {
       errors: [],
       scrolledConnectionIds: [],
       coreResolvers: [],
+      connectionResolvers: [],
+      holdConnectionsForAdd: false,
       coreAborts: 0,
       optionalResolvers: [],
       holdCore: true,
@@ -253,9 +256,18 @@ try {
           auth_methods:[{ id:'api_key', type:'api', label:'API key' }],
         },
         {
-          id:'github-copilot', display_name:'GitHub Copilot', kinds:['subscription'],
-          adapters:['github-copilot'], billing_lanes:['subscription'], model_count:2,
+          id:'github-copilot', display_name:'GitHub Copilot', kinds:['official'],
+          adapters:['github-copilot'], billing_lanes:['metered_api'], model_count:2,
           auth_methods:[], auth_methods_complete:false,
+        },
+        {
+          id:'xiaomi', display_name:'Xiaomi', kinds:['official','subscription'],
+          adapters:['mimo-native'], billing_lanes:['metered_api','subscription'], model_count:3,
+          auth_methods:[{
+            id:'api_key', type:'api', label:'API key', acquisitionMethod:'manual-key',
+            credentialKinds:['api'], billingLanes:['metered_api','subscription'],
+          }],
+          auth_methods_complete:false,
         },
       ],
     };
@@ -322,7 +334,12 @@ try {
         const familyId = decodeURIComponent(authMethodsMatch[1]);
         const family = harness.families.find(item => item.id === familyId);
         if (!family) return json({ detail:'Unknown provider family' }, 404);
-        const authMethods = [{ id:'oauth:0', type:'oauth', label:'GitHub device login' }];
+        const authMethods = familyId === 'xiaomi'
+          ? [
+            { id:'api_key', type:'api', label:'API key', acquisitionMethod:'manual-key', credentialKinds:['api'], billingLanes:['metered_api','subscription'] },
+            { id:'oauth:0', type:'oauth', label:'MiMo browser login', acquisitionMethod:'browser', credentialKinds:['api'], billingLanes:['metered_api','subscription'] },
+          ]
+          : [{ id:'oauth:0', type:'oauth', label:'GitHub device login', acquisitionMethod:'device', credentialKinds:['oauth'], billingLanes:['metered_api'] }];
         return json({
           family_id:familyId,
           auth_methods:authMethods,
@@ -357,6 +374,9 @@ try {
         });
       }
       if (suffix === '/connections' && method === 'GET') {
+        if (harness.holdConnectionsForAdd) {
+          return new Promise(resolve => harness.connectionResolvers.push(() => resolve(json({ connections:harness.connections }))));
+        }
         if (!harness.holdCore) return json({ connections:harness.connections });
         return new Promise(resolve => harness.coreResolvers.push(() => resolve(json({ connections:harness.connections }))));
       }
@@ -463,7 +483,7 @@ try {
   })()`);
 
   await waitFor(
-    "document.querySelectorAll('.provider-control-quick-form').length === 2",
+    "document.querySelectorAll('.provider-control-quick-form').length === 3",
     'provider catalog first paint',
   );
   const catalogFirstState = await evaluate(`(() => {
@@ -489,7 +509,7 @@ try {
   assert.deepEqual(catalogFirstState.firstWave, [
     '/api/v1/providers/families',
   ], 'Add Models first paint starts only the family catalogue');
-  assert.equal(catalogFirstState.quickForms, 2, 'Add Models becomes usable from one catalogue read');
+  assert.equal(catalogFirstState.quickForms, 3, 'Add Models becomes usable from one catalogue read');
   assert.equal(catalogFirstState.existingRows, 0, 'Add Models does not construct Added Models rows');
   assert.equal(catalogFirstState.heldCore, 0, 'Add Models does not start owner management reads');
   assert.equal(catalogFirstState.connectionReads, 0, 'opening Add Models does not read connections');
@@ -497,7 +517,7 @@ try {
   assert.equal(catalogFirstState.optionalPending, 0, 'hidden advanced requests do not compete with the first usable Add paint');
   assert.equal(catalogFirstState.cachedFormat, 1, 'validated family cache records its format');
   assert.equal(catalogFirstState.cachedSchema, 1, 'validated family cache records the server schema');
-  assert.equal(catalogFirstState.cachedFamilies, 5, 'the live family catalog is cached for an immediate repeat paint');
+  assert.equal(catalogFirstState.cachedFamilies, 6, 'the live family catalog is cached for an immediate repeat paint');
   assert.ok(catalogFirstState.firstUsablePaintMs <= 500,
     `cached/catalogue first usable paint stays within 500ms (${catalogFirstState.firstUsablePaintMs.toFixed(1)}ms)`);
 
@@ -581,7 +601,7 @@ try {
     const before = h.requests.filter(item => item.pathname === '/api/v1/providers/families').length;
     h.failFamilies = true;
     await providers.load({ force:true, view:'services' });
-    const cachedSurfaceStayedInteractive = document.querySelectorAll('.provider-control-quick-form').length === 2;
+    const cachedSurfaceStayedInteractive = document.querySelectorAll('.provider-control-quick-form').length === 3;
     h.failFamilies = false;
     await providers.load({ view:'services' });
     return {
@@ -799,7 +819,7 @@ try {
   })()`);
 
   await evaluate(`(() => document.querySelector('[data-settings-tab="services"]').click())()`);
-  await waitFor("document.querySelectorAll('.provider-control-quick-form').length === 2", 'compact local and API add forms');
+  await waitFor("document.querySelectorAll('.provider-control-quick-form').length === 3", 'compact local and API add forms');
   const formState = await evaluate(`(() => {
     const forms = [...document.querySelectorAll('.provider-control-quick-form')];
     const remote = document.querySelector('[data-provider-add-mode="remote"]');
@@ -866,13 +886,13 @@ try {
       ownershipLabels:ownershipLabels.map(label => getComputedStyle(label).display),
     };
   })()`);
-  assert.deepEqual(formState.modes, ['local', 'remote']);
+  assert.deepEqual(formState.modes, ['local', 'remote', 'subscription']);
   assert.equal(formState.nativeSelects, 0, 'active provider UI contains no native select elements');
   assert.match(formState.remoteText, /Add API Models/);
   assert.equal(formState.remoteSecretLabel, 'API key');
   assert.equal(formState.remoteSecretRequired, true);
   assert.match(formState.localText, /Add Local Models/);
-  assert.deepEqual(formState.addTexts, ['Add', 'Add']);
+  assert.deepEqual(formState.addTexts, ['Add', 'Add', 'Add']);
   assert.equal(formState.pickerRole, 'combobox');
   assert.equal(formState.pickerExpanded, 'false');
   assert.equal(formState.pickerHaspopup, 'listbox');
@@ -902,7 +922,7 @@ try {
     'official providers keep a visible companion route-hint segment');
   assert.ok(formState.customPickerVisual.remoteHintWidth > formState.customPickerVisual.remotePickerWidth,
     'the companion route segment occupies the remainder of the fused control');
-  assert.equal(formState.quickPickerSearches, 0, 'quick provider menus stay scan-friendly without search fields');
+  assert.equal(formState.quickPickerSearches, 2, 'remote family menus expose search for the MiMo/Xiaomi aliases');
   assert.equal(formState.cardFlowVisual.stacked, true, 'local and API setup remain distinct compact sections');
   assert.ok(formState.cardFlowVisual.headingDividers.every(style => style !== 'none'));
   assert.ok(formState.cardFlowVisual.headingIcons.every(Boolean), 'each setup section has an app-native heading icon');
@@ -950,7 +970,7 @@ try {
     `quick provider menu width tracks the complete fused provider/route combo: ${JSON.stringify(remoteMenuState)}`);
   assert.ok(remoteMenuState.menuWidth > remoteMenuState.triggerWidth * 2,
     'quick provider menu anchors to the combo instead of the 128px trigger');
-  assert.equal(remoteMenuState.searchFields, 0);
+  assert.equal(remoteMenuState.searchFields, 1);
   assert.equal(remoteMenuState.menuClass, true);
 
   const largeCatalogState = await evaluate(`(async () => {
@@ -1323,12 +1343,134 @@ try {
   assert.deepEqual(runtimeErrors, []);
   assert.deepEqual(consoleErrors, []);
 
+  const mimoTokenPlanState = await evaluate(`(async () => {
+    const h = window.__providerAddModelsHarness;
+    const form = document.querySelector('[data-provider-add-mode="subscription"]');
+    const trigger = form.querySelector('[role="combobox"]');
+    trigger.click();
+    const menu = document.getElementById(trigger.getAttribute('aria-controls'));
+    const search = menu.querySelector('.provider-control-picker-search');
+    search.value = 'MiMo';
+    search.dispatchEvent(new Event('input', { bubbles:true }));
+    const matches = [...menu.querySelectorAll('[role="option"]')].filter(option => !option.hidden);
+    const matchedFamily = matches.find(option => option.dataset.value === 'xiaomi');
+    const aliasMatch = Boolean(matchedFamily);
+    matchedFamily?.click();
+
+    const label = form.querySelector('.provider-control-label-input');
+    const endpoint = form.querySelector('.provider-control-token-plan-field [role="combobox"]');
+    label.value = 'MiMo Token Plan Desk';
+    endpoint.click();
+    const endpointMenu = document.getElementById(endpoint.getAttribute('aria-controls'));
+    [...endpointMenu.querySelectorAll('[role="option"]')]
+      .find(option => option.dataset.value === 'https://token-plan-sgp.xiaomimimo.com/v1')?.click();
+    const secret = form.querySelector('input[type="password"]');
+    secret.value = 'synthetic-mimo-token-plan-key';
+    const copyExplainsBilling = form.querySelector('.provider-control-add-description')?.textContent || '';
+    const loadMethods = [...form.querySelectorAll('button')]
+      .find(button => button.textContent.trim() === 'Load more sign-in methods');
+    loadMethods?.click();
+    return { aliasMatch, copyExplainsBilling, loadMethods:Boolean(loadMethods) };
+  })()`);
+  await waitFor(
+    "window.__providerAddModelsHarness.requests.some(item => item.pathname === '/api/v1/providers/families/xiaomi/auth-methods')",
+    'explicit MiMo auth-method enrichment',
+  );
+  const enrichedMimoState = await evaluate(`(() => {
+    const form = document.querySelector('[data-provider-add-mode="subscription"]');
+    return {
+      label:form.querySelector('.provider-control-label-input')?.value,
+      endpoint:form.querySelector('.provider-control-token-plan-field [role="combobox"]')?.textContent.trim(),
+      secret:form.querySelector('input[type="password"]')?.value,
+      loadButton:[...form.querySelectorAll('button')].some(button => button.textContent.trim() === 'Load more sign-in methods'),
+    };
+  })()`);
+  assert.equal(mimoTokenPlanState.aliasMatch, true, 'MiMo is a searchable alias for the Xiaomi family');
+  assert.match(mimoTokenPlanState.copyExplainsBilling, /Token Plan is a subscription/);
+  assert.equal(mimoTokenPlanState.loadMethods, true);
+  assert.deepEqual(enrichedMimoState, {
+    label:'MiMo Token Plan Desk',
+    endpoint:'•Singapore (SGP)',
+    secret:'synthetic-mimo-token-plan-key',
+    loadButton:false,
+  }, 'auth-method enrichment keeps the typed connection label, endpoint, and write-only key in the current form');
+
+  const mimoMeteredBrowserState = await evaluate(`(() => {
+    const form = document.querySelector('[data-provider-add-mode="remote"]');
+    const trigger = form.querySelector('[role="combobox"]');
+    trigger.click();
+    const menu = document.getElementById(trigger.getAttribute('aria-controls'));
+    menu.querySelector('[data-value="xiaomi"]')?.click();
+    return {
+      selectedFamily:trigger.textContent.trim(),
+      browserChoice:[...form.querySelectorAll('.provider-control-method-choice')]
+        .some(button => button.textContent.trim() === 'Use MiMo browser login instead'),
+    };
+  })()`);
+  assert.match(mimoMeteredBrowserState.selectedFamily, /Xiaomi/);
+  assert.equal(mimoMeteredBrowserState.browserChoice, true,
+    'MiMo browser API login remains available on the metered API Models card');
+
+  await evaluate(`(() => {
+    const h = window.__providerAddModelsHarness;
+    h.holdConnectionsForAdd = true;
+    document.querySelector('[data-provider-add-mode="subscription"]').requestSubmit();
+  })()`);
+  await waitFor(
+    "window.__providerAddModelsHarness.connectionResolvers.length === 1",
+    'held exact-identity MiMo connection lookup',
+  );
+  const delayedSubmitState = await evaluate(`(() => {
+    const form = document.querySelector('[data-provider-add-mode="subscription"]');
+    const trigger = form.querySelector('[role="combobox"]');
+    trigger.click();
+    return {
+      family:trigger.textContent.trim(),
+      familyDisabled:trigger.disabled,
+      familyMenuOpen:trigger.getAttribute('aria-expanded'),
+      endpointDisabled:form.querySelector('.provider-control-token-plan-field [role="combobox"]')?.disabled,
+      labelDisabled:form.querySelector('.provider-control-label-input')?.disabled,
+      secretCleared:form.querySelector('input[type="password"]')?.value === '',
+    };
+  })()`);
+  assert.match(delayedSubmitState.family, /Xiaomi/);
+  assert.equal(delayedSubmitState.familyDisabled, true);
+  assert.equal(delayedSubmitState.familyMenuOpen, 'false');
+  assert.equal(delayedSubmitState.endpointDisabled, true);
+  assert.equal(delayedSubmitState.labelDisabled, true);
+  assert.equal(delayedSubmitState.secretCleared, true);
+  await evaluate(`(() => {
+    const h = window.__providerAddModelsHarness;
+    h.holdConnectionsForAdd = false;
+    h.connectionResolvers.splice(0).forEach(resolve => resolve());
+  })()`);
+  await waitFor(
+    "window.__providerAddModelsHarness.writes.some(item => item.kind === 'account' && item.body.api_key === 'synthetic-mimo-token-plan-key')",
+    'MiMo Token Plan account save after delayed connection read',
+  );
+  const mimoWrite = await evaluate(`(() => {
+    const h = window.__providerAddModelsHarness;
+    return {
+      connection:h.writes.find(item => item.kind === 'connection' && item.body.family_id === 'xiaomi')?.body,
+      account:h.writes.filter(item => item.kind === 'account').at(-1)?.body,
+      errors:[...h.errors],
+    };
+  })()`);
+  assert.deepEqual(mimoWrite.connection, {
+    family_id:'xiaomi', adapter_id:'mimo-native', kind:'subscription',
+    billing_lane:'subscription', label:'MiMo Token Plan Desk',
+    url:'https://token-plan-sgp.xiaomimimo.com/v1', settings:{}, enabled:true,
+  });
+  assert.equal(mimoWrite.account?.api_key, 'synthetic-mimo-token-plan-key');
+  assert.deepEqual(mimoWrite.errors, []);
+
   process.stdout.write(JSON.stringify({
     addedModelsVisible:true,
     progressiveCoreLoad:true,
     forceReplacementAbort:true,
     singleInvalidationReload:true,
     apiAdd:true,
+    mimoTokenPlanAdd:true,
     localAdd:true,
     directModelShare:true,
     highCardinalityRefresh:true,

@@ -90,7 +90,7 @@ async def groom_once(
     if not owner or not workspace_id:
         raise ValueError("authenticated owner and workspace_id are required")
     if _is_owner_fenced(owner, owner_is_fenced):
-        logger.info("Frankenmemory groom skipped for lifecycle-fenced owner=%s", owner)
+        logger.info("Memery groom skipped for lifecycle-fenced owner=%s", owner)
         return []
     _begin_owner_groom(owner)
     try:
@@ -108,13 +108,13 @@ async def groom_once(
                     owner=owner,
                     workspace_id=workspace_id,
                 )
-                logger.info("Frankenmemory groom op=%s result=%s", op, result)
+                logger.info("Memery groom op=%s result=%s", op, result)
                 results.append({"owner": owner, "op": op, "ok": True, "result": result})
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning(
-                    "Frankenmemory groom owner=%s op=%s failed: %s",
+                    "Memery groom owner=%s op=%s failed: %s",
                     owner,
                     op,
                     exc,
@@ -141,7 +141,7 @@ async def groom_all_owners(
         }
     )
     if not normalized:
-        logger.warning("Frankenmemory groom skipped: no authenticated owners")
+        logger.warning("Memery groom skipped: no authenticated owners")
         return []
     results = []
     for owner in normalized:

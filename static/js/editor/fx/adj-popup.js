@@ -14,7 +14,7 @@
  *     → small chooser menu (B/C, H/S, Levels, Color Balance)
  *     → openAdjPopup(layer, type, anchor[, existingAdj])
  *       → buildAdjBody renders the type-specific sliders + histogram
- *       → sliders / histogram handles mutate `layer._stagedAdj.params`
+ *       → sliders / histogram handles mutate `popEl._stagedAdj.params`
  *       → composite() previews live via the adjLayers stack
  *       → Apply commits to layer.adjLayers + saveState() + renderLayerPanel()
  *       → Cancel / Esc drops the staged state
@@ -38,8 +38,8 @@
  *   minimiseAdjPopup,
  * }}
  */
-import { state } from '../state.js';
-import modalManager from '../../modalManager.js';
+import { state as legacyState } from '../state.js';
+import legacyModalManager from '../../modalManager.js';
 import {
   ADJ_ICONS,
   adjLayerLabel,
@@ -47,9 +47,20 @@ import {
 } from '../layer-helpers.js';
 import { drawHistogram } from './histogram.js';
 
-export function createAdjPopupSystem({ composite, saveState, renderLayerPanel }) {
+export function createAdjPopupSystem({ composite, saveState, renderLayerPanel, markSceneChanged = () => {}, withSceneMutation = (_name, fn) => fn(), captureOrigin = () => null, originCurrent = () => true, onRefused = () => {}, state = legacyState, root = null, lifetime = null, modalManager = null }) {
+  if (state !== legacyState && (!root || !lifetime || !modalManager)) throw new TypeError('isolated adjustment popup requires ownership');
+  modalManager ||= legacyModalManager;
+  const ownerRoot = root || state.container;
+  const doc = ownerRoot?.ownerDocument || document, win = doc.defaultView || window;
+  const portal = state === legacyState ? doc.body : ownerRoot;
+  let dock = null, backdrop = null, frame = null, activePreview = null;
+  const minimized = new Set(), removers = [];
+  const listen = (node, type, fn, options) => { if (!node) return; const wrapped = (...args) => { if (!lifetime?.disposed && node.isConnected) fn(...args); }; node.addEventListener(type, wrapped, options); const remove = () => node.removeEventListener(type, wrapped, options); remove.node = node; removers.push(remove); };
+  const removeOwned = owner => { for (let i = removers.length - 1; i >= 0; i--) if (removers[i].node && (removers[i].node === owner || owner.contains(removers[i].node))) removers.splice(i, 1)[0](); };
+  lifetime?.add(() => { for (const remove of removers.splice(0)) remove(); closeFxMenu(); closeAdjPopup(); closeFxPopup(); for (const pop of minimized) { if (pop._escHandler) doc.removeEventListener('keydown', pop._escHandler, true); if (pop._modalId) modalManager.unregister(pop._modalId); pop.remove(); } minimized.clear(); dock?.remove(); if (frame != null) win.cancelAnimationFrame(frame); state.adjRafPending = false; });
   function suppressLayerGhostTap() {
-    window.__geSuppressLayerTapUntil = Date.now() + 650;
+    if (state === legacyState) win.__geSuppressLayerTapUntil = Date.now() + 650;
+    else state.suppressLayerTapUntil = Date.now() + 650;
   }
 
   function closeFxPopup() {
@@ -61,6 +72,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
   }
 
   function ensureAdjustments(layer) {
+    const before = JSON.stringify(layer.adjustments ?? null);
     // Older layers (loaded from saved projects) may be missing the
     // adjustments structure entirely. Pad with identity values.
     if (!layer.adjustments) layer.adjustments = {};
@@ -75,32 +87,35 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
       midtones: { r: 0, g: 0, b: 0 },
       highlights: { r: 0, g: 0, b: 0 },
     };
+    if (JSON.stringify(a) !== before) markSceneChanged();
     return a;
   }
 
   // Floating dock for minimised FX popups — lives at bottom-right.
   function ensureFxDock() {
-    let dock = document.getElementById('ge-fx-dock');
-    if (!dock) {
-      dock = document.createElement('div');
-      dock.id = 'ge-fx-dock';
-      document.body.appendChild(dock);
+    if (dock?.isConnected) return dock;
+    if (!dock?.isConnected) {
+      dock = doc.createElement('div');
+      if (state === legacyState) dock.id = 'ge-fx-dock';
+      else dock.className = 'ge-fx-dock';
+      portal.appendChild(dock);
     }
     return dock;
   }
 
   function closeFxMenu() {
     if (state.fxMenuEl) {
+      removeOwned(state.fxMenuEl);
       if (state.fxMenuEl._escHandler) {
-        document.removeEventListener('keydown', state.fxMenuEl._escHandler, true);
+        doc.removeEventListener('keydown', state.fxMenuEl._escHandler, true);
       }
       if (state.fxMenuEl._awayHandler) {
-        document.removeEventListener('pointerdown', state.fxMenuEl._awayHandler, true);
+        doc.removeEventListener('pointerdown', state.fxMenuEl._awayHandler, true);
       }
       state.fxMenuEl.remove();
       state.fxMenuEl = null;
     }
-    document.getElementById('ge-fx-menu-backdrop')?.remove();
+    if (backdrop) { removeOwned(backdrop); backdrop.remove(); backdrop = null; }
   }
 
   function openFxPopup(layer, anchorEl) {
@@ -110,24 +125,24 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     // element still carries a now-recycled `_layerId`) used to make
     // this guard fire and silently swallow the first click. Verify the
     // element is still in the document before treating it as "open".
-    if (state.fxMenuEl && document.body.contains(state.fxMenuEl) &&
+    if (state.fxMenuEl && portal.contains(state.fxMenuEl) &&
         state.fxMenuEl._layerId === layer.id) { closeFxMenu(); return; }
     closeFxMenu();
-    if (!layer.adjLayers) layer.adjLayers = [];
-    const backdrop = document.createElement('div');
-    backdrop.id = 'ge-fx-menu-backdrop';
+    backdrop = doc.createElement('div');
+    if (state === legacyState) backdrop.id = 'ge-fx-menu-backdrop';
+    else backdrop.className = 'ge-fx-menu-backdrop';
     backdrop.style.cssText = 'position:fixed;inset:0;z-index:10001;background:transparent;pointer-events:auto;touch-action:none;';
-    document.body.appendChild(backdrop);
-    backdrop.addEventListener('pointerdown', (ev) => {
+    portal.appendChild(backdrop);
+    listen(backdrop, 'pointerdown', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       closeFxMenu();
     }, true);
-    backdrop.addEventListener('click', (ev) => {
+    listen(backdrop, 'click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
     }, true);
-    const menu = document.createElement('div');
+    const menu = doc.createElement('div');
     menu.className = 'ge-fx-menu ge-frosted';
     menu._layerId = layer.id;
     menu._ignoreActivationUntil = Date.now() + 350;
@@ -142,7 +157,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     menu.innerHTML = items.map(i =>
       `<button class="ge-fx-menu-item" data-fx-type="${i.type}"><span class="ge-fx-menu-icon">${ADJ_ICONS[i.type] || ''}</span><span>${i.label}</span></button>`
     ).join('');
-    document.body.appendChild(menu);
+    portal.appendChild(menu);
     state.fxMenuEl = menu;
     const activateMenuItem = (btn, ev) => {
       ev?.preventDefault?.();
@@ -154,21 +169,21 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
       closeFxMenu();
       openAdjPopup(layer, type, anchorEl);
     };
-    menu.addEventListener('pointerdown', (ev) => {
+    listen(menu, 'pointerdown', (ev) => {
       ev.stopPropagation();
     }, true);
-    menu.addEventListener('pointerup', (ev) => {
+    listen(menu, 'pointerup', (ev) => {
       const btn = ev.target.closest('.ge-fx-menu-item');
       if (btn) activateMenuItem(btn, ev);
       else ev.stopPropagation();
     }, true);
-    menu.addEventListener('click', (ev) => {
+    listen(menu, 'click', (ev) => {
       const btn = ev.target.closest('.ge-fx-menu-item');
       if (btn) activateMenuItem(btn, ev);
       else ev.stopPropagation();
     }, true);
 
-    const isMobile = window.matchMedia('(max-width: 820px)').matches;
+    const isMobile = win.matchMedia('(max-width: 820px)').matches;
     const r = isMobile ? null : anchorEl?.getBoundingClientRect?.();
     if (isMobile) {
       menu.style.left = '';
@@ -180,33 +195,34 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
       const menuH = menu.offsetHeight || 200;
       const rightX = r.right + 4;
       const leftX  = r.left - menuW - 4;
-      const fitsRight = rightX + menuW <= window.innerWidth - 8;
+      const fitsRight = rightX + menuW <= win.innerWidth - 8;
       let left = fitsRight ? rightX : Math.max(8, leftX);
-      left = Math.min(window.innerWidth - menuW - 8, Math.max(8, left));
+      left = Math.min(win.innerWidth - menuW - 8, Math.max(8, left));
       menu.style.left = left + 'px';
       let top = r.top;
-      if (top + menuH > window.innerHeight - 8) top = r.bottom - menuH;
-      top = Math.min(window.innerHeight - menuH - 8, Math.max(8, top));
+      if (top + menuH > win.innerHeight - 8) top = r.bottom - menuH;
+      top = Math.min(win.innerHeight - menuH - 8, Math.max(8, top));
       menu.style.top = top + 'px';
     }
     menu.querySelectorAll('.ge-fx-menu-item').forEach(btn => {
       const activate = (ev) => {
         activateMenuItem(btn, ev);
       };
-      btn.addEventListener('pointerup', activate);
-      btn.addEventListener('click', activate);
+      listen(btn, 'pointerup', activate);
+      listen(btn, 'click', activate);
     });
     // Esc closes the menu, capture-phase + stopPropagation so the
     // editor overlay's own Esc handler doesn't fire too.
     const onKey = (ev) => {
+      if (state !== legacyState && !ownerRoot.contains(doc.activeElement)) return;
       if (ev.key === 'Escape') {
         ev.preventDefault();
         ev.stopPropagation();
         closeFxMenu();
-        document.removeEventListener('keydown', onKey, true);
+        doc.removeEventListener('keydown', onKey, true);
       }
     };
-    document.addEventListener('keydown', onKey, true);
+    doc.addEventListener('keydown', onKey, true);
     menu._escHandler = onKey;
   }
 
@@ -223,10 +239,14 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     if (state.adjPopupEl === pop) state.adjPopupEl = null;
     const popupId = pop._modalId || `ge-fx-popup-${Math.random().toString(36).slice(2, 8)}`;
     pop._modalId = popupId;
+    minimized.add(pop);
+    if (activePreview === pop) { if (frame != null) { win.cancelAnimationFrame(frame); frame = null; state.adjRafPending = false; } activePreview = null; composite(); }
     modalManager.register(popupId, {
       label: adjLayerLabel(type),
       icon: ADJ_ICONS[type] || '',
       restoreFn: () => {
+        if (lifetime?.disposed) return;
+        minimized.delete(pop);
         pop.style.left = pop._stashLeft + 'px';
         pop.style.top  = pop._stashTop  + 'px';
         pop.style.display = '';
@@ -235,11 +255,11 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
           state.adjPopupEl = other;
           closeAdjPopup();
         }
-        state.adjPopupEl = pop;
+        state.adjPopupEl = pop; activePreview = pop; composite();
       },
       closeFn: () => {
-        state.adjPopupEl = pop;
-        closeAdjPopup();
+        minimized.delete(pop);
+        closeAdjPopup(pop);
         modalManager.unregister(popupId);
       },
     });
@@ -252,25 +272,17 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     openAdjPopup(layer, adj.type, anchorEl, adj);
   }
 
-  function closeAdjPopup() {
-    if (state.adjPopupEl) {
-      suppressLayerGhostTap();
-      const layer = state.adjPopupEl._layer;
-      if (layer) {
-        if (layer._stagedAdj) layer._stagedAdj = null;
-        if (layer._editingAdjId) layer._editingAdjId = null;
-        layer._adjFinalKey = null;
-        composite();
-      }
-      if (state.adjPopupEl._escHandler) {
-        document.removeEventListener('keydown', state.adjPopupEl._escHandler, true);
-      }
-      if (state.adjPopupEl._modalId) {
-        try { modalManager.unregister(state.adjPopupEl._modalId); } catch {}
-      }
-      state.adjPopupEl.remove();
-      state.adjPopupEl = null;
-    }
+  function closeAdjPopup(pop = state.adjPopupEl) {
+    if (!pop) return;
+    removeOwned(pop);
+    if (activePreview === pop && frame != null) { win.cancelAnimationFrame(frame); frame = null; state.adjRafPending = false; }
+    suppressLayerGhostTap();
+    if (activePreview === pop) { activePreview = null; composite(); }
+    if (pop._escHandler) doc.removeEventListener('keydown', pop._escHandler, true);
+    if (pop._modalId) { try { modalManager.unregister(pop._modalId); } catch {} }
+    pop._preview = null;
+    pop.remove();
+    if (state.adjPopupEl === pop) state.adjPopupEl = null;
   }
 
   function openAdjPopup(layer, type, anchorEl, existingAdj) {
@@ -281,14 +293,12 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     const startParams = editing
       ? JSON.parse(JSON.stringify(existingAdj.params))
       : defaultAdjParams(type);
-    layer._stagedAdj = { type, params: startParams };
-    if (editing) {
-      // Hide the existing sub-layer from the render stack so the
-      // staged preview shows correctly without doubling the effect.
-      layer._editingAdjId = existingAdj.id;
-      layer._adjFinalKey = null;
-    }
-    const pop = document.createElement('div');
+    const pop = doc.createElement('div');
+    pop._stagedAdj = { type, params: startParams };
+    pop._origin = captureOrigin();
+    pop._editingId = existingAdj?.id || null;
+    pop._preview = {staged:pop._stagedAdj, editingId:pop._editingId, revision:0, cache:{}};
+    activePreview = pop;
     pop.className = 'ge-adj-popup ge-frosted';
     pop.style.zIndex = '10003';
     pop._layer = layer;
@@ -309,7 +319,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
       <button class="ge-btn ge-btn-sm ge-btn-primary ge-adj-apply-btn" data-adj-action="ok">Apply</button>
     </div>
     `;
-    document.body.appendChild(pop);
+    portal.appendChild(pop);
     state.adjPopupEl = pop;
 
     const r = anchorEl?.getBoundingClientRect?.();
@@ -319,10 +329,10 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     if (r) {
       const rightX = r.right + 8;
       const leftX  = r.left - pw - 8;
-      const fitsRight = rightX + pw <= window.innerWidth - 8;
+      const fitsRight = rightX + pw <= win.innerWidth - 8;
       left = fitsRight ? rightX : Math.max(8, leftX);
     } else {
-      left = (window.innerWidth - pw) / 2;
+      left = (win.innerWidth - pw) / 2;
     }
     const top = r ? Math.max(8, r.top - 20) : 60;
     pop.style.left = left + 'px';
@@ -331,13 +341,13 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     const body = pop.querySelector('[data-adj-body]');
     buildAdjBody(layer, type, body, pop);
 
-    pop.querySelector('.ge-adj-close')?.addEventListener('click', closeAdjPopup);
-    pop.querySelector('.ge-adj-min')?.addEventListener('click', () => minimiseAdjPopup(pop));
+    listen(pop.querySelector('.ge-adj-close'), 'click', () => closeAdjPopup(pop));
+    listen(pop.querySelector('.ge-adj-min'), 'click', () => minimiseAdjPopup(pop));
     // Drag by head — anywhere except buttons. Mobile pins via !important
     // rules; setProperty with 'important' lets inline styles win during drag.
     const head = pop.querySelector('[data-adj-drag]');
     if (head) {
-      const isMobile = window.matchMedia('(max-width: 820px)').matches;
+      const isMobile = win.matchMedia('(max-width: 820px)').matches;
       const setPos = (x, y) => {
         if (isMobile) {
           pop.style.setProperty('left', x + 'px', 'important');
@@ -352,7 +362,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
         }
       };
       head.style.touchAction = 'none';
-      head.addEventListener('pointerdown', (e) => {
+      listen(head, 'pointerdown', (e) => {
         if (e.target.closest('button')) return;
         e.preventDefault();
         const startX = e.clientX, startY = e.clientY;
@@ -360,8 +370,8 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
         head.setPointerCapture(e.pointerId);
         head.style.cursor = 'grabbing';
         const onMove = (ev) => {
-          const nx = Math.max(0, Math.min(window.innerWidth - 60, r0.left + (ev.clientX - startX)));
-          const ny = Math.max(0, Math.min(window.innerHeight - 30, r0.top  + (ev.clientY - startY)));
+          const nx = Math.max(0, Math.min(win.innerWidth - 60, r0.left + (ev.clientX - startX)));
+          const ny = Math.max(0, Math.min(win.innerHeight - 30, r0.top  + (ev.clientY - startY)));
           setPos(nx, ny);
         };
         const onUp = () => {
@@ -372,67 +382,60 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
         };
         head.addEventListener('pointermove', onMove);
         head.addEventListener('pointerup', onUp);
+        const cleanup = () => { try { onUp(); } catch {} head.removeEventListener('pointermove', onMove); head.removeEventListener('pointerup', onUp); }; cleanup.node = head; removers.push(cleanup);
       });
     }
     // Esc closes; capture-phase + stopPropagation so the editor overlay's
     // own Esc handler doesn't fire too.
     const onKey = (ev) => {
+      if (state.adjPopupEl !== pop || (state !== legacyState && !ownerRoot.contains(doc.activeElement))) return;
       if (ev.key === 'Escape') {
         ev.preventDefault();
         ev.stopPropagation();
-        closeAdjPopup();
-        document.removeEventListener('keydown', onKey, true);
+        closeAdjPopup(pop);
+        doc.removeEventListener('keydown', onKey, true);
       }
     };
-    document.addEventListener('keydown', onKey, true);
+    doc.addEventListener('keydown', onKey, true);
     pop._escHandler = onKey;
-    pop.querySelector('[data-adj-action="cancel"]')?.addEventListener('click', (e) => {
+    listen(pop.querySelector('[data-adj-action="cancel"]'), 'click', (e) => {
       e.preventDefault();
       e.stopPropagation();
       closeAdjPopup();
     });
-    pop.querySelector('[data-adj-action="ok"]')?.addEventListener('click', (e) => {
+    listen(pop.querySelector('[data-adj-action="ok"]'), 'click', (e) => {
       e.preventDefault();
       e.stopPropagation();
       suppressLayerGhostTap();
-      saveState(editing ? `Edit ${adjLayerLabel(type)}` : `Add ${adjLayerLabel(type)}`);
-      const params = layer._stagedAdj.params;
-      layer._stagedAdj = null;
-      if (editing) {
-        const existing = (layer.adjLayers || []).find(a => a.id === existingAdj.id);
-        if (existing) existing.params = params;
-        layer._editingAdjId = null;
-      } else {
-        if (!layer.adjLayers) layer.adjLayers = [];
-        layer.adjLayers.push({
-          id: 'adj-' + Math.random().toString(36).slice(2, 9),
-          type,
-          name: adjLayerLabel(type),
-          visible: true,
-          opacity: 1,
-          params,
-        });
-      }
-      layer._adjFinalKey = null;
-      composite();
-      renderLayerPanel();
+      const current = () => !lifetime?.disposed && originCurrent(pop._origin) && state.layers.includes(layer) && (!editing || layer.adjLayers?.includes(existingAdj));
+      if (!current()) { onRefused(); return; }
+      const accepted = withSceneMutation('adjustment-apply', () => {
+        if (!current()) return false;
+        const params = JSON.parse(JSON.stringify(pop._stagedAdj.params));
+        saveState(editing ? `Edit ${adjLayerLabel(type)}` : `Add ${adjLayerLabel(type)}`);
+        if (editing) existingAdj.params = params;
+        else { if (!layer.adjLayers) layer.adjLayers = []; layer.adjLayers.push({ id: 'adj-' + Math.random().toString(36).slice(2, 9), type, name: adjLayerLabel(type), visible: true, opacity: 1, params }); }
+        layer._adjFinalKey = null; markSceneChanged(); renderLayerPanel(); return true;
+      });
+      if (accepted !== true) { onRefused(); return; }
+
       closeAdjPopup();
     });
   }
 
   // rAF-throttled live preview while sliders are dragged.
-  function scheduleAdjRefresh(layer) {
+  function scheduleAdjRefresh(layer, pop) {
     if (state.adjRafPending) return;
     state.adjRafPending = true;
-    requestAnimationFrame(() => {
-      state.adjRafPending = false;
-      layer._adjFinalKey = null;
+    frame = win.requestAnimationFrame(() => {
+      frame = null; state.adjRafPending = false;
+      if (lifetime?.disposed || activePreview !== pop || !state.layers.includes(layer)) return;
       composite();
     });
   }
 
   function buildAdjBody(layer, type, body, popEl) {
-    const p = layer._stagedAdj.params;
+    const p = popEl._stagedAdj.params;
     const revertIcon = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
     const sliderRow = (key, label, min, max, value, suffix) => `
       <div class="ge-adj-row" data-adj-key="${key}">
@@ -462,7 +465,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
       // the user is matching levels against what they're really seeing.
       // <details> wrapper is collapsed by default on mobile to save
       // vertical space; open by default on desktop.
-      const isMobile = window.matchMedia('(max-width: 820px)').matches;
+      const isMobile = win.matchMedia('(max-width: 820px)').matches;
       body.innerHTML = `
       <details class="ge-adj-hist-details"${isMobile ? '' : ' open'}>
         <summary>Histogram</summary>
@@ -483,10 +486,10 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     `;
       const hist = body.querySelector('.ge-adj-histogram');
       drawHistogram(hist, layer);
-      wireHistogramHandles(body, layer, type);
+      wireHistogramHandles(body, layer, type, popEl);
       // Redraw histogram when the user opens the disclosure (canvas
       // dimensions are layout-dependent).
-      body.querySelector('.ge-adj-hist-details')?.addEventListener('toggle', (e) => {
+      listen(body.querySelector('.ge-adj-hist-details'), 'toggle', (e) => {
         if (e.target.open) drawHistogram(hist, layer);
       });
     } else if (type === 'color-balance') {
@@ -522,7 +525,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
         ${toneSliders(tone)}
       </div>
     `;
-      body.querySelector('.ge-adj-cb-tone-select')?.addEventListener('change', (e) => {
+      listen(body.querySelector('.ge-adj-cb-tone-select'), 'change', (e) => {
         popEl._cbTone = e.target.value;
         body.innerHTML = '';
         buildAdjBody(layer, type, body, popEl);
@@ -530,14 +533,14 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     }
     // Wire all sliders.
     body.querySelectorAll('input[type="range"]').forEach(sl => {
-      sl.addEventListener('input', () => onAdjSliderInput(layer, type, sl));
+      listen(sl, 'input', () => onAdjSliderInput(layer, type, sl, popEl));
     });
     // Per-slider revert buttons.
     body.querySelectorAll('.ge-adj-revert').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      listen(btn, 'click', (e) => {
         e.stopPropagation();
         const key = btn.dataset.revertKey;
-        revertAdjKey(layer, type, key);
+        revertAdjKey(layer, type, key, popEl);
         // Rebuild body so values + histogram refresh.
         body.innerHTML = '';
         buildAdjBody(layer, type, body, popEl);
@@ -547,9 +550,9 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
 
   // Reset a single slider key back to identity. Updates staged params
   // and triggers a composite refresh.
-  function revertAdjKey(layer, type, key) {
+  function revertAdjKey(layer, type, key, popEl) {
     const defaults = defaultAdjParams(type);
-    const p = layer._stagedAdj.params;
+    const p = popEl._stagedAdj.params;
     if (type === 'brightness-contrast' || type === 'hue-saturation') {
       p[key] = defaults[key];
     } else if (type === 'levels') {
@@ -558,15 +561,14 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
       const [tone, ch] = key.split('-');
       p[tone][ch] = defaults[tone][ch];
     }
-    layer._adjFinalKey = null;
-    composite();
+    if (activePreview === popEl) composite();
   }
 
-  function onAdjSliderInput(layer, type, sl) {
+  function onAdjSliderInput(layer, type, sl, popEl) {
     const key = sl.dataset.key;
     const raw = parseInt(sl.value, 10);
     const valEl = sl.parentElement.querySelector('.ge-adj-value');
-    const p = layer._stagedAdj.params;
+    const p = popEl._stagedAdj.params;
     let display = String(raw);
     if (type === 'brightness-contrast' || type === 'hue-saturation') {
       if (key === 'brightness' || key === 'contrast' || key === 'saturation') {
@@ -585,19 +587,19 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
       p[tone][ch] = raw;
     }
     if (valEl) valEl.textContent = display;
-    scheduleAdjRefresh(layer);
+    scheduleAdjRefresh(layer, popEl);
   }
 
   // Position the three histogram triangle handles by current staged
   // values + wire pointer drags.
-  function wireHistogramHandles(bodyEl, layer, type) {
+  function wireHistogramHandles(bodyEl, layer, type, popEl) {
     const wrap = bodyEl.querySelector('.ge-adj-hist-wrap');
     const canvas = bodyEl.querySelector('.ge-adj-histogram');
     if (!wrap || !canvas) return;
     const handles = bodyEl.querySelectorAll('.ge-adj-hist-handle');
     const placeHandles = () => {
       const w = canvas.getBoundingClientRect().width;
-      const p = layer._stagedAdj.params;
+      const p = popEl._stagedAdj.params;
       const xB = (p.inBlack  / 255) * w;
       const xW = (p.inWhite  / 255) * w;
       // Gamma handle sits at a fraction of the (xB..xW) span, mapped
@@ -614,7 +616,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     };
     placeHandles();
     handles.forEach(h => {
-      h.addEventListener('pointerdown', (e) => {
+      listen(h, 'pointerdown', (e) => {
         e.preventDefault();
         e.stopPropagation();
         h.setPointerCapture(e.pointerId);
@@ -623,7 +625,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
         const onMove = (ev) => {
           const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
           const v = Math.round((x / rect.width) * 255);
-          const p = layer._stagedAdj.params;
+          const p = popEl._stagedAdj.params;
           if (which === 'inBlack') {
             p.inBlack = Math.min(p.inWhite - 1, v);
           } else if (which === 'inWhite') {
@@ -642,15 +644,15 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
           // Update visible slider rows + value labels.
           const updateRow = (key, displayVal) => {
             const sl = bodyEl.querySelector(`input[type="range"][data-key="${key}"]`);
-            if (sl) sl.value = String(key === 'gamma' ? Math.round(layer._stagedAdj.params.gamma * 100) : layer._stagedAdj.params[key]);
+            if (sl) sl.value = String(key === 'gamma' ? Math.round(popEl._stagedAdj.params.gamma * 100) : popEl._stagedAdj.params[key]);
             const val = sl?.parentElement.querySelector('.ge-adj-value');
             if (val) val.textContent = displayVal;
           };
-          if (which === 'inBlack') updateRow('inBlack', String(layer._stagedAdj.params.inBlack));
-          if (which === 'inWhite') updateRow('inWhite', String(layer._stagedAdj.params.inWhite));
-          if (which === 'gamma')   updateRow('gamma',   layer._stagedAdj.params.gamma.toFixed(2) + 'γ');
+          if (which === 'inBlack') updateRow('inBlack', String(popEl._stagedAdj.params.inBlack));
+          if (which === 'inWhite') updateRow('inWhite', String(popEl._stagedAdj.params.inWhite));
+          if (which === 'gamma')   updateRow('gamma',   popEl._stagedAdj.params.gamma.toFixed(2) + 'γ');
           drawHistogram(canvas, layer);
-          scheduleAdjRefresh(layer);
+          scheduleAdjRefresh(layer, popEl);
         };
         const onUp = () => {
           h.releasePointerCapture(e.pointerId);
@@ -659,6 +661,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
         };
         h.addEventListener('pointermove', onMove);
         h.addEventListener('pointerup', onUp);
+        const cleanup = () => { try { onUp(); } catch {} h.removeEventListener('pointermove', onMove); h.removeEventListener('pointerup', onUp); }; cleanup.node = h; removers.push(cleanup);
       });
     });
   }
@@ -673,5 +676,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
     ensureFxDock, ensureAdjustments,
     syncFxPanelToActiveLayerIfPresent,
     minimiseAdjPopup,
+    invalidatePreview(layer) { for (const pop of [activePreview, ...minimized]) if (pop?._layer === layer && pop._preview) pop._preview.cache = {}; },
+    previewFor(layer) { if (activePreview?._layer !== layer || lifetime?.disposed || !originCurrent(activePreview._origin) || !state.layers.includes(layer)) return null; activePreview._preview.revision = state.sceneRevision; return activePreview._preview; },
   };
 }

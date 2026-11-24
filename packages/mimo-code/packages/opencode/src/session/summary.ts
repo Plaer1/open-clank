@@ -5,7 +5,9 @@ import { Snapshot } from "@/snapshot"
 import { Storage } from "@/storage"
 import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
+import { CaptureMembership, matchesActionRef } from "./capture-membership"
 import { SessionID, MessageID } from "./schema"
+import { Flag } from "@/flag/flag"
 
 function unquoteGitPath(input: string) {
   if (!input.startsWith('"')) return input
@@ -63,9 +65,31 @@ function unquoteGitPath(input: string) {
   return Buffer.from(bytes).toString()
 }
 
+/** Counts are observed metadata, not authorization or complete coverage. */
+export type LoreDiffUnavailable = { code: "LORE_DIFF_UNAVAILABLE"; coverage: "partial" | "unavailable"; recordedActions: number; pendingActions: number }
+function unavailable(messages: MessageV2.WithParts[]): LoreDiffUnavailable | undefined {
+  let starts = 0, finishes = 0, missing = false, recordedActions = 0, pendingActions = 0
+  for (const message of messages) for (const part of message.parts) {
+    if (part.type === "step-start") {
+      starts++
+      if (!part.snapshot || part.captureMembership !== undefined) missing = true
+      const parsed = CaptureMembership.safeParse(part.captureMembership)
+      if (parsed.success) for (const member of parsed.data.members) {
+        if (member.state === "complete" && member.actionRef && matchesActionRef(member.actionRef, parsed.data, member.actionID, member.toolCallID)) recordedActions = Math.min(4096, recordedActions + 1)
+        else pendingActions = Math.min(4096, pendingActions + 1)
+      }
+    }
+    if (part.type === "step-finish") { finishes++; if (!part.snapshot) missing = true }
+  }
+  if (!starts || !finishes || starts !== finishes) missing = true
+  if (!missing) return undefined
+  return { code: "LORE_DIFF_UNAVAILABLE", coverage: recordedActions || pendingActions ? "partial" : "unavailable", recordedActions, pendingActions }
+}
+
 export interface Interface {
   readonly summarize: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<void>
   readonly diff: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Snapshot.FileDiff[]>
+  readonly diffResult: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<{ coverage: LoreDiffUnavailable } | { diffs: Snapshot.FileDiff[] }>
   readonly computeDiff: (input: { messages: MessageV2.WithParts[] }) => Effect.Effect<Snapshot.FileDiff[]>
 }
 
@@ -80,6 +104,7 @@ export const layer = Layer.effect(
     const bus = yield* Bus.Service
 
     const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: MessageV2.WithParts[] }) {
+      if (unavailable(input.messages)) return yield* Effect.die(new Error("Lore diff unavailable"))
       let from: string | undefined
       let to: string | undefined
       for (const item of input.messages) {
@@ -106,6 +131,7 @@ export const layer = Layer.effect(
       const all = yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" })
       if (!all.length) return
 
+      if (unavailable(all)) return
       const diffs = yield* computeDiff({ messages: all })
       yield* sessions.setSummary({
         sessionID: input.sessionID,
@@ -115,7 +141,7 @@ export const layer = Layer.effect(
           files: diffs.length,
         },
       })
-      yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
+      if (!Flag.OPEN_CLANK_PRIVATE_RUNTIME) yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
       yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
 
       const messages = all.filter(
@@ -128,36 +154,24 @@ export const layer = Layer.effect(
       yield* sessions.updateMessage(target.info)
     })
 
+    const diffResult = Effect.fn("SessionSummary.diffResult")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
+      const all = yield* sessions.messages({ sessionID: input.sessionID, agentID: "*" })
+      const messages = input.messageID ? all.filter((item) => item.info.id === input.messageID ||
+        (item.info.role === "assistant" && item.info.parentID === input.messageID)) : all
+      if (input.messageID && !messages.some((item) => item.info.id === input.messageID && item.info.role === "user"))
+        return { coverage: { code: "LORE_DIFF_UNAVAILABLE", coverage: "unavailable", recordedActions: 0, pendingActions: 0 } } as const
+      const coverage = unavailable(messages)
+      if (coverage) return { coverage }
+      const diffs = yield* computeDiff({ messages })
+      return { diffs: diffs.map((item) => ({ ...item, file: unquoteGitPath(item.file) })) }
+    })
     const diff = Effect.fn("SessionSummary.diff")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
-      if (input.messageID) {
-        const all = yield* sessions.messages({ sessionID: input.sessionID, agentID: "*" })
-        const target = all.find((item) => item.info.id === input.messageID)
-        if (!target || target.info.role !== "user") return []
-        const diffs =
-          target.info.summary?.diffs ??
-          (yield* computeDiff({
-            messages: all.filter(
-              (item) =>
-                item.info.id === input.messageID ||
-                (item.info.role === "assistant" && item.info.parentID === input.messageID),
-            ),
-          }))
-        return diffs.map((item) => ({ ...item, file: unquoteGitPath(item.file) }))
-      }
-      const diffs = yield* storage
-        .read<Snapshot.FileDiff[]>(["session_diff", input.sessionID])
-        .pipe(Effect.catch(() => Effect.succeed([] as Snapshot.FileDiff[])))
-      const next = diffs.map((item) => {
-        const file = unquoteGitPath(item.file)
-        if (file === item.file) return item
-        return { ...item, file }
-      })
-      const changed = next.some((item, i) => item.file !== diffs[i]?.file)
-      if (changed) yield* storage.write(["session_diff", input.sessionID], next).pipe(Effect.ignore)
-      return next
+      const result = yield* diffResult(input)
+      if ("coverage" in result) return yield* Effect.die(new Error("Lore diff unavailable"))
+      return result.diffs
     })
 
-    return Service.of({ summarize, diff, computeDiff })
+    return Service.of({ summarize, diff, diffResult, computeDiff })
   }),
 )
 

@@ -25,7 +25,7 @@ mod macos {
     use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
     use std::thread;
 
-    const SESSION_ENV: &str = "ODYSSEUS_QUICKLOOK_SESSION_TOKEN";
+    const SESSION_ENV: &str = "OPEN_CLANK_QUICKLOOK_SESSION_TOKEN";
     const ACTOR_QUEUE_CAPACITY: usize = 8;
     const OUTPUT_QUEUE_CAPACITY: usize = 2;
     const MAX_DIMENSION: u32 = 1024;

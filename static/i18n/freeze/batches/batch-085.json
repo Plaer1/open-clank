@@ -1,0 +1,35 @@
+{
+  "id": "batch-085",
+  "group": "docs.openclank-docs-app-windows",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1491,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-app-windows.title",
+      "source": "App Windows and Navigation",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-app-windows.body",
+      "source": "# App Windows and Navigation\n\nThe hamburger switches between the full sidebar and the compact rail. Use [[Buddy]] to ask about a control or **Tools → Instruction Manual** to look it up.\n\n## Copal\n\nOpen your [[Journal]] from **Copal**. **Manage journals** beside the shortcut lets you choose which Journal opens. Restore a hidden shortcut under **Settings → Appearance → Copal navigation**.\n\n## Arrange the work\n\nDrag a title bar to an edge and release when the snap preview appears. Left and right snap side by side. Top and bottom stack. Drag the divider to resize either arrangement, or drag a snapped window away to free it.\n\n**Maximize** fills the workspace and **Restore** returns to the prior size. **Minimize** puts the window in the bottom dock. Pop out Chat for a standalone window and use **Dock chat** to return it. To end a run, use **Stop** in Chat.\n\n## Choose a split or another window\n\n- **Files** · **Window → New Files Window** opens an independent browser. **Split right** and **Split below** let you browse two places in one window.\n- **Editor** · **Window → Split editor right…** or **Split editor below…** lets you choose a document for the new group. Two views of the same document share one draft. **Go → Previous document** follows document history. Back in Editor’s file sidebar follows folder history.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
@@ -289,6 +289,8 @@ class _PendingShellApproval:
     authority_workspace_id: str
     binding: str
     future: asyncio.Future[str]
+    account_id: str = ""
+    claimed: list[bool] = field(default_factory=lambda: [False], compare=False, repr=False)
 
 
 _PENDING_SHELL_APPROVALS: dict[str, _PendingShellApproval] = {}
@@ -1275,6 +1277,7 @@ async def _require_shell_approval_grant(
         authority_workspace_id=authority_workspace_id,
         binding=binding,
         future=future,
+        account_id=str(ctx.get("approval_account_id") or ""),
     )
     with _PENDING_SHELL_APPROVALS_LOCK:
         _PENDING_SHELL_APPROVALS[request_id] = pending
@@ -1301,6 +1304,10 @@ async def _require_shell_approval_grant(
         audit("approval_requested")
         await progress_cb(payload)
         option_id = await future
+        current = ctx.get("approval_current")
+        if current is not None:
+            if not callable(current) or not await current():
+                raise ShellApprovalError("shell approval authority changed")
         if option_id in {"chat", "workspace", "always"}:
             try:
                 from src.openclank.permission_grants import grant_scope_for_lifetime
@@ -1352,6 +1359,35 @@ async def _require_shell_approval_grant(
             _PENDING_SHELL_APPROVALS.pop(request_id, None)
 
 
+async def require_shell_stdin_approval(*, ctx: Mapping[str, object], binding: str, length: int) -> None:
+    """Admit one opaque non-secret input under the existing shell approval owner."""
+    owner=str(ctx.get('owner') or '');session_id=str(ctx.get('session_id') or '')
+    workspace=str(ctx.get('workspace') or '');workspace_id=str(ctx.get('authority_workspace_id') or '')
+    if (not owner or not session_id or not workspace or not isinstance(binding,str)
+            or not re.fullmatch(r'[0-9a-f]{64}',binding) or type(length) is not int or not 1<=length<=16384):
+        raise ShellApprovalError('shell input approval unavailable')
+    current=ctx.get('approval_current')
+    if not callable(current) or not await current(): raise ShellApprovalError('shell input authority changed')
+    from src.permission_mode import auto_approves
+    if auto_approves(owner):
+        if not await current(): raise ShellApprovalError('shell input authority changed')
+        return
+    callback=ctx.get('progress_cb')
+    if not callable(callback): raise ShellApprovalError('shell input approval unavailable')
+    loop=asyncio.get_running_loop();request_id='shell_perm_'+uuid.uuid4().hex[:20];future=loop.create_future()
+    pending=_PendingShellApproval(request_id=request_id,owner=owner,session_id=session_id,workspace=workspace,
+        authority_workspace_id=workspace_id,binding=binding,future=future,account_id=str(ctx.get('approval_account_id') or ''))
+    with _PENDING_SHELL_APPROVALS_LOCK: _PENDING_SHELL_APPROVALS[request_id]=pending
+    try:
+        await callback({'type':'permission_request','data':{'request_id':request_id,'session_id':session_id,
+            'permission_type':f'shell input · exact {binding[:12]}','detail':{'input_sha256_binding':binding,'length':length,
+            'notice':'Non-secret text is sent to the existing shell input.'},'options':['once','reject']}})
+        choice=await future
+        if choice!='once' or not await current(): raise ShellApprovalError('shell input approval unavailable')
+    finally:
+        with _PENDING_SHELL_APPROVALS_LOCK: _PENDING_SHELL_APPROVALS.pop(request_id,None)
+
+
 async def require_shell_approval(
     command: str,
     *,
@@ -1379,7 +1415,7 @@ async def require_shell_approval(
         containment=containment,
         network=network,
     )
-    if command_needs_sudo_password(command):
+    if command_needs_sudo_password(command) and ctx.get("suppress_sudo_prompt") is not True:
         await _request_sudo_password(command, binding, ctx=ctx)
     return binding
 
@@ -1493,12 +1529,25 @@ def inject_sudo_askpass(command: str) -> str:
     return _SUDO_IN_POSITION.sub(lambda m: f"{m.group(1)}{m.group(2)}sudo -A", command)
 
 
+def current_shell_approval(request_id: str, *, owner: str, session_id: str, account_id: str):
+    """Return the exact still-pending managed request, never its secret or command."""
+    with _PENDING_SHELL_APPROVALS_LOCK:
+        pending = _PENDING_SHELL_APPROVALS.get(str(request_id))
+        if (pending is None or not account_id or pending.account_id != account_id
+                or pending.owner != owner or pending.session_id != session_id
+                or pending.claimed[0] or pending.future.done()):
+            return None
+        return pending
+
+
 def resolve_shell_approval(
     request_id: str,
     option_id: str,
     *,
     owner: str,
     session_id: str,
+    account_id: str = "",
+    expected_pending=None,
 ) -> bool:
     """Resolve only an exact pending owner/session request."""
     if option_id not in {"once", "chat", "workspace", "always", "reject"}:
@@ -1507,12 +1556,16 @@ def resolve_shell_approval(
         pending = _PENDING_SHELL_APPROVALS.get(str(request_id))
         if (
             pending is None
+            or (expected_pending is not None and pending is not expected_pending)
             or pending.owner != str(owner or "")
             or pending.session_id != str(session_id or "")
+            or (pending.account_id and pending.account_id != str(account_id or ""))
+            or pending.claimed[0]
             or pending.future.done()
         ):
             return False
         future = pending.future
+        pending.claimed[0] = True
 
     def finish() -> None:
         if not future.done():
@@ -1541,9 +1594,10 @@ def reject_shell_approval_scope(
     matches: list[asyncio.Future[str]] = []
     with _PENDING_SHELL_APPROVALS_LOCK:
         for pending in _PENDING_SHELL_APPROVALS.values():
-            if pending.owner != str(owner or "") or pending.future.done():
+            if pending.owner != str(owner or "") or pending.future.done() or pending.claimed[0]:
                 continue
             if all_pending:
+                pending.claimed[0] = True
                 matches.append(pending.future)
                 continue
             if session_id and pending.session_id != str(session_id):
@@ -1561,6 +1615,7 @@ def reject_shell_approval_scope(
                 and pending.authority_workspace_id != authority_workspace_id
             ):
                 continue
+            pending.claimed[0] = True
             matches.append(pending.future)
     for future in matches:
         future.get_loop().call_soon_threadsafe(
@@ -1927,7 +1982,7 @@ def contained_argv(
         f"{FM_DB_PATH}-wal",
         f"{FM_DB_PATH}-shm",
         f"{FM_DB_PATH}-journal",
-        os.environ.get("MIMOCODE_HOME"),
+        os.environ.get("OPENCLANK_HOME"),
         os.environ.get("OPEN_CLANK_CONTROL_DATA_DIR"),
         os.environ.get("OPEN_CLANK_SKILLS_DIR"),
     }
@@ -1992,8 +2047,8 @@ def contained_argv(
             args.extend(["--ro-bind", os.devnull, candidate])
 
     runtime_cache_target = (
-        os.path.abspath(os.path.join(os.environ["MIMOCODE_HOME"], "cache"))
-        if os.environ.get("MIMOCODE_HOME")
+        os.path.abspath(os.path.join(os.environ["OPENCLANK_HOME"], "cache"))
+        if os.environ.get("OPENCLANK_HOME")
         else ""
     )
     runtime_cache = (

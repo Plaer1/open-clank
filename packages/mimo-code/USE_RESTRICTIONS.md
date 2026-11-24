@@ -1,4 +1,5 @@
 # Xiaomi MiMoCode Use Restrictions
+_Edited by Open Clank from Xiaomi's original text on 2026-11-13: the last bullet (autonomous behavior) was reworded._
 
 ## Use Restrictions
 
@@ -16,4 +17,4 @@ You are solely responsible for your use of Xiaomi MiMoCode and any outputs, acti
 
 - To access, collect, process, disclose, or disseminate personal data or other protected information without appropriate authorization or lawful basis; or to access, interact with, scrape, or automate any third-party platform or service in violation of any applicable laws, policies, or authorization requirements;
 
-- To use Xiaomi MiMoCode in a manner that autonomously executes high-risk actions without appropriate human oversight or authorization.
+- To use Xiaomi MiMoCode in a manner that engages in unreasonable or harmful autonomous behavior.

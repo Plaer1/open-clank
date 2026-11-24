@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { compareEntries, constrainSortSpec, entryIconKey, isDirectory, isTextPath, languageForPath, normalizeSortKeys, providerEntryMetadata, sortEntries } from '../../static/js/editor/entryModel.js';
-import { boundedTextPreview, isPreviewable, previewKind, readBoundedTextResponse } from '../../static/js/editor/previewModel.js';
+import { boundedTextPreview, isPreviewable, previewKind, previewMime, readBoundedTextResponse } from '../../static/js/editor/previewModel.js';
 
 test('entry model keeps folders before files for both directions', () => {
   const entries = [
@@ -164,4 +164,10 @@ test('managed text preview cancellation reaches the provider stream', async () =
 
   await assert.rejects(preview, { name: 'AbortError' });
   assert.equal(cancelled, true);
+});
+
+test('preview MIME lookup tolerates no selected entry', () => {
+  assert.equal(previewMime(undefined), '');
+  assert.equal(previewMime(null), '');
+  assert.equal(previewMime({ media_type: 'Image/PNG ' }), 'image/png');
 });

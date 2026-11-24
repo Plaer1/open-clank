@@ -40,21 +40,21 @@ class Provider:
                 "freshness": "missing", "root": arguments.get("root"), "error": None}
 
 
-NATIVE_BINARY = os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN", "")
+NATIVE_BINARY = os.environ.get("OPEN_CLANK_TEST_MEMERY_WORKER_BIN", "")
 needs_native = pytest.mark.skipif(not NATIVE_BINARY or not Path(NATIVE_BINARY).is_file(),
     reason="Explicit current s03-fixtures MCP binary is required")
 
 
 async def native_provider(scope, tmp_path, monkeypatch):
     from src import constants
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
 
     repository, _workspaces, _bindings, _provider = scope
     data = tmp_path / "native-data"
     data.mkdir()
     gate = tmp_path / "native-gate"
     gate.mkdir()
-    paths = {"OPEN_CLANK_DATA_DIR": str(data), "ODYSSEUS_DATA_DIR": str(data),
+    paths = {"OPEN_CLANK_DATA_DIR": str(data),
         "OPEN_CLANK_AUTHORITY_DB_PATH": repository.db_path,
         "OPEN_CLANK_AUTHORITY_AUTH_PATH": str(data / "auth.json"),
         "FM_DB_PATH": str(data / "fm.db"), "FM_S03_FIXTURE_GATE": str(gate)}
@@ -66,7 +66,7 @@ async def native_provider(scope, tmp_path, monkeypatch):
     monkeypatch.setattr(constants, "APP_DB", repository.db_path)
     monkeypatch.setattr(constants, "AUTH_FILE", paths["OPEN_CLANK_AUTHORITY_AUTH_PATH"])
     monkeypatch.setattr(constants, "FM_DB_PATH", paths["FM_DB_PATH"])
-    provider = FrankenmemoryProvider(command=NATIVE_BINARY, env=paths)
+    provider = MemeryProvider(command=NATIVE_BINARY, env=paths)
     assert provider._command == NATIVE_BINARY
     assert provider._local_db_path() == paths["FM_DB_PATH"]
     await provider.initialize()
@@ -287,7 +287,7 @@ async def test_native_cleanup_ignores_lost_read_but_rejects_other_account(scope,
 
 @needs_native
 async def test_native_child_restart_keeps_last_ready_and_revalidates_new_job(scope, tmp_path, monkeypatch):
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
 
     provider, gate = await native_provider(scope, tmp_path, monkeypatch)
     source = Path(native_request(scope)["root"]) / "restart.py"
@@ -306,7 +306,7 @@ async def test_native_child_restart_keeps_last_ready_and_revalidates_new_job(sco
         await provider.shutdown()
         (gate / "release").unlink()
         source.write_text("def after_restart():\n    return 2\n", encoding="utf-8")
-        provider = FrankenmemoryProvider(command=NATIVE_BINARY, env=environment)
+        provider = MemeryProvider(command=NATIVE_BINARY, env=environment)
         await provider.initialize()
         persisted = await provider.code_index_lifecycle(**native_request(scope, action="status"))
         assert persisted["head_generation"] == first["head_generation"]
@@ -319,7 +319,7 @@ async def test_native_child_restart_keeps_last_ready_and_revalidates_new_job(sco
         # Stop this child while its replacement job is held. The following
         # process has no in-memory task and must reuse/fence persisted authority.
         await provider.shutdown()
-        provider = FrankenmemoryProvider(command=NATIVE_BINARY, env=environment)
+        provider = MemeryProvider(command=NATIVE_BINARY, env=environment)
         await provider.initialize()
         resumed = await provider.code_index_lifecycle(**native_request(scope))
         assert resumed["head_generation"] == first["head_generation"]
@@ -630,10 +630,10 @@ async def test_mounted_routes_distinguish_rejection_from_transport_without_priva
 
 
 async def test_provider_lifecycle_is_app_only_and_scope_bound(tmp_path, monkeypatch):
-    from src.frankenmemory_provider import BROKER_MEMORY_TOOLS, FrankenmemoryProvider
+    from src.memery_provider import BROKER_MEMORY_TOOLS, MemeryProvider
     from src.memory_provider import MemoryRequestRejectedError
 
-    provider = FrankenmemoryProvider(command="/unused", env={"FM_OWNER": "alice", "FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command="/unused", env={"FM_OWNER": "alice", "FM_DB_PATH": str(tmp_path / "fm.db")})
     calls = []
 
     async def call(name, arguments):
@@ -654,13 +654,13 @@ async def test_provider_lifecycle_is_app_only_and_scope_bound(tmp_path, monkeypa
 
 def test_provider_pins_canonical_child_paths_without_ambient_override(tmp_path, monkeypatch):
     from src import constants
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
 
     monkeypatch.delenv("OPEN_CLANK_AUTHORITY_DB_PATH", raising=False)
     monkeypatch.delenv("OPEN_CLANK_AUTHORITY_AUTH_PATH", raising=False)
     monkeypatch.setattr(constants, "APP_DB", str(tmp_path / "canonical.db"))
     monkeypatch.setattr(constants, "AUTH_FILE", str(tmp_path / "canonical-auth.json"))
-    provider = FrankenmemoryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     assert provider._env["OPEN_CLANK_AUTHORITY_DB_PATH"] == str(tmp_path / "canonical.db")
     assert provider._env["OPEN_CLANK_AUTHORITY_AUTH_PATH"] == str(tmp_path / "canonical-auth.json")
     assert all(Path(provider._env[name]).resolve().is_relative_to(tmp_path.resolve())
@@ -672,7 +672,7 @@ def test_provider_pins_canonical_child_paths_without_ambient_override(tmp_path, 
 async def test_transport_classifies_structured_rejection_and_preserves_ambiguity(tmp_path, failure):
     from mcp.shared.exceptions import McpError
     from mcp.types import ErrorData
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
     from src.memory_provider import MemoryRequestRejectedError, MemoryTransportError
 
     failures = {
@@ -684,7 +684,7 @@ async def test_transport_classifies_structured_rejection_and_preserves_ambiguity
         "disconnect": ConnectionError("connection closed"),
         "cancelled": asyncio.CancelledError(),
     }
-    provider = FrankenmemoryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     provider._owner_task = SimpleNamespace(done=lambda: False)
 
     class Queue:

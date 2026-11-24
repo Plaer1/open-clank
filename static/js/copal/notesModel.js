@@ -1,3 +1,4 @@
+import { extractDocumentReferences, resolveReference } from './markdownResources.js';
 function scalar(raw) {
   const value = String(raw ?? '').trim();
   if (value === 'true') return true;
@@ -286,28 +287,39 @@ export function normalizeLinkTarget(value) {
   return String(value || '').split('|', 1)[0].split('#', 1)[0].replace(/\.[^.\/]+$/, '').trim().toLowerCase();
 }
 
-export function resolveDocumentLink(docs, value) {
-  const target = normalizeLinkTarget(value);
-  if (!target) return null;
-  return docs.find((doc) => normalizedDocumentNames(doc).includes(target)) || null;
+export function resolveDocumentLink(_docs, _value, _origin = null) {
+  // The loaded corpus carries no completeness proof. Named resolution must
+  // not turn a single observed candidate into an authoritative identity.
+  return null;
 }
 
-export function databaseRelations(text, docs = []) {
-  const relations = [];
-  const seen = new Set();
-  for (const match of String(text || '').matchAll(/(!?)\[\[([^\]\n]+)\]\]/g)) {
-    const raw = match[2].split('|', 1)[0].trim();
-    const [target, ...fragmentParts] = raw.split('#');
-    const name = target.trim();
-    if (!name) continue;
-    const kind = match[1] ? 'embed' : 'link';
-    const fragment = fragmentParts.join('#').trim();
-    const key = `${kind}\0${name}\0${fragment}`;
+export function databaseRelations(text, docs = [], origin = null) {
+  const extraction = extractDocumentReferences(text);
+  const relations = [], seen = new Set();
+  let scanOffset = 0, line = 1;
+  for (const token of extraction.references) {
+    const span = String(text || '').slice(scanOffset, token.index);
+    line += (span.match(/\n/g) || []).length; scanOffset = token.index;
+    // Markdown images and non-document resources are not document edges.
+    if (token.syntax === 'markdown' && token.embed) continue;
+    const raw = String(token.target || '').trim();
+    const path = raw.split('#', 1)[0];
+    if (token.syntax === 'markdown' && path && !/\.md$/i.test(path)) continue;
+    if (token.syntax === 'wiki' && /\.(?:png|jpe?g|gif|webp|svg|avif|bmp|ico|mp3|wav|ogg|m4a|flac|aac|mp4|webm|mov|pdf)$/i.test(path)) continue;
+    const result = resolveReference(token, { documents:docs, origin });
+    if (!['resolved','ambiguous','missing'].includes(result.status)) continue;
+    const target = path.trim();
+    if (!target && !result.fragment) continue;
+    const kind = token.syntax === 'wiki' && token.embed ? 'embed' : 'link';
+    const key = `${kind}\0${target}\0${result.fragment || ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const resolved = resolveDocumentLink(docs, name);
-    relations.push({ kind, target:name, targetDocumentId:resolved?.id || null, ...(fragment ? { fragment } : {}) });
+    const exactSelf = !target && result.fragment && origin?.id;
+    relations.push({ kind, target:target || '#', targetDocumentId:exactSelf ? origin.id : null,
+      ...(result.fragment ? { fragment:result.fragment } : {}), sourceLine:line,
+      resolution:exactSelf ? 'resolved' : result.status === 'resolved' ? 'unverified' : result.status, origin:'parsed' });
   }
+  Object.defineProperty(relations, 'coverage', { value:{ truncated:extraction.truncated, unresolvedDefinitions:extraction.unresolvedDefinitions }, enumerable:false });
   return relations;
 }
 

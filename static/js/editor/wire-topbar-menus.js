@@ -1,3 +1,4 @@
+import { editorIdSelector } from './dom-identity.js';
 /**
  * Topbar dropdown menus — Image, Filter, and Resize.
  *
@@ -35,84 +36,65 @@
  *   resizeCustomPrompt:  () => Promise<void>,
  * }}
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 
-export function wireTopbarMenus({
+export function wireTopbarMenus({ state = legacyState, root = null, lifetime = null,
   closeOtherTopbarMenus, registerDocClickAway,
-  saveState, composite, fitZoom,
-  promptCanvasSize, doFillSelection,
+  saveState, composite, fitZoom, markSceneChanged = () => {},
+  promptCanvasSize, doFillSelection, captureResizeOrigin, resizeBounds,
   rotateAllLayers, flipAllLayers,
   applyGaussianBlur, applyZoomBlur,
   uiModule,
 }) {
+  if (state !== legacyState && (!root || !lifetime)) throw new TypeError('isolated menus require ownership');
+  const ownerRoot = root || state.container, doc = ownerRoot.ownerDocument;
+  const find = id => ownerRoot.querySelector(editorIdSelector(id));
+  const removers = [];
+  const listen = (node, type, fn, options) => { if (!node) return; const guarded = (...args) => { if (!lifetime?.disposed) fn(...args); }; node.addEventListener(type, guarded, options); removers.push(() => node.removeEventListener(type, guarded, options)); };
+  lifetime?.add(() => { for (const remove of removers.splice(0)) remove(); });
+
   // ── Resize canvas ──
   // Extracted so both the popup presets and the Ctrl+Shift+T shortcut
   // can call it.
-  function applyResize(newW, newH) {
-    if (!newW || !newH || newW < 1 || newH < 1) {
-      uiModule.showToast('Invalid size');
-      return;
-    }
-    saveState('Resize canvas');
-    // Only resize the main canvas — layers keep their original size.
-    // Content outside the new bounds is clipped during composite, not
-    // destroyed.
-    if (state.maskCanvas) {
-      const tmpMask = document.createElement('canvas');
-      tmpMask.width = state.maskCanvas.width;
-      tmpMask.height = state.maskCanvas.height;
-      tmpMask.getContext('2d').drawImage(state.maskCanvas, 0, 0);
-      state.maskCanvas.width = newW;
-      state.maskCanvas.height = newH;
-      state.maskCtx.drawImage(tmpMask, 0, 0);
-    }
-    state.imgWidth = newW;
-    state.imgHeight = newH;
-    state.mainCanvas.width = newW;
-    state.mainCanvas.height = newH;
-    const sizeLabel = document.getElementById('ge-canvas-size');
-    if (sizeLabel) sizeLabel.textContent = `${newW}×${newH}`;
-    fitZoom();
-    composite();
-    uiModule.showToast(`Canvas resized to ${newW}×${newH}`);
+  function applyResize(newW, newH, origin = captureResizeOrigin()) {
+    try {
+      if (!resizeBounds(newW,newH,origin)) { uiModule.showToast('Canvas resize was not applied.'); return false; }
+      uiModule.showToast(`Canvas resized to ${newW}×${newH}`); return true;
+    } catch (error) { uiModule.showToast(error?.message || 'Canvas resize was not applied.'); return false; }
   }
 
   async function resizeCustomPrompt() {
-    const result = await promptCanvasSize({
-      title: 'Canvas size',
-      okLabel: 'Apply',
-      initialW: state.imgWidth,
-      initialH: state.imgHeight,
-    });
-    if (!result) return;
-    applyResize(result.w, result.h);
+    const origin=captureResizeOrigin();
+    const result = await promptCanvasSize({ title:'Canvas size', okLabel:'Apply', initialW:state.imgWidth, initialH:state.imgHeight });
+    if (!result || lifetime?.disposed) return;
+    applyResize(result.w,result.h,origin);
   }
 
   // ── Image menu ──
   {
-    const btn = document.getElementById('ge-image-menu-btn');
-    const menu = document.getElementById('ge-image-menu');
+    const btn = find('ge-image-menu-btn');
+    const menu = find('ge-image-menu');
     if (btn && menu) {
-      btn.addEventListener('click', (e) => {
+      listen(btn, 'click', (e) => {
         e.stopPropagation();
         const willOpen = menu.hidden;
         if (willOpen) closeOtherTopbarMenus('ge-image-menu');
         menu.hidden = !menu.hidden;
       });
-      menu.addEventListener('click', (e) => {
+      listen(menu, 'click', (e) => {
         const item = e.target.closest('[data-image-action]');
         if (!item || item.disabled) return;
         menu.hidden = true;
         const action = item.dataset.imageAction;
         if (action === 'resize') resizeCustomPrompt();
-        else if (action === 'selection') document.getElementById('ge-edge-menu-btn')?.click();
+        else if (action === 'selection') find('ge-edge-menu-btn')?.click();
         else if (action === 'fill') doFillSelection();
         else if (action === 'rotate-90') rotateAllLayers(90);
         else if (action === 'rotate-180') rotateAllLayers(180);
         else if (action === 'flip-h') flipAllLayers('h');
         else if (action === 'flip-v') flipAllLayers('v');
       });
-      registerDocClickAway((e) => {
+      listen(doc, 'pointerdown', (e) => {
         if (!menu.hidden && !menu.contains(e.target) && e.target !== btn) menu.hidden = true;
       });
     }
@@ -120,16 +102,16 @@ export function wireTopbarMenus({
 
   // ── Filter menu (Blur sub-menu — Gaussian / Zoom) ──
   {
-    const btn = document.getElementById('ge-filter-menu-btn');
-    const menu = document.getElementById('ge-filter-menu');
+    const btn = find('ge-filter-menu-btn');
+    const menu = find('ge-filter-menu');
     if (btn && menu) {
-      btn.addEventListener('click', (e) => {
+      listen(btn, 'click', (e) => {
         e.stopPropagation();
         const willOpen = menu.hidden;
         if (willOpen) closeOtherTopbarMenus('ge-filter-menu');
         menu.hidden = !menu.hidden;
       });
-      menu.addEventListener('click', (e) => {
+      listen(menu, 'click', (e) => {
         const item = e.target.closest('[data-filter-action]');
         if (!item) return;
         menu.hidden = true;
@@ -137,7 +119,7 @@ export function wireTopbarMenus({
         if (action === 'blur-gaussian') applyGaussianBlur();
         else if (action === 'blur-zoom') applyZoomBlur();
       });
-      registerDocClickAway((e) => {
+      listen(doc, 'pointerdown', (e) => {
         if (!menu.hidden && !menu.contains(e.target) && e.target !== btn) menu.hidden = true;
       });
     }
@@ -145,26 +127,26 @@ export function wireTopbarMenus({
 
   // ── Resize popup (preset items + Custom… → resizeCustomPrompt) ──
   {
-    const btn = document.getElementById('ge-resize-menu-btn');
-    const menu = document.getElementById('ge-resize-menu');
+    const btn = find('ge-resize-menu-btn');
+    const menu = find('ge-resize-menu');
     if (btn && menu) {
-      btn.addEventListener('click', (e) => {
+      listen(btn, 'click', (e) => {
         e.stopPropagation();
         const willOpen = menu.hidden;
         if (willOpen) closeOtherTopbarMenus('ge-resize-menu');
         menu.hidden = !menu.hidden;
       });
       menu.querySelectorAll('[data-resize-w]').forEach(item => {
-        item.addEventListener('click', () => {
+        listen(item, 'click', () => {
           menu.hidden = true;
           applyResize(parseInt(item.dataset.resizeW, 10), parseInt(item.dataset.resizeH, 10));
         });
       });
-      menu.querySelector('[data-resize-custom]')?.addEventListener('click', () => {
+      listen(menu.querySelector('[data-resize-custom]'), 'click', () => {
         menu.hidden = true;
         resizeCustomPrompt();
       });
-      registerDocClickAway((e) => {
+      listen(doc, 'pointerdown', (e) => {
         if (!menu.hidden && !menu.contains(e.target) && e.target !== btn) menu.hidden = true;
       });
     }

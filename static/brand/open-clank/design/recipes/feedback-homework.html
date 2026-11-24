@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Feedback homework template</title>
+<style>body{max-width:65rem;margin:auto;padding:1.5rem;background:#191a1e;color:#fff4d6;font:16px/1.5 system-ui}section{border:1px solid #555a62;background:#25272c;padding:1rem;margin:1rem 0}label{display:block;margin:.7rem 0}textarea{display:block;width:100%;min-height:5rem}button,input,textarea{font:inherit}button{margin:.3rem;padding:.5rem}#status{border-left:4px solid #f6be48;padding:.5rem}#status[data-error=true]{border-color:#ff776e}</style></head><body>
+<h1>Feedback homework template</h1><p>Consider and concern can both be selected. Choices are feedback, not implementation approval. Edit the report ID, source digest, item IDs, item digests, labels and storage key in this template for a real report; these sample identities are placeholders.</p>
+<p>This editable template requires the bundled Open Clank modules at their original relative paths. HTML progress exports are standalone, read-only copies.</p>
+<div id="status" role="status" aria-live="polite">Ready.</div><main id="items"></main>
+<button id="json">Export JSON backup</button><button id="markdown">Export Markdown backup</button><button id="html">Export read-only HTML progress</button><label>Load progress copy <input id="import" type="file" accept=".json,.md,.html,application/json,text/markdown,text/html"></label>
+<script type="module">
+import {feedbackRegistration,createDeliverableFeedback,inspectFeedbackBackup} from '../../../../js/editor/deliverableFeedback.js';
+// Replace these stable sample identities with the authored report's actual hashes.
+const sourceDigest='sha256:'+'0'.repeat(64), items=[{id:'sample-item',digest:'sha256:'+'1'.repeat(64),title:'Sample item'}];
+const registration=feedbackRegistration({reportId:'feedback-sample',sourceDigest,items:items.map(({id,digest})=>({id,digest}))});
+const status=(message,error=false)=>{const node=document.querySelector('#status');node.textContent=message;node.dataset.error=String(error)};
+const kit=createDeliverableFeedback({registration,storageKey:'openclank.feedback.sample.v1',status});
+function render(){const root=document.querySelector('#items');root.replaceChildren();for(const item of items){const value=kit.get(item.id),section=document.createElement('section'),heading=document.createElement('h2');heading.textContent=item.title;section.append(heading);
+for(const [field,title,type] of [['selected','Consider this','checkbox'],['notes','Adoption notes','textarea'],['disliked','Concerns / not for me','checkbox'],['dislikeNotes','Concern notes','textarea']]){const label=document.createElement('label');label.append(document.createTextNode(title));const input=document.createElement(type==='textarea'?'textarea':'input');if(type==='checkbox'){input.type='checkbox';input.checked=value[field]}else input.value=value[field];input.addEventListener('input',()=>kit.set(item.id,{[field]:type==='checkbox'?input.checked:input.value}));label.append(input);section.append(label)}root.append(section)}}
+function download(file){const url=URL.createObjectURL(file),link=document.createElement('a');link.href=url;link.download=file.name;link.click();setTimeout(()=>URL.revokeObjectURL(url),0)}
+for(const format of ['json','markdown'])document.querySelector('#'+format).addEventListener('click',()=>{try{download(kit.backup(format))}catch(error){status(error.message,true)}});
+document.querySelector('#html').addEventListener('click',()=>{try{download(new File([kit.html(items)],'feedback-progress.html',{type:'text/html'}))}catch(error){status(error.message,true)}});
+document.querySelector('#import').addEventListener('change',async event=>{const file=event.target.files[0];if(!file)return;try{const checked=await inspectFeedbackBackup(file,registration);kit.apply(checked);render()}catch(error){status(error.message,true)}finally{event.target.value=''}});
+try{kit.load()}catch(error){status(error.message,true)}render();
+</script></body></html>

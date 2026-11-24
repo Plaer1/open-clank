@@ -181,14 +181,14 @@ def _bounded_map(items: List[Any], worker: Callable[[int, Any], Dict[str, Any]],
     return out
 
 
-# ── Canonical Frankenmemory RAG ──
+# ── Canonical Memery RAG ──
 
-def frankenmemory_rag_health(rag_manager: Any) -> Dict[str, Any]:
-    """Report the canonical Frankenmemory document RAG."""
+def memery_rag_health(rag_manager: Any) -> Dict[str, Any]:
+    """Report the canonical Memery document RAG."""
     rag_present = rag_manager is not None
     if not rag_present:
-        return _svc("frankenmemory_rag", DISABLED,
-                    "Canonical Frankenmemory RAG is not initialized.",
+        return _svc("memery_rag", DISABLED,
+                    "Canonical Memery RAG is not initialized.",
                     rag=None)
 
     rag_ok = bool(rag_present and getattr(rag_manager, "healthy", False))
@@ -219,7 +219,7 @@ def frankenmemory_rag_health(rag_manager: Any) -> Dict[str, Any]:
             else "Canonical RAG is healthy; exact/FTS retrieval and published generation state are available."
         )
         return _svc(
-            "frankenmemory_rag",
+            "memery_rag",
             status,
             detail,
             rag=True,
@@ -230,8 +230,8 @@ def frankenmemory_rag_health(rag_manager: Any) -> Dict[str, Any]:
             generation_states=generation_states,
             indexes=stats.get("indexes", []),
         )
-    return _svc("frankenmemory_rag", DOWN,
-                "Canonical Frankenmemory RAG is unavailable.", rag=False)
+    return _svc("memery_rag", DOWN,
+                "Canonical Memery RAG is unavailable.", rag=False)
 
 
 # ── SearXNG ──
@@ -526,7 +526,7 @@ async def collect_service_health(rag_manager: Any = None,
                                  owner: str | None = None) -> Dict[str, Any]:
     """Run every probe and return {overall, services, timestamp}.
 
-    Bounded end-to-end: in-process Frankenmemory flags are read synchronously; the
+    Bounded end-to-end: in-process Memery flags are read synchronously; the
     four network subsystems run concurrently, each under `_SUBSYSTEM_DEADLINE`,
     with an overall `_AGGREGATE_DEADLINE` backstop. Per-item probes inside
     providers/email are themselves bounded by `_FANOUT_BUDGET`.
@@ -536,8 +536,8 @@ async def collect_service_health(rag_manager: Any = None,
     inputs = _gather_inputs(owner)
     settings = inputs["settings"]
 
-    # Frankenmemory RAG is in-process and synchronous (just reads flags).
-    canonical_rag = frankenmemory_rag_health(rag_manager)
+    # Memery RAG is in-process and synchronous (just reads flags).
+    canonical_rag = memery_rag_health(rag_manager)
 
     names = ["searxng", "ntfy", "email", "providers"]
     coros = [

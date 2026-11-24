@@ -1,0 +1,818 @@
+import { stageFormatted } from "./format-staging"
+// the approaches in this edit tool are sourced from
+// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-23-25.ts
+// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/editCorrector.ts
+// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-26-25.ts
+
+import z from "zod"
+import * as path from "path"
+import { Effect, Semaphore } from "effect"
+import * as Tool from "./tool"
+import { LSP } from "../lsp"
+import { createTwoFilesPatch, diffLines } from "diff"
+import DESCRIPTION from "./edit.txt"
+import { File } from "../file"
+import { FileWatcher } from "../file/watcher"
+import { Bus } from "../bus"
+import { Format } from "../format"
+import { Instance } from "../project/instance"
+import { SessionCwd } from "./session-cwd"
+import { Snapshot } from "@/snapshot"
+import { assertWriteAllowed, askEditUnlessMemory } from "./external-directory"
+import { AppFileSystem } from "@mimo-ai/shared/filesystem"
+import { Flag } from "@/flag/flag"
+import { RecoverableError } from "./recoverable"
+import { fileResult } from "./file-contract"
+import { assertProjectFilePolicy } from "./project-policy"
+import { randomUUID } from "crypto"
+
+function normalizeLineEndings(text: string): string {
+  return text.replaceAll("\r\n", "\n").replaceAll("\r", "\n")
+}
+
+function detectLineEnding(text: string): "\n" | "\r\n" | "\r" {
+  if (text.includes("\r\n")) return "\r\n"
+  return text.includes("\r") ? "\r" : "\n"
+}
+
+function convertToLineEnding(text: string, ending: "\n" | "\r\n" | "\r"): string {
+  if (ending === "\n") return text
+  return text.replaceAll("\n", ending)
+}
+
+const locks = new Map<string, Semaphore.Semaphore>()
+
+function lock(filePath: string) {
+  const resolvedFilePath = AppFileSystem.resolve(filePath)
+  const hit = locks.get(resolvedFilePath)
+  if (hit) return hit
+
+  const next = Semaphore.makeUnsafe(1)
+  locks.set(resolvedFilePath, next)
+  return next
+}
+
+const Parameters = z.object({
+  file_path: z.string().describe("The absolute path to the file to modify"),
+  old_string: z.string().describe("The text to replace"),
+  new_string: z.string().describe("The text to replace it with (must be different from old_string)"),
+  replace_all: z.boolean().optional().describe("Replace all occurrences of old_string (default false)"),
+  expected_fingerprint: z.string().optional().describe("Fingerprint returned by read; rejects stale edits"),
+})
+
+export const EditTool = Tool.define(
+  "edit",
+  Effect.gen(function* () {
+    const lsp = yield* LSP.Service
+    const afs = yield* AppFileSystem.Service
+    const format = yield* Format.Service
+    const bus = yield* Bus.Service
+
+    return {
+      description: DESCRIPTION,
+      parameters: Parameters,
+      resources: (params: z.infer<typeof Parameters>, ctx: Tool.Context) => {
+        const filepath = path.isAbsolute(params.file_path)
+          ? params.file_path
+          : path.join(SessionCwd.get(ctx.sessionID), params.file_path)
+        return { reads: [filepath], writes: [filepath] }
+      },
+      execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context) =>
+        Effect.gen(function* () {
+          if (!params.file_path) {
+            throw new Error("file_path is required")
+          }
+
+          if (params.old_string === params.new_string) {
+            throw new Error("No changes to apply: old_string and new_string are identical.")
+          }
+
+          const requested = path.isAbsolute(params.file_path)
+            ? params.file_path
+            : path.join(SessionCwd.get(ctx.sessionID), params.file_path)
+          const filePath = (yield* assertWriteAllowed(ctx, requested))!
+          const history = AppFileSystem.historyContextFromTool(ctx, filePath)
+          const actionId = randomUUID()
+
+          let diff = ""
+          let contentOld = ""
+          let contentNew = ""
+          let oldFingerprint: string | undefined
+          let newFingerprint: string | undefined
+          let formatStatus: "skipped_policy" | "completed" | "failed" = "skipped_policy"
+          let finalSize = 0
+          let finalEncoding: AppFileSystem.TextSnapshot["encoding"] = "utf-8"
+          let finalNewline: AppFileSystem.TextSnapshot["newline"] = "\n"
+          yield* lock(filePath).withPermits(1)(
+            Effect.gen(function* () {
+              if (params.old_string === "") {
+                const existed = yield* afs.existsSafe(filePath)
+                if (existed) throw new RecoverableError(`edit: ${filePath} already exists; read and edit it instead.`)
+                contentNew = params.new_string
+                diff = createTwoFilesPatch(filePath, filePath, contentOld, contentNew)
+                const policy = yield* Effect.promise(() =>
+                  assertProjectFilePolicy(ctx, [{ path: filePath, content: contentNew }]),
+                )
+                let candidateContent: string | Uint8Array = contentNew
+                if (!policy.enforced) {
+                  const staged = yield* stageFormatted(afs, format, filePath, candidateContent)
+                  candidateContent = staged.content
+                  contentNew = staged.text
+                  formatStatus = staged.status
+                  diff = createTwoFilesPatch(filePath, filePath, contentOld, contentNew)
+                  yield* Effect.promise(() => assertProjectFilePolicy(ctx, [{ path: filePath, content: candidateContent }]))
+                }
+                yield* askEditUnlessMemory(ctx, filePath, {
+                  patterns: [path.relative(Instance.worktree, filePath)],
+                  diff,
+                })
+                yield* afs.atomicWrite({
+                  path: filePath,
+                  content: candidateContent,
+                  actionId,
+                  history,
+                  requireMissing: true,
+                }).pipe(
+                  Effect.catchIf(
+                    (error) => error instanceof AppFileSystem.AtomicConflict,
+                    (error) => Effect.fail(new RecoverableError(error.message.startsWith("history ") ? error.message : `edit: ${filePath} was created concurrently. Read it and retry.`)),
+                  ),
+                )
+                const finalSnapshot = yield* afs.readTextSnapshot(filePath)
+                contentNew = finalSnapshot.text
+                newFingerprint = finalSnapshot.fingerprint
+                finalSize = finalSnapshot.size
+                finalEncoding = finalSnapshot.encoding
+                finalNewline = finalSnapshot.newline
+                yield* bus.publish(File.Event.Edited, { file: filePath })
+                yield* bus.publish(FileWatcher.Event.Updated, {
+                  file: filePath,
+                  event: existed ? "change" : "add",
+                })
+                contentNew = yield* afs.readFileString(filePath)
+                diff = createTwoFilesPatch(filePath, filePath, contentOld, contentNew)
+                return
+              }
+
+              const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+              if (!info) throw new Error(`File ${filePath} not found`)
+              if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
+              const snapshot = yield* afs.readTextSnapshot(filePath)
+              oldFingerprint = snapshot.fingerprint
+              // No read-before-edit gate (removed with upstream); a caller-supplied fingerprint still rejects a stale edit.
+              if (params.expected_fingerprint && params.expected_fingerprint !== snapshot.fingerprint) {
+                throw new RecoverableError(`edit: ${filePath} changed since it was read. Read it again and retry.`)
+              }
+              contentOld = snapshot.text
+
+              const ending = detectLineEnding(contentOld)
+              const old = convertToLineEnding(normalizeLineEndings(params.old_string), ending)
+              const next = convertToLineEnding(normalizeLineEndings(params.new_string), ending)
+
+              contentNew = replace(contentOld, old, next, params.replace_all)
+              let candidateContent: string | Uint8Array = AppFileSystem.encodeText(snapshot, contentNew)
+
+              diff = createTwoFilesPatch(
+                filePath,
+                filePath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(contentNew),
+              )
+              const policy = yield* Effect.promise(() =>
+                assertProjectFilePolicy(ctx, [{ path: filePath, content: candidateContent }]),
+              )
+              if (!policy.enforced) {
+                const staged = yield* stageFormatted(afs, format, filePath, candidateContent, snapshot.mode)
+                candidateContent = staged.content
+                contentNew = staged.text
+                formatStatus = staged.status
+                diff = createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew))
+                yield* Effect.promise(() => assertProjectFilePolicy(ctx, [{ path: filePath, content: candidateContent }]))
+              }
+              yield* askEditUnlessMemory(ctx, filePath, {
+                patterns: [path.relative(Instance.worktree, filePath)],
+                diff,
+              })
+
+              yield* afs.atomicWrite({
+                path: filePath,
+                content: candidateContent,
+                actionId,
+                history,
+                expectedFingerprint: snapshot.fingerprint,
+                mode: snapshot.mode,
+              }).pipe(
+                Effect.catchIf(
+                  (error) => error instanceof AppFileSystem.AtomicConflict,
+                  (error) => Effect.fail(new RecoverableError(error.message.startsWith("history ") ? error.message : `edit: ${filePath} changed during the edit. Read it again and retry.`)),
+                ),
+              )
+              yield* bus.publish(File.Event.Edited, { file: filePath })
+              yield* bus.publish(FileWatcher.Event.Updated, {
+                file: filePath,
+                event: "change",
+              })
+              const finalSnapshot = yield* afs.readTextSnapshot(filePath)
+              contentNew = finalSnapshot.text
+              newFingerprint = finalSnapshot.fingerprint
+              finalSize = finalSnapshot.size
+              finalEncoding = finalSnapshot.encoding
+              finalNewline = finalSnapshot.newline
+              diff = createTwoFilesPatch(
+                filePath,
+                filePath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(contentNew),
+              )
+            }).pipe(Effect.orDie),
+          )
+
+          const filediff: Snapshot.FileDiff = {
+            file: filePath,
+            patch: diff,
+            additions: 0,
+            deletions: 0,
+          }
+          for (const change of diffLines(contentOld, contentNew)) {
+            if (change.added) filediff.additions += change.count || 0
+            if (change.removed) filediff.deletions += change.count || 0
+          }
+
+          yield* ctx.metadata({
+            metadata: {
+              diff,
+              filediff,
+              diagnostics: {},
+              action_id: actionId,
+              format_status: formatStatus,
+          history: history?.status ?? { status: "unconfigured", durable: false, coverage: "NoCapture" },
+            },
+          })
+
+          let output = "Edit applied successfully."
+          yield* lsp.touchFile(filePath, true)
+          const diagnostics = yield* lsp.diagnostics()
+          const normalizedFilePath = AppFileSystem.normalizePath(filePath)
+          const block = LSP.Diagnostic.report(filePath, diagnostics[normalizedFilePath] ?? [])
+          if (block) output += `\n\nLSP errors detected in this file, please fix:\n${block}`
+
+          return {
+            metadata: {
+              diagnostics,
+              diff,
+              filediff,
+              filepath: filePath,
+              old_fingerprint: oldFingerprint,
+              fingerprint: newFingerprint,
+              action_id: actionId,
+          history: history?.status ?? { status: "unconfigured", durable: false, coverage: "NoCapture" },
+              file: fileResult({
+                operation: "edit",
+                path: filePath,
+                kind: "text",
+                range: finalSize ? { unit: "byte", start: 0, end: finalSize - 1 } : null,
+                page: {
+                  unit: "byte",
+                  cursor: 0,
+                  next_cursor: null,
+                  has_more: false,
+                  returned: finalSize,
+                  total: finalSize,
+                },
+                bytes_considered: finalSize,
+                lines_considered: contentNew ? contentNew.split(/\r\n|\n|\r/).length : 0,
+                encoding: finalEncoding,
+                newline: finalNewline === "\n" ? "lf" : finalNewline === "\r\n" ? "crlf" : "cr",
+                media_type: AppFileSystem.mimeType(filePath),
+                fingerprint: newFingerprint,
+              }),
+            },
+            title: `${path.relative(Instance.worktree, filePath)}`,
+            output,
+          }
+        }),
+    }
+  }),
+)
+
+export type Replacer = (content: string, find: string) => Generator<string, void, unknown>
+
+// Similarity thresholds for block anchor fallback matching
+const SINGLE_CANDIDATE_SIMILARITY_THRESHOLD = 0.0
+const MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD = 0.3
+
+/**
+ * Levenshtein distance algorithm implementation
+ */
+function levenshtein(a: string, b: string): number {
+  // Handle empty strings
+  if (a === "" || b === "") {
+    return Math.max(a.length, b.length)
+  }
+  const matrix = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+  )
+
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost)
+    }
+  }
+  return matrix[a.length][b.length]
+}
+
+export const SimpleReplacer: Replacer = function* (_content, find) {
+  yield find
+}
+
+export const LineTrimmedReplacer: Replacer = function* (content, find) {
+  const originalLines = content.split("\n")
+  const searchLines = find.split("\n")
+
+  if (searchLines[searchLines.length - 1] === "") {
+    searchLines.pop()
+  }
+
+  for (let i = 0; i <= originalLines.length - searchLines.length; i++) {
+    let matches = true
+
+    for (let j = 0; j < searchLines.length; j++) {
+      const originalTrimmed = originalLines[i + j].trim()
+      const searchTrimmed = searchLines[j].trim()
+
+      if (originalTrimmed !== searchTrimmed) {
+        matches = false
+        break
+      }
+    }
+
+    if (matches) {
+      let matchStartIndex = 0
+      for (let k = 0; k < i; k++) {
+        matchStartIndex += originalLines[k].length + 1
+      }
+
+      let matchEndIndex = matchStartIndex
+      for (let k = 0; k < searchLines.length; k++) {
+        matchEndIndex += originalLines[i + k].length
+        if (k < searchLines.length - 1) {
+          matchEndIndex += 1 // Add newline character except for the last line
+        }
+      }
+
+      yield content.substring(matchStartIndex, matchEndIndex)
+    }
+  }
+}
+
+export const BlockAnchorReplacer: Replacer = function* (content, find) {
+  const originalLines = content.split("\n")
+  const searchLines = find.split("\n")
+
+  if (searchLines.length < 3) {
+    return
+  }
+
+  if (searchLines[searchLines.length - 1] === "") {
+    searchLines.pop()
+  }
+
+  const firstLineSearch = searchLines[0].trim()
+  const lastLineSearch = searchLines[searchLines.length - 1].trim()
+  const searchBlockSize = searchLines.length
+
+  // Collect all candidate positions where both anchors match
+  const candidates: Array<{ startLine: number; endLine: number }> = []
+  for (let i = 0; i < originalLines.length; i++) {
+    if (originalLines[i].trim() !== firstLineSearch) {
+      continue
+    }
+
+    // Look for the matching last line after this first line
+    for (let j = i + 2; j < originalLines.length; j++) {
+      if (originalLines[j].trim() === lastLineSearch) {
+        candidates.push({ startLine: i, endLine: j })
+        break // Only match the first occurrence of the last line
+      }
+    }
+  }
+
+  // Return immediately if no candidates
+  if (candidates.length === 0) {
+    return
+  }
+
+  // Handle single candidate scenario (using relaxed threshold)
+  if (candidates.length === 1) {
+    const { startLine, endLine } = candidates[0]
+    const actualBlockSize = endLine - startLine + 1
+
+    let similarity = 0
+    let linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
+
+    if (linesToCheck > 0) {
+      for (let j = 1; j < searchBlockSize - 1 && j < actualBlockSize - 1; j++) {
+        const originalLine = originalLines[startLine + j].trim()
+        const searchLine = searchLines[j].trim()
+        const maxLen = Math.max(originalLine.length, searchLine.length)
+        if (maxLen === 0) {
+          continue
+        }
+        const distance = levenshtein(originalLine, searchLine)
+        similarity += (1 - distance / maxLen) / linesToCheck
+
+        // Exit early when threshold is reached
+        if (similarity >= SINGLE_CANDIDATE_SIMILARITY_THRESHOLD) {
+          break
+        }
+      }
+    } else {
+      // No middle lines to compare, just accept based on anchors
+      similarity = 1.0
+    }
+
+    if (similarity >= SINGLE_CANDIDATE_SIMILARITY_THRESHOLD) {
+      let matchStartIndex = 0
+      for (let k = 0; k < startLine; k++) {
+        matchStartIndex += originalLines[k].length + 1
+      }
+      let matchEndIndex = matchStartIndex
+      for (let k = startLine; k <= endLine; k++) {
+        matchEndIndex += originalLines[k].length
+        if (k < endLine) {
+          matchEndIndex += 1 // Add newline character except for the last line
+        }
+      }
+      yield content.substring(matchStartIndex, matchEndIndex)
+    }
+    return
+  }
+
+  // Calculate similarity for multiple candidates
+  let bestMatch: { startLine: number; endLine: number } | null = null
+  let maxSimilarity = -1
+
+  for (const candidate of candidates) {
+    const { startLine, endLine } = candidate
+    const actualBlockSize = endLine - startLine + 1
+
+    let similarity = 0
+    let linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
+
+    if (linesToCheck > 0) {
+      for (let j = 1; j < searchBlockSize - 1 && j < actualBlockSize - 1; j++) {
+        const originalLine = originalLines[startLine + j].trim()
+        const searchLine = searchLines[j].trim()
+        const maxLen = Math.max(originalLine.length, searchLine.length)
+        if (maxLen === 0) {
+          continue
+        }
+        const distance = levenshtein(originalLine, searchLine)
+        similarity += 1 - distance / maxLen
+      }
+      similarity /= linesToCheck // Average similarity
+    } else {
+      // No middle lines to compare, just accept based on anchors
+      similarity = 1.0
+    }
+
+    if (similarity > maxSimilarity) {
+      maxSimilarity = similarity
+      bestMatch = candidate
+    }
+  }
+
+  // Threshold judgment
+  if (maxSimilarity >= MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD && bestMatch) {
+    const { startLine, endLine } = bestMatch
+    let matchStartIndex = 0
+    for (let k = 0; k < startLine; k++) {
+      matchStartIndex += originalLines[k].length + 1
+    }
+    let matchEndIndex = matchStartIndex
+    for (let k = startLine; k <= endLine; k++) {
+      matchEndIndex += originalLines[k].length
+      if (k < endLine) {
+        matchEndIndex += 1
+      }
+    }
+    yield content.substring(matchStartIndex, matchEndIndex)
+  }
+}
+
+export const WhitespaceNormalizedReplacer: Replacer = function* (content, find) {
+  const normalizeWhitespace = (text: string) => text.replace(/\s+/g, " ").trim()
+  const normalizedFind = normalizeWhitespace(find)
+
+  // Handle single line matches
+  const lines = content.split("\n")
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (normalizeWhitespace(line) === normalizedFind) {
+      yield line
+    } else {
+      // Only check for substring matches if the full line doesn't match
+      const normalizedLine = normalizeWhitespace(line)
+      if (normalizedLine.includes(normalizedFind)) {
+        // Find the actual substring in the original line that matches
+        const words = find.trim().split(/\s+/)
+        if (words.length > 0) {
+          const pattern = words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+")
+          try {
+            const regex = new RegExp(pattern)
+            const match = line.match(regex)
+            if (match) {
+              yield match[0]
+            }
+          } catch {
+            // Invalid regex pattern, skip
+          }
+        }
+      }
+    }
+  }
+
+  // Handle multi-line matches
+  const findLines = find.split("\n")
+  if (findLines.length > 1) {
+    for (let i = 0; i <= lines.length - findLines.length; i++) {
+      const block = lines.slice(i, i + findLines.length)
+      if (normalizeWhitespace(block.join("\n")) === normalizedFind) {
+        yield block.join("\n")
+      }
+    }
+  }
+}
+
+export const IndentationFlexibleReplacer: Replacer = function* (content, find) {
+  const removeIndentation = (text: string) => {
+    const lines = text.split("\n")
+    const nonEmptyLines = lines.filter((line) => line.trim().length > 0)
+    if (nonEmptyLines.length === 0) return text
+
+    const minIndent = Math.min(
+      ...nonEmptyLines.map((line) => {
+        const match = line.match(/^(\s*)/)
+        return match ? match[1].length : 0
+      }),
+    )
+
+    return lines.map((line) => (line.trim().length === 0 ? line : line.slice(minIndent))).join("\n")
+  }
+
+  const normalizedFind = removeIndentation(find)
+  const contentLines = content.split("\n")
+  const findLines = find.split("\n")
+
+  for (let i = 0; i <= contentLines.length - findLines.length; i++) {
+    const block = contentLines.slice(i, i + findLines.length).join("\n")
+    if (removeIndentation(block) === normalizedFind) {
+      yield block
+    }
+  }
+}
+
+export const EscapeNormalizedReplacer: Replacer = function* (content, find) {
+  const unescapeString = (str: string): string => {
+    return str.replace(/\\(n|t|r|'|"|`|\\|\n|\$)/g, (match, capturedChar) => {
+      switch (capturedChar) {
+        case "n":
+          return "\n"
+        case "t":
+          return "\t"
+        case "r":
+          return "\r"
+        case "'":
+          return "'"
+        case '"':
+          return '"'
+        case "`":
+          return "`"
+        case "\\":
+          return "\\"
+        case "\n":
+          return "\n"
+        case "$":
+          return "$"
+        default:
+          return match
+      }
+    })
+  }
+
+  const unescapedFind = unescapeString(find)
+
+  // Try direct match with unescaped find string
+  if (content.includes(unescapedFind)) {
+    yield unescapedFind
+  }
+
+  // Also try finding escaped versions in content that match unescaped find
+  const lines = content.split("\n")
+  const findLines = unescapedFind.split("\n")
+
+  for (let i = 0; i <= lines.length - findLines.length; i++) {
+    const block = lines.slice(i, i + findLines.length).join("\n")
+    const unescapedBlock = unescapeString(block)
+
+    if (unescapedBlock === unescapedFind) {
+      yield block
+    }
+  }
+}
+
+export const MultiOccurrenceReplacer: Replacer = function* (content, find) {
+  // This replacer yields all exact matches, allowing the replace function
+  // to handle multiple occurrences based on replaceAll parameter
+  let startIndex = 0
+
+  while (true) {
+    const index = content.indexOf(find, startIndex)
+    if (index === -1) break
+
+    yield find
+    startIndex = index + find.length
+  }
+}
+
+export const TrimmedBoundaryReplacer: Replacer = function* (content, find) {
+  const trimmedFind = find.trim()
+
+  if (trimmedFind === find) {
+    // Already trimmed, no point in trying
+    return
+  }
+
+  // Try to find the trimmed version
+  if (content.includes(trimmedFind)) {
+    yield trimmedFind
+  }
+
+  // Also try finding blocks where trimmed content matches
+  const lines = content.split("\n")
+  const findLines = find.split("\n")
+
+  for (let i = 0; i <= lines.length - findLines.length; i++) {
+    const block = lines.slice(i, i + findLines.length).join("\n")
+
+    if (block.trim() === trimmedFind) {
+      yield block
+    }
+  }
+}
+
+export const ContextAwareReplacer: Replacer = function* (content, find) {
+  const findLines = find.split("\n")
+  if (findLines.length < 3) {
+    // Need at least 3 lines to have meaningful context
+    return
+  }
+
+  // Remove trailing empty line if present
+  if (findLines[findLines.length - 1] === "") {
+    findLines.pop()
+  }
+
+  const contentLines = content.split("\n")
+
+  // Extract first and last lines as context anchors
+  const firstLine = findLines[0].trim()
+  const lastLine = findLines[findLines.length - 1].trim()
+
+  // Find blocks that start and end with the context anchors
+  for (let i = 0; i < contentLines.length; i++) {
+    if (contentLines[i].trim() !== firstLine) continue
+
+    // Look for the matching last line
+    for (let j = i + 2; j < contentLines.length; j++) {
+      if (contentLines[j].trim() === lastLine) {
+        // Found a potential context block
+        const blockLines = contentLines.slice(i, j + 1)
+        const block = blockLines.join("\n")
+
+        // Check if the middle content has reasonable similarity
+        // (simple heuristic: at least 50% of non-empty lines should match when trimmed)
+        if (blockLines.length === findLines.length) {
+          let matchingLines = 0
+          let totalNonEmptyLines = 0
+
+          for (let k = 1; k < blockLines.length - 1; k++) {
+            const blockLine = blockLines[k].trim()
+            const findLine = findLines[k].trim()
+
+            if (blockLine.length > 0 || findLine.length > 0) {
+              totalNonEmptyLines++
+              if (blockLine === findLine) {
+                matchingLines++
+              }
+            }
+          }
+
+          if (totalNonEmptyLines === 0 || matchingLines / totalNonEmptyLines >= 0.5) {
+            yield block
+            break // Only match the first occurrence
+          }
+        }
+        break
+      }
+    }
+  }
+}
+
+export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
+  if (oldString === newString) {
+    throw new Error("No changes to apply: old_string and new_string are identical.")
+  }
+
+  // Default: pure exact match with explicit, actionable errors. Set
+  // OPENCLANK_ENABLE_FUZZY_EDIT=true to opt into the legacy fuzzy fallback chain.
+  if (!Flag.OPENCLANK_ENABLE_FUZZY_EDIT) {
+    const firstIndex = content.indexOf(oldString)
+    if (firstIndex === -1) {
+      throw new Error(buildNotFoundError(content, oldString))
+    }
+    if (replaceAll) {
+      return content.replaceAll(oldString, newString)
+    }
+    const matches = content.split(oldString).length - 1
+    if (matches > 1) {
+      throw new Error(
+        `Found ${matches} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, provide more surrounding context to make the match unique.\nString: ${oldString}`,
+      )
+    }
+    return content.substring(0, firstIndex) + newString + content.substring(firstIndex + oldString.length)
+  }
+
+  // Fuzzy fallback chain (opt-in via OPENCLANK_ENABLE_FUZZY_EDIT)
+  let notFound = true
+
+  for (const replacer of [
+    SimpleReplacer,
+    LineTrimmedReplacer,
+    BlockAnchorReplacer,
+    WhitespaceNormalizedReplacer,
+    IndentationFlexibleReplacer,
+    EscapeNormalizedReplacer,
+    TrimmedBoundaryReplacer,
+    ContextAwareReplacer,
+    MultiOccurrenceReplacer,
+  ]) {
+    for (const search of replacer(content, oldString)) {
+      const index = content.indexOf(search)
+      if (index === -1) continue
+      notFound = false
+      if (replaceAll) {
+        return content.replaceAll(search, newString)
+      }
+      const lastIndex = content.lastIndexOf(search)
+      if (index !== lastIndex) continue
+      return content.substring(0, index) + newString + content.substring(index + search.length)
+    }
+  }
+
+  if (notFound) {
+    throw new Error(buildNotFoundError(content, oldString))
+  }
+  throw new Error(
+    `Found multiple matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, provide more surrounding context to make the match unique.\nString: ${oldString}`,
+  )
+}
+
+// Cap on the closest-match hint to keep error messages bounded. Long enough to
+// show a meaningful surrounding block; short enough to not flood the tool result.
+const CLOSEST_MATCH_HINT_MAX_CHARS = 2000
+
+function buildNotFoundError(content: string, oldString: string): string {
+  const base = `String to replace not found in file. It must match exactly, including whitespace, indentation, and line endings.\nString: ${oldString}`
+  const hint = findClosestMatch(content, oldString)
+  if (!hint) return base
+  const truncated =
+    hint.length > CLOSEST_MATCH_HINT_MAX_CHARS
+      ? hint.slice(0, CLOSEST_MATCH_HINT_MAX_CHARS) + "\n... (truncated)"
+      : hint
+  return `${base}\n\nClosest match found in file (note the exact whitespace / indentation / line endings — resubmit old_string copying this verbatim):\n${truncated}`
+}
+
+// Try the fuzzy Replacers in order of specificity and return the first block
+// from the file that "looks like" oldString. Used only to enrich error messages
+// — never to silently apply an edit. SimpleReplacer/MultiOccurrenceReplacer are
+// skipped because they yield oldString itself, which is useless as a hint.
+function findClosestMatch(content: string, oldString: string): string | undefined {
+  for (const replacer of [
+    LineTrimmedReplacer,
+    BlockAnchorReplacer,
+    IndentationFlexibleReplacer,
+    WhitespaceNormalizedReplacer,
+    TrimmedBoundaryReplacer,
+    EscapeNormalizedReplacer,
+    ContextAwareReplacer,
+  ]) {
+    for (const match of replacer(content, oldString)) {
+      if (match && match !== oldString && content.includes(match)) {
+        return match
+      }
+    }
+  }
+  return undefined
+}

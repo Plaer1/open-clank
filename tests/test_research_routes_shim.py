@@ -21,24 +21,3 @@ def test_legacy_and_canonical_research_module_are_same_object():
         "routes.research_routes shim must resolve to the canonical "
         "routes.research.research_routes module object"
     )
-
-
-def test_string_targeted_monkeypatch_reaches_canonical(monkeypatch):
-    """String-targeted ``monkeypatch.setattr`` via the legacy path must reach
-    the canonical module.
-
-    ``test_research_owner_scope_routes.py`` patches
-    ``"routes.research_routes.DEEP_RESEARCH_DIR"`` as an autouse fixture; for
-    that to take effect at runtime, the legacy module name and the canonical
-    module must be identical.
-    """
-    legacy = importlib.import_module("routes.research_routes")
-    canonical = importlib.import_module("routes.research.research_routes")
-
-    sentinel = "/tmp/shim-test-sentinel"
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", sentinel)
-    assert canonical.DEEP_RESEARCH_DIR == sentinel, (
-        "string-targeted monkeypatch via legacy path did not reach the canonical module"
-    )
-    # restore is handled by monkeypatch fixture teardown
-    assert legacy is canonical

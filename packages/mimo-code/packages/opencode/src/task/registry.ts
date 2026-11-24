@@ -72,6 +72,9 @@ export interface Interface {
     include_archived?: boolean
   }) => Effect.Effect<Task[]>
 
+  /** Bounded live observation ordered by immutable native ID; not a snapshot. */
+  readonly pageBySession?: (input: { session_id: SessionID; limit: number; after?: string }) => Effect.Effect<{ items: Task[]; nextCursor?: string }>
+
   readonly get: (input: { session_id: SessionID; id: string }) => Effect.Effect<Task | undefined>
 
   readonly block: (input: { session_id: SessionID; id: string; event_summary?: string }) => Effect.Effect<Task>
@@ -198,6 +201,18 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Config.Service> = 
         db.select().from(TaskTable).where(where).orderBy(TaskTable.created_at).all(),
       )
       return rows.map(fromTaskRow)
+    })
+
+    const pageBySession = Effect.fn("TaskRegistry.pageBySession")(function* (input: { session_id: SessionID; limit: number; after?: string }) {
+      if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) throw new Error("observation page limit is invalid")
+      const now = Date.now()
+      const rows = yield* Effect.sync(() => Database.use((db) => db.select().from(TaskTable).where(and(
+        eq(TaskTable.session_id, input.session_id),
+        ...(input.after ? [gt(TaskTable.id, input.after)] : []),
+        or(isNull(TaskTable.cleanup_after), gt(TaskTable.cleanup_after, now)),
+      )).orderBy(TaskTable.id).limit(input.limit + 1).all()))
+      const items = rows.slice(0, input.limit).map(fromTaskRow)
+      return { items, ...(rows.length > input.limit && items.length ? { nextCursor: items[items.length - 1]!.id } : {}) }
     })
 
     const get = Effect.fn("TaskRegistry.get")(function* (input: { session_id: SessionID; id: string }) {
@@ -383,6 +398,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Config.Service> = 
     return Service.of({
       create,
       list,
+      pageBySession,
       get,
       events,
       block,

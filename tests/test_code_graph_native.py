@@ -13,21 +13,21 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-if not os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN"):
+if not os.environ.get("OPEN_CLANK_TEST_MEMERY_WORKER_BIN"):
     pytest.skip("Explicit matching code-query native binary is required", allow_module_level=True)
 
 
 def _assert_startup():
     root = Path(os.environ["OPEN_CLANK_DATA_DIR"]).resolve()
     assert root.name.startswith("openclank-s03-s06-projection.")
-    for key in ("ODYSSEUS_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "OPENCLANK_CONVERSATION_ARCHIVE_DB"):
+    for key in ("OPEN_CLANK_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "OPENCLANK_CONVERSATION_ARCHIVE_DB"):
         assert Path(os.environ[key]).resolve().is_relative_to(root), key
     assert os.environ["DATABASE_URL"] == "sqlite:///:memory:"
-    assert os.environ["ODYSSEUS_INPROCESS_POLLERS"] == "0"
+    assert os.environ["OPEN_CLANK_INPROCESS_POLLERS"] == "0"
     assert os.environ["PYTHONDONTWRITEBYTECODE"] == "1"
     assert "OPEN_CLANK_AGENT_HOME" not in os.environ and "THESIUS_AGENT_HOME" not in os.environ
-    binary = Path(os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"]).resolve()
-    assert binary == Path(os.environ["FM_MCP_COMMAND"]).resolve() and binary.is_file()
+    binary = Path(os.environ["OPEN_CLANK_TEST_MEMERY_WORKER_BIN"]).resolve()
+    assert binary == Path(os.environ["OPEN_CLANK_MEMERY_WORKER"]).resolve() and binary.is_file()
     assert hashlib.sha256(binary.read_bytes()).hexdigest() == os.environ["OPEN_CLANK_TEST_FM_MCP_SHA256"]
 
 

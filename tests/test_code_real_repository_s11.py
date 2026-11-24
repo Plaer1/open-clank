@@ -80,9 +80,9 @@ scope = lifecycle.scope
 
 async def repository_provider(scope, tmp_path, monkeypatch):
     expected = os.environ["OPEN_CLANK_TEST_DEFAULT_FM_SHA256"]
-    binary = Path(os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"])
+    binary = Path(os.environ["OPEN_CLANK_TEST_MEMERY_WORKER_BIN"])
     assert hashlib.sha256(binary.read_bytes()).hexdigest() == expected
-    assert hashlib.sha256(Path(os.environ["ODYSSEUS_FILES_SERVICE_BIN"]).read_bytes()).hexdigest() == os.environ["OPEN_CLANK_TEST_FILES_SHA256"]
+    assert hashlib.sha256(Path(os.environ["OPEN_CLANK_FILES_SERVICE_BIN"]).read_bytes()).hexdigest() == os.environ["OPEN_CLANK_TEST_FILES_SHA256"]
     return await lifecycle.native_provider(scope, tmp_path, monkeypatch)
 
 
@@ -232,7 +232,7 @@ def test_public_work_capacity_default_parity_and_finite_boundary():
 async def test_actual_repository_queries_source_and_copy_lifecycle(scope, tmp_path, monkeypatch):
     from core.models import Session
     from src import ai_interaction
-    from src.frankenmemory_provider import FrankenmemoryProvider
+    from src.memery_provider import MemeryProvider
     from src.memory_provider import MemoryRequestRejectedError
     from src.tool_execution import execute_tool_block
     from src.tool_schemas import function_call_to_tool_block
@@ -344,7 +344,7 @@ async def test_actual_repository_queries_source_and_copy_lifecycle(scope, tmp_pa
         assert len(delta["files"]) == 34 and all(row["rel_path"] != "src/openclank/operation_journal.py" for row in delta["files"])
         # A completely empty database, no copied graph/files/runs/evidence.
         fresh_env = dict(provider._env, FM_DB_PATH=str(tmp_path / "independent-full.db"))
-        fresh = FrankenmemoryProvider(command=provider._command, env=fresh_env)
+        fresh = MemeryProvider(command=provider._command, env=fresh_env)
         await fresh.initialize()
         _, metrics["phases"]["independent_full_ms"] = await publish(scope, fresh)
         independent = logical_snapshot(fresh_env["FM_DB_PATH"])
@@ -353,7 +353,7 @@ async def test_actual_repository_queries_source_and_copy_lifecycle(scope, tmp_pa
         command, environment = provider._command, dict(provider._env)
         before_restart = await ask(scope, provider, search("encode_command", path="packages/odysseus-files/src/quicklook_protocol.rs"))
         await provider.shutdown()
-        provider = FrankenmemoryProvider(command=command, env=environment)
+        provider = MemeryProvider(command=command, env=environment)
         await provider.initialize(); ai_interaction.set_memory_manager(None, provider=provider)
         after_restart = await ask(scope, provider, search("encode_command", path="packages/odysseus-files/src/quicklook_protocol.rs"))
         assert after_restart["receipt"] == before_restart["receipt"] and after_restart["hits"] == before_restart["hits"]

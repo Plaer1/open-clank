@@ -11,7 +11,7 @@ import type {
   Auth,
   Config as SDKConfig,
 } from "@mimo-ai/sdk"
-import type { Provider as ProviderV2, Model as ModelV2 } from "@mimo-ai/sdk/v2"
+import type { PublicProvider as ProviderV2, Model as ModelV2 } from "@mimo-ai/sdk/v2"
 
 import type { BunShell } from "./shell.js"
 import { type ToolDefinition } from "./tool.js"
@@ -92,6 +92,9 @@ export type AuthHook = {
   methods: (
     | {
         type: "oauth"
+        acquisitionMethod?: "manual-key" | "browser" | "device"
+        credentialKinds?: Array<"api" | "oauth">
+        billingLanes?: Array<"metered_api" | "subscription" | "custom" | "local">
         label: string
         prompts?: Array<
           | {
@@ -122,6 +125,9 @@ export type AuthHook = {
       }
     | {
         type: "api"
+        acquisitionMethod?: "manual-key" | "browser" | "device"
+        credentialKinds?: Array<"api" | "oauth">
+        billingLanes?: Array<"metered_api" | "subscription" | "custom" | "local">
         label: string
         prompts?: Array<
           | {
@@ -162,14 +168,19 @@ export type AuthHook = {
   )[]
 }
 
-export type AuthOAuthResult = { url: string; instructions: string } & (
+export type AuthOAuthResult = { url: string; instructions: string; userCode?: string; dispose?: () => void | Promise<void> } & (
   | {
       method: "auto"
-      callback(code?: string): Promise<
+      callback(code?: string, signal?: AbortSignal): Promise<
         | ({
             type: "success"
             provider?: string
             metadata?: Record<string, string>
+            credentialMetadata?: {
+              device_id: string
+              kimi_region: "cn" | "global"
+              credential_profile: "kimi-code-device-v1"
+            }
           } & (
             | {
                 refresh: string
@@ -187,11 +198,16 @@ export type AuthOAuthResult = { url: string; instructions: string } & (
     }
   | {
       method: "code"
-      callback(code: string): Promise<
+      callback(code: string, signal?: AbortSignal): Promise<
         | ({
             type: "success"
             provider?: string
             metadata?: Record<string, string>
+            credentialMetadata?: {
+              device_id: string
+              kimi_region: "cn" | "global"
+              credential_profile: "kimi-code-device-v1"
+            }
           } & (
             | {
                 refresh: string
@@ -274,6 +290,7 @@ export type ActorPostStopInput = ActorStopBaseInput & {
   // false → the spawned agent cannot use the Write tool (read-only, e.g. explore).
   // Absent/undefined → unknown; hooks must NOT suppress on absence (fail-open).
   canWrite?: boolean
+  canWorkflowWrite?: boolean
 }
 
 export type ActorStopOutput = {

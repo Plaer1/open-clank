@@ -30,7 +30,6 @@ CATALOG_REVISION = "2026-09-25.1"
 PREDICATE_VERSION = "1"
 EVENT_SCHEMA_VERSION = 1
 
-NORMAL_COUNT = 34  # 30 visible N + 4 mystery S
 ULTRA_COUNT = 3
 
 # ---------------------------------------------------------------------------
@@ -221,6 +220,10 @@ CATALOG: tuple[AchievementDefinition, ...] = (
        "Complete all thirty guide lessons."),
     _n(30, "oc.shortcuts-grow", "Shortcuts Grow Here", KIND_UI, (EventFamily.SURFACE_VISITED,),
        "Open shared app links from Editor and TreeHouse."),
+    _n(31, "oc.clankshop-visit", "A Visit to Clankshop", KIND_UI, (EventFamily.SURFACE_VISITED,),
+       "Visit the visible Clankshop."),
+    _n(32, "oc.clankshop-play", "A Different View", KIND_UI, (EventFamily.SURFACE_VISITED,),
+       "Deliberately view a Clankshop game presentation."),
     _s(1, "oc.five-branches", "Five Branches", KIND_UI, (EventFamily.SURFACE_VISITED,),
        "Visit five core surfaces."),
     _s(2, "oc.same-clank-new-digs", "Same Clank, New Digs", "mixed", (EventFamily.CHAT_WORKSPACE_REBOUND, EventFamily.CHAT_ACTION_COMPLETED),
@@ -241,6 +244,7 @@ CATALOG: tuple[AchievementDefinition, ...] = (
 BY_ID: dict[str, AchievementDefinition] = {item.id: item for item in CATALOG}
 BY_KEY: dict[str, AchievementDefinition] = {item.key: item for item in CATALOG}
 NORMAL_IDS: tuple[str, ...] = tuple(item.id for item in CATALOG if item.rarity != "ultra")
+NORMAL_COUNT = len(NORMAL_IDS)
 ULTRA_IDS: tuple[str, ...] = tuple(item.id for item in CATALOG if item.rarity == "ultra")
 VISIBLE_NORMAL_IDS: tuple[str, ...] = tuple(item.id for item in CATALOG if item.rarity == "normal")
 MYSTERY_IDS: tuple[str, ...] = tuple(item.id for item in CATALOG if item.rarity == "mystery")
@@ -1182,6 +1186,21 @@ def _check_u03(earned_ids: set[str]) -> Qualification | None:
     return None
 
 
+def _check_n31(state: Any, event: ActivityEvent) -> Qualification | None:
+    facts = _f(event)
+    if event.kind == KIND_UI and event.event_family == EventFamily.SURFACE_VISITED and facts.get('surface') == 'clankshop' and _truth(facts, 'visited'):
+        return Qualification('N31', (event.source_event_id,), {'surface':'clankshop'})
+    return None
+
+
+def _check_n32(state: Any, event: ActivityEvent) -> Qualification | None:
+    facts = _f(event)
+    if (event.kind == KIND_UI and event.event_family == EventFamily.SURFACE_VISITED and facts.get('surface') == 'clankshop-game'
+        and facts.get('mode') in ('drift','blocks','idle') and _truth(facts,'visited') and _truth(facts,'deliberate')):
+        return Qualification('N32', (event.source_event_id,), {'surface':'clankshop-game','mode':facts['mode']})
+    return None
+
+
 _SINGLE_CHECKERS: dict[str, Callable[[PredicateState, ActivityEvent], Qualification | None]] = {
     "N01": _check_n01,
     "N02": _check_n02,
@@ -1212,6 +1231,8 @@ _SINGLE_CHECKERS: dict[str, Callable[[PredicateState, ActivityEvent], Qualificat
     "N27": _check_n27,
     "N28": _check_n28,
     "N30": _check_n30,
+    "N31": _check_n31,
+    "N32": _check_n32,
     "S01": _check_s01,
     "S02": _check_s02,
     "S03": _check_s03,

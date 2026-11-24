@@ -1,5 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
-import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve, sep } from "path"
+import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve, sep, win32 } from "path"
 import { realpathSync } from "fs"
 import * as NFS from "fs/promises"
 import { createHash, randomUUID } from "crypto"
@@ -60,13 +60,28 @@ export namespace AppFileSystem {
   }
 
   export type HistoryStatus = {
-    status?: "prepared" | "complete" | "paused" | "failed" | "aborted" | "unconfigured"
+    status?: "prepared" | "complete" | "paused" | "skipped" | "failed" | "aborted" | "unconfigured"
     action_id?: string
-    history_status: "prepared" | "complete" | "paused" | "failed" | "aborted"
+    history_status: "prepared" | "complete" | "paused" | "skipped" | "failed" | "aborted"
     capture_phase: string
     error?: string
     durable?: boolean
     coverage?: string
+    managed_action_ref?: string
+    observed_membership?: "pending"
+  }
+
+  export type ManagedToolOriginV1 = {
+    version: 1; host_chat_id: string; engine_session_id: string; root_operation_id: string;
+    actor_id: string; execution_revision: number; inner_turn_id: string; tool_call_id: string; assistant_message_id: string
+  }
+
+  /** Content-free facts from the authenticated Host's original Files reservation. */
+  export type ManagedCaptureFact = {
+    readonly source: { readonly accountID:string; readonly authorityWorkspaceID:string; readonly hostChatID:string;
+      readonly sessionID:string; readonly actorID:string; readonly executionRevision:number; readonly rootOperationID:string;
+      readonly innerTurnID:string; readonly toolCallID:string; readonly assistantMessageID:string }
+    readonly capture: { readonly historyActorID:string; readonly historyWorkspaceID:string }
   }
 
   export type HistoryContext = {
@@ -77,6 +92,14 @@ export namespace AppFileSystem {
     readonly rootId?: string
     readonly socketPath: string
     readonly token?: string
+    readonly managedToolOrigin?: ManagedToolOriginV1
+    readonly observedCaptureMembership?: {
+      begin: (context: HistoryContext, actionID: string) => Promise<void>
+      complete: (context: HistoryContext, actionID: string, actionRef: string) => Promise<void>
+      beginManaged?: (fact: ManagedCaptureFact, actionID: string) => Promise<void>
+      completeManaged?: (actionID: string, actionRef: string) => Promise<void>
+      currentManaged?: () => boolean
+    }
     status: HistoryStatus
   }
 
@@ -104,6 +127,11 @@ export namespace AppFileSystem {
     const normalized = resolve(target)
     const root = resolve(workspaceRoot)
     if (!(normalized === root || normalized.startsWith(`${root}${sep}`))) return undefined
+    const origin = value.managedToolOrigin
+    const fields = ["version", "host_chat_id", "engine_session_id", "root_operation_id", "actor_id", "execution_revision", "inner_turn_id", "tool_call_id", "assistant_message_id"]
+    const validOrigin = origin && typeof origin === "object" && !Array.isArray(origin) && Object.keys(origin).length === fields.length && fields.every((key) => Object.hasOwn(origin, key)) &&
+      (origin as any).version === 1 && Number.isSafeInteger((origin as any).execution_revision) && (origin as any).execution_revision >= 0 &&
+      fields.filter((key) => key !== "version" && key !== "execution_revision").every((key) => typeof (origin as any)[key] === "string" && Buffer.byteLength((origin as any)[key], "utf8") <= 256 && (origin as any)[key].length > 0 && !/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/.test((origin as any)[key]))
     return {
       actorId,
       accountId,
@@ -112,6 +140,9 @@ export namespace AppFileSystem {
       rootId,
       socketPath,
       token,
+      ...(validOrigin ? { managedToolOrigin: origin as ManagedToolOriginV1 } : {}),
+      ...(validOrigin && ctx.extra?.observedCaptureMembership && typeof ctx.extra.observedCaptureMembership === "object"
+        ? { observedCaptureMembership: ctx.extra.observedCaptureMembership as HistoryContext["observedCaptureMembership"] } : {}),
       status: { status: "paused", history_status: "paused", capture_phase: "unavailable", durable: false, coverage: "NoCapture" },
     }
   }
@@ -281,12 +312,13 @@ export namespace AppFileSystem {
         finish(new Error("history IPC timeout"))
       })
       socket.on("error", (error) => finish(error))
-      socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)))
+      let size = 0
+      socket.on("data", (chunk) => { size += chunk.length; if (size > 2 * 1024 * 1024) { socket.destroy(); finish(new Error("history IPC response exceeds limit")); return } chunks.push(Buffer.from(chunk)) })
       socket.on("end", () => {
         try {
           const value = JSON.parse(Buffer.concat(chunks).toString("utf8"))
           if (value?.Error || value?.error || value?.code === "error") {
-            throw new Error(String(value.Error ?? value.error ?? value.code))
+            throw new Error(String(value.Error?.code ?? value.Error ?? value.error ?? value.code))
           }
           finish(undefined, value)
         } catch (error) {
@@ -302,7 +334,21 @@ export namespace AppFileSystem {
     token: context.token ?? "",
   })
 
-  const historyEnvelope = (context: HistoryContext, actionId: string, path: string, operation: string, before: Uint8Array | undefined, paths: string[]) => {
+  /** Internal bounded History reads; callers must revalidate their current host scope. */
+  export const historyActionRead = (context: HistoryContext, actionId: string, request:
+    | { kind: "resource"; resourceID: string }
+    | { kind: "action" }
+    | { kind: "info"; receipt: unknown }
+    | { kind: "chunk"; receipt: unknown; offset: number; length: number }) => {
+    const envelope = { protocol_version: 1, auth: historyAuth(context), action_id: actionId }
+    const body = request.kind === "resource" ? { ResolveResource: { envelope, resource_id: request.resourceID } }
+      : request.kind === "action" ? { GetCaptureAction: envelope }
+      : request.kind === "info" ? { ReadVersionInfo: { envelope, receipt: request.receipt } }
+      : { ReadVersionChunk: { envelope, receipt: request.receipt, offset: request.offset, length: request.length } }
+    return historyRequest(context.socketPath, body)
+  }
+
+  const historyEnvelope = (context: HistoryContext, actionId: string, path: string, operation: string, before: string | undefined, paths: string[]) => {
     const resource = (value: string) => ({
       account_id: context.accountId,
       workspace_id: context.workspaceId,
@@ -323,16 +369,18 @@ export namespace AppFileSystem {
       expected_revision: null,
       actor_id: context.actorId,
       actor_kind: "agent",
+      managed_tool_origin_v1: context.managedToolOrigin,
       session_id: null,
       run_id: null,
       task_id: null,
       tool_id: "mimo-filesystem",
-      before_revision: before ? { Opaque: { kind: "fingerprint", value: fingerprintBytes(before) } } : null,
+      before_revision: before ? { Opaque: { kind: "fingerprint", value: before } } : null,
       expected_after_revision: null,
       original_locator: { display_name: basename(path), location_label: resolve(path), opaque_ref: null },
       destination_locator: null,
       timestamp_millis: Date.now(),
       coverage: {
+        metadata: { required_recovery: true },
         kind: paths.length ? "ObservedAfterOnly" : "KnownMutationHooks",
         roots: [{ display_name: basename(context.workspaceRoot), location_label: context.workspaceRoot, opaque_ref: null }],
         exclusions: paths.length ? ["non-primary batch targets lack exact byte payloads"] : [],
@@ -349,8 +397,33 @@ export namespace AppFileSystem {
     readonly path: string
     readonly resource: Record<string, string>
     readonly before: Buffer | undefined
+    readonly stream?: { fingerprint: string; size: number; identity: FileIdentity }
     readonly resourceType: "File" | "Directory" | "Symlink"
     readonly metadata: Record<string, unknown>
+  }
+
+  type FileIdentity = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number; mode: number }
+  const sameFile = (a: FileIdentity, b: FileIdentity) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.mode === b.mode
+  // Both the opened object and the named target must remain the same across each pass.
+  const streamFile = async (target: string, expected?: FileIdentity, visit?: (chunk: Buffer, offset: number) => Promise<void>) => {
+    const handle = await NFS.open(target, "r")
+    try {
+      const first = await handle.stat()
+      if (!first.isFile() || !Number.isSafeInteger(first.size) || first.size < 0 || (expected && !sameFile(first, expected))) throw new AtomicConflict(`${target}: file changed before History capture`)
+      if (!sameFile(first, await NFS.stat(target))) throw new AtomicConflict(`${target}: target changed before History capture`)
+      const digest = createHash("sha256"), buffer = Buffer.allocUnsafe(512 * 1024)
+      let offset = 0
+      while (offset < first.size) {
+        const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, first.size - offset), offset)
+        if (!bytesRead) throw new AtomicConflict(`${target}: file shortened during History capture`)
+        const chunk = buffer.subarray(0, bytesRead)
+        digest.update(chunk)
+        if (visit) await visit(chunk, offset)
+        offset += bytesRead
+      }
+      if (!sameFile(first, await handle.stat()) || !sameFile(first, await NFS.stat(target))) throw new AtomicConflict(`${target}: file changed during History capture`)
+      return { fingerprint: `sha256:${digest.digest("hex")}:${offset}`, size: offset, identity: first }
+    } finally { await handle.close() }
   }
 
   const directoryManifest = async (target: string): Promise<Buffer> => {
@@ -405,6 +478,10 @@ export namespace AppFileSystem {
         before = await directoryManifest(target)
         resourceType = "Directory"
       } else {
+        if (info.isFile() && info.size > 256 * 1024) {
+          const stream = await streamFile(target, info)
+          return { path: target, resource, before: undefined, stream, resourceType: "File", metadata: { mode: info.mode, size: info.size, modified_millis: Math.trunc(info.mtimeMs) } }
+        }
         before = await NFS.readFile(target)
         resourceType = "File"
       }
@@ -439,12 +516,82 @@ export namespace AppFileSystem {
     }
   }
 
+  class HistoryBatchOutcomeUnknown extends Error {}
+
+  // Keep every History IPC frame below the service's fixed 1-MiB limit.
+  // A batch consumes its staged IDs only after dispatch, so unknown dispatch
+  // outcomes are never cleaned up or reissued here.
+  const historyBatchRequest = async (context: HistoryContext, actionId: string, entries: any[], makeBody: (entries: any[]) => any) => {
+    const maxFrame = 1024 * 1024, chunkSize = 512 * 1024
+    const envelope = { protocol_version: 1, auth: historyAuth(context), action_id: actionId }
+    const knownUnconsumed: string[] = []
+    let dispatched = false
+    const request = async (body: unknown) => {
+      if (Buffer.byteLength(JSON.stringify(body), "utf8") + 1 > maxFrame) throw new Error("history IPC frame exceeds limit")
+      return historyRequest(context.socketPath, body)
+    }
+    try {
+      const wire = entries.map(({ _stream, ...entry }) => ({ ...entry }))
+      for (let i = 0; i < entries.length; i++) {
+        const source = entries[i]._stream as HistoryTarget | undefined
+        if (!source?.stream) continue
+        const upload = `stage-${randomUUID()}`, expected = source.stream
+        const begin = await request({StageBegin:{envelope,upload_id:upload,content_length:expected.size,fingerprint:expected.fingerprint}})
+        if (begin !== "Accepted") throw new Error("history stage admission unavailable")
+        knownUnconsumed.push(upload)
+        const actual = await streamFile(source.path, expected.identity, async (chunk, offset) => {
+          const result = await request({StageChunk:{envelope,upload_id:upload,offset,content:chunk.toString("base64")}})
+          if (result !== "Accepted") throw new Error("history stage write unavailable")
+        })
+        if (actual.fingerprint !== expected.fingerprint) throw new AtomicConflict(`${source.path}: file content changed during History capture`)
+        const finished = await request({StageFinish:{envelope,upload_id:upload}})
+        if (finished?.Staged?.upload_id !== upload || finished?.Staged?.content_length !== expected.size) throw new Error("history stage finish unavailable")
+        wire[i].content = null; wire[i].staged_upload_id = upload
+      }
+      const body = () => makeBody(wire)
+      while (Buffer.byteLength(JSON.stringify(body()), "utf8") + 1 > maxFrame) {
+        let index = -1, largest = -1
+        for (let i=0; i<wire.length; i++) {
+          if (typeof wire[i].content === "string" && wire[i].content.length > largest) { index=i; largest=wire[i].content.length }
+        }
+        if (index < 0) throw new Error("history batch metadata exceeds frame limit")
+        const item=wire[index], content=Buffer.from(item.content, "base64")
+        const fingerprint=fingerprintBytes(content), upload=`stage-${randomUUID()}`
+        if (item.fingerprint !== fingerprint) throw new Error("history staged fingerprint changed")
+        const begin=await request({StageBegin:{envelope,upload_id:upload,content_length:content.length,fingerprint}})
+        if (begin !== "Accepted") throw new Error("history stage admission unavailable")
+        knownUnconsumed.push(upload)
+        for (let offset=0; offset<content.length; offset+=chunkSize) {
+          const result=await request({StageChunk:{envelope,upload_id:upload,offset,content:content.subarray(offset,offset+chunkSize).toString("base64")}})
+          if (result !== "Accepted") throw new Error("history stage write unavailable")
+        }
+        const finished=await request({StageFinish:{envelope,upload_id:upload}})
+        if (finished?.Staged?.upload_id !== upload || finished?.Staged?.content_length !== content.length) throw new Error("history stage finish unavailable")
+        item.content=null; item.staged_upload_id=upload
+      }
+      for (const entry of entries) {
+        const source = entry._stream as HistoryTarget | undefined
+        if (source?.stream && !sameFile(source.stream.identity, await NFS.stat(source.path))) throw new AtomicConflict(`${source.path}: target changed before History batch`)
+      }
+      const payload=body()
+      if (Buffer.byteLength(JSON.stringify(payload), "utf8") + 1 > maxFrame) throw new Error("history batch frame exceeds limit")
+      dispatched=true
+      return await request(payload)
+    } catch (error) {
+      if (!dispatched) {
+        for (const upload of knownUnconsumed) await request({StageAbort:{envelope,upload_id:upload}}).catch(() => undefined)
+        throw error
+      }
+      throw new HistoryBatchOutcomeUnknown(`history batch outcome unknown: ${String(error)}`)
+    }
+  }
+
   const beginHistoryCapture = async (change: AtomicChange, canonicalTargets: string[]) => {
     const context = change.history
     const actionId = change.actionId
     if (!context || !actionId) return undefined
     const targets = await Promise.all(canonicalTargets.map((target) => readHistoryTarget(target)))
-    const before = targets[0]?.before
+    const before = targets[0]?.stream?.fingerprint ?? (targets[0]?.before ? fingerprintBytes(targets[0].before) : undefined)
     const operation = before ? "replace" : "create"
     const resources = await Promise.all(targets.map((target) => historyResource(context, target.path)))
     const envelope = historyEnvelope(context, actionId, canonicalTargets[0]!, operation, before, canonicalTargets.slice(1))
@@ -455,76 +602,198 @@ export namespace AppFileSystem {
       target.resource.account_id = resource.account_id
       target.resource.workspace_id = resource.workspace_id
       target.resource.resource_id = resource.resource_id
-      const digest = target.before ? `sha256:${createHash("sha256").update(target.before).digest("hex")}` : null
+      const fingerprint = target.stream?.fingerprint ?? (target.before ? fingerprintBytes(target.before) : "missing")
+      const digest = fingerprint === "missing" ? null : fingerprint.slice(0, fingerprint.lastIndexOf(":"))
       return {
         resource_key: resource,
         old_locator: { display_name: basename(target.path), location_label: relative(context.workspaceRoot, target.path), opaque_ref: resource.resource_id },
         new_locator: { display_name: basename(target.path), location_label: relative(context.workspaceRoot, target.path), opaque_ref: resource.resource_id },
-        expected_revision: { Opaque: { kind: "fingerprint", value: target.before ? fingerprintBytes(target.before) : "missing" } },
-        existence: target.before ? "Present" : "Absent",
+        expected_revision: { Opaque: { kind: "fingerprint", value: fingerprint } },
+        existence: fingerprint !== "missing" ? "Present" : "Absent",
         resource_type: target.resourceType,
         metadata: { ...target.metadata, opaque: target.resourceType === "Directory" ? { manifest_digest: digest } : null },
         content: target.before ? Buffer.from(target.before).toString("base64") : null,
         staged_upload_id: null,
-        fingerprint: target.before ? fingerprintBytes(target.before) : "missing",
-        coverage: { byte_len: target.before?.byteLength ?? 0, content_digest: digest, metadata: { exact_preimage: true } },
+        _stream: target.stream ? target : undefined,
+        fingerprint: fingerprint,
+        coverage: { byte_len: target.stream?.size ?? target.before?.byteLength ?? 0, content_digest: digest, metadata: { exact_preimage: true } },
       }
     })
     try {
-      await historyRequest(context.socketPath, { PrepareBatch: { envelope: { protocol_version: 1, auth: historyAuth(context), claimed_digest: "", request: envelope }, batch_version: 1, entries } })
+      const prepared = await historyBatchRequest(context, actionId, entries, (items) => ({ PrepareBatch: { envelope: { protocol_version: 1, auth: historyAuth(context), claimed_digest: "", request: envelope }, batch_version: 1, entries: items } }))
+      const record=prepared?.Action, batch=record?.mutation_batch, acknowledgement=batch?.prepare
+      const keyOf=(key:any) => JSON.stringify([key?.account_id,key?.workspace_id,key?.provider,key?.resource_id])
+      const expected=new Map(entries.map((entry) => [keyOf(entry.resource_key),entry]))
+      const covers=(actual:any) => {
+        if (!Array.isArray(actual) || actual.length !== expected.size) return false
+        const seen=new Set<string>()
+        return actual.every((item:any) => {
+          const key=keyOf(item?.resource_key), wanted=expected.get(key)
+          if (!wanted || seen.has(key)) return false
+          seen.add(key)
+          return item.existence===wanted.existence && item.resource_type===wanted.resource_type && item.fingerprint===wanted.fingerprint &&
+            item.before?.fingerprint===wanted.fingerprint && typeof item.before?.version_id==="string" && !!item.before.version_id
+        })
+      }
+      if (expected.size!==entries.length || record?.action_id!==actionId || record?.actor_id!==context.actorId ||
+          record?.actor_account_id!==context.accountId || record?.state!=="BeforeDurable" ||
+          acknowledgement?.batch_version!==1 || acknowledgement?.parent_action_id!==actionId ||
+          acknowledgement?.resource_count!==entries.length || acknowledgement?.acknowledged!==true ||
+          !covers(record?.before_resources) || !covers(batch?.resources)) throw new HistoryBatchOutcomeUnknown("history preparation receipt unavailable")
+      if (!record.recovery_only && context.observedCaptureMembership) {
+        try {
+          await context.observedCaptureMembership.begin(context, actionId)
+        } catch (error) {
+          await historyRequest(context.socketPath, { RecordLive: {
+            envelope: { protocol_version: 1, auth: historyAuth(context), action_id: actionId },
+            receipt: { action_id: actionId, status: "NotCommitted", fingerprint: null, after_unavailable: false },
+          } }).catch(() => undefined)
+          throw error
+        }
+      }
       context.status = Object.assign(context.status, { status: "prepared", action_id: actionId, history_status: "prepared", capture_phase: "before_durable", durable: true, coverage: "ExactBatch" })
       return { context, actionId, before, targets }
     } catch (error) {
-      context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "before_failed", durable: false, coverage: "NoCapture", error: String(error) })
+      const unknown=error instanceof HistoryBatchOutcomeUnknown
+      context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: unknown ? "before_outcome_unknown" : "before_failed", durable: false, coverage: unknown ? "Unknown" : "NoCapture", error: String(error) })
       throw new AtomicConflict(`history prepare failed before live mutation: ${String(error)}`)
     }
   }
 
   const finishHistoryCapture = async (capture: { context: HistoryContext; actionId: string; targets: HistoryTarget[] }, canonicalTargets: string[], committed: boolean) => {
     const { context, actionId } = capture
-    let after: Buffer | undefined
-    try {
-      after = (await readHistoryTarget(canonicalTargets[0]!)).before
-    } catch (error) {
-      context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "after_failed", durable: false, error: String(error) })
-      if (committed) throw new AtomicConflict(`history reconciliation pending after committed mutation: ${String(error)}`)
-      return
-    }
     if (!committed) {
       context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "live_not_committed", durable: false, coverage: "BeforeOnly" })
       await historyRequest(context.socketPath, { RecordLive: { envelope: { protocol_version: 1, auth: historyAuth(context), action_id: actionId }, receipt: { action_id: actionId, status: "NotCommitted", fingerprint: null, after_unavailable: false } } }).catch(() => undefined)
       return
     }
     try {
-      await historyRequest(context.socketPath, { RecordLive: { envelope: { protocol_version: 1, auth: historyAuth(context), action_id: actionId }, receipt: { action_id: actionId, status: "Committed", fingerprint: after ? fingerprintBytes(after) : "missing", after_unavailable: false } } })
       const afterTargets = await Promise.all(canonicalTargets.map((target) => readHistoryTarget(target)))
+      const primary = afterTargets[0]!
+      const afterFingerprint = primary.stream?.fingerprint ?? (primary.before ? fingerprintBytes(primary.before) : "missing")
+      await historyRequest(context.socketPath, { RecordLive: { envelope: { protocol_version: 1, auth: historyAuth(context), action_id: actionId }, receipt: { action_id: actionId, status: "Committed", fingerprint: afterFingerprint, after_unavailable: false } } })
       const entries = await Promise.all(afterTargets.map(async (target) => {
         const resource = await historyResource(context, target.path)
-        const digest = target.before ? `sha256:${createHash("sha256").update(target.before).digest("hex")}` : null
+        const fingerprint = target.stream?.fingerprint ?? (target.before ? fingerprintBytes(target.before) : "missing")
+        const digest = fingerprint === "missing" ? null : fingerprint.slice(0, fingerprint.lastIndexOf(":"))
         return {
           resource_key: resource,
           locator: { display_name: basename(target.path), location_label: relative(context.workspaceRoot, target.path), opaque_ref: resource.resource_id },
-          existence: target.before ? "Present" : "Absent",
+          existence: fingerprint !== "missing" ? "Present" : "Absent",
           resource_type: target.resourceType,
           metadata: { ...target.metadata, opaque: target.resourceType === "Directory" ? { manifest_digest: digest } : null },
           content: target.before ? target.before.toString("base64") : null,
           staged_upload_id: null,
-          fingerprint: target.before ? fingerprintBytes(target.before) : "missing",
-          coverage: { byte_len: target.before?.byteLength ?? 0, content_digest: digest, metadata: { exact_after: true } },
-          outcome: { resource_id: resource.resource_id, status: "Committed", revision: { Opaque: { kind: "fingerprint", value: target.before ? fingerprintBytes(target.before) : "missing" } } },
+          _stream: target.stream ? target : undefined,
+          fingerprint: fingerprint,
+          coverage: { byte_len: target.stream?.size ?? target.before?.byteLength ?? 0, content_digest: digest, metadata: { exact_after: true } },
+          outcome: { resource_id: resource.resource_id, status: "Committed", revision: { Opaque: { kind: "fingerprint", value: fingerprint } } },
         }
       }))
-      await historyRequest(context.socketPath, { CompleteBatch: { envelope: { protocol_version: 1, auth: historyAuth(context), action_id: actionId }, batch_version: 1, entries } })
+      const control = { protocol_version: 1, auth: historyAuth(context), action_id: actionId }
+      const completed = await historyBatchRequest(context, actionId, entries, (items) => ({ CompleteBatch: { envelope: control, batch_version: 1, entries: items } })).catch(async (error) => {
+        if (!(error instanceof HistoryBatchOutcomeUnknown)) throw error
+        // The service may already have committed the batch. Read its original
+        // terminal receipt without replaying either the file write or the batch.
+        return historyRequest(context.socketPath, { GetCaptureAction: control })
+      })
+      if (completed?.Action?.state !== "Complete" || completed.Action.action_id !== actionId) throw new Error("history completion receipt unavailable")
+      if (completed.Action.recovery_only === true) {
+        const action = completed.Action
+        const expected = new Map(entries.map((entry) => [entry.resource_key.resource_id, entry]))
+        const seen = new Set<string>()
+        if (action.actor_id !== context.actorId || action.actor_account_id !== context.accountId ||
+            action.live?.action_id !== actionId || action.live?.status !== "Committed" ||
+            action.live?.fingerprint !== afterFingerprint || !Array.isArray(action.after_resources) ||
+            expected.size !== entries.length || action.after_resources.length !== expected.size ||
+            !action.after_resources.every((item: any) => {
+              const key = item?.resource_key, entry = expected.get(key?.resource_id)
+              if (!entry || seen.has(key.resource_id) || key.provider !== "mimo-filesystem" ||
+                  key.account_id !== context.accountId || key.workspace_id !== context.workspaceId ||
+                  item.existence !== entry.existence || item.resource_type !== entry.resource_type ||
+                  item.fingerprint !== entry.fingerprint || item.after?.fingerprint !== entry.fingerprint) return false
+              seen.add(key.resource_id)
+              return true
+            })) throw new Error("private History completion receipt unavailable")
+        const settlement = await historyRequest(context.socketPath, { SettleRecovery: control })
+          .catch(() => historyRequest(context.socketPath, { GetCaptureAction: control }).catch(() => undefined))
+        const receipt = settlement?.Action
+        if (receipt?.action_id !== actionId || receipt.actor_id !== context.actorId ||
+            receipt.actor_account_id !== context.accountId || receipt.recovery_only !== true ||
+            receipt.recovery_settled !== true || receipt.state !== "Complete") {
+          context.status = { status: "paused", history_status: "paused", capture_phase: "recovery_settlement_pending", action_id: actionId, durable: false }
+          return
+        }
+        context.status = { status: "skipped", history_status: "skipped", capture_phase: "recovery_settled", action_id: actionId, durable: false }
+        return
+      }
       context.status = Object.assign(context.status, { status: "complete", action_id: actionId, history_status: "complete", capture_phase: "complete", durable: true })
+      const record = completed?.Action
+      const originFields = ["version", "host_chat_id", "engine_session_id", "root_operation_id", "actor_id", "execution_revision", "inner_turn_id", "tool_call_id", "assistant_message_id"] as const
+      const storedOrigin = record?.managed_tool_origin_v1
+      if (context.managedToolOrigin && canonicalTargets.length === 1 && record?.state === "Complete" &&
+          record.action_id === actionId && record.actor_id === context.actorId && record.actor_account_id === context.accountId &&
+          storedOrigin && typeof storedOrigin === "object" && Object.keys(storedOrigin).length === originFields.length &&
+          originFields.every((key) => storedOrigin[key] === context.managedToolOrigin?.[key]) &&
+          Array.isArray(record.before_resources) && record.before_resources.length === 1 &&
+          Array.isArray(record.after_resources) && record.after_resources.length === 1) {
+        const before = record.before_resources[0], after = record.after_resources[0]
+        const resourceID = before?.resource_key?.resource_id
+        if (typeof resourceID === "string" && resourceID.length <= 256 && resourceID.startsWith("file:") &&
+            ["account_id", "workspace_id", "provider", "resource_id"].every((key) => before.resource_key[key] === after?.resource_key?.[key]) &&
+            before.resource_key.account_id === context.accountId && before.resource_key.workspace_id === context.workspaceId &&
+            typeof before.before?.version_id === "string" && typeof after.after?.version_id === "string" &&
+            before.before.version_id.length <= 256 && after.after.version_id.length <= 256) {
+          const payload = { version: 1, actionID: actionId, resourceID, beforeVersionID: before.before.version_id,
+            afterVersionID: after.after.version_id, origin: context.managedToolOrigin }
+          const locator = `oc-history-action:v1:${Buffer.from(JSON.stringify(payload)).toString("base64url")}`
+          if (locator.length <= 4096) context.status.managed_action_ref = locator
+        }
+      } else if (context.managedToolOrigin && canonicalTargets.length > 1 && canonicalTargets.length <= 64 && record?.state === "Complete" &&
+          record.action_id === actionId && record.actor_id === context.actorId && record.actor_account_id === context.accountId &&
+          storedOrigin && typeof storedOrigin === "object" && Object.keys(storedOrigin).length === originFields.length &&
+          originFields.every((key) => storedOrigin[key] === context.managedToolOrigin?.[key]) &&
+          Array.isArray(record.before_resources) && record.before_resources.length === canonicalTargets.length &&
+          Array.isArray(record.after_resources) && record.after_resources.length === canonicalTargets.length &&
+          typeof record.request_digest === "string" && /^[a-f0-9]{64}$/.test(record.request_digest) &&
+          typeof record.complete_request_digest === "string" && /^[a-f0-9]{64}$/.test(record.complete_request_digest)) {
+        const ids = new Set<string>()
+        const valid = record.before_resources.every((before: any, index: number) => {
+          const key = before?.resource_key, after = record.after_resources[index], id = key?.resource_id
+          if (typeof id !== "string" || !id.startsWith("file:") || ids.has(id) ||
+              key.account_id !== context.accountId || key.workspace_id !== context.workspaceId || key.provider !== "mimo-filesystem" ||
+              !["account_id", "workspace_id", "provider", "resource_id"].every((field) => key[field] === after?.resource_key?.[field]) ||
+              typeof before.before?.version_id !== "string" || !before.before.version_id ||
+              typeof after?.after?.version_id !== "string" || !after.after.version_id) return false
+          ids.add(id); return true
+        })
+        if (valid) {
+          const payload = { version: 2, actionID: actionId, requestDigest: record.request_digest,
+            completeDigest: record.complete_request_digest, origin: context.managedToolOrigin }
+          const locator = `oc-history-action:v2:${Buffer.from(JSON.stringify(payload)).toString("base64url")}`
+          if (locator.length <= 4096) context.status.managed_action_ref = locator
+        }
+      }
     } catch (error) {
       context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "after_failed", durable: false, error: String(error) })
       throw new AtomicConflict(`history reconciliation pending after committed mutation: ${String(error)}`)
+    }
+    if (context.observedCaptureMembership && !context.status.managed_action_ref)
+      context.status = Object.assign(context.status, { observed_membership: "pending" })
+    if (context.observedCaptureMembership && context.status.managed_action_ref) {
+      try {
+        await context.observedCaptureMembership.complete(context, actionId, context.status.managed_action_ref)
+      } catch {
+        // History already completed. Preserve its real receipt and leave the
+        // transcript admission pending rather than encouraging another edit.
+        context.status = Object.assign(context.status, { observed_membership: "pending" })
+      }
     }
   }
 
   const fileFingerprint = async (target: string) => {
     try {
-      return fingerprintBytes(await NFS.readFile(target))
+      return (await streamFile(target)).fingerprint
     } catch (error: any) {
       if (error?.code === "ENOENT") return undefined
       throw error
@@ -667,6 +936,11 @@ export namespace AppFileSystem {
         const target = canonicalTargets[index]!
         assertCanonicalTarget(change.path, target)
         const current = await fileFingerprint(target)
+        const captured = historyCapture?.targets[index]
+        if (captured) {
+          const capturedFingerprint = captured.stream?.fingerprint ?? (captured.before ? fingerprintBytes(captured.before) : undefined)
+          if (current !== capturedFingerprint) throw new AtomicConflict(`${target}: changed after History preparation`)
+        }
         if (change.requireMissing && current !== undefined) {
           throw new AtomicConflict(`${change.path}: created by another writer`)
         }
@@ -987,15 +1261,12 @@ export namespace AppFileSystem {
   }
 
   export function overlaps(a: string, b: string) {
-    const relA = relative(resolve(a), resolve(b))
-    const relB = relative(resolve(b), resolve(a))
-    const contains = (rel: string) =>
-      rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))
-    return contains(relA) || contains(relB)
+    return contains(a, b) || contains(b, a)
   }
 
   export function contains(parent: string, child: string) {
     const rel = relative(resolve(parent), resolve(child))
-    return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))
+    // Windows cross-drive path.relative returns the absolute `to` path, not "..".
+    return rel === "" || (!isAbsolute(rel) && !win32.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))
   }
 }

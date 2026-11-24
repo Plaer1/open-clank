@@ -13,6 +13,9 @@ the provider cutover.
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
+import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import math
@@ -21,11 +24,13 @@ import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 import uuid
+from types import MappingProxyType
 
 from core.database import SessionLocal
 from core.provider_models import (
     ProviderConnection,
     ProviderModelRoute,
+    ProviderOperationBinding,
     ProviderRouteBinding,
     ProviderShareGrant,
 )
@@ -56,6 +61,9 @@ MODEL_OPERATIONS = frozenset(
 
 PURPOSE_OPERATIONS: Mapping[str, frozenset[str]] = {
     "chat": frozenset({"chat.complete"}),
+    "code_summary": frozenset({"chat.complete"}),
+    "next_prompt": frozenset({"chat.complete"}),
+    "worker_naming": frozenset({"chat.complete"}),
     "utility": frozenset({"chat.complete"}),
     # Memory photo extraction is still the Memory purpose: the route must be
     # explicitly image-aware, and the resolver must use this same binding.
@@ -334,6 +342,28 @@ class OperationRoute:
         return result
 
 
+_CODE_SUMMARY_REUSE_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _CodeSummaryReuseWitness:
+    commitment: Mapping[str, Any]
+    seal: object
+    def __deepcopy__(self, memo):
+        return self
+
+
+def _code_summary_reuse_witness(commitment: Mapping[str, Any]) -> _CodeSummaryReuseWitness:
+    """In-process summary owner witness; it is not a transport authority."""
+    value = copy.deepcopy(dict(commitment))
+    if (set(value) != {'version','profile','material_sha256','authority_sha256'}
+            or value['version'] != 1 or value['profile'] != 'code-summary-v1'
+            or any(not isinstance(value[k], str) or not re.fullmatch(r'[0-9a-f]{64}', value[k])
+                   for k in ('material_sha256','authority_sha256'))):
+        raise ManagedOperationDenied('summary reuse commitment unavailable')
+    return _CodeSummaryReuseWitness(_freeze_json(value), _CODE_SUMMARY_REUSE_SEAL)
+
+
 @dataclass(frozen=True, slots=True)
 class ManagedOperationRequest:
     owner: str
@@ -352,6 +382,7 @@ class ManagedOperationRequest:
     )
     artifacts: Sequence[OperationArtifact] = ()
     options: Mapping[str, Any] = field(default_factory=dict)
+    _summary_reuse_witness: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +412,219 @@ class ManagedOperationResult:
     identity_coverage: str = "partial"
     model_fingerprint: Optional[str] = None
     dimension: Optional[int] = None
+
+
+@dataclass(slots=True)
+class _FinalizationReceipt:
+    raw: Optional[str] = None
+    result: Optional[ManagedOperationResult] = None
+    owned_send: Any = None
+    public_started: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedManagedOperation:
+    """Trusted, immutable host selection prepared before engine dispatch."""
+    request: ManagedOperationRequest
+    owner: str
+    operation: str
+    routes: tuple[OperationRoute, ...]
+    payload: Mapping[str, Any]
+    router_token: int
+    receipt: _FinalizationReceipt = field(default_factory=_FinalizationReceipt, compare=False, repr=False)
+
+
+
+_OWNED_MANAGED_SEND_SEAL=object()
+
+
+class OwnedManagedOperation:
+    """One retained original utility, paused before its actual ACP frame."""
+    def __init__(self, router, prepared, seal, background_reservation=None):
+        if seal is not _OWNED_MANAGED_SEND_SEAL:
+            raise ManagedOperationUnavailable('owned managed operation unavailable')
+        self._seal=seal; self._router=router; self._prepared=prepared
+        self._background_reservation=background_reservation
+        self._before_issue=None;self._utility=None;self._task=None;self._launcher=None
+        self._state='new';self._attempted=False;self._disarmed=False;self._deadline=None;self._launch_safe=True
+        self._ready_event=asyncio.Event();self._arm_event=asyncio.Event();self._boundary=asyncio.Event()
+
+    @property
+    def state(self): return self._state
+
+    @staticmethod
+    def _remaining(deadline):
+        if type(deadline) is not float or not math.isfinite(deadline):
+            raise ManagedOperationUnavailable('owned managed deadline unavailable')
+        return max(0.0,deadline-asyncio.get_running_loop().time())
+
+    async def _launch(self):
+        try:
+            await self._router._launch_prepared_utility(self._prepared,owned=self)
+        except BaseException:
+            # _launch_prepared_utility creates no model task before returning.
+            if self._task is None and self._state=='pending':
+                self._state='suppressed' if self._launch_safe else 'unknown';self._ready_event.set();self._boundary.set()
+            raise
+
+    async def ready(self, *, deadline):
+        """Acquire the existing utility and wait outside source guards."""
+        if self._state!='new' or self._disarmed or self._remaining(deadline)<=0:
+            raise ManagedOperationUnavailable('owned managed readiness unavailable')
+        self._state='pending';self._launcher=asyncio.create_task(self._launch())
+        def consume(done):
+            if done.cancelled():
+                if self._task is None and self._launch_safe and self._state=='pending':
+                    self._state='suppressed';self._ready_event.set();self._boundary.set()
+            else:
+                try: done.exception()
+                except BaseException: pass
+        self._launcher.add_done_callback(consume)
+        try:
+            await asyncio.wait_for(self._ready_event.wait(),timeout=self._remaining(deadline))
+        except asyncio.TimeoutError:
+            self._disarmed=True;self._arm_event.set()
+            if self._task is None and self._launcher is not None: self._launcher.cancel()
+            return {'state':'unknown'}
+        except asyncio.CancelledError:
+            self._disarmed=True;self._arm_event.set()
+            if self._task is None and self._launcher is not None: self._launcher.cancel()
+            raise
+        if self._state=='ready': return {'state':'ready'}
+        if self._state=='suppressed' and self._task is None: return {'state':'suppressed'}
+        return {'state':'unknown'}
+
+    async def _wait_for_arm(self, utility, client, obj):
+        if (self._seal is not _OWNED_MANAGED_SEND_SEAL or self._state!='pending'
+            or utility is not self._utility or utility.owned_send is not self or utility.client is not client
+            or type(obj) is not dict or obj.get('method')!='_openclank/operations/v1/execute'):
+            raise ManagedOperationUnavailable('owned managed frame changed')
+        self._state='ready';self._ready_event.set()
+        await self._arm_event.wait()
+        if self._disarmed or self._before_issue is None:
+            raise ManagedOperationUnavailable('owned managed frame suppressed')
+
+    def _reject_preissue(self, utility, client):
+        if utility is self._utility and utility.client is client and self._state in ('pending','ready'):
+            self._disarmed=True;self._arm_event.set()
+
+    async def arm(self, *, before_issue, deadline):
+        """Bind fresh source authority and wait only for the actual frame boundary."""
+        if self._state!='ready' or self._disarmed or self._before_issue is not None or self._arm_event.is_set() or not callable(before_issue):
+            raise ManagedOperationUnavailable('owned managed arm unavailable')
+        if self._remaining(deadline)<=0:
+            self._disarmed=True;self._arm_event.set();return {'state':'unknown'}
+        self._before_issue=before_issue;self._deadline=deadline;self._arm_event.set()
+        try:
+            await asyncio.wait_for(self._boundary.wait(),timeout=self._remaining(deadline))
+        except asyncio.TimeoutError:
+            self._disarmed=True;self._arm_event.set();return {'state':'unknown'}
+        except asyncio.CancelledError:
+            self._disarmed=True;self._arm_event.set();raise
+        return {'state':self._state}
+
+    def _before_frame(self, utility, client, obj):
+        from src.openclank.operation_journal import canonical_request_hash
+        try:
+            if (self._seal is not _OWNED_MANAGED_SEND_SEAL or self._state!='ready' or self._attempted
+                or self._disarmed or self._remaining(self._deadline)<=0 or utility is not self._utility
+                or utility.owned_send is not self or utility.client is not client
+                or self._prepared.router_token!=id(self._router) or not utility.account_current()
+                or type(obj) is not dict or obj.get('method')!='_openclank/operations/v1/execute'
+                or type(obj.get('params')) is not dict):
+                raise ManagedOperationUnavailable('owned managed frame changed')
+            params=obj['params'];material={key:params[key] for key in ('operation','routes','input','artifactInputs','options')}
+            if (params.get('rootOperationID')!=utility.root or params.get('idempotencyKey')!=utility.idempotency_key
+                or canonical_request_hash(material)!=utility.request_hash):
+                raise ManagedOperationUnavailable('owned managed frame changed')
+            if self._background_reservation is not None:
+                utility.barrier.assert_live_utility(utility)
+                self._background_reservation.assert_dispatched(self._prepared, self._router, utility)
+            value=self._before_issue()
+            import inspect
+            if inspect.isawaitable(value):
+                if inspect.iscoroutine(value): value.close()
+                raise ManagedOperationUnavailable('owned managed source check must be synchronous')
+            if value is not None:
+                raise ManagedOperationUnavailable('owned managed source check must raise on refusal')
+            if self._disarmed or self._remaining(self._deadline)<=0:
+                raise ManagedOperationUnavailable('owned managed deadline changed')
+        except BaseException:
+            self._before_issue=None;self._state='suppressed';self._boundary.set()
+            raise
+        self._attempted=True
+
+    def _frame_issued(self, utility, client):
+        if utility is not self._utility or utility.client is not client or not self._attempted or self._state!='ready':
+            self._state='unknown';self._boundary.set()
+            raise ManagedOperationUnavailable('owned managed frame changed')
+        self._before_issue=None;self._state='issued';self._boundary.set()
+
+    def _frame_unknown(self, utility, client):
+        if utility is self._utility and utility.client is client and self._state=='ready':
+            self._before_issue=None;self._state='unknown';self._boundary.set()
+
+    def _settled(self, task):
+        if self._state in ('pending','ready'):
+            self._state='unknown' if self._attempted else 'suppressed'
+            self._ready_event.set();self._boundary.set()
+        if not task.cancelled():
+            try: task.exception()
+            except BaseException: pass
+
+    async def wait(self):
+        """Await only this exact original; never dispatch again."""
+        if self._task is None: raise ManagedOperationUnavailable('owned managed original unavailable')
+        return await asyncio.shield(self._task)
+
+    async def drain(self, *, deadline):
+        """Boundedly observe this original's task and utility cleanup."""
+        if self._launcher is not None and not self._launcher.done():
+            try: await asyncio.wait_for(asyncio.shield(self._launcher),timeout=self._remaining(deadline))
+            except asyncio.TimeoutError: return 'unknown'
+            except asyncio.CancelledError: raise
+            except Exception: pass
+        if self._task is None:
+            return 'suppressed' if self._state=='suppressed' and self._launch_safe else 'unknown'
+        if not self._task.done():
+            try: await asyncio.wait_for(asyncio.shield(self._task),timeout=self._remaining(deadline))
+            except asyncio.TimeoutError: return 'unknown'
+            except asyncio.CancelledError: raise
+            except Exception: pass
+        if not self._task.done(): return 'unknown'
+        if not self._task.cancelled():
+            try: self._task.result()
+            except BaseException: pass
+        if self._state=='suppressed' and (self._utility is None or not self._utility.settled):
+            return 'unknown'
+        return self._state
+
+    async def cancel(self):
+        """Request cancellation of this original without creating another."""
+        self._disarmed=True;self._arm_event.set()
+        if self._state=='new' and self._launcher is None and self._task is None and self._launch_safe:
+            self._state='suppressed';self._ready_event.set();self._boundary.set()
+        utility=self._utility
+        if utility is None or self._task is None: return
+        utility.cancel_requested=True
+        if not self._task.done() and utility.issued and not utility.response_seen and utility.client is not None:
+            await utility.client.notify_utility_cancel(utility.root,utility.idempotency_key)
+
+
+def _freeze_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(k): _freeze_json(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(v) for v in value)
+    return value
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _thaw_json(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(v) for v in value]
+    return value
 
 
 EngineExecutor = Callable[[str, Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
@@ -590,6 +834,10 @@ class ManagedOperationRouter:
         purpose = str(request.purpose or OPERATION_PURPOSE.get(operation) or "").strip().lower()
         if purpose not in PURPOSE_OPERATIONS or operation not in PURPOSE_OPERATIONS[purpose]:
             raise ManagedOperationError("operation does not match its route purpose")
+        if purpose == 'code_summary' and not request.model_route_id:
+            raise ManagedOperationDenied('code summaries require an explicit model route')
+        if purpose == 'worker_naming' and not request.model_route_id:
+            raise ManagedOperationDenied('worker naming requires an explicit model route')
 
         db = self._session_factory()
         try:
@@ -730,6 +978,7 @@ class ManagedOperationRouter:
         self,
         owner: str,
         payload: Mapping[str, Any],
+        *, utility=None,
     ) -> Mapping[str, Any]:
         if self._executor is not None:
             return await self._executor(owner, payload)
@@ -740,64 +989,95 @@ class ManagedOperationRouter:
             raise ManagedOperationUnavailable(
                 "Open Clank managed engine is unavailable"
             )
+        if utility is not None and supervisor is not utility.supervisor:
+            raise ManagedOperationUnavailable("utility supervisor changed")
         execute = getattr(supervisor, "execute_operation", None)
         if not callable(execute):
             raise ManagedOperationUnavailable(
                 "Open Clank managed engine does not support typed operations"
             )
-        result = await execute(owner, dict(payload))
+        result = await (execute(owner, dict(payload), utility=utility) if utility is not None else execute(owner, dict(payload)))
         if not isinstance(result, Mapping):
             raise ManagedOperationProtocolError(
                 "managed engine returned an invalid operation result"
             )
         return result
 
-    async def execute(
-        self,
-        request: ManagedOperationRequest,
-    ) -> ManagedOperationResult:
+    def prepare(self, request: ManagedOperationRequest) -> PreparedManagedOperation:
         owner = _owner(request.owner)
         operation = _required(request.operation, "operation")
-        root_operation_id = _required(
-            request.root_operation_id,
-            "root operation ID",
-            identifier=True,
-        )
-        idempotency_key = _required(
-            request.idempotency_key,
-            "idempotency key",
-        )
+        root_operation_id = _required(request.root_operation_id, "root operation ID", identifier=True)
+        idempotency_key = _required(request.idempotency_key, "idempotency key")
         if not 16 <= len(idempotency_key) <= 128:
-            raise ManagedOperationError(
-                "idempotency key must contain between 16 and 128 characters"
-            )
+            raise ManagedOperationError("idempotency key must contain between 16 and 128 characters")
         if operation == "web.search" and not request.model_route_id:
-            raise ManagedOperationDenied(
-                "web.search requires an explicitly selected helper model route"
-            )
+            raise ManagedOperationDenied("web.search requires an explicitly selected helper model route")
+        reuse = request.options.get('openclankCodeSummaryReuse')
+        witness = request._summary_reuse_witness
+        if 'openclankCodeSummaryReuse' in request.options:
+            if (type(witness) is not _CodeSummaryReuseWitness or witness.seal is not _CODE_SUMMARY_REUSE_SEAL
+                    or operation != 'chat.complete' or request.purpose != 'code_summary'
+                    or _thaw_json(witness.commitment) != reuse):
+                raise ManagedOperationDenied('summary reuse commitment unavailable')
+        elif witness is not None:
+            raise ManagedOperationDenied('summary reuse commitment unavailable')
         routes = self._resolve_routes(request)
+        if reuse is not None and (len(routes) != 1 or routes[0].billing_lane == 'local'):
+            raise ManagedOperationDenied('summary reuse route unavailable')
+        snapshot = request.options.get("modelRequestOptions")
+        if "modelRequestOptions" in request.options:
+            if operation not in {"chat.complete", "vision.describe"} or len(routes) != 1:
+                raise ManagedOperationDenied("model options require one text or vision route")
+            from src.openclank.chat_routing import resolve_chat_route, shared_endpoint_id
+            from src.openclank.provider_request_options import project_request_options, validate_request_option_selection
+            from src.openclank.provider_store import ProviderStore
+            route = routes[0]
+            try:
+                if (not isinstance(snapshot, Mapping)
+                    or set(snapshot) != {"version", "routeID", "optionRouteID", "catalogRevision", "model", "options"}
+                    or type(snapshot["version"]) is not int or snapshot["version"] != 1
+                    or snapshot["routeID"] != route.model_route_id
+                    or snapshot["model"] != {"providerID": route.connection_id, "modelID": route.model_id}):
+                    raise ValueError("invalid model option snapshot")
+                current = resolve_chat_route(owner=owner, model_route_id=route.model_route_id,
+                    endpoint_id=shared_endpoint_id(route.grant_id) if route.grant_id else route.connection_id,
+                    model_id=route.model_id, provider_store=ProviderStore(session_factory=self._session_factory))
+                if (current.connection_id != route.connection_id or current.family_id != route.provider_id
+                    or current.billing_lane != route.billing_lane or current.provider_grant_id != route.grant_id):
+                    raise ValueError("model route changed")
+                validated = validate_request_option_selection(route_id=current.option_route_id, catalog_revision=current.catalog_revision,
+                    descriptors=project_request_options(current.capabilities, catalog_revision=current.catalog_revision, source="engine-catalog"),
+                    selection={"route_id": snapshot["optionRouteID"], "catalog_revision": snapshot["catalogRevision"], "options": snapshot["options"]})
+                if validated != snapshot["options"]:
+                    raise ValueError("model options are not normalized")
+            except Exception as exc:
+                raise ManagedOperationDenied("model options are unavailable or stale; refresh required") from exc
         artifacts = self._verify_input_artifacts(owner, request.artifacts)
         payload = {
             "rootOperationID": root_operation_id,
             "idempotencyKey": idempotency_key,
             "operation": operation,
             "routes": [route.to_wire() for route in routes],
-            "input": (
-                _validate_search_input(request.input)
-                if operation == "web.search"
-                else _safe_json(request.input, label="operation input")
-            ),
+            "input": (_validate_search_input(request.input) if operation == "web.search"
+                       else _safe_json(request.input, label="operation input")),
             "artifactInputs": [artifact.to_wire() for artifact in artifacts],
             "options": _safe_json(request.options, label="operation options"),
         }
-        raw = await self._execute_engine(owner, payload)
-        result = self._validate_result(
-            owner=owner,
-            request=request,
-            routes=routes,
-            raw=raw,
-        )
-        if operation == "web.search":
+        admitted = copy.deepcopy(request)
+        admitted = replace(admitted, input=_freeze_json(admitted.input), options=_freeze_json(admitted.options))
+        return PreparedManagedOperation(admitted, owner, operation, routes, _freeze_json(payload), id(self))
+
+    def finalize(self, prepared: PreparedManagedOperation, raw: Mapping[str, Any]) -> ManagedOperationResult:
+        if prepared.router_token != id(self):
+            raise ManagedOperationProtocolError("prepared operation belongs to another router")
+        raw_receipt = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        if prepared.receipt.result is not None:
+            if prepared.receipt.raw != raw_receipt:
+                raise ManagedOperationProtocolError("conflicting terminal finalization")
+            return prepared.receipt.result
+        result = self._validate_result(owner=prepared.owner, request=prepared.request,
+                                       routes=prepared.routes, raw=raw)
+        if prepared.operation == "web.search":
             search_usage = result.output.get("webSearchUsage")
             if isinstance(search_usage, Mapping):
                 usage = dict(result.usage)
@@ -808,48 +1088,269 @@ class ManagedOperationRouter:
             try:
                 from services.stats.quota_adapters import native_capacity_envelope
                 native_payload = native_capacity_envelope(
-                    next(route for route in routes if route.model_route_id == result.model_route_id).provider_id,
+                    next(route for route in prepared.routes if route.model_route_id == result.model_route_id).provider_id,
                     native_capacity, observed_at=datetime.now(timezone.utc))
                 if native_payload:
                     result = replace(result, output={**result.output, "_openclank_quota": native_payload})
             except Exception as error:
                 logger.info("terminal quota metadata unavailable (%s)", type(error).__name__)
         quota_payload = result.output.get("_openclank_quota") if isinstance(result.output, Mapping) else None
-        public_result = (replace(result, output={key: value for key, value in result.output.items()
-                                                  if key != "_openclank_quota"})
-                         if isinstance(result.output, Mapping) and "_openclank_quota" in result.output
-                         else result)
-        if bool(request.options.get("incognito")):
-            return public_result
-        # Capture the validated terminal result at the managed operation seam.
-        # A Stats failure must not turn a committed operation into a host error.
-        try:
-            from services.stats.ledger import capture_operation_result
-            db = self._session_factory()
+        public_result = (replace(result, output={key: value for key, value in result.output.items() if key != "_openclank_quota"})
+                         if isinstance(result.output, Mapping) and "_openclank_quota" in result.output else result)
+        if not bool(prepared.request.options.get("incognito")):
             try:
-                selected_route = next(route for route in routes if route.model_route_id == result.model_route_id)
-                capture_operation_result(db, request, result, selected_route=selected_route)
-                db.commit()
-                if quota_payload is not None:
-                    try:
-                        from services.stats.quota_adapters import admit_terminal_quota_payload
-                        admit_terminal_quota_payload(
-                            db, owner=request.owner, operation_id=result.operation_id,
-                            root_operation_id=result.root_operation_id,
-                            connection_id=selected_route.connection_id,
-                            provider_id=selected_route.provider_id,
-                            billing_lane=selected_route.billing_lane,
-                            account_id=result.selected_account_id,
-                            payload=quota_payload)
-                        db.commit()
-                    except Exception as error:
-                        db.rollback()
-                        logger.warning("managed operation quota admission unavailable (%s)", type(error).__name__)
-            finally:
-                db.close()
-        except Exception as error:
-            logger.warning("managed operation Stats capture unavailable (%s)", type(error).__name__)
+                from services.stats.ledger import capture_operation_result
+                db = self._session_factory()
+                try:
+                    selected_route = next(route for route in prepared.routes if route.model_route_id == result.model_route_id)
+                    capture_operation_result(db, prepared.request, result, selected_route=selected_route)
+                    db.commit()
+                    if quota_payload is not None:
+                        try:
+                            from services.stats.quota_adapters import admit_terminal_quota_payload
+                            admit_terminal_quota_payload(db, owner=prepared.owner, operation_id=result.operation_id,
+                                root_operation_id=result.root_operation_id, connection_id=selected_route.connection_id,
+                                provider_id=selected_route.provider_id, billing_lane=selected_route.billing_lane,
+                                account_id=result.selected_account_id, payload=quota_payload)
+                            db.commit()
+                        except Exception as error:
+                            db.rollback()
+                            logger.warning("managed operation quota admission unavailable (%s)", type(error).__name__)
+                finally:
+                    db.close()
+            except Exception as error:
+                logger.warning("managed operation Stats capture unavailable (%s)", type(error).__name__)
+        prepared.receipt.raw = raw_receipt
+        prepared.receipt.result = public_result
         return public_result
+
+    async def execute(
+        self,
+        request: ManagedOperationRequest,
+    ) -> ManagedOperationResult:
+        return await self.execute_prepared(self.prepare(request))
+
+    async def _execute_prepared_lifetime(self, prepared: PreparedManagedOperation, utility=None) -> ManagedOperationResult:
+        if prepared.router_token != id(self):
+            raise ManagedOperationProtocolError("prepared operation belongs to another router")
+        from src.model_dispatch import get_agent_supervisor
+        from src.openclank.memory_job_admission import observe_shadow
+        pool = get_agent_supervisor()
+        provider = getattr(pool, "_memory_provider", None)
+        identity = hashlib.sha256(json.dumps([prepared.owner, prepared.request.root_operation_id, prepared.operation, prepared.request.idempotency_key], separators=(",", ":")).encode()).hexdigest()
+        connections = {route.connection_id for route in prepared.routes}
+        connection = next(iter(connections)) if len(connections) == 1 else "unknown"
+        shadow = dict(operation_id="utility:" + identity, owner=prepared.owner, connection_id=connection, generation="shadow-utility-v1", account_id=utility.account if utility is not None else None)
+        runtime = getattr(pool, "_s05_foreground_runtime", None)
+        handle = None
+        owned = utility.owned_send if utility is not None else None
+        background = owned._background_reservation if owned is not None else None
+        if runtime is None:
+            observe_shadow(provider, **shadow, event="start")
+        try:
+            if background is not None:
+                from src.memery_provider import _S08BackgroundReservation
+                from src.openclank.memory_job_admission import ForegroundRuntime, _S05ReviewBackgroundReservation
+                from src.openclank.skill_draft_reservation import _SkillDraftReservation
+                if (type(background) not in (_S08BackgroundReservation, _S05ReviewBackgroundReservation, _SkillDraftReservation) or type(runtime) is not ForegroundRuntime
+                    or connection == "unknown" or utility is None or not utility.account_current()
+                    or not await utility.barrier.is_live(prepared.owner, utility.admission)):
+                    raise ManagedOperationUnavailable("background reservation unavailable")
+                background.assert_reserved(prepared, self, utility)
+            if runtime is not None and background is None:
+                from src.openclank.memory_job_admission import ForegroundRuntime
+                if (type(runtime) is not ForegroundRuntime or connection == "unknown" or utility is None
+                    or not utility.account_current() or not await utility.barrier.is_live(prepared.owner, utility.admission)):
+                    raise ManagedOperationUnavailable("foreground occupancy unavailable")
+                from src.memory_scope import memory_owner
+                handle = runtime.enter(owner=memory_owner(prepared.owner), account_id=utility.account, connection_id=connection)
+                if utility is not None:
+                    utility.foreground_runtime, utility.foreground_handle = runtime, handle
+            raw = await self._execute_engine(prepared.owner, _thaw_json(prepared.payload), utility=utility)
+            result = self.finalize(prepared, raw)
+        except BaseException:
+            if runtime is None:
+                observe_shadow(provider, **shadow, event="unknown")
+            if utility is not None and not utility.host_cleanup_unknown and (utility.response_seen or not utility.issued):
+                if handle is not None:
+                    runtime.leave(handle)
+                await self._settle_utility(utility, successful=False)
+            raise
+        if runtime is None:
+            observe_shadow(provider, **shadow, event="finished")
+        if handle is not None:
+            runtime.leave(handle)
+        if utility is not None and utility.response_seen and not utility.host_cleanup_unknown:
+            await self._settle_utility(utility, successful=True)
+        return result
+
+    @staticmethod
+    async def _settle_utility(utility, *, successful):
+        if utility.settled or utility.settling or not utility.account_current():
+            return
+        if utility.lease is not None:
+            worker = utility.worker
+            if (utility.lease.worker is not worker or getattr(worker, '_proc', None) is not utility.process
+                or getattr(worker, '_bridge', None) is not utility.bridge
+                or getattr(utility.bridge, '_managed_provider_generation', None) != utility.holder
+                or getattr(worker, 'installed_generation', None) != utility.generation):
+                return
+            try:
+                utility.lease._pool._assert_owner_lifecycle(utility.owner, utility.epoch)
+            except Exception:
+                return
+        utility.settling = True
+        try:
+            if utility.lease is not None:
+                await utility.lease.release(successful_terminal=successful)
+            await utility.barrier.release(utility.admission)
+            utility.settled = True
+        finally:
+            utility.settling = False
+
+    async def _launch_prepared_utility(self, prepared, *, owned=None):
+        """Use the existing utility admission for public and owned execution."""
+        from src.model_dispatch import get_agent_supervisor
+        from core.models import get_session_manager_instance
+        from src.openclank.acp_supervisor_adapter import AcpSupervisorAdapter
+        from src.openclank.account_request_barrier import UtilityLifetime
+        from src.openclank.operation_journal import canonical_request_hash
+        manager=get_session_manager_instance();state=getattr(manager,'lifecycle_context',None) if manager else None
+        barrier=getattr(state,'account_request_barrier',None);auth=getattr(state,'auth_manager',None)
+        supervisor=get_agent_supervisor()
+        if owned is not None:
+            from src.openclank.mimo_supervisor import MimoSupervisorPool
+            if type(supervisor) is not AcpSupervisorAdapter or type(getattr(supervisor,'_pool',None)) is not MimoSupervisorPool:
+                raise ManagedOperationUnavailable('owned utility writer unavailable')
+        if (barrier is None or auth is None or not isinstance(supervisor,AcpSupervisorAdapter)):
+            if owned is not None or getattr(supervisor,'_s05_foreground_runtime',None) is not None:
+                raise ManagedOperationUnavailable('utility admission coverage unavailable')
+            return None
+        account=auth.account_id(prepared.owner)
+        if not account or auth.username_for_account_id(account)!=prepared.owner:
+            raise ManagedOperationUnavailable('utility account unavailable')
+        payload=_thaw_json(prepared.payload)
+        material={key:payload[key] for key in ('operation','routes','input','artifactInputs','options')}
+        admission=await barrier.acquire(prepared.owner)
+        if owned is not None: owned._launch_safe=False
+        try:
+            utility=UtilityLifetime(barrier,admission,prepared.owner,account,prepared.request.root_operation_id,
+                prepared.request.idempotency_key,canonical_request_hash(material),auth)
+            utility.supervisor=supervisor; utility.owned_send=owned
+            await barrier.bind_utility(admission,utility)
+            task=asyncio.create_task(self._execute_prepared_lifetime(prepared,utility))
+        except BaseException:
+            await barrier.release(admission)
+            if owned is not None: owned._launch_safe=True
+            raise
+        utility.task=task
+        if owned is not None:
+            owned._utility=utility;owned._task=task;task.add_done_callback(owned._settled)
+        else:
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return task,utility
+
+    def new_prepared_owned(self, prepared: PreparedManagedOperation, *, background_reservation=None) -> OwnedManagedOperation:
+        """Mint one inert handle; no utility, worker or model is started here."""
+        if (type(prepared) is not PreparedManagedOperation or prepared.router_token!=id(self)
+            or self._executor is not None or prepared.receipt.owned_send is not None
+            or prepared.receipt.public_started or prepared.receipt.raw is not None or prepared.receipt.result is not None):
+            raise ManagedOperationUnavailable('owned managed operation unavailable')
+        if background_reservation is not None:
+            from src.memery_provider import _S08BackgroundReservation
+            from src.openclank.memory_job_admission import _S05ReviewBackgroundReservation
+            from src.openclank.skill_draft_reservation import _SkillDraftReservation
+            if type(background_reservation) not in (_S08BackgroundReservation, _S05ReviewBackgroundReservation, _SkillDraftReservation):
+                raise ManagedOperationUnavailable("background reservation unavailable")
+        owned=OwnedManagedOperation(self,prepared,_OWNED_MANAGED_SEND_SEAL,background_reservation)
+        prepared.receipt.owned_send=owned
+        return owned
+
+    async def execute_prepared(self, prepared: PreparedManagedOperation) -> ManagedOperationResult:
+        receipt=getattr(prepared,'receipt',None)
+        if type(receipt) is _FinalizationReceipt:
+            if receipt.owned_send is not None:
+                raise ManagedOperationUnavailable('owned managed original already exists')
+            receipt.public_started=True
+        return await self._execute_prepared_public(prepared)
+
+    async def _execute_prepared_public(self, prepared: PreparedManagedOperation) -> ManagedOperationResult:
+        if getattr(getattr(prepared,'receipt',None),'owned_send',None) is not None:
+            raise ManagedOperationUnavailable('owned managed original already exists')
+        if prepared.router_token != id(self):
+            raise ManagedOperationProtocolError("prepared operation belongs to another router")
+        from src.model_dispatch import get_agent_supervisor
+        if self._executor is not None:
+            if getattr(get_agent_supervisor(), '_s05_foreground_runtime', None) is not None:
+                raise ManagedOperationUnavailable('utility admission coverage unavailable')
+            return await self._execute_prepared_lifetime(prepared)
+        launched=await self._launch_prepared_utility(prepared)
+        if launched is None:
+            return await self._execute_prepared_lifetime(prepared)
+        task,utility=launched
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            utility.cancel_requested=True
+            if not task.done() and utility.issued and not utility.response_seen and utility.client is not None:
+                notify=asyncio.create_task(utility.client.notify_utility_cancel(utility.root,utility.idempotency_key))
+                while not notify.done():
+                    try: await asyncio.shield(notify)
+                    except asyncio.CancelledError: continue
+                try: notify.result()
+                except Exception: pass
+            raise
+
+    def reconcile_prepared(self, prepared: PreparedManagedOperation, *, authenticated_owner: str, operation_id: str, revision: int) -> dict:
+        """Read exact durable evidence; missing terminal artifacts remain unknown."""
+        from src.openclank.operation_journal import OperationJournalStore
+        from src.openclank.artifacts import ArtifactError
+        if prepared.router_token != id(self) or _owner(authenticated_owner) != prepared.owner:
+            raise ManagedOperationProtocolError('prepared operation belongs to another router')
+        payload = _thaw_json(prepared.payload)
+        request = {key: payload[key] for key in ('operation','routes','input','artifactInputs','options')}
+        row = OperationJournalStore(self._session_factory).lookup_exact(owner=prepared.owner,
+            root_operation_id=prepared.request.root_operation_id, idempotency_key=prepared.request.idempotency_key,
+            operation_id=operation_id,revision=revision,request=request)
+        if row.state not in ('complete','cancelled'):
+            return {'state':'unknown','operationID':row.id,'revision':row.revision}
+        for artifact_id in reversed(row.artifact_ids or []):
+            try:
+                artifact = self.artifacts.get(owner=prepared.owner,artifact_id=artifact_id)
+                if artifact.state != 'acknowledged' or artifact.media_type != 'application/vnd.openclank.operation-result+json' or artifact.size_bytes > 1024 * 1024:
+                    continue
+                raw = json.loads(b''.join(self.artifacts.read_chunks(owner=prepared.owner,artifact_id=artifact_id)))
+                if (not isinstance(raw, dict) or raw.get('operationID') != row.id
+                    or raw.get('rootOperationID') != row.root_operation_id or raw.get('operation') != row.operation
+                    or raw.get('state') != row.state or raw.get('committed') is not row.committed
+                    or raw.get('bindingID') != row.binding_id or raw.get('selectedAccountID') != row.selected_account_id
+                    or raw.get('modelRouteID') != row.model_route_id or raw.get('connectionID') != row.connection_id
+                    or raw.get('billingLane') != row.billing_lane or raw.get('commitReason') != row.commit_reason):
+                    continue
+                if row.commit_reason == 'outcome_unknown':
+                    return {'state':'unknown','operationID':row.id,'revision':row.revision}
+                result = self._validate_result(owner=prepared.owner,request=prepared.request,routes=prepared.routes,raw=raw)
+                return {'state':'terminal','operationID':row.id,'revision':row.revision,'result':result}
+            except (ValueError, TypeError, KeyError, ArtifactError):
+                continue
+        return {'state':'unknown','operationID':row.id,'revision':row.revision}
+
+    def recover_prepared(self, prepared: PreparedManagedOperation, *, authenticated_owner: str) -> dict:
+        """Discover and inspect the exact persisted operation; never redispatch."""
+        from src.openclank.operation_journal import OperationJournalStore, OperationJournalError
+        if prepared.router_token != id(self) or _owner(authenticated_owner) != prepared.owner:
+            raise ManagedOperationProtocolError('prepared operation belongs to another router')
+        payload = _thaw_json(prepared.payload)
+        request = {key:payload[key] for key in ('operation','routes','input','artifactInputs','options')}
+        identity = OperationJournalStore(self._session_factory).discover_exact(owner=prepared.owner,
+            root_operation_id=prepared.request.root_operation_id,idempotency_key=prepared.request.idempotency_key,request=request)
+        if identity is None:
+            return {'state':'unknown'}
+        try:
+            return self.reconcile_prepared(prepared,authenticated_owner=authenticated_owner,operation_id=identity[0],revision=identity[1])
+        except OperationJournalError:
+            # The journal may have advanced between discovery and exact read.
+            return {'state':'unknown'}
 
     def _validate_result(
         self,
@@ -942,9 +1443,72 @@ class ManagedOperationRouter:
         dimension = raw.get("dimension")
         selected_account_raw = raw.get("selectedAccountID")
         if request.preferred_account_id and selected_account_raw != request.preferred_account_id:
-            raise ManagedOperationProtocolError(
-                "managed engine selected an account different from the bound request"
+            binding_id = raw.get("bindingID")
+            admitted_route = next(
+                (
+                    route
+                    for route in routes
+                    if (
+                        route.model_route_id,
+                        route.connection_id,
+                        route.billing_lane,
+                    )
+                    == selected
+                ),
+                None,
             )
+            binding_db = self._session_factory()
+            try:
+                binding = binding_db.query(ProviderOperationBinding).filter(
+                    ProviderOperationBinding.id == binding_id,
+                    ProviderOperationBinding.owner == owner,
+                    ProviderOperationBinding.root_operation_id == request.root_operation_id,
+                    ProviderOperationBinding.connection_id == selected[1],
+                    ProviderOperationBinding.billing_lane == selected[2],
+                ).first() if isinstance(binding_id, str) and binding_id else None
+                snapshot = binding.policy_snapshot if binding is not None else None
+                ordered_ids = snapshot.get("ordered_account_ids") if isinstance(snapshot, Mapping) else None
+                if (
+                    binding is None
+                    or admitted_route is None
+                    or binding.selected_account_id != selected_account_raw
+                    or binding.provider_id != admitted_route.provider_id
+                    or binding.model_id != admitted_route.model_id
+                    or binding.grant_id != admitted_route.grant_id
+                    or not isinstance(snapshot, Mapping)
+                    or type(snapshot.get("version")) is not int
+                    or snapshot.get("version") != 1
+                    or not isinstance(ordered_ids, list)
+                    or len(ordered_ids) > 1024
+                    or any(not isinstance(item, str) for item in ordered_ids)
+                    or selected_account_raw not in ordered_ids
+                ):
+                    raise ManagedOperationProtocolError(
+                        "managed engine selected an account different from the bound request"
+                    )
+                mode = snapshot.get("mode")
+                configured_account = snapshot.get("account_id")
+                if snapshot.get("source") == "legacy":
+                    allowed_override = (
+                        binding.source == "failover"
+                        and snapshot.get("same_model_fallback") is True
+                    )
+                elif snapshot.get("source") != "explicit":
+                    allowed_override = False
+                elif mode == "pinned":
+                    allowed_override = selected_account_raw == configured_account
+                elif mode == "preferred" and selected_account_raw != configured_account:
+                    allowed_override = snapshot.get("same_model_fallback") is True
+                elif mode in {"preferred", "round_robin"}:
+                    allowed_override = True
+                else:
+                    allowed_override = False
+                if not allowed_override:
+                    raise ManagedOperationProtocolError(
+                        "managed engine result does not match the admitted account policy"
+                    )
+            finally:
+                binding_db.close()
         if operation == "embeddings.create" and state == "complete":
             vectors = output.get("embeddings")
             if not isinstance(vectors, list) or not vectors:

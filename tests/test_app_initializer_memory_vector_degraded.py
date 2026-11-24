@@ -58,18 +58,18 @@ def test_primary_provider_never_inherits_child_broker_environment(
     monkeypatch.setenv("MEMORY_PROVIDER", "frankenmemory")
     monkeypatch.setenv(
         "OPEN_CLANK_MEMORY_BROKER_URL",
-        "http://127.0.0.1:7000/api/internal/frankenmemory/tool",
+        "http://127.0.0.1:7000/api/internal/memery/tool",
     )
     monkeypatch.setenv("OPEN_CLANK_MEMORY_BROKER_TOKEN", "child-only-token")
     monkeypatch.delenv("MEMORY_VECTOR_ENABLED", raising=False)
     _neutralize_collaborators(monkeypatch)
     monkeypatch.setattr(
         app_init,
-        "prepare_frankenmemory_database",
+        "prepare_memery_database",
         lambda: "db-test",
     )
-    constructor = MagicMock(return_value=MagicMock(provider_id="frankenmemory"))
-    monkeypatch.setattr(app_init, "FrankenmemoryProvider", constructor)
+    constructor = MagicMock(return_value=MagicMock(provider_id="memery"))
+    monkeypatch.setattr(app_init, "MemeryProvider", constructor)
 
     app_init.initialize_managers(str(tmp_path), rag_manager=None)
 
@@ -80,5 +80,5 @@ def test_primary_provider_never_inherits_child_broker_environment(
 def test_frankenmemory_health_ignores_retired_vector_state():
     healthy_rag = MagicMock(healthy=True)
 
-    assert sh.frankenmemory_rag_health(None)["status"] == sh.DISABLED
-    assert sh.frankenmemory_rag_health(healthy_rag)["status"] == sh.OK
+    assert sh.memery_rag_health(None)["status"] == sh.DISABLED
+    assert sh.memery_rag_health(healthy_rag)["status"] == sh.OK

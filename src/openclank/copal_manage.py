@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import asyncio
-from src.openclank.copal_history_wire import capture_metadata, mutation_failure_status
+from src.openclank.copal_history_wire import capture_metadata, finish_capture, mutation_failure_status, settle_terminal_recovery
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -172,7 +172,7 @@ class _HistoryMutationBridge:
             "tool_id": "manage_copal",
             "expected_after_revision": None,
             "timestamp_millis": now,
-            "coverage": {"metadata": {"coverage_kind": "KnownMutationHooks", "roots": [self._workspace], "exclusions": []}},
+            "coverage": {"metadata": {"coverage_kind": "KnownMutationHooks", **({"required_recovery": True} if operation != "checkpoint" else {}), "roots": [self._workspace], "exclusions": []}},
             "per_resource_outcomes": None,
             **capture_metadata(before, workspace=self._workspace, resource_id=resource_id, destination_name=args.get("name")),
         }
@@ -222,7 +222,7 @@ class _HistoryMutationBridge:
             # and its original locator for reconciliation; never replay it.
             if prepared:
                 try:
-                    await asyncio.to_thread(
+                    live_receipt = await asyncio.to_thread(
                         self._client.record_live,
                         envelope["action_id"],
                         {
@@ -233,6 +233,7 @@ class _HistoryMutationBridge:
                             "resource_id": raw_id,
                         },
                     )
+                    await asyncio.to_thread(settle_terminal_recovery, self._client, action_id, live_receipt)
                 except Exception:
                     pass
             if mutation_failure_status(exc) == "Unknown" and not isinstance(exc, asyncio.CancelledError):
@@ -245,7 +246,7 @@ class _HistoryMutationBridge:
         if prepared:
             receipt = {"action_id": envelope["action_id"], "status": status, "fingerprint": self._fingerprint(after_doc), "resource_id": after_doc.get("id") if isinstance(after_doc, dict) else raw_id}
             try:
-                await asyncio.to_thread(self._client.record_live, envelope["action_id"], receipt)
+                live_receipt = await asyncio.to_thread(self._client.record_live, envelope["action_id"], receipt)
                 if status == "Committed":
                     # Creates initially use the caller's name as a locator. Bind
                     # the durable action to the provider-issued immutable id
@@ -255,9 +256,10 @@ class _HistoryMutationBridge:
                         rebind = getattr(self._client, "rebind_resource", None)
                         if callable(rebind):
                             await asyncio.to_thread(rebind, envelope["action_id"], str(after_doc["id"]))
-                    await asyncio.to_thread(self._client.complete, envelope["action_id"], content=self._bytes(after_doc), fingerprint=self._fingerprint(after_doc))
-                    history_status.update(status="complete", durable=True, phase="complete")
+                    receipt = await asyncio.to_thread(self._client.complete, envelope["action_id"], content=self._bytes(after_doc), fingerprint=self._fingerprint(after_doc))
+                    history_status.update(await asyncio.to_thread(finish_capture, self._client, envelope["action_id"], receipt))
                 else:
+                    await asyncio.to_thread(settle_terminal_recovery, self._client, action_id, live_receipt)
                     history_status.update(status="failed", phase="live_conflict")
             except Exception as exc:
                 if status == "Committed":
@@ -806,7 +808,7 @@ async def manage_copal(
         elif action.endswith("patch_metadata"):
             content = _patched_note_content(doc, args.get("patch") or {}) if doc.get("kind") in {"note", "wiki"} else None
             if content is None:
-                raise CopalManageError("metadata patches require a structured Copal note or wiki", code="unsupported_kind")
+                raise CopalManageError("metadata patches require a structured journal page or wiki", code="unsupported_kind")
             result = await bridge.call("write", {"owner": owner, "workspace_id": workspace, "id": document_id, "content": content, "base": doc.get("head"), "corpus": "wiki" if doc.get("kind") == "wiki" else "notes"}, timeout=60)
         elif action.endswith("rename"):
             result = await bridge.call("rename", {"owner": owner, "workspace_id": workspace, "id": document_id, "name": str(args.get("name") or ""), "corpus": "wiki" if doc.get("kind") == "wiki" else "notes"}, timeout=30)
@@ -1192,7 +1194,7 @@ async def manage_copal(
     if action.startswith("mind.heading."):
         document_id = _id(args.get("id")); doc = by_id.get(document_id)
         if not doc or doc.get("kind") not in {"note", "wiki", "markdown"}:
-            raise CopalManageError("Mind source must be a Copal note, wiki, or Markdown document", code="not_found")
+            raise CopalManageError("Mind source must be a journal page, wiki, or Markdown document", code="not_found")
         content = _mind_transform(str(doc.get("text") or ""), action, args.get("patch") or {})
         if content == str(doc.get("text") or ""):
             return _result(action, workspace, doc=doc, saved=False, data={"changed": False})
@@ -1206,7 +1208,7 @@ async def manage_copal(
     if action in {"graph.link", "graph.unlink"}:
         document_id = _id(args.get("id")); doc = by_id.get(document_id)
         if not doc or doc.get("kind") not in {"note", "wiki"}:
-            raise CopalManageError("Graph source must be a Copal note or wiki", code="not_found")
+            raise CopalManageError("Graph source must be a journal page or wiki", code="not_found")
         patch = args.get("patch") or {}
         if not isinstance(patch, dict):
             raise CopalManageError("graph patch must be an object", code="invalid_patch")

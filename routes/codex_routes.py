@@ -150,8 +150,15 @@ def setup_codex_routes(
     memory_router: APIRouter | None = None,
     calendar_router: APIRouter | None = None,
     document_router: APIRouter | None = None,
+    orchestration_router: APIRouter | None = None,
+    session_router: APIRouter | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/codex", tags=["codex"])
+    from src.openclank.agent_session_gateway import install_session_gateway
+    from src.openclank.connector_turns import connector_send_available
+    submit_actor_input = _find_endpoint(orchestration_router, "POST", "/api/orchestration/{host_chat_id}/actors/{actor_id}/input")
+    create_session = _find_endpoint(session_router, "POST", "/api/session")
+    install_session_gateway(router, submit_actor_input, create_session)
     email_list_endpoint = _find_endpoint(email_router, "GET", "/api/email/list")
     email_read_endpoint = _find_endpoint(email_router, "GET", "/api/email/read/{uid}")
     email_send_endpoint = _find_endpoint(email_router, "POST", "/api/email/send")
@@ -170,10 +177,19 @@ def setup_codex_routes(
         has_token = bool(getattr(request.state, "api_token", False))
         def scoped(allowed):
             return bool(token_scopes.intersection(allowed)) if has_token else True
+        session_credential = not getattr(request.state, "internal_tool_authenticated", False)
         return {
             "integration": "codex",
             "token_scopes": sorted(token_scopes),
             "tools": {
+                "sessions": {
+                    "read": session_credential and scoped({"sessions:read", "sessions:write"}),
+                    "write": False,  # Full send/start support is not yet available.
+                    "create": session_credential and scoped({"sessions:write"}) and create_session is not None,
+                    "steer": session_credential and scoped({"sessions:write"}) and submit_actor_input is not None,
+                    "send": session_credential and scoped({"sessions:write"}) and connector_send_available(request.app.state),
+                    "actions": ["list", "read", "progress", "create", "steer", "send"],
+                },
                 "todos": {
                     "read": scoped(TODO_READ_SCOPES),
                     "write": scoped(TODO_WRITE_SCOPES),
@@ -226,9 +242,9 @@ def setup_codex_routes(
             for path in sorted(root.rglob("*")):
                 if path.is_dir() or "__pycache__" in path.parts or path.suffix == ".pyc":
                     continue
-                zf.write(path, Path("odysseus") / path.relative_to(root))
+                zf.write(path, Path("openclank") / path.relative_to(root))
         buf.seek(0)
-        headers = {"Content-Disposition": 'attachment; filename="odysseus-codex-plugin.zip"'}
+        headers = {"Content-Disposition": 'attachment; filename="openclank-codex-plugin.zip"'}
         return StreamingResponse(buf, media_type="application/zip", headers=headers)
 
     @router.get("/todos")
@@ -614,7 +630,7 @@ def setup_codex_routes(
         # moment vllm exits; the log file is the raw stdout/stderr and
         # survives unchanged. Falls back to pane for older tasks predating
         # the tee-to-log runner change.
-        log_path = f"/tmp/odysseus-tmux/{session_id}.log"
+        log_path = f"/tmp/open-clank-tmux/{session_id}.log"
         inner = (
             f"if [ -s {log_path} ]; then tail -n {tail} {log_path}; "
             f"else tmux capture-pane -t {session_id} -p -S -{tail}; fi"
@@ -849,29 +865,26 @@ def setup_codex_routes(
         if chk.get("exit_code") not in (0, None):
             raise HTTPException(404, f"tmux session {sess!r} not found on {host or 'local'}")
         # Write into cookbook_state.json.
-        import time as _t, json as _json
-        from core.atomic_io import atomic_write_json
+        import time as _t
+        from src.openclank.cookbook_state import transaction, save
         from pathlib import Path as _Path
         cookbook_state_path = _Path(COOKBOOK_STATE_FILE)
         try:
-            state = _json.loads(cookbook_state_path.read_text(encoding="utf-8"))
-        except Exception:
-            state = {}
-        tasks = state.setdefault("tasks", [])
-        if any(isinstance(t, dict) and t.get("sessionId") == sess for t in tasks):
-            return {"ok": True, "already_tracked": True, "session_id": sess}
-        tasks.append({
-            "id": sess, "sessionId": sess,
-            "name": model.split("/")[-1] if "/" in model else model,
-            "type": "serve", "status": "running",
-            "output": f"Adopted externally-launched session {sess!r} on {host or 'local'}.",
-            "ts": int(_t.time() * 1000),
-            "payload": {"repo_id": model, "remote_host": host, "_cmd": "(adopted — launched outside cookbook)", "port": int(port)},
-            "remoteHost": host, "sshPort": "", "platform": "linux",
-            "_serveReady": False, "_endpointAdded": False, "_adoptedExternally": True,
-        })
-        try:
-            atomic_write_json(cookbook_state_path, state)
+            with transaction(cookbook_state_path) as state:
+                tasks = state.setdefault("tasks", [])
+                if any(isinstance(t, dict) and t.get("sessionId") == sess for t in tasks):
+                    return {"ok": True, "already_tracked": True, "session_id": sess}
+                tasks.append({
+                    "id": sess, "sessionId": sess,
+                    "name": model.split("/")[-1] if "/" in model else model,
+                    "type": "serve", "status": "running",
+                    "output": f"Adopted externally-launched session {sess!r} on {host or 'local'}.",
+                    "ts": int(_t.time() * 1000),
+                    "payload": {"repo_id": model, "remote_host": host, "_cmd": "(adopted — launched outside cookbook)", "port": int(port)},
+                    "remoteHost": host, "sshPort": "", "platform": "linux",
+                    "_serveReady": False, "_endpointAdded": False, "_adoptedExternally": True,
+                })
+                save(cookbook_state_path, state)
         except Exception as exc:
             raise HTTPException(500, f"state write failed: {exc}")
         return {"ok": True, "session_id": sess, "host": host or "local"}
@@ -904,7 +917,7 @@ def setup_claude_routes() -> APIRouter:
                     continue
                 zf.write(path, path.relative_to(bundle_root))
         buf.seek(0)
-        headers = {"Content-Disposition": 'attachment; filename="odysseus-claude-skill.zip"'}
+        headers = {"Content-Disposition": 'attachment; filename="openclank-claude-skill.zip"'}
         return StreamingResponse(buf, media_type="application/zip", headers=headers)
 
     return router

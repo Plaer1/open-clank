@@ -6,9 +6,8 @@ The application release tag is `v1.0.3-beta.2`. Use the checksums and
 source/target provenance supplied with each release artifact.
 [Beta 1 notes](beta1.md) remain the historical record for the previous release.
 
-## Code Graph is Alpha
+## Code Graph
 
-Code Graph remains **Alpha**, separately from the Beta 2 application label.
 Choose an approved workspace code folder to inspect the file map and lazily
 expanded stored symbols. Supported grammar-backed declarations, occurrences
 and static relationship rules retain their source bindings and evidence states.
@@ -68,6 +67,13 @@ subject progress, shared Main Quests, private courses and the distinction betwee
 self-report and admitted practical evidence. Existing user data and historical
 progress must be preserved during upgrade; consult [upgrading](upgrading.md) and
 [backup and restore](backup-restore.md) before replacing an installation.
+
+## Current source updates since the Beta 2 package
+
+- **Provider/Model Management** groups provider sign-in, connected models and web search settings. **AI Defaults** includes Deep Research, **Integrations** includes email, and **Buddy** has its own settings.
+- Hover over the colored marks beside a chat to preview its turns. Click a mark to jump to the exchange. Drag the grip above the input to change its height.
+- In **Compare**, each lane can independently append the literal text `no mistakes.` to its prompt.
+- **Appearance → Interface language** switches both the controls and the read-only instruction manual. Personal messages and documents keep their original text.
 
 ## Packages and supporting artwork
 

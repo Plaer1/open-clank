@@ -80,7 +80,9 @@ def begin_agent_turn(root_turn_id: str, mimo_session_id: str) -> bool:
                     actor_accounting_state="pending",
                 )
             )
-        else:
+        elif row.mimo_session_id != mimo_session_id:
+            if row.last_source_revision or row.actor_accounting_state in {"recording", "closed"}:
+                return False
             row.mimo_session_id = mimo_session_id
         db.commit()
         return True
@@ -100,7 +102,9 @@ def apply_actor_feed(payload: dict[str, Any]) -> dict[str, Any]:
     db = SessionLocal()
     try:
         turn = db.get(AgentTurn, root_turn_id)
-        if turn is None:
+        if turn is None or turn.mimo_session_id != mimo_session_id:
+            return {"state": "not_recorded", "total": None, "actors": []}
+        if isinstance(actor, dict) and actor.get("sessionID", mimo_session_id) != mimo_session_id:
             return {"state": "not_recorded", "total": None, "actors": []}
         if turn.actor_accounting_state == "pending":
             turn.actor_accounting_state = "recording"
@@ -109,29 +113,27 @@ def apply_actor_feed(payload: dict[str, Any]) -> dict[str, Any]:
 
         if isinstance(actor, dict) and actor.get("actorID"):
             actor_id = str(actor["actorID"])
-            existing_any = (
+            # A continuing worker stays with its originating turn in this
+            # native session and host chat. IDs can repeat in every session.
+            chat_id = db.query(ChatMessage.session_id).filter(ChatMessage.id == root_turn_id).scalar()
+            scoped_actors = (
                 db.query(TurnActor)
+                .join(AgentTurn, AgentTurn.root_turn_id == TurnActor.root_turn_id)
+                .join(ChatMessage, ChatMessage.id == AgentTurn.root_turn_id)
                 .filter(
                     TurnActor.mimo_session_id == mimo_session_id,
-                    TurnActor.actor_id == actor_id,
+                    AgentTurn.mimo_session_id == mimo_session_id,
+                    ChatMessage.session_id == chat_id,
                 )
-                .first()
             )
+            existing = scoped_actors.filter(TurnActor.actor_id == actor_id).first()
             parent_id = str(actor.get("parentActorID") or "") or None
             parent = None
-            if parent_id:
-                parent = (
-                    db.query(TurnActor)
-                    .filter(
-                        TurnActor.mimo_session_id == mimo_session_id,
-                        TurnActor.actor_id == parent_id,
-                    )
-                    .first()
-                )
-            target_root = existing_any.root_turn_id if existing_any else (parent.root_turn_id if parent else root_turn_id)
-            target_turn = db.get(AgentTurn, target_root)
-            if target_turn is not None:
-                row = db.get(TurnActor, (target_root, actor_id))
+            if existing is None and parent_id and actor.get("mode", "subagent") == "subagent":
+                parent = scoped_actors.filter(TurnActor.actor_id == parent_id).first()
+            target_root = existing.root_turn_id if existing else (parent.root_turn_id if parent else root_turn_id)
+            row = db.get(TurnActor, (target_root, actor_id))
+            if row is None or row.mimo_session_id == mimo_session_id:
                 if row is None:
                     status, outcome = _project_status(actor)
                     counts = bool(
@@ -235,7 +237,11 @@ def _aggregate(db, turn: AgentTurn | None) -> dict[str, Any]:
         return {"state": "not_recorded", "total": None, "actors": []}
     rows = (
         db.query(TurnActor)
-        .filter(TurnActor.root_turn_id == turn.root_turn_id, TurnActor.counts_toward_total.is_(True))
+        .filter(
+            TurnActor.root_turn_id == turn.root_turn_id,
+            TurnActor.mimo_session_id == turn.mimo_session_id,
+            TurnActor.counts_toward_total.is_(True),
+        )
         .order_by(TurnActor.created_at, TurnActor.actor_id)
         .all()
     )
@@ -244,7 +250,9 @@ def _aggregate(db, turn: AgentTurn | None) -> dict[str, Any]:
     actors = [
         {
             "id": row.actor_id,
+            "session_id": row.mimo_session_id,
             "parent_id": row.parent_actor_id,
+            "parent_session_id": row.mimo_session_id if row.parent_actor_id and row.mode == "subagent" else None,
             "agent": row.agent,
             "description": row.description,
             "status": row.status,

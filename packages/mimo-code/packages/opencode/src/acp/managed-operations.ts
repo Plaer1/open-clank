@@ -7,6 +7,7 @@ import type {
   TranscriptionModelV3,
 } from "@ai-sdk/provider"
 import { createHash } from "node:crypto"
+import { mergeDeep, pipe } from "remeda"
 import {
   embedMany,
   experimental_generateSpeech,
@@ -15,11 +16,12 @@ import {
   generateText,
 } from "ai"
 import { AppRuntime } from "@/effect/app-runtime"
-import { Provider } from "@/provider"
+import { Provider, ProviderTransform } from "@/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { flushCaptures, passiveQuota, sdkUsageEvidence, captureScopeEvidence, markCaptureRetry } from "@/provider/logging-transport"
 import { ManagedProvider } from "./managed-provider"
 import { OpenClankManagedProtocol } from "./openclank-protocol"
+import { transformXiaomiSearchRequestBody } from "./provider-capabilities"
 
 type ExecuteRequest = OpenClankManagedProtocol.OperationExecuteRequest
 type ExecuteResult = OpenClankManagedProtocol.OperationExecuteResult
@@ -52,11 +54,13 @@ export interface Runtime {
   readonly getLanguage: (
     model: Provider.Model,
     scope: ManagedProvider.BoundOperation["scope"],
+    auxiliary?: ManagedProvider.AuxiliaryClaudeOwner,
   ) => Promise<LanguageModelV3>
   readonly getSearchLanguage?: (
     model: Provider.Model,
     scope: ManagedProvider.BoundOperation["scope"],
     count: number,
+    answer?: boolean,
   ) => Promise<LanguageModelV3>
   readonly getImage: (
     model: Provider.Model,
@@ -144,11 +148,7 @@ export function transformMimoSearchRequestBody(
   body: Record<string, unknown>,
   input: { count: number; answer: boolean },
 ): Record<string, unknown> {
-  return {
-    ...body,
-    tools: [{ type: "web_search", max_keyword: 1, force_search: true, limit: input.count }],
-    ...(input.answer ? { max_completion_tokens: 512 } : { max_completion_tokens: 256 }),
-  }
+  return transformXiaomiSearchRequestBody(body, input)
 }
 
 function rawResponseBody(value: unknown): unknown {
@@ -156,7 +156,7 @@ function rawResponseBody(value: unknown): unknown {
   return response?.body ?? (value as { body?: unknown })?.body
 }
 
-function searchEnvelope(value: unknown): { annotations: SearchAnnotation[]; queries: string[]; usage?: Record<string, number>; supportLinks: string[] } {
+export function searchEnvelope(value: unknown): { annotations: SearchAnnotation[]; queries: string[]; usage?: Record<string, number>; supportLinks: string[] } {
   let body = value
   if (typeof body === "string") {
     try { body = JSON.parse(body) } catch { return { annotations: [], queries: [], supportLinks: [] } }
@@ -169,12 +169,36 @@ function searchEnvelope(value: unknown): { annotations: SearchAnnotation[]; quer
   const supportLinks = Array.isArray(root.support_links)
     ? root.support_links.filter((item): item is string => typeof item === "string" && /^https?:\/\//.test(item))
     : []
-  const usageValue = root.web_search_usage
+  const nestedUsage = root.usage && typeof root.usage === "object" && !Array.isArray(root.usage)
+    ? (root.usage as Record<string, unknown>).web_search_usage
+    : undefined
+  const usageValue = nestedUsage ?? root.web_search_usage
   const usage = usageValue && typeof usageValue === "object" && !Array.isArray(usageValue)
     ? Object.fromEntries(Object.entries(usageValue).filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isSafeInteger(entry[1]) && entry[1] >= 0))
     : undefined
   void choices
   return { annotations, queries, ...(usage && Object.keys(usage).length ? { usage } : {}), supportLinks }
+}
+
+export function searchErrorMessage(value: unknown): boolean {
+  let body = value
+  if (typeof body === "string") {
+    try { body = JSON.parse(body) } catch { return false }
+  }
+  if (!body || typeof body !== "object") return false
+  const root = body as Record<string, unknown>
+  if (typeof root.error_message === "string" && root.error_message.trim()) return true
+  const choices = Array.isArray(root.choices) ? root.choices : []
+  return choices.some((choice) => {
+    if (!choice || typeof choice !== "object") return false
+    const item = choice as Record<string, unknown>
+    for (const candidate of [item.message, item.delta]) {
+      if (candidate && typeof candidate === "object"
+        && typeof (candidate as Record<string, unknown>).error_message === "string"
+        && String((candidate as Record<string, unknown>).error_message).trim()) return true
+    }
+    return false
+  })
 }
 
 export function extractMimoSearchAnnotations(value: unknown): SearchAnnotation[] {
@@ -208,7 +232,10 @@ export function extractMimoSearchAnnotations(value: unknown): SearchAnnotation[]
 }
 
 function webSearchOutput(response: any, provider: string, answerWanted: boolean): Record<string, unknown> {
-  const envelope = searchEnvelope(rawResponseBody(response))
+  const raw = rawResponseBody(response)
+  const providerError = searchErrorMessage(raw)
+  if (providerError) throw new ManagedOperationError("provider_error", "Xiaomi search returned a provider error", "entitlement")
+  const envelope = searchEnvelope(raw)
   const rows = envelope.annotations.map((row) => ({ ...row, provider }))
   return {
     results: rows,
@@ -508,12 +535,12 @@ async function modelForRoute(route: Route) {
 
 const DEFAULT_RUNTIME: Runtime = {
   modelForRoute,
-  getLanguage: (model, scope) =>
-    AppRuntime.runPromise(Provider.Service.use((service) => service.getLanguage(model, scope))),
-  getSearchLanguage: (model, scope, count) =>
+  getLanguage: (model, scope, auxiliary) =>
+    AppRuntime.runPromise(Provider.Service.use((service) => service.getLanguage(model, scope, auxiliary ? { auxiliaryClaude: auxiliary } : undefined))),
+  getSearchLanguage: (model, scope, count, answer) =>
     AppRuntime.runPromise(
       Provider.Service.use((service) =>
-        service.getSearchLanguage ? service.getSearchLanguage(model, scope, count) : service.getLanguage(model, scope),
+        service.getSearchLanguage ? service.getSearchLanguage(model, scope, count, answer === true) : service.getLanguage(model, scope),
       ),
     ),
   getImage: (model, scope) =>
@@ -586,6 +613,7 @@ async function executeRemote(
   scope: ManagedProvider.BoundOperation["scope"],
   runtime: Runtime,
   callerAbortSignal?: AbortSignal,
+  auxiliary?: ManagedProvider.AuxiliaryClaudeOwner,
 ): Promise<ExecutionOutput> {
   const dispatchOffset = captureScopeEvidence(scope).coveredDispatchIDs.length
   const model = await runtime.modelForRoute(route)
@@ -615,7 +643,7 @@ async function executeRemote(
     const timeout = setTimeout(() => abortController.abort(new Error("web.search deadline exceeded")), timeoutMs)
     try {
       const language = await (runtime.getSearchLanguage
-        ? runtime.getSearchLanguage(model, scope, count)
+        ? runtime.getSearchLanguage(model, scope, count, answer)
         : runtime.getLanguage(model, scope))
       const response = await generateText({
         model: language,
@@ -643,7 +671,7 @@ async function executeRemote(
   }
 
   if (request.operation === "chat.complete" || request.operation === "vision.describe") {
-    const language = await runtime.getLanguage(model, scope)
+    const language = await runtime.getLanguage(model, scope, auxiliary)
     let messages: any
     if (request.operation === "vision.describe") {
       const image = inputArtifacts.get("image") ?? [...inputArtifacts.values()][0]
@@ -663,9 +691,40 @@ async function executeRemote(
       }
       messages = request.input.messages
     }
+    const snapshot = request.options.modelRequestOptions
+    let selectedOptions: ReturnType<typeof ProviderTransform.providerOptions> | undefined
+    if (snapshot !== undefined) {
+      const data = record(snapshot, "model request options")
+      const actualModel = record(data.model, "model request option model")
+      const options = record(data.options, "model request option values")
+      if (Object.keys(data).sort().join(",") !== "catalogRevision,model,optionRouteID,options,routeID,version"
+        || data.version !== 1 || data.routeID !== route.modelRouteID
+        || typeof data.optionRouteID !== "string" || !data.optionRouteID
+        || !Number.isSafeInteger(data.catalogRevision) || Number(data.catalogRevision) < 1
+        || Object.keys(actualModel).sort().join(",") !== "modelID,providerID"
+        || actualModel.providerID !== route.connectionID || actualModel.modelID !== route.modelID
+        || Object.keys(options).some((key) => key !== "reasoning_effort")) {
+        throw new ManagedOperationError("invalid_request", "model option snapshot is invalid")
+      }
+      const effort = options.reasoning_effort
+      if (effort !== undefined) {
+        if (typeof effort !== "string" || !Object.hasOwn(model.variants ?? {}, effort)) {
+          throw new ManagedOperationError("invalid_request", "model reasoning selection is unsupported")
+        }
+        selectedOptions = ProviderTransform.providerOptions(model, pipe(
+          ProviderTransform.options({ model, sessionID: request.rootOperationID }),
+          mergeDeep(model.options),
+          mergeDeep(model.variants![effort]),
+        ))
+      }
+    }
+    if (request.operation === "chat.complete" && callerAbortSignal?.aborted)
+      throw new ManagedOperationError("cancelled", "operation cancelled before dispatch", "transient", undefined, false)
     const response = await generateText({
       model: language,
       messages,
+      ...(request.operation === "chat.complete" ? { abortSignal: callerAbortSignal } : {}),
+      ...(selectedOptions ? { providerOptions: selectedOptions } : {}),
       maxRetries: 0,
       ...(Number.isSafeInteger(request.input.maxOutputTokens)
         ? { maxOutputTokens: Number(request.input.maxOutputTokens) }
@@ -677,7 +736,7 @@ async function executeRemote(
     return {
       output: { text: response.text },
       artifacts: [],
-      ...sdkUsageEvidence(usage, scope, "managed-sdk-inclusive-v1", dispatchOffset),
+      ...sdkUsageEvidence(usage, auxiliary?.bound.scope ?? scope, "managed-sdk-inclusive-v1", dispatchOffset),
       ...(quota ? { quota } : {}),
     }
   }
@@ -823,8 +882,8 @@ export class Router {
     if (completed) return { operationID: completed.operationID, rootOperationID, state: completed.state }
     const active = this.inFlight.get(key)
     if (!active) throw new ManagedOperationError("operation_not_found", "operation is not active")
-    if (active.operation !== "web.search") throw new ManagedOperationError("unsupported_operation", "cancellation is only supported for web.search")
-    active.controller.abort(new Error("web.search cancelled by caller"))
+    if (active.operation !== "web.search" && active.operation !== "chat.complete") throw new ManagedOperationError("unsupported_operation", "operation cancellation is unavailable")
+    active.controller.abort(new Error("managed operation cancelled by caller"))
     // The provider task still owns the durable terminal transition. Until it
     // settles, report pending so a completion winner is never misreported as
     // cancelled by the notification response.
@@ -894,6 +953,10 @@ export class Router {
     const captureScopes: object[] = []
 
     for (const route of request.routes) {
+      if (request.operation === "chat.complete" && callerController.signal.aborted) {
+        lastError = new ManagedOperationError("cancelled", "operation cancelled before dispatch", "transient", undefined, false)
+        break
+      }
       lastRoute = route
       const modelIdentity = { providerID: route.connectionID, modelID: route.modelID }
       let bound: ManagedProvider.BoundOperation
@@ -927,13 +990,40 @@ export class Router {
           },
         )
         let executed: ExecutionOutput
+        const auxiliary = bound.binding.providerID === 'anthropic' && bound.binding.billingLane === 'subscription'
+          ? ManagedProvider.ownAuxiliaryClaude(bound, callerController.signal) : undefined
+        const adoptKnown = () => {
+          if (!auxiliary) return
+          const known = auxiliary.lastKnownBound
+          if (known.scope !== bound.scope) {
+            const index = captureScopes.indexOf(bound.scope)
+            if (index >= 0) captureScopes[index] = known.scope
+            bound = known
+          }
+        }
         try {
           const executorID = localExecutor(request, route)
           executed = executorID
             ? await executeLocal(this.connection, request, executorID)
-            : await executeRemote(this.connection, request, route, bound.scope, this.runtime, callerController.signal)
+            : await executeRemote(this.connection, request, route, bound.scope, this.runtime, callerController.signal, auxiliary)
+          auxiliary?.assertCurrent()
+          adoptKnown()
         } catch (error) {
           lastError = classify(error)
+          adoptKnown()
+          if (auxiliary?.issued || auxiliary?.uncertain) {
+            const safe: Record<string,string> = {
+              provider_auth:'provider authentication failed', provider_quota:'provider quota is unavailable',
+              model_ineligible:'provider account cannot use this model', provider_transient:'provider is temporarily unavailable',
+            }
+            const message = safe[lastError.code]
+            lastError = new ManagedOperationError(message ? lastError.code : 'provider_unknown', message ?? 'provider operation outcome is unknown', 'unknown')
+          }
+          auxiliary?.retire()
+          if (request.operation === "chat.complete" && callerController.signal.aborted && lastError.code !== "cancelled") {
+            // An aborted SDK transport does not prove the provider did no work.
+            lastError = new ManagedOperationError("provider_unknown", "provider operation outcome is unknown", "unknown")
+          }
 
           // Model lookup is local topology resolution. No provider request
           // occurred, so do not report an account attempt or mutate provider
@@ -1057,6 +1147,8 @@ export class Router {
 
           break
         }
+
+        auxiliary?.retire()
 
         // A completed provider response or returned artifact is already a
         // commit event. Fence first; health and journal bookkeeping cannot be

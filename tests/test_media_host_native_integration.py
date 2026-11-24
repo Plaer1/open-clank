@@ -41,7 +41,7 @@ const output = ProviderTransform.message(input, model, {})
 console.log(JSON.stringify(output.map((m) => ({ ...m, content: Array.isArray(m.content) ? m.content.map((p) => ({ type: p.type, data: typeof p.data === "string" ? p.data : undefined, image: typeof p.image === "string" ? p.image : undefined, mediaType: p.mediaType, text: p.text })) : m.content }))))
 '''
     result = subprocess.run(
-        ["bun", "-e", script], cwd=root / "packages/mimo-code/packages/opencode",
+        ["bun", "-e", script], cwd=root / "packages/mimo-code/packages/cli",
         input=json.dumps(messages), text=True, capture_output=True, check=True,
     )
     return json.loads(result.stdout)

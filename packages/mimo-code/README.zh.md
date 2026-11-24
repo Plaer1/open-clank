@@ -14,11 +14,25 @@
   <a href="https://mimo.xiaomi.com/zh/mimocode">官网</a> | <a href="https://mimo.xiaomi.com/zh/blog/mimo-code-long-horizon">博客</a>
 </p>
 
----
-
 MiMoCode 是一个终端原生的 AI 编程助手。它能读写代码、执行命令、管理 Git，通过持久化记忆系统，在多次会话间保持对你项目的深度理解，并自我进化。
 
-内置 MiMo Auto 限时免费通道——零配置即可开始使用。也支持接入各家主流 LLM 厂商 API。
+支持接入各家主流 LLM 厂商 API。
+
+## Xiaomi MiMo Desktop
+
+<p align="center"><a href="https://mimo.xiaomimimo.com/desktop/">国内版下载</a> | <a href="https://mimo-ai.xiaomimimo.com/desktop/">Global Download</a></p>
+
+<p align="center"><img src="assets/readme/mimo-desktop-cn.jpg" alt="Xiaomi MiMo Desktop 中文界面：会话与研究报告预览" width="900"></p>
+
+Xiaomi MiMo Desktop 面向真实工作场景打造，一个会话即可完成办公、设计、编程和全模态创作；多个会话可自动分工、协作与通信。桌面端以 **MiMo Code 作为核心引擎**，将终端原生的智能能力延伸到桌面工作流。
+
+- **「Smart」调度**：自动评估任务类型与成本，动态选择模型、框架与工具，复杂任务由多个 Agent 并行推进。
+- **从生成结果到持续迭代**：支持拖入多格式文件，成果覆盖 PPT、网页、3D、App 等；会话内实时预览和操作，选中局部即可精准修改，并支持版本回退。
+- **让长任务成本可控**：标准与旗舰模型自动路由，局部编辑只修改需要的部分；同会话缓存命中率最高 99%，跨会话最高 95%。
+- **浏览器操控**：自主打开网页、检索和提取信息、填写表单，生成网页后自动检查关键交互。
+- **电脑操控（仅限海外版）**：读屏并操作键鼠，跨应用执行；Record & Replay 录制一次后，可用自然语言复用。
+
+搭载新一代小米模型 **MiMo-V2.6-Pro** 和 **MiMo-V2.6-Flash**。
 
 ---
 
@@ -31,15 +45,11 @@ curl -fsSL https://mimo.xiaomi.com/install | bash
 # 一键安装（Windows PowerShell）
 powershell -ep Bypass -c "irm https://mimo.xiaomi.com/install.ps1 | iex"
 
-# 或通过 npm 安装（全平台）
-npm install -g @mimo-ai/cli
-
 # 运行
 mimo
 ```
 
 首次启动自动引导配置。支持：
-- **MiMo Auto（限时免费）** — 匿名通道，零配置
 - **小米 MiMo 平台** — OAuth 登录
 - **Codex（ChatGPT Pro/Plus）** — OpenAI OAuth 登录
 - **从 Claude Code 导入** — 一键迁移已有认证
@@ -56,6 +66,36 @@ sudo apt install xsel
 </details>
 
 <details>
+<summary><strong>macOS：默认终端渲染异常</strong></summary>
+
+MiMoCode 不支持 macOS 自带的“终端”（Terminal.app）。如果界面出现错位、闪烁或其他渲染异常，请改用 [iTerm2](https://iterm2.com/) 或 VS Code 集成终端：
+
+```bash
+brew install --cask iterm2
+```
+</details>
+
+<details>
+<summary><strong>TUI 卡顿与视觉动画问题</strong></summary>
+
+如果通过 SSH 直接运行 TUI 时卡顿，可以让 TUI 在本地渲染，远端只运行 MiMoCode 服务。先在远端项目目录中启动服务：
+
+```bash
+# 远端主机
+mimo serve --port 4096
+
+# 本地主机：建立 SSH 端口转发
+ssh -N -L 4096:127.0.0.1:4096 user@remote-host
+
+# 本地主机：在另一个终端连接远端 MiMoCode
+mimo attach http://127.0.0.1:4096
+```
+
+如果卡顿来自装饰性动画，可以运行 `/vivid`，或在 `ctrl+p` 命令面板中设置“丰富显示”，根据实际情况在丰富视觉模式和简洁模式间切换。
+
+</details>
+
+<details>
 <summary><strong>Windows：shell 输出中文（CJK）乱码</strong></summary>
 
 在系统区域为非 UTF-8 的 Windows 上（如简体中文，活动代码页为 936/GBK），命令输出里的
@@ -67,6 +107,36 @@ sudo apt install xsel
 
 这会把活动代码页（ACP）切换为 UTF-8（65001），所有程序都生效，子进程不再继承旧代码页。
 注意这是系统级 Beta 开关，可能导致部分老的非 Unicode 程序显示异常，建议作为临时方案。
+</details>
+
+<details>
+<summary><strong>如何配置联网搜索</strong></summary>
+
+如需让 Agent 联网搜索，可以设置 `MIMOCODE_ENABLE_EXA=1` 启用内置的 `websearch` 和 `codesearch` 工具（基于 Exa；如需更高频率上限，在 https://dashboard.exa.ai/api-keys 创建 Key 并设置 `EXA_API_KEY`），或在配置的 `mcp` 下添加一个搜索 MCP 服务。密钥可通过 `{env:VAR}` 从环境变量读取：
+
+```jsonc
+{
+  "mcp": {
+    // Exa（Key 可选：在 https://dashboard.exa.ai/api-keys 创建后，在 URL 末尾加 ?exaApiKey=<key>）
+    "exa": { "type": "remote", "url": "https://mcp.exa.ai/mcp" },
+    // Tavily（在 https://app.tavily.com 获取 API Key）
+    "tavily": {
+      "type": "remote",
+      "url": "https://mcp.tavily.com/mcp/",
+      "headers": { "Authorization": "Bearer {env:TAVILY_API_KEY}" }
+    },
+    // 火山引擎豆包搜索（需要 uv 与 Python 3.12/3.13；
+    // 在 https://console.volcengine.com/search-infinity/api-key 获取 Key）
+    "doubao-search": {
+      "type": "local",
+      "command": ["uvx", "--from", "mcp-server-askecho-search-infinity>=0.2.0", "mcp-server-askecho-search-infinity"],
+      "environment": { "ASK_ECHO_SEARCH_INFINITY_API_KEY": "{env:ASK_ECHO_SEARCH_INFINITY_API_KEY}" }
+    }
+  }
+}
+```
+
+运行 `mimo mcp` 检查服务是否连接成功。
 </details>
 
 ---
@@ -87,11 +157,8 @@ sudo apt install xsel
 |--------|------|
 | **build** | 默认。完整工具权限，用于开发 |
 | **plan** | 只读分析模式，适合代码探索和方案设计 |
-| **compose** | 编排模式，适合 specs-driven 开发和 Skill 驱动流程 |
 
-按 `Tab` 在主智能体间切换。子智能体由系统按需生成。发送第一条消息后模式会锁定：Build 和 Plan 之间仍可互切，但 Compose 一旦进入即被隔离——skill/tool 集合从会话开始就保持固定，可显著提升工具调用成功率。
-
-对于前沿模型（Fable/Sol 级），推荐用 **build** agent 配合 `/compose-next` 技能来完成 compose 类工作——见 [Compose 编排模式](#compose-编排模式)。
+按 `Tab` 在主智能体间切换。Build 和 Plan 之间可以随时切换，其他自定义模式或特殊模式在发送消息后将会锁定。
 
 ### 持久化记忆
 
@@ -156,48 +223,38 @@ sudo apt install xsel
 
 ### Compose 编排模式
 
-Compose 是 MiMoCode 的 specs-driven 结构化开发流程，编排从 spec 到交付的完整开发生命周期。
-
-推荐用法是在 **build** agent 中使用 **`/compose-next`** 技能：一份独立完整的契约，覆盖 grill → spec → workspace → implement → verify → review → finalize → finish，功能文档落在 `docs/compose/spec/<feature>.md`。它面向前沿模型（Fable/Sol 级）设计——这类模型已内化大部分流程，用一份紧凑契约效果最好。
-
-Legacy 路径是专用的 **compose agent**（按 `Tab` 切换），它编排规划、执行、代码审查、TDD、调试、验证、合并等十四个内置技能——这套分步技能课程对较弱模型依然适用。
+使用 **`/compose-next`** 技能即可跑通端到端功能交付：一份独立完整的契约，覆盖 grill → workspace → spec → implement → verify → review → finalize → finish，功能文档落在 workspace root 下的 `docs/compose/spec/<feature>.md`，不要和 plan 模式一起使用。
 
 ### Workflows
 
 Workflow 是在沙箱运行时中执行的确定性 JavaScript 脚本，可编排多个 Agent 协作。与 Agent 对话不同，Workflow 编码了固定的阶段序列、有界重试和自动并行化——全程非交互，丢出去跑完即可。
 
-MiMoCode 内置四个 Workflow：
+MiMoCode 内置三个 Workflow：
 
 | Workflow | 阶段 | 说明 |
 |----------|------|------|
-| `compose` | Brainstorm → Design → Implement → Verify → Review → Report → Merge | 完整开发流水线。自动将独立任务并行分发到隔离的 git worktree，每个任务应用 TDD，阶段之间传递结构化输出。适合需求明确且可拆分为独立子任务的场景。 |
 | `deep-research` | Brief → Plan → Research → Reflect → Write → Review | 多源深度调研报告生成器。规划独立研究角度，并行派发子代理搜集带引用的 findings，反思补缺，单点写完整 Markdown 报告，最后冷审引用。支持断点续跑。 |
 | `fact-check` | Plan → Search → Extract → Group → Crosscheck → Report | 对抗式事实验证。并行搜索网络、提取可验证事实、分组去重、用 3 人陪审投票交叉验证，只保留通过的结论。适合精确求证（"X 是否属实？"）。 |
 | `research-experiment` | Baseline → Loop → Audit → Report | 面向可机械验证指标的自主优化循环。建立基线后反复执行“提出假设 → 实现 → 评估 → 保留/回滚”，审计指标作弊风险，并生成可复现的结果日志。需要固定预算的评估命令和明确的可编辑文件范围。 |
 
-compose workflow 与交互式路径互补：**workflow** 适合需求清晰、任务可独立拆解的场景（确定性、并行、非交互）；**build** agent 配合 `/compose-next`（或 legacy 的 compose agent）适合需要中途改方向或在步骤间注入人工判断的场景（对话式、交互式）。
-
-**自定义 Workflow：** 在 `.mimocode/workflows/` 或 `.claude/workflows/` 下放置 `.js` 文件即可定义自己的 Workflow，也可用同名文件覆盖内置 Workflow（如 `.mimocode/workflows/compose.js`）。
+**自定义 Workflow：** 在 `.mimocode/workflows/` 或 `.claude/workflows/` 下放置 `.js` 文件即可定义自己的 Workflow，也可用同名文件覆盖内置 Workflow。
 
 ### 内置技能（Builtin Skills）
 
-技能（Skill）是可复用的指令集，教会 Agent 如何处理特定任务（如生成 PDF、写学术论文、搜索 arXiv）。面对新任务时，MiMoCode 会按准确名称、本地化别名和 BM25 相关性搜索可用的非 Compose Skill；高置信度结果会自动加载，不确定的候选则交由 Agent 判断。在 TUI 中输入 `/` 可以浏览自动补全列表，也可以通过 `/<skill-name>` 直接调用 Skill——一条消息里提到两个及以上技能时会自动加载它们并注入多技能编排计划。
+技能（Skill）是可复用的指令集，教会 Agent 如何处理特定任务（如生成 PDF、写学术论文、搜索 arXiv）。面对新任务时，MiMoCode 会按准确名称、本地化别名和 BM25 相关性搜索可用技能；高置信度结果会自动加载，不确定的候选则交由 Agent 判断。在 TUI 中输入 `/` 可以浏览自动补全列表，也可以通过 `/<skill-name>` 直接调用 Skill——一条消息里提到两个及以上技能时会自动加载它们并注入多技能编排计划。
 
 MiMoCode 打包了以下内置技能：
 
 | 技能 | 说明 |
 |------|------|
 | `arxiv` | 搜索、阅读、引用和分析 arXiv 论文 |
-| `claude-code` | 将编码、测试、审查和 Git 任务委派给 Claude Code CLI |
-| `codex` | 在无头自动化、CI、容器和远程环境中运行及排查 Codex CLI |
-| `compose-next` | 推荐的 spec→ship 功能交付工作流（grill → spec → implement → verify → review → finish）；通过 `/compose-next` 显式调用 |
+| `claude-code` | 以 CLI 驱动 Claude Code，完成编码、测试、审查和 Git 任务（需 `MIMOCODE_ENABLE_AGENT_CLI_SKILLS`） |
+| `codex` | 以 CLI 驱动 Codex，用于无头自动化、CI、容器和远程环境（需 `MIMOCODE_ENABLE_AGENT_CLI_SKILLS`） |
+| `compose-next` | spec→ship 功能交付编排——澄清需求、规格、实现、验证、评审、收尾 |
 | `data-analytics` | 通过数据质量、KPI、仪表盘、报告、Notebook 和市场规模测算等工作流分析产品与业务数据 |
 | `deep-research` | 使用并行子智能体和内置 Web 工具生成带引用的多源深度调研报告 |
-| `design-blueprint` | 动手做视觉前先出设计蓝图（DESIGN.md + 决策轨迹）|
 | `docx-official` | 生成、读取和转换 Word (.docx) 文件 |
-| `drive-mimo` | 以无头或交互式 TUI 模式编排、测试和自动化另一个 MiMoCode 进程 |
-| `evolve` | 全面自我修改——改写 Agent 的任意层面：工具、行为钩子、知识、工作流，乃至界面本身 |
-| `frontend-design` | UI 开发的视觉设计指导 |
+| `grok-build` | 操作 Grok Build CLI，支持交互式与无头 agent 工作流（需 `MIMOCODE_ENABLE_AGENT_CLI_SKILLS`） |
 | `html-to-video-pipeline` | 通过无头浏览器 + ffmpeg 将 HTML 渲染为 MP4 |
 | `learn-everything` | 将文档、URL 或主题转化为包含练习、反馈和进度追踪的自适应课程 |
 | `loop` | 按固定周期调度循环提示 |
@@ -212,20 +269,32 @@ MiMoCode 打包了以下内置技能：
 | `super-research` | 执行长周期、可审计的研究、实验、评测、诊断、论文复现和引用校验 |
 | `xlsx-official` | 构建、清洗和转换电子表格 (.xlsx/.csv) |
 
-`claude-code` 和 `codex` 仅在系统分别安装了 `claude` 和 `codex` 可执行文件时提供。其他技能也可能需要其说明中列出的任务专用工具。
+`claude-code`、`codex` 与 `grok-build` 用于从终端以 CLI 方式驱动其他 agent。它们默认不开启，需设置 `MIMOCODE_ENABLE_AGENT_CLI_SKILLS=true` 才会加载。其他技能也可能需要其说明中列出的任务专用工具。
 
-**覆盖内置技能：** 在项目（`.mimocode/skills/<name>/SKILL.md`）或个人技能目录（`~/.claude/skills/`、`~/.opencode/skills/` 等）中创建同名技能即可。扫描顺序中后发现的用户技能会覆盖同名的内置技能。
+**覆盖内置技能：** 在项目的 `.mimocode/skills/<name>/SKILL.md`，或个人技能目录（例如 `~/.config/mimocode/skills/<name>/SKILL.md`）里放同名技能即可。项目 `.agents/skills/` 与 `~/.agents/skills/` 这两处开放标准目录同样会扫到。扫描顺序靠后的用户技能会覆盖同名内置技能。
 
 <details>
-<summary><strong>通过环境变量禁用内置技能</strong></summary>
+<summary><strong>通过环境变量配置技能</strong></summary>
 
 | 变量 | 效果 |
 |------|------|
 | `MIMOCODE_DISABLE_BUILTIN_SKILLS=true` | 禁用所有内置技能 |
 | `MIMOCODE_DISABLE_OFFICIAL_SKILLS=true` | 仅禁用办公/媒体类技能：`docx-official`、`pdf-official`、`pptx-official`、`xlsx-official`、`html-to-video-pipeline` |
+| `MIMOCODE_ENABLE_AGENT_CLI_SKILLS=true` | 打开 agent CLI 技能 `claude-code`、`codex`、`grok-build`（默认关） |
 | `MIMOCODE_DISABLE_SLASH_SKILLS=true` | 从 TUI 的 `/` 自动补全中隐藏 Skill，但不禁用它们 |
 
-前两个选项会将对应技能从 Agent 可用技能列表中完全移除——不会出现在上下文中，也无法被调用。`MIMOCODE_DISABLE_SLASH_SKILLS` 仅影响 TUI 自动补全，Skill 对 Agent 仍然可用。
+**外部技能根**（默认加载面 = `.mimocode` + 开放标准 `.agents`）：
+
+| Env | 默认 | 作用 |
+| --- | --- | --- |
+| `MIMOCODE_DISABLE_AGENTS_SKILLS=true` | 不设 = 开 | 关闭 `~/.agents/skills` 与项目 `.agents/skills` |
+| `MIMOCODE_ENABLE_CLAUDE_CODE_SKILLS=true` | 不设 = 关 | 打开 `.claude/skills` |
+| `MIMOCODE_ENABLE_CODEX_SKILLS=true` | 不设 = 关 | 打开 `.codex/skills`（仅用户 skill；Codex `skills/.system` 永不加载） |
+| `MIMOCODE_ENABLE_OPENCODE_SKILLS=true` | 不设 = 关 | 打开 `.opencode/skills` |
+
+外部扫描不匹配 `skills/` 下的点目录段。
+
+`MIMOCODE_DISABLE_BUILTIN_SKILLS` 与 `MIMOCODE_DISABLE_OFFICIAL_SKILLS` 会将对应技能从 Agent 可用技能列表中完全移除——不会出现在上下文中，也无法被调用。`MIMOCODE_DISABLE_SLASH_SKILLS` 仅影响 TUI 自动补全，Skill 对 Agent 仍然可用。
 
 </details>
 
@@ -261,7 +330,7 @@ export PULSE_SERVER=tcp:127.0.0.1:4713
 <details>
 <summary><strong>非 MiMo 渠道语音输入（OpenRouter、内部 API 等）</strong></summary>
 
-语音输入可通过 `voice` 配置字段路由到其他 OpenAI 兼容 provider。ASR 模型（`mimo-v2.5-asr`）仅在 MiMo 平台可用；语音控制模式（`mimo-v2.5`）可通过 OpenRouter 等中转平台使用。
+语音输入可通过 `voice` 配置字段路由到其他 OpenAI 兼容 provider。ASR 模型（`mimo-v2.5-asr`）仅在 MiMo 平台可用；语音控制模式（`mimo-v2.6-flash`）可通过 OpenRouter 等中转平台使用。
 
 **OpenRouter（仅语音控制）：**
 
@@ -269,7 +338,7 @@ export PULSE_SERVER=tcp:127.0.0.1:4713
 ```jsonc
 {
   "voice": {
-    "control_model": "openrouter/xiaomi/mimo-v2.5"
+    "control_model": "openrouter/xiaomi/mimo-v2.6-flash"
   }
 }
 ```
@@ -285,13 +354,13 @@ export PULSE_SERVER=tcp:127.0.0.1:4713
       },
       "models": {
         "xiaomi/mimo-v2.5-asr": { "name": "MiMo-V2.5-ASR" },
-        "xiaomi/mimo-v2.5": { "name": "MiMo-V2.5" }
+        "xiaomi/mimo-v2.6-flash": { "name": "MiMo-V2.6-Flash" }
       }
     }
   },
   "voice": {
     "asr_model": "internal/xiaomi/mimo-v2.5-asr",
-    "control_model": "internal/xiaomi/mimo-v2.5"
+    "control_model": "internal/xiaomi/mimo-v2.6-flash"
   }
 }
 ```
@@ -472,14 +541,14 @@ MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1 mimo
 ```bash
 bun ci                   # 安装依赖(= bun install --frozen-lockfile)
 bun run dev              # 开发模式运行
-bun turbo typecheck      # 类型检查
+bun run typecheck          # 类型检查
 ```
 
 ---
 
 ## 与 OpenCode 的关系
 
-MiMoCode 基于 [OpenCode](https://github.com/anomalyco/opencode) fork 构建，保留其全部核心能力（多 Provider、TUI、LSP、MCP、插件），并在此基础上构建了持久化记忆、智能上下文管理、子智能体编排、目标驱动的自主循环、Compose 工作流，以及通过 dream/distill 实现的自我进化。
+MiMoCode 基于 [OpenCode](https://github.com/anomalyco/opencode) fork 构建，保留其全部核心能力（多 Provider、TUI、LSP、MCP、插件），并在此基础上构建了持久化记忆、智能上下文管理、子智能体编排、目标驱动的自主循环、compose-next 端到端交付、Dynamic Workflow，以及通过 dream/distill 实现的自我进化。
 
 ---
 

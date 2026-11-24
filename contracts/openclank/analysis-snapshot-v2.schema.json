@@ -1,0 +1,518 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.local/contracts/analysis-snapshot-v2.schema.json",
+  "title": "Analysis snapshot data and compact reference",
+  "description": "Structural shape only; canonical bytes, identity and directory digests require analysis_snapshot_contract validation. omitted_count is an observed lower bound when traversal stops.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/manifest"
+    },
+    {
+      "$ref": "#/$defs/reference"
+    }
+  ],
+  "$defs": {
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "account_id",
+        "workspace_id",
+        "project_key",
+        "root_identity",
+        "capture_interval",
+        "scope",
+        "limits",
+        "dossier",
+        "components"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "openclank.analysis-snapshot.v2"
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "workspace_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "project_key": {
+          "type": "string",
+          "pattern": "^analysis-[0-9a-f]{64}$"
+        },
+        "root_identity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "capture_interval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "started_ms",
+            "finished_ms"
+          ],
+          "properties": {
+            "started_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "finished_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "root_resource_id",
+            "selections",
+            "filters",
+            "policy_generation"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "folder",
+                "selected"
+              ]
+            },
+            "root_resource_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "selections": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255,
+                  "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$"
+                }
+              }
+            },
+            "filters": {
+              "type": "array",
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "policy_generation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodes",
+            "depth",
+            "file_bytes",
+            "total_bytes",
+            "manifest_bytes",
+            "seconds"
+          ],
+          "properties": {
+            "nodes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            },
+            "depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "file_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1073741824
+            },
+            "total_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1073741824
+            },
+            "manifest_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1048576
+            },
+            "seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30
+            }
+          }
+        },
+        "dossier": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "dossier_id",
+            "dossier_revision",
+            "source_id",
+            "source_revision",
+            "source_sha256",
+            "result_sha256",
+            "operation",
+            "producer",
+            "producer_version",
+            "producer_evidence",
+            "coverage",
+            "payload_integrity",
+            "result",
+            "interpretations"
+          ],
+          "properties": {
+            "dossier_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "dossier_revision": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "value"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "hostFingerprint"
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 256,
+                  "pattern": "^sha256:[0-9a-f]{64}:[0-9]+$"
+                }
+              }
+            },
+            "source_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "source_revision": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "value"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "hostFingerprint"
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 256,
+                  "pattern": "^sha256:[0-9a-f]{64}:[0-9]+$"
+                }
+              }
+            },
+            "source_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "result_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "interpretations": {
+              "type": "array",
+              "maxItems": 0,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "sha256"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            },
+            "operation": {
+              "const": "info"
+            },
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "encoding",
+                "size_bytes",
+                "sha256",
+                "data"
+              ],
+              "properties": {
+                "encoding": {
+                  "const": "base64"
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 51200
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "data": {
+                  "type": "string",
+                  "minLength": 4,
+                  "maxLength": 68268,
+                  "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+                }
+              }
+            },
+            "producer": {
+              "const": "openclank.elf-metadata"
+            },
+            "producer_version": {
+              "const": "elf-v1-metadata-1"
+            },
+            "producer_evidence": {
+              "const": "host_owned_capture"
+            },
+            "coverage": {
+              "const": "partial_declared_metadata"
+            },
+            "payload_integrity": {
+              "const": "not_checked"
+            }
+          }
+        },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "path",
+                  "kind",
+                  "resource_id",
+                  "revision",
+                  "size_bytes",
+                  "sha256"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255,
+                      "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$"
+                    }
+                  },
+                  "kind": {
+                    "const": "file"
+                  },
+                  "resource_id": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "revision": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "value"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "const": "hostFingerprint"
+                      },
+                      "value": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^sha256:[0-9a-f]{64}:[0-9]+$"
+                      }
+                    }
+                  },
+                  "size_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1073741824
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "path",
+                  "kind",
+                  "coverage",
+                  "child_count",
+                  "omitted_count",
+                  "reasons",
+                  "sha256"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255,
+                      "pattern": "^(?!\\.{1,2}$)[^/\\\\\\u0000-\\u001f\\u007f]+$"
+                    }
+                  },
+                  "kind": {
+                    "const": "directory"
+                  },
+                  "coverage": {
+                    "enum": [
+                      "complete",
+                      "selected",
+                      "partial",
+                      "unknown"
+                    ]
+                  },
+                  "child_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1024
+                  },
+                  "omitted_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1024
+                  },
+                  "reasons": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "enum": [
+                        "denied",
+                        "invalid_name",
+                        "symlink",
+                        "special",
+                        "overflow",
+                        "changed",
+                        "unavailable",
+                        "filtered"
+                      ]
+                    }
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "upload_id",
+        "manifest_sha256",
+        "size_bytes",
+        "media_type",
+        "schema_version",
+        "capture_scope_sha256",
+        "coverage",
+        "component_count"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "upload_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "media_type": {
+          "const": "application/vnd.openclank.analysis-snapshot+json"
+        },
+        "schema_version": {
+          "const": "openclank.analysis-snapshot.v2"
+        },
+        "capture_scope_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "coverage": {
+          "enum": [
+            "complete",
+            "selected",
+            "partial",
+            "unknown"
+          ]
+        },
+        "component_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        }
+      }
+    }
+  }
+}

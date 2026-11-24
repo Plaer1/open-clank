@@ -32,7 +32,7 @@ const DESCRIPTION = [
 
 async function requestManagedCwd(sessionID: string, cwd: string) {
   const binding = managedSessionBinding(sessionID)
-  if (!binding || binding.transition) throw new Error("managed session binding is unavailable")
+  if (!binding || binding.authority || binding.transition) throw new Error("managed session cwd transition is unavailable")
   const transitionID = randomUUID()
   let settledFromAuthority = false
   beginManagedSessionTransition(sessionID, cwd, transitionID, binding.bindingRevision)
@@ -42,6 +42,7 @@ async function requestManagedCwd(sessionID: string, cwd: string) {
   } catch (error) {
     try {
       const recovered = await ManagedProvider.readManagedSessionBinding(sessionID)
+      if (recovered.authority) throw new Error("private session cwd transition is unavailable")
       if (recovered.engineSessionID !== binding.engineSessionID || recovered.stableChatID !== binding.stableChatID || recovered.owner !== binding.owner || recovered.mapRevision < binding.mapRevision || recovered.mappingRevision !== binding.mappingRevision || recovered.workspaceRevision < binding.bindingRevision) throw error
       replaceManagedSessionBinding(sessionID, {
         ...binding,

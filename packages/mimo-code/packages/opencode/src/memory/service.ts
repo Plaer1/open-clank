@@ -1,3 +1,4 @@
+import type { ActorExecutionIdentity } from "@/actor/turn"
 import { Context, Effect, Layer } from "effect"
 import { RecoverableError } from "@/tool/recoverable"
 import path from "path"
@@ -5,6 +6,8 @@ import os from "os"
 import { Global } from "../global"
 import { Database } from "../storage"
 import { Config } from "../config"
+import { Flag } from "@/flag/flag"
+import { ManagedProvider } from "@/acp/managed-provider"
 import { Log } from "../util"
 import { reconcileMemory } from "./reconcile"
 import { buildFtsQuery } from "./fts-query"
@@ -22,7 +25,7 @@ export type SearchRow = {
   score: number
   source?: string
   trust?: string
-  backend?: "mimo" | "frankenmemory"
+  backend?: "mimo" | "memery"
   source_uri?: string
   source_revision?: string | number
   content_hash?: string
@@ -31,7 +34,7 @@ export type SearchRow = {
   provenance_conflict?: boolean
 }
 
-export function mergeSearchRows(fmRows: SearchRow[], nativeRows: SearchRow[], limit: number): SearchRow[] {
+export function mergeSearchRows(memeryRows: SearchRow[], nativeRows: SearchRow[], limit: number): SearchRow[] {
   const normalize = (rows: SearchRow[], backend: SearchRow["backend"]) => {
     const top = Math.max(...rows.map((row) => row.score), 0)
     return rows.map((row) => ({
@@ -43,39 +46,39 @@ export function mergeSearchRows(fmRows: SearchRow[], nativeRows: SearchRow[], li
     }))
   }
   const combined = [
-    ...normalize(fmRows, "frankenmemory"),
+    ...normalize(memeryRows, "memery"),
     ...normalize(nativeRows, "mimo"),
   ]
-  // Cross-backend identity is the AUTHORED FILE, not source_uri: FM projects
+  // Cross-backend identity is the AUTHORED FILE, not source_uri: Memery projects
   // one row per section (source_uri file://path#anchor + a section content
   // hash, with metadata.authored_path = path) while native emits one row per
   // file (source_uri file://path + a size-mtime fingerprint). The two hash
   // schemes never collide, so keying on source_uri + content_hash never
-  // matched across backends. FM's section content hash stays FM-internal
+  // matched across backends. Memery's section content hash stays Memery-internal
   // identity; only the file path is shared.
-  const fileOf = (row: SearchRow) => (row.backend === "frankenmemory" ? row.authored_path : row.path)
-  const fmHashesByPath = new Map<string, Set<string>>()
+  const fileOf = (row: SearchRow) => (row.backend === "memery" ? row.authored_path : row.path)
+  const memeryHashesByPath = new Map<string, Set<string>>()
   for (const row of combined) {
-    if (row.backend !== "frankenmemory" || !row.authored_path || !row.content_hash) continue
-    const hashes = fmHashesByPath.get(row.authored_path) ?? new Set<string>()
+    if (row.backend !== "memery" || !row.authored_path || !row.content_hash) continue
+    const hashes = memeryHashesByPath.get(row.authored_path) ?? new Set<string>()
     hashes.add(row.content_hash)
-    fmHashesByPath.set(row.authored_path, hashes)
+    memeryHashesByPath.set(row.authored_path, hashes)
   }
-  // A file surfaced by both backends whose native fingerprint matches no FM
+  // A file surfaced by both backends whose native fingerprint matches no Memery
   // section hash is a provenance conflict: both rows stay visible, flagged.
   const conflictPaths = new Set<string>()
   for (const row of combined) {
     if (row.backend !== "mimo" || !row.content_hash) continue
-    const hashes = fmHashesByPath.get(row.path)
+    const hashes = memeryHashesByPath.get(row.path)
     if (hashes && !hashes.has(row.content_hash)) conflictPaths.add(row.path)
   }
   const dedupKey = (row: SearchRow) => {
     const file = fileOf(row)
     if (!file || !row.content_hash) return `${row.backend}:${row.path}`
-    if (row.backend === "frankenmemory") return `source:${file}\u001f${row.content_hash}`
-    // A native row only collapses onto FM's key when its fingerprint equals a
+    if (row.backend === "memery") return `source:${file}\u001f${row.content_hash}`
+    // A native row only collapses onto Memery's key when its fingerprint equals a
     // section hash; otherwise it is a distinct (possibly conflicting) row.
-    if (fmHashesByPath.get(file)?.has(row.content_hash)) return `source:${file}\u001f${row.content_hash}`
+    if (memeryHashesByPath.get(file)?.has(row.content_hash)) return `source:${file}\u001f${row.content_hash}`
     return `${row.backend}:${row.path}`
   }
   const canonical = new Map<string, SearchRow>()
@@ -89,7 +92,7 @@ export function mergeSearchRows(fmRows: SearchRow[], nativeRows: SearchRow[], li
     const prior = canonical.get(key)
     if (
       !prior ||
-      (row.backend === "frankenmemory" && prior.backend !== "frankenmemory") ||
+      (row.backend === "memery" && prior.backend !== "memery") ||
       (row.backend === prior.backend && row.score > prior.score)
     ) {
       canonical.set(key, row)
@@ -99,7 +102,7 @@ export function mergeSearchRows(fmRows: SearchRow[], nativeRows: SearchRow[], li
     .sort((a, b) => {
       const score = b.score - a.score
       if (score !== 0) return score
-      if (a.backend !== b.backend) return a.backend === "frankenmemory" ? -1 : 1
+      if (a.backend !== b.backend) return a.backend === "memery" ? -1 : 1
       return a.path.localeCompare(b.path)
     })
     .slice(0, limit)
@@ -111,6 +114,8 @@ export interface Interface {
   readonly search: (input: {
     query: string
     sessionID?: string
+    actorExecution?: ActorExecutionIdentity
+    toolCallID?: string
     scope?: string
     scope_id?: string
     type?: string
@@ -129,19 +134,20 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
       return root
     })
 
-    // fm projection scope for reconcile-time ingest: only in fm mode and
+    // memery projection scope for reconcile-time ingest: only in memery mode and
     // only when an authenticated session scope exists (same rule as
     // capture.ts — no owner, no writes).
-    const fmIngestScope = (cfg: { memory?: { provider?: string } }) => {
-      if (cfg.memory?.provider !== "frankenmemory") return undefined
+    const memeryIngestScope = (cfg: { memory?: { provider?: string } }) => {
+      if (cfg.memory?.provider !== "memery") return undefined
       const scope = uniqueMemorySessionScope()
       return scope?.owner ? { owner: scope.owner, workspaceId: scope.workspaceId } : undefined
     }
 
     const reconcile = Effect.fn("Memory.reconcile")(function* () {
+      if (Flag.OPEN_CLANK_PRIVATE_RUNTIME || ManagedProvider.enabled()) return { indexed: 0, pruned: 0 }
       const cfg = yield* config.get()
       const cc = cfg.memory?.cc_index ? ccBase : undefined
-      return yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }, fmIngestScope(cfg)))
+      return yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }, memeryIngestScope(cfg)))
     })
 
     const search = Effect.fn("Memory.search")(function* (input: {
@@ -152,6 +158,8 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
       type?: string
       limit?: number
     }) {
+      if (ManagedProvider.enabled()) return yield* Effect.die(new RecoverableError("Native memory search is unavailable in managed mode"))
+      if (Flag.OPEN_CLANK_PRIVATE_RUNTIME) return []
       // Lazy reconcile before search (covers off-tool writes); honour config flag.
       const cfg = yield* config.get()
       if (cfg.checkpoint?.memory_reconcile_on_search ?? true) {
@@ -160,7 +168,7 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
         // maintenance mirror, never a search blocker. A scoped-ingest failure
         // (e.g. a mixed-tenant process tripping uniqueMemorySessionScope)
         // degrades to serving the last good index instead of failing search.
-        yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }, fmIngestScope(cfg))).pipe(
+        yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }, memeryIngestScope(cfg))).pipe(
           Effect.catchCause((cause) =>
             Effect.sync(() =>
               log.warn("reconcile-on-search failed; serving last index", { cause: String(cause) }),
@@ -270,21 +278,28 @@ export const defaultLayer = Layer.suspend(() =>
       // is instance-scoped (AsyncLocalStorage) since upstream v0.1.4+, so a
       // config.get() while the layer is being built runs outside any instance
       // context and throws. Method calls always run inside one.
-      let fm: Interface | undefined
+      let memery: Interface | undefined
       const backend = Effect.fn("Memory.backend")(function* () {
         const cfg = yield* config.get()
-        if (cfg.memory?.provider !== "frankenmemory") return native
-        if (!fm) {
-          const mod = yield* Effect.promise(() => import("./frankenmemory")).pipe(Effect.orDie)
-          fm = yield* mod.make
+        if (cfg.memory?.provider !== "memery") {
+          if (ManagedProvider.enabled()) return yield* Effect.die(new RecoverableError("Managed memory provider is unavailable"))
+          return native
         }
-        return fm
+        if (!memery) {
+          const mod = yield* Effect.promise(() => import("./memery")).pipe(Effect.orDie)
+          memery = yield* mod.make
+        }
+        return memery
       })
       return Service.of({
         root: () => native.root(),
         reconcile: () => native.reconcile(),
         search: (input) =>
           Effect.gen(function* () {
+            if (Flag.OPEN_CLANK_PRIVATE_RUNTIME) {
+              if (ManagedProvider.enabled()) return yield* Effect.die(new RecoverableError("Managed memory search is unavailable without owned Host admission"))
+              return []
+            }
             const selected = yield* backend()
             if (selected === native) return yield* native.search(input)
 
@@ -292,26 +307,26 @@ export const defaultLayer = Layer.suspend(() =>
             const scope = input.sessionID ? memorySessionScope(input.sessionID) : undefined
             // Native queries are intentionally not issued in managed mode
             // (see search below). Kept as a local only for the standalone
-            // branch above; managed callers use the Frankenmemory surface.
+            // branch above; managed callers use the Memery surface.
             void scope
-            // Managed Frankenmemory is the single retrieval surface. On shared-
+            // Managed Memery is the single retrieval surface. On shared-
             // service failure return recoverable-unavailable (never a silent
             // empty success and never an unscoped native fallback).
-            const fmRows = yield* selected.search(input).pipe(
+            const memeryRows = yield* selected.search(input).pipe(
               Effect.catchCause((cause) =>
                 Effect.die(
                   new RecoverableError(
-                    `frankenmemory search unavailable: ${String(cause)}`,
+                    `memery search unavailable: ${String(cause)}`,
                   ),
                 ),
               ),
             )
 
-            // Managed Frankenmemory is the single retrieval/admission surface.
+            // Managed Memery is the single retrieval/admission surface.
             // Native rows are a competing owner: disable duplicate native
-            // result merging in managed mode. Standalone (non-frankenmemory)
+            // result merging in managed mode. Standalone (non-memery)
             // keeps native search unchanged.
-            return mergeSearchRows(fmRows, [], limit)
+            return mergeSearchRows(memeryRows, [], limit)
           }),
       })
     }),

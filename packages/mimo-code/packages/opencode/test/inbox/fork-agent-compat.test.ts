@@ -78,6 +78,7 @@ const summary = Layer.succeed(
   SessionSummary.Service.of({
     summarize: () => Effect.void,
     diff: () => Effect.succeed([]),
+    diffResult: () => Effect.succeed({ diffs: [] }),
     computeDiff: () => Effect.succeed([]),
   }),
 )
@@ -258,6 +259,25 @@ describe("Fork-agent inbox compat (Plan 4 / Task 5)", () => {
           title: "fork-agent compat test",
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
+        const registry = yield* ActorRegistry.Service
+        yield* registry.updateModel(parent.id, "main", undefined, ref)
+        const sourceUserID = MessageID.ascending()
+        yield* session.updateMessage({
+          id: sourceUserID,
+          sessionID: parent.id,
+          role: "user",
+          agentID: "main",
+          agent: "build",
+          model: ref,
+          time: { created: Date.now() },
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: parent.id,
+          messageID: sourceUserID,
+          type: "text",
+          text: "source transcript for fork compatibility",
+        })
 
         // Seed two synthetic "inherited" messages in the forkContext — these
         // represent the parent's conversation history that a fork agent would
@@ -315,10 +335,10 @@ describe("Fork-agent inbox compat (Plan 4 / Task 5)", () => {
         const forkActorID = result.actorID
 
         // Tier 2 — structural: capture forkContext BEFORE inbox send.
-        const forkCtxBefore = yield* actor.getForkContext(forkActorID)
+        const forkCtxBefore = yield* actor.getForkContext(result.sessionID, forkActorID)
         expect(forkCtxBefore).toBeDefined()
-        expect(forkCtxBefore?.system).toEqual(["inherited-system-prompt"])
-        expect(forkCtxBefore?.inheritedMessages).toHaveLength(2)
+        expect(forkCtxBefore?.context.system).toEqual(["inherited-system-prompt"])
+        expect(forkCtxBefore?.context.inheritedMessages).toHaveLength(2)
 
         // Seed a real message in the fork's slice so drain's lastReal predicate
         // can resolve. Drain requires a prior real assistant/user turn in the
@@ -356,10 +376,10 @@ describe("Fork-agent inbox compat (Plan 4 / Task 5)", () => {
 
         // Tier 2 — structural: forkContext must still have the exact same
         // inheritedMessages snapshot. Drain must not touch forkContexts.
-        const forkCtxAfter = yield* actor.getForkContext(forkActorID)
+        const forkCtxAfter = yield* actor.getForkContext(result.sessionID, forkActorID)
         expect(forkCtxAfter).toBeDefined()
-        expect(forkCtxAfter?.inheritedMessages).toStrictEqual(forkCtxBefore?.inheritedMessages)
-        expect(forkCtxAfter?.system).toEqual(["inherited-system-prompt"])
+        expect(forkCtxAfter?.context.inheritedMessages).toStrictEqual(forkCtxBefore?.context.inheritedMessages)
+        expect(forkCtxAfter?.context.system).toEqual(["inherited-system-prompt"])
 
         // Tier 3 — slice routing: the synthetic user message must appear in the
         // fork's own slice (agentID = forkActorID), not in main's slice.

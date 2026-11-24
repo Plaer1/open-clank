@@ -1,4 +1,5 @@
 import { isChatResource, editorDestinationReason } from './resourceDestinations.js';
+import { isMetadataInspection, metadataFormatId } from '../editor/previewModel.js';
 /* Files-v1 resource picker shared by Editor and Notes.
  *
  * The picker is deliberately a display/selection adapter.  It only sends
@@ -10,7 +11,7 @@ import { isChatResource, editorDestinationReason } from './resourceDestinations.
 import { wireDialog } from './overlays.js';
 import { filesBrowserResource, installEditorFilesStyles, mountEditorFilesBrowser } from './editorFilesBrowser.js';
 
-export const RESOURCE_PICKER_PURPOSES = Object.freeze(new Set(['file', 'folder', 'template-folder']));
+export const RESOURCE_PICKER_PURPOSES = Object.freeze(new Set(['file', 'image', 'folder', 'template-folder', 'snapshot-file']));
 const MAX_PAGE = 200;
 const EVENT_NAMES = [
   'openclank-account-changed', 'openclank-files-policy-changed', 'openclank-policy-changed',
@@ -103,6 +104,12 @@ export function normalizeAuthorizedResource(row, {
     logicalPath: text(row?.logical_path ?? row?.logicalPath ?? row?.path ?? row?.resource?.logical_path),
     capabilities: caps,
     revision: revision && typeof revision === 'object' ? { kind:text(revision.kind), value:text(revision.value) } : null,
+    inspectionHint: provider === 'host' && kind === 'file' && isMetadataInspection(row.format)
+      && row.format.resourceRef === ref && row.format.policyGeneration === Number(generation)
+      ? { formatId:row.format.formatId }
+      : provider === 'host' && kind === 'file' && Object.isFrozen(row.inspectionHint)
+        && row.generation === Number(generation) && row.accountScope === text(accountScope) && row.workspaceScope === text(workspaceScope)
+        && metadataFormatId(row.inspectionHint?.formatId) ? {formatId:row.inspectionHint.formatId} : null,
     generation: Number.isSafeInteger(Number(generation)) ? Number(generation) : 0,
     accountScope: text(accountScope),
     workspaceScope: text(workspaceScope),
@@ -151,8 +158,8 @@ function defaultElement(tag, attrs = {}, ...children) {
 export function createResourcePicker({
   client, purpose = 'file', h = defaultElement, accountScope = '', workspaceScope = '', generation = 0,
   signal = null, getGeneration = null, getAccountScope = null, getWorkspaceScope = null,
-  isOriginCurrent = null, originWindow = null, initialDirectory = null, isCompatible = null,
-  onSelect = null, onCancel = null, onClose = null, rootLabel = 'Files', mount = null,
+  isOriginCurrent = null, originWindow = null, initialDirectory = null, isCompatible = null, inspectionOpen = false,
+  onSelect = null, onCancel = null, onClose = null, rootLabel = 'Files', title = null, confirmLabel = null, mount = null,
 } = {}) {
   if (!client || typeof client.roots !== 'function' || typeof client.children !== 'function') throw new TypeError('Files facade client is required');
   if (!RESOURCE_PICKER_PURPOSES.has(purpose)) throw new TypeError(`Unsupported picker purpose: ${purpose}`);
@@ -176,10 +183,12 @@ export function createResourcePicker({
   const reason = (row) => {
     if (row && isChatResource(row)) return 'Chats belong in Chats or Library, outside Editor.';
     if (purpose === 'file' && row && editorDestinationReason(row)) return editorDestinationReason(row);
-    if (!row) return purpose === 'file' ? 'Select a file to open.' : 'Select or browse to a folder.';
-    if (purpose === 'file') {
+    if (!row) return ['file','image','snapshot-file'].includes(purpose) ? 'Select a file to open.' : 'Select or browse to a folder.';
+    if (purpose === 'file' || purpose === 'image' || purpose === 'snapshot-file') {
       if (row.kind === 'folder') return 'Open a folder to browse its files.';
-      if (row.capabilities.open !== true) return 'This resource cannot be opened in Editor.';
+      if (purpose === 'file' && row.capabilities.open !== true) return 'This resource cannot be opened in Editor.';
+      if (purpose === 'image' && row.capabilities.download !== true) return 'This image cannot be read.';
+      if (purpose === 'snapshot-file' && (row.provider !== 'host' || row.capabilities.download !== true)) return 'Choose a readable Host file.';
     } else {
       if (row.kind !== 'folder') return 'Choose a folder.';
       if (row.capabilities.children !== true) return 'This folder cannot be browsed.';
@@ -188,7 +197,7 @@ export function createResourcePicker({
     const compatible = isCompatible?.(row);
     return compatible === false ? 'This resource is not supported by this Editor.' : typeof compatible === 'string' ? compatible : '';
   };
-  const candidate = () => state.selected || (purpose !== 'file' ? state.currentFolder : null);
+  const candidate = () => state.selected || (!['file','image','snapshot-file'].includes(purpose) ? state.currentFolder : null);
   const render = () => {
     if (!state.dom) return;
     const confirm = state.dom.querySelector('[data-resource-picker-confirm]');
@@ -196,7 +205,7 @@ export function createResourcePicker({
     const row = candidate();
     if (confirm) {
       confirm.disabled = !scopeStillCurrent() || state.loading || state.confirming || !!reason(row);
-      confirm.textContent = state.confirming ? 'Opening…' : purpose === 'template-folder' ? 'Choose Folder' : 'Open';
+      confirm.textContent = state.confirming ? 'Opening…' : confirmLabel || (purpose === 'template-folder' ? 'Choose Folder' : 'Open');
       confirm.title = reason(row) || row?.name || '';
     }
     if (status) {
@@ -281,11 +290,15 @@ export function createResourcePicker({
       // exact opaque reference before handing the immutable identity back.
       let authorized = selected;
       if (typeof client.stat === 'function') {
-        const result = await client.stat(selected.ref, { signal:state.controller.signal });
+        const inspect = inspectionOpen === true && purpose === 'file' && selected.provider === 'host' && selected.inspectionHint;
+        const snapshotInspect = purpose === 'snapshot-file' && selected.provider === 'host';
+        const result = await client.stat(selected.ref, { signal:state.controller.signal, ...(snapshotInspect ? {purpose:'snapshot'} : inspect ? {purpose:'inspect'} : {}) });
         if (!scopeStillCurrent()) { close(); return false; }
         state.generation = generationFrom(result, state.generation);
         authorized = normalize(result?.resource || result, selected.parentRef || state.parentRef);
         if (authorized.resourceKey !== selected.resourceKey || authorized.provider !== selected.provider || authorized.kind !== selected.kind) throw new Error('The selected resource changed. Select it again.');
+        if (inspect && (authorized.inspectionHint?.formatId !== inspect.formatId || authorized.revision?.kind !== 'hostObjectIdentity')) throw new Error('The inspection source changed. Select it again.');
+        if (snapshotInspect && authorized.revision?.kind !== 'hostObjectIdentity') throw new Error('The snapshot source changed. Select it again.');
       }
       const unavailable = reason(authorized);
       if (unavailable) throw new Error(unavailable);
@@ -328,7 +341,7 @@ export function createResourcePicker({
     installEditorFilesStyles();
     const browserHost = h('div', { class:'copal-resource-picker-browser' });
     const dialog = h('dialog', { class:'copal-dialog copal-resource-picker copal-files-selection-dialog', 'aria-label':`${rootLabel}: ${purpose}` },
-      h('h2', { text:purpose === 'folder' ? 'Open Folder' : purpose === 'template-folder' ? 'Choose template folder' : 'Open File' }),
+      h('h2', { text:title || (purpose === 'folder' ? 'Open Folder' : purpose === 'template-folder' ? 'Choose template folder' : 'Open File') }),
       browserHost,
       h('p', { class:'copal-resource-picker-status', 'data-resource-picker-status':true, role:'status', 'aria-live':'polite' }),
       h('footer', { class:'copal-dialog-actions' },

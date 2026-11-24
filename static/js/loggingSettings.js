@@ -1,10 +1,11 @@
+import { mountStorageInventory } from './storageInventory.js';
 import { setUiIconText } from './uiIcons.js';
 // Account-scoped logging settings; archive/Lore/memory retention keep their owners.
 import { openStatsUsage } from './statsUsage.js';
 function el(tag, text = '', cls = '') { const node = document.createElement(tag); node.textContent = text; node.className = cls; return node; }
 const controlIcons = Object.freeze({
   'Apply prune preview':'check', 'Save reviewed retention rule':'save', 'Preview retention':'preview',
-  'Disable advanced logging':'pause', 'Enable advanced logging':'play', 'Save display preferences':'save',
+  'Disable Detailed logging':'pause', 'Enable Detailed logging':'play', 'Save display preferences':'save',
   'Provider accounts':'provider', 'Prices and cost coverage':'usage', 'Memory and Recall controls':'memory',
   'Lore history budgets':'restore', 'Optional content Trends':'usage', 'Open logs and export':'terminal',
   'Reload settings':'refresh',
@@ -27,7 +28,11 @@ export function mountLoggingSettings(root) {
   const request = (path, body = null, method = 'POST') => api(path, body, method, lifetime.signal);
   const status = el('p', '', 'logging-status'); status.setAttribute('role', 'status');
   const controls = el('div'); const health = el('section', '', 'logging-health');
-  root.replaceChildren(el('h2', 'Logging'), el('p', 'Open Clank activity and usage logging is always on. Advanced provider capture is optional and starts off.', 'settings-hint'), status, controls, health);
+  const storage = el('section');
+  root.replaceChildren(el('h2', 'Logging'), el('p', 'On records ordinary activity and usage where permitted. Detailed adds optional local provider capture and starts off.', 'settings-hint'), status, controls, health, storage);
+  let disposeStorage = mountStorageInventory(storage);
+  root._storageHide = () => { disposeStorage?.(); disposeStorage = null; };
+  root._storageShow = () => { if (!disposeStorage) disposeStorage = mountStorageInventory(storage); };
   async function run(action) { if (!owned()) return; root.setAttribute('aria-busy', 'true'); status.textContent = 'Loading…'; try { await action(); if (owned()) status.textContent = ''; } catch (error) { if (!owned() || error.name === 'AbortError') return; status.textContent = String(error.message) + ' Reload to review the latest saved policy.'; } finally { if (owned()) root.removeAttribute('aria-busy'); } }
   async function save(patch, extra = {}) { const response = await request('/policy', { policy: patch, expected_revision: policy.revision, ...extra }, 'PUT'); policy = response.policy; await load(); }
   function toggle(label, key, hint, disabled = false) {
@@ -51,22 +56,22 @@ export function mountLoggingSettings(root) {
   async function load() {
     const currentGeneration = ++generation;
     const [preferences, current, ordinary] = await Promise.all([request('/policy'), request('/status'), request('/sessions?period=all&limit=1').catch(error => ({ coverage: { state: 'unavailable', reason: error.message } }))]); if (!owned() || currentGeneration !== generation) return; policy = preferences.policy;
-    controls.replaceChildren(el('p', 'Ordinary logging · Always on', 'logging-always-on'), el('p', 'Saved conversations, tool evidence and numeric usage continue in both modes. Advanced logging adds optional provider transport detail.', 'settings-hint'));
-    const advanced = el('section', '', 'logging-advanced'); advanced.append(el('h3', 'Advanced provider logging'), el('p', 'Captures Open Clank operations only. Sanitized request/response bodies can contain user content. Credentials, authentication fields and cookies are excluded; there is no external history import.', 'settings-hint'));
-    const enable = button(policy.advanced_enabled ? 'Disable advanced logging' : 'Enable advanced logging', () => run(() => save({ advanced_enabled: !policy.advanced_enabled }))); enable.setAttribute('aria-pressed', String(policy.advanced_enabled));
-    advanced.append(enable, toggle('Sanitized request text and structure', 'request_body_enabled', 'Bodies are captured only while advanced logging is enabled.', !policy.advanced_enabled), toggle('Sanitized response text and events', 'response_body_enabled', 'Timing remains available when bodies are off.', !policy.advanced_enabled));
+    controls.replaceChildren(el('p', 'On · Ordinary activity and usage', 'logging-always-on'), el('p', 'Privacy and capture availability can suppress individual records. Detailed adds local provider transport detail under the same operation policy.', 'settings-hint'));
+    const advanced = el('section', '', 'logging-advanced'); advanced.append(el('h3', 'Detailed provider logging'), el('p', 'Local capture covers Open Clank operations only. Sanitized bodies may contain user content; credentials, authentication fields and cookies are excluded. There is no external history import.', 'settings-hint'), el('p', 'Request and response body preferences may already be selected while Detailed is off. Enabling Detailed makes those selected preferences effective for eligible new operations; review them below.', 'settings-hint'));
+    const enable = button(policy.advanced_enabled ? 'Disable Detailed logging' : 'Enable Detailed logging', () => run(() => save({ advanced_enabled: !policy.advanced_enabled }))); enable.setAttribute('aria-pressed', String(policy.advanced_enabled));
+    advanced.append(enable, toggle('Sanitized request text and structure', 'request_body_enabled', 'The selected preference applies only to eligible operations while Detailed is enabled.'), toggle('Sanitized response text and events', 'response_body_enabled', 'The preference applies while Detailed is enabled; timing may still be available when bodies are off.'));
     const capability = current.effective?.binary_body_capability || preferences.effective?.binary_body_capability;
-    advanced.append(toggle('Embedded media bodies', 'binary_body_enabled', capability?.state === 'supported' ? 'Optional bounded JSON base64/data URL capture only. No external URL fetch or multipart/raw capture.' : 'Unsupported by the current capture capability; media bytes remain excluded.', !policy.advanced_enabled || capability?.state !== 'supported'));  controls.append(advanced);
+    advanced.append(toggle('Embedded media bodies', 'binary_body_enabled', capability?.state === 'supported' ? 'Optional bounded JSON base64/data URL capture only while Detailed is enabled. No external URL fetch or multipart/raw capture.' : 'Unsupported by the current capture capability; media bytes remain excluded.', capability?.state !== 'supported'));  controls.append(advanced);
     controls.append(toggle('Live refresh while visible', 'live_refresh', 'Hidden views pause; visible changes are coalesced.'));
     const display = el('div', '', 'logging-display'); const timezone = el('input'); timezone.className = 'settings-select'; timezone.value = policy.timezone; timezone.setAttribute('aria-label', 'Logging timezone');
     const range = el('select'); range.className = 'settings-select'; range.setAttribute('aria-label', 'Initial log range'); for (const value of ['7d', '30d', '90d', 'all']) { const option = el('option', value === 'all' ? 'All retained time' : value.replace('d', ' days')); option.value = value; range.append(option); } range.value = policy.initial_period;
     display.append(el('label', 'Timezone (local or IANA name)'), timezone, el('label', 'Initial range'), range, button('Save display preferences', () => run(() => save({ timezone: timezone.value, initial_period: range.value })))); controls.append(display);
-    controls.append(el('h3', 'Captured log retention'), el('p', 'These rules apply to advanced capture data. Lore file history, saved-chat deletion and semantic-memory retention use their own controls.', 'settings-hint'), retention('body_retention', 'Capture bodies', 'advanced_bodies'), retention('metadata_retention', 'Capture metadata', 'advanced_metadata'));
+    controls.append(el('h3', 'Captured log retention'), el('p', 'These saved rules apply separately to Detailed capture bodies and metadata. Lore file history, saved-chat deletion and semantic-memory retention use their own controls.', 'settings-hint'), retention('body_retention', 'Capture bodies', 'advanced_bodies'), retention('metadata_retention', 'Capture metadata', 'advanced_metadata'));
     const related = el('section'); related.append(el('h3', 'Related controls'), button('Provider accounts', () => { void import('./settings.js').then(module => module.open('services')); }), button('Prices and cost coverage', () => openStatsUsage({ view: 'usage', mode: 'cost' })), button('Memory and Recall controls', () => run(async () => { const opener = document.getElementById('tool-memory-btn') || document.getElementById('rail-memory'); if (!opener) throw new Error('Memory entry is unavailable in this host'); opener.click(); })), button('Lore history budgets', () => { void import('./settings.js').then(module => module.open('history')); }), button('Optional content Trends', () => openStatsUsage({ view: 'trends' })), el('p', 'Memory consent and optional content analysis remain separate from logging. Price coverage comes from admitted source schedules; unpriced data stays unpriced.', 'settings-hint')); controls.append(related);
     controls.append(button('Open logs and export', () => openStatsUsage({ view: 'logs', range: policy.initial_period, timezone: policy.timezone })), button('Reload settings', () => run(load)));
     const effective = current.effective || {}; const capture = current.capture || {};
-    health.replaceChildren(el('h3', 'Effective logging and storage'), el('p', `Ordinary ${effective.ordinary?.state || 'status unavailable'} · Advanced ${effective.advanced_enabled ? 'on' : 'off'} · selected mode ${effective.transport_mode || 'unavailable'} · policy revision ${effective.policy_revision ?? policy.revision}`));
-    health.append(el('p', `Ordinary archive read coverage: ${ordinary.coverage?.state || 'unavailable'}${ordinary.coverage?.reason ? ' · ' + ordinary.coverage.reason : ''}. Usage measurement coverage is reported separately in Usage and each attempt.`, 'settings-hint'));
+    health.replaceChildren(el('h3', 'Effective logging and storage'), el('p', `On ${effective.ordinary?.state || 'status unavailable'} · Detailed ${effective.advanced_enabled ? 'on' : 'off'} · transport ${effective.transport_mode || 'unavailable'} · policy revision ${effective.policy_revision ?? policy.revision}`));
+    health.append(el('p', `On archive read coverage: ${ordinary.coverage?.state || 'unavailable'}${ordinary.coverage?.reason ? ' · ' + ordinary.coverage.reason : ''}. Usage measurement coverage is reported separately in Usage and each attempt.`, 'settings-hint'));
     health.append(el('p', `${effective.inflight_operations ?? 'unknown'} operations in flight · ${effective.old_policy_inflight ?? 'unknown'} using an older pinned policy${effective.draining ? ' · draining' : ''}. Changes apply at the next operation boundary.`, 'settings-hint'));
     health.append(el('p', `Capture storage: ${capture.storage_state || 'unavailable'} · ${capture.body_bytes ?? 'unknown'} body bytes · ${capture.pending_captures ?? 'unknown'} pending captures`));
     health.append(el('p', `Last successful write: ${capture.last_successful_write || 'none observed'}`, 'settings-hint'));
@@ -74,5 +79,5 @@ export function mountLoggingSettings(root) {
     health.append(el('pre', JSON.stringify({ capture_counts: capture.capture_counts || {}, losses: capture.losses || {}, formats: capture.formats || {}, limits: capture.limits || {} }, null, 2), 'logging-source'));
     health.append(el('p', 'The attempt inspector reports measured milestones and gaps for each captured provider format. Theme and reduced motion follow Open Clank.', 'settings-hint'));
   }
-  const refresh = () => { if (owned()) run(load); }; root.addEventListener('logging-settings-refresh', refresh); root._loggingDispose = () => { lifetime.abort(); generation++; root.removeEventListener('logging-settings-refresh', refresh); }; run(load);
+  const refresh = () => { if (owned()) run(load); }; root.addEventListener('logging-settings-refresh', refresh); root._loggingDispose = () => { root._storageHide(); delete root._storageHide; delete root._storageShow; delete root.dataset.loggingMounted; lifetime.abort(); generation++; root.removeEventListener('logging-settings-refresh', refresh); }; run(load);
 }

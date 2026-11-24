@@ -84,6 +84,9 @@ export const make = <A, E = never, B = never>(
       const id = next()
       const fiber = yield* work.pipe(
         Effect.onExit((exit) => finishRun(id, done, exit)),
+        // startRun executes inside the runner's state reservation, which is
+        // masked so the Running handle is installed atomically. The actual
+        // work fiber still must be interruptible by Runner.cancel.
         Effect.forkIn(scope),
       )
       return { id, done, fiber } satisfies RunHandle<A, E>

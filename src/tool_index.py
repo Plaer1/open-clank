@@ -1,7 +1,7 @@
-"""Frankenmemory-backed tool selection for agent mode.
+"""Memery-backed tool selection for agent mode.
 
 The legacy Chroma class remains importable for migration tests, but the live
-singleton has one authority: Frankenmemory.
+singleton has one authority: Memery.
 """
 
 import logging
@@ -45,7 +45,7 @@ ALWAYS_AVAILABLE = frozenset({
     # Always reachable so the agent can pause and ask at any point.
     "ask_user",
     # Copal is a bounded pure-read surface and must remain discoverable when a
-    # user says "read/edit this Copal note" without knowing its storage model.
+    # user says "read/edit this journal page" without knowing its storage model.
     "read_copal",
     "manage_copal",
     # Write back to the active plan (tick steps done / revise) during execution.
@@ -79,10 +79,10 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "bash": "Run shell commands on the server. Install packages, git operations, builds, system info, process management. Prefer a dedicated tool whenever one fits the job (file read/write/edit, search, listing); use bash only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "python": "Execute Python code for computation, data processing, math, scripting, and parsing. Not for writing code for the user. Prefer a dedicated tool for reading, writing, or searching files; use python only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "web_search": "Quick single web lookup for a fact, current event, latest/current information, or doc mid-task. Use this instead of bash/curl/python/requests for web searches. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
-    "web_fetch": "Fetch and read the text content of a specific URL/website the user names (e.g. 'check example.com', 'open this link'). Use when you have a concrete URL; for open-ended lookups use web_search instead.",
+    "web_fetch": "Fetch a specific public URL and return a bounded first page. Use a returned continuation token as {\"continuation\": \"token\"} to read more of that exact response within the current authorized session. A new URL request fetches the current page. For open-ended lookup, use web_search.",
     "read_file": "Read a file from disk and return its contents. View source code, config files, logs. Supports an optional line range (offset/limit) for large files.",
-    "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
-    "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
+    "grep": "Search contents in the authorized Files scope using a literal pattern. JSON options include path, glob, max_depth, exclude (up to eight glob patterns), ignore_case, and limit. Returns known file locations and any partial coverage.",
+    "glob": "Find files by name pattern in the authorized Files scope (e.g. '**/*.py'). JSON options include path, max_depth, exclude (up to eight glob patterns), and limit. Results report incomplete coverage when scan bounds are reached.",
     "ls": "List a directory's entries (folders then files with sizes). Use to see what's in a folder — prefer over bash ls.",
     "get_workspace": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; shell writes are contained to it with bubblewrap when available. Call this first when the user refers to 'the project'/'the code'/'this folder' without giving a path, instead of asking them.",
     "publish_file": "Post a downloadable copy of an accessible local file and add it to Files. Use for 'give me a download link', 'post this zip', or 'make this file downloadable'. Owner links require the user's login; public links are anonymous and expiring. The user can break links or delete the managed copy from Files.",
@@ -154,7 +154,10 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "edit_image": "Edit an image in the gallery: upscale (increase resolution), remove background (rembg), inpaint (fill selected area), or harmonize (blend edits). Specify image ID and action.",
     "trigger_research": "Start a deep research job on any topic — appears in the Deep Research sidebar, streams progress, produces a detailed report. Use for 'research X', 'look into Y', 'do deep research on Z', 'investigate'. NOT a scheduled task — it runs now and surfaces in the sidebar.",
     "manage_bg_jobs": "Start and control durable workspace-contained shell sessions scoped to this owner/chat/workspace. Actions: start, poll, write, wait, terminate, list, tail. Tail uses a bounded byte cursor; terminate tears down the process tree.",
-    "capture_desktop": "Capture one opted-in display, visible window, or bounded region on macOS or Windows for the current task; retain it through Files without exposing a host path.",
+    "capture_desktop": "Capture an opted-in display, visible window, or region on macOS or Windows, or use the one-shot Linux portal chooser; retain through Files. Linux readiness is unverified until use, and optional local OCR must be requested.",
+    "inspect_desktop": "Read an application window's accessibility tree on the user's REAL Linux desktop (needs the accessibility setting and approval per read): handshake, list_apps, list_windows, app_state.",
+    "control_desktop": "Control the user's REAL desktop on Linux: element actions on an inspect_desktop snapshot (click_element, secondary, set_value, type_element) or pixel actions on Wayland (begin, click, key, hotkey, type, scroll, drag, paste). Only when the user asked; every call needs their approval; look at a fresh capture_desktop frame before each click; 'sent' does not mean it worked; never repeated automatically.",
+    "control_desktop_status": "Desktop control readiness per capability, portal probe, or stop the control session immediately (no approval needed).",
 }
 
 
@@ -380,7 +383,7 @@ class _ChromaToolIndex:
             {"manage_notes"},
         # Explicit Copal/view language selects the canonical Redb-backed read
         # surface; an unqualified note still retains legacy manage_notes.
-        frozenset({"copal", "timeline", "wiki", "galaxy", "graph", "mind", "base", "bases", "treehouse", "meatbag tasks", "this copal note", "active copal"}):
+        frozenset({"copal", "timeline", "wiki", "galaxy", "graph", "mind", "base", "bases", "treehouse", "meatbag tasks", "journal page", "journal pages", "active copal"}):
             {"read_copal", "manage_copal"},
         # Chat/session management. "rename" alone maps to documents below, so a
         # request like "rename the last 12 sessions/chats" needs these session
@@ -613,16 +616,16 @@ class _ChromaToolIndex:
         return base
 
 
-class FrankenmemoryToolIndex:
-    """Canonical deterministic tool catalogue stored beside Frankenmemory.
+class MemeryToolIndex:
+    """Canonical deterministic tool catalogue stored beside Memery.
 
     Tool descriptions are system-owned index data, not user memories.  Keeping
-    them in the Frankenmemory SQLite authority removes the default Chroma
+    them in the Memery SQLite authority removes the default Chroma
     dependency while preserving the existing retrieval and keyword policy
     contract used by the agent.
     """
 
-    backend = "frankenmemory"
+    backend = "memery"
     _owner = "__open_clank_tool_index__"
     _SCHEDULE_RE = _ChromaToolIndex._SCHEDULE_RE
     _WEB_RE = _ChromaToolIndex._WEB_RE
@@ -733,10 +736,10 @@ class FrankenmemoryToolIndex:
         return [name for _, name in ranked[: max(1, min(int(k), 100))]]
 
 
-# The public/default type is canonical Frankenmemory. Legacy Chroma coverage
+# The public/default type is canonical Memery. Legacy Chroma coverage
 # imports the explicit migration-only name.
 LegacyChromaToolIndex = _ChromaToolIndex
-ToolIndex = FrankenmemoryToolIndex
+ToolIndex = MemeryToolIndex
 
 
 # ── Singleton ──
@@ -759,7 +762,7 @@ def get_tool_index() -> Optional[ToolIndex]:
     _last_attempt = now
 
     try:
-        _tool_index = FrankenmemoryToolIndex()
+        _tool_index = MemeryToolIndex()
         _tool_index.index_builtin_tools()
         return _tool_index
     except Exception as e:

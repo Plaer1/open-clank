@@ -15,11 +15,11 @@ def host(monkeypatch, request):
     assert root.name.startswith("openclank-s03-s06-projection.")
     assert root.is_relative_to(Path("/tmp").resolve())
     assert Path(str(request.config.option.basetemp)).resolve() == root / "tests"
-    for key in ("ODYSSEUS_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH",
+    for key in ("OPEN_CLANK_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH", "OPEN_CLANK_AUTHORITY_AUTH_PATH",
                 "FM_DB_PATH", "OPENCLANK_CONVERSATION_ARCHIVE_DB"):
         assert Path(os.environ[key]).resolve().is_relative_to(root), key
     assert os.environ["DATABASE_URL"] == "sqlite:///:memory:"
-    assert os.environ["ODYSSEUS_INPROCESS_POLLERS"] == "0"
+    assert os.environ["OPEN_CLANK_INPROCESS_POLLERS"] == "0"
     assert os.environ["PYTHONDONTWRITEBYTECODE"] == "1"
     assert "OPEN_CLANK_AGENT_HOME" not in os.environ and "THESIUS_AGENT_HOME" not in os.environ
 

@@ -3,9 +3,9 @@
 .copal-notes-explorer .copal-side-body:has(> .copal-editor-files-explorer) { overflow:hidden; }
 .copal-editor-files-explorer { display:flex; flex-direction:column; min-width:0; min-height:0; flex:1 1 0; overflow:hidden; }
 .copal-editor-files-explorer ~ .copal-file-tree { flex:1 1 0; }
-.copal-editor-files-navigation { display:flex; flex-wrap:wrap; align-items:center; gap:3px; padding:4px 0; flex:none; }
+.copal-editor-files-navigation { display:flex; flex-wrap:wrap; align-items:center; gap:3px; padding:2px 0; flex:none; }
 .copal-editor-files-navigation .copal-btn { display:inline-flex; align-items:center; justify-content:center; min-width:27px; padding:4px; }
-.copal-editor-files-location { font-size:11px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:3px 0; }
+.copal-editor-files-location { font-size:11px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:2px 0; }
 .copal-editor-files-mount { flex:1 1 0; min-width:0; min-height:0; overflow:hidden; }
 .copal-editor-files-mount .files-sidebar { box-sizing:border-box; max-width:none; min-width:0; overflow:auto; padding:4px; }
 .copal-editor-files-status { font-size:11px; padding:4px 0; }
@@ -38,11 +38,121 @@
 
 .copal-notes-explorer .copal-side-body.copal-explorer-sections { display:flex; flex-direction:column; min-height:0; overflow:auto; }
 .copal-explorer-section { display:flex; flex-direction:column; min-width:0; min-height:32px; overflow:hidden; }
-.copal-explorer-section-heading { display:flex; flex:none; border-bottom:1px solid var(--border); padding:3px 0; }
-.copal-explorer-section-heading button { flex:1; text-align:left; background:transparent; color:inherit; border:0; font:inherit; cursor:pointer; padding:4px; }
+.copal-explorer-section-heading { display:flex; flex:none; border-bottom:1px solid var(--border); padding:1px 0; }
+.copal-explorer-section-heading button { flex:1; text-align:left; background:transparent; color:inherit; border:0; font:inherit; cursor:pointer; padding:2px 4px; }
 .copal-explorer-section > .copal-file-tree { flex:1 1 0; min-height:0; overflow:auto; }
 .copal-explorer-section > [hidden],.copal-explorer-section[hidden],.copal-explorer-section-divider[hidden] { display:none !important; }
 .copal-explorer-section-divider { flex:none; height:8px; cursor:row-resize; touch-action:none; background:var(--border); border-block:2px solid transparent; background-clip:content-box; }
 .copal-explorer-section-divider:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .copal-editor-files-status { flex:none; max-height:88px; overflow:auto; }
 .copal-explorer-section .copal-editor-files-explorer { min-height:0; }
+
+.copal-notes-ribbon > [role="tablist"],
+.copal-editor-document-activity > [role="tablist"],
+.copal-ribbon-shortcuts { display: grid; gap: 4px; }
+.copal-notes-ribbon button.active {
+  background: color-mix(in srgb,var(--clanker-sky,#57bce5) 14%,var(--panel));
+  box-shadow: inset 2px 0 var(--clanker-sky,#57bce5);
+  color: var(--fg);
+}
+.copal-ribbon-shortcuts { margin-top: auto; }
+
+.copal-notes-ribbon { overflow: auto; scrollbar-width: none; }
+@media (max-width: 760px) {
+  .copal-notes-workspace.narrow > .copal-notes-ribbon { z-index: 22; }
+  .copal-notes-workspace.narrow > .copal-notes-explorer {
+    inset-inline: 40px auto;
+    max-width: calc(100% - 40px);
+  }
+}
+
+.copal-explorer-overview { display: flex; flex-direction: column; overflow: hidden; }
+.copal-explorer-overview > section { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.copal-explorer-overview > .copal-editor-files-explorer,
+.copal-explorer-overview-docs { flex:1 1 auto; }
+.copal-explorer-overview h3 {
+  flex: 0 0 auto; margin: 0; padding: 5px 6px; font-size: .9em;
+}
+.copal-explorer-overview-docs > .copal-file-tree {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+}
+.copal-manual-tree .copal-file-row {
+  height: auto;
+  text-align: start;
+  white-space: normal;
+}
+.copal-manual-tree .copal-file-row > span:last-child {
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.copal-editor-files-mount .files-sidebar[data-editor-root-bound] > :not([data-files-editor-root]),
+.copal-editor-files-mount [data-files-editor-root][hidden] { display:none !important; }
+
+.copal-editor-graph[hidden],
+.copal-notes-window .copal-view[hidden],
+.copal-notes-window .workbench-menubar[hidden],
+.copal-notes-window .copal-editor-document-actions[hidden] { display:none; }
+.copal-editor-document-actions { display:flex; gap:4px; }
+.copal-notes-window .copal-view:has(> .copal-editor-activity-rail):not([hidden]) { display:flex; }
+.copal-view > .copal-notes-workspace { flex:1; }
+.copal-editor-activity-rail { box-sizing:border-box; }
+.copal-editor-mode-buttons { display:grid; gap:4px; padding-block-end:5px; border-block-end:1px solid var(--border); }
+.copal-editor-document-activity { flex:1; display:flex; flex-direction:column; gap:5px; }
+.copal-editor-document-activity[hidden] { display:none; }
+@media (max-width: 760px) {
+  .copal-notes-window .copal-view > .copal-notes-workspace.narrow > .copal-notes-explorer {
+    inset-inline:0 auto; max-width:100%;
+  }
+}
+.copal-editor-graph {
+  display:flex; flex:1; flex-direction:column; min-width:0; min-height:0;
+  container-type:inline-size;
+}
+.copal-editor-graph-content {
+  display:grid; flex:1; grid-template-columns:40px clamp(195px,23cqw,274px) minmax(0,1fr);
+  min-width:0; min-height:0;
+}
+.copal-editor-graph-content > .copal-editor-activity-rail { grid-column:1; grid-row:1/-1; }
+.copal-editor-graph-sidebar {
+  display:flex; flex-direction:column; gap:8px; min-width:0; min-height:0;
+  padding:8px; border-inline-end:1px solid var(--border); background:var(--panel);
+  overflow:auto;
+}
+.copal-editor-graph-sidebar label { display:grid; gap:4px; font-size:11px; }
+.copal-editor-graph-sidebar :is(input,select) { width:100%; min-width:0; }
+.copal-editor-graph-sidebar .copal-btn { align-self:start; }
+.copal-editor-graph-sidebar > div:empty,
+.copal-editor-graph-status:empty { display:none; }
+.copal-editor-graph-status { margin:0; font-size:11px; overflow-wrap:anywhere; }
+.copal-editor-graph-status.error { color:var(--color-danger,var(--red)); }
+.copal-editor-graph-sidebar .copal-mind-picker { border:0; padding:0; overflow:visible; }
+.copal-editor-graph-body { position:relative; min-width:0; min-height:0; overflow:auto; padding:8px; }
+.copal-editor-graph-body > .copal-mind-tree { height:100%; box-sizing:border-box; }
+.copal-editor-graph-body > .copal-graph-wrap { height:auto; min-height:100%; }
+.copal-editor-graph-body > [data-code-graph] { height:100%; }
+.copal-editor-graph-code-surface:has(.code-map-workbench) { display:flex; flex:1 1 0; min-height:0; }
+@container (max-width: 520px) {
+  .copal-editor-graph-content { grid-template-columns:40px minmax(0,1fr); grid-template-rows:auto minmax(0,1fr); }
+  .copal-editor-graph-sidebar { max-height:28dvh; border-inline-end:0; border-block-end:1px solid var(--border); }
+}
+
+.code-map-table-panel,
+.code-map-project-panel { position:absolute; inset:0; padding:12px; overflow:auto; }
+.code-map-project-panel h3 { margin:0 0 8px; }
+.code-map-project-panel > p { margin-block:6px; }
+.code-map-project-panel .code-map-table { margin-block:8px; }
+.code-map-table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:.85rem; }
+.code-map-table caption { text-align:start; margin-block-end:8px; }
+.code-map-table th,.code-map-table td { border-block-end:1px solid var(--border); padding:5px; text-align:start; overflow-wrap:anywhere; }
+.code-map-table th:first-child { width:52%; }
+.code-map-table button { width:100%; text-align:start; overflow-wrap:anywhere; }
+.code-map-table button[aria-pressed=true] { color:var(--accent); }
+.code-map-panel:has(.code-map-inspector:not([hidden])) .code-map-table-panel { inset-inline-end:min(346px,88%); }
+.code-map-panel:has(.code-map-explorer:not([hidden])) .code-map-table-panel { inset-inline-start:min(346px,88%); }
+@container (max-width: 640px) {
+  .code-map-panel:has(.code-map-inspector:not([hidden]),.code-map-explorer:not([hidden])) .code-map-table-panel { inset-inline:0; inset-block-end:42%; }
+}

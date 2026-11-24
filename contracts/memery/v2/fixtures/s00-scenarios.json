@@ -1,0 +1,503 @@
+{
+  "fixture_version": "s00.synthetic.v1",
+  "status": "future_behavior_expectations_not_v2_wire",
+  "scope": {
+    "subjects": [
+      {
+        "id": "a-global",
+        "owner": "owner-a",
+        "workspace": null,
+        "project": null,
+        "text": "shared phrase"
+      },
+      {
+        "id": "a-work",
+        "owner": "owner-a",
+        "workspace": "work-a",
+        "project": null,
+        "text": "shared phrase"
+      },
+      {
+        "id": "a-project",
+        "owner": "owner-a",
+        "workspace": "work-a",
+        "project": "project-a",
+        "text": "shared phrase"
+      },
+      {
+        "id": "a-other",
+        "owner": "owner-a",
+        "workspace": "work-b",
+        "project": null,
+        "text": "shared phrase"
+      },
+      {
+        "id": "b-global",
+        "owner": "owner-b",
+        "workspace": null,
+        "project": null,
+        "text": "shared phrase"
+      }
+    ],
+    "cases": [
+      {
+        "id": "scope-project-visible",
+        "request": {
+          "owner": "owner-a",
+          "workspace": "work-a",
+          "project": "project-a"
+        },
+        "expected_ids": [
+          "a-global",
+          "a-work",
+          "a-project"
+        ],
+        "excluded_ids": [
+          "a-other",
+          "b-global"
+        ]
+      },
+      {
+        "id": "scope-other-owner-reference",
+        "request": {
+          "owner": "owner-b",
+          "workspace": "work-a",
+          "reference": "a-project"
+        },
+        "expected": "scope_denied",
+        "event_resolves": false
+      }
+    ]
+  },
+  "revision_authority": [
+    {
+      "id": "manual-falsy-values",
+      "manual": {
+        "enabled": false,
+        "count": 0,
+        "label": "",
+        "unset": {
+          "type": "null"
+        }
+      },
+      "absent": [
+        "unseen"
+      ],
+      "expected": "all_explicit_values_protected_absent_unknown"
+    },
+    {
+      "id": "inferred-and-legacy-unknown",
+      "fields": {
+        "inferred": "model",
+        "prior": "legacy_unknown"
+      },
+      "expected": "neither_is_assumed_manual"
+    },
+    {
+      "id": "stale-model-proposal",
+      "base_revision": 2,
+      "current_revision": 3,
+      "current_author": "human",
+      "proposal_author": "model",
+      "expected": "stale_revision_no_overwrite"
+    }
+  ],
+  "structure": [
+    {
+      "id": "diamond-equal",
+      "edges": [
+        [
+          "child",
+          "left"
+        ],
+        [
+          "child",
+          "right"
+        ],
+        [
+          "left",
+          "base"
+        ],
+        [
+          "right",
+          "base"
+        ]
+      ],
+      "values": {
+        "left": "blue",
+        "right": "blue"
+      },
+      "expected": "one_effective_value_with_both_sources"
+    },
+    {
+      "id": "diamond-conflict",
+      "edges": [
+        [
+          "child",
+          "left"
+        ],
+        [
+          "child",
+          "right"
+        ],
+        [
+          "left",
+          "base"
+        ],
+        [
+          "right",
+          "base"
+        ]
+      ],
+      "values": {
+        "left": "blue",
+        "right": "red"
+      },
+      "expected": "explicit_conflict_no_silent_winner"
+    },
+    {
+      "id": "inheritance-cycle-batch",
+      "edges": [
+        [
+          "a",
+          "b"
+        ],
+        [
+          "b",
+          "a"
+        ]
+      ],
+      "expected": "reject_batch_atomically"
+    },
+    {
+      "id": "unavailable-parent",
+      "edges": [
+        [
+          "child",
+          "missing"
+        ]
+      ],
+      "expected": "unavailable_not_empty_parent"
+    },
+    {
+      "id": "ordinary-graph-cycle",
+      "edges": [
+        [
+          "a",
+          "b"
+        ],
+        [
+          "b",
+          "a"
+        ]
+      ],
+      "relation": "related",
+      "expected": "allowed_outside_inheritance"
+    }
+  ],
+  "source": [
+    {
+      "id": "source-current",
+      "source": {
+        "owner": "owner-a",
+        "part_id": "part-1",
+        "revision": 2,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "workspace": "work-a",
+        "chat_id": "chat-a",
+        "actor_id": "main",
+        "message_id": "message-1",
+        "commit_marker": "turn-1-complete"
+      },
+      "current_revision": 2,
+      "expected": "hydrate_exact"
+    },
+    {
+      "id": "source-edited",
+      "part_id": "part-1",
+      "revision": 2,
+      "current_revision": 3,
+      "expected": "stale_job_current_only_no_historical_or_current_substitution"
+    },
+    {
+      "id": "source-deleted",
+      "part_id": "part-2",
+      "revision": 1,
+      "state": "deleted",
+      "expected": "unavailable_no_raw_copy_fallback"
+    },
+    {
+      "id": "source-uncommitted",
+      "state": "uncommitted",
+      "expected": "pending_no_durable_source_part"
+    },
+    {
+      "id": "source-wrong-owner",
+      "source_owner": "owner-a",
+      "request_owner": "owner-b",
+      "expected": "scope_denied"
+    },
+    {
+      "id": "source-append-failure",
+      "archive_append": "failed",
+      "expected": "no_durable_reference_or_success"
+    },
+    {
+      "id": "source-host-acp-revisions",
+      "host_revision": 4,
+      "acp_revision": 9,
+      "expected": "distinct_revision_domains"
+    },
+    {
+      "id": "source-span-bounds",
+      "span": {
+        "start": 0,
+        "end": 12
+      },
+      "content_length": 8,
+      "expected": "reject_out_of_bounds"
+    },
+    {
+      "id": "source-incomplete-turn",
+      "part_committed": true,
+      "completed_turn_marker": null,
+      "expected": "pending_no_automatic_capture"
+    }
+  ],
+  "feedback": [
+    {
+      "id": "found-only",
+      "events": [
+        "found"
+      ],
+      "expected": "found_not_admitted_or_helpful"
+    },
+    {
+      "id": "found-trimmed",
+      "events": [
+        "found",
+        "trimmed"
+      ],
+      "expected": "no_admission"
+    },
+    {
+      "id": "admitted-no-feedback",
+      "events": [
+        "found",
+        "admitted"
+      ],
+      "expected": "no_helpfulness_inference"
+    },
+    {
+      "id": "helpful-unhelpful",
+      "events": [
+        "helpful",
+        "unhelpful"
+      ],
+      "expected": "separate_explicit_observations"
+    },
+    {
+      "id": "feedback-retry-duplicate",
+      "event_id": "event-1",
+      "deliveries": 2,
+      "expected": "one_event"
+    },
+    {
+      "id": "feedback-stale-revision",
+      "reference_revision": 1,
+      "current_revision": 2,
+      "expected": "historical_exact_or_stale_no_rebind"
+    }
+  ],
+  "consolidation": [
+    {
+      "id": "summary-complement",
+      "sources": [
+        "source-a@1",
+        "source-b@1"
+      ],
+      "expected": "new_summary_preserves_sources_and_provenance"
+    },
+    {
+      "id": "summary-false-friend",
+      "left": "Java island",
+      "right": "Java language",
+      "expected": "no_merge_on_lexical_overlap"
+    },
+    {
+      "id": "summary-contradiction",
+      "sources": [
+        "claim-yes@1",
+        "claim-no@1"
+      ],
+      "expected": "retain_contradiction"
+    },
+    {
+      "id": "summary-manual-regenerate",
+      "summary_revision": 2,
+      "author": "human",
+      "expected": "no_overwrite_preserve_originals"
+    }
+  ],
+  "questions": [
+    {
+      "id": "question-existing-answer",
+      "state": "answered",
+      "expected": "do_not_reask"
+    },
+    {
+      "id": "question-refusal",
+      "answer": "I do not want to answer",
+      "expected": "record_refusal_not_fact"
+    },
+    {
+      "id": "question-repeated-seed",
+      "seed": "seed-1",
+      "count": 2,
+      "expected": "deduplicate"
+    },
+    {
+      "id": "question-wrong-pronoun",
+      "subject": "entity-a",
+      "answer_subject": "entity-b",
+      "expected": "no_cross_entity_answer"
+    },
+    {
+      "id": "question-explicit",
+      "answer": "Yes, on Tuesday",
+      "expected": "candidate_answer_with_source"
+    },
+    {
+      "id": "question-hedge",
+      "answer": "Maybe Tuesday",
+      "expected": "uncertain_not_confirmed"
+    },
+    {
+      "id": "question-contradiction",
+      "answers": [
+        "yes",
+        "no"
+      ],
+      "expected": "preserve_conflict"
+    },
+    {
+      "id": "question-unsurfaced",
+      "state": "not_shown",
+      "expected": "no_answer_or_benefit_event"
+    }
+  ],
+  "ratings": [
+    {
+      "id": "rating-unrated",
+      "rating": null,
+      "expected": "unrated_not_zero"
+    },
+    {
+      "id": "rating-boundaries",
+      "valid": [
+        0,
+        0.5,
+        5
+      ],
+      "invalid": [
+        -0.5,
+        5.5,
+        0.25
+      ],
+      "expected": "half_step_range_checked"
+    },
+    {
+      "id": "rating-edit-revision",
+      "target_revision": 1,
+      "current_revision": 2,
+      "expected": "stale_target_no_silent_rebind"
+    },
+    {
+      "id": "rating-multimessage-unicode",
+      "parts": [
+        {
+          "message": "m1",
+          "text": "A😀"
+        },
+        {
+          "message": "m2",
+          "text": "café"
+        }
+      ],
+      "expected": "exact_ordered_boundaries"
+    },
+    {
+      "id": "rating-inaccessible",
+      "target_owner": "owner-a",
+      "request_owner": "owner-b",
+      "expected": "scope_denied"
+    }
+  ],
+  "scheduling": [
+    {
+      "id": "job-forever-busy",
+      "state": "busy",
+      "expected": "wait_no_dispatch"
+    },
+    {
+      "id": "job-backend-unknown",
+      "state": "unknown",
+      "expected": "defer_no_assumed_idle"
+    },
+    {
+      "id": "job-dispatch-race",
+      "policy_revision_before": 1,
+      "policy_revision_after": 2,
+      "expected": "revalidate_before_effect"
+    },
+    {
+      "id": "job-cancelled",
+      "turn": "cancelled",
+      "expected": "no_success_receipt"
+    },
+    {
+      "id": "job-budget-restart",
+      "remaining": 0,
+      "restart": true,
+      "expected": "persist_budget_no_reset"
+    },
+    {
+      "id": "job-overflow-retry",
+      "capacity": 2,
+      "pending": 3,
+      "expected": "bounded_overflow_and_idempotent_retry"
+    }
+  ],
+  "sharing": [
+    {
+      "id": "share-published-draft",
+      "published": "skill-1@2",
+      "draft": "skill-1@3",
+      "expected": "published_and_draft_distinct"
+    },
+    {
+      "id": "share-explicit-accept",
+      "destination": "work-b",
+      "accepted": false,
+      "expected": "prepared_no_transfer"
+    },
+    {
+      "id": "share-private-evidence",
+      "source": "private",
+      "expected": "excluded"
+    },
+    {
+      "id": "share-name-collision",
+      "source_id": "id-a",
+      "destination_id": "id-b",
+      "name": "same",
+      "expected": "no_silent_transfer_or_merge"
+    }
+  ],
+  "dormancy": [
+    {
+      "id": "forgetting-inert",
+      "expected": "isolated_contract_only_no_runtime_registration_job_migration_setting_or_call"
+    }
+  ]
+}

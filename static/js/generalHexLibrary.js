@@ -193,6 +193,51 @@ export function mountGeneralHexLibrary(root) {
     const rules = data.contract?.hexes || data.contract?.henxels || [];
     if (!rules.length) workspace.append(node('p', 'This contract has no Hex rules.', 'settings-hint'));
     if (data.state === 'active') workspace.append(node('p', 'Current declarative rules apply automatically. Rule edits still require owner authorization.', 'settings-hint'));
+    if (data.state === 'active' && data.project_id) {
+      const modePanel = node('div', '', 'hex-workspace-mode');
+      modePanel.append(node('p', 'Checking workspace mode…', 'settings-hint'));
+      workspace.append(modePanel);
+      api('/workspace/evolve-mode', payload({workspace_id: data.workspace_id})).then(mode => {
+        if (!modePanel.isConnected) return;
+        modePanel.replaceChildren(node('p', `Workspace mode: ${mode.mode}`, 'hex-source'),
+          node('p', 'An agent can propose declarative changes while Evolve mode is enabled; availability depends on current workspace authorization.', 'settings-hint'));
+        if (mode.operation) {
+          modePanel.append(node('p', `Last Evolve operation: ${mode.operation.state || 'unknown'}`, 'hex-status'));
+          if (mode.operation.reason) modePanel.append(node('p', `Agent proposal rationale (unverified): ${mode.operation.reason}`, 'settings-hint'));
+          if (mode.operation.history_action_id) modePanel.append(node('p', `History action: ${mode.operation.history_action_id}`, 'hex-source'));
+          if (['rollback_prepared', 'rollback_incomplete', 'rollback_recovering'].includes(mode.operation.state) && mode.mode === 'evolve') {
+            modePanel.append(button('Recover interrupted rollback', () => run(async () => {
+              const result = await api('/workspace/evolve-rollback-reconcile', payload({workspace_id: data.workspace_id, operation_id: mode.operation.operation_id}));
+              if (result.state !== 'rolled_back') throw new Error('Rollback still needs reconciliation.');
+              const current = await api('/workspace/inspect', payload({workspace_id: data.workspace_id}));
+              state.workspaceInspection = current; renderWorkspace(current);
+            })));
+          }
+          if (mode.operation.state === 'complete' && mode.mode === 'evolve') {
+            modePanel.append(button('Review rollback', () => run(async () => {
+              const review = await api('/workspace/evolve-rollback-preview', payload({workspace_id: data.workspace_id, operation_id: mode.operation.operation_id}));
+              if (!modePanel.isConnected) return;
+              const section = node('section', '', 'hex-entry');
+              section.append(node('p', 'Rollback preview', 'hex-source'), node('pre', review.diff || '(No textual diff)', 'hex-source'));
+              if (review.restores_agents_absence) section.append(node('p', 'Rollback removes the generated AGENTS.md file.', 'settings-hint'));
+              section.append(button('Roll back operation', () => run(async () => {
+                const result = await api('/workspace/evolve-rollback', payload({workspace_id: data.workspace_id, operation_id: review.operation_id}));
+                if (result.state !== 'rolled_back') throw new Error('Rollback needs reconciliation; inspect History before retrying.');
+                const current = await api('/workspace/inspect', payload({workspace_id: data.workspace_id}));
+                state.workspaceInspection = current; renderWorkspace(current);
+              })));
+              modePanel.append(section);
+            })));
+          }
+        }
+        modePanel.append(button(mode.mode === 'evolve' ? 'Use normal mode' : 'Select Evolve mode', () => run(async () => {
+          await api('/workspace/evolve-mode', payload({workspace_id: data.workspace_id,
+            mode: mode.mode === 'evolve' ? 'normal' : 'evolve', expected_revision: mode.revision}));
+          const current = await api('/workspace/inspect', payload({workspace_id: data.workspace_id}));
+          state.workspaceInspection = current; renderWorkspace(current);
+        })));
+      }).catch(() => { if (modePanel.isConnected) modePanel.replaceChildren(node('p', 'Workspace mode unavailable.', 'hex-status')); });
+    }
     if (data.executable_policy?.state === 'untrusted') workspace.append(node('p', 'Executable checks need separate approval: ' + data.executable_policy.reason, 'hex-status'));
     if (data.contract) workspace.append(node('pre', JSON.stringify(data.contract, null, 2), 'hex-source'));
     if (data.state !== 'active' && data.contract_hash) {

@@ -69,7 +69,8 @@ export function transformPopupHTML() {
  * @param {HTMLElement} root   Element that owns one or more spin groups
  *                             (e.g. the transform popup).
  */
-export function attachSpinRepeat(root) {
+export function attachSpinRepeat(root, lifetime = null) {
+  const cleanups = [];
   root.querySelectorAll('.ge-transform-spin button').forEach(btn => {
     const tick = (shift) => {
       const targetId = btn.parentElement?.dataset?.spinFor;
@@ -83,7 +84,7 @@ export function attachSpinRepeat(root) {
       input.dispatchEvent(new Event('input', { bubbles: true }));
     };
     let holdTimeout = null, repeatInterval = null, started = 0;
-    btn.addEventListener('pointerdown', (e) => {
+    const beginHold = (e) => {
       e.preventDefault();
       tick(e.shiftKey);
       started = Date.now();
@@ -96,14 +97,19 @@ export function attachSpinRepeat(root) {
           }
         }, 70);
       }, 350);
-    });
+    };
     const endHold = () => {
       if (holdTimeout) clearTimeout(holdTimeout);
       if (repeatInterval) clearInterval(repeatInterval);
       holdTimeout = null; repeatInterval = null;
     };
+    btn.addEventListener('pointerdown', beginHold);
     btn.addEventListener('pointerup', endHold);
     btn.addEventListener('pointerleave', endHold);
     btn.addEventListener('pointercancel', endHold);
+    cleanups.push(() => { endHold(); btn.removeEventListener('pointerdown', beginHold); btn.removeEventListener('pointerup', endHold); btn.removeEventListener('pointerleave', endHold); btn.removeEventListener('pointercancel', endHold); });
   });
+  const dispose = () => { for (const cleanup of cleanups.splice(0)) cleanup(); };
+  lifetime?.add(dispose);
+  return dispose;
 }

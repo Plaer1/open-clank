@@ -12,6 +12,8 @@ import difflib
 import hashlib
 import json
 import os
+import posixpath
+import re
 import shutil
 import stat
 import tempfile
@@ -38,6 +40,7 @@ class LooseCopalRepository:
     LIFECYCLE_VERSION = 1
     supports_task_index_lookup = True
     supports_keyed_task_index = True
+    supports_readonly_task_observation = True
     supports_document_write_receipts = True
     _OWNER_MARKER = ".copal-owner-lifecycle.json"
 
@@ -776,12 +779,117 @@ class LooseCopalRepository:
             except FileNotFoundError:
                 pass
 
+    @staticmethod
+    def _assert_v2_path_contained(vault: Path, candidate: Path) -> None:
+        """Reject symlinked v2 path components and escapes from this vault."""
+        root = vault.resolve()
+        try:
+            relative = candidate.relative_to(vault)
+        except ValueError as exc:
+            raise CopalBridgeError("managed media path is outside its vault") from exc
+        cursor = vault
+        for part in relative.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise CopalBridgeError("managed media path contains a symlink")
+        try:
+            candidate.resolve(strict=False).relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise CopalBridgeError("managed media path is outside its vault") from exc
+
     def _manifest_path(self, vault: Path) -> Path:
         return vault / ".copal" / "manifest.json"
 
     @staticmethod
     def _task_index_dir(vault: Path) -> Path:
         return vault / ".copal" / "task-index-keyed"
+
+    async def observe_task_index(self, owner: str, workspace: str, *, after: str = "", limit: int = 50) -> dict[str, Any]:
+        """Read a capped current index under the ordinary commit lock, without recovery."""
+        return await asyncio.to_thread(self._observe_task_index_sync, owner, workspace, after=after, limit=limit)
+
+    def _observe_task_index_sync(self, owner: str, workspace: str, *, after: str, limit: int) -> dict[str, Any]:
+        if not owner or not workspace or type(limit) is not int or not 1 <= limit <= 100 or not isinstance(after, str) or len(after) > 4096:
+            raise CopalBridgeError("task observation unavailable")
+        if not getattr(os, "O_NOFOLLOW", 0):
+            raise CopalBridgeError("task observation unavailable")
+        vault = self._vault(owner, workspace)
+        meta, root = vault / ".copal", self._task_index_dir(vault)
+        max_entries, max_bytes = 10000, 16 * 1024 * 1024
+        budget = 0
+
+        def entries(directory: Path) -> list[str]:
+            names = []
+            with os.scandir(directory) as scan:
+                for entry in scan:
+                    names.append(entry.name)
+                    if len(names) > max_entries:
+                        raise CopalBridgeError("task observation exceeds bounds")
+            return names
+
+        def read(path: Path, cap: int) -> bytes:
+            nonlocal budget
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > cap or budget + info.st_size > max_bytes:
+                    raise CopalBridgeError("task observation exceeds bounds")
+                chunks = []
+                size = 0
+                while size <= cap:
+                    chunk = os.read(fd, min(65536, cap + 1 - size))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
+                if size != info.st_size or size > cap:
+                    raise CopalBridgeError("task observation changed")
+                budget += size
+                return b"".join(chunks)
+            finally:
+                os.close(fd)
+
+        try:
+            with copal_commit_lock(self.data_dir, existing_only=True, nonblocking=True):
+                for directory in (self.data_dir, vault.parent, vault, meta, root, root / "rows"):
+                    info = os.lstat(directory)
+                    if not stat.S_ISDIR(info.st_mode):
+                        raise CopalBridgeError("task observation unavailable")
+                if any(n == ".copal-import-journal.json" or n.startswith(".copal-import-") for n in entries(self.data_dir)):
+                    raise CopalBridgeError("task recovery pending")
+                if any(n == "task-index-keyed.old" or n.startswith("task-index-keyed.rebuild-") for n in entries(meta)):
+                    raise CopalBridgeError("task recovery pending")
+                manifest_bytes = read(meta / "manifest.json", 8 * 1024 * 1024)
+                generation_bytes = read(root / "generation.json", 65536)
+                manifest, generation = json.loads(manifest_bytes), json.loads(generation_bytes)
+                operations = manifest.get("operations") if isinstance(manifest, dict) else None
+                revision = generation.get("sourceRevision") if isinstance(generation, dict) else None
+                if (not isinstance(manifest, dict) or manifest.get("schemaVersion") != self.VERSION or not isinstance(operations, list) or not operations
+                    or not isinstance(operations[-1], dict) or not isinstance(revision, str) or not revision
+                    or (operations[-1].get("id") or operations[-1].get("op")) != revision):
+                    raise CopalBridgeError("task index stale")
+                names = sorted(n for n in entries(root / "rows") if n.endswith(".json"))
+                if after and after not in names:
+                    raise CopalBridgeError("task cursor stale")
+                selected = [n for n in names if n > after][:limit + 1]
+                rows = []
+                digest = hashlib.sha256()
+                for name in names:
+                    raw = read(root / "rows" / name, 262144)
+                    digest.update(len(name.encode()).to_bytes(4, "big")); digest.update(name.encode())
+                    digest.update(len(raw).to_bytes(8, "big")); digest.update(raw)
+                    if name not in selected[:limit]:
+                        continue
+                    row = json.loads(raw)
+                    if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not isinstance(row.get("checked"), bool):
+                        raise CopalBridgeError("task index malformed")
+                    rows.append(row)
+                if read(meta / "manifest.json", 8 * 1024 * 1024) != manifest_bytes or read(root / "generation.json", 65536) != generation_bytes:
+                    raise CopalBridgeError("task index changed")
+                return {"revision": revision, "snapshot": digest.hexdigest(), "items": rows,
+                        "after": selected[limit - 1] if len(selected) > limit else None}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise CopalBridgeError("task observation unavailable") from exc
 
     @classmethod
     def _recover_task_index(cls, vault: Path) -> None:
@@ -1077,6 +1185,10 @@ class LooseCopalRepository:
     def _record_doc(self, vault: Path, record: dict[str, Any], *, include_body: bool) -> dict[str, Any]:
         result = dict(record)
         result.pop("path", None)
+        # These fields support storage-owned attachment move recovery and are
+        # not part of the public document/asset metadata contract.
+        result.pop("mediaOwnerDocumentId", None)
+        result.pop("mediaLayoutVersion", None)
         result["name"] = record["name"]
         result["hidden"] = any(
             component.startswith(".") and len(component) > 1
@@ -1228,6 +1340,15 @@ class LooseCopalRepository:
         source_path = str(record.get("path") or "")
         if not source_path:
             return {"status": "noop"}
+        managed_v2_assets = [
+            item for item in (manifest.get("documents") or {}).values()
+            if isinstance(item, dict)
+            and not item.get("trashed")
+            and item.get("kind") == "asset"
+            and str(item.get("mediaOwnerDocumentId") or "") == str(record.get("id") or "")
+            and item.get("mediaLayoutVersion") == 2
+        ]
+        source_layout_version = 2 if managed_v2_assets else 1
         # Loose Copal treats the vault as the document's canonical root.
         try:
             source_layout = document_media_dir(
@@ -1235,19 +1356,46 @@ class LooseCopalRepository:
                 canonical_root=str(vault),
                 origin="workspace",
                 owner_subject_id=str(record.get("owner") or ""),
+                layout_version=source_layout_version,
             )
             destination_layout = document_media_dir(
                 document_path=destination_name,
                 canonical_root=str(vault),
                 origin="workspace",
                 owner_subject_id=str(record.get("owner") or ""),
+                layout_version=source_layout_version,
             )
         except Exception:
             return {"status": "noop"}
         source_media_abs = Path(source_layout.absolute_media_dir())
         destination_media_abs = Path(destination_layout.absolute_media_dir())
         assets: list[dict[str, str]] = []
-        if source_media_abs.is_dir():
+        if source_layout_version == 2:
+            for child_record in managed_v2_assets:
+                relative_path = PurePosixPath(str(child_record.get("path") or ""))
+                if relative_path.parent.as_posix() != source_layout.media_dir or len(relative_path.parts) != len(PurePosixPath(source_layout.media_dir).parts) + 1:
+                    raise CopalBridgeError("managed media path does not match its document")
+                source_asset = vault / Path(*relative_path.parts)
+                destination_asset = vault / destination_layout.media_dir / relative_path.name
+                self._assert_v2_path_contained(vault, source_asset)
+                self._assert_v2_path_contained(vault, destination_asset)
+                current_asset = source_asset if source_asset.is_file() else destination_asset
+                if not current_asset.is_file():
+                    raise CopalBridgeError("managed media asset is unavailable")
+                try:
+                    data = current_asset.read_bytes()
+                except OSError as exc:
+                    raise CopalBridgeError("managed media asset is unavailable") from exc
+                durable_digest = str(child_record.get("head") or "")
+                if binary_digest(data) != durable_digest:
+                    raise CopalBridgeError("managed media asset changed before rename")
+                assets.append({
+                    "name": relative_path.name,
+                    "digest": durable_digest,
+                    "asset_id": str(child_record.get("id") or ""),
+                    "owner_document_id": str(record.get("id") or ""),
+                })
+        elif source_media_abs.is_dir():
             for child in sorted(source_media_abs.iterdir()):
                 if not child.is_file():
                     continue
@@ -1281,9 +1429,12 @@ class LooseCopalRepository:
             sites = scan_references(str(other_id), text, protected=bool(other.get("readOnly")))
             touched = False
             for site in sites:
-                target = str(site.target or "").replace("\\", "/").lstrip("./")
+                target = str(site.target or "").strip().replace("\\", "/")
                 if not target:
                     continue
+                if target.startswith("/") or ":" in target.split("/", 1)[0]:
+                    continue
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(str(other.get("path") or "")), target))
                 points_at_document = target in {source_rel, PurePosixPath(source_rel).name, "/" + source_rel}
                 # Only this document's own media/<stem>/ counts; a reference to
                 # some other document's media/... is unrelated to this move.
@@ -1300,7 +1451,15 @@ class LooseCopalRepository:
                     writable=not bool(other.get("readOnly")),
                 ))
             if touched:
-                referencing.append((str(other_id), text, bool(other.get("readOnly"))))
+                referencing.append((str(other_id), text, bool(other.get("readOnly")), str(other.get("path") or "")))
+        source_file = vault / source_path
+        if source_file.is_file():
+            try:
+                own_text = source_file.read_text(encoding="utf-8")
+                if scan_references(str(record.get("id") or ""), own_text):
+                    referencing.append((str(record.get("id") or ""), own_text, False, source_path))
+            except (OSError, UnicodeDecodeError):
+                pass
         expected = str(record.get("head") or "")
         current = expected
         source_file = vault / source_path
@@ -1325,6 +1484,7 @@ class LooseCopalRepository:
                 assets=tuple(assets),
             ),
             referencing_documents=referencing,
+            source_layout_version=source_layout_version,
         )
         if plan.conflicts:
             reasons = "; ".join(
@@ -1337,11 +1497,52 @@ class LooseCopalRepository:
         # and the document relocate.  Detect that half-applied state and resume
         # it rather than refusing the retry; both-sides-present stays a conflict.
         stranded = (
+            source_layout_version == 1
+            and
             source_media_abs != destination_media_abs
             and not source_media_abs.exists()
             and destination_media_abs.is_dir()
         )
-        if stranded:
+        if source_layout_version == 2:
+            moved_any = False
+            recovered_any = False
+            records_by_id = manifest.get("documents") or {}
+            for asset in plan.asset_moves:
+                source_asset = source_media_abs / asset.asset_name
+                destination_asset = destination_media_abs / asset.asset_name
+                asset_record = records_by_id.get(asset.asset_id)
+                if not isinstance(asset_record, dict) or asset_record.get("mediaOwnerDocumentId") != record.get("id"):
+                    raise CopalBridgeError("managed media ownership changed during rename")
+                if source_asset == destination_asset:
+                    if not source_asset.is_file() or binary_digest(source_asset.read_bytes()) != asset.digest:
+                        raise CopalBridgeError("managed media asset changed during rename")
+                elif source_asset.is_file() and destination_asset.exists():
+                    raise CopalBridgeError("destination media asset already exists")
+                elif source_asset.is_file():
+                    self._assert_v2_path_contained(vault, destination_asset)
+                    destination_media_abs.mkdir(parents=True, exist_ok=True)
+                    self._assert_v2_path_contained(vault, source_asset)
+                    self._assert_v2_path_contained(vault, destination_asset)
+                    os.replace(source_asset, destination_asset)
+                    moved_any = True
+                elif destination_asset.is_file():
+                    self._assert_v2_path_contained(vault, destination_asset)
+                    try:
+                        if binary_digest(destination_asset.read_bytes()) != asset.digest:
+                            raise CopalBridgeError("destination media asset changed during recovery")
+                    except OSError as exc:
+                        raise CopalBridgeError("destination media asset is unavailable") from exc
+                    recovered_any = True
+                else:
+                    raise CopalBridgeError("managed media asset disappeared during rename")
+                next_path = PurePosixPath(destination_layout.media_dir, asset.asset_name).as_posix()
+                asset_record["path"] = next_path
+                asset_record["name"] = next_path
+            if recovered_any:
+                plan.phase = MovePhase.RECOVERING
+            elif moved_any:
+                plan.phase = MovePhase.COMMITTED
+        elif stranded:
             plan.phase = MovePhase.RECOVERING
         elif source_media_abs.is_dir() and source_media_abs != destination_media_abs:
             # Stage: relocate owned asset bytes only.  A missing source media dir
@@ -1629,7 +1830,7 @@ class LooseCopalRepository:
         key = hashlib.sha256(json.dumps([owner, workspace, action], separators=(",", ":")).encode()).hexdigest()
         return {"owner": owner, "workspace_id": workspace, "action_id": f"document-write-{key}", "actor_id": actor, "guards": [], "logical_request": {"owner": owner, "workspace_id": workspace, "actor_id": actor, "document_id": str(args.get("id") or ""), "payload": args["document_write_request"]}, "operations": [{"kind": "write", "owner": owner, "workspace_id": workspace, "id": str(args.get("id") or ""), "revision": {"kind": "copalHead", "value": str(args["base"])}, "content": str(args.get("content") or "")}]}
 
-    def _call_locked(self, operation: str, args: dict[str, Any]) -> Any:
+    def _call_locked(self, operation: str, args: dict[str, Any], *, journal_home: bool = False) -> Any:
         self._guarded.reconcile(self)
         if operation == "import_vault":
             from src.openclank.copal_loose_import import import_vault
@@ -1668,11 +1869,42 @@ class LooseCopalRepository:
                 expected=args.get("expected"),
             )
         vault, manifest = self._scope(args)
-        if self._refresh_prefix is None and operation in {"status", "scoped_status", "metadata_page", "list", "index", "search"}:
+        if self._refresh_prefix is None and operation in {"status", "scoped_status", "metadata_page", "list", "index", "search", "reference_snapshot"}:
             manifest = self._ensure_official_references(vault, manifest, args)
         action_id = str(args.get("action_id") or args.get("actionId") or args.get("commandId") or "").strip() or None
         documents = manifest["documents"]
         self._refresh_external_files(vault, manifest)
+        if operation == "open_default_journal":
+            self._validate_mutable_owner(args.get("owner"))
+            if args.get("workspace_id") != "default":
+                raise CopalBridgeError("Starter Journal belongs to the default workspace")
+            home = manifest.get("journalHome")
+            if not home:
+                # Use the ordinary document creation path and save its ID in the same manifest commit.
+                # An existing personal file with the proposed title keeps its name.
+                name = "Welcome to your journal.md"
+                number = 1
+                while (vault / name).exists() or (vault / name).is_symlink():
+                    number += 1
+                    name = f"Welcome to your journal ({number}).md"
+                body = """# Your journal
+
+Keep pages, pictures and sources here. Link related pages so you can find your way back.
+
+Choose **New journal page** in Editor’s file sidebar (Explorer). Link a page by typing its name in double brackets. Its backlinks show which other pages refer to it.
+
+[[OpenClank/Journal|Using your journal]] · [[OpenClank/Editor|Writing and saving]] · [[OpenClank/Markdown Formatting Demo|Formatting examples]] · [[OpenClank/Graph|See your links on a map]]
+
+[Obsidian’s guide to links](https://obsidian.md/help/links) · [Andrej Karpathy’s LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
+"""
+                created = self._call_locked("create", {
+                    "owner": args["owner"], "workspace_id": "default", "kind": "markdown",
+                    "corpus": "notes", "name": name, "content": body,
+                }, journal_home=True)
+                home = created["doc"]["id"]
+                manifest = self._load(vault)
+            record = manifest["documents"].get(home)
+            return {"documentId": home if record and not record.get("trashed") else None}
         if operation == "task_index_get":
             ids = args.get("ids")
             if ids is not None and not isinstance(ids, list):
@@ -1787,6 +2019,67 @@ class LooseCopalRepository:
             if record is None:
                 return None
             return self._record_doc(vault, record, include_body=True)
+        if operation == "reference_snapshot":
+            # The registered manifest is the scoped corpus.  A missing, changing,
+            # or over-budget entry makes the snapshot incomplete, never absent.
+            records = [r for r in documents.values() if isinstance(r, dict) and not r.get("trashed")]
+            rows, checks, complete, total_bytes = [], [], len(records) <= 5000 and all(isinstance(r, dict) for r in documents.values()), 0
+            for record in records[:5000]:
+                try:
+                    if not isinstance(record.get("id"), str) or not isinstance(record.get("name"), str):
+                        complete = False
+                        continue
+                    if self._is_official_reference(record):
+                        # Installed reference heads carry the encoded byte size.
+                        # Reject unknown or over-budget metadata before hydration.
+                        match = re.fullmatch(r"sha256:[0-9a-f]{64}:([0-9]+)", str(record.get("head") or ""))
+                        if not match:
+                            complete = False
+                            continue
+                        size = int(match.group(1))
+                        total_bytes += size
+                        if size > 2 * 1024 * 1024 or total_bytes > 32 * 1024 * 1024:
+                            complete = False
+                            continue
+                        row = self._record_doc(vault, record, include_body=True)
+                        if row.get("size") != size or str(row.get("head")) != str(record.get("head")):
+                            complete = False
+                            continue
+                    else:
+                        path = vault / str(record.get("path") or "")
+                        before = path.stat()
+                        total_bytes += before.st_size
+                        if before.st_size > 2 * 1024 * 1024 or total_bytes > 32 * 1024 * 1024:
+                            complete = False
+                            continue
+                        row = self._record_doc(vault, record, include_body=True)
+                        after = path.stat()
+                        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                            complete = False
+                            continue
+                        checks.append((path, (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)))
+                        if record.get("kind") not in {"asset", "compatibility"} and str(row.get("head")) != str(record.get("head")):
+                            complete = False
+                            continue
+                    if total_bytes > 32 * 1024 * 1024:
+                        complete = False
+                        continue
+                    rows.append(row)
+                except (OSError, UnicodeError, CopalBridgeError, ValueError, KeyError, TypeError):
+                    complete = False
+            for path, expected in checks:
+                try:
+                    st = path.stat()
+                    if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns) != expected:
+                        complete = False
+                except OSError:
+                    complete = False
+            rows.sort(key=lambda row: str(row.get("id") or ""))
+            evidence = {"owner": str(args.get("owner") or ""), "workspace": str(args.get("workspace_id") or ""),
+                        "records": [[row.get("id"), row.get("head"), row.get("name"), row.get("kind"),
+                                     row.get("corpus"), row.get("properties")] for row in rows]}
+            generation = hashlib.sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest() if complete else None
+            return {"docs": rows, "coverage": {"complete": complete, "registered": len(records), "included": len(rows), "generation": generation}}
         if operation in {"list", "index", "search"}:
             rows = [self._record_doc(vault, record, include_body=True) for record in documents.values() if isinstance(record, dict) and not record.get("trashed") and (not args.get("kind") or record.get("kind") == args.get("kind")) and (not args.get("corpus") or args.get("corpus") == "all" or record.get("corpus") == args.get("corpus"))]
             query = str(args.get("query") or "").casefold()
@@ -1806,18 +2099,43 @@ class LooseCopalRepository:
                 raise CopalBridgeError("asset exceeds the configured limit")
             raw_name = str(args.get("name") or "")
             name = self._safe_name(raw_name, "asset")
+            media_owner_id = str(args.get("media_owner_document_id") or "")
+            media_layout_version = args.get("media_layout_version")
+            media_fields: dict[str, Any] = {}
+            if media_owner_id or media_layout_version is not None:
+                if not media_owner_id or media_layout_version != 2:
+                    raise CopalBridgeError("managed media ownership is invalid")
+                try:
+                    media_owner = self._doc(manifest, media_owner_id)
+                    expected_layout = document_media_dir(
+                        document_path=str(media_owner.get("path") or ""),
+                        canonical_root=str(vault),
+                        origin="workspace",
+                        owner_subject_id=str(args.get("owner") or ""),
+                        workspace_id=str(args.get("workspace_id") or ""),
+                        layout_version=2,
+                    )
+                except (CopalBridgeError, ValueError) as exc:
+                    raise CopalBridgeError("managed media target is unavailable") from exc
+                relative = PurePosixPath(name)
+                if media_owner.get("kind") == "asset" or media_owner.get("readOnly") or relative.parent.as_posix() != expected_layout.media_dir:
+                    raise CopalBridgeError("managed media path does not match its target")
+                self._assert_v2_path_contained(vault, vault / name)
+                media_fields = {"mediaOwnerDocumentId": media_owner_id, "mediaLayoutVersion": 2}
             existing = next((row for row in documents.values() if isinstance(row, dict) and (row.get("path") == name or row.get("name") == name) and not row.get("trashed")), None)
             # Asset heads must hash the original bytes.  The text fingerprint
             # re-encodes a Latin-1 decode as UTF-8, which disagrees with the
             # verification path for non-ASCII payloads.
             digest = binary_digest(data)
             if existing is not None:
-                if existing.get("kind") == "asset" and existing.get("head") == digest:
+                if existing.get("kind") == "asset" and existing.get("head") == digest and all(existing.get(key) == value for key, value in media_fields.items()):
                     return {"doc": self._record_doc(vault, existing, include_body=False)}
                 raise CopalBridgeError("asset already exists")
             document_id = f"asset_{uuid.uuid4().hex}"
-            record = {"id": document_id, "owner": args.get("owner"), "workspace_id": args.get("workspace_id"), "kind": "asset", "corpus": "system", "name": name, "path": name, "head": digest, "createdAt": time.time(), "updatedAt": time.time(), "readOnly": True, "trashed": False}
+            record = {"id": document_id, "owner": args.get("owner"), "workspace_id": args.get("workspace_id"), "kind": "asset", "corpus": "system", "name": name, "path": name, "head": digest, "createdAt": time.time(), "updatedAt": time.time(), "readOnly": True, "trashed": False, **media_fields}
             documents[document_id] = record
+            if media_layout_version == 2:
+                self._assert_v2_path_contained(vault, vault / name)
             self._atomic_write(vault / name, data)
             self._operation(manifest, "put_asset", f"put asset {name}", document_id=document_id, action_id=str(args.get("action_id") or "") or None)
             self._save(vault, manifest)
@@ -1863,6 +2181,8 @@ class LooseCopalRepository:
             content = str(args.get("content") or "")
             record = {"id": document_id, "owner": args.get("owner"), "workspace_id": args.get("workspace_id"), "kind": kind, "corpus": str(args.get("corpus") or "notes"), "name": name, "path": name, "head": self._fingerprint(content), "createdAt": time.time(), "updatedAt": time.time(), "readOnly": bool(args.get("read_only")), "trashed": False}
             documents[document_id] = record
+            if journal_home:
+                manifest["journalHome"] = document_id
             self._atomic_write(vault / name, content)
             try:
                 record["mtime_ns"] = (vault / name).stat().st_mtime_ns
@@ -1990,10 +2310,28 @@ class LooseCopalRepository:
         if operation == "asset_path":
             record = self._doc(manifest, str(args.get("id") or ""))
             self._assert_not_official_reference(record)
-            path = vault / str(record["path"])
-            if not path.is_file():
+            if record.get("kind") != "asset":
                 raise CopalBridgeError("asset not found in this scope")
-            return {"path": str(path), "name": record["name"]}
+            if record.get("owner") not in (None, "", args.get("owner")) or record.get("workspace_id") not in (None, "", args.get("workspace_id")):
+                raise CopalBridgeError("asset not found in this scope")
+            requested_corpus = str(args.get("corpus") or "")
+            if requested_corpus and record.get("corpus") != requested_corpus:
+                raise CopalBridgeError("asset not found in this scope")
+            relative = PurePosixPath(str(record.get("path") or ""))
+            if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+                raise CopalBridgeError("asset not found in this scope")
+            root = vault.resolve()
+            try:
+                path = (vault / Path(*relative.parts)).resolve(strict=True)
+                path.relative_to(root)
+                if not path.is_file():
+                    raise OSError("not a regular file")
+            except (OSError, RuntimeError, ValueError):
+                raise CopalBridgeError("asset not found in this scope")
+            # Keep the storage root alongside this internal bridge result so
+            # the HTTP adapter can validate containment without assuming the
+            # legacy flat asset directory layout.
+            return {"path": str(path), "name": record["name"], "root": str(root)}
         raise CopalBridgeError(f"loose Copal operation is not implemented: {operation}")
 
 

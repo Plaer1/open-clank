@@ -8,6 +8,7 @@ const disableDefault = process.env.MIMOCODE_DISABLE_DEFAULT_PLUGINS
 process.env.MIMOCODE_DISABLE_DEFAULT_PLUGINS = "1"
 
 const { Plugin } = await import("../../src/plugin/index")
+const { Snapshot } = await import("../../src/snapshot/index")
 const { Instance } = await import("../../src/project/instance")
 
 afterEach(async () => {
@@ -46,6 +47,39 @@ const triggerTransform = () =>
   })
 
 describe("plugin file hooks", () => {
+  test("runs the capture barrier immediately before the resolved file hook", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, ".mimocode", "hooks", "greet.ts"), hookSource("hook"))
+        await Bun.write(path.join(dir, "mimocode.json"), "{}")
+      },
+    })
+    const events: string[] = []
+
+    const out = await Instance.provide({
+      directory: tmp.path,
+      fn: async () =>
+        Effect.gen(function* () {
+          const plugin = yield* Plugin.Service
+          const output = { system: [] as string[] }
+          yield* plugin
+            .trigger(
+              "experimental.chat.system.transform",
+              { model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" } as any },
+              output,
+            )
+            .pipe(
+              Effect.provideService(Snapshot.CaptureBarrier, () => Effect.sync(() => events.push("capture"))),
+            )
+          events.push(...output.system)
+          return { output, events }
+        }).pipe(Effect.provide(Plugin.defaultLayer), Effect.runPromise),
+    })
+
+    expect(out.output.system).toEqual(["hook"])
+    expect(out.events).toEqual(["capture", "hook"])
+  })
+
   test("loads hooks from .mimocode/hooks and picks up external edits without reload call", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {

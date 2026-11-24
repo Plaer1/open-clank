@@ -41,6 +41,7 @@ from .interaction_tools import AskUserTool, UpdatePlanTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
 from .bg_job_tools import ManageBgJobsTool
 from src.desktop_capture import capture_tool
+from src.openclank.computer_control.linux import legacy_control_tool, legacy_inspect_tool, status_tool as control_status_tool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .admin_tools import (
     ADMIN_TOOL_HANDLERS,
@@ -77,6 +78,9 @@ TOOL_HANDLERS = {
     "list_models": ListModelsTool().execute,
     "manage_bg_jobs": ManageBgJobsTool().execute,
     "capture_desktop": capture_tool,
+    "inspect_desktop": legacy_inspect_tool,
+    "control_desktop": legacy_control_tool,
+    "control_desktop_status": control_status_tool,
     "create_session": CreateSessionTool().execute,
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,

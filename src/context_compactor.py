@@ -376,6 +376,12 @@ async def maybe_compact(
         # One active compactor per execution context: MiMo owns ACP sessions.
         return messages, get_context_length(endpoint_url, model), False
 
+    if session is None:
+        return messages, get_context_length(endpoint_url, model), False
+    from core.session_manager import _history_fingerprint
+    with session._history_lock:
+        original_history = _history_fingerprint(session)
+
     context_length = get_context_length(endpoint_url, model)
     used = estimate_tokens(messages)
     pct = (used / context_length) * 100 if context_length else 0
@@ -459,7 +465,8 @@ async def maybe_compact(
     # offset — session.history INCLUDES the system messages, but
     # split_point is indexed against convo_msgs which does NOT. Without
     # this, the slice drops the leading system message(s).
-    _update_session_history(session, split_point, summary, system_msg_count=len(system_msgs))
+    if not await _update_session_history(session, split_point, summary, system_msg_count=len(system_msgs), expected_history=original_history):
+        return messages, context_length, False
 
     new_used = estimate_tokens(compacted)
     logger.info(
@@ -470,8 +477,8 @@ async def maybe_compact(
     return compacted, context_length, True
 
 
-def _update_session_history(session, split_point: int, summary: str,
-                            system_msg_count: int = 0):
+async def _update_session_history(session, split_point: int, summary: str,
+                            system_msg_count: int = 0, expected_history=None):
     """Write the active-context projection after host finite-context compaction.
 
     `split_point` is the index in `convo_msgs` (system-stripped). The
@@ -489,13 +496,15 @@ def _update_session_history(session, split_point: int, summary: str,
         return
 
     effective_split = system_msg_count + split_point
-    if effective_split >= len(session.history):
-        return
-
-    # Keep the recent messages, prepend summary AND the leading system
-    # messages so the system prompt survives compaction.
-    system_prefix = list(session.history[:system_msg_count])
-    recent_history = session.history[effective_split:]
+    from core.session_manager import _history_fingerprint
+    with session._history_lock:
+        if effective_split >= len(session.history):
+            return
+        before_history = _history_fingerprint(session)
+        if expected_history is not None and before_history != expected_history:
+            return False
+        system_prefix = list(session.history[:system_msg_count])
+        recent_history = list(session.history[effective_split:])
     summary = normalize_compaction_summary(summary)
     summary_msg = ChatMessage(
         role="system",
@@ -522,12 +531,17 @@ def _update_session_history(session, split_point: int, summary: str,
         from src.openclank.conversation_archive import ArchiveUnavailableError
 
         try:
-            if manager.replace_messages(session.id, new_history):
-                return
+            if await manager.replace_messages_guarded(session.id, new_history, _expected_history=before_history):
+                return True
+            return False
         except ArchiveUnavailableError:
             logger.warning(
                 "active projection write aborted; archive unavailable for %s",
                 getattr(session, "id", None),
             )
-            return
-    session.history = new_history
+            return False
+    with session._history_lock:
+        if _history_fingerprint(session) == before_history:
+            session.history = new_history
+            return True
+        return False

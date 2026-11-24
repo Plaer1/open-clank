@@ -1,3 +1,4 @@
+import { bindCardActionMenu } from './cardActionMenu.js';
 import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK SERVE SUB-MODULE
@@ -1182,154 +1183,61 @@ function _rerenderCachedModels() {
     });
   }
 
-  // Long-press anywhere on a cached model card → click its ⋮ menu, so
-  // mobile users don't have to hit the small 3-dot target precisely.
-  list.querySelectorAll('.memory-item').forEach(item => {
-    const menuBtn = item.querySelector('.hwfit-cached-menu-btn');
-    if (!menuBtn || item.dataset.lpWired === '1') return;
-    item.dataset.lpWired = '1';
-    let _t = null;
-    let _y = 0;
-    const _cancel = () => { if (_t) { clearTimeout(_t); _t = null; } };
-    item.addEventListener('touchstart', (e) => {
-      if (e.target.closest('button, a, input, textarea, .hwfit-cached-dropdown')) return;
-      _y = e.touches?.[0]?.clientY ?? 0;
-      _t = setTimeout(() => { _t = null; try { menuBtn.click(); } catch {} }, 500);
-    }, { passive: true });
-    item.addEventListener('touchmove', (e) => {
-      const y = e.touches?.[0]?.clientY ?? 0;
-      if (Math.abs(y - _y) > 8) _cancel();
-    }, { passive: true });
-    item.addEventListener('touchend', _cancel, { passive: true });
-    item.addEventListener('touchcancel', _cancel, { passive: true });
-  });
-
-  // Wire menu on each cached model
-  list.querySelectorAll('.hwfit-cached-menu-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      // Toggle: if a dropdown for THIS button is already open, close it
-      // (through its own dismiss so the Escape-stack entry goes with it).
-      const existing = document.querySelector('.hwfit-cached-dropdown');
-      if (existing && existing._anchor === btn) {
-        if (typeof existing._dismiss === 'function') existing._dismiss();
-        else { existing.remove(); btn.classList.remove('cookbook-menu-active'); }
-        return;
-      }
-      // Otherwise close any other open menu (and clear its anchor's active
-      // state) before opening fresh.
-      document.querySelectorAll('.hwfit-cached-dropdown').forEach(d => {
-        if (d._anchor) d._anchor.classList.remove('cookbook-menu-active');
-        if (typeof d._dismiss === 'function') d._dismiss(); else d.remove();
-      });
-      const item = btn.closest('.memory-item');
-      const repo = item?.dataset.repo;
-      if (!repo) return;
-      const m = allModels.find(x => x.repo_id === repo);
-
-      const dropdown = document.createElement('div');
-      dropdown.className = 'hwfit-cached-dropdown';
-      dropdown._anchor = btn;
-      btn.classList.add('cookbook-menu-active');
-      // Shared close — used by every item, the mobile Cancel, outside-click,
-      // and the Escape arbiter (reassigned to the registry-aware close below).
-      let closeDropdown = () => { dropdown.remove(); btn.classList.remove('cookbook-menu-active'); };
-      const _di = (svg) => `<span class="dropdown-icon">${svg}</span>`;
-      const _serveIco = uiIcon("play", 14);
-      const _retryIco = uiIcon("refresh", 14);
-      const _deleteIco = uiIcon("trash", 14);
-      const _selectIco = '<span style="font-size:16px;line-height:1;position:relative;top:-2px;">●</span>';
-      const _schedIco = uiIcon("calendar", 14);
-      const _favNow = _isServeFavorite(repo);
-      const _favIco = _favNow
-        ? uiIcon("bookmark-filled", 14)
-        : uiIcon("bookmark", 14);
-      const items = [];
-      items.push({ label: _favNow ? 'Unfavorite' : 'Favorite', icon: _favIco, action: 'favorite' });
-      if (m && m.status === 'ready') items.push({ label: 'Serve', icon: _serveIco, action: 'serve' });
-      if (m && (m.status === 'downloading' || m.status === 'stalled' || m.has_incomplete)) {
-        items.push({ label: 'Resume download', icon: _retryIco, action: 'retry' });
-      }
-      if (m && m.status === 'ready') items.push({ label: 'Schedule…', icon: _schedIco, action: 'schedule' });
-      items.push({ label: 'Select', icon: _selectIco, action: 'select' });
-      items.push({ label: 'Delete', icon: _deleteIco, action: 'delete', danger: true });
-      for (const opt of items) {
-        const div = document.createElement('div');
-        div.className = 'dropdown-item-compact' + (opt.danger ? ' dropdown-item-danger' : '');
-        div.innerHTML = _di(opt.icon) + '<span>' + opt.label + '</span>';
-        div.addEventListener('click', () => {
-          closeDropdown();
-          if (opt.action === 'serve') item.click();
-          else if (opt.action === 'favorite') {
+  list.querySelectorAll('.memory-item[data-repo]').forEach(item => {
+    const button = item.querySelector('.hwfit-cached-menu-btn');
+    if (!button) return;
+    const repo = item.dataset.repo;
+    const host = _resolveCacheHost();
+    bindCardActionMenu(item, {
+      button,
+      current: () => host === _resolveCacheHost(),
+      exclude: '.serve-select-cb, .hwfit-serve-panel',
+      allowGesture: () => !document.getElementById('hwfit-cache-select')?.classList.contains('active'),
+      items: valid => {
+        const m = allModels.find(model => model.repo_id === repo);
+        const favorite = _isServeFavorite(repo);
+        const items = [{
+          id: 'favorite', label: favorite ? 'Unfavorite' : 'Favorite',
+          icon: favorite ? 'bookmark-filled' : 'bookmark', run: () => {
             const favored = _toggleServeFavorite(repo);
             uiModule.showToast(favored ? 'Favorited — pinned to top' : 'Unfavorited');
             _rerenderCachedModels();
-          }
-          else if (opt.action === 'delete') _deleteCachedModel(repo, item, false, m);
-          else if (opt.action === 'retry') _promptResumeIncompleteModel(m, item);
-          else if (opt.action === 'schedule') {
-            // Same entry point as the ^ button next to Launch — let
-            // cookbookSchedule.js handle it. Expand the panel first
-            // so the form has somewhere to mount.
+          },
+        }];
+        if (m?.status === 'ready') {
+          items.push({ id: 'serve', label: 'Serve', icon: 'play', run: () => item.click() });
+        }
+        if (m && (m.status === 'downloading' || m.status === 'stalled' || m.has_incomplete)) {
+          items.push({ id: 'retry', label: 'Resume download', icon: 'refresh', dialog: true, run: () => _promptResumeIncompleteModel(m, item) });
+        }
+        if (m?.status === 'ready') {
+          items.push({ id: 'schedule', label: 'Schedule', icon: 'calendar', dialog: true, run: () => {
             if (!item.querySelector('.hwfit-serve-panel')) item.click();
             setTimeout(() => {
-              const arrow = item.querySelector('.hwfit-serve-schedule-arrow');
-              if (arrow) arrow.click();
+              if (valid()) item.querySelector('.hwfit-serve-schedule-arrow')?.click();
             }, 120);
-          }
-          else if (opt.action === 'select') {
-            const selectBtn = document.getElementById('hwfit-cache-select');
-            const bulkBar = document.getElementById('serve-bulk-bar');
-            if (selectBtn) {
-              selectBtn.classList.add('active');
-              selectBtn.textContent = 'Cancel';
-            }
-            if (bulkBar) bulkBar.classList.remove('hidden');
-            document.querySelectorAll('.serve-select-cb').forEach(dot => {
-              dot.style.display = 'inline-block';
-            });
-            const dot = item.querySelector('.serve-select-cb');
-            if (dot) dot.classList.add('selected');
-            const count = document.querySelectorAll('.serve-select-cb.selected').length;
-            const countEl = document.getElementById('serve-bulk-count');
-            if (countEl) countEl.textContent = count + ' selected';
-            const all = document.getElementById('serve-select-all');
-            const dots = document.querySelectorAll('.serve-select-cb');
-            if (all) all.checked = dots.length > 0 && count === dots.length;
-          }
-        });
-        dropdown.appendChild(div);
-      }
-      // Mobile-only Cancel — gives an explicit close on touch devices where
-      // outside-tap-to-close is fiddly. Hidden on desktop via CSS.
-      const _cancelIco = uiIcon("close", 14);
-      const cancelDiv = document.createElement('div');
-      cancelDiv.className = 'dropdown-item-compact dropdown-cancel-mobile';
-      cancelDiv.innerHTML = _di(_cancelIco) + '<span>Cancel</span>';
-      cancelDiv.addEventListener('click', () => { closeDropdown(); });
-      dropdown.appendChild(cancelDiv);
-      const rect = btn.getBoundingClientRect();
-      dropdown.style.cssText = `position:fixed;z-index:${topPortalZ()};visibility:hidden;top:0;right:${window.innerWidth-rect.right}px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,0.3);font-size:12px;`;
-      document.body.appendChild(dropdown);
-      // Clamp into the VISIBLE area (visualViewport, not innerHeight — they differ
-      // on mobile under the dynamic toolbar). Flip above the button if there's no
-      // room below, else clamp to the visible bottom edge, so it never runs
-      // off-screen / grows the page.
-      {
-        const vv = window.visualViewport;
-        const viewTop = vv ? vv.offsetTop : 0;
-        const viewBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
-        const dh = dropdown.offsetHeight;
-        const mm = 8;
-        let top = rect.bottom + 2;
-        if (top + dh > viewBottom - mm) {
-          const above = rect.top - 2 - dh;
-          top = above >= viewTop + mm ? above : Math.max(viewTop + mm, viewBottom - dh - mm);
+          } });
         }
-        dropdown.style.top = top + 'px';
-        dropdown.style.visibility = '';
-      }
-      closeDropdown = bindMenuDismiss(dropdown, () => { dropdown.remove(); btn.classList.remove('cookbook-menu-active'); }, (ev) => !dropdown.contains(ev.target) && ev.target !== btn);
+        items.push({ id: 'select', label: 'Select', icon: 'select', run: () => {
+          const selectBtn = document.getElementById('hwfit-cache-select');
+          if (selectBtn) {
+            selectBtn.classList.add('active');
+            selectBtn.textContent = 'Cancel';
+          }
+          document.getElementById('serve-bulk-bar')?.classList.remove('hidden');
+          document.querySelectorAll('.serve-select-cb').forEach(dot => { dot.style.display = 'inline-block'; });
+          item.querySelector('.serve-select-cb')?.classList.add('selected');
+          const count = document.querySelectorAll('.serve-select-cb.selected').length;
+          const countEl = document.getElementById('serve-bulk-count');
+          if (countEl) countEl.textContent = count + ' selected';
+          const all = document.getElementById('serve-select-all');
+          const dots = document.querySelectorAll('.serve-select-cb');
+          if (all) all.checked = dots.length > 0 && count === dots.length;
+        } });
+        items.push({ id: 'delete', label: 'Delete', icon: 'trash', destructive: true, dialog: true,
+          run: () => _deleteCachedModel(repo, item, false, m, valid) });
+        return items;
+      },
     });
   });
 
@@ -2925,6 +2833,28 @@ function _rerenderCachedModels() {
           }, 0);
         };
 
+        const bindGpuActions = btn => {
+          const index = Number(btn.dataset.gpu);
+          const lookup = () => panel._gpuProbe.byIdx?.get(index);
+          bindCardActionMenu(btn, {
+            current: () => panel.contains(btn) && !!lookup(),
+            items: valid => {
+              const gpu = lookup();
+              const host = panel._gpuProbe.host;
+              return [{ id: 'inspect', label: 'Inspect processes', icon: 'activity', dialog: true, run: () => {
+                if (valid() && lookup() === gpu && panel._gpuProbe.host === host) _openProbePopup(btn, gpu, host);
+              } }];
+            },
+          });
+          btn.addEventListener('dblclick', event => {
+            const gpu = lookup();
+            if (!gpu) return;
+            event.preventDefault();
+            _openProbePopup(btn, gpu, panel._gpuProbe.host);
+          });
+        };
+        panel.querySelectorAll('.cookbook-gpu-btn').forEach(bindGpuActions);
+
         const _runProbe = async (silent = false) => {
           _closeProbePopup();
           const hostEl = panel.querySelector('[data-field="host"]');
@@ -2966,6 +2896,7 @@ function _rerenderCachedModels() {
                 _b.dataset.gpu = String(g.index);
                 _b.textContent = String(g.index);
                 _grp.appendChild(_b);
+                bindGpuActions(_b);
                 // Re-wire the click handler the same way the panel did
                 // on first render. Toggles active + rewrites the hidden
                 // gpus input from the live set of active buttons.
@@ -3089,23 +3020,6 @@ function _rerenderCachedModels() {
           });
         }
 
-        // After probe, clicking a GPU button opens kill popup (Shift-click also toggles select)
-        panel.querySelectorAll('.cookbook-gpu-btn').forEach(btn => {
-          btn.addEventListener('contextmenu', (ev) => {
-            if (!panel._gpuProbe.byIdx) return;
-            const g = panel._gpuProbe.byIdx.get(parseInt(btn.dataset.gpu));
-            if (!g) return;
-            ev.preventDefault();
-            _openProbePopup(btn, g, panel._gpuProbe.host);
-          });
-          btn.addEventListener('dblclick', (ev) => {
-            if (!panel._gpuProbe.byIdx) return;
-            const g = panel._gpuProbe.byIdx.get(parseInt(btn.dataset.gpu));
-            if (!g) return;
-            ev.preventDefault();
-            _openProbePopup(btn, g, panel._gpuProbe.host);
-          });
-        });
       }
 
       // Update preview on input change
@@ -3783,7 +3697,7 @@ function _resolveCacheHost() {
   return _serverFromCacheSelection().host || '';
 }
 
-async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = null) {
+async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = null, valid = () => true) {
   const m = model || _cachedAllModels.find(x => x.repo_id === repo);
   // Delete the EXACT on-disk path the scan reported. Models in a custom
   // model dir live at <path>/<repo>; HF-cache models at
@@ -3809,6 +3723,7 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
       return;
     }
   }
+  if (!valid()) return;
   const host = _resolveCacheHost();
   let cmd;
   if (_isWindows()) {

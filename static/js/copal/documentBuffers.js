@@ -64,7 +64,7 @@ function actionId(localRevision) {
 }
 
 class ResourceBuffer {
-  constructor(handle, envelope, { save = null, actorId = '', epoch = '', scope = null, historyLimit = 2000, historyLimitBytes = 32 * 1024 * 1024 } = {}) {
+  constructor(handle, envelope, { save = null, actorId = '', epoch = '', scope = null, historyLimit = 2000, historyLimitBytes = 32 * 1024 * 1024, acceptVerifiedMerge = false, sharedStatusCurrent = null } = {}) {
     this.handle = normalizeResourceHandle(handle);
     this.key = this.handle.key;
     this.id = resourceKeyId(this.key);
@@ -90,6 +90,8 @@ class ResourceBuffer {
     this.projections = null;
     this.actionIds = new Map();
     this.save = typeof save === 'function' ? save : null;
+    this.acceptVerifiedMerge = acceptVerifiedMerge === true;
+    this.sharedStatusCurrent = typeof sharedStatusCurrent === 'function' ? sharedStatusCurrent : null;
     this.pending = null;
     this.pendingSheetRevision = null;
     this.running = null;
@@ -138,6 +140,7 @@ class ResourceBuffer {
   retryAtRevision(localRevision, revision) {
     if (this.invalidated || this.running || this.drainPromise || localRevision !== this.localRevision) return false;
     this.handle = { ...this.handle, revision:normalizeRevision(revision) };
+    if (this.journalRecovery && this.conflict) this.uncertainSave = null;
     // Explicitly rebasing after a conflict is a new operation. An uncertain
     // replay still uses the existing pending snapshot/action ID via flush().
     this.actionIds.set(localRevision, actionId(localRevision));
@@ -203,9 +206,75 @@ class ResourceBuffer {
   snapshot() {
     return { ...snapshotEnvelope({ key:this.key, expectedRevision:this.handle.revision, localRevision:this.localRevision, actionId:this.localRevision ? this._actionId() : null, scope:this.scope, envelope:this.envelope }), uncertainSave:this.uncertainSave, pendingEdits:[...this.pendingEdits.values()].map(edit => ({ id:String(edit.id), body:String(edit.body ?? ''), expectedSource:String(edit.expectedSource ?? ''), expectedLocalRevision:Number(edit.expectedLocalRevision || 0) })) };
   }
+  _applySaveResult(submitted, result, {reconciled = false} = {}) {
+    const outcome = result?.outcome;
+    if (result?.changedAfterSave === true || outcome === 'conflict' || (result?.status === 409 && result?.uncertain !== true)) {
+      this.status = 'conflict';
+      this.conflict = { local:reconciled ? this.snapshot() : copy(submitted), remote:copy(result.remote || result.current || result.snapshot || null), result };
+      return result;
+    }
+    if (outcome !== 'applied' || !result?.revision) {
+      this.status = 'error'; this.error = Object.assign(new Error(result?.message || 'resource save did not return an applied receipt'), { result });
+      this.pending = submitted;
+      if (result?.uncertain === true) this.uncertainSave = submitted;
+      return false;
+    }
+    if (result.verifiedMergedSnapshot === true) {
+      const merged = result.snapshot?.envelope;
+      if (!this.acceptVerifiedMerge || !merged || typeof merged.text !== 'string'
+          || !equivalent({...submitted.envelope, text:merged.text}, merged)) {
+        throw new Error('Verified merged snapshot is unavailable.');
+      }
+      const mergedRevision = normalizeRevision(result.revision);
+      // Existing local inverses were built against the pre-merge source.
+      // They cannot safely cross another contributor's committed text.
+      this.history = []; this.redoHistory = []; this.historyBytes = 0; this.redoBytes = 0;
+      this.lastHistoryTime = 0;
+      this.historyNotice = 'Local undo history ended at the shared merge; earlier versions remain in History.';
+      this.uncertainSave = null;
+      if (result.forceSharedConflict === true || this.localRevision !== submitted.localRevision || !equivalent(this.envelope, submitted.envelope)
+          || this.pendingEdits.size || this.recovered) {
+        this.status = 'conflict';
+        this.conflict = { local:this.snapshot(), remote:{revision:mergedRevision, envelope:copy(merged)}, result };
+        return {...result, outcome:'conflict'};
+      }
+      this.envelope = copy(merged);
+      // The merged value is the accepted result, not a newer local edit.
+      this.runningTarget = null;
+    }
+    this.uncertainSave = null;
+    this.projections = result.projections || null;
+    this.acknowledge(submitted.localRevision, result.revision, result.snapshot?.envelope || submitted.envelope);
+    return result;
+  }
+  reconcileVerifiedSave(submitted, result) {
+    const original=this.uncertainSave;
+    let current=false;
+    try { current=this.sharedStatusCurrent?.(this.scope) === true; } catch (_) { current=false; }
+    if (!this.acceptVerifiedMerge || !current || this.invalidated || this.running || this.drainPromise || !original
+        || result?.verifiedOriginalReceipt !== true || result.originalActionID !== original.actionId
+        || !submitted || submitted.actionId !== original.actionId || submitted.localRevision !== original.localRevision
+        || resourceKeyId(submitted.key) !== this.id || !valueEquivalent(submitted.scope, original.scope)
+        || !valueEquivalent(submitted.expectedRevision, original.expectedRevision) || !equivalent(submitted.envelope, original.envelope)) return false;
+    if (result.outcome === 'failed' && result.uncertain === false) {
+      this.uncertainSave=null; this.error=null; this.status='unsaved';
+      this.actionIds.set(this.localRevision, actionId(this.localRevision));
+      this.pending=this.snapshot(); this._emit(); return result;
+    }
+    if (result.outcome !== 'applied' && result.outcome !== 'conflict') return false;
+    this.uncertainSave=null;
+    try {
+      const applied=this._applySaveResult(submitted,result,{reconciled:true});
+      if (applied === false) this.uncertainSave=original;
+      this._emit(); return applied;
+    } catch (_) {
+      this.uncertainSave=original; this.status='error'; this._emit(); return false;
+    }
+  }
   async _flushOne(submitted, options = {}) {
     if (this.status === 'conflict') return { outcome:'conflict', conflict:this.conflict };
     if (!this.save) throw new Error('resource buffer has no save adapter');
+    if (this.uncertainSave && this.error?.result?.retryable === false) { this.status = 'error'; this._emit(); return false; }
     if (this.uncertainSave && submitted.actionId !== this.uncertainSave.actionId) { this.error = new Error('The previous Save outcome is unknown. Retry that captured Save before saving newer edits.'); this.status = 'error'; this._emit(); return false; }
     this.runningTarget = submitted;
     this.status = 'saving'; this.error = null; this._emit();
@@ -214,22 +283,7 @@ class ResourceBuffer {
         if (this.invalidated) { this.status = 'cancelled'; return false; }
         const result = await this.save(submitted, { ...options, key:this.key, sheet:submitted.localRevision === this.pendingSheetRevision });
         if (this.invalidated) { this.status = 'cancelled'; return false; }
-        const outcome = result?.outcome;
-        if (outcome === 'conflict' || result?.status === 409) {
-          this.status = 'conflict';
-          this.conflict = { local:copy(submitted), remote:copy(result.remote || result.current || result.snapshot || null), result };
-          return result;
-        }
-        if (outcome !== 'applied' || !result?.revision) {
-          this.status = 'error'; this.error = Object.assign(new Error(result?.message || 'resource save did not return an applied receipt'), { result });
-          this.pending = submitted;
-          if (result?.uncertain === true) this.uncertainSave = submitted;
-          return false;
-        }
-        this.uncertainSave = null;
-        this.projections = result.projections || null;
-        this.acknowledge(submitted.localRevision, result.revision, result.snapshot?.envelope || submitted.envelope);
-        return result;
+        return this._applySaveResult(submitted, result);
       } catch (error) {
         this.status = 'error'; this.error = error; this.pending = submitted;
         if (error?.retryable !== false) this.uncertainSave = submitted;
@@ -317,7 +371,7 @@ class ResourceBuffer {
   }
 }
 
-export function createBufferRegistry({ storage = globalThis.localStorage, namespace = 'copal-buffer-draft:v1' } = {}) {
+export function createBufferRegistry({ storage = globalThis.localStorage, journalStorage, namespace = 'copal-buffer-draft:v1' } = {}) {
   const buffers = new Map();
   // Failed persistent writes retain the newest snapshot under its immutable
   // actor/resource key. This survives scope teardown, not a process restart.
@@ -328,9 +382,52 @@ export function createBufferRegistry({ storage = globalThis.localStorage, namesp
   const mapKey = (key, scope) => `${scope}:${resourceKeyId(key)}`;
   // Epochs invalidate live work; durable drafts must remain recoverable after
   // restart or a display-name change, so they are not part of the key.
-  const draftKey = (buffer) => `${namespace}:${encodeURIComponent(buffer.actorId)}:${encodeURIComponent(buffer.id)}`;
+  const draftKey = (buffer, consumer) => `${namespace}${consumer === 'journal' ? ':journal' : ''}:${encodeURIComponent(buffer.actorId)}:${encodeURIComponent(buffer.id)}`;
+  const draftStorage = consumer => consumer === 'journal'
+    ? (journalStorage === undefined ? globalThis.sessionStorage : journalStorage) : storage;
+  // A Wiki write gets an immutable slot. Another tab can recover that
+  // revision without ever deleting a newer revision from the original tab.
+  const wikiRecords = new WeakMap();
+  const wikiPrefix = ':wiki-version:';
+  function wikiRead(key) {
+    return memoryDrafts.get(key)?.snapshot || JSON.parse(storage?.getItem(key) || 'null');
+  }
+  function removeWikiRecord(record) {
+    if (!record) return;
+    const {key, snapshot} = record;
+    // Legacy versions used the base key and may still have an old writer.
+    if (!key.includes(wikiPrefix) && JSON.stringify(wikiRead(key)) !== JSON.stringify(snapshot)) return;
+    try { storage?.removeItem(key); }
+    catch (_) { storage.setItem(key, JSON.stringify({discarded:true})); }
+    memoryDrafts.delete(key);
+  }
+  function persistWiki(buffer) {
+    const snapshot = {...buffer.snapshot(), consumer:'wiki', savedAt:Date.now()};
+    const previous = wikiRecords.get(buffer);
+    const key = draftKey(buffer) + wikiPrefix + actionId(buffer.localRevision);
+    const record = {key, snapshot};
+    try {
+      if (!storage) throw new Error('Draft recovery storage is unavailable');
+      storage.setItem(key, JSON.stringify(snapshot));
+    } catch (error) {
+      // Keep the earlier on-disk revision until its replacement is durable.
+      if (previous && memoryDrafts.has(previous.key)) memoryDrafts.delete(previous.key);
+      memoryDrafts.set(key, {snapshot,error});
+      wikiRecords.set(buffer, {...record, predecessor:previous?.predecessor || previous});
+      buffer.recoveryError = error;
+      return false;
+    }
+    wikiRecords.set(buffer, record);
+    try {
+      removeWikiRecord(previous);
+      removeWikiRecord(previous?.predecessor);
+      buffer.recoveryError = null;
+      return true;
+    } catch (error) { buffer.recoveryError = error; return false; }
+  }
   return {
     acquire(handle, envelope, options = {}) {
+      if (handle?.representation === 'image') throw new TypeError('image sessions cannot use text document buffers');
       const scope = scopeFor(options, handle.key);
       const id = mapKey(handle.key, scope);
       let buffer = buffers.get(id);
@@ -352,13 +449,47 @@ export function createBufferRegistry({ storage = globalThis.localStorage, namesp
       for (const buffer of buffers.values()) buffer.invalidated = true;
       buffers.clear();
     },
+    hasWikiDraft(buffer) { return wikiRecords.has(buffer); },
+    wikiRecoveryIndex() {
+      const index = new Map();
+      const keys = new Set(memoryDrafts.keys());
+      try {
+        for (let i = 0; i < (storage?.length || 0); i++) keys.add(storage.key(i));
+      } catch (_) { /* In-memory recovery is still available. */ }
+      for (const key of keys) {
+        if (!key?.startsWith(namespace + ':') || !key.includes(wikiPrefix)) continue;
+        const base = key.slice(0, key.indexOf(wikiPrefix));
+        if (!index.has(base)) index.set(base, []);
+        index.get(base).push(key);
+      }
+      return index;
+    },
+    wikiRecoveryOffers(handle, options, index) {
+      const base = draftKey({id:resourceKeyId(handle.key), actorId:options.actorId || handle.key.accountId});
+      const offers = [];
+      for (const key of [...(index.get(base) || []), base]) {
+        try {
+          const snapshot = wikiRead(key);
+          if (!snapshot || snapshot.discarded || snapshot.consumer && snapshot.consumer !== 'wiki' ||
+              resourceKeyId(snapshot.key) !== resourceKeyId(handle.key)) continue;
+          // Validate owner scope and the entire snapshot before exposing its
+          // preview or touching any live buffer.
+          new ResourceBuffer(handle, options.envelope, options).recover(snapshot);
+          offers.push({key, snapshot});
+        } catch (_) { /* Isolate malformed and inaccessible recovery records. */ }
+      }
+      return offers.sort((a,b) => (b.snapshot.savedAt || 0) - (a.snapshot.savedAt || 0));
+    },
     persistDraft(buffer, { consumer = null, shouldPersist = null } = {}) {
       clearTimeout(recoveryTimers.get(buffer)); recoveryTimers.delete(buffer);
       if (shouldPersist && !shouldPersist(buffer) || !buffer.state().dirty) return false;
-      const key = draftKey(buffer); const snapshot = { ...buffer.snapshot(), ...(consumer ? { consumer:String(consumer) } : {}) };
+      if (consumer === 'wiki') return persistWiki(buffer);
+      const key = draftKey(buffer, consumer); const snapshot = { ...buffer.snapshot(), ...(consumer ? { consumer:String(consumer) } : {}) };
+      if (consumer === 'journal' && buffer.uncertainSave && buffer.error?.result?.retryable === false) snapshot.replayBlocked = true;
       try {
-        if (!storage) throw new Error('Draft recovery storage is unavailable');
-        storage.setItem(key, JSON.stringify(snapshot));
+        const target = draftStorage(consumer);
+        if (!target) throw new Error('Draft recovery storage is unavailable');
+        target.setItem(key, JSON.stringify(snapshot));
         memoryDrafts.delete(key); buffer.recoveryError = null; return true;
       } catch (error) {
         memoryDrafts.set(key, { snapshot, error }); buffer.recoveryError = error; return false;
@@ -366,14 +497,25 @@ export function createBufferRegistry({ storage = globalThis.localStorage, namesp
     },
     scheduleDraft(buffer, options = {}) {
       clearTimeout(recoveryTimers.get(buffer));
-      recoveryTimers.set(buffer, setTimeout(() => this.persistDraft(buffer, options), 250));
+      recoveryTimers.set(buffer, setTimeout(() => {
+        this.persistDraft(buffer, options);
+        options.onPersist?.();
+      }, 250));
     },
     recoverDraft(handle, options = {}) {
       const probe = options.offerOnly ? new ResourceBuffer(handle, options.envelope, options) : this.acquire(handle, options.envelope, options);
-      const key = draftKey(probe);
+      const base = draftKey(probe, options.consumer);
+      let offer = options.wikiOffer;
+      if (options.consumer === 'wiki' && !offer) {
+        const offers = this.wikiRecoveryOffers(handle, options, this.wikiRecoveryIndex());
+        if (offers.length !== 1) return null;
+        [offer] = offers;
+      }
+      if (offer && (options.consumer !== 'wiki' || offer.key !== base && !offer.key.startsWith(base + wikiPrefix))) return null;
+      const key = offer?.key || base;
       try {
         const memory = memoryDrafts.get(key);
-        const raw = memoryDrafts.has(key) ? null : storage?.getItem(key);
+        const raw = memoryDrafts.has(key) ? null : draftStorage(options.consumer)?.getItem(key);
         const saved = memory?.snapshot || (raw ? JSON.parse(raw) : null);
         if (!saved || saved.discarded === true) {
           // Probing thousands of indexed documents for recovery must not leave
@@ -381,21 +523,48 @@ export function createBufferRegistry({ storage = globalThis.localStorage, namesp
           if (!options.offerOnly) this.release(handle.key, options);
           return null;
         }
+        if (offer && JSON.stringify(saved) !== JSON.stringify(offer.snapshot)) return null;
         const currentRevision = probe.handle.revision;
+        if (options.consumer === 'journal' && saved.consumer !== 'journal') return null;
         probe.recover(saved);
+        if (offer && !options.offerOnly) wikiRecords.set(probe, offer);
+        // A refresh may have interrupted receipt delivery after commit.
+        // Exact agreement with the current provider envelope needs no replay.
+        if (options.consumer === 'journal' && !probe.pendingEdits.size && equivalent(saved.envelope, options.envelope)) {
+          probe.resolveExternal(options.envelope, currentRevision, { force:true });
+          probe.uncertainSave = null;
+          this.discardDraft(probe, { consumer:options.consumer });
+          return probe;
+        }
         if (options.offerOnly) return { snapshot:copy(saved), recoveryError:memory?.error || null };
         probe.recoveryError = memory?.error || null;
         if (currentRevision.kind !== saved.expectedRevision?.kind || currentRevision.value !== saved.expectedRevision?.value) {
           probe.status = 'conflict';
           probe.conflict = { local:probe.snapshot(), remote:{ revision:currentRevision, envelope:copy(options.envelope) } };
+        } else if (options.consumer === 'journal' && probe.uncertainSave) {
+          probe.status = 'error';
+          probe.error = new Error('The previous Save outcome is unknown. Retry the captured Save to reconcile it.');
+          if (saved.replayBlocked === true) probe.error.result = { retryable:false };
         }
         return probe;
       } catch (error) { probe.recoveryError = error; return null; }
     },
-    discardDraft(buffer, { verifyOwner = false } = {}) {
+    discardDraft(buffer, { verifyOwner = false, consumer = null } = {}) {
       clearTimeout(recoveryTimers.get(buffer)); recoveryTimers.delete(buffer);
-      const key = draftKey(buffer);
+      if (consumer === 'wiki' || !consumer && !verifyOwner && wikiRecords.has(buffer)) {
+        const record = wikiRecords.get(buffer);
+        try {
+          removeWikiRecord(record);
+          removeWikiRecord(record?.predecessor);
+          wikiRecords.delete(buffer);
+          buffer.recoveryError = null;
+          return true;
+        } catch (error) { buffer.recoveryError = error; return false; }
+      }
+      const key = draftKey(buffer, consumer);
+      let target;
       try {
+        target = draftStorage(consumer);
         if (verifyOwner) {
           let saved;
           try { saved = memoryDrafts.get(key)?.snapshot || JSON.parse(storage?.getItem(key) || 'null'); }
@@ -413,11 +582,11 @@ export function createBufferRegistry({ storage = globalThis.localStorage, namesp
           } catch (_) { return true; } // Unknown ownership is never overwritten.
 
         }
-        storage?.removeItem(key); memoryDrafts.delete(key); buffer.recoveryError = null; return true;
+        target?.removeItem(key); memoryDrafts.delete(key); buffer.recoveryError = null; return true;
       } catch (error) {
         try {
-          if (!storage) throw error;
-          storage.setItem(key, JSON.stringify({ discarded:true }));
+          if (!target) throw error;
+          target.setItem(key, JSON.stringify({ discarded:true }));
           memoryDrafts.delete(key); buffer.recoveryError = null; return true;
         } catch (_) {
           buffer.recoveryError = error; return false;

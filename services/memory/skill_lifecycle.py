@@ -32,6 +32,135 @@ _BUNDLE_INTERNAL = {
 }
 _LOCK_STATE = threading.local()
 
+# No production issuer is installed yet. A future qualified host must bind
+# these callbacks to its live account/target and exact current FM definitions.
+SKILL_METADATA_WRITER_VERSION = 'skill-metadata-writer.v1'
+_SKILL_METADATA_SEAL = object()
+
+
+class _SkillMetadataAuthority:
+    __slots__ = ('owner', 'account_id', 'actor', '_current', '_domains', '_history', '_seal')
+
+    def __init__(self, seal, *, owner, account_id, actor, current, domains, history=None):
+        if (seal is not _SKILL_METADATA_SEAL or any(type(v) is not str or not v or v != v.strip() or len(v.encode()) > 512 for v in (owner, account_id, actor))
+                or not callable(current) or not callable(domains)):
+            raise ValueError('skill metadata authority unavailable')
+        self.owner, self.account_id, self.actor = owner, account_id, actor
+        self._current, self._domains, self._history, self._seal = current, domains, history, seal
+
+    def open_history(self, owner, skill_id, directory, identity):
+        if owner != self.owner or self._seal is not _SKILL_METADATA_SEAL or not callable(self._history):
+            raise ValueError('skill History unavailable')
+        return self._history('open', skill_id, directory, identity, None)
+
+    def read_history(self, owner):
+        if owner != self.owner or self._seal is not _SKILL_METADATA_SEAL or not callable(self._history):
+            raise ValueError('skill History unavailable')
+        return self._history('read', None, None, None, None)
+
+    def close_history(self, scope):
+        if self._seal is not _SKILL_METADATA_SEAL or not callable(self._history):
+            raise ValueError('skill History unavailable')
+        return self._history('close', None, None, None, scope)
+
+    def assert_current(self, owner, domain_refs):
+        if (self._seal is not _SKILL_METADATA_SEAL or owner != self.owner
+                or self._current(self) is not True or self._domains(self, domain_refs) is not True):
+            raise ValueError('skill metadata authority unavailable')
+
+
+class PreparedReadUnavailable(RuntimeError):
+    """A bounded read cannot prove a complete current snapshot."""
+
+
+class PreparedReadBudget:
+    def __init__(self, *, max_entries=512, max_bytes=8 * 1024 * 1024, max_file=256 * 1024, seconds=1.0):
+        import time
+        self.entries = max_entries
+        self.bytes = max_bytes
+        self.max_file = max_file
+        self.deadline = time.monotonic() + seconds
+
+    def entry(self):
+        import time
+        self.entries -= 1
+        if self.entries < 0 or time.monotonic() >= self.deadline:
+            raise PreparedReadUnavailable('prepared skill snapshot budget exhausted')
+
+    def read(self, path, *, text=False):
+        import time
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(os.fspath(path), flags)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_size > self.max_file or before.st_size > self.bytes:
+                raise PreparedReadUnavailable('prepared skill file unavailable')
+            self.bytes -= before.st_size
+            parts = []
+            remaining = before.st_size
+            while remaining:
+                if time.monotonic() >= self.deadline:
+                    raise PreparedReadUnavailable('prepared skill snapshot budget exhausted')
+                chunk = os.read(fd, min(65536, remaining))
+                if not chunk:
+                    raise PreparedReadUnavailable('prepared skill file changed')
+                parts.append(chunk)
+                remaining -= len(chunk)
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise PreparedReadUnavailable('prepared skill file changed')
+            data = b''.join(parts)
+            return data.decode('utf-8') if text else data
+        finally:
+            os.close(fd)
+
+
+@contextmanager
+def prepared_existing_lock(skill_path):
+    """Read-only, nonblocking use of the existing lifecycle lock."""
+    if os.name == 'nt' or not hasattr(os, 'O_NOFOLLOW'):
+        raise PreparedReadUnavailable('prepared skill lock unavailable')
+    import fcntl
+    path = os.path.join(os.path.dirname(os.fspath(skill_path)), '.lifecycle.lock')
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise PreparedReadUnavailable('prepared skill lock unavailable') from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PreparedReadUnavailable('prepared skill lock unavailable')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise PreparedReadUnavailable('prepared skill lock busy') from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _prepared_walk(root, budget):
+    pending = [Path(root)]
+    while pending:
+        current = pending.pop()
+        dirs, names = [], []
+        with os.scandir(current) as entries:
+            for entry in entries:
+                budget.entry()
+                if entry.is_symlink():
+                    raise PreparedReadUnavailable('prepared skill source unavailable')
+                if entry.is_dir(follow_symlinks=False):
+                    dirs.append(entry.name)
+                elif entry.is_file(follow_symlinks=False):
+                    names.append(entry.name)
+                else:
+                    raise PreparedReadUnavailable('prepared skill source unavailable')
+        dirs.sort(); names.sort()
+        yield str(current), dirs, names
+        pending.extend(current / name for name in reversed(dirs))
+
 
 def legacy_skill_id(skill, path: str) -> str:
     """Give legacy files a stable ID without relying on their mutable slug."""
@@ -64,12 +193,30 @@ def revision_path(skill_path: str, revision: int, content_hash: str) -> str:
     )
 
 
-def load_state(skill_path: str) -> dict:
+def _prepared_unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate prepared skill metadata')
+        result[key] = value
+    return result
+
+
+def load_state(skill_path: str, *, budget=None) -> dict:
     try:
-        with open(state_path(skill_path), encoding="utf-8") as handle:
-            value = json.load(handle)
+        if budget is None:
+            with open(state_path(skill_path), encoding="utf-8") as handle:
+                value = json.load(handle)
+        else:
+            value = json.loads(budget.read(state_path(skill_path), text=True), object_pairs_hook=_prepared_unique_pairs)
+        if budget is not None and type(value) is not dict:
+            raise PreparedReadUnavailable('prepared skill state unavailable')
         return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        if budget is not None:
+            raise PreparedReadUnavailable('prepared skill state unavailable') from exc
         return {}
 
 
@@ -79,8 +226,12 @@ def save_state(skill_path: str, state: dict) -> None:
 
 def ensure_revision(skill, skill_path: str, state: dict | None = None) -> dict:
     """Persist the exact head revision without granting activation authority."""
-    hydrate_identity(skill, skill_path)
     state = dict(load_state(skill_path) if state is None else state)
+    if state.get('metadata_pending') is not None:
+        raise ValueError('skill metadata transition requires recovery')
+    if getattr(skill, "resource_metadata", None) is not None:
+        raise ValueError("metadata-aware skill writing requires a qualified profile")
+    hydrate_identity(skill, skill_path)
     owner = str(skill.owner or "")
     if (
         ("skill_id" in state and state.get("skill_id") != skill.skill_id)
@@ -140,7 +291,7 @@ def ensure_revision(skill, skill_path: str, state: dict | None = None) -> dict:
     return state
 
 
-def read_snapshot(skill_path: str, pointer: dict) -> str | None:
+def read_snapshot(skill_path: str, pointer: dict, *, budget=None) -> str | None:
     relative = str(pointer.get("snapshot") or "")
     parts = PurePosixPath(relative).parts
     if (
@@ -165,7 +316,7 @@ def read_snapshot(skill_path: str, pointer: dict) -> str | None:
             or not target.is_file()
         ):
             return None
-        return target.read_text(encoding="utf-8")
+        return target.read_text(encoding="utf-8") if budget is None else budget.read(target, text=True)
     except OSError:
         return None
 
@@ -358,7 +509,7 @@ def snapshot_bundle(
     }
 
 
-def read_bundle_snapshot(skill_path: str, pointer: dict) -> dict | None:
+def read_bundle_snapshot(skill_path: str, pointer: dict, *, budget=None) -> dict | None:
     relative_root = str(pointer.get("bundle_root") or "")
     relative_manifest = str(pointer.get("bundle_manifest") or "")
     digest = str(pointer.get("bundle_sha256") or "")
@@ -404,13 +555,13 @@ def read_bundle_snapshot(skill_path: str, pointer: dict) -> dict | None:
             or raw_manifest.is_symlink()
         ):
             return None
-        text = manifest_path.read_text(encoding="utf-8")
+        text = manifest_path.read_text(encoding="utf-8") if budget is None else budget.read(manifest_path, text=True)
     except (OSError, ValueError):
         return None
     if hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
         return None
     try:
-        payload = json.loads(text)
+        payload = json.loads(text) if budget is None else json.loads(text, object_pairs_hook=_prepared_unique_pairs)
     except ValueError:
         return None
     if (
@@ -421,6 +572,8 @@ def read_bundle_snapshot(skill_path: str, pointer: dict) -> dict | None:
         return None
     expected_paths: set[str] = set()
     for relative_path, metadata in payload["files"].items():
+        if budget is not None:
+            budget.entry()
         if (
             not isinstance(relative_path, str)
             or _safe_bundle_path(relative_path) != relative_path
@@ -441,7 +594,7 @@ def read_bundle_snapshot(skill_path: str, pointer: dict) -> dict | None:
                 or not target.is_file()
             ):
                 return None
-            content = target.read_bytes()
+            content = target.read_bytes() if budget is None else budget.read(target)
             if (
                 len(content) != metadata["size"]
                 or hashlib.sha256(content).hexdigest() != metadata["sha256"]
@@ -453,7 +606,8 @@ def read_bundle_snapshot(skill_path: str, pointer: dict) -> dict | None:
         expected_paths.add(relative_path)
     actual_paths: set[str] = set()
     try:
-        for current, dirs, names in os.walk(root, topdown=True, followlinks=False):
+        walk = os.walk(root, topdown=True, followlinks=False) if budget is None else _prepared_walk(root, budget)
+        for current, dirs, names in walk:
             current_path = Path(current)
             for name in dirs:
                 if (current_path / name).is_symlink():
@@ -477,21 +631,19 @@ def read_bundle_file(
     skill_path: str,
     pointer: dict,
     relative_path: str,
+    *, budget=None,
 ) -> str | None:
     safe_path = _safe_bundle_path(relative_path)
     if safe_path is None:
         return None
-    payload = read_bundle_snapshot(skill_path, pointer)
+    payload = read_bundle_snapshot(skill_path, pointer, budget=budget)
     if payload is None:
         return None
     if safe_path not in payload["files"]:
         return None
     try:
-        return (
-            Path(payload["root"])
-            .joinpath(*PurePosixPath(safe_path).parts)
-            .read_text(encoding="utf-8")
-        )
+        target = Path(payload["root"]).joinpath(*PurePosixPath(safe_path).parts)
+        return target.read_text(encoding="utf-8") if budget is None else budget.read(target, text=True)
     except (OSError, UnicodeError):
         return None
 

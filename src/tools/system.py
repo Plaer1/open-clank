@@ -51,7 +51,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
             "error": "action is required (list|view|view_ref|add|edit|patch|publish|delete|search)",
             "exit_code": 1,
         }
-    from services.memory.skills import SkillsManager
+    from services.memory.skills import SkillsManager, SkillProtectedDeleteError
     from services.memory.skill_format import Skill, slugify
     from src.constants import DATA_DIR
     sm = SkillsManager(DATA_DIR)
@@ -119,6 +119,9 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
             version=args.get("version") or "1.0.0",
             confidence=args.get("confidence", 0.8),
             source=args.get("source", "learned"),
+            source_uri=args.get("source_uri"),
+            source_revision=args.get("source_revision"),
+            session_id=args.get("session_id"),
             teacher_model=args.get("teacher_model"),
             owner=owner,
             title=args.get("title", ""),
@@ -199,7 +202,10 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     if action == "delete":
         if not name:
             return {"error": "name is required for delete", "exit_code": 1}
-        ok = sm.delete_skill(name, owner=owner)
+        try:
+            ok = sm.delete_skill(name, owner=owner)
+        except SkillProtectedDeleteError:
+            return {"error": "Skill deletion is unavailable for protected or unverifiable lifecycle metadata.", "exit_code": 1}
         return {"results": f"Deleted skill `{name}`."} if ok else {"error": f"Skill {name!r} not found", "exit_code": 1}
 
     if action == "search":
@@ -263,6 +269,8 @@ async def do_manage_tasks(
     session_id: Optional[str] = None,
 ) -> Dict:
     """Handle manage_tasks tool calls: CRUD on scheduled tasks."""
+    if not isinstance(owner, str) or not owner.strip():
+        return {"error": "Authenticated task owner is required.", "exit_code": 1}
     import uuid as _uuid
     from core.database import SessionLocal, ScheduledTask
     from src.task_scheduler import compute_next_run
@@ -299,14 +307,14 @@ async def do_manage_tasks(
     db = SessionLocal()
     try:
         if action == "list":
-            q = db.query(ScheduledTask)
+            q = db.query(ScheduledTask).filter(ScheduledTask.host_account_id.is_(None))
             if owner:
                 q = q.filter(ScheduledTask.owner == owner)
             tasks = q.order_by(ScheduledTask.created_at.desc()).all()
             if not tasks:
-                return {"response": "No scheduled tasks found.", "exit_code": 0}
+                return {"response": "No legacy tasks are available here; account-bound tasks require authenticated Tasks controls.", "exit_code": 0}
 
-            lines = [f"Found {len(tasks)} tasks:"]
+            lines = [f"Found {len(tasks)} legacy tasks (account-bound tasks require authenticated Tasks controls):"]
             for idx, t in enumerate(tasks, 1):
                 bits = [t.status or "unknown"]
                 if t.schedule:
@@ -409,9 +417,9 @@ async def do_manage_tasks(
             task_id = args.get("task_id")
             if not task_id:
                 return {"error": "task_id is required for edit", "exit_code": 1}
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, ScheduledTask.host_account_id.is_(None)).first()
             if not task:
-                return {"error": f"Task {task_id} not found", "exit_code": 1}
+                return {"error": "Task unavailable; account-bound tasks require an authenticated Tasks control.", "exit_code": 1}
             # Strict ownership: the old `task.owner and task.owner != owner`
             # skipped the check on an owner-less task (created in no-login mode
             # or before the legacy-owner sweep), letting any authenticated user
@@ -459,9 +467,9 @@ async def do_manage_tasks(
             task_id = args.get("task_id")
             if not task_id:
                 return {"error": "task_id is required for delete", "exit_code": 1}
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, ScheduledTask.host_account_id.is_(None)).first()
             if not task:
-                return {"error": f"Task {task_id} not found", "exit_code": 1}
+                return {"error": "Task unavailable; account-bound tasks require an authenticated Tasks control.", "exit_code": 1}
             if owner and task.owner != owner:
                 return {"error": "Access denied", "exit_code": 1}
             name = task.name
@@ -473,9 +481,9 @@ async def do_manage_tasks(
             task_id = args.get("task_id")
             if not task_id:
                 return {"error": f"task_id is required for {action}", "exit_code": 1}
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, ScheduledTask.host_account_id.is_(None)).first()
             if not task:
-                return {"error": f"Task {task_id} not found", "exit_code": 1}
+                return {"error": "Task unavailable; account-bound tasks require an authenticated Tasks control.", "exit_code": 1}
             if owner and task.owner != owner:
                 return {"error": "Access denied", "exit_code": 1}
 
@@ -494,9 +502,9 @@ async def do_manage_tasks(
             task_id = args.get("task_id")
             if not task_id:
                 return {"error": "task_id is required for run", "exit_code": 1}
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id, ScheduledTask.host_account_id.is_(None)).first()
             if not task:
-                return {"error": f"Task {task_id} not found", "exit_code": 1}
+                return {"error": "Task unavailable; account-bound tasks require an authenticated Tasks control.", "exit_code": 1}
             if owner and task.owner != owner:
                 return {"error": "Access denied", "exit_code": 1}
 

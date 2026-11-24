@@ -1,0 +1,857 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.local/contracts/comfy-job-v1.schema.json",
+  "$comment": "Closed presentation DTO only. Authentication, owner, resource and provider authority are server-resolved; byte, depth, finite numeric bounds, min <= max and canonical digest limits are enforced by the route.",
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "parameters": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "maxLength": 16384
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          }
+        ]
+      }
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "submitting",
+        "queued",
+        "running",
+        "collecting",
+        "stopping",
+        "complete",
+        "failed",
+        "cancel_requested",
+        "cancelled",
+        "unknown_outcome",
+        "reconciling"
+      ]
+    },
+    "inspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionID",
+        "recipeRef"
+      ],
+      "properties": {
+        "sessionID": {
+          "$ref": "#/$defs/token"
+        },
+        "recipeRef": {
+          "$ref": "#/$defs/ref"
+        }
+      }
+    },
+    "prepare": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionID",
+        "connectionID",
+        "recipeRef",
+        "destinationRef",
+        "destinationName",
+        "parameters"
+      ],
+      "properties": {
+        "sessionID": {
+          "$ref": "#/$defs/token"
+        },
+        "connectionID": {
+          "$ref": "#/$defs/token"
+        },
+        "recipeRef": {
+          "$ref": "#/$defs/ref"
+        },
+        "destinationRef": {
+          "$ref": "#/$defs/ref"
+        },
+        "destinationName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "parameters": {
+          "$ref": "#/$defs/parameters"
+        },
+        "outputProfile": {
+          "enum": [
+            "png",
+            "flac"
+          ]
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobID",
+        "revision",
+        "parameters"
+      ],
+      "properties": {
+        "jobID": {
+          "$ref": "#/$defs/token"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "parameters": {
+          "$ref": "#/$defs/parameters"
+        }
+      }
+    },
+    "recoveryPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobID",
+        "destinationRef",
+        "destinationName"
+      ],
+      "properties": {
+        "jobID": {
+          "$ref": "#/$defs/token"
+        },
+        "destinationRef": {
+          "$ref": "#/$defs/ref"
+        },
+        "destinationName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "recoveryPrepared": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobID",
+        "revision",
+        "recoveryID",
+        "destination",
+        "artifact"
+      ],
+      "properties": {
+        "jobID": {
+          "$ref": "#/$defs/token"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "recoveryID": {
+          "$ref": "#/$defs/token"
+        },
+        "destination": {
+          "$ref": "#/$defs/destination"
+        },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sha256",
+            "size"
+          ],
+          "properties": {
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "recoverySave": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobID",
+        "revision",
+        "recoveryID"
+      ],
+      "properties": {
+        "jobID": {
+          "$ref": "#/$defs/token"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "recoveryID": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "jobRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobID"
+      ],
+      "properties": {
+        "jobID": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "slot": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "type"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "type": {
+              "enum": [
+                "string",
+                "boolean"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "type",
+            "min",
+            "max"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "type": {
+              "const": "integer"
+            },
+            "min": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "max": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "type",
+            "min",
+            "max"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "type": {
+              "const": "number"
+            },
+            "min": {
+              "type": "number"
+            },
+            "max": {
+              "type": "number"
+            }
+          }
+        }
+      ]
+    },
+    "recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "sha256",
+        "nodeClasses",
+        "slots"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "nodeClasses": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "slots": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/slot"
+          }
+        }
+      }
+    },
+    "inspected": {
+      "$ref": "#/$defs/recipe"
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "connectionID",
+        "connectionRevision",
+        "interface"
+      ],
+      "properties": {
+        "connectionID": {
+          "$ref": "#/$defs/token"
+        },
+        "connectionRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "interface": {
+          "const": "comfyui-workflow-v1"
+        }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "folder"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "folder": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "prepared": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobID",
+        "revision",
+        "state",
+        "profile",
+        "destination",
+        "recipe",
+        "parameters"
+      ],
+      "properties": {
+        "jobID": {
+          "$ref": "#/$defs/token"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "const": "prepared"
+        },
+        "profile": {
+          "$ref": "#/$defs/profile"
+        },
+        "destination": {
+          "$ref": "#/$defs/destination"
+        },
+        "recipe": {
+          "$ref": "#/$defs/recipe"
+        },
+        "parameters": {
+          "$ref": "#/$defs/parameters"
+        },
+        "outputProfile": {
+          "const": "flac"
+        }
+      }
+    },
+    "meshyRefineParameters": {"type":"object","additionalProperties":false,"required":["enablePBR"],"properties":{"enablePBR":{"type":"boolean"}}},
+    "meshyRefinePrepare": {"type":"object","additionalProperties":false,"required":["sessionID","sourceJobID","destinationRef","destinationName","parameters"],"properties":{"sessionID":{"$ref":"#/$defs/token"},"sourceJobID":{"$ref":"#/$defs/token"},"destinationRef":{"$ref":"#/$defs/ref"},"destinationName":{"type":"string","minLength":1,"maxLength":255},"parameters":{"$ref":"#/$defs/meshyRefineParameters"}}},
+    "meshyRefinePrepared": {"type":"object","additionalProperties":false,"required":["jobID","revision","state","profile","source","destination","parameters","notice"],"properties":{"jobID":{"$ref":"#/$defs/token"},"revision":{"type":"integer","minimum":1},"state":{"const":"prepared"},"profile":{"type":"object","additionalProperties":false,"required":["connectionID","connectionRevision","providerAccountID","providerAccountRevision","credentialVersion","interface"],"properties":{"connectionID":{"$ref":"#/$defs/token"},"connectionRevision":{"type":"integer","minimum":1},"providerAccountID":{"$ref":"#/$defs/token"},"providerAccountRevision":{"type":"integer","minimum":1},"credentialVersion":{"type":"integer","minimum":1},"interface":{"const":"meshy-preview-v1"}}},"source":{"type":"object","additionalProperties":false,"required":["jobID","sha256"],"properties":{"jobID":{"$ref":"#/$defs/token"},"sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"}}},"destination":{"type":"object","additionalProperties":false,"required":["name","folder"],"properties":{"name":{"type":"string","minLength":1,"maxLength":255},"folder":{"type":"string","maxLength":4096}}},"parameters":{"$ref":"#/$defs/meshyRefineParameters"},"notice":{"type":"string","maxLength":1024}}},
+    "animationMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "animationID",
+        "type",
+        "frameCount",
+        "fps",
+        "width",
+        "height",
+        "sha256"
+      ],
+      "properties": {
+        "animationID": {
+          "type": "string",
+          "pattern": "^anim_[A-Za-z0-9_-]{1,124}$"
+        },
+        "type": {
+          "enum": [
+            "idle",
+            "walk",
+            "run",
+            "attack",
+            "jump",
+            "death",
+            "hurt"
+          ]
+        },
+        "frameCount": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 12
+        },
+        "fps": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 60
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "selectedSpriteLayout": {"type":"object","additionalProperties":false,"required":["version","source","sourceWidth","sourceHeight","cellWidth","cellHeight","sheetWidth","sheetHeight","frames","fps","facing","palette","style","sha256"],"properties":{"version":{"const":2},"source":{"type":"object","additionalProperties":false,"required":["resourceID","revision","sha256"],"properties":{"resourceID":{"type":"string","minLength":1,"maxLength":256},"revision":{"type":"object","additionalProperties":false,"required":["kind","value"],"properties":{"kind":{"type":"string","minLength":1,"maxLength":512},"value":{"type":"string","minLength":1,"maxLength":512}}},"sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"}}},"sourceWidth":{"type":"integer","minimum":1,"maximum":4096},"sourceHeight":{"type":"integer","minimum":1,"maximum":4096},"cellWidth":{"type":"integer","minimum":1,"maximum":512},"cellHeight":{"type":"integer","minimum":1,"maximum":512},"sheetWidth":{"type":"integer","minimum":2,"maximum":1024},"sheetHeight":{"type":"integer","minimum":2,"maximum":1024},"frames":{"type":"array","minItems":4,"maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["index","sourceRect","x","y","width","height","pivot"],"properties":{"index":{"type":"integer","minimum":0,"maximum":3},"sourceRect":{"type":"object","additionalProperties":false,"required":["x","y","width","height"],"properties":{"x":{"type":"integer","minimum":0,"maximum":4095},"y":{"type":"integer","minimum":0,"maximum":4095},"width":{"type":"integer","minimum":1,"maximum":512},"height":{"type":"integer","minimum":1,"maximum":512}}},"x":{"type":"integer","minimum":0,"maximum":512},"y":{"type":"integer","minimum":0,"maximum":512},"width":{"type":"integer","minimum":1,"maximum":512},"height":{"type":"integer","minimum":1,"maximum":512},"pivot":{"type":"object","additionalProperties":false,"required":["x","y"],"properties":{"x":{"type":"integer","minimum":0,"maximum":512},"y":{"type":"integer","minimum":0,"maximum":512}}}}}},"fps":{"type":"integer","minimum":1,"maximum":60},"facing":{"oneOf":[{"type":"null"},{"type":"string","minLength":1,"maxLength":128}]},"palette":{"oneOf":[{"type":"null"},{"type":"string","minLength":1,"maxLength":128}]},"style":{"oneOf":[{"type":"null"},{"type":"string","minLength":1,"maxLength":128}]},"sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"}}},
+    "fourHeadingLayout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "coordinateFrame",
+        "cellWidth",
+        "cellHeight",
+        "sheetWidth",
+        "sheetHeight",
+        "views",
+        "sha256"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "coordinateFrame": {
+          "const": "imported-world-z"
+        },
+        "cellWidth": {
+          "const": 512
+        },
+        "cellHeight": {
+          "const": 512
+        },
+        "sheetWidth": {
+          "const": 1024
+        },
+        "sheetHeight": {
+          "const": 1024
+        },
+        "views": {
+          "const": [
+            {
+              "degrees": 0,
+              "x": 0,
+              "y": 0,
+              "width": 512,
+              "height": 512
+            },
+            {
+              "degrees": 90,
+              "x": 512,
+              "y": 0,
+              "width": 512,
+              "height": 512
+            },
+            {
+              "degrees": 180,
+              "x": 0,
+              "y": 512,
+              "width": 512,
+              "height": 512
+            },
+            {
+              "degrees": 270,
+              "x": 512,
+              "y": 512,
+              "width": 512,
+              "height": 512
+            }
+          ]
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "filesReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationID",
+        "itemID",
+        "resourceRef",
+        "sha256",
+        "mimeType"
+      ],
+      "properties": {
+        "operationID": {
+          "$ref": "#/$defs/token"
+        },
+        "itemID": {
+          "const": "output"
+        },
+        "resourceRef": {
+          "$ref": "#/$defs/ref"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "mimeType": {
+          "enum": [
+            "image/png",
+            "model/gltf-binary",
+            "audio/flac",
+            "video/webm"
+          ]
+        },
+        "animation": {
+          "$ref": "#/$defs/animationMetadata"
+        },
+        "layout": {
+          "oneOf": [{"$ref":"#/$defs/fourHeadingLayout"},{"$ref":"#/$defs/selectedSpriteLayout"}]
+        },
+        "audio": {
+          "$ref": "#/$defs/flacHeader"
+        }
+      }
+    },
+    "trimTiming": {
+      "type": "object", "additionalProperties": false, "required": ["requested", "observed"],
+      "properties": {
+        "requested": { "type": "object", "additionalProperties": false, "required": ["start_ms", "end_ms", "timebase"],
+          "properties": { "start_ms": { "type": "integer", "minimum": 0 }, "end_ms": { "type": "integer", "minimum": 1 }, "timebase": { "const": "playback_hint" } } },
+        "observed": { "type": "object", "additionalProperties": false,
+          "required": ["timebase", "first_pts_ns", "last_pts_ns", "last_duration_ns", "selected_frames", "encoded_frames", "coverage"],
+          "properties": { "timebase": { "const": "source_stream_nanoseconds" },
+            "first_pts_ns": { "type": "integer", "minimum": 0 }, "last_pts_ns": { "type": "integer", "minimum": 0 },
+            "last_duration_ns": { "type": ["integer", "null"], "minimum": 0 },
+            "selected_frames": { "type": "integer", "minimum": 1 }, "encoded_frames": { "type": "integer", "minimum": 1 },
+            "coverage": { "enum": ["reached_end", "source_eos_before_end", "unknown"] } } }
+      }
+    },
+    "recordingObservations": {"type":"object","additionalProperties":false,"required":["measurements","upstream_loss"],"properties":{"upstream_loss":{"const":"unknown"},"measurements":{"type":"object","additionalProperties":false,"required":["source_pixels","output_pixels","caps_changed","source","rate_output","encoded","videorate"],"properties":{"source_pixels":{"oneOf":[{"type":"null"},{"type":"array","minItems":2,"maxItems":2,"items":{"type":"integer","minimum":1,"maximum":65536}}]},"output_pixels":{"oneOf":[{"type":"null"},{"type":"array","minItems":2,"maxItems":2,"items":{"type":"integer","minimum":1,"maximum":65536}}]},"caps_changed":{"type":"boolean"},"source":{"type":"object","additionalProperties":false,"required":["buffers","missing_pts","missing_running","first_pts_ns","last_pts_ns","first_running_ns","last_running_ns"],"properties":{"buffers":{"type":"integer","minimum":0,"maximum":9007199254740991},"missing_pts":{"type":"integer","minimum":0,"maximum":9007199254740991},"missing_running":{"type":"integer","minimum":0,"maximum":9007199254740991},"first_pts_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"last_pts_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"first_running_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"last_running_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]}}},"rate_output":{"type":"object","additionalProperties":false,"required":["buffers","missing_pts","missing_running","first_pts_ns","last_pts_ns","first_running_ns","last_running_ns"],"properties":{"buffers":{"type":"integer","minimum":0,"maximum":9007199254740991},"missing_pts":{"type":"integer","minimum":0,"maximum":9007199254740991},"missing_running":{"type":"integer","minimum":0,"maximum":9007199254740991},"first_pts_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"last_pts_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"first_running_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"last_running_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]}}},"encoded":{"type":"object","additionalProperties":false,"required":["buffers","missing_pts","missing_running","first_pts_ns","last_pts_ns","first_running_ns","last_running_ns"],"properties":{"buffers":{"type":"integer","minimum":0,"maximum":9007199254740991},"missing_pts":{"type":"integer","minimum":0,"maximum":9007199254740991},"missing_running":{"type":"integer","minimum":0,"maximum":9007199254740991},"first_pts_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"last_pts_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"first_running_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"last_running_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]}}},"videorate":{"type":"object","additionalProperties":false,"required":["in","out","drop","duplicate"],"properties":{"in":{"oneOf":[{"type":"null"},{"type":"integer","minimum":0,"maximum":9007199254740991}]},"out":{"oneOf":[{"type":"null"},{"type":"integer","minimum":0,"maximum":9007199254740991}]},"drop":{"oneOf":[{"type":"null"},{"type":"integer","minimum":0,"maximum":9007199254740991}]},"duplicate":{"oneOf":[{"type":"null"},{"type":"integer","minimum":0,"maximum":9007199254740991}]}}}}}}},
+    "recordingAudioChoices": {"description":"Source dimensions have a 16,000,000 pixel combined limit enforced by the host.","type":"object","additionalProperties":false,"required":["generation","choices"],"properties":{"preview":{"type":"object","additionalProperties":false,"required":["basis_id","source_width","source_height","preview_width","preview_height","bytes","sha256","mime","png"],"properties":{"basis_id":{"type":"string","pattern":"^[a-f0-9]{32}$"},"source_width":{"type":"integer","minimum":1,"maximum":16384},"source_height":{"type":"integer","minimum":1,"maximum":16384},"preview_width":{"type":"integer","minimum":1,"maximum":960},"preview_height":{"type":"integer","minimum":1,"maximum":540},"bytes":{"type":"integer","minimum":24,"maximum":2097152},"sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},"mime":{"const":"image/png"},"png":{"type":"string","maxLength":2796204}}},"generation":{"type":"string","pattern":"^[a-f0-9]{32}$"},"choices":{"type":"array","maxItems":24,"items":{"type":"object","additionalProperties":false,"required":["kind","choice_id","label","channels"],"properties":{"kind":{"enum":["microphone","system_output"]},"choice_id":{"type":"string","pattern":"^[a-f0-9]{32}$"},"label":{"type":"string","minLength":1,"maxLength":64},"channels":{"oneOf":[{"const":["MONO"]},{"const":["FL","FR"]},{"const":["FR","FL"]}]}}}}}},
+    "recordingAudioSelection": {"type":"object","additionalProperties":false,"required":["state","selectionID","selectionDigest","generation","selectedKinds"],"properties":{"crop":{"type":"object","additionalProperties":false,"required":["mode","basis_id","rect"],"properties":{"mode":{"enum":["full","crop"]},"basis_id":{"type":"string","pattern":"^[a-f0-9]{32}$"},"rect":{"oneOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["x","y","width","height"],"properties":{"x":{"type":"integer","minimum":0,"maximum":16384},"y":{"type":"integer","minimum":0,"maximum":16384},"width":{"type":"integer","minimum":0,"maximum":16384},"height":{"type":"integer","minimum":0,"maximum":16384}}}]}}},"state":{"enum":["issued","accepted","unknown"]},"selectionID":{"type":"string","pattern":"^[a-f0-9]{32}$"},"selectionDigest":{"type":"string","pattern":"^[a-f0-9]{64}$"},"generation":{"type":"string","pattern":"^[a-f0-9]{32}$"},"selectedKinds":{"enum":[[],["microphone"],["system_output"],["microphone","system_output"]]}}},
+    "recordingAudioTracks": {"description":"Finalized selected tracks require positive submitted frames, ordered present running timestamps, and queued frames equal submitted plus pre-start discarded; partial tracks may be incomplete.","type":"array","maxItems":2,"items":{"type":"object","additionalProperties":false,"required":["kind","stage","assurance","sample_rate","channels","queued_frames","submitted_frames","first_running_ns","last_running_ns","max_clock_uncertainty_ns","last_graph_delay_ns","discontinuities","missing_metadata","header_buffers","header_absent_buffers","pre_start_discarded_frames","eos"],"properties":{"kind":{"enum":["microphone","system_output"]},"stage":{"const":"pcm_appsrc_submission"},"assurance":{"const":"software_correlated_estimate"},"sample_rate":{"enum":[null,48000]},"channels":{"enum":[null,1,2]},"queued_frames":{"type":"integer","minimum":0,"maximum":9007199254740991},"submitted_frames":{"type":"integer","minimum":0,"maximum":9007199254740991},"first_running_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"last_running_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"max_clock_uncertainty_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$"}]},"last_graph_delay_ns":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^(0|-?[1-9][0-9]{0,18})$"}]},"discontinuities":{"type":"integer","minimum":0,"maximum":9007199254740991},"missing_metadata":{"type":"integer","minimum":0,"maximum":9007199254740991},"header_buffers":{"type":"integer","minimum":0,"maximum":9007199254740991},"header_absent_buffers":{"type":"integer","minimum":0,"maximum":9007199254740991},"pre_start_discarded_frames":{"type":"integer","minimum":0,"maximum":9007199254740991},"eos":{"type":"boolean"}}}},
+    "jobResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobID",
+        "revision",
+        "state",
+        "cancelAvailable"
+      ],
+      "properties": {
+        "audioChoices": { "$ref": "#/$defs/recordingAudioChoices" },
+        "audioSelection": { "$ref": "#/$defs/recordingAudioSelection" },
+        "audioTracks": { "$ref": "#/$defs/recordingAudioTracks" },
+        "recordingObservations": { "$ref": "#/$defs/recordingObservations" },
+        "trimTiming": { "$ref": "#/$defs/trimTiming" },
+        "outputMime": {
+          "enum": [
+            "image/png",
+            "model/gltf-binary",
+            "audio/flac",
+            "video/webm"
+          ]
+        },
+        "recordingPhase": { "enum": [null, "consent_pending", "audio_choices", "starting", "recording"] },
+        "stopAvailable": { "type": "boolean" },
+        "stopState": { "enum": [null, "issued", "accepted", "unknown"] },
+        "partialAvailable": { "type": "boolean" },
+        "audio": { "enum": ["unavailable", "selecting", "selected", "off"] },
+        "partialRecovery": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "object", "additionalProperties": false, "required": ["recoveryID", "state"],
+              "properties": { "recoveryID": { "$ref": "#/$defs/token" },
+                "state": { "enum": ["prepared", "dispatched", "unknown", "complete"] } } }
+          ]
+        },
+        "cancelAvailable": {
+          "type": "boolean"
+        },
+        "canRefine": {
+          "type": "boolean"
+        },
+        "jobID": {
+          "$ref": "#/$defs/token"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "reason": {
+          "enum": [
+            "unavailable",
+            "stale",
+            "unsupported",
+            "unknown",
+            "files_receipt",
+            "not_dispatched"
+          ]
+        },
+        "result": {
+          "$ref": "#/$defs/filesReceipt"
+        }
+      }
+    },
+    "jobListItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobID",
+        "revision",
+        "state",
+        "detached",
+        "cancelAvailable"
+      ],
+      "properties": {
+        "audioChoices": { "$ref": "#/$defs/recordingAudioChoices" },
+        "audioSelection": { "$ref": "#/$defs/recordingAudioSelection" },
+        "audioTracks": { "$ref": "#/$defs/recordingAudioTracks" },
+        "recordingObservations": { "$ref": "#/$defs/recordingObservations" },
+        "trimTiming": { "$ref": "#/$defs/trimTiming" },
+        "outputMime": {
+          "enum": [
+            "image/png",
+            "model/gltf-binary",
+            "audio/flac",
+            "video/webm"
+          ]
+        },
+        "recordingPhase": { "enum": [null, "consent_pending", "audio_choices", "starting", "recording"] },
+        "stopAvailable": { "type": "boolean" },
+        "stopState": { "enum": [null, "issued", "accepted", "unknown"] },
+        "partialAvailable": { "type": "boolean" },
+        "audio": { "enum": ["unavailable", "selecting", "selected", "off"] },
+        "partialRecovery": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "object", "additionalProperties": false, "required": ["recoveryID", "state"],
+              "properties": { "recoveryID": { "$ref": "#/$defs/token" },
+                "state": { "enum": ["prepared", "dispatched", "unknown", "complete"] } } }
+          ]
+        },
+        "cancelAvailable": {
+          "type": "boolean"
+        },
+        "canRefine": {
+          "type": "boolean"
+        },
+        "recovery": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "recoveryID",
+                "state"
+              ],
+              "properties": {
+                "recoveryID": {
+                  "$ref": "#/$defs/token"
+                },
+                "state": {
+                  "enum": [
+                    "prepared",
+                    "dispatched",
+                    "unknown",
+                    "complete"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "jobID": {
+          "$ref": "#/$defs/token"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "reason": {
+          "enum": [
+            "unavailable",
+            "stale",
+            "unsupported",
+            "unknown",
+            "files_receipt",
+            "not_dispatched"
+          ]
+        },
+        "result": {
+          "$ref": "#/$defs/filesReceipt"
+        }
+      }
+    },
+    "jobPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "nextCursor",
+        "omitted"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/jobListItem"
+          }
+        },
+        "nextCursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/token"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "omitted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "flacHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sampleRate",
+        "channels",
+        "bitsPerSample",
+        "declaredSamples",
+        "payloadVerified"
+      ],
+      "properties": {
+        "sampleRate": {
+          "type": "integer",
+          "minimum": 8000,
+          "maximum": 192000
+        },
+        "channels": {
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "bitsPerSample": {
+          "enum": [
+            16,
+            24
+          ]
+        },
+        "declaredSamples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 115200000
+        },
+        "payloadVerified": {
+          "const": false
+        }
+      }
+    }
+  }
+}

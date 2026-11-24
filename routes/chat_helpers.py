@@ -149,6 +149,7 @@ class PreprocessedMessage:
     text_for_context: str
     youtube_transcripts: list
     attachment_meta: list
+    media_witnesses: list | None = None
 
 
 @dataclass
@@ -240,6 +241,14 @@ def _enforce_chat_privileges(request, sess) -> None:
         raise HTTPException(429, f"Daily message limit reached ({cap}). Try again in 24 hours.")
 
 
+def media_input_counts(attachment_meta) -> dict[str, int]:
+    """Per-turn image-input counts from the attachment records' media-input receipts (Stats `mediaInputs*` metrics); {} without images."""
+    receipts = [m.get("media_input") for m in (attachment_meta or []) if isinstance(m, dict) and isinstance(m.get("media_input"), dict)]
+    if not receipts:
+        return {}
+    return {"mediaInputsEvaluated": len(receipts), "mediaInputsNotSent": sum(1 for r in receipts if r.get("sent") is False)}
+
+
 def needs_auto_name(name: str) -> bool:
     """Check if a session still has its default/placeholder name."""
     if not name:
@@ -326,15 +335,17 @@ async def auto_name_session(session_manager, sess):
 
 def extract_preset(chat_handler, preset_id, owner: str = "") -> PresetInfo:
     """Extract preset parameters via chat_handler."""
-    temperature, max_tokens, system_prompt, char_name = (
-        chat_handler.validate_and_extract_preset(preset_id, owner=owner)
-    )
-    return PresetInfo(
-        temperature=temperature,
-        max_tokens=max_tokens,
-        system_prompt=system_prompt,
-        character_name=char_name,
-    )
+    owned_resolver = getattr(chat_handler, '_validate_preset_with_factory_origin', None)
+    if callable(owned_resolver):
+        values, selection = owned_resolver(preset_id, owner=owner)
+    else:
+        values, selection = chat_handler.validate_and_extract_preset(preset_id, owner=owner), None
+    temperature, max_tokens, system_prompt, char_name = values
+    result = PresetInfo(temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt, character_name=char_name)
+    if selection is not None:
+        result._factory_selection = selection
+        result._factory_owner = owner
+    return result
 
 
 def session_persona_override(session_id: str, preset: PresetInfo) -> PresetInfo:
@@ -345,6 +356,9 @@ def session_persona_override(session_id: str, preset: PresetInfo) -> PresetInfo:
     for that chat only; the global default persona covers branding and new
     chats. Fail-open: any error keeps the incoming preset.
     """
+    # A reused preset must never retain an earlier successful DB observation.
+    if hasattr(preset, '_factory_session'):
+        del preset._factory_session
     try:
         import json as _json
 
@@ -355,7 +369,15 @@ def session_persona_override(session_id: str, preset: PresetInfo) -> PresetInfo:
             row = db.query(_DbSession.persona).filter(_DbSession.id == session_id).first()
         finally:
             db.close()
-        if not row or not row.persona:
+        if not row:
+            return preset
+        if not row.persona:
+            from src.default_persona import bind_factory_session
+            selection = getattr(preset, '_factory_selection', None)
+            bound = bind_factory_session(selection, owner=getattr(preset, '_factory_owner', None), chat_id=session_id,
+                system_prompt=preset.system_prompt, character_name=preset.character_name)
+            if bound is not None:
+                preset._factory_session = bound
             return preset
         record = _json.loads(row.persona)
         if not isinstance(record, dict):
@@ -383,8 +405,15 @@ async def preprocess(
     structured_resources: bool = False,
     root_operation_id: Optional[str] = None,
     provider_grant_id: Optional[str] = None,
+    auth_manager=None,
 ) -> PreprocessedMessage:
     """Run chat_handler.preprocess_message and wrap the result."""
+    import inspect
+    media_witnesses = []
+    try:
+        extra = {"media_witnesses": media_witnesses} if "media_witnesses" in inspect.signature(chat_handler.preprocess_message).parameters else {}
+    except (TypeError, ValueError):
+        extra = {}
     enhanced, user_content, text_ctx, yt_transcripts, att_meta = (
         await chat_handler.preprocess_message(
             message,
@@ -395,6 +424,8 @@ async def preprocess(
             structured_resources=structured_resources,
             root_operation_id=root_operation_id,
             provider_grant_id=provider_grant_id,
+            auth_manager=auth_manager,
+            **extra,
         )
     )
     return PreprocessedMessage(
@@ -403,6 +434,7 @@ async def preprocess(
         text_for_context=text_ctx,
         youtube_transcripts=yt_transcripts,
         attachment_meta=att_meta,
+        media_witnesses=media_witnesses,
     )
 
 
@@ -468,23 +500,37 @@ def add_user_message(
     preprocessed: PreprocessedMessage,
     incognito: bool = False,
     root_operation_id: Optional[str] = None,
+    model_request_options: Optional[dict] = None,
+    origin_admission=None,
+    deliverable_appearance=None,
+    connector_guard=None,
+    channel_guard=None,
+    tui_guard=None,
+    buddy_help: str | None = None,
 ):
     """Add user message to session history and update session name.
     Incognito messages must not mutate persistent session history, even in
     memory, because a later normal turn can persist the same session object."""
     if incognito:
         return
-    user_meta = {}
+    user_meta = {"buddy_help": buddy_help} if buddy_help else {}
     if preprocessed.attachment_meta:
         user_meta["attachments"] = preprocessed.attachment_meta
     if root_operation_id:
         user_meta["root_operation_id"] = root_operation_id
+    if model_request_options is not None:
+        user_meta["model_request_options"] = dict(model_request_options)
+    if deliverable_appearance is not None:
+        user_meta["deliverable_appearance"] = deliverable_appearance
     sess.add_message(ChatMessage(
         "user",
         preprocessed.user_content,
         metadata=user_meta,
         persistence_id=root_operation_id,
-    ))
+    ), **({"origin_admission": origin_admission} if origin_admission is not None else {}),
+       **({"connector_guard": connector_guard} if connector_guard is not None else {}),
+       **({"tui_guard": tui_guard} if tui_guard is not None else {}),
+       **({"channel_guard": channel_guard} if channel_guard is not None else {}))
     chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
 
 
@@ -545,10 +591,17 @@ async def build_chat_context(
     allow_tool_preprocessing: bool = True,
     structured_resources: bool = False,
     root_operation_id: Optional[str] = None,
+    origin_admission=None,
+    model_request_options: Optional[dict] = None,
     provider_grant_id: Optional[str] = None,
     has_persistent_engine: bool = False,
     hex_workspace: str = "",
     hex_workspace_id: str = "",
+    deliverable_appearance: Optional[dict] = None,
+    connector_guard=None,
+    channel_guard=None,
+    tui_guard=None,
+    buddy_help: str | None = None,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -582,6 +635,7 @@ async def build_chat_context(
         structured_resources=structured_resources,
         root_operation_id=root_operation_id,
         provider_grant_id=provider_grant_id,
+        auth_manager=getattr(request.app.state,'auth_manager',None),
     )
 
     # Add user message to history. Nobody/incognito uses a request-local
@@ -593,6 +647,8 @@ async def build_chat_context(
             user_meta["attachments"] = preprocessed.attachment_meta
         if root_operation_id:
             user_meta["root_operation_id"] = root_operation_id
+        if model_request_options is not None:
+            user_meta["model_request_options"] = dict(model_request_options)
         _append_incognito_message(session_id, "user", preprocessed.user_content, user_meta)
     else:
         if root_operation_id:
@@ -602,14 +658,24 @@ async def build_chat_context(
                 preprocessed,
                 incognito=False,
                 root_operation_id=root_operation_id,
+                model_request_options=model_request_options,
+                origin_admission=origin_admission,
+                deliverable_appearance=deliverable_appearance,
+                connector_guard=connector_guard,
+                channel_guard=channel_guard,
+                tui_guard=tui_guard,
+                **({"buddy_help": buddy_help} if buddy_help else {}),
             )
         else:
             # Retain the long-standing helper call shape for non-chat callers
             # and test adapters that do not participate in managed operations.
-            add_user_message(sess, chat_handler, preprocessed, incognito=False)
+            add_user_message(
+                sess, chat_handler, preprocessed, incognito=False,
+                model_request_options=model_request_options,
+            )
 
     # Fire events
-    if not incognito:
+    if not incognito and not buddy_help:
         fire_message_event(request, webhook_manager, session_id, sess, message, compare_mode)
 
     # Resolve owner-scoped prefs/context. Browser requests keep the cookie user;
@@ -673,7 +739,7 @@ async def build_chat_context(
         message=_ctx_msg,
         session=sess,
         use_web=use_web and not skip_web,
-        use_memory=mem_enabled,
+        use_memory=mem_enabled and not has_persistent_engine,
         time_filter=time_filter,
         preset_system_prompt=preset.system_prompt,
         owner=user,
@@ -683,8 +749,23 @@ async def build_chat_context(
         use_skills=skills_enabled,
         root_operation_id=root_operation_id,
     )
-    if use_rag is not None or is_research_spinoff or casual_low_signal:
+    if use_rag is not None or not use_rag_val or is_research_spinoff or casual_low_signal:
         _preface_kwargs["use_rag"] = use_rag_val
+    if use_rag_val:
+        try:
+            from src.auth_helpers import require_privilege
+            if require_privilege(request,'can_use_documents')!=user:raise ValueError('document privilege unavailable')
+        except Exception:
+            use_rag_val=False
+            _preface_kwargs['use_rag']=False
+    if use_rag_val and not incognito and not compare_mode and not no_memory and origin_admission is not None:
+        try:
+            from src.openclank.document_vector_access import _issue_chat_document_search
+            _document_authority=_issue_chat_document_search(request,origin_admission,owner=user,chat=session_id,
+                root=root_operation_id,incognito=incognito,compare_mode=compare_mode,no_memory=no_memory)
+            if _document_authority is not None:_preface_kwargs['document_vector_authority']=_document_authority
+        except Exception:
+            pass
     preface_result = chat_processor.build_context_preface(**_preface_kwargs)
     if inspect.isawaitable(preface_result):
         preface_result = await preface_result
@@ -1157,6 +1238,7 @@ def run_post_response_tasks(
     memory_provider=None,
     no_memory: bool = False,
     root_operation_id: str | None = None,
+    user_body_candidate=None,
 ):
     """Fire background tasks after a completed response: memory extraction, webhooks, auto-name, skill extraction.
 
@@ -1173,13 +1255,24 @@ def run_post_response_tasks(
     turn's request too.
     """
     _extraction_jobs: list = []
+    # These consumers inspect a live history, but no current producer can yet
+    # prove all contributing messages' immutable privacy or freeze that view.
+    # Keep pair-only provider capture independent of this unavailable gate.
+    history_source_coverage = False
 
     _provider_captures = (
         memory_provider is not None
         and getattr(memory_provider, "provider_id", "native") != "native"
         and hasattr(memory_provider, "capture")
     )
-    if _provider_captures:
+    # Guarded Memery admits completed turns through its S05 owner;
+    # generic provider capture is deliberately unavailable on that profile.
+    _guarded_memery = False
+    if _provider_captures and getattr(memory_provider, "provider_id", None) == "memery":
+        from src.memery_provider import MemeryProvider
+        _guarded_memery = (isinstance(memory_provider, MemeryProvider)
+                                  and memory_provider._guarded_v17 is True)
+    if _provider_captures and not _guarded_memery:
         # Provider-backed capture, every turn, every transport — mimo is a
         # provider leg, not a separate memory system, and only this seam
         # knows the full policy context (incognito, compare, auto_memory).
@@ -1207,23 +1300,15 @@ def run_post_response_tasks(
                 ),
                 root_operation_id=root_operation_id,
             )))
-    else:
+    elif not _provider_captures:
         # Native-store extraction — only every 4th message pair to avoid
         # excess LLM calls
         _msg_count = len(sess.history) if hasattr(sess, 'history') else 0
         _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
-        if (
-            allow_background_extraction
-            and not no_memory
-            and capture_allowed(uprefs, incognito=incognito, compare_mode=compare_mode)
-            and _should_extract
-        ):
-            from services.memory.memory_extractor import extract_and_store
-            _extraction_jobs.append(("memory", extract_and_store(
-                sess, memory_manager, memory_vector,
-                owner=owner,
-                root_operation_id=root_operation_id,
-            )))
+        # S04 reference preparation is not S05 admission.  Do not hydrate or
+        # dispatch native automatic learning until the durable gate exists.
+        if allow_background_extraction and not no_memory and _should_extract:
+            logger.info("native memory derivation unavailable for owner %s: admission and writer authority unavailable", owner)
 
     # Skill extraction from complex agent runs. Only when the user actually
     # chose agent mode — not a chat we auto-escalated for a notes/calendar
@@ -1244,7 +1329,9 @@ def run_post_response_tasks(
         and allow_background_extraction
         and auto_skills_enabled
         and not incognito
+        and not no_memory
         and not compare_mode
+        and history_source_coverage
         and (agent_rounds >= 2 or agent_tool_calls >= 2)
     ):
         if skills_manager is None:
@@ -1262,6 +1349,11 @@ def run_post_response_tasks(
                 owner=owner,
                 root_operation_id=root_operation_id,
             )))
+
+    if (extract_skills and allow_background_extraction and auto_skills_enabled and not incognito
+        and not no_memory and not compare_mode and (agent_rounds >= 2 or agent_tool_calls >= 2)
+        and not history_source_coverage):
+        logger.info("skill derivation unavailable for owner %s: history source coverage unavailable", owner)
 
     if _extraction_jobs:
         _spawn_bg(

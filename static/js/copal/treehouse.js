@@ -1,3 +1,4 @@
+import { registerAdapter } from '../custom-context-menu.js';
 import {createTreeHouseDiscovery} from './treehouseDiscovery.js';
 import {createTreeHouseNavigation} from './treehouseNavigation.js';
 import { createTreeHouseTopicWeb } from './treehouseTopicWeb.js';
@@ -309,8 +310,8 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
   const contextKey = (base, accountId = ui.snapshot?.accountId || ui.actorId, mode = ui.mode) => copalStorageKey(`${base}:${accountId}:${mode}`, ui.snapshot?.workspace || 'default');
   const preferenceKey = (base, accountId = ui.snapshot?.accountId || ui.actorId) => copalStorageKey(`${base}:${accountId}`, ui.snapshot?.workspace || 'default');
   const persistContext = (accountId = ui.snapshot?.accountId || ui.actorId, mode = ui.mode) => {
-    localStorage.setItem(contextKey('odysseus-treehouse-section', accountId, mode), ui.section);
-    localStorage.setItem(contextKey('odysseus-treehouse-course', accountId, mode), ui.selectedCourse || '');
+    localStorage.setItem(contextKey('openclank-treehouse-section', accountId, mode), ui.section);
+    localStorage.setItem(contextKey('openclank-treehouse-course', accountId, mode), ui.selectedCourse || '');
   };
   const learnerProjection = () => ui.snapshot?.projection?.learners?.[ui.actorId] || { points: 0, badges: [], quests: [], streak: 0, courses: {}, skills: {}, pointEvidence: [] };
   const adminMode = () => ui.mode === 'admin' && !!ui.snapshot?.permissions?.author;
@@ -344,9 +345,9 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
   }
 
   function loadState() {
-    ui.actorId = localStorage.getItem(copalStorageKey('odysseus-treehouse-actor')) || 'owner';
-    ui.mode = localStorage.getItem(copalStorageKey('odysseus-treehouse-mode')) || 'learner';
-    ui.section = localStorage.getItem(copalStorageKey('odysseus-treehouse-section')) || 'courses';
+    ui.actorId = localStorage.getItem(copalStorageKey('openclank-treehouse-actor')) || 'owner';
+    ui.mode = localStorage.getItem(copalStorageKey('openclank-treehouse-mode')) || 'learner';
+    ui.section = localStorage.getItem(copalStorageKey('openclank-treehouse-section')) || 'courses';
   }
 
   function suspendScope() {
@@ -471,7 +472,7 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
     } catch (error) {
       if (token !== ui.token) return false;
       if (ui.actorId !== 'owner' && (error.status === 404 || /profile not found|inactive/i.test(error.message))) {
-        ui.actorId = 'owner'; localStorage.setItem(copalStorageKey('odysseus-treehouse-actor'), ui.actorId);
+        ui.actorId = 'owner'; localStorage.setItem(copalStorageKey('openclank-treehouse-actor'), ui.actorId);
         return load();
       }
       throw error;
@@ -487,12 +488,12 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
     if (snapshot.accountId && snapshot.actor?.id) {
       ui.actorId = snapshot.actor.id;
       ui.snapshot = snapshot;
-      const accountMode = localStorage.getItem(preferenceKey('odysseus-treehouse-mode', snapshot.accountId));
+      const accountMode = localStorage.getItem(preferenceKey('openclank-treehouse-mode', snapshot.accountId));
       if (accountMode === 'learner' || accountMode === 'admin') ui.mode = accountMode;
-      ui.section = sectionId(localStorage.getItem(contextKey('odysseus-treehouse-section', snapshot.accountId, ui.mode)) || 'courses');
-      ui.selectedCourse = localStorage.getItem(contextKey('odysseus-treehouse-course', snapshot.accountId, ui.mode)) || null;
-      localStorage.setItem(copalStorageKey('odysseus-treehouse-actor'), ui.actorId);
-      localStorage.setItem(preferenceKey('odysseus-treehouse-mode', snapshot.accountId), ui.mode);
+      ui.section = sectionId(localStorage.getItem(contextKey('openclank-treehouse-section', snapshot.accountId, ui.mode)) || 'courses');
+      ui.selectedCourse = localStorage.getItem(contextKey('openclank-treehouse-course', snapshot.accountId, ui.mode)) || null;
+      localStorage.setItem(copalStorageKey('openclank-treehouse-actor'), ui.actorId);
+      localStorage.setItem(preferenceKey('openclank-treehouse-mode', snapshot.accountId), ui.mode);
     }
     const shareToken = new URLSearchParams(window.location.search).get('treehouseShare');
     if (shareToken && snapshot.accountId && !sessionStorage.getItem(`treehouse-share:${shareToken}`)) {
@@ -505,7 +506,7 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
       window.history.replaceState({}, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
     }
     if (!snapshot.state.profiles[ui.actorId]) {
-      ui.actorId = 'owner'; localStorage.setItem(copalStorageKey('odysseus-treehouse-actor'), ui.actorId); return load();
+      ui.actorId = 'owner'; localStorage.setItem(copalStorageKey('openclank-treehouse-actor'), ui.actorId); return load();
     }
     // Best-effort toast drain after a successful load (S12 task-identity).
     void drainAchievementNotifications();
@@ -551,7 +552,7 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
       }
       select.value = ui.actorId;
       select.addEventListener('change', async () => {
-        ui.actorId = select.value; localStorage.setItem(copalStorageKey('odysseus-treehouse-actor'), ui.actorId);
+        ui.actorId = select.value; localStorage.setItem(copalStorageKey('openclank-treehouse-actor'), ui.actorId);
         ui.body.replaceChildren(h('div', { class: 'copal-empty', text: 'Switching TreeHouse profile…' }));
         try { await load(); renderLoaded(); } catch (error) { renderFailure(error); }
       });
@@ -564,11 +565,11 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
         if (snapshot.accountId) persistContext(snapshot.accountId, ui.mode);
         history.checkpoint();ui.mode = mode;
         if (snapshot.accountId) {
-          localStorage.setItem(preferenceKey('odysseus-treehouse-mode', snapshot.accountId), mode);
-          ui.section = sectionId(localStorage.getItem(contextKey('odysseus-treehouse-section', snapshot.accountId, mode)) || 'courses');
-          ui.selectedCourse = localStorage.getItem(contextKey('odysseus-treehouse-course', snapshot.accountId, mode)) || null;
+          localStorage.setItem(preferenceKey('openclank-treehouse-mode', snapshot.accountId), mode);
+          ui.section = sectionId(localStorage.getItem(contextKey('openclank-treehouse-section', snapshot.accountId, mode)) || 'courses');
+          ui.selectedCourse = localStorage.getItem(contextKey('openclank-treehouse-course', snapshot.accountId, mode)) || null;
         }
-        else localStorage.setItem(copalStorageKey('odysseus-treehouse-mode'), mode);
+        else localStorage.setItem(copalStorageKey('openclank-treehouse-mode'), mode);
         if (mode === 'learner' && !['courses', 'skills', 'library', 'credentials', 'podcasts', 'analytics', 'achievements'].includes(ui.section)) ui.section = 'courses';
         renderLoaded();recordNavigation();
       } }));
@@ -745,6 +746,25 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
     input.click();
   }
 
+  function registerTreeHouseAction(node, action, run, targetFor = () => node, identity = target => target) {
+    const snapshot = ui.snapshot;
+    const origin = contentScope();
+    const isCurrent = request => {
+      const target = request.adapterContext?.target;
+      return snapshot === ui.snapshot && origin === contentScope() && node.isConnected
+        && !!target && target.isConnected && node.contains(target) && targetFor(target) === target
+        && request.adapterContext.identity === identity(target);
+    };
+    registerAdapter(node, {
+      editingCommands:false,
+      hitTest:target => !!targetFor(target),
+      capture:target => { const resolved = targetFor(target); return resolved ? { target:resolved, identity:identity(resolved) } : null; },
+      isCurrent,
+      commands:() => [action],
+      execute:(id, request) => id === action.id && isCurrent(request) ? run(request.adapterContext.target) : false,
+    });
+  }
+
   function courseCard(course, root) {
     const save=metadataWriter();
     const state = ui.snapshot.state; const progress = learnerProjection().courses?.[course.id];
@@ -753,7 +773,18 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
       h('header', {}, h('h3', { text: course.title }), h('span', { class: `copal-treehouse-state ${course.status}`, text: course.status })),
       h('p', { text: course.description || 'No description yet.' }),
       h('p', { text: `${modules.length} module${modules.length === 1 ? '' : 's'}${progress ? ` · ${progress.percent}% complete` : ''}` }));
-    const actions = h('div', { class: 'copal-treehouse-actions' }, h('button', { class: 'copal-btn', text: ui.selectedCourse === course.id ? 'Hide' : 'Open', onclick: () => { ui.selectedCourse = ui.selectedCourse === course.id ? null : course.id; persistContext(); renderLoaded(); } }));
+    const openCourse = () => { ui.selectedCourse = course.id; persistContext(); renderLoaded(); };
+    const toggleCourse = () => {
+      if (ui.selectedCourse !== course.id) return openCourse();
+      ui.selectedCourse = null; persistContext(); renderLoaded();
+    };
+    const openButton = h('button', { class:'copal-btn', text:ui.selectedCourse === course.id ? 'Hide' : 'Open', onclick:toggleCourse });
+    const actions = h('div', { class:'copal-treehouse-actions' }, openButton);
+    if (ui.selectedCourse !== course.id) {
+      const command = { id:'open-treehouse-course', label:'Open course' };
+      registerTreeHouseAction(card.querySelector('h3'), command, openCourse);
+      registerTreeHouseAction(openButton, command, openCourse);
+    }
     if (ui.snapshot.permissions.learner && course.status === 'published' && !currentEnrollment(course.id)) actions.append(h('button', { class: 'copal-btn primary', text: 'Enroll', onclick: () => enroll(course.id) }));
     if (ui.snapshot.permissions.learner && currentEnrollment(course.id)) actions.append(h('button', { class: 'copal-btn danger', text: 'Unenroll', onclick: async () => { if (await styledConfirm('Withdraw from this course?', { title: 'Withdraw from course', confirmText: 'Withdraw', danger: true })) await save('enrollment.unenroll', { courseId: course.id }); } }));
     const capability = ui.snapshot.courseCapabilities?.[course.id] || {};
@@ -809,6 +840,7 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
         h('button', { class: 'copal-btn', icon: 'chevron-down', text: '', title: 'Move module later', 'aria-label': `Move ${module.title} later`, disabled: moduleIndex === course.moduleIds.length - 1, onclick: () => save('course.reorder_modules', { courseId: course.id, moduleIds: moveTreeHouseItem(course.moduleIds, module.id, 1) }) }),
         h('button', { class: 'copal-btn danger', text: 'Delete', 'aria-label': `Delete ${module.title}`, onclick: async () => { if (await styledConfirm(`Delete module "${module.title}" and all its content?`, { title: 'Delete module', confirmText: 'Delete module', danger: true })) await save('module.delete', { moduleId: module.id }); } })));
       const moduleCard = h('article', { class: 'copal-card copal-treehouse-module', 'data-copal-context-object':preview ? '' : 'treehouse', 'data-treehouse-id':module.id }, moduleHeader);
+      if (!preview && courseCanEdit(course.id)) registerTreeHouseAction(moduleHeader.querySelector('h3'), { id:'open-treehouse-module', label:'Edit module', dialog:true }, () => editModule(module));
       if (module.description) moduleCard.append(h('p', { text: module.description }));
       for (const [activityIndex, activityId] of module.activityIds.entries()) {
         const activity = state.activities[activityId]; if (!activity || activity.status === 'archived' || (preview && activity.status !== 'published')) continue;
@@ -819,8 +851,10 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
         if (preview) previewRows.set(activity.id, row);
         const activityHost = preview ? h('div', {inert:true}) : row;
         const renderedActivity = !activity.contentDeferred && renderTreeHouseActivity(activityHost,{...viewContext(),course,activity,progress:progress.courses?.[course.id] || {},preview});
+        let lessonDisclosure = null;
         if(activity.contentDeferred){
           const host=h('div'),disclosure=h('details',{'data-lazy-lesson':activity.id},h('summary',{text:'Open lesson'}),host);
+          lessonDisclosure = disclosure;
           let request=0,loaded=false;
           const snapshot=ui.snapshot,origin=contentScope();
           const show=async(fresh=false)=>{const run=++request;host.replaceChildren(h('p',{role:'status',text:'Loading lesson…'}));
@@ -840,7 +874,8 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
           if (preview) for (const control of body.querySelectorAll('a,button,input,textarea,select,[contenteditable]')) {
             if (!(control.tagName === 'A' && previewTarget(control.getAttribute('href')))) control.inert = true;
           }
-          row.append(h('details', { open: preview }, h('summary', { text: 'Open lesson' }), body));
+          lessonDisclosure = h('details', { open: preview }, h('summary', { text: 'Open lesson' }), body);
+          row.append(lessonDisclosure);
         }
         const practice = activity.practice || {};
         if (practice.seed || activity.verifierSpec?.evidence) {
@@ -849,6 +884,12 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
             h('p', { text: practice.expectedEvidence || activity.verifierSpec?.evidence || 'Complete the exercise and inspect the saved result.' }));
           if (practice.seed) practiceBody.append(h('pre', { class: 'copal-treehouse-practice-seed', tabindex: '0' }, practice.seed));
           row.append(practiceBody);
+        }
+        if (!preview && lessonDisclosure) {
+          const command = { id:'open-treehouse-lesson', label:'Open lesson' };
+          const showLesson = () => { lessonDisclosure.open = true; };
+          registerTreeHouseAction(row.querySelector('strong'), command, showLesson);
+          registerTreeHouseAction(lessonDisclosure.querySelector(':scope > summary'), command, showLesson);
         }
         // Hidden achievement-linked components.  Learner mode never names an
         // unearned ultra rare and shows mystery entries as ???.  Ultra-rares
@@ -880,7 +921,7 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
           if (surface.href && surface.href !== '#') return; // let the anchor navigate
           event?.preventDefault?.();
         };
-        lessonActions.append(h('a', {
+        const destination = h('a', {
           class: 'copal-btn',
           href: surface.href || '#',
           'data-app-destination': surface.appLink || (surface.key ? `clank://${surface.key}` : ''),
@@ -888,7 +929,14 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
           title: `Open ${surface.label || 'lesson'} destination`,
           text: `Open ${surface.label || 'destination'}`,
           onclick: openDestination,
-        }));
+        });
+        lessonActions.append(destination);
+        if (!preview && (surface.appLink || surface.key || surface.href && surface.href !== '#')) {
+          const command = { id:'open-treehouse-destination', label:'Open lesson destination' };
+          const follow = () => destination.click();
+          registerTreeHouseAction(destination, command, follow);
+          if (!lessonDisclosure) registerTreeHouseAction(row.querySelector('strong'), command, follow);
+        }
         lessonActions.append(h('button', { type: 'button', class: 'copal-btn', 'aria-label': `Ask for help with ${activity.title}`, title: 'Attach this lesson and its active workspace context to help', text: 'Ask for help', onclick: () => requestLessonHelp(course, activity) }));
         if (!preview && courseCanEdit(course.id)) lessonActions.append(h('button', { type:'button', class:'copal-btn', 'aria-label':`Attach Files resource to ${activity.title}`, title:'Drop one readable Files resource here to attach it to this lesson', text:'Attach Files resource', onclick:() => setStatus('Drop one readable Files resource on this lesson to attach it.', false) }));
         if (!preview) row.append(lessonActions);
@@ -930,7 +978,7 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
   }
 
   function viewContext() {
-    return { h, ui, api, command:metadataWriter(), topicWeb, discovery, hydratePrivateItem, recheckPrivateSource, privateItemState, contentWriter, openLessonSource, recordNavigation, beforeNavigation:()=>history.checkpoint(), present, openSharedQuest, onGlobalMutation:()=>discovery.invalidate(), onTopicNavigate:()=>{ui.section='courses';ui.selectedCourse=null;persistContext();recordNavigation();}, reloadTreeHouse:async()=>{if(await load())renderLoaded();}, setStatus, renderMarkdown, values, openForm, styledConfirm, learnerProjection, adminMode, courseCanEdit, currentEnrollment, persistContext, renderLoaded, requestLessonHelp, openAppDestination,
+    return { h, ui, api, registerTreeHouseAction, command:metadataWriter(), topicWeb, discovery, hydratePrivateItem, recheckPrivateSource, privateItemState, contentWriter, openLessonSource, recordNavigation, beforeNavigation:()=>history.checkpoint(), present, openSharedQuest, onGlobalMutation:()=>discovery.invalidate(), onTopicNavigate:()=>{ui.section='courses';ui.selectedCourse=null;persistContext();recordNavigation();}, reloadTreeHouse:async()=>{if(await load())renderLoaded();}, setStatus, renderMarkdown, values, openForm, styledConfirm, learnerProjection, adminMode, courseCanEdit, currentEnrollment, persistContext, renderLoaded, requestLessonHelp, openAppDestination,
       createCourse, editCourse, createModule, editModule, createActivity, editActivity, createAssignment, submitAssignment:(assignment) => openTreeHouseSubmission(assignment,viewContext()), gradeSubmission:(submission) => openTreeHouseReview(submission,viewContext()), shareCourse, exportCoursePackage, importCoursePackage, previewAsLearner, courseCard, courseDetail, renderAssignments, renderSkills, renderAchievements, renderAnalytics, attachLessonResource, lessonHandle,
       navigate };
   }
@@ -1266,44 +1314,6 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
     ui.body?.replaceChildren(h('div', { class: 'copal-empty' }, h('h2', { text: 'TreeHouse could not load' }), h('p', { text: error.message }), h('button', { class: 'copal-btn', text: 'Retry', onclick: () => render(ui.body) })));
   }
 
-  async function handleContextCommand(command, target) {
-    if (command !== 'open-treehouse-item') return false;
-    const id = String(target?.dataset?.treehouseId || '').trim();
-    if (!id || !ui.snapshot) return false;
-    const state = ui.snapshot.state || {};
-    const course = values(state.courses).find((item) => item.id === id);
-    if (course) {
-      ui.section = 'courses';
-      ui.selectedCourse = ui.selectedCourse === course.id ? null : course.id;
-      persistContext();
-      renderLoaded();
-      return true;
-    }
-    const module = values(state.modules).find((item) => item.id === id);
-    if (module) {
-      const parent = values(state.courses).find((item) => item.moduleIds?.includes(module.id));
-      if (parent) { ui.section = 'courses'; ui.selectedCourse = parent.id; persistContext(); renderLoaded(); }
-      return Boolean(parent);
-    }
-    const activity = values(state.activities).find((item) => item.id === id);
-    if (!activity) return false;
-    const parent = values(state.courses).find((courseItem) => courseItem.moduleIds?.some((moduleId) => state.modules[moduleId]?.activityIds?.includes(activity.id)));
-    if (parent) { ui.section = 'courses'; ui.selectedCourse = parent.id; persistContext(); renderLoaded(); }
-    const href = String(activity.surface?.href || '').trim();
-    const appLink = String(activity.surface?.appLink || (activity.surface?.key ? `clank://${activity.surface.key}` : '')).trim();
-    if (appLink) {
-      // Surface destinations resolve through the shared app-link registry so
-      // context-menu activation focuses the same view as the lesson action,
-      // preserving chat identity and unsaved drafts. Failures surface in the
-      // status line instead of vanishing.
-      const opened = await openAppDestination(appLink, null, { sourceKind:'treehouse' });
-      if (opened && opened.ok === false) setStatus(opened.error || `Could not open ${appLink}`, true);
-    } else if (href && href !== '#') {
-      window.location.assign(href);
-    }
-    return true;
-  }
-
   let achievementPanelBody = null;
   function renderAchievementsPanel(body) {
     achievementPanelBody = body;
@@ -1327,5 +1337,5 @@ export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderM
     try { if (await load()) { ui.loading = false; renderLoaded(); } } catch (error) { if (ui.body === body) renderFailure(error); }
   }
 
-  return { setNavigationWindow(window){navigationWindow=window;window.setNavigationAdapter(history);}, navigation:history, render, renderAchievementsPanel, stopEngagement:() => engagement.stop(), refreshEngagement:() => engagement.refresh(), command, handleContextCommand, loadState, suspendScope, attachLessonResource, exportCoursePackageToFiles, get snapshot() { return ui.snapshot; } };
+  return { setNavigationWindow(window){navigationWindow=window;window.setNavigationAdapter(history);}, navigation:history, render, renderAchievementsPanel, stopEngagement:() => engagement.stop(), refreshEngagement:() => engagement.refresh(), command, loadState, suspendScope, attachLessonResource, exportCoursePackageToFiles, get snapshot() { return ui.snapshot; } };
 }

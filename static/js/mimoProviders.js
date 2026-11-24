@@ -94,7 +94,7 @@ function closeFlow({ cancel = true } = {}) {
 }
 
 function visibleFlow() {
-  const addedPanel = document.querySelector('[data-settings-panel="added-models"]:not(.hidden)');
+  const addedPanel = document.querySelector('[data-provider-section="added-models"]:not(.hidden)');
   return addedPanel?.querySelector('#mimo-connected-provider-flow')
     || document.getElementById('mimo-provider-flow');
 }

@@ -80,7 +80,7 @@ def provider_topology(monkeypatch):
         provider_model_id="shared-gpt",
         display_name="Shared GPT",
         operations=("chat.stream", "chat.complete"),
-        capabilities={"tools": False},
+        capabilities={"tools": False, "reasoning": True, "reasoning_effort": ["low", "none", "0"]},
     )
     grant = store.create_share_grant(
         owner="carol",
@@ -188,7 +188,7 @@ def _request(owner: str = "alice"):
                 auth_manager=SimpleNamespace(
                     is_configured=True,
                     users={owner: {}},
-                    get_privileges=lambda _owner: {},
+                    get_privileges=lambda _owner: {"block_all_models": False},
                     is_admin=lambda _owner: False,
                 ),
                 mimo_supervisor=None,
@@ -241,6 +241,7 @@ def test_api_models_is_secret_free_normalized_projection(provider_topology):
     assert own["url"] == normalized.MANAGED_ENGINE_PUBLIC_URL
     assert own["models"] == ["gpt-test"]
     assert own["catalog"][0]["provider_model_route_id"] == "pmr_alice_chat"
+    assert own["catalog"][0]["option_route_id"] == provider_topology.own_route.id
     shared = by_endpoint[f"share:{provider_topology.grant_id}"]
     assert shared["shared"] is True
     assert shared["endpoint_name"] == "Team subscription · shared by carol"
@@ -249,12 +250,18 @@ def test_api_models_is_secret_free_normalized_projection(provider_topology):
     assert "billing_lane" not in shared
     assert "family_id" not in shared
     assert "provider_model_route_id" not in shared["catalog"][0]
+    shared_option_route_id = shared["catalog"][0]["option_route_id"]
+    assert shared_option_route_id.startswith("pmro_")
+    assert provider_topology.shared_route.id not in shared_option_route_id
+    assert shared["catalog"][0]["catalog_revision"] == provider_topology.shared_route.catalog_revision
+    assert shared["catalog"][0]["capabilities"]["request_options"][0]["values"] == ["low", "none", "0"]
 
     wire = json.dumps(result, sort_keys=True)
     assert "private-source.example.test" not in wire
     assert "Private source label" not in wire
     assert provider_topology.shared_connection.id not in wire
     assert provider_topology.shared_route.id not in wire
+    assert shared_option_route_id in wire
     assert "credential" not in wire.casefold()
     assert "mimo:" not in wire
     assert "ody-" not in wire

@@ -1,5 +1,7 @@
+import { bindCardActionMenu } from './cardActionMenu.js';
 import { recordPresentation } from './achievementProducer.js';
 import { uiIcon } from './uiIcons.js';
+import { withRequirement, blocksPublicLinks } from './standingGuidanceRequirement.js';
 // Memory Management Functions
 // This module handles all memory-related operations
 
@@ -8,7 +10,6 @@ import sessionModule from './sessions.js';
 import spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
-import { topPortalZ } from './toolWindowZOrder.js';
 import { memoryChips, isTrusted, DEFAULT_KIND_TRUST } from './util/memoryTrust.js';
 import { forceLayout, hitTest, tagCounts, mergeExpansion } from './util/memoryGraph.js';
 import { contextualErrorMessage, responseError } from './util/httpError.js';
@@ -16,6 +17,13 @@ import { memoryAssetUrl } from './util/memoryExport.js';
 import { createMemoryExportDialog, downloadMemoryAsset } from './memoryExportDialog.js';
 import { dismissAllPendingImportBatches } from './memoryImportDismiss.js';
 import Storage, { KEYS } from './storage.js';
+import { mountMemoryBatchReview } from './memoryBatchReview.js';
+import { memoryRelationReview } from './memoryRelationReview.js';
+import { openMemoryUpdateBatch } from './memoryUpdateBatch.js';
+import { mountJournalCoverage } from './memoryJournalCoverage.js';
+import { filesFacadeClient } from './filesFacadeClient.js';
+import { mountShadowRanking } from './memoryShadowRanking.js';
+import { openKnowledgeSnapshotExport, openKnowledgeSnapshotImport, openKnowledgeSnapshotBundleExport, openKnowledgeSnapshotBundleImport } from './knowledgeSnapshot.js';
 
 var escapeHtml = uiModule.esc;
 
@@ -28,8 +36,39 @@ let memoriesLoading = false;
 let memoryLoadError = null;
 let memoryProviderStatus = '';
 let inspectedMemories = [];
+let pairedInspect = null;
+let manualAddInspect = null;
+let preextractedInspect = [];
+let memoryInspectGeneration = 0;
+let disposeMemoryBatchReview = null;
+
+function _pairedScope() {
+  const scope = window.chatModule?.ratingAccountScope?.();
+  return scope && scope.owner && document.body?.dataset?.accountId === scope.owner
+    ? {owner:scope.owner, authEpoch:scope.authEpoch} : null;
+}
+function _pairedCurrent(scope) {
+  const now = _pairedScope();
+  return !!scope && !!now && now.owner === scope.owner && now.authEpoch === scope.authEpoch;
+}
+function _mergePairedRow(previous, item) {
+  const original=item.original || previous?.original || null;
+  const retained=previous?._candidateReviewPending;
+  const value={...(previous || {}),...item,original};
+  if (retained) value._candidateReviewPending=retained;
+  if (retained || (original && item.status === 'pending') || item.status === 'unknown') value.status='unknown';
+  if (item.content === null && (original || retained || item.status === 'unknown')) value.content=null;
+  return value;
+}
+function _pairedIntent(value) {
+  return !!value && ['accept','reject'].includes(value.action) && typeof value.reason === 'string'
+    && typeof value.request_key === 'string' && !!value.request_key
+    && /^[a-f0-9]{64}$/.test(value.candidate_digest || '') && /^[a-f0-9]{64}$/.test(value.association_sha256 || '');
+}
+
 let pendingMemoryImportFile = null;
 let pendingMemoryImportFiles = [];
+let pendingMemoryImportIntent = null;
 let memoryImportRetrying = false;
 // Per-user trust prefs (memory_trust_auto + memory_trust_auto_kinds),
 // loaded with the list so the trusted/reference chip reflects reality.
@@ -219,18 +258,469 @@ function buildCategoryChips() {
   });
 }
 
+async function syncDerivationCapabilities() {
+  const toggle = document.getElementById('auto-skills-toggle');
+  const card = toggle?.closest('.admin-card');
+  if (!card) return;
+  let status = card.querySelector('[data-derivation-status]');
+  if (!status) {
+    status = document.createElement('span');
+    status.dataset.derivationStatus = 'true';
+    status.className = 'admin-toggle-sub';
+    status.style.display = 'block';
+    card.appendChild(status);
+  }
+  status.textContent = 'Automatic skill processing status is unavailable.';
+  try {
+    const response = await fetch('/api/memory?limit=1', { credentials: 'same-origin' });
+    if (!response.ok) return;
+    const data = await response.json();
+    if (data?.derivation_capabilities?.automatic_skills?.state === 'unavailable') {
+      status.textContent = 'Automatic skill extraction is awaiting source-qualified processing, even when enabled. Native automatic memory also awaits admission and writer authority.';
+    }
+  } catch (_) { /* Leave the honest unavailable status. */ }
+}
+
+let s02PolicyStatusGeneration = 0;
+async function syncS02PolicyAvailability() {
+  const generation=++s02PolicyStatusGeneration, scope=_pairedScope();
+  const axes=[['importance','importance'],['connections','connections'],['consolidation','merge']];
+  const nodes=axes.map(([name])=>document.getElementById(`memory-policy-${name}-status`));
+  if (!scope || nodes.some(node=>!node)) return;
+  for (const node of nodes) node.textContent='Checking profile availability…';
+  try {
+    const [policyResponse,predicateResponse]=await Promise.all([
+      fetch('/api/prefs/memory-policy/preview',{credentials:'same-origin',cache:'no-store'}),
+      fetch('/api/memory/policy/connection-predicates',{credentials:'same-origin',cache:'no-store'}).catch(()=>null)
+    ]);
+    if (!policyResponse.ok) throw new Error('unavailable');
+    const policy=await policyResponse.json();
+    const predicate=predicateResponse?.ok ? await predicateResponse.json().catch(()=>null) : null;
+    if (generation!==s02PolicyStatusGeneration || !_pairedCurrent(scope) || nodes.some(node=>!node.isConnected)) return;
+    for (const [index,[name,axis]] of axes.entries()) {
+      const toggle=document.getElementById(`memory-policy-${name}-toggle`);
+      const modes=policy?.capabilities?.axes?.[axis];
+      const available=Array.isArray(modes) && modes.length>0;
+      const choice=toggle?.dataset.prefLoaded==='1' ? (toggle.checked ? 'Saved choice: on.' : 'Saved choice: off.') : 'Saved choice unavailable.';
+      let detail=available ? 'Profile support is available; execution still depends on current authority and eligible sources.' : 'Profile support is unavailable.';
+      if (name==='connections' && available) {
+        const selected=predicate?.selected;
+        const valid=predicate?.version===1 && selected && Array.isArray(predicate.predicates)
+          && predicate.predicates.some(item=>JSON.stringify(item)===JSON.stringify(selected));
+        if (!valid) detail='Profile support is available; a current registered predicate must be selected.';
+      }
+      nodes[index].textContent=`${choice} ${detail}`;
+    }
+  } catch (_) {
+    if (generation===s02PolicyStatusGeneration && _pairedCurrent(scope))
+      for (const node of nodes) if (node.isConnected) node.textContent='Profile availability unavailable; saved choice is retained.';
+  }
+}
+
+function retireS02PolicyAvailability() {
+  s02PolicyStatusGeneration++;
+  for (const name of ['importance','connections','consolidation']) {
+    const node=document.getElementById(`memory-policy-${name}-status`);
+    if (node) node.textContent='Profile availability unavailable.';
+  }
+}
+for (const type of ['openclank:auth-context-changed','workspace-change','pagehide']) {
+  window.addEventListener(type, retireS02PolicyAvailability);
+  if (type==='openclank:auth-context-changed') document.addEventListener(type, retireS02PolicyAvailability);
+}
+
+async function syncConnectionPredicate() {
+  const select=document.getElementById('memory-connection-predicate');
+  const status=document.getElementById('memory-connection-predicate-status');
+  const scope=_pairedScope(); if (!select || !status || !scope) return;
+  select.disabled=true; status.textContent='Loading predicate options…';
+  const load=async () => {
+    const response=await fetch('/api/memory/policy/connection-predicates',{credentials:'same-origin'});
+    if (!response.ok) throw new Error('unavailable');
+    const data=await response.json();
+    if (!_pairedCurrent(scope) || !select.isConnected || data?.version!==1 || !Array.isArray(data.predicates)) throw new Error('changed');
+    const values=[null,...data.predicates]; select.replaceChildren();
+    for (const [index,item] of values.entries()) {
+      const option=document.createElement('option'); option.value=String(index);
+      option.textContent=item===null?'Not selected':`${item.predicate} (version ${item.version})`; select.appendChild(option);
+    }
+    const index=values.findIndex(item=>JSON.stringify(item)===JSON.stringify(data.selected ?? null));
+    select.value=String(index<0?0:index);select.disabled=false;
+    status.textContent=index<0?'Saved predicate is unavailable or changed; select a current option.':'Choose an explicitly registered predicate.';
+    return values;
+  };
+  try {
+    let values=await load();
+    select.onchange=async () => {
+      if (!_pairedCurrent(scope)) return;
+      const selected=values[Number(select.value)];if (selected===undefined) return;
+      select.disabled=true;
+      try {
+        const response=await fetch('/api/memory/policy/connection-predicates',{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({selected})});
+        if (!response.ok || !_pairedCurrent(scope)) throw new Error('unavailable');
+        values=await load();
+        void syncS02PolicyAvailability();
+      } catch (_) {if (_pairedCurrent(scope)) {status.textContent='Predicate could not be saved; refresh and try again.';select.disabled=true;}}
+    };
+  } catch (_) {if (_pairedCurrent(scope)) {status.textContent='Predicate options unavailable.';select.disabled=true;}}
+}
+
+
+async function initMemoryRankLearning() {
+  const root=document.getElementById('memory-rank-learning'), save=document.getElementById('memory-rank-save');
+  const status=document.getElementById('memory-rank-status');
+  if (!root || !save || !status || root.dataset.bound) return;
+  root.dataset.bound='1'; let snapshot=null, scope=null, generation=0, busy=false;
+  const names=['enabled','salience','age_decay','retrieval_boost'];
+  const controls=Object.fromEntries(names.map(name=>[name,root.querySelector(`[data-rank="${name}"]`)]));
+  async function load() {
+    const epoch=++generation; scope=_pairedScope(); snapshot=null; root.disabled=true;
+    if (!scope) {status.textContent='Ranking settings are unavailable.';return;}
+    try {
+      const response=await fetch('/api/prefs/memory-policy/preview',{credentials:'same-origin',cache:'no-store'});
+      const value=await response.json();
+      if (epoch!==generation || !_pairedCurrent(scope)) return;
+      if (!response.ok || value.owner!==scope.owner || !Number.isInteger(value.revision)) throw new Error();
+      const doc=value.document, accepted=['openclank.memory-policy.v2','openclank.memory-policy.v3'].includes(doc?.schema) ? doc.accepted_policy : doc;
+      const policy=accepted?.policy || value.proposed_defaults;
+      if (!policy || typeof policy!=='object') throw new Error();
+      const rank=policy.rank_learning || {enabled:false,salience:false,age_decay:false,retrieval_boost:false};
+      if (names.some(name=>typeof rank[name]!=='boolean')) throw new Error();
+      for (const name of names) controls[name].checked=rank[name];
+      snapshot={owner:value.owner,revision:value.revision,policy:structuredClone(policy)};
+      const ready=value.capabilities?.consumers?.rank_learning===true;
+      root.disabled=!ready && !rank.enabled;
+      for (const name of names.slice(1)) controls[name].disabled=!ready;
+      status.textContent=ready ? 'Preferences are available. Signal effects depend on the current evidence profile and saved weights.' : 'Ranking is unavailable for this memory profile; saved choices are retained. You can turn it off.';
+    } catch (_) {if (epoch===generation && _pairedCurrent(scope)) status.textContent='Ranking settings are unavailable.';}
+  }
+  save.addEventListener('click',async()=>{
+    if (busy || !snapshot || !_pairedCurrent(scope)) return;
+    const prior=snapshot, ticket=scope, epoch=generation;
+    const policy=structuredClone(prior.policy);
+    policy.rank_learning=Object.fromEntries(names.map(name=>[name,controls[name].checked]));
+    busy=true;root.disabled=true;status.textContent='Saving ranking preferences…';
+    try {
+      const check=await fetch('/api/prefs/memory-policy/preview',{credentials:'same-origin',cache:'no-store'});
+      const fresh=await check.json();
+      if (epoch!==generation || !_pairedCurrent(ticket)) return;
+      if (!check.ok || fresh.owner!==prior.owner || fresh.revision!==prior.revision || (fresh.capabilities?.consumers?.rank_learning!==true && policy.rank_learning.enabled)) throw new Error();
+      const response=await fetch('/api/prefs/memory-policy',{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:prior.revision,policy})});
+      if (epoch!==generation || !_pairedCurrent(ticket)) return;
+      if (!response.ok) throw new Error();
+      document.dispatchEvent(new CustomEvent('openclank:memory-policy-changed'));
+      await load();
+      if (_pairedCurrent(ticket)) status.textContent='Ranking preferences saved. Signal effects depend on available evidence and saved weights.';
+    } catch (_) {if (epoch===generation && _pairedCurrent(ticket)) {status.textContent='Settings changed or could not be saved. Refresh and try again.';snapshot=null;}}
+    finally {busy=false;}
+  });
+  root._refreshRankLearning=load;
+  document.addEventListener('openclank:auth-context-changed',()=>{generation++;snapshot=null;root.disabled=true;void load();});
+  document.addEventListener('odysseus:session-selected',()=>{void load();});
+  await load();
+}
+
+function _retainedRunTokenSummary(tokens) {
+  if (!tokens) return '';
+  const counts = value => `${value.input} input, ${value.output} output`;
+  const reported = tokens.supplierReported;
+  return ` Reserved tokens ${counts(tokens.reserved)}. Charged tokens ${counts(tokens.charged)}. `
+    + (reported ? `Supplier-reported tokens ${counts(reported)}.` : 'Supplier-reported tokens unavailable.');
+}
+
+async function loadRetainedConsolidationRun() {
+  const label = document.getElementById('memory-retained-run');
+  const scope = _pairedScope();
+  if (!label || !scope) return;
+  let journal = document.getElementById('memory-journal-retained-run');
+  if (!journal) {
+    journal = document.createElement('div');
+    journal.id = 'memory-journal-retained-run';
+    journal.className = 'admin-toggle-sub';
+    label.after(journal);
+  }
+  label.textContent = 'Last retained verified summary run: unavailable.';
+  journal.textContent = 'Last retained verified Journal model run: unavailable.';
+  for (const [target, kind, name] of [[label, 'summary', 'summary'], [journal, 'journal_synthesis', 'Journal model']]) {
+    if (!_pairedCurrent(scope) || !target.isConnected) return;
+    try {
+      const response = await fetch(`/api/memory/consolidation-retained-run?output_kind=${kind}`,
+        { credentials: 'same-origin', cache: 'no-store' });
+      const data = await response.json();
+      if (!_pairedCurrent(scope) || !target.isConnected) return;
+      if (!response.ok || data?.coverage !== 'retained_history') continue;
+      if (data.state === 'empty') {
+        target.textContent = `No verified ${name} run was found in retained history.`;
+        continue;
+      }
+      const run = data.lastVerifiedRetainedRun;
+      const when = new Date(run?.settledAtMs);
+      if (data.state === 'available' && Number.isFinite(when.getTime())
+          && ['staged', 'no_proposal', 'failed', 'cancelled'].includes(run?.outcome)) {
+        target.textContent = `Last retained verified ${name} run: ${when.toLocaleString()} (${run.outcome.replace('_', ' ')}).`
+          + _retainedRunTokenSummary(run.tokens);
+      }
+    } catch (_) { /* Keep the unavailable status for this output kind. */ }
+  }
+}
+
+let retainedConnectionGeneration=0;
+async function loadRetainedConnectionRun() {
+  const label=document.getElementById('memory-connection-retained-run'), scope=_pairedScope();
+  const generation=++retainedConnectionGeneration;
+  if (!label || !scope) return;
+  label.textContent='Last retained verified connection model run: unavailable.';
+  try {
+    const response=await fetch('/api/memory/consolidation-retained-run?output_kind=connection',{credentials:'same-origin',cache:'no-store'});
+    const data=await response.json();
+    if (generation!==retainedConnectionGeneration || !_pairedCurrent(scope) || !label.isConnected || !response.ok || data?.coverage!=='retained_history') return;
+    if (data.state==='empty') {label.textContent='No verified connection model run was found in retained history.';return;}
+    if (data.state!=='available') return;
+    const run=data.lastVerifiedRetainedRun, when=new Date(run?.settledAtMs);
+    if (!Number.isFinite(when.getTime()) || !['staged','no_proposal','failed','cancelled'].includes(run?.outcome)) return;
+    label.textContent=`Last retained verified connection model run: ${when.toLocaleString()} (${run.outcome.replace('_',' ')}).`
+      + _retainedRunTokenSummary(run.tokens);
+  } catch (_) {}
+}
+function retireRetainedConnectionRun() {
+  retainedConnectionGeneration++;
+  const label=document.getElementById('memory-connection-retained-run');
+  if (label) label.textContent='Last retained verified connection model run: unavailable.';
+}
+window.addEventListener('pagehide',retireRetainedConnectionRun);
+window.addEventListener('workspace-change',retireRetainedConnectionRun);
+window.addEventListener('openclank:auth-context-changed',retireRetainedConnectionRun);
+document.addEventListener('openclank:auth-context-changed',retireRetainedConnectionRun);
+
+async function syncJournalInterval() {
+  const input=document.getElementById('memory-journal-interval');
+  const button=document.getElementById('memory-journal-interval-save');
+  const status=document.getElementById('memory-journal-interval-status');
+  if (!input || !button || !status) return;
+  const scope=_pairedScope(); input.disabled=true;button.disabled=true;input.value='';
+  status.textContent='Interval unavailable.';
+  if (!scope) return;
+  const load=async () => {
+    const response=await fetch('/api/prefs/memory_policy_consolidation_interval_days',{credentials:'same-origin',cache:'no-store'});
+    const data=await response.json();
+    if (!_pairedCurrent(scope) || !response.ok || data.account_id!==scope.owner || !(data.value===null || (Number.isInteger(data.value) && data.value>=1 && data.value<=365))) throw new Error('unavailable');
+    input.value=data.value===null ? '' : String(data.value); input.disabled=false;button.disabled=false;
+    status.textContent='Sets how often Memery automatically consolidates chat records.';
+  };
+  button.onclick=async () => {
+    if (!_pairedCurrent(scope)) {input.disabled=true;button.disabled=true;input.value='';return;}
+    const value=input.value.trim()==='' ? null : Number(input.value);
+    if (value!==null && (!Number.isInteger(value) || value<1 || value>365)) {status.textContent='Enter 1–365 days or leave blank.';return;}
+    input.disabled=true;button.disabled=true;
+    try {
+      const response=await fetch('/api/prefs/memory_policy_consolidation_interval_days',{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({value,expected_account_id:scope.owner})});
+      if (!_pairedCurrent(scope) || !response.ok) throw new Error('unavailable');
+      await load(); if (_pairedCurrent(scope)) status.textContent='Chat memory consolidation interval saved.';
+    } catch (_) {if (_pairedCurrent(scope)) status.textContent='Interval could not be saved. Reopen Memory to retry.';}
+  };
+  try {await load();} catch (_) {if (_pairedCurrent(scope)) status.textContent='Interval unavailable.';}
+}
+
+async function syncDocumentVectorProfile() {
+  const box=document.getElementById('memory-document-vector');
+  const select=document.getElementById('memory-document-vector-family');
+  const save=document.getElementById('memory-document-vector-save');
+  const build=document.getElementById('memory-document-vector-build');
+  const status=document.getElementById('memory-document-vector-status');
+  if (!box || !select || !save || !build || !status) return;
+  const scope=_pairedScope();box.disabled=true;
+  if (!scope) {status.textContent='Profile unavailable.';return;}
+  const presets={exact:{version:1,family:'exact'},ivf_minibatch:{version:1,family:'ivf_minibatch',seed:19,lists:2,iterations:2,effort:2,visit_budget:512},ivf_flat:{version:1,family:'ivf_flat',seed:19,lists:2,iterations:4,effort:2,visit_budget:512},hnsw:{version:1,family:'hnsw',seed:19,m:4,ef_construction:16,effort:16,visit_budget:512},scalar8:{version:1,family:'scalar8',transform:{kind:'identity'},candidate_limit:64},pq:{version:1,family:'pq',seed:9,transform:{kind:'identity'},parts:2,centroids:2,iterations:4,candidate_limit:64}};
+  let requested=null,supported=false;
+  async function load() {
+    const response=await fetch('/api/prefs/document-vector-profile',{credentials:'same-origin'});
+    if (!_pairedCurrent(scope) || !response.ok) throw new Error('unavailable');
+    const data=await response.json();
+    if (!_pairedCurrent(scope) || data.version!==1 || !data.requested || !presets[data.requested.family] || typeof data.profile_supported!=='boolean') throw new Error('unavailable');
+    requested=data.requested;supported=data.profile_supported;select.value=requested.family;box.disabled=false;
+    build.disabled=!supported || requested.family==='exact';
+    status.textContent=requested.family==='exact' ? 'Exact search selected.' : supported ? 'Preference saved. Build explicitly; search uses exact fallback until a compatible profile is available.' : 'Profile support is unavailable; search uses exact fallback.';
+  }
+  select.onchange=() => {build.disabled=!supported || !requested || select.value!==requested.family || requested.family==='exact';};
+  save.onclick=async () => {
+    if (!_pairedCurrent(scope) || !requested || !presets[select.value]) return;
+    const desired=select.value===requested.family ? requested : presets[select.value];box.disabled=true;
+    try {
+      const response=await fetch('/api/prefs/document-vector-profile',{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected:requested,selection:desired})});
+      if (!_pairedCurrent(scope) || !response.ok) throw new Error('unavailable');
+      await load();
+    } catch (_) {if (_pairedCurrent(scope)) status.textContent='Preference could not be saved. Reopen Memory to retry.';}
+  };
+  build.onclick=async () => {
+    if (!_pairedCurrent(scope) || !requested || !supported || requested.family==='exact') return;
+    box.disabled=true;status.textContent='Building the selected profile…';
+    try {
+      const response=await fetch('/api/personal/vector-profile/build',{method:'POST',credentials:'same-origin'});
+      if (!_pairedCurrent(scope) || !response.ok) throw new Error('unavailable');
+      const result=await response.json();if (result.state!=='available' || result.family!==requested.family) throw new Error('unavailable');
+      await load();
+      if (_pairedCurrent(scope)) {
+        status.textContent = 'Profile built for the current document generation. Later changes may require another explicit build.';
+        const sizes = result.payload_bytes;
+        if (sizes && ['original_vectors', 'derived_profile', 'profile_descriptor']
+            .every((key) => Number.isSafeInteger(sizes[key]) && sizes[key] > 0)) {
+          const bytes = (value) => `${value.toLocaleString()} bytes`;
+          status.textContent += ` Stored payloads: original vectors ${bytes(sizes.original_vectors)}, derived profile ${bytes(sizes.derived_profile)}, descriptor ${bytes(sizes.profile_descriptor)}.`;
+        }
+      }
+    } catch (_) {if (_pairedCurrent(scope)) {status.textContent='Profile build unavailable or outcome unconfirmed. Exact search remains available.';box.disabled=false;}}
+  };
+  try {await load();} catch (_) {if (_pairedCurrent(scope)) status.textContent='Profile unavailable.';}
+}
+
+async function syncDocumentVectorBuild() {
+  const box=document.getElementById('memory-document-build');
+  const build=document.getElementById('memory-document-build-start');
+  const check=document.getElementById('memory-document-build-check');
+  const resume=document.getElementById('memory-document-build-resume');
+  const cancel=document.getElementById('memory-document-build-cancel');
+  const status=document.getElementById('memory-document-build-status');
+  if (!box || !build || !check || !resume || !cancel || !status) return;
+  const scope=_pairedScope();box.disabled=true;
+  if (!scope) {status.textContent='Document embedding build unavailable.';return;}
+  let key=null,operation=null,storageReady=false,rowCount=0,routeReady=false;
+  const idValid=value=>typeof value==='string' && /^[A-Za-z0-9_-]{16,128}$/.test(value);
+  const setButtons=()=>{
+    box.disabled=false;
+    build.disabled=!storageReady || !routeReady || !!operation || rowCount===0;
+    check.disabled=cancel.disabled=!storageReady || !operation;
+    resume.disabled=!storageReady || !routeReady || !operation;
+  };
+  const call=async (action,body)=>{
+    const response=await fetch('/api/personal/vector-build/'+action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if (!_pairedCurrent(scope) || !response.ok) throw new Error('unavailable');
+    const result=await response.json();if (!_pairedCurrent(scope) || !result || typeof result.state!=='string') throw new Error('unavailable');
+    return result;
+  };
+  const report=result=>{
+    if (result.state==='published') {
+      const direct=result.version===1 && result.current===true && typeof result.generation_id==='string' && /^gen_vec_[0-9a-f]{64}$/.test(result.generation_id);
+      const retained=(result.version===1 || result.version===2) && result.operation_id===operation && result.outcome && result.outcome.state==='published';
+      if (!direct && !retained) throw new Error('unavailable');
+      localStorage.removeItem(key);operation=null;status.textContent='Document embeddings are ready.';
+    } else if (result.state==='terminal') {
+      if ((result.version!==1 && result.version!==2) || result.operation_id!==operation || !['published','cancelled'].includes(result.terminal)) throw new Error('unavailable');
+      localStorage.removeItem(key);operation=null;
+      status.textContent=result.terminal==='published' ? 'The previous build finished. Current documents may need a new build.' : 'The previous build was canceled.';
+    } else if (result.state==='cancelled') {
+      if ((result.version!==1 && result.version!==2) || result.operation_id!==operation || result.paid_outcome!=='unknown') throw new Error('unavailable');
+      localStorage.removeItem(key);operation=null;status.textContent='Build canceled. An earlier request may still have completed.';
+    } else if (result.operation_id!==operation || (result.version!==1 && result.version!==2)) throw new Error('unavailable');
+    else if (result.state==='ready_to_continue') status.textContent='A batch was saved. Continue to process the remaining documents.';
+    else if (result.state==='queued') status.textContent='Build prepared. Continue when ready.';
+    else if (result.state==='probe_complete') status.textContent='The model check completed. Continue to recover or process the next batch.';
+    else if (result.state==='unknown') status.textContent='The outcome is not confirmed. Check or continue; requests are not automatically repeated.';
+    else status.textContent='Build outcome unavailable. Keep this build to check again or cancel.';
+  };
+  try {
+    const response=await fetch('/api/personal/vector-build/capability',{credentials:'same-origin'});
+    if (!_pairedCurrent(scope) || !response.ok) throw new Error('unavailable');
+    const info=await response.json();
+    if (!_pairedCurrent(scope) || info.version!==1 || info.state!=='ready' || info.account_id!==scope.owner
+        || typeof info.workspace_id!=='string' || !info.workspace_id || info.profile!=='document_vector_batch.v2'
+        || typeof info.route_ready!=='boolean' || !Number.isInteger(info.row_count) || info.row_count<0 || info.row_count>100000) throw new Error('unavailable');
+    rowCount=info.row_count;routeReady=info.route_ready;
+    key='openclank.document-vector.v2:'+encodeURIComponent(scope.owner)+':'+encodeURIComponent(info.workspace_id)+':'+info.profile;
+    operation=localStorage.getItem(key);storageReady=operation===null || idValid(operation);
+    if (!storageReady) {status.textContent='Saved build ID is unavailable.';return;}
+    status.textContent=operation ? (routeReady ? 'A saved build can be checked or continued.' : 'The saved build can be checked or canceled; the configured model route is unavailable.') : !rowCount ? 'No indexed documents to build.' : routeReady ? 'Ready to build embeddings for indexed documents.' : 'The configured model route is unavailable.';
+    setButtons();
+  } catch (_) {if (_pairedCurrent(scope)) status.textContent='Document embedding build unavailable.';return;}
+  build.onclick=async ()=>{
+    if (!_pairedCurrent(scope) || !storageReady || !routeReady || operation || !rowCount) return;
+    box.disabled=true;status.textContent='Preparing the document build…';
+    try {
+      const result=await call('prepare',{});
+      if (result.version!==1 || result.state!=='queued' || !idValid(result.operation_id)) throw new Error('unavailable');
+      operation=result.operation_id;
+      try {
+        localStorage.setItem(key,operation);
+        if (localStorage.getItem(key)!==operation) throw new Error('storage');
+      } catch (_) {
+        operation=null;storageReady=false;status.textContent='Could not save the build ID; no embedding request was sent.';
+        if (_pairedCurrent(scope)) setButtons();return;
+      }
+      status.textContent='Building document embeddings…';
+      report(await call('execute',{operation_id:operation}));
+    } catch (_) {if (_pairedCurrent(scope)) status.textContent=operation ? 'Build outcome unconfirmed. Check, continue, or cancel this build.' : 'Build preparation unavailable.';}
+    if (_pairedCurrent(scope)) setButtons();
+  };
+  check.onclick=async ()=>{
+    if (!_pairedCurrent(scope) || !operation) return;box.disabled=true;
+    try {report(await call('status',{operation_id:operation}));}
+    catch (_) {if (_pairedCurrent(scope)) status.textContent='Build status unavailable. The saved build has not been discarded.';}
+    if (_pairedCurrent(scope)) setButtons();
+  };
+  resume.onclick=async ()=>{
+    if (!_pairedCurrent(scope) || !routeReady || !operation) return;box.disabled=true;status.textContent='Checking and continuing the saved build…';
+    try {report(await call('resume',{operation_id:operation}));}
+    catch (_) {if (_pairedCurrent(scope)) status.textContent='Build outcome unconfirmed. Check again or cancel this build.';}
+    if (_pairedCurrent(scope)) setButtons();
+  };
+  cancel.onclick=async ()=>{
+    if (!_pairedCurrent(scope) || !operation) return;box.disabled=true;
+    try {report(await call('cancel',{operation_id:operation}));}
+    catch (_) {if (_pairedCurrent(scope)) status.textContent='Cancellation unconfirmed. The saved build has not been discarded.';}
+    if (_pairedCurrent(scope)) setButtons();
+  };
+}
+
+let learningObserver;
+function mountLearningSettings(host) {
+  const controls = document.getElementById('memory-learning-controls');
+  const home = document.querySelector('[data-memory-learning-home]');
+  const panel = host?.closest('[data-settings-panel]');
+  const modal = host?.closest('#settings-modal');
+  if (!controls || !home || !panel || !modal) return;
+  learningObserver?.disconnect();
+  host.append(controls);
+  learningObserver = new MutationObserver(() => {
+    if (modal.classList.contains('hidden') || panel.classList.contains('hidden')) {
+      home.append(controls);
+      learningObserver.disconnect();
+    }
+  });
+  for (const node of [panel, modal]) learningObserver.observe(node, { attributes: true, attributeFilter: ['class'] });
+  void syncLearningControls();
+}
+
+async function syncLearningControls() {
+  const toggles = Promise.all([
+    syncPrefToggle('memory-assistant-interpretation-toggle', 'memory_assistant_interpretation', 'Assistant interpretation review enabled', 'Assistant interpretation review disabled', false),
+    syncPrefToggle('memory-policy-importance-toggle', 'memory_policy_importance_enabled', 'Importance preference saved as on', 'Importance preference saved as off', false),
+    syncPrefToggle('memory-policy-connections-toggle', 'memory_policy_connections_enabled', 'Connections preference saved as on', 'Connections preference saved as off', false),
+    syncPrefToggle('memory-policy-consolidation-toggle', 'memory_policy_consolidation_enabled', 'Consolidation preference saved as on', 'Consolidation preference saved as off', false),
+  ]);
+  void syncConnectionPredicate();
+  void loadRetainedConsolidationRun();
+  void loadRetainedConnectionRun();
+  void syncJournalInterval();
+  await toggles;
+  void syncS02PolicyAvailability();
+}
+
 async function syncToggles() {
-  // The settings tab no longer hosts a separate "Memory in context" toggle —
-  // the header toggle owns that pref directly now.
+  // Settings and the workspace header use the same account preference.
   await syncPrefToggle('memory-enabled-header-toggle', 'memory_enabled', 'Memory enabled', 'Memory disabled', false);
   // The Skills header toggle owns the `skills_enabled` pref (was never wired —
   // toggling it did nothing, so skills stayed on). Now it actually gates skill
   // injection (see chat_helpers.py: uprefs.skills_enabled).
   await syncPrefToggle('skills-enabled-header-toggle', 'skills_enabled', 'Skills enabled', 'Skills disabled', false);
   await syncMemoryMode();
+  await syncLearningControls();
+  void syncDocumentVectorProfile();
+  void syncDocumentVectorBuild();
+  void document.getElementById('memory-rank-learning')?._refreshRankLearning?.();
+  await syncPrefToggle('memory-shadow-ranking-toggle', 'memory_shadow_ranking_enabled', 'Shadow ranking enabled', 'Shadow ranking disabled', false);
   await syncPrefToggle('memory-trust-auto-toggle', 'memory_trust_auto', 'Auto-captured memories can be trusted (per kind below)', 'Auto-captured memories stay behind the firewall', false);
   await _wireTrustKindSwitches();
   await syncPrefToggle('auto-skills-toggle', 'auto_skills', 'Auto-extract skills enabled', 'Auto-extract skills disabled', false);
+  void syncDerivationCapabilities();
   await syncPrefToggle('auto-approve-skills-toggle', 'auto_approve_skills', 'Auto-approve skills enabled', 'Auto-approve skills disabled', false);
   await syncPrefSlider('skill-confidence-slider', 'skill_min_confidence', 'skill-confidence-label', 0.85);
   await syncPrefNumber('skill-max-input', 'skill_max_injected', 3);
@@ -322,94 +812,61 @@ function _setProfileQuestionStatus(message, tone = '') {
 }
 
 async function _addHandlerProfileQuestions() {
-  const button = document.getElementById('memory-add-profile-questions');
-  if (button?.dataset.busy === '1') return;
-  if (button) {
-    button.dataset.busy = '1';
-    button.disabled = true;
-  }
-  _setProfileQuestionStatus('Preparing Handler questions…');
+  // Qualified Memory prepares these inquiries without a model call. They remain
+  // unsurfaced until the user chooses otherwise.
+  const message = 'Profile question preparation is unavailable until Memory identity, policy, and its guarded writer are qualified. Questions are not asked automatically.';
+  _setProfileQuestionStatus(message);
+  showToast(message);
+}
+
+let _seedPreferenceGeneration = 0;
+async function _refreshQuestionSeedPreference() {
+  const seeds = document.getElementById('memory-question-seeds');
+  if (!seeds || seeds.dataset.saving === '1') return;
+  const generation = ++_seedPreferenceGeneration;
+  const ticket = _memoryActionTicket();
+  seeds.disabled = true;
+  seeds.checked = false;
   try {
-    const response = await fetch('/api/memory/principals', { credentials: 'same-origin' });
-    if (!response.ok) throw new Error((await responseError(response, 'Handler identity is unavailable')).message);
-    const payload = await response.json();
-    const handler = (Array.isArray(payload?.principals) ? payload.principals : [])
-      .find((principal) => principal?.role === 'Handler');
-    if (!handler?.id) throw new Error('Handler identity is unavailable; try again after Memory reconnects.');
-    const target = { kind: 'entity', id: String(handler.id) };
-    const questions = [
-      {
-        text: "What name should I use for my Handler?",
-        category: 'unknown',
-        question_context: {
-          mode: 'missing_slot',
-          target,
-          predicate: 'preferred_name',
-          predicate_version: '1',
-          claim_slot: 'identity.preferred_name',
-          expected_value_type: 'string',
-          question_id: 'handler-preferred-name',
-        },
-      },
-      {
-        text: 'Which side should my Handler prefer for mobile controls: left, right, or system default?',
-        category: 'unknown',
-        question_context: {
-          mode: 'missing_slot',
-          target,
-          predicate: 'mobile_control_side',
-          predicate_version: '1',
-          claim_slot: 'ui.mobile_control_side',
-          expected_value_type: 'string',
-          question_id: 'handler-mobile-control-side',
-        },
-      },
-    ];
-    let added = 0;
-    let already = 0;
-    const failures = [];
-    for (const question of questions) {
-      try {
-        const result = await fetch('/api/memory/add', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(question),
-        });
-        if (!result.ok) throw new Error((await responseError(result, 'Could not add profile question')).message);
-        const saved = await result.json();
-        if (saved?.memory_id || saved?.candidate_id) added += 1;
-        else already += 1;
-      } catch (error) {
-        failures.push(error?.message || 'Could not add a profile question');
-      }
-    }
-    if (failures.length) {
-      const message = `${added + already} profile question${added + already === 1 ? '' : 's'} ready; ${failures.length} need attention.`;
-      _setProfileQuestionStatus(message, 'error');
-      showError(`${message} ${failures[0]}`);
-      return;
-    }
-    const message = added
-      ? `${added} profile question${added === 1 ? '' : 's'} added${already ? `; ${already} already existed` : ''}.`
-      : 'Profile questions already exist.';
-    _setProfileQuestionStatus(message, 'success');
-    await loadMemories();
-    showToast(message);
-  } catch (error) {
-    const message = error?.message || 'Could not prepare Handler profile questions';
-    _setProfileQuestionStatus(message, 'error');
-    showError(message);
-  } finally {
-    if (button) {
-      button.dataset.busy = '0';
-      button.disabled = false;
-    }
+    const response = await fetch('/api/prefs/memory_question_seeds', { credentials:'same-origin' });
+    if (!response.ok) throw new Error('Question setting unavailable');
+    const data = await response.json();
+    if (!_memoryActionCurrent(ticket) || generation !== _seedPreferenceGeneration) return;
+    if (typeof data.value !== 'boolean') throw new Error('Question setting unavailable');
+    seeds.checked = data.value;
+    seeds.disabled = false;
+  } catch (_) {
+    if (_memoryActionCurrent(ticket) && generation === _seedPreferenceGeneration)
+      _setProfileQuestionStatus('Question setting unavailable.', 'error');
   }
 }
 
 function _wireHandlerProfileControls() {
   document.getElementById('memory-add-profile-questions')?.addEventListener('click', _addHandlerProfileQuestions);
+  const seeds = document.getElementById('memory-question-seeds');
+  if (!seeds) return;
+  _refreshQuestionSeedPreference();
+  seeds.addEventListener('change', async () => {
+    ++_seedPreferenceGeneration;
+    const changeTicket = _memoryActionTicket();
+    const wanted = seeds.checked;
+    seeds.dataset.saving = '1';
+    seeds.disabled = true;
+    try {
+      const response = await fetch('/api/prefs/memory_question_seeds', { method:'PUT', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:wanted}) });
+      if (!_memoryActionCurrent(changeTicket)) return;
+      if (!response.ok) throw new Error('Question setting could not be saved');
+      const data = await response.json();
+      if (!_memoryActionCurrent(changeTicket)) return;
+      if (data.value !== wanted) throw new Error('Question setting could not be saved');
+    } catch (error) {
+      if (_memoryActionCurrent(changeTicket)) { seeds.checked = !wanted; _setProfileQuestionStatus(error.message, 'error'); }
+    } finally {
+      delete seeds.dataset.saving;
+      if (_memoryActionCurrent(changeTicket)) seeds.disabled = false;
+    }
+  });
 }
 
 function reflectMemoryToggleInSidebar(enabled) {
@@ -448,7 +905,7 @@ function _updateMemoryNukeControls() {
   const selected = _selectedMemoryNukeComponents();
   const nukeButton = document.getElementById('memory-nuke-btn');
   if (nukeButton) {
-    nukeButton.disabled = memoryNukeBusy || selected.length === 0;
+    nukeButton.disabled = memoryNukeBusy;
     nukeButton.textContent = memoryNukeBusy
       ? 'Working…'
       : (selected.length === Object.keys(MEMORY_NUKE_COMPONENTS).length ? 'Nuke all my Brain data' : 'Nuke selected');
@@ -473,6 +930,7 @@ function _boundedMemoryNukeText(value, maxLength = 280) {
 }
 
 function _memoryNukeCount(detail) {
+  if (detail?.count_unavailable === true) return null;
   const value = typeof detail === 'number' ? detail : detail?.count;
   return Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : null;
 }
@@ -498,28 +956,49 @@ function _memoryNukeLabel(component) {
     || String(component || '').replaceAll('_', ' ').replace(/^./, char => char.toUpperCase());
 }
 
+function _memoryNukeSelective(detail, completed = false) {
+  if (!detail || typeof detail !== 'object' || !Object.hasOwn(detail, 'selective')) return null;
+  const value = detail.selective, count = n => Number.isSafeInteger(n) && n >= 0;
+  const keys = ['version','state','unit','erasable_candidates','retained_approved_candidates','retained_raw','retained_recovery','retained_quarantine','retained_jobs','partition_sha256'];
+  const unitCount = (item, unit) => item && typeof item === 'object' && !Array.isArray(item)
+    && Object.keys(item).length === 2 && item.unit === unit && count(item.count);
+  const valid = value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
+    && value.version === 1 && value.state === 'complete' && value.unit === 'candidate'
+    && count(value.erasable_candidates) && count(value.retained_approved_candidates)
+    && unitCount(value.retained_raw, 'raw_record') && unitCount(value.retained_recovery, 'recovery_unit')
+    && unitCount(value.retained_quarantine, 'quarantine_record') && unitCount(value.retained_jobs, 'job_record')
+    && /^[a-f0-9]{64}$/.test(value.partition_sha256 || '');
+  if (!valid) return 'Candidate classification unavailable.';
+  return `Unreviewed or rejected candidates ${completed ? 'removed' : 'selected for removal'}: ${value.erasable_candidates}; approved candidates retained as memory dependencies: ${value.retained_approved_candidates}. Retained raw records: ${value.retained_raw.count}; recovery units: ${value.retained_recovery.count}; quarantine records: ${value.retained_quarantine.count}; whole job payloads: ${value.retained_jobs.count}. Retained raw records, quarantine records, recovery units, and job payloads may contain unreviewed text.`;
+}
+
 function _memoryNukeConfirmationMessage(preview, requested) {
   const expanded = _memoryNukeExpandedComponents(preview.expanded_components);
   const components = preview.components && typeof preview.components === 'object'
     ? preview.components
     : {};
   const included = [...new Set((expanded.length ? expanded : requested).filter(Boolean))];
-  const lines = ['This permanently deletes the following data owned by your account:'];
+  const selective=Object.hasOwn(components.ingest || {}, 'selective');
+  const lines = ['The following account data is selected for reset:'];
   for (const component of included) {
     const count = _memoryNukeCount(components[component]);
-    lines.push(`• ${_memoryNukeLabel(component)}${count === null ? '' : ` — ${count} ${count === 1 ? 'record' : 'records'}`}`);
+    lines.push(`• ${_memoryNukeLabel(component)}${count === null ? '' : selective && component === 'ingest' ? ` — ${count} inventoried database ${count === 1 ? 'record' : 'records'}` : ` — ${count} inventoried ${count === 1 ? 'entry' : 'entries'}`}`);
+    if (component === 'ingest') { const detail=_memoryNukeSelective(components[component]); if (detail) lines.push(`  ${detail}`); }
   }
   const added = included.filter(component => !requested.includes(component));
   if (added.length) {
     lines.push('', `Required additions: ${added.map(_memoryNukeLabel).join(', ')}`);
   }
-  const implications = _memoryNukeImplications(preview.implications);
+  const implications = _memoryNukeImplications(preview.implications).filter(item => !selective || item !== 'Selected live memory data is permanently cleared for this account.');
   if (implications.length) {
     lines.push('', 'What this means:');
     for (const implication of implications.slice(0, 6)) lines.push(`• ${implication}`);
     if (implications.length > 6) lines.push(`• ${implications.length - 6} more implications`);
   }
-  lines.push('', 'This cannot be undone in the live Brain. Existing exports, backups, and source files remain. Other users and built-in or shared skills are not touched.');
+  lines.push('', selective
+    ? 'Selected live ingest will be removed. Old restore operations that would revive erased ingest are blocked. Existing exports, backups, and source files remain. Other users and built-in or shared skills are not touched.'
+    : 'Selected live data will be removed. Content-free original, reset, and replay-denial facts remain. Existing exports, backups, and source files remain. Other users and built-in or shared skills are not touched.');
   return lines.join('\n');
 }
 
@@ -570,18 +1049,23 @@ function _validateMemoryNukeCommit(result) {
 
 function _memoryNukeResultSummary(result) {
   const parts = [];
+  const hasSelective = Object.hasOwn(result.categories?.ingest || {}, 'selective');
   for (const component of Object.keys(MEMORY_NUKE_COMPONENTS)) {
     const detail = result.categories?.[component];
     if (!detail) continue;
     const count = _memoryNukeCount(detail);
     const state = _boundedMemoryNukeText(detail.state, 60);
     const error = _boundedMemoryNukeText(detail.error, 180);
-    parts.push(`${_memoryNukeLabel(component)}${count === null ? '' : ` ${count}`}${state ? ` (${state})` : ''}${error ? ` — ${error}` : ''}`);
+    const known = detail.count_unavailable === true && Number.isFinite(Number(detail.count))
+      ? ` (known ${Math.max(0, Number(detail.count))}; total unavailable)` : '';
+    const selective=_memoryNukeSelective(detail, result.complete === true && detail.state === 'complete');
+    parts.push(`${_memoryNukeLabel(component)}${count === null ? known : selective && component === 'ingest' ? ` ${count} inventoried database ${count === 1 ? 'record' : 'records'}` : ` ${count} inventoried ${count === 1 ? 'entry' : 'entries'}`}${state ? ` (${state})` : ''}${error ? ` — ${error}` : ''}${selective ? ` · ${selective}` : ''}`);
   }
   const serverMessage = _boundedMemoryNukeText(result.message, 400);
-  if (serverMessage && parts.length) return `${serverMessage} ${parts.join(' · ')}`;
-  if (serverMessage) return serverMessage;
-  if (parts.length) return parts.join(' · ');
+  const retained = hasSelective ? '' : ' Content-free original, reset, and replay-denial facts remain.';
+  if (serverMessage && parts.length) return `${serverMessage} ${parts.join(' · ')}${retained}`;
+  if (serverMessage) return `${serverMessage}${retained}`;
+  if (parts.length) return `${parts.join(' · ')}${retained}`;
   return result.complete ? 'Selected Brain data was deleted.' : 'Brain reset finished only partially.';
 }
 
@@ -602,22 +1086,26 @@ async function _refreshMemoryNukeSurfaces() {
 async function _nukeSelectedMemoryData() {
   if (memoryNukeBusy) return;
   const components = _selectedMemoryNukeComponents();
-  if (!components.length) {
-    _updateMemoryNukeControls();
-    return;
-  }
-
   memoryNukeBusy = true;
   _setMemoryNukeStatus('Counting the selected data…');
   _updateMemoryNukeControls();
   try {
-    const preview = await _postMemoryNuke({ action: 'preview', components }, 'Could not preview Brain reset');
+    const recovery = await _postMemoryNuke({ action: 'recovery_preview' }, 'Could not check Brain reset recovery');
+    if (recovery.status === 'none' && !components.length) {
+      _setMemoryNukeStatus('Select at least one Brain data category.');
+      return;
+    }
+    const preview = recovery.status === 'none'
+      ? await _postMemoryNuke({ action: 'preview', components }, 'Could not preview Brain reset')
+      : recovery;
     _validateMemoryNukePreview(preview);
+    const selected = preview.recovery === true ? preview.requested_components : components;
+    if (!Array.isArray(selected) || !selected.length) throw new Error('Brain reset recovery selection is unavailable');
     const confirmed = await uiModule.styledConfirm(
-      _memoryNukeConfirmationMessage(preview, components),
+      _memoryNukeConfirmationMessage(preview, selected),
       {
-        title: 'Nuke selected Brain data?',
-        confirmText: 'Nuke selected data',
+        title: preview.recovery === true ? 'Resume Brain reset?' : 'Nuke selected Brain data?',
+        confirmText: preview.recovery === true ? 'Resume reset' : 'Nuke selected data',
         cancelText: 'Keep my data',
         danger: true,
       },
@@ -859,6 +1347,11 @@ async function syncPrefNumber(elementId, prefKey, defaultVal) {
   }
 }
 
+document.addEventListener('openclank:memery-preferences-saved', () => {
+  void syncPrefToggle('memory-enabled-header-toggle', 'memory_enabled', 'Memery enabled', 'Memery disabled', false);
+  void syncMemoryMode();
+});
+
 async function syncMemoryMode() {
   const select = document.getElementById('memory-mode-select');
   const help = document.getElementById('memory-mode-help');
@@ -875,9 +1368,9 @@ async function syncMemoryMode() {
       if (Object.hasOwn(copy, data.value)) {
         select.value = data.value;
       } else {
-        const legacy = await fetch(`${window.location.origin}/api/prefs/auto_memory`);
+        const legacy = await fetch('/api/prefs/auto_memory');
         const legacyData = legacy.ok ? await legacy.json() : {};
-        select.value = legacyData.value === false ? 'off' : 'automatic';
+        select.value = typeof legacyData.value === 'boolean' ? (legacyData.value ? 'automatic' : 'off') : 'manual';
       }
     }
   } catch (e) {
@@ -914,11 +1407,25 @@ async function syncMemoryMode() {
 async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true) {
   const toggle = document.getElementById(elementId);
   if (!toggle) return;
+  const scoped = Boolean(toggle.closest('#memory-learning-controls'));
+  const scope = scoped && _pairedScope();
+  const ticket = {};
+  toggle._prefTicket = ticket;
+  const current = () => toggle._prefTicket === ticket && (!scoped || (scope && _pairedCurrent(scope)));
+  if (scoped) {
+    toggle._prefCurrent = current;
+    toggle.disabled = true;
+    toggle.checked = false;
+  }
+  delete toggle.dataset.prefLoaded;
   try {
     const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`);
     if (res.ok) {
       const data = await res.json();
+      if (!current()) return;
       toggle.checked = data.value !== false;
+      if (scoped) toggle.disabled = false;
+      toggle.dataset.prefLoaded = '1';
     }
   } catch (e) {
     console.error(`Failed to load ${prefKey} pref:`, e);
@@ -927,6 +1434,8 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
   if (!toggle.dataset.bound) {
     toggle.dataset.bound = '1';
     toggle.addEventListener('change', async () => {
+      const isCurrent = scoped ? toggle._prefCurrent : () => true;
+      if (!isCurrent()) return;
       if (dimBelow) syncToggleDim(toggle);
       try {
         const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`, {
@@ -934,6 +1443,7 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ value: toggle.checked })
         });
+        if (!isCurrent()) return;
         if (!res.ok) {
           console.error(`PUT ${prefKey} returned ${res.status}`);
           toggle.checked = !toggle.checked; // revert
@@ -941,8 +1451,11 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
           showError('Failed to save preference');
           return;
         }
+        toggle.dataset.prefLoaded = '1';
         showToast(toggle.checked ? onMsg : offMsg);
+        if (['memory_policy_importance_enabled','memory_policy_connections_enabled','memory_policy_consolidation_enabled'].includes(prefKey)) void syncS02PolicyAvailability();
       } catch (e) {
+        if (!isCurrent()) return;
         console.error(`Failed to save ${prefKey} pref:`, e);
         toggle.checked = !toggle.checked; // revert
         if (dimBelow) syncToggleDim(toggle);
@@ -980,6 +1493,7 @@ export async function loadMemories({ isCurrent = null } = {}) {
   const current = isCurrent || (() => true);
   if (!current()) return;
   if (!isCurrent) {
+    _refreshQuestionSeedPreference();
     _ensureNewMemoryCategorySelect();
     memoriesLoading = true;
     renderMemoryList();
@@ -1024,18 +1538,168 @@ export async function loadMemories({ isCurrent = null } = {}) {
   if (!isCurrent) _refreshPendingImportNotice();
 }
 
+function _systemSeedInquiry(item) {
+  const rationale = item.current?.activation_rationale;
+  const provenance = rationale?.question_context?.provenance;
+  if (!provenance || provenance.version !== 1 || provenance.kind !== 'system_seed' ||
+      !['handler.preferred_address', 'assistant.operating_boundary'].includes(provenance.seed_key)) return null;
+  return typeof rationale.question_text === 'string' && rationale.question_text.length <= 512
+    ? rationale.question_text : null;
+}
+
+// A supplied fact staged by Native: provenance is set there, never by the caller. Shown as source reference + "inferred".
+function _preextractedSource(item) {
+  const source = item?.provenance?.kind === 'preextracted' ? item.provenance.source
+    : (item?.evidence_role === 'inferred' && item.source && typeof item.source === 'object' ? item.source : null);
+  if (source && typeof source.uri === 'string' && Number.isSafeInteger(source.revision)) return source;
+  if (source?.kind === 'host_user_body_anchor' && source.coverage === 'host_user_body_anchor_only'
+      && Object.keys(source).sort().join(',') === 'coverage,kind,navigation,reference'
+      && ['unverified', 'stale', 'unavailable'].includes(source.navigation)
+      && source.reference && Number.isSafeInteger(source.reference.revision) && source.reference.revision > 0) {
+    // A persisted review snapshot cannot establish present Host navigation.
+    return item?.provenance?.kind === 'preextracted' ? {...source, navigation: 'unverified'} : source;
+  }
+  return null;
+}
+
+function _preextractedSourceLabel(source) {
+  if (source?.kind === 'host_user_body_anchor') {
+    const nav = ['stale', 'unavailable'].includes(source.navigation) ? source.navigation : 'unverified';
+    return `Host user-body snapshot (revision ${source.reference.revision}; navigation ${nav})`;
+  }
+  return source ? `${source.uri} (revision ${source.revision})` : 'source unavailable';
+}
+
+function _preextractedCard(entry) {
+  const card = document.createElement('div'); card.className = 'memory-item'; card.dataset.preextracted = entry.candidate_id;
+  const body = document.createElement('div'); body.className = 'memory-item-content';
+  const text = document.createElement('div'); text.className = 'memory-item-text'; text.textContent = entry.text || '';
+  const source = _preextractedSource(entry);
+  const line = document.createElement('div'); line.className = 'memory-inferred-line';
+  const tag = document.createElement('span'); tag.className = 'memory-inferred-badge'; tag.textContent = 'inferred';
+  line.append(tag, document.createTextNode(` ${entry.kind || 'fact'} · Source: ${_preextractedSourceLabel(source)}`));
+  body.append(text, line);
+  if (entry.conflict) { const c = document.createElement('div'); c.className = 'admin-toggle-sub'; c.textContent = 'Conflicts with a protected memory field; nothing was overwritten.'; body.append(c); }
+  const actions = document.createElement('div'); actions.style.cssText = 'display:flex;gap:6px;margin-top:8px';
+  for (const [label, action] of [['Approve', 'accept'], ['Reject', 'reject']]) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'memory-toolbar-btn' + (action === 'reject' ? ' danger' : ''); button.textContent = label;
+    button.addEventListener('click', () => reviewPreextractedCandidate(entry, action, button)); actions.append(button);
+  }
+  body.append(actions); card.append(body); return card;
+}
+
+async function reviewPreextractedCandidate(entry, action, button) {
+  const ticket = _memoryActionTicket(); button.disabled = true;
+  const post = async (path, payload) => {
+    const response = await fetch(`/api/memory/candidates/preextracted/${path}`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error('This fact could not be reviewed. It may have changed; reload and try again.');
+    return data;
+  };
+  try {
+    const preview = await post('review-preview', { candidate_id: entry.candidate_id });
+    if (!_memoryActionCurrent(ticket) || preview.state !== 'preview' || preview.text !== entry.text) throw new Error('The fact changed while opening review. Reload and try again.');
+    const source = _preextractedSource(preview) || _preextractedSource(entry);
+    const ok = await uiModule.styledConfirm(`${action === 'accept' ? 'Add to your memories' : 'Reject'}?\n\n${preview.text}\n\nInferred from ${_preextractedSourceLabel(source)}.`, { title: 'Review inferred fact', confirmText: action === 'accept' ? 'Approve' : 'Reject', danger: action === 'reject' });
+    if (!ok || !_memoryActionCurrent(ticket)) return;
+    await post('review', { candidate_id: entry.candidate_id, candidate_digest: preview.candidate_digest, action, request_key: crypto.randomUUID(), reason: 'owner_review' });
+    showToast(action === 'accept' ? 'Fact added to your memories' : 'Fact rejected');
+    await Promise.all([loadMemoryInspect(), loadMemories()]);
+  } catch (error) { showError(error.message || 'Review unavailable'); }
+  finally { button.disabled = false; }
+}
+
+// A journal-synthesis proposal is stored as its proposal object; the review list shows the proposed text and the cited parts, never raw JSON.
+function _journalProposalText(content) {
+  try {
+    const proposal = JSON.parse(content);
+    if (proposal?.version !== 's08.policy-journal.v1' || typeof proposal.content !== 'string' || !Array.isArray(proposal.journal?.rows)) return null;
+    const cited = proposal.journal.rows.map((row) => `message ${row.message_id} · part ${row.part_id} · revision ${row.revision}`).join('; ');
+    return `${proposal.content}\n\nJournal synthesis from chat ${proposal.journal.chat_id}. Cited: ${cited || 'none'}. Inferred, not yet approved.`;
+  } catch (_) { return null; }
+}
+
+function _journalSourceControl(card, item) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'memory-toolbar-btn';
+  button.textContent = 'Review Journal sources';
+  const details = document.createElement('div');
+  details.className = 'memory-details-drawer';
+
+  async function preview(current) {
+    const response = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review-preview`, {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'accept', reason: 'approved_by_user' }),
+    });
+    const result = await response.json();
+    const journal = result.proposal?.journal;
+    if (!current() || !response.ok || result.state !== 'preview' || result.candidate_id !== item.id
+        || result.output_kind !== 'journal_synthesis' || !/^[a-f0-9]{64}$/.test(result.candidate_digest || '')
+        || typeof journal?.chat_id !== 'string' || !journal.chat_id || !Array.isArray(journal.cited)
+        || !journal.cited.length || journal.cited.length > 128
+        || journal.cited.some((row) => typeof row?.message_id !== 'string' || typeof row.part_id !== 'string'
+          || !Number.isSafeInteger(row.revision) || row.revision < 1)) {
+      throw new Error('The original Journal sources are unavailable or have changed.');
+    }
+    return { digest: result.candidate_digest, journal };
+  }
+
+  button.addEventListener('click', async () => {
+    const ticket = _memoryActionTicket();
+    const current = () => _memoryActionCurrent(ticket) && card.isConnected;
+    button.disabled = true;
+    try {
+      const original = await preview(current);
+      const list = document.createElement('ul');
+      for (const row of original.journal.cited) {
+        const citation = document.createElement('li');
+        citation.textContent = `Message ${row.message_id} · part ${row.part_id} · revision ${row.revision}`;
+        list.appendChild(citation);
+      }
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'memory-toolbar-btn';
+      open.textContent = 'Open source chat';
+      open.addEventListener('click', async () => {
+        if (!current()) return;
+        open.disabled = true;
+        try {
+          const latest = await preview(current);
+          if (latest.digest !== original.digest || JSON.stringify(latest.journal) !== JSON.stringify(original.journal)) {
+            throw new Error('The original Journal sources changed. Review them again.');
+          }
+          document.getElementById('memory-modal')?.classList.add('hidden');
+          await sessionModule.selectSession(latest.journal.chat_id);
+        } catch (error) {
+          if (current()) showError(error.message || 'The source chat is unavailable.');
+        } finally { open.disabled = false; }
+      });
+      details.replaceChildren(list, open);
+    } catch (error) {
+      if (current()) details.textContent = error.message || 'The Journal sources are unavailable.';
+    } finally { button.disabled = false; }
+  });
+  card.append(button, details);
+}
+
+
 function _inspectText(item, tier) {
-  if (tier === 'candidate') return item.content || '';
+  if (tier === 'candidate') return _journalProposalText(item.content) || item.content || (['assistant_interpretation','explicit_add_original'].includes(item.review_kind) ? 'Original review status only; proposal unavailable.' : item.review_kind === 'explicit_add_terminal' ? 'Original review was erased.' : '');
   if (tier === 'quarantine') return item.content || '';
-  if (tier === 'history') return item.current?.text || item.latest?.text || '';
+  if (tier === 'history') return (item.current?.status === 'open' && _systemSeedInquiry(item)) || item.current?.text || item.latest?.text || '';
   return item.content || item.text || '';
 }
 
 function _inspectMeta(item, tier) {
+  if (tier === 'candidate' && item.review_kind === 'assistant_interpretation') return `Assistant interpretation · ${item.status || 'unknown'}`;
   const meta = item.metadata || item.payload || {};
   const provenance = meta.provenance || {};
   const sessionId = item.session_id || provenance.session_id;
   const parts = [
+    tier === 'history' && _systemSeedInquiry(item) ? 'System-generated inquiry' : null,
+    tier === 'candidate' && item.review_kind === 'assistant_interpretation' ? 'Assistant interpretation' : null,
     tier === 'raw' ? meta.role : (item.current?.status || item.status),
     item.current?.kind || item.kind || item.tier,
     tier === 'history' ? `revision ${item.current_revision || item.latest_revision || '?'}` : null,
@@ -1056,23 +1720,101 @@ function _memoryError(data, fallback) {
 }
 
 async function _runVersionedAction(item, action, fields = {}) {
-  const id = item.id || item.block_id;
-  const body = new URLSearchParams({
-    expected_revision: String(item.current_revision || item.latest_revision),
-    ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, String(value)])),
-  });
-  const response = await fetch(`/api/memory/${encodeURIComponent(id)}/${action}`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    body,
-  });
+  const ticket = _memoryActionTicket();
+  if (!_memoryActionCurrent(ticket)) return { cancelled: true };
+  const legacyId = item.id || item.block_id;
+  const revision = item.current_revision || item.latest_revision;
+  let id = legacyId;
+  let body = new URLSearchParams({ expected_revision: String(revision),
+    ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, String(value)])) });
+  const questionReview = ['question_defer', 'question_dismiss', 'question_reopen'].includes(action);
+  if ((['retract', 'revert'].includes(action) || questionReview) && item.block_id) {
+    let pending = item._pendingPublishedReview;
+    if (pending && (pending.action !== action || pending.revision !== revision || pending.target !== (fields.target_revision ?? null))) {
+      throw new Error('A prior reviewed request may have completed. Retry it or reload before reviewing another action.');
+    }
+    if (!pending) {
+      const request = { action, expected_revision: revision, target_revision: fields.target_revision ?? null, request_key: crypto.randomUUID() };
+      const response = await fetch(`/api/memory/${encodeURIComponent(item.block_id)}/published-preview`, {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+      });
+      if (!_memoryActionCurrent(ticket)) return { cancelled: true };
+      const preview = await response.json().catch(() => ({}));
+      if (!_memoryActionCurrent(ticket)) return { cancelled: true };
+      if (!response.ok) throw new Error(_memoryError(preview, 'Memory review is unavailable'));
+      if (preview.mode === 'guarded') {
+        if (preview.block_id !== item.block_id || preview.action !== action || preview.expected_revision !== revision ||
+            preview.target_revision !== request.target_revision || preview.request_key !== request.request_key ||
+            !Array.isArray(preview.selected_paths) || !preview.selected_paths.length || !Array.isArray(preview.changes) ||
+            typeof preview.operation_json !== 'string' || !/^[0-9a-f]{64}$/.test(preview.operation_sha256 || '')) {
+          throw new Error('Memory review is unavailable');
+        }
+        const summary = action === 'retract' ? 'Retract this memory?' : questionReview
+          ? ({question_defer:'Defer this question?', question_dismiss:'Dismiss this question?', question_reopen:'Make this question eligible again?'})[action]
+          : `Restore revision ${request.target_revision}?\n\n${preview.changes.map(change => `${change.path}: ${JSON.stringify(change.before?.value)} → ${JSON.stringify(change.after?.value)}`).join('\n')}`;
+        if (!await uiModule.styledConfirm(summary, { title: 'Review memory change', confirmText: 'Apply' })) return { cancelled: true };
+        if (!_memoryActionCurrent(ticket)) return { cancelled: true };
+        pending = { action, revision, target: request.target_revision, preview };
+        item._pendingPublishedReview = pending;
+      } else if (preview.mode !== 'legacy' || questionReview) throw new Error('Memory review is unavailable');
+    }
+    if (pending) {
+      id = item.block_id;
+      body = new URLSearchParams({ expected_revision: String(pending.revision), request_key: pending.preview.request_key,
+        selected_paths: JSON.stringify(pending.preview.selected_paths), operation_json: pending.preview.operation_json,
+        operation_sha256: pending.preview.operation_sha256 });
+      if (pending.target !== null) body.set('target_revision', String(pending.target));
+      if (questionReview) body.set('action', action);
+    }
+  }
+  if (!_memoryActionCurrent(ticket)) return { cancelled: true };
+  const endpoint = questionReview ? 'question-review' : action;
+  const response = await fetch(`/api/memory/${encodeURIComponent(id)}/${endpoint}`, { method: 'POST', credentials: 'same-origin', body });
+  if (!_memoryActionCurrent(ticket)) return { cancelled: true };
   const data = await response.json().catch(() => ({}));
+  if (!_memoryActionCurrent(ticket)) return { cancelled: true };
   if (!response.ok) throw new Error(_memoryError(data, `Memory ${action} failed`));
-  await Promise.all([loadMemoryInspect(), loadMemories()]);
+  delete item._pendingPublishedReview;
+  await Promise.all([loadMemoryInspect({ isCurrent: () => _memoryActionCurrent(ticket) }), loadMemories({ isCurrent: () => _memoryActionCurrent(ticket) })]);
+  if (!_memoryActionCurrent(ticket)) return { cancelled: true };
   return data;
 }
 
-function _editInspectedCandidate(card, item) {
+function _publishedActionToast(result, fallback) {
+  if (result?.cancelled) return;
+  const receipt = result?.review;
+  if (receipt && receipt.current_revision !== receipt.applied_revision) {
+    showToast(`Applied revision ${receipt.applied_revision}; current revision ${receipt.current_revision}`);
+  } else showToast(fallback);
+}
+
+const _explicitAddEdits = new Set();
+const _ownedReviewCandidate = id => /^(?:manualadd|importreview)_[a-f0-9]{64}$/.test(id || '');
+async function _editInspectedCandidate(card, item) {
+  const editKey = `${document.body?.dataset?.accountId || ''}:${item.id}`;
+  if (_ownedReviewCandidate(item.id) && (_explicitAddReviews.has(editKey) || _explicitAddEdits.has(editKey))) {
+    showError('The original candidate action is unresolved.'); return;
+  }
+  let captured = null;
+  if (_ownedReviewCandidate(item.id)) {
+    const ticket = _memoryActionTicket(), account = document.body?.dataset?.accountId;
+    try {
+      const originalResponse = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review`, {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phase:'original'})});
+      const original = await originalResponse.json().catch(() => ({}));
+      if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account || !card.isConnected) return;
+      if (!originalResponse.ok || original.state !== 'absent') throw new Error('Check the original review status before editing.');
+      const response = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review-preview`, {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'accept'}) });
+      const preview = await response.json().catch(() => ({}));
+      if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account || !card.isConnected) return;
+      if (!response.ok || preview.review_kind !== 'explicit_add' || preview.candidate_id !== item.id
+          || !Number.isSafeInteger(preview.expected_revision) || !/^[a-f0-9]{64}$/.test(preview.binding_sha256 || '')
+          || !preview.proposal || typeof preview.proposal.text !== 'string' || !MEMORY_CATEGORIES.includes(preview.proposal.category))
+        throw new Error('Candidate preview unavailable.');
+      captured = preview;
+    } catch (error) { if (_memoryActionCurrent(ticket)) showError(error.message || 'Candidate preview unavailable.'); return; }
+  }
   const editor = document.createElement('div');
   editor.className = 'memory-inline-editor';
   const text = document.createElement('textarea');
@@ -1080,7 +1822,7 @@ function _editInspectedCandidate(card, item) {
   text.rows = 3;
   // The candidate list renders identity tokens for display; the editor must
   // round-trip the stored (raw) form.
-  text.value = item.raw_content || item.content || '';
+  text.value = captured ? captured.proposal.text : (item.raw_content || item.content || '');
   text.setAttribute('aria-label', 'Candidate text');
   const category = document.createElement('select');
   category.className = 'memory-edit-cat-select';
@@ -1089,7 +1831,7 @@ function _editInspectedCandidate(card, item) {
     const option = document.createElement('option');
     option.value = name;
     option.textContent = categoryLabel(name);
-    option.selected = name === (item.kind || item.category);
+    option.selected = name === (captured ? captured.proposal.category : (item.kind || item.category));
     category.append(option);
   }
   const save = document.createElement('button');
@@ -1106,19 +1848,26 @@ function _editInspectedCandidate(card, item) {
     if (!content) return showError('Candidate text cannot be empty');
     save.disabled = true;
     try {
+      let body = { text: content, category: category.value };
+      if (captured) {
+        body = {expected_revision:captured.expected_revision, expected_binding:captured.binding_sha256,
+                text:content, category:category.value, source:captured.proposal.source, question_context:captured.proposal.question_context};
+      }
+      if (_ownedReviewCandidate(item.id)) _explicitAddEdits.add(editKey);
       const response = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}`, {
         method: 'PUT',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: content, category: category.value }),
+        body: JSON.stringify(body),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(_memoryError(data, 'Candidate edit failed'));
+      _explicitAddEdits.delete(editKey);
       showToast('Candidate updated');
       await loadMemoryInspect();
     } catch (error) {
-      showError(error.message || 'Candidate edit failed');
-      save.disabled = false;
+      showError(_explicitAddEdits.has(editKey) ? 'Candidate edit outcome is unknown; refresh before further action.' : (error.message || 'Candidate edit failed'));
+      save.disabled = _explicitAddEdits.has(editKey);
     }
   });
   const actions = document.createElement('div');
@@ -1128,23 +1877,127 @@ function _editInspectedCandidate(card, item) {
   card.replaceChildren(editor);
 }
 
+async function reviewPairedCandidate(item, action, button) {
+  const scope=_pairedScope(); if (!scope) { showError('The original account is unavailable.'); return; }
+  const workspace=Storage.get(KEYS.WORKSPACE_ID,'') || '', page=pairedInspect;
+  const filter=document.getElementById('memory-inspect-status')?.value || '';
+  const current=()=>_pairedCurrent(scope) && pairedInspect === page && (Storage.get(KEYS.WORKSPACE_ID,'') || '') === workspace
+    && document.getElementById('memory-inspect-tier')?.value === 'candidate'
+    && (document.getElementById('memory-inspect-status')?.value || '') === filter;
+  button.disabled=true;
+  try {
+    let intent=item._candidateReviewPending || item.original || null;
+    if (intent && !_pairedIntent(intent)) throw new Error('Original review status is unavailable.');
+    if (action !== 'status' && intent) throw new Error('Check the original review status first.');
+    if (action === 'status' && !intent) throw new Error('Original review status is unavailable.');
+    if (!intent) {
+      const reason=action === 'accept' ? 'approved_by_user' : 'rejected_by_user';
+      const response=await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review-preview`, {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action,reason})});
+      const preview=await response.json().catch(()=>({}));
+      if (!current()) return;
+      if (!response.ok || preview.mode !== 'guarded' || preview.state !== 'preview'
+          || preview.review_kind !== 'assistant_interpretation' || preview.candidate_id !== item.id
+          || typeof preview.proposal !== 'string' || !/^[a-f0-9]{64}$/.test(preview.candidate_digest || '')
+          || !/^[a-f0-9]{64}$/.test(preview.association_sha256 || '')) throw new Error('Assistant interpretation review is unavailable.');
+      if (preview.proposal !== item.content) throw new Error('The proposal changed. Refresh before review.');
+      if (!current()) return;
+      intent={action,reason,candidate_digest:preview.candidate_digest,association_sha256:preview.association_sha256,request_key:crypto.randomUUID()};
+      item._candidateReviewPending=intent;
+    }
+    const response=await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review`, {
+      method:'POST', credentials:'same-origin',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({phase:action === 'status' ? 'status' : 'apply',accept:intent.action === 'accept',
+        workspace_id:item.workspace_id,candidate_digest:intent.candidate_digest,association_sha256:intent.association_sha256,
+        request_key:intent.request_key,reason:intent.reason})});
+    const result=await response.json().catch(()=>({}));
+    if (!current()) return;
+    if (!response.ok || result.candidate_id !== item.id || !['applied','rejected','unknown'].includes(result.state))
+      throw new Error('Review outcome is unknown. Check the original status.');
+    if (result.state === 'unknown') throw new Error('Review outcome is unknown. Check the original status.');
+    delete item._candidateReviewPending;
+    showToast(result.visibility === 'not_rechecked' ? 'Review settled; current visibility has not been checked.' : 'Assistant interpretation review settled.');
+    const reloadCurrent=()=>_pairedCurrent(scope) && (Storage.get(KEYS.WORKSPACE_ID,'') || '') === workspace
+      && document.getElementById('memory-inspect-tier')?.value === 'candidate'
+      && (document.getElementById('memory-inspect-status')?.value || '') === filter;
+    await Promise.all([loadMemoryInspect({isCurrent:reloadCurrent}),loadMemories({isCurrent:reloadCurrent})]);
+  } catch (error) { if (current()) showError(error.message || 'Review status unavailable.'); }
+  finally { if (current()) { button.disabled=false; renderMemoryInspect(); } }
+}
+
+const _explicitAddReviews = new Map();
 async function reviewInspectedCandidate(item, accept, button) {
+  if (_ownedReviewCandidate(item.id)) return reviewExplicitAddCandidate(item, accept, button);
   button.disabled = true;
   try {
+    const reason = accept ? 'approved_by_user' : 'rejected_by_user';
+    let pending = item._candidateReviewPending;
+    if (pending && pending.accept !== accept) throw new Error('Retry the pending review before choosing another action.');
+    if (!pending) {
+      const previewResponse = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review-preview`, {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: accept ? 'accept' : 'reject', reason }),
+      });
+      const preview = await previewResponse.json().catch(() => ({}));
+      if (!previewResponse.ok) throw new Error(preview.detail || 'Candidate preview unavailable');
+      if (preview.mode === 'legacy') {
+        pending = { accept, reason, workspace_id: item.workspace_id };
+      } else if (preview.mode === 'guarded' && preview.review_kind === 's08_policy' && preview.state === 'original') {
+        const original=preview.original, receipt=preview.receipt;
+        if (!['connection','summary','journal_synthesis'].includes(preview.output_kind)) throw new Error('Original S08 review unavailable.');
+        if (!original || original.candidate_id!==item.id || original.candidate_revision!==3
+            || !/^[0-9a-f]{64}$/.test(original.candidate_sha256 || '') || typeof original.request_key!=='string'
+            || typeof original.reason!=='string' || !['accept','reject'].includes(original.action) || !receipt || !['applied','rejected','unknown'].includes(receipt.state))
+          throw new Error('Original connection review unavailable.');
+        if (receipt.state==='applied' || receipt.state==='rejected') {
+          showToast('Review was previously settled; current visibility has not been checked.');
+          await Promise.all([loadMemoryInspect(),loadMemories()]); return;
+        }
+        pending={accept:original.action==='accept',action:original.action,reason:original.reason,workspace_id:item.workspace_id,candidate_digest:original.candidate_sha256,
+          expected_v2_head:3,selected_paths:original.action==='accept'?['/value']:[],request_key:original.request_key,review_kind:'s08_policy',output_kind:preview.output_kind,phase:'status'};
+      } else if (preview.mode === 'guarded') {
+        if (!/^[0-9a-f]{64}$/.test(preview.candidate_digest || '')) throw new Error('Candidate preview unavailable');
+        pending = { accept, reason, workspace_id: item.workspace_id, candidate_digest: preview.candidate_digest,
+          request_key: crypto.randomUUID() };
+        if (preview.review_kind === 's08_policy') {
+          if (!['connection','summary','journal_synthesis'].includes(preview.output_kind)) throw new Error('S08 review unavailable.');
+          pending.review_kind='s08_policy'; pending.output_kind=preview.output_kind; pending.action=accept?'accept':'reject'; pending.phase='apply';
+        }
+        if (accept) {
+          if (!Number.isSafeInteger(preview.expected_v2_head) || preview.expected_v2_head < 0 || JSON.stringify(preview.selected_paths) !== '["/value"]') throw new Error('Candidate preview unavailable');
+          pending.expected_v2_head = preview.expected_v2_head;
+          pending.selected_paths = preview.selected_paths;
+        } else if (preview.review_kind === 's08_policy') {
+          if (preview.expected_v2_head!==3 || JSON.stringify(preview.selected_paths)!=='[]') throw new Error('Candidate preview unavailable');
+          pending.expected_v2_head=3; pending.selected_paths=[];
+        } else {
+          if (!/^[0-9a-f]{64}$/.test(preview.association_sha256 || '')) throw new Error('Candidate preview unavailable');
+          if (typeof preview.source_chat_id !== 'string' || !preview.source_chat_id) throw new Error('Candidate preview unavailable');
+          pending.association_sha256 = preview.association_sha256;
+          pending.source_chat_id = preview.source_chat_id;
+        }
+      } else throw new Error('Candidate review unavailable');
+      item._candidateReviewPending = pending;
+    }
+    const outgoing={...pending};
+    if (pending.review_kind==='s08_policy') pending.phase='status';
     const response = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        accept,
-        reason: accept ? 'approved_by_user' : 'rejected_by_user',
-        owner: item.owner,
-        workspace_id: item.workspace_id,
-      }),
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(outgoing),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.detail || 'Review failed');
-    showToast(accept ? 'Candidate promoted to Curated' : 'Candidate rejected');
+    if (!response.ok) throw new Error(data.detail || 'Review failed; check the original status.');
+    if (pending.review_kind==='s08_policy' && data.candidate_id===item.id && data.state==='terminal_erased') {
+      delete item._candidateReviewPending;
+      showToast('The candidate was erased; review cannot continue.');
+      await Promise.all([loadMemoryInspect(),loadMemories()]); return;
+    }
+    if (pending.review_kind==='s08_policy' && (data.candidate_id!==item.id || data.state!==(pending.accept?'applied':'rejected')))
+      throw new Error('Review outcome is unknown. Check the original status.');
+    delete item._candidateReviewPending;
+    showToast(data.visibility === 'not_rechecked'
+      ? 'Review was previously applied; current visibility has not been checked.'
+      : (pending.accept ? 'Candidate promoted to Curated' : 'Candidate rejected'));
     await Promise.all([loadMemoryInspect(), loadMemories()]);
   } catch (error) {
     showError(error.message || 'Review failed');
@@ -1152,21 +2005,132 @@ async function reviewInspectedCandidate(item, accept, button) {
   }
 }
 
+function _explicitAddNoEffect(result, intent, candidateId) {
+  return result && result.state === 'not_applied' && result.candidate_id === candidateId
+    && Object.keys(result).length === 7 && ['conflict','policy_changed'].includes(result.reason)
+    && ['expected_revision','expected_binding','review_key','action'].every(field => result[field] === intent?.[field]);
+}
+async function reviewExplicitAddCandidate(item, accept, button) {
+  const ticket = _memoryActionTicket(), account = document.body?.dataset?.accountId;
+  if (!account) { showError('Account is unavailable.'); return; }
+  const key = `${account}:${item.id}`;
+  if (_explicitAddEdits.has(key)) { showError('The original candidate edit outcome is unresolved.'); return; }
+  let pending = _explicitAddReviews.get(key);
+  const acknowledged = pending?.noEffect ? pending : null;
+  if (acknowledged) pending = null;
+  if (pending && pending.action !== (accept ? 'accept' : 'reject')) { showError('Check the original review status first.'); return; }
+  button.disabled = true;
+  try {
+    if (!pending) {
+      const originalResponse = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review`, {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phase:'original'})});
+      const original = await originalResponse.json().catch(() => ({}));
+      if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account) return;
+      if (!originalResponse.ok) throw new Error('Original review status unavailable.');
+      if (original.state === 'terminal_erased' && original.candidate_id === item.id) {
+        showToast('The original review was erased.'); return;
+      }
+      if (original.state === 'found') {
+        const intent = original.original, receipt = original.receipt;
+        if (!intent || intent.candidate_id !== item.id || !Number.isSafeInteger(intent.expected_revision)
+            || !/^[a-f0-9]{64}$/.test(intent.expected_binding || '') || typeof intent.review_key !== 'string'
+            || !intent.review_key || !['accept','reject'].includes(intent.action) || !receipt || receipt.candidate_id !== item.id
+            || !['applied','rejected','unknown','not_applied'].includes(receipt.state)) throw new Error('Original review status unavailable.');
+        if (receipt.state === 'not_applied') {
+          if (!_explicitAddNoEffect(receipt, intent, item.id)) throw new Error('Original review status unavailable.');
+          if (!acknowledged || !_explicitAddNoEffect(receipt, acknowledged, item.id)) {
+            _explicitAddReviews.set(key, {...intent, noEffect:true});
+            showError('The review was not applied. Refresh and review again.'); return;
+          }
+        } else {
+        pending = {expected_revision:intent.expected_revision, expected_binding:intent.expected_binding,
+                   review_key:intent.review_key, action:intent.action, issued:true};
+        _explicitAddReviews.set(key, pending);
+        if (receipt.state === 'applied' || receipt.state === 'rejected') {
+          _explicitAddReviews.delete(key);
+          showToast(receipt.state === 'applied' ? 'Original review was applied.' : 'Original review was rejected.');
+          await Promise.all([loadMemoryInspect(), loadMemories()]); return;
+        }
+        }
+      } else if (original.state !== 'absent') throw new Error('Original review status unavailable.');
+    }
+    if (!pending) {
+      const response = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review-preview`, {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:accept ? 'accept' : 'reject'})});
+      const preview = await response.json().catch(() => ({}));
+      if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account) return;
+      if (!response.ok || preview.review_kind !== 'explicit_add' || preview.candidate_id !== item.id
+          || !Number.isSafeInteger(preview.expected_revision) || !/^[a-f0-9]{64}$/.test(preview.binding_sha256 || '')
+          || !preview.proposal || preview.proposal.text !== (item.raw_content || item.content || '')) throw new Error('Candidate changed; refresh before review.');
+      const recheckResponse = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review`, {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phase:'original'})});
+      const recheck = await recheckResponse.json().catch(() => ({}));
+      if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account) return;
+      const sameNoEffect = acknowledged && recheck.state === 'found'
+        && _explicitAddNoEffect(recheck.receipt, acknowledged, item.id)
+        && ['expected_revision','expected_binding','review_key','action'].every(field => recheck.original?.[field] === acknowledged[field]);
+      if (!recheckResponse.ok || (recheck.state !== 'absent' && !sameNoEffect)) throw new Error('Original review changed; check its status.');
+      pending = {expected_revision:preview.expected_revision, expected_binding:preview.binding_sha256, review_key:crypto.randomUUID(), action:accept ? 'accept' : 'reject'};
+      _explicitAddReviews.set(key, pending);
+    }
+    const phase = pending.issued ? 'status' : 'apply';
+    pending.issued = true;
+    const response = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review`, {
+      method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({expected_revision:pending.expected_revision, expected_binding:pending.expected_binding,
+                           review_key:pending.review_key, action:pending.action, phase})});
+    const result = await response.json().catch(() => ({}));
+    if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account) return;
+    if (response.ok && _explicitAddNoEffect(result, pending, item.id)) {
+      _explicitAddReviews.set(key, {...pending, noEffect:true});
+      showError('The review was not applied. Refresh and review again.'); return;
+    }
+    if (response.ok && result.state === 'terminal_erased' && result.candidate_id === item.id) {
+      _explicitAddReviews.delete(key); showToast('The original review was erased.'); return;
+    }
+    if (!response.ok || result.state !== (pending.action === 'accept' ? 'applied' : 'rejected') || result.candidate_id !== item.id)
+      throw new Error('Original review outcome unavailable; select the same review action again to check status.');
+    _explicitAddReviews.delete(key);
+    showToast(pending.action === 'accept' ? 'Candidate promoted to Curated' : 'Candidate rejected');
+    await Promise.all([loadMemoryInspect(), loadMemories()]);
+  } catch (error) { if (_memoryActionCurrent(ticket)) showError(error.message || 'Original review unavailable.'); }
+  finally { if (_memoryActionCurrent(ticket)) button.disabled = false; }
+}
+
 function renderMemoryInspect() {
   const list = document.getElementById('memory-inspect-list');
   const tier = document.getElementById('memory-inspect-tier')?.value || 'raw';
   if (!list) return;
+  disposeMemoryBatchReview?.(); disposeMemoryBatchReview=null;
   list.replaceChildren();
-  if (!inspectedMemories.length) {
+  const preextracted = tier === 'candidate' ? preextractedInspect : [];
+  if (!inspectedMemories.length && !preextracted.length && !(tier === 'candidate' && pairedInspect)) {
     const empty = document.createElement('div');
     empty.className = 'memory-empty';
     empty.textContent = `No ${tier === 'raw' ? 'raw trajectory' : tier} records.`;
     list.append(empty);
     return;
   }
+  if (tier === 'candidate' && pairedInspect?.legacyState === 'unavailable') {
+    const notice=document.createElement('p'); notice.textContent='Other candidate records are unavailable.'; list.append(notice);
+  }
+  if (tier === 'candidate' && manualAddInspect?.state === 'unavailable') {
+    const notice=document.createElement('p'); notice.textContent='Original Add review history is unavailable.'; list.append(notice);
+  }
+  if (tier === 'candidate' && manualAddInspect?.partial) {
+    const notice=document.createElement('p'); notice.textContent='Original Add review history is partial.'; list.append(notice);
+  }
+  if (tier === 'candidate' && pairedInspect?.state === 'unavailable') {
+    const notice=document.createElement('p'); notice.textContent='Assistant interpretations are unavailable.'; list.append(notice);
+  }
+  if (tier === 'candidate' && pairedInspect?.partial) {
+    const notice=document.createElement('p'); notice.textContent='Assistant interpretation list is partial; more results are available.'; list.append(notice);
+  }
+  preextracted.forEach(entry => list.append(_preextractedCard(entry)));
   inspectedMemories.forEach(item => {
     const card = document.createElement('div');
     card.className = 'memory-item';
+    if (tier === 'candidate' && /^manualadd_[0-9a-f]{64}$/.test(item.id || '')) card.dataset.batchCandidate=item.id;
     const text = document.createElement('div');
     text.className = 'memory-item-text';
     text.textContent = _inspectText(item, tier);
@@ -1175,6 +2139,13 @@ function renderMemoryInspect() {
     meta.style.marginTop = '6px';
     meta.textContent = _inspectMeta(item, tier);
     card.append(text, meta);
+    const inferred = _preextractedSource(item);
+    if (inferred) {
+      const badge = document.createElement('div'); badge.className = 'memory-inferred-line';
+      const tag = document.createElement('span'); tag.className = 'memory-inferred-badge'; tag.textContent = 'inferred';
+      badge.append(tag, document.createTextNode(` Source: ${_preextractedSourceLabel(inferred)}`));
+      card.append(badge);
+    }
     if (tier === 'curated') {
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:6px;margin-top:8px';
@@ -1199,7 +2170,25 @@ function renderMemoryInspect() {
       actions.append(edit);
       card.append(actions);
     }
-    if (tier === 'candidate' && item.status === 'pending') {
+    if (tier === 'candidate' && item.review_kind === 'explicit_add_original') {
+      const check=document.createElement('button'); check.type='button'; check.className='memory-toolbar-btn'; check.textContent='Check original status';
+      check.addEventListener('click',()=>reviewExplicitAddCandidate(item,item.original?.action !== 'reject',check)); card.append(check);
+    }
+    if (tier === 'candidate' && item.review_kind === 'assistant_interpretation') {
+      const actions=document.createElement('div'); actions.style.cssText='display:flex;gap:6px;margin-top:8px';
+      const pending=item._candidateReviewPending || item.original;
+      if (pending || item.status === 'unknown') {
+        const check=document.createElement('button'); check.type='button'; check.className='memory-toolbar-btn'; check.textContent='Check original status';
+        check.disabled=!_pairedIntent(pending); check.addEventListener('click',()=>reviewPairedCandidate(item,'status',check)); actions.append(check);
+      } else if (item.status === 'pending' && typeof item.content === 'string') {
+        for (const [label,action] of [['Promote','accept'],['Reject','reject']]) {
+          const button=document.createElement('button'); button.type='button'; button.className='memory-toolbar-btn'; button.textContent=label;
+          button.addEventListener('click',()=>reviewPairedCandidate(item,action,button)); actions.append(button);
+        }
+      }
+      card.append(actions);
+    }
+    if (tier === 'candidate' && item.status === 'pending' && item.review_kind !== 'assistant_interpretation') {
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:6px;margin-top:8px';
       const edit = document.createElement('button');
@@ -1219,6 +2208,7 @@ function renderMemoryInspect() {
       reject.addEventListener('click', () => reviewInspectedCandidate(item, false, reject));
       actions.append(edit, accept, reject);
       card.append(actions);
+      if (_journalProposalText(item.content)) _journalSourceControl(card, item);
     }
     if (tier === 'history') {
       const revisions = document.createElement('div');
@@ -1233,6 +2223,22 @@ function renderMemoryInspect() {
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:6px;margin-top:8px;flex-wrap:wrap';
       const current = item.current || item.latest || {};
+      if (current.kind === 'open_question' && current.status === 'open' && current.source_event_id === null &&
+          Array.isArray(current.evidence_ids) && current.evidence_ids.length === 0 && current.activation_rationale?.question_context) {
+        const review = current.activation_rationale.question_review;
+        const disposition = review == null ? 'eligible' :
+          (review.version === 1 && ['eligible','deferred','dismissed'].includes(review.disposition) ? review.disposition : null);
+        const choices = disposition === 'eligible' ? [['Defer','question_defer'],['Dismiss','question_dismiss']] :
+          (disposition ? [['Make eligible','question_reopen']] : []);
+        for (const [label, action] of choices) {
+          const button = document.createElement('button'); button.type = 'button'; button.className = 'memory-toolbar-btn'; button.textContent = label;
+          button.addEventListener('click', async () => {
+            try { const result = await _runVersionedAction(item, action); _publishedActionToast(result, 'Question updated'); }
+            catch (error) { showError(error.message); }
+          });
+          actions.append(button);
+        }
+      }
       if (current.kind === 'open_question' && current.status === 'active') {
         const reopen = document.createElement('button');
         reopen.type = 'button';
@@ -1253,8 +2259,8 @@ function renderMemoryInspect() {
         retract.textContent = 'Retract';
         retract.addEventListener('click', async () => {
           try {
-            await _runVersionedAction(item, 'retract', { reason: 'retracted by user' });
-            showToast('Memory retracted');
+            const result = await _runVersionedAction(item, 'retract', { reason: 'retracted by user' });
+            _publishedActionToast(result, 'Memory retracted');
           } catch (error) { showError(error.message); }
         });
         actions.append(retract);
@@ -1267,8 +2273,8 @@ function renderMemoryInspect() {
         revert.textContent = `Restore revision ${prior.revision}`;
         revert.addEventListener('click', async () => {
           try {
-            await _runVersionedAction(item, 'revert', { target_revision: prior.revision });
-            showToast(`Restored revision ${prior.revision}`);
+            const result = await _runVersionedAction(item, 'revert', { target_revision: prior.revision });
+            _publishedActionToast(result, `Restored revision ${prior.revision}`);
           } catch (error) { showError(error.message); }
         });
         actions.append(revert);
@@ -1277,9 +2283,118 @@ function renderMemoryInspect() {
     }
     list.append(card);
   });
+  if (tier === 'candidate') {
+    const scope=_pairedScope(), generation=memoryInspectGeneration, workspace=Storage.get(KEYS.WORKSPACE_ID,'') || '';
+    disposeMemoryBatchReview=mountMemoryBatchReview({list,items:inspectedMemories,scope,current:()=>generation===memoryInspectGeneration && _pairedCurrent(scope) && (Storage.get(KEYS.WORKSPACE_ID,'') || '')===workspace && (document.getElementById('memory-inspect-tier')?.value || 'raw')==='candidate',onComplete:async()=>{await Promise.all([loadMemoryInspect(),loadMemories()]);}});
+  }
+  if (tier === 'candidate' && (manualAddInspect?.original_cursor || manualAddInspect?.terminal_cursor || manualAddInspect?.import_original_cursor || manualAddInspect?.import_terminal_cursor)) {
+    const more=document.createElement('button'); more.type='button'; more.className='memory-toolbar-btn'; more.textContent='Load more original Add reviews';
+    more.addEventListener('click',()=>_loadMoreManualAdd(more)); list.append(more);
+  }
+  if (tier === 'candidate' && ['ready','unavailable'].includes(pairedInspect?.state)
+      && (pairedInspect.candidate_cursor || pairedInspect.intent_cursor)) {
+    const more=document.createElement('button'); more.type='button'; more.className='memory-toolbar-btn'; more.textContent='Load more assistant interpretations';
+    more.addEventListener('click',()=>_loadMorePaired(more)); list.append(more);
+  }
 }
 
-export async function loadMemoryInspect() {
+function _mergeManualAddRows(rows, page, status) {
+  const merged=new Map(rows.map(item=>[item.id,item]));
+  for (const item of page.items || []) {
+    if (!item || typeof item.id !== 'string' || !/^(?:manualadd|importreview)_[a-f0-9]{64}$/.test(item.id)
+        || !['explicit_add_original','explicit_add_terminal'].includes(item.review_kind)
+        || (status && item.status !== status)) continue;
+    if (merged.has(item.id)) {
+      if (item.review_kind === 'explicit_add_original' && item.status === 'unknown' && item.original)
+        merged.set(item.id,{...merged.get(item.id),...item});
+      continue;
+    }
+    merged.set(item.id,item);
+  }
+  return [...merged.values()];
+}
+async function _loadMoreManualAdd(button) {
+  const page=manualAddInspect, scope=page?.scope, status=page?.filter, workspace=page?.workspace;
+  const current=()=>manualAddInspect===page && _pairedCurrent(scope)
+    && (document.getElementById('memory-inspect-tier')?.value || 'raw')==='candidate'
+    && (document.getElementById('memory-inspect-status')?.value || '')===status
+    && (Storage.get(KEYS.WORKSPACE_ID,'') || '')===workspace;
+  if (!current()) return;
+  button.disabled=true;
+  try {
+    const query=new URLSearchParams({tier:'candidate',manual_original_cursor:page.original_cursor || 'done',manual_terminal_cursor:page.terminal_cursor || 'done',import_original_cursor:page.import_original_cursor || 'done',import_terminal_cursor:page.import_terminal_cursor || 'done',paired_candidate_cursor:'done',paired_intent_cursor:'done'});
+    if (status) query.set('status',status);
+    const response=await fetch(`/api/memory/inspect?${query}`,{credentials:'same-origin'});
+    const data=await response.json().catch(()=>({})); if (!current()) return;
+    const next=data.manual_add;
+    if (!response.ok || !['ready','unavailable'].includes(next?.state) || !Array.isArray(next.items)) throw new Error('More original reviews are unavailable.');
+    if (next.state === 'unavailable') {
+      page.state='unavailable'; page.partial=true;
+      inspectedMemories=_mergeManualAddRows(inspectedMemories,next,status); renderMemoryInspect(); return;
+    }
+    const before=JSON.stringify([page.original_cursor,page.terminal_cursor,page.import_original_cursor,page.import_terminal_cursor]);
+    Object.assign(page,{state:next.state,original_cursor:next.original_cursor || null,terminal_cursor:next.terminal_cursor || null,import_original_cursor:next.import_original_cursor || null,import_terminal_cursor:next.import_terminal_cursor || null,partial:!!next.partial});
+    if ((page.original_cursor || page.terminal_cursor || page.import_original_cursor || page.import_terminal_cursor) && before===JSON.stringify([page.original_cursor,page.terminal_cursor,page.import_original_cursor,page.import_terminal_cursor])) throw new Error('More original reviews are unavailable.');
+    inspectedMemories=_mergeManualAddRows(inspectedMemories,next,status); renderMemoryInspect();
+  } catch (error) { if (current()) { showError(error.message || 'More original reviews are unavailable.'); button.disabled=false; } }
+}
+
+async function _loadMorePaired(button) {
+  const page=pairedInspect, scope=page?.scope, status=page?.filter, workspace=page?.workspace;
+  const current=()=>pairedInspect===page && _pairedCurrent(scope)
+    && (document.getElementById('memory-inspect-tier')?.value || 'raw')==='candidate'
+    && (document.getElementById('memory-inspect-status')?.value || '')===status
+    && (Storage.get(KEYS.WORKSPACE_ID,'') || '')===workspace;
+  if (!current()) return;
+  button.disabled=true;
+  try {
+    const query=new URLSearchParams({tier:'candidate', paired_candidate_cursor:page.candidate_cursor || 'done', paired_intent_cursor:page.intent_cursor || 'done'});
+    if (status) query.set('status',status);
+    const response=await fetch(`/api/memory/inspect?${query}`,{credentials:'same-origin'});
+    const data=await response.json().catch(()=>({}));
+    if (!current()) return;
+    const next=data.paired;
+    if (!response.ok || !['ready','unavailable'].includes(next?.state) || !Array.isArray(next.items)) throw new Error('More assistant interpretations are unavailable.');
+    const merged=new Map(inspectedMemories.map(item=>[item.id,item]));
+    for (const item of next.items) {
+      if (item && typeof item.id==='string' && item.review_kind==='assistant_interpretation'
+          && ['pending','unknown','accepted','rejected'].includes(item.status) && (!status || item.status===status)
+          && (next.state === 'ready' || item.original))
+        merged.set(item.id,_mergePairedRow(merged.get(item.id),item));
+    }
+    const before=JSON.stringify([page.candidate_cursor,page.intent_cursor]);
+    Object.assign(page,{state:next.state,candidate_cursor:next.candidate_cursor || null,intent_cursor:next.intent_cursor || null,partial:!!next.partial});
+    if ((page.candidate_cursor || page.intent_cursor) && before===JSON.stringify([page.candidate_cursor,page.intent_cursor]))
+      throw new Error('More assistant interpretations are unavailable.');
+    inspectedMemories=[...merged.values()]; renderMemoryInspect();
+  } catch (error) { if (current()) { showError(error.message || 'More results are unavailable.'); button.disabled=false; } }
+}
+
+// Text of the quality line from a /api/memory/quality reply: states only fields the reply carries.
+export function memoryQualityLine(quality) {
+  const isObj=value=>value && typeof value === 'object' && !Array.isArray(value);
+  const num=value=>typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+  if (!isObj(quality)) return 'Memory quality unavailable.';
+  const counts=isObj(quality.counts) ? quality.counts : {};
+  const tier=isObj(counts.by_tier) ? counts.by_tier : {};
+  const graph=isObj(quality.graph) ? quality.graph : {};
+  const parts=[];
+  const add=(label,value)=>{ if (value !== null) parts.push(`${label} ${value}`); };
+  add('Memories',num(tier.curated));
+  add('Awaiting review',num(tier.candidates_pending ?? counts.candidates_pending));
+  add('Raw',num(tier.raw));
+  if (isObj(counts.by_kind)) {
+    const kinds=Object.entries(counts.by_kind).filter(([,n])=>num(n) !== null && n > 0)
+      .sort((a,b)=>b[1]-a[1] || (a[0] < b[0] ? -1 : 1)).slice(0,3);
+    if (kinds.length) parts.push(`Kinds ${kinds.map(([k,n])=>`${k} ${n}`).join(', ')}`);
+  }
+  if (typeof graph.integrity_ok === 'boolean') parts.push(graph.integrity_ok ? 'Index healthy' : 'Index needs rebuild');
+  add('Index cues',num(graph.visible_cues));
+  return parts.length ? parts.join(' · ') : 'Memory quality unavailable.';
+}
+
+export async function loadMemoryInspect({ isCurrent = () => true } = {}) {
+  if (!isCurrent()) return;
   const tier = document.getElementById('memory-inspect-tier')?.value || 'raw';
   const statusSelect = document.getElementById('memory-inspect-status');
   if (statusSelect) {
@@ -1300,23 +2415,63 @@ export async function loadMemoryInspect() {
   }
   const status = ['candidate', 'history'].includes(tier) ? (statusSelect?.value || '') : '';
   const list = document.getElementById('memory-inspect-list');
+  pairedInspect=null;
+  manualAddInspect=null;
+  const pairedScope=_pairedScope(), pairedWorkspace=Storage.get(KEYS.WORKSPACE_ID,'') || '';
+  const generation=++memoryInspectGeneration;
+  const loadCurrent=()=>generation===memoryInspectGeneration && isCurrent()
+    && (pairedScope ? _pairedCurrent(pairedScope) : !_pairedScope())
+    && (Storage.get(KEYS.WORKSPACE_ID,'') || '')===pairedWorkspace
+    && (document.getElementById('memory-inspect-tier')?.value || 'raw')===tier
+    && (!['candidate','history'].includes(tier) || (statusSelect?.value || '')===status);
   if (list) list.textContent = 'Loading…';
+  const qualityEl=document.getElementById('memory-quality');
+  if (qualityEl) qualityEl.textContent='Memory quality pending…';
+  if (qualityEl && !document.getElementById('memory-journal-coverage')) { const box=document.createElement('div'); box.id='memory-journal-coverage'; qualityEl.after(box); mountJournalCoverage(box,()=>sessionModule?.getCurrentSessionId?.()||''); }
+  if (qualityEl && !document.getElementById('memory-shadow-ranking')) { const box=document.createElement('div'); box.id='memory-shadow-ranking'; qualityEl.after(box); mountShadowRanking(box); }
+  void Promise.resolve().then(()=>fetch('/api/memory/quality', {credentials:'same-origin'}))
+    .then(async response=>response?.ok ? await response.json().catch(()=>null) : null)
+    .catch(()=>null).then(quality=>{
+      if (!loadCurrent() || !qualityEl) return;
+      qualityEl.textContent=memoryQualityLine(quality);
+    });
   try {
-    const [tierResponse, qualityResponse] = await Promise.all([
-      fetch(`/api/memory/inspect?tier=${encodeURIComponent(tier)}${status ? `&status=${encodeURIComponent(status)}` : ''}`, { credentials: 'same-origin' }),
-      fetch('/api/memory/quality', { credentials: 'same-origin' }),
-    ]);
-    if (!tierResponse.ok || !qualityResponse.ok) throw new Error('Memory inspection unavailable');
-    const tierData = await tierResponse.json();
-    const quality = await qualityResponse.json();
+    const tierResponse=await fetch(`/api/memory/inspect?tier=${encodeURIComponent(tier)}${status ? `&status=${encodeURIComponent(status)}` : ''}`, {credentials:'same-origin'});
+    if (!tierResponse.ok) throw new Error('Memory inspection unavailable');
+    const tierData=await tierResponse.json();
+    if (!loadCurrent()) return;
     inspectedMemories = Array.isArray(tierData.items) ? tierData.items : [];
-    const graph = quality.graph || {};
-    const qualityEl = document.getElementById('memory-quality');
-    if (qualityEl) {
-      qualityEl.textContent = `Raw ${quality.raw || 0} · Candidates ${quality.candidates || 0} · Curated ${quality.curated || 0} · Quarantined ${quality.quarantined || 0} · Index ${graph.integrity_ok ? 'healthy' : 'needs rebuild'} (${graph.cues || 0}/${graph.cue_fts || 0}, ${graph.orphan_cues || 0} orphans)`;
+    pairedInspect = tier === 'candidate' && tierData.paired && typeof tierData.paired === 'object'
+      ? (pairedScope ? tierData.paired : {state:'unavailable'}) : null;
+    if (pairedInspect) Object.assign(pairedInspect,{scope:pairedScope,workspace:pairedWorkspace,filter:status,legacyState:tierData.legacy_state || null});
+    if (['ready','unavailable'].includes(pairedInspect?.state) && Array.isArray(pairedInspect.items)) {
+      const merged=new Map(inspectedMemories.map(item=>[item.id,item]));
+      for (const item of pairedInspect.items) {
+        if (item && typeof item.id === 'string' && item.review_kind === 'assistant_interpretation'
+            && ['pending','unknown','accepted','rejected'].includes(item.status) && (!status || item.status === status)
+            && (pairedInspect.state === 'ready' || item.original))
+          merged.set(item.id,_mergePairedRow(merged.get(item.id),item));
+      }
+      inspectedMemories=[...merged.values()];
+    }
+    manualAddInspect = tier === 'candidate' && tierData.manual_add && typeof tierData.manual_add === 'object'
+      ? (pairedScope ? tierData.manual_add : {state:'unavailable',items:[]}) : null;
+    if (manualAddInspect) {
+      Object.assign(manualAddInspect,{scope:pairedScope,workspace:pairedWorkspace,filter:status});
+      if (Array.isArray(manualAddInspect.items)) inspectedMemories=_mergeManualAddRows(inspectedMemories,manualAddInspect,status);
+    }
+    preextractedInspect = [];
+    if (tier === 'candidate' && (!status || status === 'pending')) {
+      try {
+        const response = await fetch('/api/memory/candidates/preextracted?limit=50', { credentials: 'same-origin' });
+        const data = response.ok ? await response.json() : null;
+        if (!loadCurrent()) return;
+        if (Array.isArray(data?.items)) preextractedInspect = data.items.filter(entry => typeof entry?.candidate_id === 'string' && _preextractedSource(entry));
+      } catch (_) { /* guarded store only; the rest of the list is unaffected */ }
     }
     renderMemoryInspect();
   } catch (error) {
+    if (!loadCurrent()) return;
     inspectedMemories = [];
     if (list) list.textContent = error.message || 'Memory inspection unavailable';
   }
@@ -1364,6 +2519,8 @@ function updateBulkCount() {
   const deleteBtn = document.getElementById('memory-bulk-delete');
   if (countEl) countEl.textContent = `${selectedIds.size} Selected`;
   if (deleteBtn) deleteBtn.disabled = selectedIds.size === 0;
+  const editBtn = document.getElementById('memory-bulk-edit');
+  if (editBtn) editBtn.disabled = selectedIds.size === 0 || selectedIds.size > 100;
 }
 
 function toggleSelectAll() {
@@ -1629,11 +2786,12 @@ const graphState = {
   ready: false,
   detailRevision: 0,
   pending: new Set(),
+  workbench: null,
 };
 
 function _graphContext() {
   return JSON.stringify({
-    account: document.body?.dataset.accountId || Storage.get('odysseus-auth-owner', '') || '',
+    account: document.body?.dataset.accountId || Storage.get('openclank-auth-owner', '') || '',
     // View lifetime only: ordinary-memory graph retains its backend scope.
     workspace: Storage.get(KEYS.WORKSPACE_ID, '') || '',
   });
@@ -1660,6 +2818,11 @@ export function disposeMemoryGraph({ clear = true, reason = 'unmounted' } = {}) 
     graphState.positions = new Map();
     graphState.selected = null;
     graphState.totals = { nodes: null, edges: null };
+  }
+  if (graphState.workbench) {
+    graphState.workbench.results.hidden = true;
+    graphState.workbench.results.replaceChildren();
+    _renderGraphWorkbench();
   }
   if (graphState.canvas) {
     graphState.canvas.dataset.graphState = reason;
@@ -1736,6 +2899,7 @@ export async function loadMemoryGraph({ tagFilter = null } = {}) {
   disposeMemoryGraph({ reason: 'loading' });
   graphState.canvas = canvas;
   _wireGraphCanvas(canvas);
+  _wireGraphWorkbench(canvas);
   canvas.dataset.graphState = 'loading';
   _drawGraph(canvas); _renderGraphCounts();
   const loadingDetail = document.getElementById('memory-graph-detail');
@@ -1760,7 +2924,7 @@ export async function loadMemoryGraph({ tagFilter = null } = {}) {
     _renderGraphCounts();
     _renderGraphDetail(null);
   } catch (error) {
-    _graphFailure(ticket, error, 'Graph unavailable — is the frankenmemory provider running?');
+    _graphFailure(ticket, error, 'Graph unavailable — is the Memery provider running?');
   } finally {
     _graphFinish(ticket);
   }
@@ -1910,7 +3074,7 @@ function _wireGraphCanvas(canvas) {
     if (moved) return; // it was a pan, not a click
     const point = _toGraphCoords(canvas, e.clientX, e.clientY);
     const hit = hitTest(graphState.positions, point.x, point.y, 14 / graphState.scale);
-    if (!hit) { graphState.detailRevision += 1; graphState.selected = null; _drawGraph(canvas); _renderGraphDetail(null); return; }
+    if (!hit) { _graphSelectNode(null); return; }
     if (e.shiftKey && graphState.selected && graphState.selected !== hit) {
       await _traceBetween(graphState.selected, hit);
       return;
@@ -1919,10 +3083,7 @@ function _wireGraphCanvas(canvas) {
       await _expandNode(hit, canvas);
       return;
     }
-    graphState.selected = hit;
-    graphState.detailRevision += 1;
-    _drawGraph(canvas);
-    _renderGraphDetail(hit);
+    _graphSelectNode(hit);
   });
   listen(canvas, 'wheel', (e) => {
     if (!_graphMounted(canvas) || !graphState.ready) return;
@@ -2019,7 +3180,285 @@ function _nodeName(nodeId) {
   return node ? (node.label || node.name) : nodeId;
 }
 
+const MEMORY_GRAPH_UUID = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
+
+function _graphElement(tag, text, ...children) {
+  const node = document.createElement(tag);
+  if (text) node.textContent = text;
+  node.append(...children);
+  return node;
+}
+
+function _graphControl(text, handler) {
+  const button = _graphElement('button', text);
+  button.type = 'button';
+  button.className = 'memory-cat-chip';
+  button.addEventListener('click', handler);
+  return button;
+}
+
+function _graphSelectNode(id) {
+  if (!graphState.ready || id!==null && !graphState.nodes.some(node => node.id === id)) return;
+  graphState.selected = id;
+  graphState.detailRevision += 1;
+  const view = graphState.workbench;
+  if (view) { view.results.hidden = true; view.results.replaceChildren(); }
+  if (graphState.canvas) _drawGraph(graphState.canvas);
+  _renderGraphDetail(id);
+}
+
+function _wireGraphWorkbench(canvas) {
+  graphState.workbench?.controls.remove();
+  graphState.workbench?.panel.remove();
+  graphState.workbench?.results.remove();
+  const controls = _graphElement('div');
+  controls.setAttribute('aria-label', 'Memory graph views');
+  controls.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;';
+  const panel = _graphElement('section');
+  panel.style.cssText = 'flex:1;min-width:0;overflow:auto;max-height:420px;';
+  panel.tabIndex = -1;
+  const results = _graphElement('section');
+  results.hidden = true;
+  results.style.cssText = 'overflow:auto;max-height:420px;margin-top:8px;';
+  results.setAttribute('aria-label', 'Memory graph reconstruction results');
+  results.tabIndex = -1;
+  const search = _graphElement('input');
+  search.type = 'search';
+  search.maxLength = 1024;
+  search.placeholder = 'Find related memories';
+  search.setAttribute('aria-label', 'Graph reconstruction query');
+  const intent = _graphElement('select');
+  intent.setAttribute('aria-label', 'Graph reconstruction intent');
+  for (const label of ['General', 'Temporal', 'Causal', 'Entity']) {
+    const option = _graphElement('option', label);
+    option.value = label.toLowerCase();
+    intent.append(option);
+  }
+  const community = _graphElement('select');
+  community.setAttribute('aria-label', 'Community context');
+  for (const [value, label] of [['focal', 'Around the query'], ['broad', 'Across retained memory'], ['off', 'Individual evidence']]) {
+    const option = _graphElement('option', label);
+    option.value = value;
+    community.append(option);
+  }
+  const adaptive = _graphElement('input');
+  adaptive.type = 'checkbox';
+  adaptive.checked = true;
+  const adaptiveLabel = _graphElement('label', '', adaptive, _graphElement('span', 'Stop when evidence stabilizes'));
+  const reconstruct = _graphControl('Reconstruct', () => void _reconstructMemoryGraph(search.value, intent.value, community.value, adaptive.checked));
+  const modes = new Map();
+  const view = graphState.workbench = {canvas, controls, panel, results, modes, mode:'graph', page:0, search, community, reconstruct};
+  for (const [id, title] of [['graph', 'Graph'], ['table', 'Table'], ['claims', 'Claims & support']]) {
+    const button = _graphControl(title, () => {
+      if (graphState.workbench !== view) return;
+      view.mode = id;
+      view.page = 0;
+      _renderGraphWorkbench();
+      if (id !== 'graph') panel.focus({preventScroll:true});
+    });
+    modes.set(id, button);
+    controls.append(button);
+  }
+  const clearReconstruction = () => {
+    graphState.detailRevision++;
+    results.hidden = true;
+    results.replaceChildren();
+    _updateGraphReconstructControl();
+  };
+  search.addEventListener('input', clearReconstruction);
+  for (const control of [intent, community, adaptive]) control.addEventListener('change', clearReconstruction);
+  search.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !reconstruct.disabled) {
+      event.preventDefault();
+      reconstruct.click();
+    }
+  });
+  controls.append(search, intent, community, adaptiveLabel, reconstruct);
+  canvas.parentElement.before(controls);
+  canvas.after(panel);
+  canvas.parentElement.after(results);
+  _renderGraphWorkbench();
+}
+
+function _updateGraphReconstructControl() {
+  const view = graphState.workbench;
+  if (view) view.reconstruct.disabled = !graphState.ready ||
+    view.community.value !== 'broad' && !view.search.value.trim() && !MEMORY_GRAPH_UUID.test(graphState.selected || '');
+}
+
+function _renderGraphWorkbench() {
+  const view = graphState.workbench;
+  if (!view || !_graphMounted(view.canvas)) return;
+  _updateGraphReconstructControl();
+  const {mode, panel} = view;
+  const focused = panel.contains(document.activeElement) ? document.activeElement.dataset.memoryGraphItem : null;
+  for (const [id, button] of view.modes) button.setAttribute('aria-pressed', String(id === mode));
+  view.canvas.style.display = mode === 'graph' ? '' : 'none';
+  panel.hidden = mode === 'graph';
+  if (mode === 'graph') { _drawGraph(view.canvas); return; }
+  if (!graphState.ready) { panel.textContent = 'Memory graph data is unavailable.'; return; }
+  if (mode === 'claims') {
+    panel.setAttribute('aria-label', 'Loaded claims and typed supporting evidence');
+    const known = new Map(graphState.nodes.map(node => [node.id, node]));
+    const supportKinds = new Set(['evidence', 'support']);
+    const typed = graphState.edges.flatMap(edge => {
+      if (!['supports', 'contradicts'].includes(edge.tag) ||
+          graphState.tagFilter && graphState.tagFilter !== edge.tag) return [];
+      const from = known.get(edge.src_id), to = known.get(edge.dst_id);
+      if (to?.kind !== 'claim' || !supportKinds.has(from?.kind)) return [];
+      return [{from, to, edge}];
+    });
+    const content = _graphElement('p', 'Loaded evidence → claim · supports or contradicts. Recorded edge trust is shown when available.');
+    const rows = typed.slice(0, 60).map(({from, to, edge}) => {
+      const row = _graphElement('li', '',
+        _graphControl(_nodeName(from.id), () => _graphSelectNode(from.id)),
+        _graphElement('span', ' ' + edge.tag + ' → '),
+        _graphControl(_nodeName(to.id), () => _graphSelectNode(to.id)));
+      if (Number.isFinite(edge.trust)) row.append(_graphElement('span', ' · edge trust ' + edge.trust));
+      if (typeof edge.fact === 'string' && edge.fact) row.append(_graphElement('p', edge.fact.slice(0, 400)));
+      return row;
+    });
+    panel.replaceChildren(content, rows.length ? _graphElement('ul', '', ...rows)
+      : _graphElement('p', 'No typed support or contradiction is available in this loaded view.'));
+    if (typed.length > rows.length) panel.append(_graphElement('p', (typed.length - rows.length) + ' typed relationships beyond the display limit'));
+    return;
+  }
+  panel.setAttribute('aria-label', 'Loaded Memory graph table');
+  const columns = _graphElement('tr');
+  for (const label of ['Memory', 'Kind', 'Loaded connections']) {
+    const column = _graphElement('th', label);
+    column.scope = 'col';
+    columns.append(column);
+  }
+  const degrees = new Map();
+  for (const edge of graphState.edges) {
+    if (graphState.tagFilter && edge.tag !== graphState.tagFilter) continue;
+    for (const id of new Set([edge.src_id, edge.dst_id])) degrees.set(id, (degrees.get(id) || 0) + 1);
+  }
+  const nodes = graphState.nodes;
+  view.page = Math.max(0, Math.min(view.page, Math.ceil(nodes.length / 40)-1));
+  const offset = view.page * 40;
+  const rows = nodes.slice(offset, offset + 40).map(node => {
+    const pick = _graphControl(_nodeName(node.id), () => _graphSelectNode(node.id));
+    pick.dataset.memoryGraphItem = node.id;
+    pick.setAttribute('aria-pressed', String(graphState.selected === node.id));
+    const name = _graphElement('th', '', pick);
+    name.scope = 'row';
+    return _graphElement('tr', '', name, _graphElement('td', node.kind), _graphElement('td', String(degrees.get(node.id) || 0)));
+  });
+  const previous = _graphControl('Previous', () => { view.page -= 1; _renderGraphWorkbench(); panel.focus(); });
+  const next = _graphControl('Next', () => { view.page += 1; _renderGraphWorkbench(); panel.focus(); });
+  previous.disabled = offset === 0;
+  next.disabled = offset + 40 >= nodes.length;
+  const status = _graphElement('p', rows.length ? (offset + 1) + '–' + (offset + rows.length) + ' of ' + nodes.length + ' loaded memories' : 'No loaded memories match the current graph filter.');
+  panel.replaceChildren(status, _graphElement('table', '', _graphElement('thead', '', columns), _graphElement('tbody', '', ...rows)), previous, next);
+  if (focused) [...panel.querySelectorAll('[data-memory-graph-item]')].find(node => node.dataset.memoryGraphItem === focused)?.focus({preventScroll:true});
+}
+
+function _reconstructionNode(id) {
+  const known = graphState.nodes.some(node => node.id === id);
+  if (known) return _graphControl(_nodeName(id), () => _graphSelectNode(id));
+  const button = _graphControl('Open memory ' + id.slice(0, 8), async () => {
+    const ticket = _graphTicket('fetch', {detail:true});
+    button.disabled = true;
+    try {
+      const result = await _graphApi({op:'fetch', node:id}, ticket);
+      if (!_graphTicketCurrent(ticket)) return;
+      if (result?.node?.id !== id) {
+        button.textContent = 'Memory unavailable';
+        return;
+      }
+      if (!graphState.nodes.some(node => node.id === id)) {
+        graphState.nodes.push(result.node);
+        _relayoutGraph(ticket.canvas);
+        _renderGraphCounts();
+      }
+      _graphSelectNode(id);
+    } catch {
+      if (_graphTicketCurrent(ticket)) button.textContent = 'Memory unavailable';
+    } finally {
+      _graphFinish(ticket);
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+async function _reconstructMemoryGraph(query, intent, community, adaptive) {
+  const view = graphState.workbench, search = query.trim();
+  if (!view || !graphState.ready || community !== 'broad' && !search && !MEMORY_GRAPH_UUID.test(graphState.selected || '')) return;
+  const ticket = _graphTicket('reconstruct', {detail:true});
+  const pending = _graphElement('p', 'Reading ranked native memory graph evidence…');
+  pending.setAttribute('role', 'status');
+  view.results.replaceChildren(pending);
+  view.results.hidden = false;
+  view.results.focus({preventScroll:true});
+  const body = {intent, community, adaptive};
+  if (search) body.query = search;
+  else if (MEMORY_GRAPH_UUID.test(graphState.selected || '')) body.seed_ids = [graphState.selected];
+  if (graphState.tagFilter) body.tag = graphState.tagFilter;
+  const owns = () => graphState.workbench === view && _graphTicketCurrent(ticket);
+  try {
+    const response = await fetch('/api/memory/graph/reconstruct', {
+      method:'POST', credentials:'same-origin', signal:ticket.signal,
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error();
+    const value = await response.json();
+    if (!owns()) return;
+    if (value?.version !== 1 || !Array.isArray(value.nodes) ||
+        !Array.isArray(value.steps) || !Array.isArray(value.omitted)) throw new Error();
+    if (value.communities && (value.communities.mode !== community ||
+        !Array.isArray(value.communities.groups) || value.communities.groups.length > 6)) throw new Error();
+    const regions = (value.communities?.groups || []).flatMap(group => {
+      if (!/^[a-f0-9]{64}$/.test(group?.id || '') || !Array.isArray(group.members) ||
+          !Array.isArray(group.anchor_ids) || !Array.isArray(group.witnesses)) return [];
+      const links = group.witnesses.slice(0, 12).flatMap(edge =>
+        MEMORY_GRAPH_UUID.test(edge?.from || '') && MEMORY_GRAPH_UUID.test(edge?.to || '') &&
+        typeof edge.tag === 'string' ? [_graphElement('li', '', _reconstructionNode(edge.from),
+          _graphElement('span', ' → ' + edge.tag.slice(0, 128) + ' → '), _reconstructionNode(edge.to))] : []);
+      if (!links.length) return [];
+      const count = group.members.length + ' memories · ' + group.witnesses.length + ' recorded relationships';
+      const details = _graphElement('details', '', _graphElement('summary', count),
+        _graphElement('ul', '', ...links));
+      if (group.witnesses.length > links.length) details.append(_graphElement('small', 'Showing first ' + links.length + ' relationships'));
+      return [details];
+    });
+    const rows = value.nodes.slice(0, 96).flatMap(row => {
+      if (!MEMORY_GRAPH_UUID.test(row?.id || '') || typeof row.kind !== 'string' ||
+          !Number.isFinite(row.score) || !Array.isArray(row.lanes)) return [];
+      const label = _reconstructionNode(row.id);
+      const ranks = row.lanes.slice(0, 8).filter(lane => typeof lane?.lane === 'string' && Number.isSafeInteger(lane.rank))
+        .map(lane => lane.lane.slice(0, 60) + ' #' + lane.rank);
+      const item = _graphElement('li', '', label, _graphElement('span', ' · ' + row.kind.slice(0, 80) + ' · rank score ' + row.score.toFixed(3) + (ranks.length ? ' · ' + ranks.join(', ') : '')));
+      const witness = row.witness;
+      if (MEMORY_GRAPH_UUID.test(witness?.from || '') && MEMORY_GRAPH_UUID.test(witness?.to || '') && typeof witness.tag === 'string') {
+        item.append(_graphElement('small', ' · recorded edge ' + _nodeName(witness.from) + ' → ' + witness.tag.slice(0, 128) + ' → ' + _nodeName(witness.to)));
+      }
+      return [item];
+    });
+    const limits = value.omitted.slice(0, 16).filter(item => typeof item === 'string').map(item => item.slice(0, 100));
+    const stops = {
+      adaptive_evidence_stable:'Stopped after two rounds added little evidence',
+      frontier_exhausted:'No more connected evidence in this traversal',
+      edge_limit:'Reached the relationship limit', step_limit:'Reached the step limit',
+      node_limit:'Reached the memory limit', no_evidence:'No matching evidence',
+    };
+    if (typeof value.stop_reason === 'string') limits.push(stops[value.stop_reason] || value.stop_reason.slice(0, 100));
+    view.results.replaceChildren(_graphElement('h4', 'Native memory graph reconstruction'),
+      _graphElement('p', value.steps.length + ' bounded traversal steps' + (limits.length ? ' · ' + limits.join(', ') : '')),
+      ...(community !== 'off' ? [_graphElement('h5', community === 'broad' ? 'Communities across retained memory' : 'Communities near the query'),
+        ...(regions.length ? regions : [_graphElement('p', 'No community had enough recorded relationships in this search.')])] : []),
+      rows.length ? _graphElement('ol', '', ...rows) : _graphElement('p', 'No individual evidence matched.'));
+  } catch {
+    if (owns()) view.results.replaceChildren(_graphElement('p', 'Native memory graph reconstruction is unavailable.'));
+  } finally {
+    _graphFinish(ticket);
+  }
+}
+
 function _renderGraphDetail(nodeId) {
+  if (graphState.workbench) _renderGraphWorkbench();
   const detail = document.getElementById('memory-graph-detail');
   if (!detail) return;
   if (!nodeId) {
@@ -2074,11 +3513,18 @@ function _renderGraphTags() {
     chip.className = 'memory-cat-chip' + (graphState.tagFilter === tag ? ' active' : '');
     chip.textContent = `${tag} (${count})`;
     chip.addEventListener('click', () => {
+      if (graphState.workbench) {
+        graphState.workbench.page=0;
+        graphState.workbench.results.hidden=true;
+        graphState.workbench.results.replaceChildren();
+      }
+      graphState.detailRevision += 1;
       graphState.tagFilter = graphState.tagFilter === tag ? null : tag;
       _renderGraphTags();
       const canvas = document.getElementById('memory-graph-canvas');
       if (canvas) _drawGraph(canvas);
       _renderGraphCounts();
+      _renderGraphWorkbench();
     });
     host.appendChild(chip);
   }
@@ -2102,6 +3548,13 @@ function _invalidateGraphContext() {
 for (const type of ['workspace-change', 'openclank:auth-context-changed', 'pagehide']) {
   window.addEventListener(type, _invalidateGraphContext);
 }
+function _retirePairedInspect(event) {
+  memoryInspectGeneration++;
+  pairedInspect=null; inspectedMemories=inspectedMemories.filter(item=>item.review_kind !== 'assistant_interpretation');
+  if (event.type !== 'pagehide') renderMemoryInspect();
+}
+for (const type of ['workspace-change','openclank:auth-context-changed','pagehide']) window.addEventListener(type, _retirePairedInspect);
+document.addEventListener('openclank:auth-context-changed', _retirePairedInspect);
 document.addEventListener('openclank:auth-context-changed', _invalidateGraphContext);
 // The existing modal owner controls class/hidden and can replace the canvas.
 // Observe that actual mount; do not require unrelated app.js ownership edits.
@@ -2122,12 +3575,16 @@ export async function loadDigestPreview() {
     const response = await fetch('/api/memory/digest-preview', { credentials: 'same-origin' });
     if (!response.ok) throw new Error('digest preview failed');
     const data = await response.json();
-    trustedEl.textContent = data.trusted_block || '(nothing endorsed yet — write or pin a memory, or enable the trust toggles)';
-    untrustedEl.textContent = data.untrusted_card || '(memory bank is empty)';
+    const questionUnavailable = data.digest?.question_eligibility === 'unavailable';
+    trustedEl.textContent = data.trusted_block || (questionUnavailable
+      ? '(Open-question eligibility is unavailable.)'
+      : '(nothing endorsed yet — write or pin a memory, or enable the trust toggles)');
+    untrustedEl.textContent = data.untrusted_card || (questionUnavailable
+      ? '(No other index entries available.)' : '(memory bank is empty)');
     const stamp = document.getElementById('memory-digest-stamp');
     if (stamp) {
       const at = data.digest?.generated_at;
-      stamp.textContent = at ? `Generated ${at}.` : '';
+      stamp.textContent = [at ? `Generated ${at}.` : '', questionUnavailable ? 'Open-question eligibility is unavailable.' : ''].filter(Boolean).join(' ');
     }
     if (countsEl) countsEl.textContent = JSON.stringify(data.digest?.counts || {}, null, 2);
     if (editListEl) _renderDigestEditors(editListEl, data.digest || {});
@@ -2157,7 +3614,7 @@ export async function loadDigestPreview() {
       }
     }
   } catch (error) {
-    trustedEl.textContent = 'Digest unavailable — is the frankenmemory provider running?';
+    trustedEl.textContent = 'Digest unavailable — is the Memery provider running?';
     untrustedEl.textContent = '—';
     if (editListEl) editListEl.replaceChildren();
   }
@@ -2252,6 +3709,57 @@ function _detailRow(label, valueNode) {
     row.appendChild(valueNode);
   }
   return row;
+}
+
+// One plain line for a record that supersedes an earlier one, with Show (when the earlier memory still resolves) and Detach.
+function _supersedesLine(relation) {
+  return relation.target_available === true ? 'Supersedes an earlier memory' : 'Supersedes an earlier memory; the earlier memory is no longer available';
+}
+
+function _supersedesRow(memory, relation) {
+  const holder = document.createElement('span');
+  holder.append(`${_supersedesLine(relation)} `);
+  const button = (label, onClick) => {
+    const el = document.createElement('button');
+    el.type = 'button'; el.textContent = label; el.style.cssText = 'margin-right:6px;font-size:11px;';
+    el.addEventListener('click', onClick);
+    holder.appendChild(el);
+  };
+  if (relation.target_available === true && typeof relation.target_id === 'string') {
+    button('Show', () => {
+      const node = [...document.querySelectorAll('.memory-item[data-memory-id]')].find(n => n.dataset.memoryId === relation.target_id);
+      if (node) node.scrollIntoView({ block: 'center' }); else showToast('That memory is not in the current list');
+    });
+  }
+  button('Detach', () => { void _detachMemoryRelation(memory); });
+  return _detailRow('Relation', holder);
+}
+
+// Detach goes through the same reviewed edit: mirror context -> preview -> confirm -> apply.
+async function _detachMemoryRelation(memory) {
+  const ticket = _memoryActionTicket();
+  try {
+    const url = `/api/memory/${encodeURIComponent(memory.id)}`;
+    const ctx = await (await fetch(`${url}/mirror-context`, { credentials: 'same-origin' })).json().catch(() => ({}));
+    if (ctx.mode !== 'guarded') throw new Error('Memory review context is unavailable');
+    const base = { candidate_id: ctx.candidate_id, origin_request_key: ctx.origin_request_key, prior_receipt_id: ctx.prior_receipt_id,
+      expected_revision: ctx.expected_revision, request_key: crypto.randomUUID(), reason: 'owner_detach' };
+    const post = async (body) => {
+      const response = await fetch(`${url}/detach`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(_memoryError(data, 'Detach is unavailable'));
+      return data;
+    };
+    const preview = await post({ phase: 'preview', ...base });
+    if (!_memoryActionCurrent(ticket)) return;
+    if (!await uiModule.styledConfirm('Detach this memory from the earlier memory it supersedes? Both keep their history.', { title: 'Review memory change', confirmText: 'Detach' })) return;
+    if (!_memoryActionCurrent(ticket)) return;
+    await post({ phase: 'apply', ...base, operation_json: preview.operation_json, operation_sha256: preview.operation_sha256 });
+    await loadMemories();
+    showToast('Memory detached');
+  } catch (error) {
+    showError(error.message || 'Detach is unavailable');
+  }
 }
 
 function _buildMemoryDetails(memory) {
@@ -2381,10 +3889,12 @@ function _buildMemoryDetails(memory) {
   history.className = 'memory-version-history';
   history.appendChild(_detailRow('History', 'Loading…'));
   drawer.appendChild(history);
-  fetch(`/api/memory/${encodeURIComponent(memory.id)}/history`, {
+  const detailTicket = _memoryActionTicket();
+  fetch(`/api/history/memery/${encodeURIComponent(memory.id)}/versions`, {
     credentials: 'same-origin',
   }).then(async response => {
     const detail = await response.json().catch(() => ({}));
+    if (!_memoryActionCurrent(detailTicket) || !drawer.isConnected) return;
     history.replaceChildren();
     if (!response.ok) {
       history.appendChild(_detailRow('History', _memoryError(detail, 'Unavailable')));
@@ -2394,11 +3904,61 @@ function _buildMemoryDetails(memory) {
       'Current',
       `revision ${detail.current_revision} · ${detail.current?.status || 'unknown'}`,
     ));
+    if (detail.supersedes && typeof detail.supersedes === 'object') history.appendChild(_supersedesRow(memory, detail.supersedes));
+    else if (detail.current?.revision) {
+      const choices = memories.filter(item => item.id && item.id !== memory.id && typeof item.text === 'string' && item.text.trim())
+        .slice(0,100).map(item => ({id:item.id,label:item.text.trim().slice(0,100)}));
+      history.append(memoryRelationReview({id:memory.id,choices,
+        isCurrent:()=>drawer.isConnected && _memoryActionCurrent(detailTicket),onSettled:()=>loadMemories()}));
+    }
     for (const revision of (detail.history || []).slice(0, 10)) {
       history.appendChild(_detailRow(
         `Revision ${revision.revision}`,
-        `${revision.status} · ${revision.text || '(no value)'}`,
+        [revision.status, revision.created_at, revision.history_reference === 'retained' ? 'Recorded in History' : '', revision.text || '(no value)'].filter(Boolean).join(' · '),
       ));
+      if (revision.history_reference === 'unpublished') {
+        const checkpoint = document.createElement('button');
+        checkpoint.type = 'button';
+        checkpoint.className = 'memory-toolbar-btn';
+        checkpoint.textContent = 'Save checkpoint';
+        checkpoint.addEventListener('click', async () => {
+          checkpoint.disabled = true;
+          try {
+            const response = await fetch(`/api/history/memery/${encodeURIComponent(memory.id)}/versions/${revision.revision}/checkpoint`, {method: 'POST', credentials: 'same-origin'});
+            if (!response.ok) throw new Error(_memoryError(await response.json(), 'Checkpoint unavailable'));
+            if (_memoryActionCurrent(detailTicket)) checkpoint.textContent = 'Checkpoint saved';
+          } catch (error) {
+            if (_memoryActionCurrent(detailTicket)) { showError(error.message); checkpoint.disabled = false; }
+          }
+        });
+        history.appendChild(checkpoint);
+      }
+      const mirrorValue = detail.id !== detail.block_id && revision.value?.type === 'string' &&
+        detail.current?.value?.type === 'string' && revision.value.value !== detail.current.value.value;
+      if (revision.revision !== detail.current_revision && (mirrorValue || (!revision.evidence_ids?.length &&
+          !detail.current?.evidence_ids?.length && !revision.source_event_id && !detail.current?.source_event_id &&
+          revision.kind !== 'open_question' && detail.current?.kind !== 'open_question'))) {
+        const restore = document.createElement('button');
+        restore.type = 'button';
+        restore.className = 'memory-toolbar-btn';
+        restore.textContent = mirrorValue ? `Restore text from revision ${revision.revision}` : `Restore revision ${revision.revision}`;
+        restore.addEventListener('click', async () => {
+          restore.disabled = true;
+          try {
+            if (mirrorValue) {
+              await saveInlineEdit(detail.id, revision.value.value, null, {
+                expectedRevision: detail.current_revision, reason: `restore text from revision ${revision.revision}`,
+                currentMemory: memory, draftCurrent: () => drawer.isConnected && _memoryActionCurrent(detailTicket),
+              });
+              return;
+            }
+            const result = await _runVersionedAction(detail, 'revert', {target_revision: revision.revision});
+            _publishedActionToast(result, `Restored revision ${revision.revision}`);
+          } catch (error) { showError(error.message); }
+          finally { if (drawer.isConnected) restore.disabled = false; }
+        });
+        history.appendChild(restore);
+      }
     }
     if (Array.isArray(detail.evidence)) {
       history.appendChild(_detailRow('Evidence', String(detail.evidence.length)));
@@ -2487,10 +4047,10 @@ export function renderMemoryList() {
     } else if (searchTerm || activeCategory !== 'all') {
       memoryList.innerHTML = `<div class="memory-empty">No matches.</div>`;
     } else {
-      const frankenmemory = memoryProviderStatus === 'frankenmemory';
+      const usesMemery = ['memery', 'frankenmemory'].includes(memoryProviderStatus);
       memoryList.innerHTML = `<div class="memory-empty" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;">
-        <span>${frankenmemory ? 'No curated memories yet' : 'No memories yet'}${_smiley}</span>
-        ${frankenmemory ? '<span style="opacity:0.7;font-size:11px;display:block;">Frankenmemory keeps raw evidence separate. <a href="#" data-mem-goto-inspect style="color:var(--accent,var(--red));text-decoration:underline;">Review it in Inspect</a>.</span>' : ''}
+        <span>${usesMemery ? 'No curated memories yet' : 'No memories yet'}${_smiley}</span>
+        ${usesMemery ? '<span style="opacity:0.7;font-size:11px;display:block;">Memery keeps raw evidence separate. <a href="#" data-mem-goto-inspect style="color:var(--accent,var(--red));text-decoration:underline;">Review it in Inspect</a>.</span>' : ''}
         <span style="opacity:0.7;font-size:11px;display:block;">
           <a href="#" data-mem-goto-add style="color:var(--accent,var(--red));text-decoration:underline;">Import in Add tab</a>
         </span>
@@ -2602,6 +4162,73 @@ export function renderMemoryList() {
     content.appendChild(textSpan);
     content.appendChild(meta);
 
+    // The marker only offers a read; the server verifies the current receipt,
+    // account and retained Upload before returning any saved analysis.
+    let snapshotCandidate = false;
+    try {
+      const data = JSON.parse(memory.raw_text || memory.text || '');
+      snapshotCandidate = data && data.version === 'openclank.analysis-snapshot-memory.v1';
+    } catch (_) { /* ordinary memory */ }
+    if (snapshotCandidate && !selectMode) {
+      const read = document.createElement('button');
+      read.type = 'button'; read.className = 'memory-toolbar-btn'; read.textContent = 'Read saved analysis';
+      const result = document.createElement('pre');
+      result.hidden = true;
+      read.addEventListener('click', async () => {
+        const ticket = _memoryActionTicket();
+        read.disabled = true;
+        try {
+          const response = await fetch(`/api/memory/${encodeURIComponent(memory.id)}/analysis-snapshot`, { credentials:'same-origin' });
+          const data = await response.json();
+          if (!_memoryActionCurrent(ticket) || !item.isConnected) return;
+          if (!response.ok || data.state !== 'ready') throw new Error('Saved analysis unavailable.');
+          result.textContent = `${data.capture_origin === 'imported_unverified' ? 'Imported; source verification unavailable' : 'Captured snapshot'}\n${JSON.stringify(data.result, null, 2)}`;
+          for (const component of data.components || []) {
+            const recover = document.createElement('button');
+            recover.type = 'button';
+            recover.className = 'memory-toolbar-btn';
+            recover.textContent = `Recover ${component.path.join('/')}`;
+            recover.addEventListener('click', async () => {
+              recover.disabled = true;
+              try {
+                const response = await fetch(`/api/history/memery/${encodeURIComponent(memory.id)}/components/${encodeURIComponent(component.resource_id)}`, {credentials: 'same-origin'});
+                if (!response.ok) throw new Error(_memoryError(await response.json(), 'Component unavailable'));
+                const blob = await response.blob();
+                if (!_memoryActionCurrent(ticket) || !item.isConnected) return;
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = component.path[component.path.length - 1];
+                link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+              } catch (error) { if (_memoryActionCurrent(ticket)) showError(error.message); }
+              finally { if (item.isConnected) recover.disabled = false; }
+            });
+            result.append(document.createElement('br'), recover);
+          }
+          result.hidden = false;
+        } catch (_) {
+          if (_memoryActionCurrent(ticket) && item.isConnected) { result.textContent = 'Saved analysis unavailable.'; result.hidden = false; }
+        } finally { if (_memoryActionCurrent(ticket) && item.isConnected) read.disabled = false; }
+      });
+      const compare = document.createElement('button');
+      compare.type = 'button'; compare.className = 'memory-toolbar-btn'; compare.textContent = 'Check original files';
+      compare.addEventListener('click', async () => {
+        const ticket = _memoryActionTicket(); compare.disabled = true;
+        try {
+          const [{runSavedSnapshotCompare},{filesFacadeClient}] = await Promise.all([
+            import('./analysisNoteFlow.js'), import('./filesFacadeClient.js')]);
+          if (!_memoryActionCurrent(ticket) || !item.isConnected) return;
+          await runSavedSnapshotCompare({client:filesFacadeClient,memoryID:String(memory.id),scopeRoot:item,
+            current:() => _memoryActionCurrent(ticket) && item.isConnected,
+            status:message => { if (_memoryActionCurrent(ticket) && item.isConnected) { result.textContent=String(message); result.hidden=false; } }});
+        } catch (_) {
+          if (_memoryActionCurrent(ticket) && item.isConnected) { result.textContent='Comparison unavailable.'; result.hidden=false; }
+        } finally { if (_memoryActionCurrent(ticket) && item.isConnected) compare.disabled=false; }
+      });
+      content.append(read, compare, result);
+    }
+
     if (memory.pinned) item.classList.add('memory-pinned');
 
     item.appendChild(content);
@@ -2622,188 +4249,45 @@ export function renderMemoryList() {
       menuBtn.innerHTML = uiIcon('more', 14);
       menuBtn.title = 'Actions';
 
-      const dropdown = document.createElement('div');
-      dropdown.className = 'memory-item-dropdown';
-
-      // Pin state carries both a bookmark silhouette and a check mark.
-      const _pinSvg = uiIcon(memory.pinned ? 'bookmark-filled' : 'bookmark', 14);
-      const pinItem = document.createElement('div');
-      pinItem.className = 'dropdown-item-compact';
-      pinItem.innerHTML = `<span class="dropdown-icon">${_pinSvg}</span><span>${memory.pinned ? 'Unpin' : 'Pin'}</span>`;
-      pinItem.addEventListener('click', () => { dropdown.style.display = 'none'; togglePin(memory.id, !memory.pinned); });
-
-      const editItem = document.createElement('div');
-      editItem.className = 'dropdown-item-compact';
-      editItem.innerHTML = uiIcon('edit', 14) + '<span>Edit</span>';
-      editItem.addEventListener('click', () => { dropdown.style.display = 'none'; startInlineEdit(item, memory); });
-
-      // Details drawer (T2): every stored signal reachable — tags, scene,
-      // provenance links, authored ledger, access/created/updated times.
-      const detailsItem = document.createElement('div');
-      detailsItem.className = 'dropdown-item-compact';
-      detailsItem.textContent = '☰ Details';
-      detailsItem.addEventListener('click', () => {
-        dropdown.style.display = 'none';
-        const existing = item.querySelector('.memory-details-drawer');
-        if (existing) { existing.remove(); return; }
-        item.appendChild(_buildMemoryDetails(memory));
-        if (item.isConnected && item.getClientRects().length) void recordPresentation('memory.record.opened', {
-          recordId: String(memory.id), authorized: true,
-        }, { workspaceId: memory.workspace_id || null });
-      });
-
-      // Answer open questions by revising their stable block, never deleting it.
-      let resolveItem = null;
-      if ((memory.kind === 'unknown' || memory.kind === 'open_question' || memory.category === 'unknown') && !memory.archived) {
-        resolveItem = document.createElement('div');
-        resolveItem.className = 'dropdown-item-compact';
-        resolveItem.textContent = '✓ Resolve';
-        resolveItem.title = 'Answer this question in the same memory block';
-        resolveItem.addEventListener('click', () => {
-          dropdown.style.display = 'none';
-          resolveQuestion(memory.id);
-        });
-      }
-
-      const deleteItem = document.createElement('div');
-      deleteItem.className = 'dropdown-item-compact memory-dropdown-delete';
-      deleteItem.innerHTML = uiIcon('trash', 14) + '<span>Delete</span>';
-      deleteItem.addEventListener('click', () => { dropdown.style.display = 'none'; deleteMemory(memory.id); });
-
-      // Select — enters bulk-select mode and pre-selects this memory. Same
-      // pattern as the email/documents/skills Select item.
-      const selectItem = document.createElement('div');
-      selectItem.className = 'dropdown-item-compact';
-      selectItem.innerHTML = uiIcon('select', 14) + '<span>Select</span>';
-      selectItem.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (dropdown.parentNode) dropdown.remove();
-        if (!selectMode) enterSelectMode();
-        selectedIds.add(memory.id);
-        updateBulkCount();
-        renderMemoryList();
-      });
-
-      // Mobile-only Cancel — mirrors the email/documents popup pattern. CSS
-      // hides `.dropdown-cancel-mobile` on desktop where outside-click already
-      // dismisses cleanly.
-      const cancelItem = document.createElement('div');
-      cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
-      cancelItem.innerHTML = uiIcon('close', 14) + '<span>Cancel</span>';
-      cancelItem.addEventListener('click', (e) => { e.stopPropagation(); if (dropdown.parentNode) dropdown.remove(); });
-
-      dropdown.appendChild(pinItem);
-      dropdown.appendChild(selectItem);
-      dropdown.appendChild(editItem);
-      dropdown.appendChild(detailsItem);
-      if (resolveItem) dropdown.appendChild(resolveItem);
-      dropdown.appendChild(deleteItem);
-      dropdown.appendChild(cancelItem);
-
-      menuBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        // Close any other open dropdowns
-        document.querySelectorAll('.memory-item-dropdown').forEach(d => d.remove());
-        const rect = menuBtn.getBoundingClientRect();
-        dropdown.style.position = 'fixed';
-        dropdown.style.top = rect.bottom + 2 + 'px';
-        dropdown.style.right = (window.innerWidth - rect.right) + 'px';
-        dropdown.style.left = 'auto';
-        // Portaled to <body>, so it must outrank the Brain modal it belongs to.
-        // Tool modals get a monotonically increasing z-index from modalManager's
-        // bring-to-front counter, which climbs unbounded over a long session —
-        // once it passed the old hardcoded 10001 the menu rendered behind the
-        // panel (#4720). topPortalZ() derives the value from the live tool-window
-        // stack so the menu always sits just above, however high it has climbed.
-        dropdown.style.zIndex = String(topPortalZ());
-        dropdown.style.display = 'block';
-        document.body.appendChild(dropdown);
-        // Keep on-screen (mobile): flip above the button if it overflows the
-        // bottom, clamp the left edge, cap height as a last resort.
-        const dr = dropdown.getBoundingClientRect();
-        if (dr.bottom > window.innerHeight - 6) {
-          dropdown.style.top = Math.max(6, rect.top - dr.height - 2) + 'px';
-        }
-        if (dr.left < 6) {
-          dropdown.style.right = Math.max(6, window.innerWidth - 6 - dr.width) + 'px';
-        }
-        const dr2 = dropdown.getBoundingClientRect();
-        if (dr2.bottom > window.innerHeight - 6) {
-          dropdown.style.maxHeight = Math.max(80, window.innerHeight - 12 - dr2.top) + 'px';
-          dropdown.style.overflowY = 'auto';
-        }
-
-        // Swipe-down-to-dismiss — mirrors the documents library popup gesture.
-        // Drag the popup down past ~60px and release to close; release earlier
-        // and it snaps back. Vertical-only; horizontal flicks fall through.
-        let _sw = null;
-        let _swDy = 0;
-        const _onTS = (ev) => {
-          if (ev.touches.length !== 1) return;
-          _sw = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
-          _swDy = 0;
-          dropdown.style.transition = '';
-        };
-        const _onTM = (ev) => {
-          if (!_sw || ev.touches.length !== 1) return;
-          const dx = ev.touches[0].clientX - _sw.x;
-          const dy = ev.touches[0].clientY - _sw.y;
-          if (Math.abs(dy) < Math.abs(dx)) { _sw = null; return; }
-          if (dy > 0) {
-            _swDy = dy;
-            dropdown.style.transform = 'translateY(' + dy + 'px)';
-            dropdown.style.opacity = String(Math.max(0.3, 1 - dy / 240));
+      bindCardActionMenu(item, {
+        button: menuBtn,
+        exclude: '.memory-select-cb, .memory-details-drawer',
+        current: () => !selectMode,
+        items: valid => {
+          const ticket = _memoryActionTicket();
+          const scope = _pairedScope();
+          const items = [
+            { id: 'snapshot', label: 'Export knowledge snapshot', dialog: true, run: () =>
+              openKnowledgeSnapshotExport({ curatedID: String(memory.id),
+                current: () => valid() && _memoryActionCurrent(ticket) && _pairedCurrent(scope) }) },
+            { id: 'pin', label: memory.pinned ? 'Unpin' : 'Pin', icon: memory.pinned ? 'bookmark-filled' : 'bookmark', run: () =>
+              togglePin(memory.id, !memory.pinned) },
+            { id: 'select', label: 'Select', icon: 'select', run: () => {
+              if (!selectMode) enterSelectMode();
+              selectedIds.add(memory.id);
+              updateBulkCount();
+              renderMemoryList();
+            } },
+            { id: 'edit', label: 'Edit', icon: 'edit', run: () => startInlineEdit(item, memory) },
+            { id: 'details', label: 'Details', run: () => {
+              const existing = item.querySelector('.memory-details-drawer');
+              if (existing) { existing.remove(); return; }
+              const drawer = _buildMemoryDetails(memory);
+              item.appendChild(drawer);
+              void _attachS02PolicyEditor(drawer, memory);
+              if (item.isConnected && item.getClientRects().length) void recordPresentation('memory.record.opened', {
+                recordId: String(memory.id), authorized: true,
+              }, { workspaceId: memory.workspace_id || null });
+            } },
+          ];
+          if ((memory.kind === 'unknown' || memory.kind === 'open_question' || memory.category === 'unknown') && !memory.archived) {
+            items.push({ id: 'resolve', label: 'Resolve', icon: 'check', dialog: true, run: () => resolveQuestion(memory.id, valid) });
           }
-        };
-        const _onTE = () => {
-          if (!_sw) return;
-          _sw = null;
-          if (_swDy > 60) {
-            dropdown.style.transition = 'transform 0.15s ease, opacity 0.15s ease';
-            dropdown.style.transform = 'translateY(120px)';
-            dropdown.style.opacity = '0';
-            setTimeout(() => { if (dropdown.parentNode) dropdown.remove(); }, 160);
-          } else {
-            dropdown.style.transition = 'transform 0.18s ease, opacity 0.18s ease';
-            dropdown.style.transform = '';
-            dropdown.style.opacity = '';
-          }
-        };
-        dropdown.addEventListener('touchstart', _onTS, { passive: true });
-        dropdown.addEventListener('touchmove', _onTM, { passive: true });
-        dropdown.addEventListener('touchend', _onTE);
+          items.push({ id: 'delete', label: 'Delete', icon: 'trash', destructive: true, dialog: true, run: () => deleteMemory(memory.id, valid) });
+          return items;
+        },
       });
-
       item.appendChild(menuBtn);
-
-      // Long-press anywhere on the card opens the same dropdown — mirrors the
-      // documents library pattern. Skip when the touch starts on the kebab,
-      // checkbox, or another button (those have their own click handlers).
-      {
-        let hold = null;
-        let start = null;
-        const _lpCancel = () => { if (hold) { clearTimeout(hold); hold = null; } start = null; };
-        item.addEventListener('pointerdown', (e) => {
-          if (e.target.closest('.memory-menu-btn, .memory-select-cb, button, input')) return;
-          start = { x: e.clientX, y: e.clientY };
-          hold = setTimeout(() => {
-            hold = null;
-            item._suppressNextClick = true;
-            setTimeout(() => { item._suppressNextClick = false; }, 400);
-            if (navigator.vibrate) try { navigator.vibrate(15); } catch {}
-            menuBtn.click();
-          }, 500);
-        });
-        item.addEventListener('pointermove', (e) => {
-          if (!start) return;
-          if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) _lpCancel();
-        });
-        item.addEventListener('pointerup', _lpCancel);
-        item.addEventListener('pointercancel', _lpCancel);
-      }
-
-      // Close dropdown on outside click
-      document.addEventListener('click', () => { if (dropdown.parentNode) dropdown.remove(); }, { once: false });
     }
 
     memoryList.appendChild(item);
@@ -2812,6 +4296,237 @@ export function renderMemoryList() {
 }
 
 // ---- Inline edit with category picker ----
+
+// S02 is an optional, explicit human review; unavailable profiles leave the editor unchanged.
+async function _attachS02PolicyEditor(container, memory) {
+  const ticket=_memoryActionTicket(); const account=document.body?.dataset?.accountId;
+  if (!memory?.id || !account) return;
+  const post=async body=>{const r=await fetch('/api/memory/policy/s02',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error('Policy is unavailable or changed.');return r.json();};
+  try {
+    const config=await post({action:'config'});
+    if (!_memoryActionCurrent(ticket) || !container.isConnected || document.body?.dataset?.accountId!==account) return;
+    const target=await post({action:'targets',curated_id:String(memory.id)}).catch(()=>null);
+    if (!_memoryActionCurrent(ticket) || !container.isConnected || document.body?.dataset?.accountId!==account) return;
+    if (config.state!=='ready' || !Array.isArray(config.entities) || !Array.isArray(config.definitions)) throw new Error('Policy unavailable for this memory.');
+    const selected=target?.state==='ready' && target.item?.selected?.curated_id===String(memory.id) ? target.item : null;
+    const box=document.createElement('fieldset'),legend=document.createElement('legend'),status=document.createElement('p');legend.textContent='Type and tag policies';box.append(legend,status);
+    const entity=document.createElement('select'),definition=document.createElement('select'),parent=document.createElement('select'),kind=document.createElement('select'),label=document.createElement('input');
+    function option(select,text,value){const o=document.createElement('option');o.textContent=text;o.value=value;select.append(o);}
+    entity.setAttribute('aria-label','Definition subject');definition.setAttribute('aria-label','Definition');parent.setAttribute('aria-label','Parent definition');kind.setAttribute('aria-label','Definition kind');label.setAttribute('aria-label','New definition name');label.placeholder='New definition name';
+    config.entities.forEach((x,i)=>option(entity,x.label,String(i)));config.definitions.forEach((x,i)=>{const n=x.label?.value || x.id;option(definition,n,String(i));option(parent,n,String(i));});option(kind,'Type','type');option(kind,'Tag','tag');
+    const axis=document.createElement('select'),mode=document.createElement('select'),value=document.createElement('input');axis.setAttribute('aria-label','Policy axis');mode.setAttribute('aria-label','Policy mode');value.setAttribute('aria-label','Policy value');value.placeholder='0–1 or true/false';['importance','connections','consolidation'].forEach(x=>option(axis,x,x));['rules','model','hybrid'].forEach(x=>option(mode,x,x));
+    box.append(entity,label,kind,definition,parent,axis,mode,value);const buttons=document.createElement('div');box.append(buttons);
+    const key=`openclank.s02.pending:${account}:${memory.id}`;let busy=false;
+    const check=()=>_memoryActionCurrent(ticket)&&container.isConnected&&document.body?.dataset?.accountId===account;
+    const receipt=async()=>{const saved=localStorage.getItem(key);if(!saved)return;const pending=JSON.parse(saved);if(pending.kind==='importance_preview'){status.textContent='The preview outcome is unknown and its original is unavailable; it will not be retried.';return;}const r=await post({action:(pending.kind==='importance'||pending.kind==='importance_prepared')?'importance_status':pending.kind==='override'?'override_status':'status',original:pending.original});if(!check())return;if(r.state==='recorded'){localStorage.removeItem(key);status.textContent='Policy review recorded. Reopen to see current revisions.';}else if(r.state==='terminal_erased'||r.state==='account_purged')status.textContent='The original review is no longer available; it will not be retried.';else status.textContent='The original review is not yet known; it will not be retried.';};
+    const button=(name,fn)=>{const b=document.createElement('button');b.type='button';b.textContent=name;b.addEventListener('click',async()=>{if(busy||!check())return;busy=true;try{await fn();}catch(e){if(check())status.textContent=e.message||'Policy unavailable.';}finally{busy=false;}});buttons.append(b);};
+    const apply=async(changes,item=null)=>{if(localStorage.getItem(key)){status.textContent='Check the pending original review first.';return;}const prepared=await post({action:'prepare',request_key:crypto.randomUUID(),expected_generation:config.generation,changes,item});if(!check()||prepared.state!=='ready')return;if(localStorage.getItem(key)){status.textContent='Check the pending original review first.';return;}localStorage.setItem(key,JSON.stringify({original:prepared.original,item}));try{const r=await post({action:'apply',original:prepared.original,item});if(!check())return;if(['applied','replayed'].includes(r.state)){localStorage.removeItem(key);status.textContent='Policy review recorded. Reopen to refresh.';}else status.textContent='Review outcome unknown; check its status.';}catch(_){if(check())status.textContent='Review outcome unknown; check its status.';}};
+    const current=()=>config.definitions[Number(definition.value)];
+    button('Create definition',async()=>{const e=config.entities[Number(entity.value)];if(!e||!label.value.trim())throw new Error('Select a subject and enter a name.');await apply([{operation:'create_definition',local_key:crypto.randomUUID(),subject_entity_id:e.id,subject_revision:e.revision,label:label.value.trim(),definition_kind:kind.value,policies:[]}]);});
+    button('Set policy',async()=>{const d=current();if(!d)throw new Error('Select a definition.');const x=axis.value==='importance'?Number(value.value):value.value==='true'?true:value.value==='false'?false:null;if(x===null||axis.value==='importance'&&(!value.value.trim()||!Number.isFinite(x)||x<0||x>1))throw new Error('Enter a valid policy value.');const policies=(d.policies||[]).filter(p=>p.axis!==axis.value);policies.push({axis:axis.value,value:x,mode:mode.value,authority:'owner'});await apply([{operation:'definition',block_id:d.id,expected_revision:d.revision,definition_kind:d.kind,policies}]);});
+    button('Inherit axis',async()=>{const d=current();if(!d)throw new Error('Select a definition.');const policies=(d.policies||[]).filter(p=>p.axis!==axis.value);policies.push({axis:axis.value,value:null,mode:null,authority:'owner'});await apply([{operation:'definition',block_id:d.id,expected_revision:d.revision,definition_kind:d.kind,policies}]);});
+    button('Add parent',async()=>{const d=current(),p=config.definitions[Number(parent.value)];if(!d||!p||d.id===p.id)throw new Error('Select two different definitions.');await apply([{operation:'edge',edge_id:crypto.randomUUID(),expected_revision:0,child_block_id:d.id,child_revision:d.revision,parent_block_id:p.id,parent_revision:p.revision,active:true}]);});
+    button('Assign to this memory',async()=>{const d=current();if(!d||!selected)throw new Error('This memory has no current reviewed selection.');const ref=selected.selected.reference;await apply([{operation:'assignment',assignment_id:crypto.randomUUID(),expected_revision:0,target_block_id:ref.block_id,target_revision:ref.revision,definition_block_id:d.id,definition_revision:d.revision,active:true}],selected);});
+    const override=async setting=>{if(!config.overrides_available||!selected)throw new Error('Reviewed per-memory overrides are unavailable.');if(localStorage.getItem(key))throw new Error('Check the pending original review first.');const prepared=await post({action:'override_prepare',request_key:crypto.randomUUID(),axis:axis.value,value:setting,item:selected});if(!check()||prepared.state!=='ready')return;if(localStorage.getItem(key))throw new Error('Check the pending original review first.');localStorage.setItem(key,JSON.stringify({kind:'override',original:prepared.original,item:selected}));try{const r=await post({action:'override_apply',original:prepared.original,item:selected});if(!check())return;if(['applied','already_applied'].includes(r.state)){localStorage.removeItem(key);status.textContent='Override reviewed. Reopen this memory to refresh its revision.';}else status.textContent='Review outcome unknown; check its status.';}catch(_){if(check())status.textContent='Review outcome unknown; check its status.';}};
+    if(config.overrides_available){button('Set memory override',async()=>{const x=axis.value==='importance'?Number(value.value):value.value==='true'?true:value.value==='false'?false:null;if(x===null||axis.value==='importance'&&(!value.value.trim()||!Number.isFinite(x)||x<0||x>1))throw new Error('Enter a valid value.');await override(x);});button('Inherit for this memory',async()=>override(null));}
+    button('Show importance score',async()=>{if(!selected)throw new Error('This memory’s reviewed selection is unavailable.');const r=await post({action:'importance_review',item:selected});if(!check())return;status.textContent=r.state==='ready'?`Importance score: ${r.value} (${r.origin}; revision ${r.revision}).`:'Importance score unavailable.';});
+    // Score review uses a separate native capability and retains the exact
+    // original selector before issue; a lost reply is reconciled, never retried.
+    const scoreSection=document.createElement('section'),scoreTitle=document.createElement('h4'),scoreDetail=document.createElement('p');
+    scoreTitle.textContent='Review importance score';scoreDetail.setAttribute('role','status');
+    const scoreKind=document.createElement('select'),scoreValue=document.createElement('input'),scoreCandidate=document.createElement('input'),scoreReason=document.createElement('input');
+    scoreKind.setAttribute('aria-label','Importance score source');option(scoreKind,'Manual score','manual');option(scoreKind,'Inferred proposal','inferred');
+    scoreValue.type='number';scoreValue.min='0';scoreValue.max='1';scoreValue.step='any';scoreValue.setAttribute('aria-label','Manual importance score');
+    scoreCandidate.setAttribute('aria-label','Inferred proposal selector');scoreCandidate.placeholder='Proposal selector';scoreReason.setAttribute('aria-label','Importance review reason');scoreReason.placeholder='Reason for review';
+    const scorePreview=document.createElement('button'),scoreApply=document.createElement('button');scorePreview.type=scoreApply.type='button';scorePreview.textContent='Preview importance change';scoreApply.textContent='Apply reviewed importance';
+    // The Host projects the current Native Once and target capability together.
+    const scoreAvailable=config.importance_available===true && !!selected;for(const node of [scoreKind,scoreValue,scoreCandidate,scoreReason,scorePreview])node.disabled=!scoreAvailable;scoreApply.disabled=true;
+    scoreDetail.textContent=scoreAvailable?`Target memory ${selected.selected.curated_id}. Choose a manual value or an existing inferred proposal, then preview.`:'Importance score changes are unavailable for this profile.';
+    scoreSection.append(scoreTitle,scoreKind,scoreValue,scoreCandidate,scoreReason,scorePreview,scoreApply,scoreDetail);box.append(scoreSection);
+    let scoreReview=null;const scoreSignature=()=>JSON.stringify([scoreKind.value,scoreValue.value,scoreCandidate.value,scoreReason.value]);
+    const invalidateScore=()=>{scoreReview=null;scoreApply.disabled=true;};
+    for(const node of [scoreKind,scoreValue,scoreCandidate,scoreReason])node.addEventListener('input',invalidateScore);
+    scoreKind.addEventListener('change',()=>{invalidateScore();scoreValue.hidden=scoreKind.value!=='manual';scoreCandidate.hidden=scoreKind.value!=='inferred';});scoreCandidate.hidden=true;
+    try{const saved=JSON.parse(localStorage.getItem(key)||'null');if(saved?.kind==='importance_preview')scoreDetail.textContent='The preview outcome is unknown and its original is unavailable; it will not be retried.';else if(saved?.kind==='importance_prepared'||saved?.kind==='importance')scoreDetail.textContent='Check the original review status; it will not be issued again.';}catch(_){}
+    scorePreview.addEventListener('click',async()=>{
+      if(busy || !scoreAvailable || !check())return;invalidateScore();busy=true;
+      try{
+        const source=scoreKind.value,reason=scoreReason.value.trim(),candidate=scoreCandidate.value.trim(),manual=scoreValue.value.trim();
+        if(!reason || new TextEncoder().encode(reason).length>512)throw Error('Enter a reason of at most 512 UTF-8 bytes.');
+        if(source==='manual' && (!manual || !Number.isFinite(Number(manual)) || Number(manual)<0 || Number(manual)>1))throw Error('Enter a manual score from 0 to 1.');
+        if(source==='inferred' && (!candidate || new TextEncoder().encode(candidate).length>512))throw Error('Enter an inferred proposal selector of at most 512 UTF-8 bytes.');
+        const signature=scoreSignature(),target=JSON.stringify(selected);
+        const input={action:'importance_preview',item:selected,kind:source,value:source==='manual'?Number(manual):null,proposal_candidate_id:source==='inferred'?candidate:null,reason};
+        if(localStorage.getItem(key))throw Error('A previous review is unresolved; do not issue another preview.');
+        const requestKey=crypto.randomUUID();
+        localStorage.setItem(key,JSON.stringify({kind:'importance_preview',input,request_key:requestKey}));
+        const reviewed=await post({...input,request_key:requestKey});
+        if(!check() || signature!==scoreSignature() || target!==JSON.stringify(selected))return;
+        const validScore=x=>typeof x==='number' && Number.isFinite(x) && x>=0 && x<=1;
+        const validOriginal=reviewed?.original && typeof reviewed.original==='object' && !Array.isArray(reviewed.original) && new TextEncoder().encode(JSON.stringify(reviewed.original)).length<=65536;
+        if(reviewed?.version===1 && reviewed.state==='unknown' && validOriginal){localStorage.setItem(key,JSON.stringify({kind:'importance_prepared',original:reviewed.original,item:selected,request_key:requestKey}));scoreDetail.textContent='The original review outcome is unknown; check its status. It will not be issued again.';return;}
+        if(reviewed?.version!==1 || reviewed.state!=='ready' || !validOriginal || !validScore(reviewed.previous?.value) || !['manual','inferred'].includes(reviewed.previous?.origin) || !Number.isSafeInteger(reviewed.previous?.revision) || reviewed.previous.revision<1 || !validScore(reviewed.proposed?.value) || reviewed.proposed?.origin!==source)throw Error('Importance review is unavailable or changed.');
+        localStorage.setItem(key,JSON.stringify({kind:'importance_prepared',original:reviewed.original,item:selected,request_key:requestKey}));
+        scoreReview={original:reviewed.original,signature,target,requestKey};scoreDetail.textContent=`Target ${selected.selected.curated_id} · current revision ${reviewed.previous.revision} · ${reviewed.previous.value} (${reviewed.previous.origin}) → ${reviewed.proposed.value} (${reviewed.proposed.origin}). Review this change before applying.`;scoreApply.disabled=false;
+      }catch(e){if(check()){let saved;try{saved=JSON.parse(localStorage.getItem(key)||'null');}catch(_){}scoreDetail.textContent=saved?.kind==='importance_preview'?'The preview outcome is unknown and its original is unavailable; it will not be retried.':saved?.kind==='importance_prepared'||saved?.kind==='importance'?'Check the original review status; it will not be issued again.':(e.message||'Importance review unavailable.');}}finally{busy=false;}
+    });
+    scoreApply.addEventListener('click',async()=>{
+      if(busy || !scoreAvailable || !check() || !scoreReview || scoreReview.signature!==scoreSignature() || scoreReview.target!==JSON.stringify(selected))return;
+      const saved=localStorage.getItem(key);let pending;try{pending=saved?JSON.parse(saved):null;}catch(_){return;}
+      if(!pending || pending.kind!=='importance_prepared' || pending.request_key!==scoreReview.requestKey || JSON.stringify(pending.item)!==scoreReview.target || JSON.stringify(pending.original)!==JSON.stringify(scoreReview.original)){scoreDetail.textContent='The original preview is unavailable; do not apply.';return;}
+      const review=scoreReview;invalidateScore();busy=true;
+      try{
+        localStorage.setItem(key,JSON.stringify({kind:'importance',original:review.original,item:selected}));
+        const outcome=await post({action:'importance_apply',item:selected,original:review.original});
+        if(!check())return;
+        if(outcome?.version===1 && ['applied','already_applied'].includes(outcome.state)){localStorage.removeItem(key);scoreDetail.textContent='Importance review applied. Reopen this memory for its current revision.';}
+        else scoreDetail.textContent='Importance outcome unknown; check the original review status. Do not apply again.';
+      }catch(_){if(check())scoreDetail.textContent='Importance outcome unknown; check the original review status. Do not apply again.';}finally{busy=false;}
+    });
+
+    button('Explain this memory',async()=>{if(!selected)throw new Error('This memory has no current reviewed selection.');const r=await post({action:'explain',item:selected});if(!check())return;status.textContent=r.state==='resolved'?Object.entries(r.axes).map(([k,v])=>`${k}: ${v.state==='unavailable'?'manual authority unavailable':v.state}${r.manual_authority?.[k]?.state==='inherit'?' (reviewed inherit)':''}`).join(' · '):'Policy explanation unavailable.';});
+    button('Check review status',receipt);if(!selected)status.textContent='This memory’s reviewed selection is unavailable.';else if(config.entities_partial)status.textContent='Some subjects are unavailable.';if(localStorage.getItem(key))status.textContent='An original review is pending; check its status.';container.append(box);
+  } catch (_) { if (_memoryActionCurrent(ticket) && container.isConnected && document.body?.dataset?.accountId===account) container.appendChild(_detailRow('Type and tag policies', 'Unavailable for this memory.')); }
+}
+
+// Optional metadata has its own exact reviewed revision and must never borrow
+// the ordinary text editor's pending request or silently rebase it.
+async function _attachMemoryMetadataEditor(container, memory) {
+  if (!memory?.id) return;
+  const ticket = _memoryActionTicket();
+  try {
+    const [response, domainResponse] = await Promise.all([
+      fetch(`/api/memory/metadata/knowledge/${encodeURIComponent(memory.id)}`, { credentials: 'same-origin' }),
+      fetch('/api/memory/metadata/domains', { credentials: 'same-origin' }),
+    ]);
+    if (!_memoryActionCurrent(ticket) || !container.isConnected || !response.ok || !domainResponse.ok) return;
+    const current = await response.json(), domains = await domainResponse.json();
+    if (!_memoryActionCurrent(ticket) || !container.isConnected || current.state !== 'ready' || domains.state !== 'ready' || !Array.isArray(domains.items)) return;
+    const fieldset = document.createElement('fieldset');
+    const legend = document.createElement('legend'); legend.textContent = 'Name and domains'; fieldset.append(legend);
+    const name = document.createElement('input'); name.type = 'text'; name.placeholder = 'Name (optional)'; name.value = current.metadata?.name || ''; name.setAttribute('aria-label', 'Memory name');
+    const aliases = document.createElement('textarea'); aliases.rows = 2; aliases.placeholder = 'Aliases, one per line'; aliases.value = (current.metadata?.aliases || []).join('\n'); aliases.setAttribute('aria-label', 'Memory aliases');
+    fieldset.append(name, aliases);
+    const selected = new Set((current.metadata?.domain_refs || []).map(ref => `${ref.block_id}:${ref.revision}`));
+    const checks = [];
+    for (const domain of domains.items) {
+      const label = document.createElement('label'), checkbox = document.createElement('input'); checkbox.type = 'checkbox';
+      checkbox.checked = selected.has(`${domain.block_id}:${domain.revision}`); label.append(checkbox, document.createTextNode(domain.name)); fieldset.append(label);
+      checks.push({ checkbox, block_id: domain.block_id, revision: domain.revision });
+    }
+    const save = document.createElement('button'); save.type = 'button'; save.textContent = 'Save name and domains';
+    let issued = false;
+    save.addEventListener('click', async () => {
+      if (issued || !_memoryActionCurrent(ticket)) return;
+      if (current.metadata?.name && !name.value.trim()) { showError('A saved name cannot be cleared here. Enter a name to continue.'); return; }
+      const metadata = { aliases: aliases.value.split('\n').map(v => v.trim()).filter(Boolean), domain_refs: checks.filter(v => v.checkbox.checked).map(({block_id, revision}) => ({block_id, revision})) };
+      if (name.value.trim()) metadata.name = name.value.trim();
+      issued = true; save.disabled = true;
+      try {
+        const result = await fetch(`/api/memory/metadata/knowledge/${encodeURIComponent(memory.id)}`, { method: 'PUT', credentials: 'same-origin', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ revision: current.revision, predecessor_receipt_id: current.predecessor_receipt_id, request_key: crypto.randomUUID(), metadata }) });
+        if (!_memoryActionCurrent(ticket) || !container.isConnected) return;
+        const value = await result.json().catch(() => ({}));
+        if (!_memoryActionCurrent(ticket) || !container.isConnected) return;
+        if (!result.ok) throw new Error(_memoryError(value, 'Metadata may not have been saved. Reopen to check.'));
+        showToast('Name and domains saved'); fieldset.remove();
+      } catch (error) { if (_memoryActionCurrent(ticket)) showError(error.message); }
+    });
+    fieldset.append(save);
+    const create = document.createElement('details'), createLabel = document.createElement('summary'); createLabel.textContent = 'Create a domain'; create.append(createLabel);
+    const domainName = document.createElement('input'); domainName.placeholder = 'Domain name'; domainName.setAttribute('aria-label','New domain name');
+    const definition = document.createElement('textarea'); definition.placeholder = 'Definition'; definition.setAttribute('aria-label','New domain definition');
+    const createButton = document.createElement('button'); createButton.type = 'button'; createButton.textContent = 'Create reviewed domain';
+    let createIssued = false;
+    createButton.addEventListener('click', async () => {
+      if (createIssued || !_memoryActionCurrent(ticket) || !domainName.value.trim() || !definition.value.trim()) return;
+      createIssued = true; createButton.disabled = true;
+      try {
+        const response = await fetch('/api/memory/metadata/domains', {method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_key:crypto.randomUUID(),name:domainName.value.trim(),aliases:[],value:definition.value.trim()})});
+        if (!_memoryActionCurrent(ticket) || !container.isConnected) return;
+        const value=await response.json().catch(()=>({}));
+        if (!_memoryActionCurrent(ticket) || !container.isConnected) return;
+        if (!response.ok) throw new Error(_memoryError(value,'Domain may not have been created. Reopen to check.'));
+        showToast('Domain created. Reopen this editor to assign it.');create.remove();
+      } catch (error) {if (_memoryActionCurrent(ticket)) showError(error.message);}
+    });
+    create.append(domainName,definition,createButton);fieldset.append(create);container.append(fieldset);
+  } catch (_) { /* Optional profile or transport is unavailable. */ }
+}
+
+async function _attachStandingGuidance(container, memory) {
+  const ticket = _memoryActionTicket();
+  const endpoint = `/api/memory/${encodeURIComponent(memory.id)}/standing-guidance/`;
+  const post = async (phase, body) => {
+    const response = await fetch(endpoint + phase, {method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const result = await response.json().catch(() => ({}));
+    if (!_memoryActionCurrent(ticket) || !container.isConnected) throw new Error('Review is no longer current.');
+    if (!response.ok) throw new Error('Standing guidance is unavailable or the outcome is unknown.');
+    return result;
+  };
+  try {
+    const current = await post('read',{decision:'approve'});
+    if (!['ready','unavailable'].includes(current.state) || typeof current.scope !== 'string') return;
+    const key = `openclank.standing-guidance.v1:${current.scope}:${memory.id}`;
+    const box=document.createElement('fieldset'), legend=document.createElement('legend');
+    legend.textContent='Standing guidance';box.append(legend);
+    const status=document.createElement('p');status.textContent=current.decision==='approve' ? 'Approved for chats in this Memory workspace.' : 'Not currently approved for standing guidance.';box.append(status);
+    if (blocksPublicLinks(current)) {const blocks=document.createElement('p');blocks.textContent='Blocks public file links';box.append(blocks);}
+    const blockLabel=document.createElement('label'), blockBox=document.createElement('input');blockBox.type='checkbox';blockBox.checked=false;
+    blockLabel.append(blockBox,document.createTextNode(' Also block public file links while this guidance is current'));box.append(blockLabel);
+    const check=document.createElement('button');check.type='button';check.textContent='Check review status';
+    const approve=document.createElement('button');approve.type='button';approve.textContent='Review approval';
+    const withdraw=document.createElement('button');withdraw.type='button';withdraw.textContent='Review withdrawal';
+    const pending=()=>localStorage.getItem(key);
+    const sync=()=>{const has=!!pending();check.hidden=!has;approve.disabled=has || current.state!=='ready';withdraw.disabled=has || current.state!=='ready';};
+    check.addEventListener('click',async()=>{try {
+      const raw=pending();if (!raw)return;const selector=JSON.parse(raw);
+      if (selector.scope!==current.scope || selector.curated_id!==String(memory.id)) throw new Error('Recovery selector is unavailable.');
+      const result=await post('status',selector);
+      if (result.state!=='applied') {status.textContent='Outcome unknown. Check status again; no review was resent.';return;}
+      if (pending()===raw)localStorage.removeItem(key);sync();
+      status.textContent=result.current ? `Review ${result.decision === 'approve' ? 'approved' : 'withdrawn'}.` : 'The review was recorded, but a later revision makes it inactive.';
+    } catch (error) {if (_memoryActionCurrent(ticket)) status.textContent=error.message;} });
+    const review=async decision=>{try {
+      if (pending())return;
+      const blockPublic=decision==='approve' && blockBox.checked;
+      const preview=await post('preview',withRequirement({decision},blockPublic));
+      if (preview.state!=='preview' || typeof preview.value!=='string' || typeof preview.reviewer!=='string' || !preview.selector || preview.selector.scope!==current.scope || preview.selector.curated_id!==String(memory.id)) throw new Error('Review unavailable.');
+      const text=`${decision==='approve'?'Approve':'Withdraw'} standing guidance as ${preview.reviewer} for chats in this Memory workspace?\n\n${preview.value}\n\nEditing this value or its revision invalidates this approval.`;
+      if (!window.confirm(text) || !_memoryActionCurrent(ticket) || !container.isConnected)return;
+      const raw=JSON.stringify(blockPublic ? withRequirement(preview.selector,true) : preview.selector);localStorage.setItem(key,raw);
+      if (localStorage.getItem(key)!==raw)throw new Error('Recovery could not be saved; nothing was sent.');
+      sync();status.textContent='Review submitted; check status if the result is unknown.';
+      const result=await post('apply',withRequirement({decision,selector:preview.selector,confirmed:true},blockPublic));
+      if (result.state!=='applied')throw new Error('Outcome unknown. Check status; do not send again.');
+      if (pending()===raw)localStorage.removeItem(key);sync();status.textContent=`Review ${decision==='approve'?'approved':'withdrawn'}.`;
+    } catch(error) {if (_memoryActionCurrent(ticket)) {status.textContent=error.message;sync();}} };
+    approve.addEventListener('click',()=>void review('approve'));withdraw.addEventListener('click',()=>void review('withdraw'));
+    box.append(approve,withdraw,check);container.append(box);sync();
+  } catch (_) { /* Unsupported, unqualified, or inaccessible memory. */ }
+}
+
+async function _attachKeepPreparedChoice(container, memory, editState) {
+  const ticket = _memoryActionTicket();
+  try {
+    const response = await fetch(`/api/memory/${encodeURIComponent(memory.id)}/mirror-context`, { credentials: 'same-origin' });
+    const context = await response.json();
+    if (!response.ok || typeof context.keep_prepared_scope !== 'string' || !_memoryActionCurrent(ticket) || !container.isConnected) return;
+    const storeKey = `openclank.prepared-recovery.v1:${context.keep_prepared_scope}:${memory.id}`;
+    const raw = localStorage.getItem(storeKey);
+    if (raw !== null) {
+      const selector = JSON.parse(raw);
+      if (!selector || selector.version !== 1 || selector.scope !== context.keep_prepared_scope || selector.curated_id !== String(memory.id) || Object.keys(selector).sort().join(',') !== 'block_id,curated_id,expected_revision,predecessor_receipt_id,request_sha256,scope,version') throw new Error('Saved recovery selector is invalid.');
+      editState.pending = { keepPrepared:true, issued:true, restored:true, selector, storeKey };
+      editState.sync?.();
+    }
+    if (context.keep_prepared_available !== true) return;
+    const label = document.createElement('label');
+    const choice = document.createElement('input'); choice.type = 'checkbox'; choice.disabled = !!editState.pending;
+    choice.addEventListener('change', () => { if (!editState.pending) editState.keepPrepared = choice.checked; });
+    label.append(choice, document.createTextNode(' Keep this edited memory prepared'));
+    container.append(label);
+  } catch (_) { if (_memoryActionCurrent(ticket) && container.isConnected) showError('Prepared memory recovery is unavailable.'); }
+}
 
 function startInlineEdit(item, memory) {
   item.innerHTML = '';
@@ -2847,28 +4562,56 @@ function startInlineEdit(item, memory) {
   const saveBtn = document.createElement('button');
   saveBtn.className = 'memory-item-btn save';
   saveBtn.textContent = 'save';
-  saveBtn.addEventListener('click', () => saveInlineEdit(memory.id, input.value, catSelect.value));
+  const editState = { pending: null, inFlight: false, sync: () => {} };
+  const saveDraft = async () => {
+    if (editState.inFlight) return;
+    editState.inFlight = true; saveBtn.disabled = true;
+    const text = input.value, category = catSelect.value;
+    try { return await saveInlineEdit(memory.id, text, category, { currentMemory: memory, editState,
+      draftCurrent: () => input.isConnected && input.value === text && catSelect.value === category });
+    } finally { editState.inFlight = false; saveBtn.disabled = false; editState.sync(); }
+  };
+  saveBtn.addEventListener('click', saveDraft);
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'memory-item-btn';
   cancelBtn.textContent = 'cancel';
-  cancelBtn.addEventListener('click', () => renderMemoryList());
+  cancelBtn.addEventListener('click', () => {
+    if (editState.pending) return showError('This request may have completed. Retry it or choose Review again first.');
+    renderMemoryList();
+  });
+
+  const reviewAgain = document.createElement('button');
+  reviewAgain.className = 'memory-item-btn'; reviewAgain.textContent = 'Review again'; reviewAgain.hidden = true;
+  reviewAgain.addEventListener('click', async () => {
+    if (editState.inFlight || !editState.pending || editState.pending.keepPrepared) return;
+    if (await uiModule.styledConfirm('The previous request may have completed. Review the current memory again?', { title: 'Review again', confirmText: 'Review again' })) {
+      editState.pending = null; editState.sync();
+    }
+  });
+  editState.sync = () => { saveBtn.textContent = editState.pending ? (editState.pending.keepPrepared ? 'Check status' : 'Retry') : 'save'; reviewAgain.hidden = !editState.pending || editState.pending.keepPrepared; };
 
   actions.appendChild(saveBtn);
   actions.appendChild(cancelBtn);
+  actions.appendChild(reviewAgain);
 
   item.appendChild(editRow);
   item.appendChild(actions);
+  void _attachMemoryMetadataEditor(item, memory);
+  void _attachS02PolicyEditor(item, memory);
+  void _attachKeepPreparedChoice(item, memory, editState);
+  void _attachStandingGuidance(item, memory);
 
   input.focus();
   input.select();
 
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') saveInlineEdit(memory.id, input.value, catSelect.value);
+    if (e.key === 'Enter') saveDraft();
     if (e.key === 'Escape') {
       e.stopPropagation();
       e.stopImmediatePropagation();
-      renderMemoryList();
+      if (editState.pending) showError('This request may have completed. Retry it or choose Review again first.');
+      else renderMemoryList();
     }
   });
 }
@@ -2907,23 +4650,46 @@ function _startMemoryCardEditor(card, memory, {
   save.type = 'button';
   save.className = 'memory-item-btn save';
   save.textContent = 'save';
+  const editState = { pending: null, inFlight: false, sync: () => {} };
   save.addEventListener('click', async () => {
+    if (editState.inFlight) return;
+    editState.inFlight = true;
     save.disabled = true;
+    const draftText = input.value, draftCategory = category.value;
     const updated = await saveInlineEdit(
       memory.id,
-      input.value,
-      category.value,
-      { refreshInspect, refreshDigest, currentMemory: memory },
+      draftText,
+      draftCategory,
+      { refreshInspect, refreshDigest, currentMemory: memory, editState,
+        draftCurrent: () => input.isConnected && input.value === draftText && category.value === draftCategory },
     );
+    editState.inFlight = false;
     if (!updated) save.disabled = false;
+    editState.sync();
   });
   const cancelButton = document.createElement('button');
   cancelButton.type = 'button';
   cancelButton.className = 'memory-item-btn';
   cancelButton.textContent = 'cancel';
-  cancelButton.addEventListener('click', () => cancel?.());
-  actions.append(save, cancelButton);
+  cancelButton.addEventListener('click', () => {
+    if (editState.pending) return showError('This request may have completed. Retry it or choose Review again first.');
+    cancel?.();
+  });
+  const reviewAgain = document.createElement('button');
+  reviewAgain.type = 'button'; reviewAgain.className = 'memory-item-btn'; reviewAgain.textContent = 'Review again'; reviewAgain.hidden = true;
+  reviewAgain.addEventListener('click', async () => {
+    if (editState.inFlight || !editState.pending || editState.pending.keepPrepared) return;
+    if (await uiModule.styledConfirm('The previous request may have completed. Review the current memory again?', { title: 'Review again', confirmText: 'Review again' })) {
+      editState.pending = null; editState.sync();
+    }
+  });
+  editState.sync = () => { save.textContent = editState.pending ? (editState.pending.keepPrepared ? 'Check status' : 'Retry') : 'save'; reviewAgain.hidden = !editState.pending || editState.pending.keepPrepared; };
+  actions.append(save, cancelButton, reviewAgain);
   card.append(editRow, actions);
+  void _attachMemoryMetadataEditor(card, memory);
+  void _attachS02PolicyEditor(card, memory);
+  void _attachKeepPreparedChoice(card, memory, editState);
+  void _attachStandingGuidance(card, memory);
   input.focus();
   input.select();
 }
@@ -2932,8 +4698,12 @@ async function saveInlineEdit(id, newText, newCategory, {
   refreshInspect = false,
   refreshDigest = false,
   currentMemory = null,
+  draftCurrent = () => true,
+  editState = { pending: null },
+  expectedRevision = null,
+  reason = 'owner_edit',
 } = {}) {
-  newText = newText.trim();
+  if (expectedRevision === null) newText = newText.trim();
   if (!newText) return false;
 
   const memory = memories.find(m => String(m.id) === String(id))
@@ -2941,13 +4711,89 @@ async function saveInlineEdit(id, newText, newCategory, {
     || currentMemory;
   const catChanged = newCategory && newCategory !== (memory?.category || 'fact');
   const storedText = memory ? (memory.raw_text || memory.text) : null;
-  if (!memory || (newText === storedText && !catChanged)) {
+  if (!editState.pending && (!memory || (newText === storedText && !catChanged))) {
     if (refreshInspect) renderMemoryInspect();
     else if (!refreshDigest) renderMemoryList();
     return true;
   }
 
   try {
+    const ticket = _memoryActionTicket();
+    const applyPending = async () => {
+      const pending = editState.pending;
+      if (!pending || (!pending.restored && (pending.text !== newText || pending.category !== newCategory))) throw new Error('The previous request may have completed. Restore that draft to retry or choose Review again.');
+      const reconcile = pending.keepPrepared && pending.issued;
+      const body = reconcile ? JSON.stringify(pending.selector) : new URLSearchParams({ mirror_review: pending.sealed });
+      if (pending.keepPrepared) pending.issued = true;
+      const response = await fetch(reconcile ? `/api/memory/${encodeURIComponent(id)}/mirror-keep-status` : `/api/memory/${encodeURIComponent(id)}`, reconcile
+        ? { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body }
+        : { method: 'PUT', credentials: 'same-origin', body });
+      if (!_memoryActionCurrent(ticket) || !draftCurrent()) throw new Error('The request may have completed. Your draft and retry are preserved.');
+      const data = await response.json().catch(() => ({}));
+      if (!_memoryActionCurrent(ticket) || !draftCurrent()) throw new Error('The request may have completed. Your draft and retry are preserved.');
+      if (!response.ok || (reconcile ? data.state !== 'applied' : data.ok !== true || data.review?.state !== 'applied')) throw new Error(pending.keepPrepared ? 'The outcome is unknown. Check status again; the edit will not be sent again.' : 'The request may have completed. Retry it or choose Review again.');
+      if (pending.keepPrepared) {
+        const saved=localStorage.getItem(pending.storeKey);
+        if (saved===JSON.stringify(pending.selector)) localStorage.removeItem(pending.storeKey);
+      }
+      editState.pending = null; editState.sync?.();
+      await loadMemories();
+      if (refreshInspect) await loadMemoryInspect();
+      if (refreshDigest) await loadDigestPreview();
+      showToast('Memory updated');
+      return true;
+    };
+    if (editState.pending) return await applyPending();
+    const contextResponse = await fetch(`/api/memory/${encodeURIComponent(id)}/mirror-context`, { credentials: 'same-origin' });
+    const context = await contextResponse.json().catch(() => ({}));
+    if (!contextResponse.ok) throw new Error(_memoryError(context, 'Memory review context is unavailable'));
+    if (!_memoryActionCurrent(ticket) || !draftCurrent()) throw new Error('The edit changed while review was opening. Your draft is still here.');
+    if (expectedRevision !== null && context.mode === 'guarded' && context.expected_revision !== expectedRevision) {
+      throw new Error('The current revision changed. Reopen History before restoring.');
+    }
+    if (context.mode === 'guarded') {
+      if (catChanged) throw new Error('Category changes are not available for guarded memories. Your draft is still here.');
+      if (newText === storedText) return true;
+      const requestKey = crypto.randomUUID();
+      const request = { candidate_id: context.candidate_id, origin_request_key: context.origin_request_key,
+        prior_receipt_id: context.prior_receipt_id, expected_revision: context.expected_revision,
+        request_key: requestKey, reason, selected_paths: ['/value/value'] };
+      const keepPrepared = editState.keepPrepared === true && context.keep_prepared_available === true;
+      const previewResponse = await fetch(`/api/memory/${encodeURIComponent(id)}/mirror-preview${keepPrepared ? '?keep_prepared=1' : ''}`, {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...request, payload: { value: { type: 'string', value: newText } } }),
+      });
+      const preview = await previewResponse.json().catch(() => ({}));
+      if (!previewResponse.ok) throw new Error(_memoryError(preview, 'Memory preview is unavailable'));
+      if (!_memoryActionCurrent(ticket) || !draftCurrent()) throw new Error('The edit changed while review was opening. Your draft is still here.');
+      if (keepPrepared) {
+        if (preview.state !== 'preview' || typeof preview.old_value !== 'string' || typeof preview.operation_json !== 'string' || typeof preview.operation_sha256 !== 'string' || !preview.policy_projection) throw new Error('Prepared memory preview is unavailable.');
+        const approved = await uiModule.styledConfirm(`Before:\n${preview.old_value}\n\nAfter:\n${newText}\n\nKeep this edited memory prepared.`, { title: 'Review memory change', confirmText: 'Apply' });
+        if (!approved) return false;
+        if (!_memoryActionCurrent(ticket) || !draftCurrent()) throw new Error('The edit changed after preview.');
+        const selector=preview.selector;
+        if (!selector || typeof selector.scope !== 'string' || selector.curated_id !== String(id) || typeof preview.request_key !== 'string') throw new Error('Prepared memory recovery is unavailable.');
+        const storeKey=`openclank.prepared-recovery.v1:${selector.scope}:${id}`;
+        const saved=JSON.stringify(selector);
+        if (localStorage.getItem(storeKey)!==null) throw new Error('An earlier prepared edit must be reconciled first.');
+        localStorage.setItem(storeKey,saved);
+        if (localStorage.getItem(storeKey)!==saved) throw new Error('Prepared memory recovery could not be saved.');
+        editState.pending = { text: newText, category: newCategory, keepPrepared: true, issued: false, selector, storeKey,
+          sealed: JSON.stringify({ ...request, request_key: preview.request_key, operation_json: preview.operation_json, operation_sha256: preview.operation_sha256, policy_projection: preview.policy_projection, keep_prepared: true }) };
+        editState.sync?.();
+        return await applyPending();
+      }
+      const change = Array.isArray(preview.changes) ? preview.changes.find(c => c.path === '/value/value') : null;
+      if (!change || !change.before?.present || !change.after?.present || typeof change.before.value !== 'string' || typeof change.after.value !== 'string' || change.after.value !== newText) throw new Error('Memory preview is unavailable. Your draft is still here.');
+      const approved = await uiModule.styledConfirm(`Before:\n${change.before.value}\n\nAfter:\n${change.after.value}`, { title: 'Review memory change', confirmText: 'Apply' });
+      if (!approved) return false;
+      if (!_memoryActionCurrent(ticket) || !draftCurrent()) throw new Error('The edit changed after preview. Your draft is still here.');
+      editState.pending = { text: newText, category: newCategory, sealed: JSON.stringify({ ...request,
+        operation_json: preview.operation_json, operation_sha256: preview.operation_sha256 }) };
+      editState.sync?.();
+      return await applyPending();
+    }
+    if (context.mode !== 'legacy') throw new Error('Memory review context is unavailable');
     const params = new URLSearchParams({ text: newText });
     if (newCategory) params.append('category', newCategory);
 
@@ -2956,6 +4802,8 @@ async function saveInlineEdit(id, newText, newCategory, {
       credentials: 'same-origin',
       body: params
     });
+
+    if (!_memoryActionCurrent(ticket) || !draftCurrent()) throw new Error('The edit context changed. Your draft is still here.');
 
     if (response.ok) {
       await loadMemories();
@@ -3003,82 +4851,109 @@ export function updateMemoryCount() {
   if (tabCount) tabCount.textContent = num;
 }
 
+const _originalMemoryAdds = new Map();
 export async function addNewMemory() {
   const input = document.getElementById('new-memory-input');
   const text = input.value.trim();
   const category = _readNewMemoryCategory();
-
-  if (!text) {
-    showError('Memory text cannot be empty');
-    return;
+  const ticket = _memoryActionTicket();
+  const account = document.body?.dataset?.accountId;
+  if (!text) { showError('Memory text cannot be empty'); return; }
+  if (!account) { showError('Account is unavailable.'); return; }
+  const old = _originalMemoryAdds.get(account);
+  if (old && (old.text !== text || old.category !== category)) {
+    showError('Check the original Add outcome before changing its text or category.'); return;
   }
-
+  const original = old || {account, text, category, request_key: crypto.randomUUID()};
+  if (original.busy) return;
+  original.busy = true;
+  _originalMemoryAdds.set(account, original);
   try {
     const response = await fetch(`${window.location.origin}/api/memory/add`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        text: text,
-        category: category,
-      })
+      method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'same-origin',
+      body: JSON.stringify({text: original.text, category: original.category,
+                            request_key: original.request_key, action: old ? 'status' : 'submit'})
     });
-
-    if (response.ok) {
-      const result = await response.json();
-      input.value = '';
-      await loadMemories();
-      showToast(result.pending_review ? 'Sent to Candidates for review' : 'Memory added');
-    } else {
-      const errorData = await response.json();
-      console.error('Server error details:', errorData);
-      throw new Error(errorData.detail || 'Failed to add memory');
+    if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account) return;
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      if (body?.reason === 'memory_preparing') throw new Error('Memory is still being prepared for this account. Try again in a moment.');
+      throw new Error('Original Add outcome unavailable; select Add again to check status.');
     }
+    const result = await response.json();
+    if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account) return;
+    if (result.state === 'absent') { showError('Original Add was not found; its outcome remains unresolved.'); return; }
+    const guarded = ['applied','staged','terminal_erased'].includes(result.state);
+    const legacy = !old && result.ok === true && !Object.hasOwn(result, 'state')
+      && (typeof result.memory_id === 'string' || (Number.isSafeInteger(result.count) && result.message === 'Memory already exists'));
+    if (!guarded && !legacy) throw new Error('Original Add outcome unavailable.');
+    _originalMemoryAdds.delete(account);
+    if (input.value.trim() === original.text && _readNewMemoryCategory() === original.category) input.value = '';
+    await loadMemories();
+    if (_memoryActionCurrent(ticket)) showToast(result.state === 'terminal_erased' ? 'Original Add was erased' : result.pending_review ? 'Sent to Candidates for review' : 'Memory added');
   } catch (error) {
-    console.error('Error adding memory:', error);
-    showError(error.message || 'Failed to add memory');
-  }
+    if (_memoryActionCurrent(ticket)) showError(error.message || 'Original Add outcome unavailable; check status.');
+  } finally { original.busy = false; }
 }
 
 export async function editMemory(id) {
   const memory = memories.find(m => m.id === id);
   if (!memory) return;
-
-  const storedText = memory.raw_text || memory.text;
-  const newText = prompt('Edit memory:', storedText);
-  if (!newText || newText === storedText) return;
-
-  await saveInlineEdit(id, newText);
+  const item = [...document.querySelectorAll('.memory-item[data-memory-id]')].find(node => node.dataset.memoryId === String(id));
+  if (item) startInlineEdit(item, memory);
+  else showError('Open this memory in the list to edit it.');
 }
 
-async function resolveQuestion(id) {
+async function resolveQuestion(id, valid = () => true) {
+  const ticket = _memoryActionTicket();
+  if (!valid() || !_memoryActionCurrent(ticket)) return;
   const answer = prompt('Answer this open question:');
-  if (!answer?.trim()) return;
+  if (!answer?.trim() || !valid() || !_memoryActionCurrent(ticket)) return;
   try {
     let expectedRevision = '';
     const history = await fetch(`/api/memory/${encodeURIComponent(id)}/history`, {
       credentials: 'same-origin',
     });
+    if (!valid() || !_memoryActionCurrent(ticket)) return;
+    let review = null;
     if (history.ok) {
       const detail = await history.json();
+      if (!valid() || !_memoryActionCurrent(ticket)) return;
       expectedRevision = String(detail.current_revision || '');
+      if (Number.isSafeInteger(detail.current_revision) && detail.current_revision > 0 &&
+          [detail.block_id, detail.subject_entity_id, detail.predicate, detail.claim_slot].every(value => typeof value === 'string' && value.trim())) {
+        const question = detail.current?.text || 'this question';
+        const subject = detail.entity?.canonical_label || detail.subject_entity_id;
+        if (!confirm(`Answer “${question}” for ${subject} (${detail.predicate} / ${detail.claim_slot}) with “${answer.trim()}”?`)) return;
+        review = detail;
+      }
     }
     const form = new URLSearchParams({ answer: answer.trim() });
     if (expectedRevision) form.set('expected_revision', expectedRevision);
-    const res = await fetch(`${window.location.origin}/api/memory/${id}/resolve`, {
+    if (review) {
+      form.set('question_block_id', review.block_id);
+      form.set('subject_entity_id', review.subject_entity_id);
+      form.set('predicate', review.predicate);
+      form.set('claim_slot', review.claim_slot);
+      form.set('request_key', crypto.randomUUID());
+      form.set('selected_paths', JSON.stringify(['/status', '/value/type', '/value/value']));
+    }
+    if (!valid() || !_memoryActionCurrent(ticket)) return;
+    const res = await fetch(`${window.location.origin}/api/memory/${encodeURIComponent(id)}/resolve`, {
       method: 'POST',
       credentials: 'same-origin',
       body: form,
     });
+    if (!valid() || !_memoryActionCurrent(ticket)) return;
     if (res.ok) {
-      await loadMemories();
-      showToast('Question answered in the same memory');
+      await loadMemories({ isCurrent: () => _memoryActionCurrent(ticket) });
+      if (_memoryActionCurrent(ticket)) showToast('Question answered in the same memory');
     } else {
       const err = await res.json().catch(() => ({}));
-      showError(_memoryError(err, 'Failed to resolve question'));
+      if (_memoryActionCurrent(ticket)) showError(_memoryError(err, 'Failed to resolve question'));
     }
   } catch (e) {
+    if (!valid() || !_memoryActionCurrent(ticket)) return;
     console.error('Failed to resolve question:', e);
     showError('Failed to resolve question');
   }
@@ -3102,14 +4977,14 @@ async function togglePin(id, pinned) {
   }
 }
 
-export async function deleteMemory(id) {
+export async function deleteMemory(id, valid = () => true) {
   const code = graphState.nodes.find(node => node.id === id && _isCodeGraphNode(node));
   const memory = memories.find(m => m.id === id) || (code ? { ...code, text: code.label || code.name } : null);
   if (!memory) return;
   const action = _memoryActionTicket();
 
   if (!await uiModule.styledConfirm(`Delete this memory?\n"${memory.text}"`, { confirmText: 'Delete', danger: true })) return;
-  if (!_memoryActionCurrent(action)) return;
+  if (!valid() || !_memoryActionCurrent(action)) return;
   disposeMemoryGraph({ clear: false, reason: 'forget' });
   action.loadId = graphState.loadId;
 
@@ -3158,6 +5033,12 @@ async function _memoryDeleteFailure(response) {
   if (problem?.code === 'code_node_forget_requires_workspace_erase') {
     // Known public contract, never interpolate raw native/private diagnostics.
     return 'A code-graph node cannot be forgotten individually. Use explicit workspace-index erasure to remove its indexed code. Nothing was deleted.';
+  }
+  if (problem?.code === 'f1_edited_head') {
+    return 'This updated memory cannot be forgotten individually yet. Nothing was deleted.';
+  }
+  if (problem?.code === 'memory_delete_unsupported') {
+    return 'This memory cannot be deleted in this form yet, so nothing was deleted.';
   }
   return 'Failed to delete memory';
 }
@@ -3297,7 +5178,14 @@ function _memoryBindingIdempotencyKey() {
   return `memory-import-route-${suffix}`;
 }
 
-async function _configureMemoryRoute(problem, route, file) {
+function _memoryImportCurrent(intent) {
+  return !!intent && _pairedCurrent(intent.scope)
+    && document.body?.dataset?.accountId === intent.account
+    && (sessionModule?.getCurrentSessionId?.() || null) === intent.sessionId;
+}
+
+async function _configureMemoryRoute(problem, route, file, intent) {
+  if (!_memoryImportCurrent(intent)) throw new Error('The original import account or session changed.');
   const files = Array.isArray(file) ? file : [file];
   const routeId = route?.model_route_id;
   if (!routeId) throw new Error('The selected Memory model route is no longer available.');
@@ -3305,6 +5193,7 @@ async function _configureMemoryRoute(problem, route, file) {
     duration: 15000,
     leadingIcon: 'spinner',
   });
+  if (!_memoryImportCurrent(intent)) throw new Error('The original import account or session changed.');
   const response = await fetch('/api/v1/providers/bindings/memory', {
     method: 'PUT',
     credentials: 'same-origin',
@@ -3317,34 +5206,45 @@ async function _configureMemoryRoute(problem, route, file) {
       routes: [{ model_route_id: routeId, enabled: true }],
     }),
   });
+  if (!_memoryImportCurrent(intent)) throw new Error('The original import account or session changed.');
   if (!response.ok) {
-    throw new Error((await responseError(response, 'Memory model setup failed')).message);
+    const failure = await responseError(response, 'Memory model setup failed');
+    if (!_memoryImportCurrent(intent)) throw new Error('The original import account or session changed.');
+    throw new Error(failure.message);
   }
-  pendingMemoryImportFile = null;
-  pendingMemoryImportFiles = [];
+  if (pendingMemoryImportIntent === intent) {
+    pendingMemoryImportFile = null;
+    pendingMemoryImportFiles = [];
+    pendingMemoryImportIntent = null;
+  }
   document.dispatchEvent(new CustomEvent('open-clank:providers-updated'));
   showToast(`${route.display_name || 'Model'} is now the Memory model. Retrying import…`, {
     duration: 5000,
     leadingIcon: 'check',
   });
-  await handleImportFiles(files);
+  await handleImportFiles(files, intent);
 }
 
-async function _openMemoryRouteSettings(problem, file) {
+async function _openMemoryRouteSettings(problem, file, intent) {
+  if (!_memoryImportCurrent(intent)) throw new Error('The original import account or session changed.');
   const files = Array.isArray(file) ? file : [file];
   pendingMemoryImportFiles = files.filter(Boolean);
   pendingMemoryImportFile = pendingMemoryImportFiles[0] || null;
+  pendingMemoryImportIntent = intent;
   const settingsModule = await import('./settings.js');
+  if (!_memoryImportCurrent(intent)) return;
   settingsModule.open(problem.settings_target || 'added-models');
   showToast('Choose and save a Memory model route; this file will retry automatically.', {
     duration: 12000,
   });
 }
 
-function _showMemoryRouteProblem(problem, file, detail) {
+function _showMemoryRouteProblem(problem, file, detail, intent) {
+  intent ||= {actionKey: crypto.randomUUID(), account: document.body?.dataset?.accountId, scope: _pairedScope(), sessionId: sessionModule?.getCurrentSessionId?.() || null};
   const files = Array.isArray(file) ? file : [file];
   pendingMemoryImportFiles = files.filter(Boolean);
   pendingMemoryImportFile = pendingMemoryImportFiles[0] || null;
+  pendingMemoryImportIntent = intent;
   const routes = Array.isArray(problem.eligible_routes) ? problem.eligible_routes : [];
   const only = routes.length === 1 ? routes[0] : null;
   const label = only?.display_name || only?.model_id || 'available model';
@@ -3355,8 +5255,8 @@ function _showMemoryRouteProblem(problem, file, detail) {
       ? `Set ${label} as the dedicated Memory model and retry this file`
       : 'Choose a dedicated Memory model and retry this file',
     onAction: () => only
-      ? _configureMemoryRoute(problem, only, file)
-      : _openMemoryRouteSettings(problem, file),
+      ? _configureMemoryRoute(problem, only, file, intent)
+      : _openMemoryRouteSettings(problem, file, intent),
   });
 }
 
@@ -3385,10 +5285,10 @@ function _importBatchReviewPending(batch) {
   return Number(reviewCounts.pending || 0) > 0;
 }
 
-async function _waitForImportBatch(batchId, { timeoutMs = 300000, intervalMs = 3000 } = {}) {
+async function _waitForImportBatch(batchId, { timeoutMs = 300000, intervalMs = 3000, isCurrent = () => true } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && isCurrent()) {
     try {
       const response = await fetch(
         `/api/memory/import-batches/${encodeURIComponent(batchId)}`,
@@ -3396,6 +5296,7 @@ async function _waitForImportBatch(batchId, { timeoutMs = 300000, intervalMs = 3
       );
       if (response.ok) {
         last = await response.json();
+        if (!isCurrent()) return null;
         if (String(last?.state || '') !== 'active') return last;
       }
     } catch (error) {
@@ -3406,19 +5307,21 @@ async function _waitForImportBatch(batchId, { timeoutMs = 300000, intervalMs = 3
   return last;
 }
 
-async function _openImportBatchReview(batchId) {
-  const data = await _waitForImportBatch(batchId);
-  if (!data) return false;
+async function _openImportBatchReview(batchId, isCurrent = () => true) {
+  const data = await _waitForImportBatch(batchId, {isCurrent});
+  if (!data || !isCurrent()) return false;
   _renderBatchReview(data);
-  _refreshPendingImportNotice();
+  _refreshPendingImportNotice(isCurrent);
   return true;
 }
 
-async function _recoverImportBatchAfterTimeout() {
+async function _recoverImportBatchAfterTimeout(isCurrent = () => true) {
+  if (!isCurrent()) return false;
   showToast('Import is still processing — watching for it to finish…');
   const deadline = Date.now() + 240000;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && isCurrent()) {
     const batches = await _fetchPendingImportBatches();
+    if (!isCurrent()) return false;
     // Only recover a batch the server touched recently; a stale pending
     // batch from an earlier session is resumed via the notice, not here.
     const latest = batches.find((batch) => {
@@ -3426,26 +5329,39 @@ async function _recoverImportBatchAfterTimeout() {
       return batch?.batch_id && Number.isFinite(updated) && Date.now() - updated < 15 * 60 * 1000;
     });
     if (latest) {
-      return _openImportBatchReview(latest.batch_id);
+      return _openImportBatchReview(latest.batch_id, isCurrent);
     }
     await new Promise((resolve) => setTimeout(resolve, 3000));
   }
   return false;
 }
 
-async function _refreshPendingImportNotice() {
+async function _refreshPendingImportNotice(isCurrent = () => true) {
+  if (!isCurrent()) return;
   const notice = document.getElementById('memory-import-pending');
   if (!notice) return;
   const batches = await _fetchPendingImportBatches();
+  if (!isCurrent()) return;
   const actionable = batches.find((batch) => String(batch?.state) === 'active')
-    || batches.find((batch) => _importBatchReviewPending(batch));
-  if (!actionable) {
-    notice.classList.add('hidden');
-    notice.replaceChildren();
-    return;
-  }
+    || batches.find((batch) => _importBatchReviewPending(batch))
+    || batches.find((batch) => Number(batch?.counts?.failed || 0) > 0);
   notice.classList.remove('hidden');
   notice.replaceChildren();
+  const snapshotStatus = document.createElement('button');
+  snapshotStatus.type='button'; snapshotStatus.className='memory-item-btn'; snapshotStatus.textContent='Check snapshot save';
+  snapshotStatus.addEventListener('click', async () => {
+    const ticket=_memoryActionTicket(); snapshotStatus.disabled=true;
+    try {
+      const {runSnapshotPublicationStatus}=await import('./analysisNoteFlow.js');
+      if (!_memoryActionCurrent(ticket) || !notice.isConnected) return;
+      const result=await runSnapshotPublicationStatus({scopeRoot:notice,current:() => _memoryActionCurrent(ticket) && notice.isConnected,
+        status:message => { if (_memoryActionCurrent(ticket)) showToast(String(message)); }});
+      if (_memoryActionCurrent(ticket) && result?.state==='applied') await loadMemories();
+    } catch (_) { if (_memoryActionCurrent(ticket)) showError('Snapshot status unavailable.'); }
+    finally { if (_memoryActionCurrent(ticket) && notice.isConnected) snapshotStatus.disabled=false; }
+  });
+  notice.appendChild(snapshotStatus);
+  if (!actionable) return;
   const label = document.createElement('span');
   label.className = 'memory-import-pending-text';
   const files = Array.isArray(actionable.filenames) && actionable.filenames.length
@@ -3461,11 +5377,17 @@ async function _refreshPendingImportNotice() {
     return;
   }
   const pending = Number(actionable.review_counts?.pending || 0);
-  label.textContent = `${pending} imported suggestion${pending === 1 ? '' : 's'} waiting for review${files}`;
+  const failed = Number(actionable.counts?.failed || 0);
+  label.textContent = pending
+    ? `${pending} imported suggestion${pending === 1 ? '' : 's'} waiting for review${files}`
+    : `${failed} import file${failed === 1 ? '' : 's'} need attention${files}`;
   const review = document.createElement('button');
   review.className = 'memory-item-btn save';
-  review.textContent = 'review';
-  review.addEventListener('click', () => _openImportBatchReview(actionable.batch_id));
+  review.textContent = pending ? 'review' : 'check import status';
+  review.addEventListener('click', () => {
+    const ticket = _memoryActionTicket();
+    _openImportBatchReview(actionable.batch_id, () => _memoryActionCurrent(ticket));
+  });
   const dismiss = document.createElement('button');
   dismiss.className = 'memory-item-btn';
   dismiss.textContent = 'dismiss';
@@ -3501,13 +5423,15 @@ function _batchReviewItems(data) {
       items.push({
         batchId,
         suggestionId: (typeof suggestion === 'object' && suggestion?.suggestion_id) || null,
-        text: String(text),
-        category: (typeof suggestion === 'object' && suggestion?.category) || 'fact',
+        text: String(reviewState === 'publishing' && typeof review?.proposal?.text === 'string' ? review.proposal.text : text),
+        category: (reviewState === 'publishing' && review?.proposal?.category) || (typeof suggestion === 'object' && suggestion?.category) || 'fact',
         filename: item.filename || 'upload',
         itemId: item.item_id || null,
-        questionContext: (typeof suggestion === 'object' && suggestion?.question_context) || null,
+        questionContext: (reviewState === 'publishing' ? review?.proposal?.question_context : (typeof suggestion === 'object' && suggestion?.question_context)) || null,
         review,
         reviewState,
+        markdownSource: typeof suggestion === 'object' ? suggestion?.markdown_source : null,
+        snapshotImport: typeof suggestion === 'object' && suggestion?.snapshot_import?.capture_origin === 'imported_unverified',
         reviewKey: null,
         active: !['accepted', 'reused', 'rejected'].includes(reviewState),
       });
@@ -3544,7 +5468,12 @@ async function _submitBatchReview(item, action) {
     category: String(item.category || 'fact').trim().toLowerCase(),
   };
   if (item.questionContext) proposal.question_context = item.questionContext;
+  if (item.reviewState === 'publishing') throw new Error('Check the original review status.');
   const key = _batchReviewIdempotencyKey(item);
+  if (action === 'accept') {
+    item.reviewState = 'publishing';
+    item.originalProposal = {...proposal};
+  }
   const response = await fetch(
     `${window.location.origin}/api/memory/import-batches/${encodeURIComponent(item.batchId)}/review`,
     {
@@ -3569,6 +5498,10 @@ async function _submitBatchReview(item, action) {
   item.review = result?.review?.review || result?.review || item.review;
   item.reviewState = String(item.review?.state || action);
   item.active = !['accepted', 'reused', 'rejected'].includes(item.reviewState);
+  if (item.reviewState === 'awaiting_review' && item.review?.last_failure?.code === 'IMPORT_REVIEW_NOT_APPLIED') {
+    if (!result?.batch || typeof result.batch !== 'object') throw new Error('Original review outcome is unavailable.');
+    return {...result, originalNotApplied:true};
+  }
   return result;
 }
 
@@ -3580,6 +5513,35 @@ function _appendBatchItemError(card, message) {
   if (!existing) card.appendChild(errorText);
 }
 
+function _batchPublishingControls(card, item, controls, fields, updateTitle) {
+  for (const field of fields) if (field) field.disabled = true;
+  controls.replaceChildren();
+  const notice = document.createElement('small');
+  notice.textContent = 'Original review outcome is unknown; check its status.';
+  const check = document.createElement('button'); check.type = 'button'; check.className = 'memory-item-btn'; check.textContent = 'Check status';
+  check.addEventListener('click', async () => {
+    const scope = _pairedScope();
+    if (!scope) return showError('The original account is unavailable.');
+    check.disabled = true;
+    try {
+      const response = await fetch(`${window.location.origin}/api/memory/import-batches/${encodeURIComponent(item.batchId)}/review`, {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({phase:'status',suggestion_id:item.suggestionId})});
+      const result = await response.json().catch(() => ({}));
+      if (!_pairedCurrent(scope) || !card.isConnected) return;
+      if (!response.ok || result.ok !== true || !result.batch || typeof result.batch !== 'object')
+        throw new Error('Original review outcome is unavailable.');
+      _renderBatchReview(result.batch);
+      const review = result.review?.review || result.review;
+      if (review?.state === 'awaiting_review' && review?.last_failure?.code === 'IMPORT_REVIEW_NOT_APPLIED')
+        showError('The original review was not applied. Review it again.');
+      updateTitle();
+    } catch (error) { if (_pairedCurrent(scope) && card.isConnected) _appendBatchItemError(card,error.message || 'Original review outcome is unavailable.'); }
+    finally { if (_pairedCurrent(scope) && card.isConnected) check.disabled = false; }
+  });
+  controls.append(notice,check);
+}
+
 function _batchFailedItems(data) {
   return (Array.isArray(data?.items) ? data.items : [])
     .filter((item) => item?.state === 'failed_terminal')
@@ -3587,6 +5549,7 @@ function _batchFailedItems(data) {
       batchId: String(data?.batch_id || ''),
       itemId: String(item?.item_id || ''),
       filename: String(item?.filename || 'upload'),
+      retryable: item?.error?.retryable !== false && !item?.superseded_by,
       error: item?.error && typeof item.error === 'object'
         ? String(item.error.message || 'This file could not be imported.')
         : 'This file could not be imported.',
@@ -3601,10 +5564,12 @@ function _renderBatchReview(data) {
   if (!body || !modal) return;
   const reviewItems = _batchReviewItems(data);
   const failedItems = _batchFailedItems(data);
+  const markdownItems = (Array.isArray(data?.items) ? data.items : [])
+    .filter((item) => item?.result?.markdown_bundle?.state === 'unverified' && !item?.superseded_by);
   body.innerHTML = '';
   body.classList.remove('hidden');
   if (memList) memList.classList.add('hidden');
-  if (reviewItems.length === 0 && failedItems.length === 0) {
+  if (reviewItems.length === 0 && failedItems.length === 0 && markdownItems.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'memory-empty';
     empty.textContent = 'No useful information found in the selected files.';
@@ -3634,12 +5599,14 @@ function _renderBatchReview(data) {
     let saved = 0;
     let failed = 0;
     for (const item of reviewItems) {
-      if (!item.active || !item.text) continue;
+      if (!item.active || !item.text || item.snapshotImport || item.reviewState === 'publishing') continue;
       try {
-        await _submitBatchReview(item, 'accept');
+        const result = await _submitBatchReview(item, 'accept');
+        if (result.originalNotApplied) { _renderBatchReview(result.batch); showError('The original review was not applied. Review it again.'); return; }
         saved += 1;
       } catch (error) {
         item.error = error?.message || 'Failed to save memory';
+        if (item.reviewState === 'publishing' && item.statusOnly) item.statusOnly();
         failed += 1;
       }
     }
@@ -3659,6 +5626,18 @@ function _renderBatchReview(data) {
   actions.append(saveAll, back);
   header.append(title, actions);
   body.appendChild(header);
+
+  for (const item of markdownItems) {
+    const bundle = item.result.markdown_bundle;
+    const source = document.createElement('p');
+    source.className = 'memory-import-source';
+    const origin = bundle.foreign ? 'foreign origin claim' : 'matching origin label';
+    const omissions = bundle.omitted_items
+      ? `. Export reports ${bundle.omitted_items}${bundle.omissions_at_least ? '+' : ''} omitted items`
+      : '';
+    source.textContent = `${item.filename || 'Markdown upload'} · verified upload checksum · ${origin}, unverified${omissions}.`;
+    body.appendChild(source);
+  }
 
   // EC-D05: photo imports carry the admitted asset in item.result.media —
   // render each photo with a per-photo download button hitting the S00
@@ -3703,6 +5682,49 @@ function _renderBatchReview(data) {
 
   for (const item of reviewItems) {
     if (!item.active) continue;
+    if (item.snapshotImport) {
+      const card = document.createElement('div'); card.className = 'memory-suggestion-item';
+      const label = document.createElement('div');
+      label.textContent = `Imported snapshot; source verification unavailable. An existing copy of the same snapshot with different wording conflicts. ${item.text}`;
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'memory-item-btn save';
+      const imported = {batch_id:String(item.batchId),item_id:String(item.itemId),suggestion_id:String(item.suggestionId)};
+      const key = `openclank.snapshot-review.v1:${item.batchId}:${item.itemId}:${item.suggestionId}`;
+      let selector = null;
+      try { const raw = localStorage.getItem(key); if (raw) selector = JSON.parse(raw); } catch (_) { /* unavailable below */ }
+      button.textContent = selector ? 'Check status' : 'Remember snapshot';
+      button.addEventListener('click', async () => {
+        const ticket = _memoryActionTicket(); button.disabled = true;
+        try {
+          const post = async payload => {
+            const response = await fetch('/api/memory/analysis-snapshot/publication', {method:'POST', credentials:'same-origin',
+              headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+            const result = await response.json();
+            if (!response.ok) throw new Error('Snapshot outcome is unavailable. Check status.');
+            return result;
+          };
+          if (!selector) {
+            const prepared = await post({phase:'prepare',imported});
+            if (!_memoryActionCurrent(ticket) || !card.isConnected) return;
+            if (prepared.state !== 'prepared' || !prepared.selector) throw new Error('Snapshot review unavailable.');
+            const raw=JSON.stringify(prepared.selector); localStorage.setItem(key,raw);
+            if (localStorage.getItem(key)!==raw) throw new Error('Recovery storage unavailable; snapshot was not sent.');
+            selector=prepared.selector;
+            button.textContent='Check status';
+            const result=await post({phase:'issue',imported,selector});
+            if (!_memoryActionCurrent(ticket) || !card.isConnected) return;
+            if (result.state!=='applied') throw new Error('Snapshot outcome is unknown. Check status.');
+          } else {
+            const result=await post({phase:'status',imported,selector});
+            if (!_memoryActionCurrent(ticket) || !card.isConnected) return;
+            if (result.state!=='applied') throw new Error('Snapshot outcome is unknown. Check status.');
+          }
+          localStorage.removeItem(key); item.active=false; card.remove(); updateTitle(); await loadMemories();
+        } catch (error) {
+          if (_memoryActionCurrent(ticket) && card.isConnected) _appendBatchItemError(card,error?.message || 'Snapshot unavailable.');
+        } finally { if (_memoryActionCurrent(ticket) && card.isConnected) button.disabled=false; }
+      });
+      card.append(label,button); body.appendChild(card); continue;
+    }
     const card = document.createElement('div');
     card.className = 'memory-suggestion-item';
     const content = document.createElement('div');
@@ -3748,10 +5770,24 @@ function _renderBatchReview(data) {
           : null;
       });
     }
-    content.append(source, text, category);
+    content.appendChild(source);
+    if (item.markdownSource?.state === 'unverified') {
+      const claim = item.markdownSource;
+      const sourceDetails = document.createElement('small');
+      sourceDetails.className = 'memory-import-source';
+      const details = [];
+      if (claim.source_sha256) details.push(`declared checksum ${claim.source_sha256}`);
+      if (Number.isSafeInteger(claim.source_revision)) details.push(`declared revision ${claim.source_revision}`);
+      if (claim.revision_omitted) details.push('declared revision outside supported range');
+      if (claim.source_uri_sha256 || claim.source_messages_sha256) details.push('declared locators retained as fingerprints');
+      sourceDetails.textContent = details.length ? `Unverified source · ${details.join(' · ')}` : 'Source attribution unavailable.';
+      content.appendChild(sourceDetails);
+    }
+    content.append(text, category);
     if (about) content.appendChild(about);
     const controls = document.createElement('div');
     controls.className = 'memory-suggestion-actions';
+    item.statusOnly = () => _batchPublishingControls(card, item, controls, [text,category,about], updateTitle);
     const save = document.createElement('button');
     save.className = 'memory-item-btn save';
     save.textContent = 'save';
@@ -3759,6 +5795,7 @@ function _renderBatchReview(data) {
       save.disabled = true;
       try {
         const result = await _submitBatchReview(item, 'accept');
+        if (result.originalNotApplied) { _renderBatchReview(result.batch); showError('The original review was not applied. Review it again.'); return; }
         card.remove();
         updateTitle();
         await loadMemories();
@@ -3766,6 +5803,7 @@ function _renderBatchReview(data) {
         showToast(outcome === 'reused' ? 'Already represented in Memory; kept this source receipt' : 'Saved to memory');
       } catch (error) {
         item.error = error?.message || 'Failed to save memory';
+        if (item.reviewState === 'publishing') item.statusOnly();
         _appendBatchItemError(card, item.error);
         showError(item.error);
       } finally {
@@ -3791,6 +5829,7 @@ function _renderBatchReview(data) {
     });
     controls.append(save, remove);
     card.append(content, controls);
+    if (item.reviewState === 'publishing') item.statusOnly();
     body.appendChild(card);
   }
 
@@ -3806,6 +5845,9 @@ function _renderBatchReview(data) {
     reason.className = 'memory-import-error';
     reason.textContent = item.error;
     content.append(source, reason);
+    card.appendChild(content);
+    body.appendChild(card);
+    if (!item.retryable) continue;
     const controls = document.createElement('div');
     controls.className = 'memory-suggestion-actions';
     const retry = document.createElement('button');
@@ -3829,20 +5871,24 @@ function _renderBatchReview(data) {
       }
     });
     controls.appendChild(retry);
-    card.append(content, controls);
-    body.appendChild(card);
+    card.appendChild(controls);
   }
   modal.classList.remove('hidden');
 }
 
-async function handleImportFiles(files) {
+async function handleImportFiles(files, originalIntent = null) {
   const selected = Array.from(files || []).filter(Boolean);
   if (!selected.length) return;
   // Every interactive import uses the durable batch/review authority, even
   // for one text file. The legacy route remains an API compatibility shim,
   // but its client-side /add flow cannot preserve server-owned provenance or
   // proposed entity matches.
-  const sessionId = sessionModule?.getCurrentSessionId?.();
+  const account = document.body?.dataset?.accountId;
+  if (!account) { showError('Account is unavailable.'); return; }
+  const intent = originalIntent || {actionKey: crypto.randomUUID(), account, scope: _pairedScope(), sessionId: sessionModule?.getCurrentSessionId?.() || null};
+  const isCurrent = () => _memoryImportCurrent(intent);
+  if (!isCurrent()) { showError('The original import account changed.'); return; }
+  const sessionId = intent.sessionId;
   const importBtn = document.getElementById('memory-import-btn');
   const original = importBtn ? importBtn.innerHTML : '';
   let spin = null;
@@ -3854,33 +5900,67 @@ async function handleImportFiles(files) {
     importBtn.append(spin.element, document.createTextNode(`Importing ${selected.length}`));
   }
   try {
+    // Bind a possible explicit historical-metadata choice to the same bytes
+    // that were examined by the first request.
+    const uploadFiles = selected.length === 1
+      ? [new File([await selected[0].arrayBuffer()], selected[0].name, { type: selected[0].type })]
+      : selected;
+    if (!isCurrent()) return;
     const formData = new FormData();
-    for (const file of selected) formData.append('files', file);
+    for (const file of uploadFiles) formData.append('files', file);
     if (sessionId) formData.append('session', sessionId);
+    formData.append('action_key', intent.actionKey);
+    if (!isCurrent()) return;
     const response = await fetch(`${window.location.origin}/api/memory/import-batches`, {
       method: 'POST',
       body: formData,
     });
+    if (!isCurrent()) return;
     if (!response.ok) {
       const failure = await responseError(response, 'Import failed');
+      if (!isCurrent()) return;
+      if (failure.problem?.code === 'HISTORICAL_OBSERVATIONS_REQUIRE_SINGLE_IMPORT' && uploadFiles.length === 1) {
+        if (!isCurrent()) return;
+        const approved = window.confirm('Retain this file’s historical metadata as unverified? This will not create memory observations, learning, or model extraction. Other memory content and media in the file will not be imported.');
+        if (!approved || !isCurrent()) return;
+        const historical = new FormData();
+        historical.append('file', uploadFiles[0]);
+        historical.append('retain_unverified_history', 'true');
+        if (sessionId) historical.append('session', sessionId);
+        if (!isCurrent()) return;
+        const retained = await fetch(`${window.location.origin}/api/memory/import`, { method: 'POST', body: historical });
+        if (!isCurrent()) return;
+        if (!retained.ok) throw new Error((await responseError(retained, 'Historical metadata retention failed')).message);
+        const result = await retained.json();
+        if (!isCurrent()) return;
+        if (result?.historical_observations?.state !== 'external_unverified') throw new Error('Historical metadata retention was not confirmed.');
+        pendingMemoryImportFiles = []; pendingMemoryImportFile = null;
+        if (pendingMemoryImportIntent === intent) pendingMemoryImportIntent = null;
+        showToast(result.message || 'Unverified historical metadata retained.');
+        return;
+      }
       const error = new Error(failure.message);
       error.problem = failure.problem;
       throw error;
     }
     pendingMemoryImportFiles = [];
     pendingMemoryImportFile = null;
+    if (pendingMemoryImportIntent === intent) pendingMemoryImportIntent = null;
     const data = await response.json();
+    if (!isCurrent()) return;
     _renderBatchReview(data);
   } catch (error) {
+    if (!isCurrent()) return;
     console.error('Batch import failed:', error);
     if (error?.problem?.code === 'MEMORY_ROUTE_UNCONFIGURED') {
-      _showMemoryRouteProblem(error.problem, selected, error.message);
+      _showMemoryRouteProblem(error.problem, selected, error.message, intent);
     } else {
       // A proxy read timeout can sever the response while the durable batch
       // keeps processing server-side; recover it instead of lying "failed".
       // Structured server rejections (413/400 problems) never created a
       // batch, so only unstructured failures are worth recovering.
-      const recovered = error?.problem ? false : await _recoverImportBatchAfterTimeout();
+      const recovered = error?.problem ? false : await _recoverImportBatchAfterTimeout(isCurrent);
+      if (!isCurrent()) return;
       if (!recovered) showError(contextualErrorMessage('Import failed', error?.message));
     }
   } finally {
@@ -3932,6 +6012,11 @@ async function handleImportFileLegacy(file) {
     }
 
     const data = await res.json();
+    if (data.snapshot_review) {
+      pendingMemoryImportFile = null;
+      _renderBatchReview(data.snapshot_review);
+      return;
+    }
     const suggestions = data.suggestions || [];
     pendingMemoryImportFile = null;
 
@@ -4112,8 +6197,193 @@ async function handleImportFileLegacy(file) {
 var showToast = uiModule.showToast;
 var showError = uiModule.showError;
 
+function _wireMemorySourceSearch() {
+  const input = document.getElementById('memory-search');
+  if (!input) return;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'memory-toolbar-btn';
+  button.textContent = 'Search journal titles';
+  const workspaceButton = document.createElement('button');
+  workspaceButton.type = 'button';
+  workspaceButton.className = 'memory-toolbar-btn';
+  workspaceButton.textContent = 'Search workspace file contents';
+  const results = document.createElement('div');
+  results.hidden = true;
+  const status = document.createElement('p');
+  status.setAttribute('role', 'status');
+  const entries = document.createElement('ul');
+  results.append(status, entries);
+  input.after(button, workspaceButton, results);
+
+  let active = null;
+  const clear = () => {
+    active?.abort();
+    active = null;
+    entries.replaceChildren();
+    status.textContent = '';
+    results.hidden = true;
+  };
+  input.addEventListener('input', clear);
+  for (const event of ['openclank:auth-context-changed', 'workspace-change', 'pagehide'])
+    window.addEventListener(event, clear);
+  document.addEventListener('openclank:auth-context-changed', clear);
+  document.querySelectorAll('.memory-tab[data-memory-tab]:not([data-memory-tab="browse"])')
+    .forEach(tab => tab.addEventListener('click', clear));
+
+  const activeFileWorkspace = () => sessionModule.isCurrentSessionIncognito?.() ? '' : Storage.get(KEYS.WORKSPACE_ID, '') || '';
+  const renderMatch = (label, href, expectedRevision, current, handoffCurrent, sourceLine) => {
+    const item = document.createElement('li');
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'memory-item-btn';
+    open.textContent = label;
+    open.addEventListener('click', async () => {
+      if (!current()) return;
+      open.disabled = true;
+      try {
+        const copal = await import('./copal.js');
+        if (!current()) return;
+        const opened = await copal.openResource(href, { expectedRevision, sourceLine, isCurrent:current, handoffCurrent });
+        if (current() && !opened) status.textContent = 'The selected source could not be opened.';
+      } catch (_) {
+        if (current()) status.textContent = 'The source changed or is unavailable. Search again for its current revision.';
+      } finally {
+        open.disabled = false;
+      }
+    });
+    item.append(open);
+    entries.append(item);
+  };
+
+  workspaceButton.addEventListener('click', async () => {
+    clear();
+    results.hidden = false;
+    const query = input.value.trim();
+    const account = _pairedScope();
+    const workspace = activeFileWorkspace();
+    if (!account || !workspace) {
+      status.textContent = 'Choose a workspace to search its authorized files.';
+      return;
+    }
+    if (!query || query.length > 256 || /[\r\n\u0000]/.test(query)) {
+      status.textContent = 'Enter up to 256 characters on one line.';
+      return;
+    }
+
+    const controller = new AbortController();
+    active = controller;
+    const handoffCurrent = () => active === controller && _pairedCurrent(account)
+      && activeFileWorkspace() === workspace && input.value.trim() === query;
+    const current = () => handoffCurrent() && results.isConnected && !results.closest('.hidden, [hidden]');
+    status.textContent = 'Searching workspace file contents…';
+    try {
+      const { resolveWorkspaceId } = await import('./workspace.js');
+      if (!current()) return;
+      const selected = await resolveWorkspaceId(workspace, 'app_folder');
+      if (!current()) return;
+      if (selected.id !== workspace || !Number.isSafeInteger(selected.revision) || selected.revision < 1) throw new Error();
+      const response = await fetch('/api/files-v1/workspace-content-search', {
+        method:'POST', credentials:'same-origin', cache:'no-store', signal:controller.signal,
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({workspace_id:workspace, expected_revision:selected.revision, query}),
+      });
+      const page = await response.json();
+      if (!current()) return;
+      if (!response.ok || page?.version !== 1 || page.workspace_id !== workspace
+          || page.workspace_revision !== selected.revision || !['complete', 'partial'].includes(page.state)
+          || !Array.isArray(page.hits) || page.hits.length > 12) throw new Error();
+
+      status.textContent = page.state === 'partial'
+        ? `Bounded search returned ${page.hits.length} exact file matches. Some files or matches could not be included.`
+        : page.hits.length ? `${page.hits.length} exact file matches.` : 'No matches in the eligible workspace files.';
+      for (const hit of page.hits) {
+        renderMatch(`${hit.label} · line ${hit.line}`, hit.ref, hit.revision, current, handoffCurrent, hit.line);
+      }
+    } catch (_) {
+      if (current()) status.textContent = 'Workspace source search is unavailable. Check the selected workspace and its Files access.';
+    }
+  });
+
+  const selectedWorkspace = () => window.__odysseusGetActiveCopalContext?.()?.workspace || 'default';
+  button.addEventListener('click', async () => {
+    clear();
+    const query = input.value.trim();
+    const account = _pairedScope();
+    const workspace = selectedWorkspace();
+    results.hidden = false;
+    if (!account || !query || query.length > 256) {
+      status.textContent = account ? 'Enter a title search of 1 to 256 characters.' : 'Sign in to search your Journal.';
+      return;
+    }
+
+    const controller = new AbortController();
+    const { signal } = controller;
+    active = controller;
+    const handoffCurrent = () => active === controller && _pairedCurrent(account)
+      && selectedWorkspace() === workspace && input.value.trim() === query;
+    const current = () => handoffCurrent() && results.isConnected && !results.closest('.hidden, [hidden]');
+    status.textContent = 'Searching active Journal titles…';
+    try {
+      const roots = await filesFacadeClient.roots({ copalWorkspace:workspace, signal });
+      if (!current()) return;
+      const root = roots.entries?.find(entry => entry.provider === 'copal' && entry.kind === 'provider_root'
+        && entry.provenance?.workspace === workspace);
+      if (!root?.ref) throw new Error('Journal is unavailable');
+      const folders = await filesFacadeClient.children(root.ref, { limit:8, signal });
+      if (!current()) return;
+      const journal = folders.entries?.find(entry => entry.provider === 'copal'
+        && entry.provenance?.view === 'active' && entry.provenance?.corpus === 'notes');
+      if (!journal?.ref) throw new Error('Journal folder is unavailable');
+      const page = await filesFacadeClient.children(journal.ref, { query, limit:12, signal });
+      if (!current()) return;
+      const matches = (page.entries || []).filter(entry => entry.provider === 'copal' && entry.kind === 'document'
+        && entry.ref && entry.revision?.kind === 'copalHead' && entry.revision.value
+        && entry.capabilities?.includes('open'));
+      status.textContent = matches.length ? `${matches.length} Journal title matches${page.next_cursor ? ' on this page' : ''}.`
+        : 'No revision-qualified matches on this page.';
+      for (const entry of matches) {
+        renderMatch(entry.name, entry.ref, entry.revision, current, handoffCurrent);
+      }
+    } catch (_) {
+      if (current()) status.textContent = 'Journal is unavailable in the current workspace.';
+    }
+  });
+}
+
 // Event listeners
 document.addEventListener('DOMContentLoaded', () => {
+  _wireMemorySourceSearch();
+  void initMemoryRankLearning();
+  document.getElementById('memory-consolidate-now')?.addEventListener('click',async event=>{
+    const scope=_pairedScope();const label=document.getElementById('memory-consolidate-status');
+    const chat=Storage.get(KEYS.CURRENT_SESSION,'');
+    if (!scope || !chat) {label.textContent='Open a chat first.';return;}
+    const button=event.currentTarget;button.disabled=true;label.textContent='Checking this chat…';
+    try {
+      const response=await fetch('/api/memory/consolidate-now',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chat})});
+      const result=await response.json();
+      if (!_pairedCurrent(scope)) return;
+      label.textContent = response.ok
+        ? `Consolidation status: ${String(result.state || 'unavailable').replaceAll('_', ' ')}.`
+        : 'Consolidation is unavailable.';
+      const skipReasons = {
+        route_unavailable: 'The selected model route is unavailable.',
+        source_changed: 'A source changed.',
+        gates_closed: 'Idle or work-budget admission is unavailable.',
+        run_unavailable: 'The admitted work did not settle in this pass.',
+      };
+      if (response.ok && Object.hasOwn(skipReasons, result.skip_reason)) label.textContent += ' ' + skipReasons[result.skip_reason];
+      const coverage = result.coverage;
+      if (response.ok && coverage && ['included', 'already_covered', 'omitted', 'superseded', 'gap']
+          .every((key) => Number.isSafeInteger(coverage[key]) && coverage[key] >= 0)) {
+        label.textContent += ` Page coverage: ${coverage.included} eligible, ${coverage.already_covered} already covered, ${coverage.omitted} omitted, ${coverage.superseded} superseded, ${coverage.gap} gaps.`;
+      }
+      void loadRetainedConsolidationRun();
+    } catch (_) {if (_pairedCurrent(scope)) label.textContent='Consolidation is unavailable.';}
+    finally {button.disabled=false;}
+  });
   _wireMemoryDrag();
   _wireMemoryNukeControls();
   _wireHandlerProfileControls();
@@ -4137,6 +6407,9 @@ document.addEventListener('DOMContentLoaded', () => {
         loadMemoryGraph({ tagFilter });
       }
       if (target === 'digest') loadDigestPreview();
+      if (target === 'explorer') import('./memoryExplorer.js').then(m => m.loadExplorer(document.getElementById('memory-explorer-root'), null, {
+        getScope: _pairedScope, getSession: () => sessionModule?.getCurrentSessionId?.() || null,
+      }));
     });
   });
 
@@ -4170,15 +6443,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const bulkDeleteBtn = document.getElementById('memory-bulk-delete');
   if (bulkDeleteBtn) bulkDeleteBtn.addEventListener('click', bulkDelete);
+  if (bulkDeleteBtn) { const bulkSnapshotBtn = bulkDeleteBtn.cloneNode(false); bulkSnapshotBtn.id = 'memory-bulk-snapshot'; bulkSnapshotBtn.classList.remove('danger'); bulkSnapshotBtn.disabled = false; bulkSnapshotBtn.textContent = 'Export selected as snapshots…';
+    bulkSnapshotBtn.addEventListener('click', () => { const ticket=_memoryActionTicket(), scope=_pairedScope(); openKnowledgeSnapshotBundleExport({curatedIDs:[...selectedIds].map(String),current:()=>bulkSnapshotBtn.isConnected && _memoryActionCurrent(ticket) && _pairedCurrent(scope)}); });
+    bulkDeleteBtn.after(bulkSnapshotBtn); }
+  if (bulkDeleteBtn) {
+    const bulkEditBtn = bulkDeleteBtn.cloneNode(false); bulkEditBtn.id = 'memory-bulk-edit'; bulkEditBtn.classList.remove('danger'); bulkEditBtn.disabled = true; bulkEditBtn.textContent = 'Edit selected…';
+    bulkEditBtn.addEventListener('click', () => {
+      const ticket = _memoryActionTicket(); const chosen = memories.filter(m => selectedIds.has(m.id));
+      if (!chosen.length || !_memoryActionCurrent(ticket)) return;
+      void openMemoryUpdateBatch({ memories: chosen, notify: showToast, onDone: async () => { exitSelectMode(); await loadMemories(); } });
+    });
+    bulkDeleteBtn.before(bulkEditBtn);
+  }
 
   const bulkCancelBtn = document.getElementById('memory-bulk-cancel');
   if (bulkCancelBtn) bulkCancelBtn.addEventListener('click', exitSelectMode);
 
   const exportBtn = document.getElementById('memory-export-btn');
   if (exportBtn) exportBtn.addEventListener('click', exportMemories);
+  if (exportBtn) { const markdownBtn = exportBtn.cloneNode(false); markdownBtn.id = 'memory-export-markdown-btn'; markdownBtn.textContent = 'Export as Markdown'; markdownBtn.title = 'Download your memories as a Markdown file with a versioned manifest (read-only; nothing is changed)';
+    markdownBtn.addEventListener('click', () => { const anchor = document.createElement('a'); anchor.href = '/api/memory/export/markdown'; anchor.download = 'openclank-memory.md'; document.body.appendChild(anchor); anchor.click(); anchor.remove(); });
+    const filesBtn = exportBtn.cloneNode(false); filesBtn.id = 'memory-export-markdown-files-btn'; filesBtn.textContent = 'Export as Markdown files (zip)'; filesBtn.title = 'Download one Markdown file per memory in a zip (read-only; nothing is changed)';
+    filesBtn.addEventListener('click', () => { const anchor = document.createElement('a'); anchor.href = '/api/memory/export/markdown?layout=files'; anchor.download = 'openclank-memory.zip'; document.body.appendChild(anchor); anchor.click(); anchor.remove(); });
+    exportBtn.after(markdownBtn); markdownBtn.after(filesBtn); }
 
   const importBtn = document.getElementById('memory-import-btn');
   if (importBtn) importBtn.addEventListener('click', importMemories);
+  if (importBtn) importBtn.title = 'Import memories from a file. A Markdown export from Open Clank is imported exactly and still goes through review.';
+  if (importBtn) { const snapshotImportBtn = importBtn.cloneNode(false); snapshotImportBtn.id = 'memory-import-snapshot-btn'; snapshotImportBtn.textContent = 'Import snapshot…'; snapshotImportBtn.title = 'Import one exported knowledge snapshot as a review-only draft';
+    snapshotImportBtn.addEventListener('click', () => { const ticket=_memoryActionTicket(), scope=_pairedScope(); openKnowledgeSnapshotImport({current:()=>snapshotImportBtn.isConnected && _memoryActionCurrent(ticket) && _pairedCurrent(scope)}); });
+    importBtn.after(snapshotImportBtn); }
+  if (importBtn) { const bundleImportBtn = importBtn.cloneNode(false); bundleImportBtn.id = 'memory-import-snapshot-bundle-btn'; bundleImportBtn.textContent = 'Import snapshot bundle…'; bundleImportBtn.title = 'Import several exported knowledge snapshots as review-only drafts';
+    bundleImportBtn.addEventListener('click', () => { const ticket=_memoryActionTicket(), scope=_pairedScope(); openKnowledgeSnapshotBundleImport({current:()=>bundleImportBtn.isConnected && _memoryActionCurrent(ticket) && _pairedCurrent(scope)}); });
+    document.getElementById('memory-import-snapshot-btn').after(bundleImportBtn); }
 
   const importFile = document.getElementById('memory-import-file');
   if (importFile) importFile.addEventListener('change', (e) => {
@@ -4204,11 +6501,30 @@ document.addEventListener('open-clank:providers-updated', () => {
   if (!files.length || memoryImportRetrying) return;
   memoryImportRetrying = true;
   setTimeout(() => {
-    handleImportFiles(files).finally(() => { memoryImportRetrying = false; });
+    const intent = pendingMemoryImportIntent;
+    if (!intent) { memoryImportRetrying = false; return; }
+    handleImportFiles(files, intent).finally(() => { memoryImportRetrying = false; });
   }, 0);
 });
 
+async function openMemoryReference(id) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._~-]{0,255}$/.test(id)) return;
+  const scope = _pairedScope(), session = sessionModule?.getCurrentSessionId?.() || null;
+  if (!scope) return;
+  const modal = document.getElementById('memory-modal');
+  const root = document.getElementById('memory-explorer-root');
+  if (!modal || !root) return;
+  modal.classList.remove('hidden');
+  document.querySelectorAll('.memory-tab').forEach(t => t.classList.toggle('active', t.dataset.memoryTab === 'explorer'));
+  document.querySelectorAll('.memory-tab-panel[data-memory-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.memoryPanel !== 'explorer'));
+  const module = await import('./memoryExplorer.js');
+  if (!_pairedCurrent(scope) || (sessionModule?.getCurrentSessionId?.() || null) !== session) return;
+  await module.loadExplorer(root, id, { getScope: _pairedScope, getSession: () => sessionModule?.getCurrentSessionId?.() || null });
+}
+
 const memoryModule = {
+  mountLearningSettings,
+  openReference: openMemoryReference,
   loadMemories,
   renderMemoryList,
   updateMemoryCount,

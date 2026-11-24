@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlite-core"
+import { sqliteTable, text, integer, index, primaryKey, foreignKey } from "drizzle-orm/sqlite-core"
 import { SessionTable } from "../session/session.sql"
 import type { SessionID, MessageID } from "../session/schema"
 import { Timestamps } from "../storage/schema.sql"
@@ -31,6 +31,7 @@ export const ActorRegistryTable = sqliteTable(
     // UI can explain inheritance/group resolution without guessing from IDs.
     requested_model: text(),
     effective_model: text(),
+    model_request_options: text({ mode: "json" }).$type<import("./schema").ActorModelOptions>(),
     host_account_id: text(),
     provider_grant_id: text(),
     grant_revision: integer(),
@@ -52,5 +53,30 @@ export const ActorRegistryTable = sqliteTable(
     index("actor_registry_session_parent_idx").on(table.session_id, table.parent_actor_id),
     index("actor_registry_status_idx").on(table.status),
     index("actor_registry_status_last_turn_idx").on(table.status, table.last_turn_time),
+  ],
+)
+
+export const ActorForkContextTable = sqliteTable(
+  "actor_fork_context",
+  {
+    session_id: text().$type<SessionID>().notNull(),
+    actor_id: text().notNull(),
+    format_version: integer().notNull(),
+    source_session_id: text().$type<SessionID>().notNull(),
+    source_actor_id: text().notNull(),
+    source_watermark_message_id: text().$type<MessageID>().notNull(),
+    model_provider_id: text().notNull(),
+    model_id: text().notNull(),
+    snapshot_json: text().notNull(),
+    snapshot_sha256: text().notNull(),
+    snapshot_bytes: integer().notNull(),
+    time_created: integer().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.session_id, table.actor_id] }),
+    foreignKey({ columns: [table.session_id, table.actor_id], foreignColumns: [ActorRegistryTable.session_id, ActorRegistryTable.actor_id] }).onDelete("cascade"),
+    foreignKey({ columns: [table.source_session_id, table.source_actor_id], foreignColumns: [ActorRegistryTable.session_id, ActorRegistryTable.actor_id] }).onDelete("cascade"),
+    foreignKey({ columns: [table.source_session_id], foreignColumns: [SessionTable.id] }).onDelete("cascade"),
+    index("actor_fork_context_source_idx").on(table.source_session_id, table.source_actor_id),
   ],
 )

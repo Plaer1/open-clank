@@ -19,6 +19,15 @@ export type ParsedDiscovery = {
   rowCount: number
 }
 
+export type ClaudeDiscoveryStatus = "ready" | "empty" | "partial" | "malformed"
+
+export type ClaudeParsedDiscovery = ParsedDiscovery & {
+  status: ClaudeDiscoveryStatus
+  hasMore: boolean
+}
+
+const MAX_CLAUDE_MODELS = 1000
+
 const MAX_MODEL_ID = 256
 
 function modelID(value: unknown): string | undefined {
@@ -107,9 +116,9 @@ function copilotCapabilities(value: unknown): Record<string, unknown> {
       boundedNumber(support.min_thinking_budget) !== undefined
     if (hasReasoning) result.reasoning = true
     if (Array.isArray(reasoningEffort)) {
-      const safeEffort = reasoningEffort.filter(
-        (item): item is string => typeof item === "string" && item.length > 0 && item.length <= 32,
-      )
+      const safeEffort = [...new Set(reasoningEffort.filter(
+        (item): item is string => typeof item === "string" && item.length > 0 && item.length <= 32 && item !== "inherit",
+      ))]
       if (safeEffort.length > 0) result.reasoning_effort = safeEffort.slice(0, 16)
     }
     for (const key of ["max_thinking_budget", "min_thinking_budget"] as const) {
@@ -129,6 +138,27 @@ function copilotCapabilities(value: unknown): Record<string, unknown> {
       }
     }
     if (Object.keys(normalized).length > 0) result.modalities = normalized
+  }
+  return result
+}
+
+/** Copy only Codex's explicit supported/default reasoning catalogue fields. */
+function codexReasoningCapabilities(item: Record<string, unknown>): Record<string, unknown> {
+  const entries = item.supported_reasoning_levels
+  if (!Array.isArray(entries)) return {}
+  const efforts = [...new Set(entries.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return []
+    const effort = boundedString((entry as Record<string, unknown>).effort, 32)
+    return effort && effort !== "inherit" ? [effort] : []
+  }))].slice(0, 16)
+  if (!efforts.length) return {}
+  const result: Record<string, unknown> = {
+    reasoning: true,
+    reasoning_effort: efforts,
+  }
+  const providerDefault = boundedString(item.default_reasoning_level, 32)
+  if (providerDefault && efforts.includes(providerDefault)) {
+    result.reasoning_default_effort = providerDefault
   }
   return result
 }
@@ -159,7 +189,10 @@ export function parseCodexCatalog(value: unknown): ParsedDiscovery {
       continue
     }
     seen.add(id)
-    models.push(route(id, item.name ?? id, "codex-account-models", { subscription: true }))
+    models.push(route(id, item.name ?? item.display_name ?? id, "codex-account-models", {
+      subscription: true,
+      ...codexReasoningCapabilities(item),
+    }))
   }
   return { models, invalidRows, rowCount: entries.length }
 }
@@ -217,4 +250,64 @@ export function parseGenericCatalog(value: unknown): ParsedDiscovery {
     models.push(route(id, item.name ?? id, "provider-account-models"))
   }
   return { models, invalidRows, rowCount: entries.length }
+}
+
+/** Parse the CLI proxy's OpenAI-compatible account inventory and retain only
+ * explicitly advertised capability fields. Model IDs grant inventory only;
+ * callers still bind them to this account's current route. */
+export function parseGrokCatalog(value: unknown): ParsedDiscovery {
+  const entries = rows(value, "data") ?? rows(value, "models")
+  if (!entries) return { models: [], invalidRows: 1, rowCount: 0 }
+  const models: DiscoveryRoute[] = []
+  const seen = new Set<string>()
+  let invalidRows = 0
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      invalidRows++
+      continue
+    }
+    const item = entry as Record<string, unknown>
+    if (item.hidden === true || item.disabled === true || item.model_picker_enabled === false) continue
+    const id = modelID(item.id ?? item.name ?? item.model)
+    if (!id || seen.has(id)) {
+      invalidRows++
+      continue
+    }
+    seen.add(id)
+    const capabilities = item.capabilities ?? item
+    models.push(route(id, item.name ?? id, "grok-account-models", copilotCapabilities(capabilities)))
+  }
+  return { models, invalidRows, rowCount: entries.length }
+}
+
+/** Parse Anthropic /v1/models without inventing pagination or capabilities. */
+export function parseClaudeCatalog(value: unknown): ClaudeParsedDiscovery {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { models: [], invalidRows: 1, rowCount: 0, status: "malformed", hasMore: false }
+  }
+  const body = value as Record<string, unknown>
+  if (!Array.isArray(body.data)) {
+    return { models: [], invalidRows: 1, rowCount: 0, status: "malformed", hasMore: false }
+  }
+  const entries = body.data.slice(0, MAX_CLAUDE_MODELS)
+  const models: DiscoveryRoute[] = []
+  let invalidRows = 0
+  const seen = new Set<string>()
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      invalidRows++
+      continue
+    }
+    const item = entry as Record<string, unknown>
+    const id = modelID(item.id)
+    if (!id || seen.has(id)) {
+      invalidRows++
+      continue
+    }
+    seen.add(id)
+    models.push(route(id, item.display_name ?? id, "claude-account-models", { subscription: true }))
+  }
+  const hasMore = body.has_more === true || body.data.length > MAX_CLAUDE_MODELS
+  const status: ClaudeDiscoveryStatus = hasMore ? "partial" : models.length === 0 ? "empty" : "ready"
+  return { models, invalidRows, rowCount: entries.length, status, hasMore }
 }

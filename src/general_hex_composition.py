@@ -7,10 +7,8 @@ from src.general_hex_library import GeneralHexRepository, GeneralHexError, _json
 
 
 def ensure_general_hex_snapshot_schema(db_path):
-    with sqlite3.connect(db_path, timeout=30) as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS fm_general_hex_snapshots (
-            owner_id TEXT NOT NULL, boundary_id TEXT NOT NULL, snapshot_hash TEXT NOT NULL,
-            snapshot_json TEXT NOT NULL, PRIMARY KEY(owner_id,boundary_id))''')
+    from src.general_hex_library import ensure_general_hex_schema
+    ensure_general_hex_schema(db_path)
 
 
 def workspace_source(owner_id, workspace, db_path):
@@ -70,12 +68,24 @@ def compose_general_hexes(inputs, *, owner_id, workspace=None, budget_chars=2400
                 used += cost
         seen.add(identity)
         decisions.append(decision)
+    from src.openclank.planning_defaults import PLANNING_DEFAULT_ID, PLANNING_DEFAULT_VERSION, PLANNING_DEFAULT_BODY
+    product = dict(id=PLANNING_DEFAULT_ID, version=PLANNING_DEFAULT_VERSION, body=PLANNING_DEFAULT_BODY)
+    block = f"Product default: planning [version {PLANNING_DEFAULT_VERSION}]\n{PLANNING_DEFAULT_BODY}"
+    cost = len(block) + (2 if rendered else 0)
+    if any(entry['hex_id'] == PLANNING_DEFAULT_ID for entry in inputs['entries']):
+        product['state'] = 'deduplicated'
+    elif used + cost > budget_chars:
+        product['state'] = 'omitted-for-budget'
+    else:
+        product['state'] = 'included'
+        rendered.append(block)
+        used += cost
     snapshot = dict(schema='open-clank.hex-composition.v1', owner_id=owner_id,
-                    context_tags=contexts, workspace=workspace, entries=decisions,
+                    context_tags=contexts, workspace=workspace, entries=decisions, product_defaults=[product],
                     budget=dict(limit_chars=budget_chars, used_chars=used,
-                                omitted_count=sum(item['state']=='omitted-for-budget' for item in decisions)),
+                                omitted_count=sum(item['state']=='omitted-for-budget' for item in decisions) + int(product['state']=='omitted-for-budget')),
                     defaults='\n\n'.join(rendered),
-                    precedence='Current explicit user instructions take precedence over saved General defaults. Existing workspace enforcement remains authoritative.')
+                    precedence='Current user instructions and workspace authority take precedence over saved General defaults; saved General defaults take precedence over product defaults.')
     snapshot['snapshot_hash'] = hashlib.sha256(_json(snapshot).encode()).hexdigest()
     return snapshot
 
@@ -120,4 +130,5 @@ def defaults_instruction(snapshot):
     reference = ''
     if source.get('contract_hash'):
         reference = '\nWorkspace policy source: ' + str(source.get('project_id')) + ' / ' + str(source['contract_hash']) + ' (' + str(source.get('state')) + '). Existing workspace instructions and enforced scopes remain authoritative.'
-    return '[Saved General defaults]\n' + snapshot['precedence'] + reference + '\n\n' + snapshot['defaults'] + '\n[/Saved General defaults]'
+    label = 'General and product defaults' if 'product_defaults' in snapshot else 'Saved General defaults'
+    return '[' + label + ']\n' + snapshot['precedence'] + reference + '\n\n' + snapshot['defaults'] + '\n[/' + label + ']'

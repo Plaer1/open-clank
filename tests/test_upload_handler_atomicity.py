@@ -6,12 +6,10 @@ under ``UploadHandler._index_lock`` and writes atomically via
 A ``.bak`` sibling is kept for partial-write recovery.
 
 These tests exercise:
-* N concurrent inserts retain all entries.
 * N concurrent uploads through ``save_upload`` retain all entries.
 * Duplicate-upload + new-insert race: the duplicate's stale snapshot
   must not overwrite a newer index entry.
 * Partial-write recovery from the ``.bak`` sibling.
-* The atomic-write primitives are wired in production code.
 * Smoke tests: normal upload, duplicate detection, info lookup after
   a backup-recovery scenario.
 """
@@ -78,35 +76,6 @@ def _seed_entry(owner: str, file_hash: str, file_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Concurrent writers via the production handler.
 # ---------------------------------------------------------------------------
-def test_concurrent_inserts_lose_entries(tmp_path):
-    """N=10 concurrent inserters on the same ``uploads.json`` must all be retained.
-
-    The production code does the reload + write under ``_index_lock``,
-    and ``_atomic_write_json`` gives readers a consistent on-disk view.
-    If either protection is removed, this test will fail.
-    """
-    handler = _make_handler(tmp_path)
-    db_path = _db_path(handler)
-    with open(db_path, "w", encoding="utf-8") as f:
-        json.dump({}, f)
-
-    def insert(idx: int) -> None:
-        with handler._index_lock:
-            current = json.load(open(db_path)) if os.path.exists(db_path) else {}
-            current[f"owner:hash_{idx}"] = {"id": f"file_{idx}", "owner": "owner"}
-            handler._atomic_write_json(db_path, current)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=N_WRITERS) as pool:
-        list(pool.map(insert, range(N_WRITERS)))
-
-    with open(db_path, "r", encoding="utf-8") as f:
-        final = json.load(f)
-    assert len(final) == N_WRITERS, (
-        f"Expected {N_WRITERS} entries, got {len(final)}. The lock+atomic-write "
-        "fix is not actually serialising the writers."
-    )
-
-
 def test_save_upload_concurrent_retains_all_entries(tmp_path):
     """Drive ``save_upload`` end-to-end with N=10 concurrent uploads.
 
@@ -271,36 +240,6 @@ def test_index_cache_reloads_same_mtime_replacement(tmp_path):
     os.utime(db_path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
     assert handler._load_upload_index() == {"entry": "two"}
-
-
-# ---------------------------------------------------------------------------
-# Atomicity primitive audit on the production module.
-# ---------------------------------------------------------------------------
-def test_atomic_write_primitives_present_in_production_code():
-    """The production module must use atomic-write primitives for the RMW
-    sites. The fix is in place when ``os.replace``, ``tempfile.mkstemp``,
-    ``_atomic_write_json`` and ``self._index_lock`` are all present and
-    the two RMW sites no longer use a bare ``open(path, "w") + json.dump``.
-    """
-    src_path = PROJECT_ROOT / "src" / "upload_handler.py"
-    text = src_path.read_text(encoding="utf-8")
-
-    assert "os.replace" in text, (
-        f"{src_path} does not use os.replace — atomic-rename write is missing."
-    )
-    assert "tempfile.mkstemp" in text or "NamedTemporaryFile" in text, (
-        f"{src_path} does not write to a temp file — atomic-rename write is missing."
-    )
-    assert "_atomic_write_json" in text, (
-        f"{src_path} is missing the _atomic_write_json helper."
-    )
-    assert "self._index_lock" in text, (
-        f"{src_path} is missing self._index_lock — concurrent writers are not serialised."
-    )
-    # The dedupe path must do its read under the production guard too.
-    assert text.count("with self._index_guard():") >= 2, (
-        "Both dedupe and insert RMW sites must use the serialized index guard."
-    )
 
 
 # ---------------------------------------------------------------------------

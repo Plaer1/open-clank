@@ -15,6 +15,8 @@ from scripts.windows_helper_artifacts import source_inputs as helper_source_inpu
 
 def refresh(bundle, native, output):
     package.verify_bundle(bundle)
+    if any((bundle / '_internal/bin' / name).exists() or (native / name).exists() for name in (package.OPTIONAL_CAPTURE, package.OPTIONAL_FRAME)):
+        raise RuntimeError('Optional capture requires a fresh package build and notices')
     if output.exists(): raise RuntimeError('Refresh output exists; preserve it')
     original = json.loads((bundle / 'build-provenance.json').read_text())
     before = {item['path']:item['sha256'] for item in original['source_inputs']}
@@ -36,8 +38,8 @@ def refresh(bundle, native, output):
         name = record['name']
         record.update(sha256=package.digest(bindir / name), bytes=(bindir / name).stat().st_size)
         if name in package.HELPERS[:2]: record['source_inputs'] = helper_source_inputs(ROOT, 'packages/odysseus-files')
-        elif name == 'openclank-history-service': record['source_inputs'] = helper_source_inputs(ROOT, 'packages/openclank-history')
-        elif name == 'fm-mcp': record['source_inputs'] = helper_source_inputs(ROOT, 'mcp_servers/frankenmemory')
+        elif name in package.HISTORY_HELPERS: record['source_inputs'] = helper_source_inputs(ROOT, 'packages/openclank-history')
+        elif name in ('memery-worker', 'memery-migrate'): record['source_inputs'] = helper_source_inputs(ROOT, 'native/memery')
         else:
             for item in record['source_inputs']: item['sha256'] = package.digest(ROOT / item['path'])
     package.write_json(bindir / 'helper-artifacts.json', inventory)

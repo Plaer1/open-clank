@@ -1,0 +1,35 @@
+{
+  "id": "batch-092",
+  "group": "docs.openclank-docs-desktop-host",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1922,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-desktop-host.title",
+      "source": "Desktop Capture and Host Opening",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-desktop-host.body",
+      "source": "# Desktop Capture and Host Opening\n\nCapture a screen or window into Files, then point feedback at a **moment in the recording**. The assistant can receive the selected frame or time range in the original task. See [[OpenClank/Deliverables#Review a recording|Review a recording]].\n\n## Capture and OCR\n\nEnable **Settings → AI Defaults → Desktop → Allow screen capture and recording**. Ask for the display, window or region you need and select it in the system chooser. If OCR is available, check its text and bounding boxes against the retained image.\n\nLinux uses the desktop portal and capture helper. macOS needs Screen Recording permission. Windows capture requires its native helper and an interactive desktop.\n\n## Record a screen or window\n\nOn a supported Linux desktop, choose **Record screen…** in Files, set the destination, then select the source. Audio starts off. **Media jobs…** lets you stop early or recover the original job’s status.\n\n## Start and stop desktop control\n\nFor a supported managed chat, an administrator can enable **Allow the assistant to control this desktop (experimental)** in Desktop settings. Choose the target and review any approval. Linux pointer control needs Wayland and the desktop portal. macOS input needs the native helper and Accessibility permission; Windows x64 needs its helper and an interactive desktop.\n\nChat shows the active control session. Use its takeover shortcut when offered, or **Stop desktop control on this host**.\n\n## Open a resource on the host\n\n**Files → Open with** hands an eligible file to the host’s default app or an installed app you choose. For an HTML report inside Open Clank, use **Open in Browser**; see [[OpenClank/Deliverables#Keep report or widget progress|report progress]].\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

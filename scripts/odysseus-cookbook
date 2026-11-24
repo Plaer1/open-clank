@@ -45,7 +45,7 @@ _STATE_PATH = _DATA_DIR / "cookbook_state.json"
 # Mirror routes/shell_routes.TMUX_LOG_DIR — don't import it because that pulls
 # the whole web app into the process. Match its definition instead.
 import tempfile
-_TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "odysseus-tmux"
+_TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "open-clank-tmux"
 
 from core.platform_compat import NVIDIA_PATH_CANDIDATES, SSH_PATH_OVERRIDE
 
@@ -325,10 +325,10 @@ def cmd_download(args) -> None:
 
     if args.host:
         # Remote — let the remote shell decide log location.
-        remote_log = f"/tmp/odysseus-tmux/{session_id}.log"
+        remote_log = f"/tmp/open-clank-tmux/{session_id}.log"
         hf_cmd = " ".join(map(_shell_quote, cmd_parts))
         remote_shell_cmd = (
-            f"mkdir -p /tmp/odysseus-tmux && "
+            f"mkdir -p /tmp/open-clank-tmux && "
             f"tmux new-session -d -s {_shell_quote(session_id)} "
             f"bash -lc {_shell_quote(f'{hf_cmd} 2>&1 | tee {remote_log}; echo DONE')}"
         )

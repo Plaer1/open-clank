@@ -1,29 +1,38 @@
 import { visibleWindowBounds } from './windowResize.js';
-import { registerMenuDismiss } from './escMenuStack.js';
+import { dismissTopMenu, registerMenuDismiss } from './escMenuStack.js';
+import { IS_MAC } from './platform.js';
+import { hasUiIcon, uiIcon } from './uiIcons.js';
 
 // The Copal menu owns the editing interaction in every browser. It keeps the
 // target and its selection in a short lived context so opening the menu cannot
 // redirect a command to whichever window receives focus later.
 
-const STORAGE_KEY = 'odysseus-custom-context-menu';
+const STORAGE_KEY = 'openclank-custom-context-menu';
 const MENU_ID = 'openclank-context-menu';
 let active = null;
-let unregisterMenuDismiss = () => {};
 let longPressTimer = null;
 let longPressOrigin = null;
+let heldTouch = null;
 const adapters = new WeakMap();
+const LEGACY_FILE_COMMANDS = [
+  ['Open in Editor', 'open-in-editor'], ['Open right', 'open-in-editor-split-right'],
+  ['Open below', 'open-in-editor-split-below'], ['Select all files', 'select-all-files'],
+  ['Copy file path', 'copy-file-path'], ['Reveal in Files', 'reveal-file'], ['Rename', 'rename-file'],
+  ['Move', 'move-files'], ['Copy', 'copy-files'], ['Move to trash', 'trash-file'], ['Restore', 'restore-file'],
+];
 const OBJECT_COMMANDS = Object.freeze({
   image:[['Open image', 'open-image'], ['Copy image address', 'copy-image-address'], ['Copy image', 'copy-image-bytes']],
   link:[['Open link in new tab', 'open-link'], ['Copy link address', 'copy-link-address']],
-  file:[['Open in Editor', 'open-in-editor'], ['Open right', 'open-in-editor-split-right'], ['Open below', 'open-in-editor-split-below'], ['Select all files', 'select-all-files'], ['Copy file path', 'copy-file-path'], ['Reveal in Files', 'reveal-file'], ['Rename', 'rename-file'], ['Move', 'move-files'], ['Copy', 'copy-files'], ['Move to trash', 'trash-file'], ['Restore', 'restore-file']],
+  file:LEGACY_FILE_COMMANDS,
   workspace:[['Open Workspace Hexes', 'open-workspace-hexes']],
-  task:[['Toggle task', 'toggle-task'], ['Open task note', 'open-task']],
-  event:[['Edit event', 'edit-event']],
-  track:[['Edit track', 'edit-track']],
-  graph:[['Open graph node', 'open-graph-node']],
-  treehouse:[['Open TreeHouse item', 'open-treehouse-item']],
-  'base-cell':[['Edit cell', 'edit-sheet-cell'], ['Clear cell', 'clear-sheet-cell'], ['Copy cell', 'copy-sheet-cell'], ['Open source note', 'open-base-document']],
-  table:[['Insert row above', 'table-insert-row-above'], ['Insert row below', 'table-insert-row-below'], ['Delete row', 'table-delete-row'], ['Insert column left', 'table-insert-column-left'], ['Insert column right', 'table-insert-column-right'], ['Delete column', 'table-delete-column']],
+});
+
+const mod = IS_MAC ? 'Cmd' : 'Ctrl';
+export const editingShortcutHints = Object.freeze({
+  undo:`${mod}+Z`, redo:IS_MAC ? 'Cmd+Shift+Z' : 'Ctrl+Y',
+  cut:`${mod}+X`, copy:`${mod}+C`, paste:`${mod}+V`, 'select-all':`${mod}+A`,
+  'select-next-match':`${mod}+D`, 'select-all-matches':`${mod}+Shift+L`,
+  'add-cursor-above':`${mod}+Alt+↑`, 'add-cursor-below':`${mod}+Alt+↓`, 'collapse-selections':'Escape',
 });
 
 function enabled() {
@@ -37,29 +46,41 @@ function editableTarget(target) {
   return candidate;
 }
 
-function findAdapter(target) {
+const NATIVE_CONTROLS = 'input,textarea,select,button,a[href],summary,[contenteditable],iframe,video,audio';
+const PROTECTED_TARGETS = 'input[type="password"],iframe,[data-openclank-native-context-menu]';
+const TEXT_INPUT_TYPES = new Set(['search', 'tel', 'text', 'url']);
+
+function nativeTextTarget(target) {
+  const input = target?.closest?.('input, textarea, [contenteditable="true"]');
+  return input && (!input.matches('input') || TEXT_INPUT_TYPES.has(input.type)) ? input : null;
+}
+
+function findAdapter(target, event) {
+  const boundary = target?.closest?.(NATIVE_CONTROLS);
+  const object = target?.closest?.('[data-copal-context-object]');
   let current = target;
-  while (current && current instanceof Element) {
+  while (current instanceof Element) {
     const adapter = adapters.get(current);
-    // A resource-owning Files adapter is not an input/clipboard owner. Let
-    // ordinary search/name fields retain the native captured-text path.
-    if (adapter && !(adapter.ownsObjectCommands && editableTarget(target))) return { element: current, adapter };
+    if (adapter && !(adapter.ownsObjectCommands && editableTarget(target))) {
+      try {
+        const hit = adapter.hitTest?.(target, event);
+        if (hit === 'native') return { reserved:true };
+        if (hit !== false && (!boundary || boundary === current || current === target && boundary.contains(current)
+          || hit === true || object === boundary && current.contains(object))) {
+          const context = adapter.capture?.(target, event);
+          if (!adapter.capture || context != null) return { element:current, adapter, context:context || null };
+        }
+      } catch (_) { return { reserved:true }; }
+    }
     current = current.parentElement;
   }
   return null;
 }
 
 function objectTarget(target) {
-  const explicit = target?.closest?.('[data-copal-context-object]');
-  if (explicit) return { target:explicit, kind:String(explicit.dataset.copalContextObject || '') };
-  if (target?.closest?.('img')) return { target:target.closest('img'), kind:'image' };
-  if (target?.closest?.('.copal-event,[data-event-id]')) return { target:target.closest('.copal-event,[data-event-id]'), kind:'event' };
-  if (target?.closest?.('.copal-track,[data-track-id]')) return { target:target.closest('.copal-track,[data-track-id]'), kind:'track' };
-  if (target?.closest?.('.copal-task-row,[data-task-id]')) return { target:target.closest('.copal-task-row,[data-task-id]'), kind:'task' };
-  if (target?.closest?.('.copal-graph-node,[data-graph-id]')) return { target:target.closest('.copal-graph-node,[data-graph-id]'), kind:'graph' };
-  if (target?.closest?.('[class*="copal-treehouse-"]')) return { target:target.closest('[class*="copal-treehouse-"]'), kind:'treehouse' };
-  if (target?.closest?.('.copal-file-row,[data-document-id]')) return { target:target.closest('.copal-file-row,[data-document-id]'), kind:'file' };
-  return null;
+  const node = target?.closest?.('[data-copal-context-object]');
+  const kind = node?.dataset.copalContextObject;
+  return kind && Object.hasOwn(OBJECT_COMMANDS, kind) ? { target:node, kind } : null;
 }
 
 function selectionSnapshot(target) {
@@ -67,7 +88,7 @@ function selectionSnapshot(target) {
     return { start: target.selectionStart, end: target.selectionEnd ?? target.selectionStart };
   }
   const selection = window.getSelection?.();
-  if (!selection || !selection.rangeCount || !target?.contains?.(selection.anchorNode)) return null;
+  if (!selection?.rangeCount || selection.isCollapsed || !target?.contains?.(selection.anchorNode) || !target.contains(selection.focusNode)) return null;
   return { range: selection.getRangeAt(0).cloneRange() };
 }
 
@@ -81,6 +102,7 @@ function selectedText(request) {
 }
 
 function hasSelectedText(request) {
+  if (request.adapterContext?.widget) return !!request.adapterContext.widgetSelection;
   const ranges = request.adapterContext?.ranges;
   // Separators used to format multi-range clipboard text are not selections.
   return Array.isArray(ranges) ? ranges.some(range => range.anchor !== range.head) : !!selectedText(request);
@@ -92,13 +114,18 @@ function fileCapabilities(target) {
   return new Set(raw.split(/[\s,]+/).map((value) => value.trim()).filter(Boolean));
 }
 
-function objectHandlers(kind) {
-  const handlers = [];
-  if (kind === 'file' && typeof window.__openClankFilesContextCommand === 'function') handlers.push(window.__openClankFilesContextCommand);
-  if (kind === 'table' && typeof window.__openClankTableContextCommand === 'function') handlers.push(window.__openClankTableContextCommand);
-  if (typeof window.__openClankCopalContextCommand === 'function') handlers.push(window.__openClankCopalContextCommand);
-  if (kind !== 'file' && kind !== 'table' && typeof window.__openClankFilesContextCommand === 'function') handlers.push(window.__openClankFilesContextCommand);
-  return handlers;
+function objectHandler(kind) {
+  if (kind === 'file' && typeof window.__openClankFilesContextCommand === 'function') return window.__openClankFilesContextCommand;
+  return typeof window.__openClankCopalContextCommand === 'function' ? window.__openClankCopalContextCommand : null;
+}
+
+function targetVisible(target) {
+  return !!target?.isConnected && !target.closest('.hidden,[hidden],.modal-minimized,.modal-closing')
+    && !!target.getClientRects().length;
+}
+
+function objectIdentity(target) {
+  return target ? JSON.stringify([target.currentSrc || target.src || '', target.href || '', ...Object.entries(target.dataset)]) : '';
 }
 
 function restoreSelection(request, { focus = true } = {}) {
@@ -139,75 +166,51 @@ function canRetrySpelling(request) {
   const service = request?.spellingService?.service;
   return spellingServiceCurrent(request) && service?.status?.().state === 'error' && typeof service.retry === 'function';
 }
-function positionContextMenu(menu, request) {
-  menu.style.overflow='auto';menu.style.boxSizing='border-box';menu.style.minWidth='0';
-  const owner=request.target?.closest?.('.modal'),z=owner?Number.parseInt(getComputedStyle(owner).zIndex,10):NaN;
-  if(Number.isSafeInteger(z)&&z>=0&&z<2147483646)menu.style.zIndex=String(z+1);
-  const bounds = visibleWindowBounds(request.target);
-  const left = bounds.left + 8, top = bounds.top + 8;
-  const right = Math.max(left, bounds.right - 8), bottom = Math.max(top, bounds.bottom - 8);
-  menu.style.maxWidth = `${Math.max(1, right - left)}px`;
-  menu.style.maxHeight = `${Math.max(1, bottom - top)}px`;
-  menu.style.left = `${Math.max(left, Math.min(request.x, right - menu.offsetWidth))}px`;
-  menu.style.top = `${Math.max(top, Math.min(request.y, bottom - menu.offsetHeight))}px`;
+function isKeyboardInvocation(event) {
+  return event.detail === 0 && !event.pointerType && event.button !== 2;
 }
 
 function capture(event) {
-  // Chromium dispatches the keyboard Context Menu key at body in some
-  // layouts. The focused editor is the only stable target in that case.
   const eventTarget = event.target instanceof Element ? event.target : null;
-  const rawTarget = event.detail === 0 && (!eventTarget || eventTarget === document.body)
+  const keyboard = isKeyboardInvocation(event);
+  const rawTarget = keyboard && (!eventTarget || eventTarget === document.body)
     ? (document.activeElement instanceof Element ? document.activeElement : document.body)
     : (eventTarget || document.body);
-  const target = editableTarget(rawTarget) || rawTarget;
-  const registered = findAdapter(rawTarget);
-  const object = objectTarget(rawTarget);
-  const range = selectionSnapshot(target);
+  const protectedTarget = rawTarget.closest(PROTECTED_TARGETS);
+  const registered = protectedTarget ? { reserved:true } : findAdapter(rawTarget, event);
+  const object = !registered && objectTarget(rawTarget);
+  const textTarget = !registered?.reserved && nativeTextTarget(rawTarget);
+  const target = registered?.adapter
+    ? (editableTarget(rawTarget) || rawTarget)
+    : textTarget || object?.target || rawTarget;
+  const editable = !registered?.reserved && !!editableTarget(target)
+    && !registered?.context?.readOnly && (!!registered?.adapter || !!textTarget);
+  const range = !registered?.reserved && !registered?.adapter && selectionSnapshot(target);
   const selectionRange = range?.start != null ? range : null;
   const domRange = range?.range || null;
-  const selection = window.getSelection?.()?.toString?.() || '';
-  const text = selectedText({ target, selectionRange, selection });
-  const rect = target.getBoundingClientRect?.();
-  const request = {
+  const rect = target.getBoundingClientRect();
+  let adapterContext = registered?.context || null;
+  if (object?.kind === 'file' && typeof window.__openClankFilesContextCapture === 'function') {
+    try { adapterContext = window.__openClankFilesContextCapture(object.target, event) || null; } catch (_) {}
+  }
+  return Object.freeze({
     requestId: `ctx-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    x: event.clientX || rect?.left || 8, y: event.clientY || rect?.bottom || 8,
-    target, editable: !!editableTarget(rawTarget),
-    // A mounted adapter owns its revision. Never materialize its document DOM.
-    value: registered ? null : typeof target.value === 'string' ? target.value : (requestEditableText(target)),
+    x: keyboard ? rect.left : event.clientX ?? rect.left,
+    y: keyboard ? rect.bottom : event.clientY ?? rect.bottom,
+    target, rawTarget, editable, reserved:!!registered?.reserved,
+    value: registered ? null : typeof target.value === 'string' && textTarget ? target.value : requestEditableText(target),
+    selection:domRange?.toString() || '', selectionRange, domRange, spellingService:spellingServiceSnapshot(),
     domSelection:domRange ? Object.freeze({ start:domRange.startContainer, startOffset:domRange.startOffset, end:domRange.endContainer, endOffset:domRange.endOffset }) : null,
-    selection: text, selectionRange, domRange, spellingService:spellingServiceSnapshot(),
-    link: rawTarget.closest?.('a')?.href || '',
-    modality: event.detail === 0 ? 'keyboard' : 'pointer',
+    link:object?.kind === 'link' ? object.target.href || '' : '',
+    modality: event.pointerType === 'touch' ? 'touch' : keyboard ? 'keyboard' : 'pointer',
     adapter: registered?.adapter || null,
     adapterElement: registered?.element || null,
+    adapterContext,
     objectTarget: object?.target || null,
-    objectKind: object?.kind || (rawTarget.closest?.('a') ? 'link' : ''),
-  };
-  if (registered?.adapter?.capture) {
-    try { request.adapterContext = registered.adapter.capture(rawTarget, event) || null; } catch (_) { request.adapterContext = null; }
-  }
-  if (object?.kind === 'file' && !registered?.adapter?.ownsObjectCommands && typeof window.__openClankFilesContextCapture === 'function') {
-    try { request.adapterContext = window.__openClankFilesContextCapture(object.target, event) || request.adapterContext; } catch (_) {}
-  }
-  return Object.freeze(request);
-}
-
-function closeMenu({ restore = true } = {}) {
-  removeMenu();
-  const prior = active; active = null;
-  if (restore) restoreSelection(prior || {}, { focus:true });
-}
-
-function removeMenu() {
-  unregisterMenuDismiss(); unregisterMenuDismiss = () => {};
-  document.getElementById(MENU_ID)?.remove();
-}
-
-function menuItem(label, command, { disabled = false } = {}) {
-  const button = document.createElement('button');
-  button.type = 'button'; button.className = 'openclank-context-item';
-  button.textContent = label; button.disabled = disabled; button.dataset.command = command;
-  return button;
+    objectKind: object?.kind || '',
+    objectIdentity: objectIdentity(object?.target),
+    objectHandler: objectHandler(object?.kind),
+  });
 }
 
 function setInputSelection(target, start, end, text) {
@@ -241,11 +244,18 @@ export function captureContextCommandTarget(target = document.activeElement) {
 }
 
 export function isCapturedContextCurrent(request) {
-  if (!request?.target?.isConnected || request.target.closest('.hidden,[hidden],.modal-minimized') || !request.target.getClientRects().length) return false;
-  if (!!editableTarget(request.target) !== request.editable) return false;
+  if (!request || request.reserved || !targetVisible(request.target)) return false;
+  if (request.objectTarget && (!targetVisible(request.objectTarget)
+    || request.objectIdentity !== objectIdentity(request.objectTarget)
+    || request.objectHandler !== objectHandler(request.objectKind))) return false;
+  if (request.editable && !editableTarget(request.target)) return false;
+  if (!request.editable && !request.adapter && nativeTextTarget(request.target) && editableTarget(request.target)) return false;
   if (request.adapter) {
     if (adapters.get(request.adapterElement) !== request.adapter) return false;
-    return typeof request.adapter.isCurrent === 'function' && request.adapter.isCurrent(request);
+    if (!request.adapterElement.contains(request.rawTarget) || !request.rawTarget.isConnected) return false;
+    // Some legacy row adapters validate within execute; their captured node
+    // and registration must still belong to the same mounted owner.
+    return request.adapter.isCurrent ? !!request.adapter.isCurrent(request) : request.adapterContext != null;
   }
   if (request.value !== null) {
     const current = typeof request.target.value === 'string' ? request.target.value : requestEditableText(request.target);
@@ -271,10 +281,9 @@ export function restoreCapturedContext(request) {
   return restoreSelection(request);
 }
 
-export function capturedEditingCommands(request) {
+function basicEditingCommands(request) {
   const selection = hasSelectedText(request);
   const editable = request.editable;
-  const capturedAdapter = !request.adapter || typeof request.adapter.isCurrent === 'function';
   const canCopy = selection && (editable || request.adapter || request.selectionRange || request.domRange);
   const reason = editable ? '' : 'Focus an editable text field or source editor.';
   const basic = [
@@ -290,7 +299,16 @@ export function capturedEditingCommands(request) {
     basic.push({ id:'spellcheck', label:'Check selected spelling locally', disabledReason:!selection ? 'Select text to check first.' : typeof service?.checkBatch !== 'function' ? 'The local spelling service is unavailable.' : '' });
     if (canRetrySpelling(request)) basic.push({ id:'retry-spelling', label:'Retry spelling', disabledReason:'' });
   }
-  if (!capturedAdapter) return basic.map((item) => ({ ...item, disabledReason:'Text commands are unavailable on this surface.' }));
+  return basic;
+}
+
+export function capturedEditingCommands(request) {
+  const basic = basicEditingCommands(request);
+  const selection = hasSelectedText(request);
+  const editable = request.editable;
+  const reason = editable ? '' : 'Focus an editable text field or source editor.';
+  if (request.reserved || (request.adapter && typeof request.adapter.isCurrent !== 'function')) return basic.map((item) => ({ ...item, disabledReason:'Text commands are unavailable on this surface.' }));
+  if (request.adapter?.editingCommands === false) return basic;
   for (const item of request.adapter?.commands?.(request) || []) {
     const selectionOnly = ['select-all-matches', 'format-bold', 'format-italic', 'format-code'].includes(item.id);
     const readOnlySafe = ['select-next-match', 'select-all-matches', 'see-source', 'collapse-selections', 'add-cursor-above', 'add-cursor-below', 'spellcheck', 'retry-spelling'].includes(item.id);
@@ -301,7 +319,7 @@ export function capturedEditingCommands(request) {
 }
 
 export async function executeCapturedContextCommand(command, request) {
-  if (!request) throw new Error('No captured command target.');
+  if (!isCapturedContextCurrent(request)) throw new Error('The original menu target changed. Reopen its menu.');
   if (command === 'check-spelling') command = 'spellcheck';
   if (['spellcheck', 'retry-spelling', 'add-word', 'remove-word'].includes(command) || command.startsWith('replace-spelling:')) assertSpellingTarget(request);
   if (command === 'retry-spelling') {
@@ -314,29 +332,27 @@ export async function executeCapturedContextCommand(command, request) {
   }
   if (request.adapter?.execute) {
     const handled = await request.adapter.execute(command, request);
-    if (handled !== false) return;
+    if (handled === false) throw new Error('The context-menu command could not be completed.');
+    return;
   }
-  const objectCommands = OBJECT_COMMANDS[request.objectKind] || [];
   if ((command === 'copy-link-address' || command === 'open-link') && request.link) {
     if (command === 'copy-link-address') await clipboardWrite(request.link);
     else window.open(request.link, '_blank', 'noopener,noreferrer');
     return;
   }
-  // Keep the object captured at menu-open time even when its owning view
-  // refreshes while the menu is open. Its immutable dataset identifies the
-  // original resource; command owners still resolve current state and the
-  // server rechecks authorization before any mutation.
-  if (objectCommands.some(([, id]) => id === command) && request.objectTarget) {
-    let handled = false;
-    for (const handler of objectHandlers(request.objectKind)) {
-      if (await handler(command, request.objectTarget, request)) { handled = true; break; }
-    }
-    if (!handled) {
-      request.objectTarget.dispatchEvent(new CustomEvent('copal-context-command', { bubbles:true, detail:Object.freeze({ command, request }) }));
+  if (request.objectTarget && OBJECT_COMMANDS[request.objectKind]?.some(([, id]) => id === command)) {
+    if (request.objectHandler) {
+      if (await request.objectHandler(command, request.objectTarget, request) === false) {
+        throw new Error('The context-menu command could not be completed.');
+      }
+    } else {
+      request.objectTarget.dispatchEvent(new CustomEvent('copal-context-command', {
+        bubbles:true, detail:Object.freeze({ command, request }),
+      }));
     }
     return;
   }
-  if (!isCapturedContextCurrent(request) || !restoreSelection(request)) throw new Error('The original editing target changed. Reopen the menu.');
+  if (!restoreSelection(request)) throw new Error('The original editing target changed. Reopen the menu.');
   if (command === 'undo' || command === 'redo' || command === 'select-all') {
     document.execCommand(command === 'select-all' ? 'selectAll' : command);
   } else if (command === 'copy') {
@@ -391,137 +407,380 @@ export async function executeCapturedContextCommand(command, request) {
   }
 }
 
-async function invoke(command) {
-  const request = active;
-  if (!request) return;
+function normalizeMenuItems(items) {
+  const seen = new Set(), groups = new Map(), result = [];
+  for (const item of items) {
+    if (!item?.separator && (!item?.id || !item.label || typeof item.run !== 'function' || seen.has(item.id))) continue;
+    if (!item.separator) seen.add(item.id);
+    let destination = result;
+    if (item.menu) {
+      if (!groups.has(item.menu)) {
+        const group = { label:String(item.menu), children:[] };
+        groups.set(item.menu, group);
+        result.push(group);
+      }
+      destination = groups.get(item.menu).children;
+    }
+    destination.push(item);
+  }
+  const trimSeparators = list => list.filter((item, index) => !item.separator
+    || index > 0 && !list[index - 1].separator && list.slice(index + 1).some(next => !next.separator));
+  for (const group of groups.values()) group.children = trimSeparators(group.children);
+  const root = trimSeparators(result.filter(item => !item.children || item.children.length));
+  return root.length === 1 && root[0].children ? root[0].children : root;
+}
+
+function closeMenu({ restore = true } = {}) {
+  const prior = active;
+  if (!prior) return;
+  active = null;
+  clearTimeout(prior.hoverTimer);
+  prior.child?.dismiss();
+  prior.root.dismiss();
+  if (prior.anchor) {
+    prior.anchor.setAttribute('aria-expanded', 'false');
+    if (prior.previousControls) prior.anchor.setAttribute('aria-controls', prior.previousControls);
+    else prior.anchor.removeAttribute('aria-controls');
+  }
+  if (restore && targetVisible(prior.origin)) prior.origin.focus?.({ preventScroll:true });
+}
+
+function menuBounds(state) {
+  const bounds = visibleWindowBounds(state.target);
+  const inset = Math.min(6, Math.floor(Math.min(bounds.right - bounds.left, bounds.bottom - bounds.top) / 4));
+  return { left:bounds.left + inset, top:bounds.top + inset, right:bounds.right - inset, bottom:bounds.bottom - inset };
+}
+
+function placePanel(state, panel, opener = null) {
+  const { left, right, top, bottom } = menuBounds(state);
+  const { element } = panel;
+  const owner = state.target.closest('.modal');
+  const zIndex = owner ? Number.parseInt(getComputedStyle(owner).zIndex, 10) : NaN;
+  if (Number.isSafeInteger(zIndex) && zIndex >= 0 && zIndex < 2147483645) {
+    element.style.zIndex = String(zIndex + (opener ? 2 : 1));
+  }
+  element.style.maxWidth = `${Math.max(1, Math.min(312, right - left))}px`;
+  element.style.maxHeight = `${Math.max(1, bottom - top)}px`;
+  let x = state.x, y = state.y;
+  if (state.anchor) {
+    const rect = state.anchor.getBoundingClientRect();
+    x = rect.left;
+    y = rect.bottom + 4;
+    if (y + element.offsetHeight > bottom && rect.top - element.offsetHeight - 4 >= top) {
+      y = rect.top - element.offsetHeight - 4;
+    }
+  }
+  if (opener) {
+    const rect = state.root.element.getBoundingClientRect();
+    const beside = rect.right - 1;
+    const opposite = rect.left - element.offsetWidth + 1;
+    panel.drill = beside + element.offsetWidth > right && opposite < left;
+    if (!panel.drill) {
+      const movesLeft = beside + element.offsetWidth > right;
+      opener.classList.toggle('opens-left', movesLeft);
+      x = movesLeft ? opposite : beside;
+      y = opener.getBoundingClientRect().top - 4;
+    } else {
+      x = rect.left; y = rect.top;
+    }
+  }
+  element.style.left = `${Math.max(left, Math.min(x, right - element.offsetWidth))}px`;
+  element.style.top = `${Math.max(top, Math.min(y, bottom - element.offsetHeight))}px`;
+}
+
+function closeChild(state, restore = true) {
+  clearTimeout(state.hoverTimer);
+  const child = state.child;
+  if (!child) return;
+  state.child = null;
+  child.hadFocus = child.element.contains(document.activeElement);
+  child.dismiss();
+  child.opener.setAttribute('aria-expanded', 'false');
+  child.opener.classList.remove('opens-left');
+  state.root.element.style.visibility = '';
+  if (restore || child.hadFocus) child.opener.focus({ preventScroll:true });
+}
+
+function focusRow(panel, edge = 'first') {
+  const buttons = panel.rows.filter(row => !row.hidden);
+  (buttons[edge === 'second' ? 1 : 0] || panel.element).focus();
+}
+
+function openChild(state, opener, entry, focus) {
+  clearTimeout(state.hoverTimer);
+  if (state.child?.opener === opener) {
+    if (focus) focusRow(state.child, state.child.drill ? 'second' : 'first');
+    return;
+  }
+  if (!state.isCurrent()) { closeMenu(); return; }
+  closeChild(state, false);
+  const panel = makePanel(state, entry.label, entry.children, opener);
+  state.child = panel;
+  opener.setAttribute('aria-expanded', 'true');
+  layoutChild(state);
+  if (focus || panel.drill) focusRow(panel, panel.drill ? 'second' : 'first');
+}
+
+function layoutChild(state) {
+  const panel = state.child;
+  if (!panel) return;
+  placePanel(state, panel, panel.opener);
+  state.root.element.style.visibility = panel.drill ? 'hidden' : '';
+  panel.back.hidden = !panel.drill;
+  placePanel(state, panel, panel.opener);
+}
+
+function repositionMenu() {
+  const state = active;
+  if (!state) return;
+  if (!state.isCurrent()) { closeMenu({ restore:false }); return; }
+  placePanel(state, state.root);
+  layoutChild(state);
+}
+
+function hoverRow(state, button, entry) {
+  clearTimeout(state.hoverTimer);
+  if (state.child?.opener === button) return;
+  state.hoverTimer = setTimeout(() => {
+    if (active !== state) return;
+    if (entry.children) openChild(state, button, entry, false);
+    else closeChild(state, false);
+  }, state.child ? 260 : 140);
+}
+
+async function invoke(state, entry) {
+  if (active !== state || entry.disabled || entry.disabledReason) return;
+  try {
+    if (!state.isCurrent() || entry.isCurrent?.() === false) {
+      closeMenu({ restore:false });
+      throw new Error('The original menu target changed. Reopen its menu.');
+    }
+    closeMenu({ restore:entry.restoreFocus !== false });
+    await entry.run();
+  } catch (error) {
+    window.uiModule?.showToast?.(error?.message || 'The context-menu command could not be completed.');
+  }
+}
+
+function appendMenuRows(state, panel, items) {
+  for (const item of items) {
+    if (item.separator) {
+      const separator = document.createElement('div');
+      separator.className = 'openclank-context-separator';
+      separator.setAttribute('role', 'separator');
+      panel.element.append(separator);
+      continue;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'openclank-context-item';
+    button.tabIndex = -1;
+    button.setAttribute('role', item.radio ? 'menuitemradio' : typeof item.checked === 'boolean' ? 'menuitemcheckbox' : 'menuitem');
+    if (item.radio || typeof item.checked === 'boolean') button.setAttribute('aria-checked', String(!!item.checked));
+    if (item.children) {
+      button.setAttribute('aria-haspopup', 'menu');
+      button.setAttribute('aria-expanded', 'false');
+    } else {
+      button.dataset.command = item.id;
+    }
+    if (item.disabled || item.disabledReason) button.setAttribute('aria-disabled', 'true');
+    if (item.disabledReason) button.title = item.disabledReason;
+    if (item.destructive) button.classList.add('is-destructive');
+    const glyph = document.createElement('span'), label = document.createElement('span'), trailing = document.createElement('span');
+    glyph.className = 'openclank-context-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    if (item.checked) glyph.textContent = item.radio ? '●' : '✓';
+    else if (item.icon && hasUiIcon(item.icon)) glyph.innerHTML = uiIcon(item.icon, 13);
+    else glyph.textContent = item.glyph || '';
+    label.className = 'openclank-context-label';
+    label.textContent = item.label;
+    if (item.dialog && !/[….]$/.test(item.label)) button.classList.add('opens-dialog');
+    trailing.className = 'openclank-context-trailing';
+    trailing.textContent = item.children ? '›' : item.shortcut || '';
+    trailing.setAttribute('aria-hidden', 'true');
+    if (item.ariaShortcut) button.setAttribute('aria-keyshortcuts', item.ariaShortcut);
+    button.append(glyph, label, trailing);
+    button.addEventListener('click', () => item.children
+      ? openChild(state, button, item, true) : void invoke(state, item));
+    if (!panel.opener) button.addEventListener('pointerenter', event => {
+      if (event.pointerType === 'mouse') hoverRow(state, button, item);
+    });
+    panel.rows.push(button);
+    panel.element.append(button);
+  }
+}
+
+function makePanel(state, label, items, opener = null) {
+  const element = document.createElement('div');
+  element.className = 'openclank-context-menu';
+  if (!opener) element.id = MENU_ID;
+  else element.id = `${MENU_ID}-child`;
+  element.setAttribute('role', 'menu');
+  element.setAttribute('aria-label', label);
+  element.tabIndex = -1;
+  const panel = { element, opener, rows:[] };
+  if (opener) {
+    opener.setAttribute('aria-controls', element.id);
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'openclank-context-item openclank-context-back';
+    back.setAttribute('role', 'menuitem');
+    back.tabIndex = -1;
+    back.textContent = 'Back';
+    back.hidden = true;
+    back.addEventListener('click', () => closeChild(state));
+    panel.back = back;
+    panel.rows.push(back);
+    element.append(back);
+    element.addEventListener('pointerenter', () => clearTimeout(state.hoverTimer));
+  }
+  appendMenuRows(state, panel, items);
+  element.addEventListener('keydown', event => {
+    if (event.isComposing || event.keyCode === 229) return;
+    const current = document.activeElement;
+    const rows = panel.rows.filter(row => !row.hidden);
+    const index = rows.indexOf(current);
+    if (event.key === 'Tab') { closeMenu(); return; }
+    let next;
+    if (event.key === 'Escape') {
+      if (state.child) closeChild(state);
+      else closeMenu();
+    } else if (event.key === 'ArrowLeft' && opener) closeChild(state);
+    else if (event.key === 'ArrowRight' && current?.hasAttribute('aria-haspopup')) current.click();
+    else if (event.key === 'ArrowDown') next = rows[(index + 1) % rows.length];
+    else if (event.key === 'ArrowUp') next = rows[(index <= 0 ? rows.length : index) - 1];
+    else if (event.key === 'Home') next = rows[0];
+    else if (event.key === 'End') next = rows.at(-1);
+    else return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    next?.focus();
+  });
+  (state.target.closest('dialog:modal') || document.body).append(element);
+  element._dismiss = () => closeMenu();
+  const unregister = registerMenuDismiss(opener ? () => closeChild(state) : closeMenu);
+  panel.dismiss = () => {
+    unregister();
+    opener?.removeAttribute('aria-controls');
+    element.remove();
+  };
+  return panel;
+}
+
+function showActionMenu({ items, target, anchor, x, y, isCurrent, origin, label, explicit = false }) {
+  const entries = normalizeMenuItems(items);
+  if (!entries.length || !targetVisible(target) || !isCurrent()) return false;
   closeMenu({ restore:false });
-  try { await executeCapturedContextCommand(command, request); }
-  catch (error) { window.uiModule?.showToast?.(error?.message || 'The context-menu command could not be completed.'); }
+  const state = { target, anchor, x, y, origin, isCurrent, explicit };
+  state.root = makePanel(state, label || 'Context actions', entries);
+  active = state;
+  if (anchor) {
+    state.previousControls = anchor.getAttribute('aria-controls');
+    anchor.setAttribute('aria-haspopup', 'menu');
+    anchor.setAttribute('aria-controls', MENU_ID);
+    anchor.setAttribute('aria-expanded', 'true');
+  }
+  placePanel(state, state.root);
+  focusRow(state.root);
+  return true;
+}
+
+export function openContextActionMenu({ anchor, event, items = [], isCurrent = () => true, label } = {}) {
+  initCustomContextMenu();
+  if (!anchor || active?.anchor === anchor) {
+    if (anchor) closeMenu();
+    return false;
+  }
+  const shown = showActionMenu({ items, target:anchor, anchor, origin:anchor, label, explicit:true,
+    isCurrent:() => targetVisible(anchor) && isCurrent() });
+  if (shown) event?.preventDefault?.();
+  return shown;
+}
+
+function legacyObjectItems(request) {
+  const items = [];
+  for (const [label, id] of OBJECT_COMMANDS[request.objectKind] || []) {
+    if (request.objectKind === 'file') {
+      const capabilities = fileCapabilities(request.objectTarget);
+      const required = { 'open-in-editor':'open', 'open-in-editor-split-right':'open', 'open-in-editor-split-below':'open',
+        'reveal-file':'stat', 'rename-file':'rename', 'trash-file':'trash', 'restore-file':'restore' }[id];
+      if (required && capabilities && !capabilities.has(required)) continue;
+      if (id.startsWith('open-in-editor') && request.objectTarget.dataset.fileOpenEditor !== 'true') continue;
+      if (id === 'copy-file-path' && !request.objectTarget.dataset.path) continue;
+      if (id === 'move-files' || id === 'copy-files') {
+        const transfer = window.__openClankFilesContextCapabilities?.(request.objectTarget, request);
+        if (!transfer?.[id === 'move-files' ? 'move' : 'copy']) continue;
+      }
+      if (request.adapterContext?.selectedKeys?.length > 1 && !['move-files', 'copy-files', 'select-all-files'].includes(id)) continue;
+    }
+    if (request.objectKind === 'workspace'
+      && (!request.objectTarget.dataset.workspaceId || request.objectTarget.dataset.workspaceAvailable !== 'true')) continue;
+    const disabled = id === 'copy-image-bytes' && (!navigator.clipboard?.write || typeof window.ClipboardItem !== 'function');
+    items.push({ id, label, disabled });
+  }
+  return items;
 }
 
 function renderMenu(request) {
-  removeMenu();
-  const menu = document.createElement('div');
-  menu.id = MENU_ID; menu.className = 'openclank-context-menu';
-  menu.setAttribute('role', 'menu'); menu.tabIndex = -1;
-  const hasSelection = hasSelectedText(request);
-  // Editing actions are meaningful only on a real editable control. Folder,
-  // tab, image and background menus are assembled from their typed owners.
-  const commands = request.editable ? [
-    ['Undo', 'undo', !request.editable], ['Redo', 'redo', !request.editable],
-    ['Cut', 'cut', !request.editable || !hasSelection], ['Copy', 'copy', !hasSelection],
-    ['Paste', 'paste', !request.editable], ['Paste as plain text', 'paste-plain', !request.editable],
-    ...(!request.adapter ? [['Check selected spelling locally', 'spellcheck', !hasSelection || typeof request.spellingService?.service?.checkBatch !== 'function'], ...(canRetrySpelling(request) ? [['Retry spelling', 'retry-spelling', false]] : [])] : []), ['Delete', 'delete', !request.editable || !hasSelection],
-    // Files owns Select all for its active column; the generic command would
-    // select the document body and is therefore disabled on a Files row.
-    ['Select all', 'select-all', request.objectKind === 'file' || !request.target],
-  ] : (request.adapter && !request.adapter.ownsObjectCommands && typeof request.adapter.isCurrent === 'function' ? [['Copy', 'copy', !hasSelection], ['Select all', 'select-all', false]] : []);
-  for (const [label, command, disabled] of commands) menu.append(menuItem(label, command, { disabled }));
-  const commandGroups = new Map();
-  for (const item of request.adapter?.commands?.(request) || []) {
-    if (!item?.id || !item.label) continue;
-    let container = menu;
-    if (request.adapter?.groupCommands && item.menu) {
-      if (!commandGroups.has(item.menu)) {
-        const group = document.createElement('details'), title = document.createElement('summary');
-        title.textContent = String(item.menu); group.append(title); menu.append(group); commandGroups.set(item.menu, group);
-      }
-      container = commandGroups.get(item.menu);
-    }
-    container.append(menuItem(String(item.label), String(item.id), { disabled:!!item.disabled || !!item.disabledReason }));
-  }
-  if (request.link) menu.append(menuItem('Open link in new tab', 'open-link'));
-  // A mounted widget adapter owns its extra commands. Files deliberately
-  // mounts the Canvas adapter over its whole body, so retain the capability
-  // filtered file object commands alongside that image-specific command.
-  if (!request.adapter?.ownsObjectCommands && (!request.adapter || request.objectKind === 'file' || ['image', 'link'].includes(request.objectKind))) for (const [label, command] of OBJECT_COMMANDS[request.objectKind] || []) {
-    if (command === 'open-link' && request.link) continue;
-    if (request.objectKind === 'file') {
-      const selectedCount = Array.isArray(request.adapterContext?.selectedKeys)
-        ? request.adapterContext.selectedKeys.length : 0;
-      const groupCommands = new Set(['move-files', 'copy-files', 'select-all-files']);
-      // A right-click inside an existing Files multi-selection represents
-      // the whole selected group. Suppress row-only actions so they cannot
-      // appear to apply to, or silently ignore, the highlighted group.
-      if (selectedCount > 1 && !groupCommands.has(command)) continue;
-      const capabilities = fileCapabilities(request.objectTarget);
-      const required = { 'open-file':'open', 'open-in-editor':'open', 'open-in-editor-split-right':'open', 'open-in-editor-split-below':'open', 'reveal-file':'stat', 'rename-file':'rename', 'move-file':'move', 'move-files':'transfer-move', 'copy-files':'transfer-copy', 'trash-file':'trash', 'restore-file':'restore' }[command];
-      if (required && !['transfer-move', 'transfer-copy'].includes(required) && capabilities && !capabilities.has(required)) continue;
-      if (required === 'transfer-move' && typeof window.__openClankFilesContextCapabilities === 'function'
-        && !window.__openClankFilesContextCapabilities(request.objectTarget, request).move) continue;
-      if (required === 'transfer-copy' && typeof window.__openClankFilesContextCapabilities === 'function'
-        && !window.__openClankFilesContextCapabilities(request.objectTarget, request).copy) continue;
-      // Editor handoff is offered only for a resource explicitly authorized
-      // as textual by the Files provider. Images and opaque managed records
-      // may expose `open` while still lacking an Editor target.
-      if (['open-in-editor', 'open-in-editor-split-right', 'open-in-editor-split-below'].includes(command)
-        && request.objectTarget?.dataset?.fileOpenEditor !== 'true') continue;
-      // A sealed resource reference is authority data and must never enter a
-      // generic clipboard lane. Only compatibility rows with a real host path
-      // expose this command.
-      if (command === 'copy-file-path' && !request.objectTarget?.dataset?.path) continue;
-    }
-    if (request.objectKind === 'workspace'
-      && (!request.objectTarget?.dataset?.workspaceId || request.objectTarget?.dataset?.workspaceAvailable !== 'true')) continue;
-    const disabled = command === 'copy-image-bytes' && (!navigator.clipboard?.write || typeof window.ClipboardItem !== 'function');
-    menu.append(menuItem(label, command, { disabled }));
-  }
-  if (request.editable && hasSelection && (!request.adapter ? /^[\p{L}\p{M}]+(?:['’-][\p{L}\p{M}]+)*$/u.test(selectedText(request).trim()) : request.adapter.spellingEligible?.(request) === true)) {
-    menu.append(menuItem('Add word to dictionary', 'add-word', { disabled:typeof request.spellingService?.service?.add !== 'function' }));
-    menu.append(menuItem('Remove word from dictionary', 'remove-word', { disabled:typeof request.spellingService?.service?.remove !== 'function' }));
+  if (!isCapturedContextCurrent(request)) return false;
+  if (!request.adapter && !request.objectTarget && !nativeTextTarget(request.target)
+    && request.rawTarget.closest(NATIVE_CONTROLS + ',img')) return false;
+  let supplied = request.adapter?.commands?.(request) || [];
+  if (request.adapter?.projectCommands) supplied = request.adapter.projectCommands(request, supplied);
+  const suppliedIds = new Set(supplied.map(item => item?.id));
+  let basic = request.editable
+    ? basicEditingCommands(request).filter(item => !['delete', 'paste-plain'].includes(item.id) && !suppliedIds.has(item.id))
+    : (hasSelectedText(request) && !suppliedIds.has('copy') ? [{ id:'copy', label:'Copy' }] : []);
+  if (typeof request.adapter?.editingCommands === 'function') basic = request.adapter.editingCommands(request, basic);
+  else if (request.adapter?.editingCommands === false) basic = [];
+  const toAction = item => {
+    const shortcut = item.shortcut ?? editingShortcutHints[item.id];
+    return { ...item, shortcut, run:item.run || (() => executeCapturedContextCommand(item.id, request)) };
+  };
+  const items = [...basic, ...supplied, ...legacyObjectItems(request)].filter(Boolean).map(toAction);
+  let spellingWord = '';
+  if (request.editable && hasSelectedText(request) && request.adapter?.editingCommands !== false
+    && (!request.adapter || request.adapter.spellingEligible?.(request) === true)) {
     const word = selectedText(request).trim();
-    const spelling = request.spellingService?.service;
-    if (/^[\p{L}][\p{L}'-]*$/u.test(word) && spelling?.suggest) {
-      Promise.resolve(spelling.suggest(word)).then((suggestions) => {
-        if (active !== request || !menu.isConnected || !isCapturedContextCurrent(request) || !spellingServiceCurrent(request)) return;
-        for (const suggestion of [...new Set(Array.isArray(suggestions) ? suggestions.map(String) : [])].slice(0, 5)) {
-          if (!suggestion || suggestion === word) continue;
-          menu.append(menuItem(`Replace with “${suggestion}”`, `replace-spelling:${suggestion}`));
-        }
-        positionContextMenu(menu, request);
-      }).catch(() => {});
+    if (/^[\p{L}][\p{L}'-]*$/u.test(word)) {
+      spellingWord = word;
+      const service = request.spellingService.service;
+      if (typeof service?.add === 'function') items.push(toAction({ id:'add-word', label:'Add word to dictionary', menu:'Spelling' }));
+      if (typeof service?.remove === 'function') items.push(toAction({ id:'remove-word', label:'Remove word from dictionary', menu:'Spelling' }));
     }
   }
-  // Leave unknown surfaces to the browser. This avoids replacing useful
-  // native actions with an empty or unrelated application menu.
-  if (!menu.querySelector('button[data-command]')) {
-    menu.remove();
-    return false;
+  const shown = showActionMenu({ items, target:request.target, x:request.x, y:request.y,
+    origin:request.adapter?.focusOrigin?.(request)
+      || (request.modality === 'keyboard' ? request.rawTarget : request.editable ? request.target : document.activeElement),
+    isCurrent:() => isCapturedContextCurrent(request) });
+  const state = active;
+  const spelling = request.spellingService?.service;
+  if (shown && spellingWord && typeof spelling?.suggest === 'function') {
+    Promise.resolve().then(() => spelling.suggest(spellingWord)).then(suggestions => {
+      if (active !== state || state.child || !state.isCurrent() || !spellingServiceCurrent(request)) return;
+      const replacements = [...new Set(Array.isArray(suggestions) ? suggestions.map(String) : [])]
+        .filter(suggestion => suggestion && suggestion !== spellingWord).slice(0, 5);
+      if (replacements.length) {
+        appendMenuRows(state, state.root, [{ separator:true }, ...replacements.map(suggestion => toAction({
+          id:`replace-spelling:${suggestion}`, label:`Replace with “${suggestion}”`,
+        }))]);
+        placePanel(state, state.root);
+      }
+    }).catch(() => {});
   }
-  for(const child of menu.children)child.style.flexShrink='0';
-  menu.addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-command]');
-    if (button && !button.disabled) void invoke(button.dataset.command);
-  });
-  menu.addEventListener('keydown', (event) => {
-    const buttons = [...menu.querySelectorAll('summary,button:not(:disabled)')].filter(node=>node.getClientRects().length);
-    const index = buttons.indexOf(document.activeElement);
-    if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); event.stopImmediatePropagation(); closeMenu(); return; }
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault(); buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
-    }
-    if (event.key === 'Home') { event.preventDefault(); buttons[0]?.focus(); }
-    if (event.key === 'End') { event.preventDefault(); buttons.at(-1)?.focus(); }
-  });
-  document.body.append(menu);
-  // ui.js arbitrates Escape in capture phase, ahead of this menu's handlers.
-  // Register with its existing transient stack before it can close the applet.
-  menu._dismiss = () => closeMenu();
-  unregisterMenuDismiss = registerMenuDismiss(menu._dismiss);
-  positionContextMenu(menu, request);
-  [...menu.querySelectorAll('summary,button:not(:disabled)')].find(node=>node.getClientRects().length)?.focus();
-  return true;
+  return shown;
 }
 
 function onContextMenu(event) {
   if (!enabled() || event.defaultPrevented) return;
-  // A second right-click is a new command target. Replace the old menu before
-  // capturing so the next command cannot accidentally act on the first target.
-  if (active) closeMenu({ restore:false });
-  const request = capture(event);
-  if (!renderMenu(request)) { active = null; return; }
-  active = request;
-  event.preventDefault();
+  if (event.target.closest?.('.openclank-context-menu')) { event.preventDefault(); return; }
+  if (heldTouch?.target.contains(event.target) && Date.now() - heldTouch.time < 900) { event.preventDefault(); return; }
+  if (event.pointerType === 'touch' && (event.target.closest?.('[draggable="true"]') || editableTarget(event.target))) return;
+  closeMenu({ restore:false });
+  if (renderMenu(capture(event))) {
+    if (event.pointerType === 'touch') heldTouch = { target:event.target, id:event.pointerId, time:Date.now() };
+    event.preventDefault();
+  }
 }
 
 function onKeyboardContextMenu(event) {
@@ -530,84 +789,90 @@ function onKeyboardContextMenu(event) {
   if (!((event.key === 'F10' && event.shiftKey) || (event.key === 'ContextMenu' && !event.shiftKey))) return;
   const target = document.activeElement;
   if (!(target instanceof Element) || target === document.body || target === document.documentElement
-    || target.closest(`#${MENU_ID}`)) return;
-  // Do not depend on an OS/browser synthesizing contextmenu from this key.
-  // Capture the focused owner through the same authority/selection gateway.
+    || target.closest('.openclank-context-menu')) return;
   if (active) closeMenu({ restore:false });
-  const request = capture({ target, detail:0 });
-  if (!isCapturedContextCurrent(request) || !renderMenu(request)) return;
-  active = request;
-  event.preventDefault();
+  if (renderMenu(capture({ target, detail:0 }))) event.preventDefault();
 }
 
 export function initCustomContextMenu() {
   if (window.__openClankContextMenuInitialized) return;
   window.__openClankContextMenuInitialized = true;
-  document.addEventListener('contextmenu', onContextMenu);
-  document.addEventListener('pointerdown', (event) => {
-    if (active && !event.target.closest(`#${MENU_ID}`)) closeMenu();
-    if (event.pointerType !== 'touch' || event.target.closest(`#${MENU_ID}`)) return;
-    clearTimeout(longPressTimer);
-    longPressOrigin = { x:event.clientX, y:event.clientY };
-    const target = event.target instanceof Element ? event.target : null;
-    if (!target) return;
-    longPressTimer = setTimeout(() => {
-      longPressTimer = null;
-      longPressOrigin = null;
-      const synthetic = new MouseEvent('contextmenu', { bubbles:true, cancelable:true, clientX:event.clientX, clientY:event.clientY, detail:1 });
-      target.dispatchEvent(synthetic);
-    }, 550);
-  }, true);
   const cancelLongPress = () => {
-    if (longPressTimer) clearTimeout(longPressTimer);
+    clearTimeout(longPressTimer);
     longPressTimer = null;
     longPressOrigin = null;
   };
-  document.addEventListener('pointermove', (event) => {
-    if (!longPressTimer || event.pointerType !== 'touch' || !longPressOrigin) return;
-    const dx = event.clientX - longPressOrigin.x;
-    const dy = event.clientY - longPressOrigin.y;
-    if (Math.hypot(dx, dy) >= 8) cancelLongPress();
+  document.addEventListener('contextmenu', event => {
+    cancelLongPress();
+    onContextMenu(event);
+  });
+  document.addEventListener('pointerdown', event => {
+    cancelLongPress();
+    heldTouch = null;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.closest('.openclank-context-menu')) return;
+    if (active && !active.anchor?.contains(target)) closeMenu({ restore:false });
+    if (!enabled() || event.pointerType !== 'touch' || !event.isPrimary
+      || target.closest('[draggable="true"],' + PROTECTED_TARGETS) || editableTarget(target)) return;
+    longPressOrigin = { id:event.pointerId, x:event.clientX, y:event.clientY };
+    longPressTimer = setTimeout(() => {
+      cancelLongPress();
+      if (!target.isConnected) return;
+      if (renderMenu(capture({ target, clientX:event.clientX, clientY:event.clientY, detail:1, pointerType:'touch' }))) {
+        heldTouch = { target, id:event.pointerId, time:Date.now() };
+      }
+    }, 550);
+  }, true);
+  document.addEventListener('pointermove', event => {
+    if (event.pointerId !== longPressOrigin?.id) return;
+    if (Math.hypot(event.clientX - longPressOrigin.x, event.clientY - longPressOrigin.y) >= 8) cancelLongPress();
   }, { capture:true, passive:true });
-  document.addEventListener('scroll', cancelLongPress, { capture:true, passive:true });
-  document.addEventListener('pointerup', cancelLongPress, true);
+  document.addEventListener('scroll', event => {
+    cancelLongPress();
+    const state = active;
+    if (!state) return;
+    if (event.target === state.root.element && state.child) {
+      const rootRect = state.root.element.getBoundingClientRect();
+      const openerRect = state.child.opener.getBoundingClientRect();
+      if (openerRect.bottom <= rootRect.top || openerRect.top >= rootRect.bottom) closeChild(state);
+      else if (!state.child.drill) placePanel(state, state.child, state.child.opener);
+    }
+  }, { capture:true, passive:true });
+  document.addEventListener('pointerup', event => {
+    cancelLongPress();
+    if (event.pointerId === heldTouch?.id && Date.now() - heldTouch.time < 900) event.preventDefault();
+  }, true);
   document.addEventListener('pointercancel', cancelLongPress, true);
-  document.addEventListener('keydown', (event) => {
+  document.addEventListener('click', event => {
+    if (heldTouch && event.detail !== 0 && Date.now() - heldTouch.time < 900) {
+      heldTouch = null;
+      event.preventDefault(); event.stopImmediatePropagation();
+      return;
+    }
+    if (active && !event.target.closest?.('.openclank-context-menu') && !active.anchor?.contains(event.target)) {
+      closeMenu({ restore:false });
+    }
+  }, true);
+  window.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229
+      || !active || !event.target?.closest?.('.openclank-context-menu')) return;
+    if (dismissTopMenu()) {
+      event.preventDefault(); event.stopImmediatePropagation();
+    }
+  }, true);
+  document.addEventListener('keydown', event => {
     cancelLongPress();
     onKeyboardContextMenu(event);
-    if (event.key === 'Escape' && active && !event.defaultPrevented && !event.isComposing) {
-      event.preventDefault(); event.stopImmediatePropagation(); closeMenu();
+    if (event.key === 'Escape' && active && !event.defaultPrevented && !event.isComposing && event.keyCode !== 229) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (active.child) closeChild(active);
+      else closeMenu();
     }
   });
-  document.addEventListener('copal-context-command', (event) => {
-    const target = event.target instanceof Element ? event.target : null;
-    const command = event.detail?.command;
-    if (!target) return;
-    const kind = target.closest?.('[data-copal-context-object]')?.dataset?.copalContextObject || '';
-    const dispatchClick = (element) => {
-      if (!element) return;
-      if (typeof element.click === 'function') element.click();
-      else element.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true, view:window }));
-    };
-    const fallback = () => {
-      // Standalone consumers may only subscribe to the event contract. Keep a
-      // small compatibility fallback when no mounted owner claims a command.
-      if (command === 'toggle-task') target.querySelector('input[type="checkbox"]')?.click?.();
-      else if (command === 'open-task') target.querySelector('.copal-task-title,[data-task-open],button,a')?.click?.();
-      else if (command === 'open-file') dispatchClick(target);
-      else if (command === 'edit-event' || command === 'open-graph-node') dispatchClick(target);
-      else if (command === 'edit-track') dispatchClick(target.querySelector('.copal-track-edit,button[aria-label^="Edit "]'));
-      else if (command === 'open-treehouse-item') dispatchClick(target.querySelector('button.copal-btn, a.copal-btn, summary'));
-    };
-    const handlers = objectHandlers(kind);
-    if (handlers.length) void (async () => {
-      for (const handler of handlers) if (await handler(command, target, event.detail?.request)) return;
-      fallback();
-    })();
-    else fallback();
-  });
-  window.addEventListener('odysseus-context-menu-changed', () => { if (!enabled()) closeMenu(); });
-  window.openClankContextMenu = Object.freeze({ enabled, close: closeMenu, registerAdapter });
+  window.addEventListener('resize', repositionMenu);
+  window.visualViewport?.addEventListener('resize', repositionMenu);
+  window.addEventListener('odysseus-context-menu-changed', () => { if (active && !active.explicit && !enabled()) closeMenu(); });
+  window.openClankContextMenu = Object.freeze({ enabled, close:closeMenu, registerAdapter, openContextActionMenu });
 }
 export function registerAdapter(element, adapter) {
   if (!(element instanceof Element) || !adapter || typeof adapter.execute !== 'function') return () => {};
@@ -623,19 +888,36 @@ function hasCommentSource(request) {
   return !!captured.commentSourceRange;
 }
 
-// Rendered documentation widgets carry bounded source offsets. Inspect only
-// mounted viewport widgets; source-mode owners may provide a cached range hook.
-function mountedCommentSourceRange(editor, ranges, rawTarget) {
-  const explicit = rawTarget?.closest?.('.cm-rich-comment-widget');
-  const candidates = explicit && editor.view.dom.contains(explicit)
-    ? [explicit] : editor.view.dom.querySelectorAll('.cm-rich-comment-widget');
-  for (const node of candidates) {
-    const from = Number(node.dataset.commentSourceFrom);
-    const to = Number(node.dataset.commentSourceTo);
-    if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) continue;
-    if (node === explicit || ranges.some((range) => from <= Math.max(range.anchor, range.head) && to >= Math.min(range.anchor, range.head))) return Object.freeze({ from, to });
-  }
-  return null;
+// Rendered comments carry bounded source offsets on the actual DOM hit.
+function mountedCommentSourceRange(widget) {
+  if (!widget) return null;
+  const from = Number(widget.dataset.commentSourceFrom);
+  const to = Number(widget.dataset.commentSourceTo);
+  return Number.isFinite(from) && Number.isFinite(to) && to >= from ? Object.freeze({ from, to }) : null;
+}
+
+function plainSelectionMatches(target, range) {
+  if (!range) return true;
+  const current = selectionSnapshot(target)?.range;
+  return current?.startContainer === range.startContainer && current?.endContainer === range.endContainer
+    && current?.startOffset === range.startOffset && current?.endOffset === range.endOffset
+    && current?.toString() === range.toString();
+}
+
+function capturedRenderObject(rawTarget, widget) {
+  const node = rawTarget?.closest?.('img, a[href]');
+  if (!widget?.contains(node)) return null;
+  const image = node.matches('img');
+  const url = image ? node.currentSrc || node.src : node.href;
+  if (!/^(https?:|blob:|data:image\/)/i.test(url) || !image && !/^https?:/i.test(url)) return null;
+  const current = () => targetVisible(node) && widget.contains(node)
+    && url === (image ? node.currentSrc || node.src : node.href);
+  const open = () => window.open(url, '_blank', 'noopener,noreferrer');
+  return { current, items:[
+    { id:image ? 'open-image' : 'open-link', label:image ? 'Open image' : 'Open link in new tab', run:open },
+    { id:image ? 'copy-image-address' : 'copy-link-address', label:image ? 'Copy image address' : 'Copy link address',
+      disabled:!navigator.clipboard?.writeText, run:() => clipboardWrite(url) },
+  ] };
 }
 
 export function createCodeMirrorContextAdapter(editor, identity = {}) {
@@ -643,14 +925,31 @@ export function createCodeMirrorContextAdapter(editor, identity = {}) {
     const value = identity[name];
     return typeof value === 'function' ? value() : value ?? fallback;
   };
+  const isReadOnly = () => !!readIdentity('readOnly', false)
+    || editor.view.contentDOM?.getAttribute('contenteditable') === 'false';
   const languageIdentity = () => { const language = editor.getStatus?.()?.language; return language ? `${language.id}|${language.mode || ''}|${language.override || ''}` : ''; };
+  const widgetAt = target => {
+    const widget = target?.closest?.('.cm-rich-comment-widget,.cm-md-inline-preview-widget,.cm-md-embed-widget,[contenteditable="false"]');
+    return widget && widget !== editor.view.contentDOM && editor.view.contentDOM.contains(widget) ? widget : null;
+  };
+  const contentHit = (target, event) => {
+    const content = editor.view?.contentDOM;
+    if (!content?.contains(target) || target.closest('.cm-editor') !== content.closest('.cm-editor')) return false;
+    const control = target.closest('input,textarea,select,button,a[href],summary,iframe,video,audio,[role="button"],[contenteditable="true"]');
+    const widget = widgetAt(target);
+    if (control && control !== content && !capturedRenderObject(target, widget)) return 'native';
+    if (event?.pointerType === 'touch' && !widget) return 'native';
+    return true;
+  };
   const isCurrent = (request) => {
     const captured = request?.adapterContext;
     const view = editor.view;
     const selection = view?.state?.selection;
     return !!captured && !!selection && view.dom.isConnected
+      && (!captured.widget || targetVisible(captured.widget) && plainSelectionMatches(captured.widget, captured.widgetSelection))
+      && (!captured.object || captured.object.current())
       && view.state.doc === captured.documentIdentity
-      && (view.contentDOM?.getAttribute('contenteditable') === 'false') === captured.readOnly
+      && isReadOnly() === captured.readOnly
       && selection.mainIndex === captured.mainIndex
       && selection.ranges.length === captured.ranges.length
       && selection.ranges.every((range, index) => range.anchor === captured.ranges[index].anchor && range.head === captured.ranges[index].head)
@@ -659,13 +958,45 @@ export function createCodeMirrorContextAdapter(editor, identity = {}) {
       && captured.scope === readIdentity('scope') && captured.languageIdentity === languageIdentity();
   };
   return {
+    hitTest:contentHit,
     isCurrent,
+    editingCommands:(request, items) => {
+      const captured = request.adapterContext;
+      if (captured?.widget) return captured.widgetSelection && !captured.object ? [{ id:'copy', label:'Copy' }] : [];
+      const status = editor.getStatus?.();
+      const itemCurrent = item => {
+        if (!captured?.atSelection && !['undo','redo','select-all'].includes(item.id)) return false;
+        if (item.id === 'undo' && status?.canUndo === false || item.id === 'redo' && status?.canRedo === false) return false;
+        if (['copy','cut'].includes(item.id) && !navigator.clipboard?.writeText) return false;
+        if (item.id === 'paste' && !navigator.clipboard?.readText) return false;
+        return !item.disabledReason;
+      };
+      return items.filter(itemCurrent);
+    },
+    projectCommands:(request, items) => {
+      const captured = request.adapterContext;
+      if (!captured) return [];
+      if (captured.widget) return captured.object?.items || (captured.commentSourceRange
+        ? [{ id:'see-source', label:'See source' }] : []);
+      const markdown = /^(markdown|mdx)$/.test(captured.languageId);
+      const plain = /^(plain|plaintext|text)$/.test(captured.languageId);
+      return items.filter(item => {
+        if (!item || item.separator) return true;
+        if (item.disabled || item.disabledReason) return false;
+        if (!captured.atSelection && item.id !== 'see-source') {
+          return item.id === 'duplicate-line' && captured.atMainLine;
+        }
+        if (item.id.startsWith('format-')) return markdown;
+        if (item.id === 'spellcheck' || item.id === 'retry-spelling') return markdown || plain || !!captured.commentSourceRange;
+        return true;
+      });
+    },
     restore:(request) => { if (!isCurrent(request)) return false; editor.focus(); return true; },
     commands: (request) => {
       // Selection-only match/transform actions are disabled with an empty
       // selection; line/cursor commands (duplicate, indent) stay usable.
       const hasSelection = hasSelectedText(request);
-      const readOnly = editor.view.contentDOM?.getAttribute('contenteditable') === 'false';
+      const readOnly = isReadOnly();
       const readOnlySafe = ['select-next-match', 'select-all-matches', 'see-source', 'add-cursor-above', 'add-cursor-below', 'collapse-selections', 'spellcheck', 'retry-spelling'];
       return [
         { id:'select-next-match', label:'Select next match', disabled:typeof editor.selectNextMatch !== 'function' },
@@ -686,7 +1017,10 @@ export function createCodeMirrorContextAdapter(editor, identity = {}) {
         { id:'new-from-template', label:'New from template', disabled:typeof identity.onCommand !== 'function' },
       ].map((item) => readOnly && !readOnlySafe.includes(item.id) ? { ...item, disabled:true, disabledReason:'This editor is read-only.' } : item);
     },
-    capture: (rawTarget) => {
+    capture: (rawTarget, event = {}) => {
+      const widget = widgetAt(rawTarget);
+      const rendered = capturedRenderObject(rawTarget, widget);
+      const widgetSelection = widget && !rendered ? selectionSnapshot(widget)?.range || null : null;
       const selection = editor.getSelection?.() || { ranges:[{ anchor:editor.view.state.selection.main.anchor, head:editor.view.state.selection.main.head }], mainIndex:0 };
       const ranges = selection.ranges.map((range) => ({ anchor:range.anchor, head:range.head }));
       const documentIdentity = editor.view.state.doc;
@@ -694,24 +1028,41 @@ export function createCodeMirrorContextAdapter(editor, identity = {}) {
       const mainRange = ranges[selection.mainIndex] || ranges[0];
       const query = mainRange && mainRange.anchor !== mainRange.head ? rangeText(mainRange) : undefined;
       const text = ranges.filter(range => range.anchor !== range.head).map(rangeText).join('\n');
+      const commentWidget = rawTarget?.closest?.('.cm-rich-comment-widget');
+      const position = isKeyboardInvocation(event) ? mainRange?.head
+        : Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+          ? editor.view.posAtCoords?.({ x:event.clientX, y:event.clientY }) : mainRange?.head;
+      const atSelection = position != null && ranges.some(range =>
+        position >= Math.min(range.anchor, range.head) && position <= Math.max(range.anchor, range.head));
+      const atMainLine = position != null && mainRange?.anchor === mainRange?.head && ranges.length === 1
+        && typeof documentIdentity.lineAt === 'function'
+        && documentIdentity.lineAt(position).number === documentIdentity.lineAt(mainRange.head).number;
+      const commentSourceRange = commentWidget ? mountedCommentSourceRange(commentWidget) : widget || position == null ? null
+        : (identity.commentSourceRange?.([{ anchor:position, head:position }]) || editor.peekCommentSourceRange?.(position) || null);
       return Object.freeze({
-        ranges, mainIndex:selection.mainIndex, text, query,
+        ranges, mainIndex:selection.mainIndex, text, query, widget, widgetSelection, object:rendered, commentSourceRange,
+        atSelection, atMainLine,
+        languageId:editor.getStatus?.()?.language?.id || '',
         documentIdentity, documentLength:documentIdentity.length,
         spelling:editor.captureSpelling?.(), languageIdentity:languageIdentity(),
-        readOnly:editor.view.contentDOM?.getAttribute('contenteditable') === 'false',
+        readOnly:isReadOnly(),
         bufferIdentity:readIdentity('bufferIdentity', editor), revision:readIdentity('revision'), scope:readIdentity('scope'),
-        commentSourceRange:typeof identity.commentSourceRange === 'function' ? identity.commentSourceRange(ranges) : editor.peekCommentSourceRange?.(ranges[selection.mainIndex || 0]?.head ?? 0) || mountedCommentSourceRange(editor, ranges, rawTarget),
       });
     },
-    spellingEligible:(request) => request.adapterContext?.ranges?.length === 1
+    spellingEligible:(request) => !request.adapterContext?.widget && request.adapterContext?.atSelection
+      && request.adapterContext?.ranges?.length === 1
       && /^[\p{L}][\p{L}'-]*$/u.test(selectedText(request).trim())
       && editor.isSpellingSelectionEligible?.(request.adapterContext?.spelling) === true,
     execute: async (command, request) => {
       const captured = request.adapterContext; const view = editor.view;
       if (!isCurrent(request)) throw new Error('The original editing target changed before the command completed.');
+      if (captured.widget && command !== 'see-source') {
+        if (command === 'copy' && captured.widgetSelection) { await clipboardWrite(captured.widgetSelection.toString()); return true; }
+        return false;
+      }
       const replace = (text) => { editor.replaceSelections?.(String(text ?? '')) || editor.replaceRange?.(captured.ranges[captured.mainIndex]?.anchor || 0, captured.ranges[captured.mainIndex]?.head || 0, String(text ?? '')); };
       const query = captured.query;
-      const readOnly = view.contentDOM?.getAttribute('contenteditable') === 'false';
+      const readOnly = isReadOnly();
       const readOnlySafe = ['copy', 'select-all', 'select-next-match', 'select-all-matches', 'add-cursor-above', 'add-cursor-below', 'collapse-selections', 'see-source', 'open-link', 'add-word', 'remove-word', 'spellcheck'];
       if (readOnly && !readOnlySafe.includes(command)) throw new Error('This editor is read-only.');
       if (command === 'undo') { editor.undo(); editor.focus(); return; }

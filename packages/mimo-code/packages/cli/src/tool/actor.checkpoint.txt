@@ -1,0 +1,3 @@
+## Checkpoint integration
+
+- Findings captured to `tasks/<TID>/progress.md` are reconciled into the next checkpoint. After the subagent finishes writing that file, the checkpoint writer reads it and integrates verbatim commands, outcome, and discoveries into the main checkpoint.

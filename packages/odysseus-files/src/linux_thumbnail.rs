@@ -1,4 +1,4 @@
-//! Linux content provider: validated shared cache, then optional KIO sidecar.
+//! Linux thumbnails from the shared cache, KIO, or registered freedesktop providers.
 //! No desktop shared libraries are linked into the broker or this helper.
 use crate::wire::{HelperErrorCode as Error, RenderCommand, MAX_HELPER_OUTPUT_BYTES};
 use std::fs::{self, File};
@@ -9,8 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "freedesktop_thumbnail.rs"]
+mod freedesktop;
+
 pub fn adapter_path() -> Option<PathBuf> {
-    std::env::var_os("ODYSSEUS_KDE_THUMBNAIL_ADAPTER").map(PathBuf::from).or_else(|| {
+    std::env::var_os("OPEN_CLANK_KDE_THUMBNAIL_ADAPTER").map(PathBuf::from).or_else(|| {
         std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join("odysseus-kde-thumbnail-adapter")))
     })
 }
@@ -23,11 +26,20 @@ fn host_command(path: &Path) -> Command {
         Some(original) => { command.env("LD_LIBRARY_PATH", original); }
         None => { command.env_remove("LD_LIBRARY_PATH"); }
     }
-    command.env_remove("ODYSSEUS_QUICKLOOK_SESSION_TOKEN");
+    command.env_remove("OPEN_CLANK_QUICKLOOK_SESSION_TOKEN");
     command
 }
 
 pub fn probe() -> bool {
+    cache_root().is_some_and(|root| root.is_dir()) || freedesktop::available() || adapter_available()
+}
+
+fn adapter_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(adapter_probe)
+}
+
+fn adapter_probe() -> bool {
     let Some(path) = adapter_path() else { return false; };
     let Ok(mut child) = host_command(&path).arg("--probe").stdin(Stdio::null())
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return false; };
@@ -99,7 +111,7 @@ fn decode(bytes: &[u8], width: u32, height: u32, expected: Option<(&str, &fs::Me
             if texts.insert(text.keyword.clone(), text.get_text().map_err(|_| Error::EncodeFailed)?).is_some() { return Err(Error::EncodeFailed); }
         }
         if texts.get("Thumb::URI").map(String::as_str) != Some(uri)
-            || texts.get("Thumb::MTime").and_then(|s| s.parse::<i64>().ok()) != Some(metadata.mtime())
+            || texts.get("Thumb::MTime").and_then(|s| parse_mtime(s)) != Some(metadata.mtime())
             || texts.get("Thumb::Size").is_some_and(|s| s.parse::<u64>().ok() != Some(metadata.len())) {
             return Err(Error::NativeUnavailable);
         }
@@ -136,25 +148,48 @@ fn decode(bytes: &[u8], width: u32, height: u32, expected: Option<(&str, &fs::Me
 
 fn cached(root: &Path, source: &Path, metadata: &fs::Metadata, width: u32, height: u32) -> Option<Vec<u8>> {
     if source.starts_with(root) { return None; }
-    let uri = file_uri(source);
-    let key = format!("{:x}.png", md5::compute(uri.as_bytes()));
     let tiers = [(128,"normal"),(256,"large"),(512,"x-large"),(1024,"xx-large")];
     let wanted = width.max(height);
     // Prefer a sufficient tier, then fall back to a smaller genuine preview.
     let mut candidates: Vec<_> = tiers.into_iter().collect();
     candidates.sort_by_key(|(size,_)| (if *size >= wanted {0} else {1}, if *size >= wanted {*size} else {1024-*size}));
-    for (_,tier) in candidates {
-        let path = root.join(tier).join(&key);
-        let Ok(file) = File::open(&path) else { continue; };
-        let Ok(meta) = file.metadata() else { continue; };
-        if !meta.is_file() || meta.len() > MAX_HELPER_OUTPUT_BYTES as u64
-            || (meta.mtime(),meta.mtime_nsec()) < (metadata.mtime(),metadata.mtime_nsec())
-            || (meta.mtime(),meta.mtime_nsec()) < (metadata.ctime(),metadata.ctime_nsec()) { continue; }
-        let mut bytes = Vec::new();
-        if file.take((MAX_HELPER_OUTPUT_BYTES+1) as u64).read_to_end(&mut bytes).is_err() { continue; }
-        if let Ok(png) = decode(&bytes,width,height,Some((&uri,metadata))) { return Some(png); }
+    for uri in cache_uris(source) {
+        let key = format!("{:x}.png", md5::compute(uri.as_bytes()));
+        for (_,tier) in &candidates {
+            let path = root.join(tier).join(&key);
+            let Ok(file) = File::open(&path) else { continue; };
+            let Ok(meta) = file.metadata() else { continue; };
+            if !meta.is_file() || meta.len() > MAX_HELPER_OUTPUT_BYTES as u64
+                || (meta.mtime(),meta.mtime_nsec()) < (metadata.mtime(),metadata.mtime_nsec())
+                || (meta.mtime(),meta.mtime_nsec()) < (metadata.ctime(),metadata.ctime_nsec()) { continue; }
+            let mut bytes = Vec::new();
+            if file.take((MAX_HELPER_OUTPUT_BYTES+1) as u64).read_to_end(&mut bytes).is_err() { continue; }
+            if let Ok(png) = decode(&bytes,width,height,Some((&uri,metadata))) { return Some(png); }
+        }
     }
     None
+}
+
+/// Cache keys to try: the canonical URI, then the same file under `$HOME` when `$HOME` is a symlink
+/// (Fedora Atomic: /home -> /var/home). Nautilus, Thunar/tumbler and pcmanfm key the shared cache by
+/// the path that was browsed; only cosmic-files uses the canonical path.
+fn cache_uris(source: &Path) -> Vec<String> {
+    let mut uris = vec![file_uri(source)];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute()) {
+        if let Ok(real) = fs::canonicalize(&home) {
+            if real != home {
+                if let Ok(rest) = source.strip_prefix(&real) { uris.push(file_uri(&home.join(rest))); }
+            }
+        }
+    }
+    uris
+}
+
+/// The spec stores whole seconds; libfm/pcmanfm write `seconds.fraction`. Compare whole seconds.
+fn parse_mtime(text: &str) -> Option<i64> {
+    text.parse::<i64>().ok().or_else(|| text.split_once('.')
+        .filter(|(_, fraction)| !fraction.is_empty() && fraction.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|(seconds, _)| seconds.parse().ok()))
 }
 
 pub fn render(request: RenderCommand) -> Result<Vec<u8>, Error> {
@@ -175,6 +210,7 @@ pub fn render(request: RenderCommand) -> Result<Vec<u8>, Error> {
     let cached_png = root.as_ref().and_then(|root| cached(root,&path,&metadata,width,height));
     let output = match cached_png {
         Some(bytes) => bytes,
+        None if !adapter_available() => freedesktop::render(&path,width,height)?,
         None => {
             let adapter = adapter_path().ok_or(Error::NativeUnavailable)?;
             let uri = file_uri(&path);
@@ -285,6 +321,20 @@ mod tests {
             if duplicate { assert_eq!(result,Err(Error::EncodeFailed)); }
             else { assert!(result.is_ok()); }
         }
+    }
+    #[test]
+    fn fractional_libfm_mtime_is_a_cache_hit() {
+        assert_eq!((parse_mtime("12"),parse_mtime("12.317085"),parse_mtime("12."),parse_mtime("x"),parse_mtime("1.5e3")),(Some(12),Some(12),None,None,None));
+        let dir=tempdir().unwrap(); let root=dir.path().join("cache"); fs::create_dir_all(root.join("normal")).unwrap();
+        let source=dir.path().join("pcmanfm.png"); fs::write(&source,b"source").unwrap();
+        let metadata=fs::metadata(&source).unwrap(); let uri=file_uri(&source);
+        let entry=root.join("normal").join(format!("{:x}.png",md5::compute(&uri)));
+        let mut encoder=png::Encoder::new(File::create(&entry).unwrap(),2,2);
+        encoder.set_color(png::ColorType::Rgba); encoder.set_depth(png::BitDepth::Eight);
+        encoder.add_text_chunk("Thumb::MTime".into(),format!("{}.317085",metadata.mtime())).unwrap();
+        encoder.add_text_chunk("Thumb::URI".into(),uri.clone()).unwrap();
+        encoder.write_header().unwrap().write_image_data(&[90;16]).unwrap();
+        assert!(cached(&root,&source,&metadata,128,128).is_some());
     }
     #[test]
     fn malformed_pixels_and_missing_or_deleted_sources_are_rejected() {

@@ -18,7 +18,7 @@ def build_candidate(data_root: Path, *, ui_fixture: Path | None = None):
     # Configure before importing modules with default store paths. Explicit
     # AuthManager/Files/repository constructors below additionally bind stores.
     data_root = data_root.resolve()
-    os.environ.update(OPEN_CLANK_DATA_DIR=str(data_root), ODYSSEUS_DATA_DIR=str(data_root),
+    os.environ.update(OPEN_CLANK_DATA_DIR=str(data_root),
                       AUTH_ENABLED='true', TREEHOUSE_REPOSITORY_PATH=str(data_root / 'treehouse.sqlite3'),
                       DATABASE_URL='sqlite:///' + str(data_root / 'application.sqlite3'),
                       FM_DB_PATH=str(data_root / 'frankenmemory.sqlite3'))

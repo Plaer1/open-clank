@@ -35,6 +35,10 @@ class CaptureError(ValueError):
     pass
 
 
+class ActorCaptureFenced(CaptureError):
+    pass
+
+
 def _hash(value):
     return hashlib.sha256(str(value).encode()).hexdigest()
 
@@ -157,24 +161,48 @@ class LoggingCaptureStore:
         self.health = {}
         self.previews = {}
         self.finished = {}
+        self.actor_fences = set()
+        self.actor_fence_saturated = set()
 
-    def admit(self, *, owner, holder_id, context, binding):
+    def admit(self, *, owner, holder_id, context, binding, original_grant_revision=None):
         """One validated bound scope; no database work precedes dispatch."""
         if not context or context.get("owner") != owner or context.get("holder_id") != holder_id or context.get("root_operation_id") != binding.root_operation_id:
             raise CaptureError("inactive or foreign logging operation")
-        policy = self.policy.pin_policy(owner, binding.root_operation_id, holder_id=holder_id)
+        actor_execution = context.get('actor_execution')
+        if actor_execution is not None:
+            if type(actor_execution) is not dict or set(actor_execution) != {'sessionID','rootOperationID','actorID','executionRevision'}:
+                raise CaptureError('actor logging identity unavailable')
+            actor_key = (owner,holder_id,actor_execution['sessionID'],actor_execution['rootOperationID'],actor_execution['actorID'],actor_execution['executionRevision'])
+            with self.lock:
+                if actor_key in self.actor_fences or (owner,holder_id) in self.actor_fence_saturated:
+                    raise ActorCaptureFenced('actor logging outcome unavailable')
+            pin_id = 'actor-binding:' + binding.id
+            policy = self.policy.pin_actor_snapshot(owner,binding.id,context.get('logging_policy_snapshot'),
+                holder_id=holder_id,private=bool(context.get('incognito') or context.get('temporary')))
+        else:
+            pin_id = binding.root_operation_id
+            policy = self.policy.pin_policy(owner,pin_id,holder_id=holder_id)
         private = bool(context.get("incognito") or context.get("temporary") or
-                       self.policy.private_operation(owner, binding.root_operation_id))
+                       self.policy.private_operation(owner, pin_id) or self.policy.private_operation(owner, binding.root_operation_id))
         persistence = {"numeric": not private, "content": not private,
                        "reason": "incognito" if context.get("incognito") else "temporary" if private else "normal"}
         attribution = {key: context.get(key) for key in (
             "root_operation_id", "operation_id", "session_id", "workspace_id", "operation_type", "actor_id", "actor_kind", "route_id")}
+        if actor_execution is not None:
+            attribution['host_account_id'] = context.get('host_account_id')
+            attribution['mapping_revision'] = context.get('mapping_revision')
+            attribution['actor_execution'] = dict(actor_execution)
+            attribution['policy_pin_id'] = pin_id
         attribution.update(instance_id=holder_id, provider_id=binding.provider_id,
                            connection_id=binding.connection_id, account_id=binding.selected_account_id,
                            billing_lane=binding.billing_lane, requested_model=binding.model_id, actual_model=None,
+                           binding_id=binding.id, binding_revision=binding.revision,
+                           binding_route_id=binding.model_route_id,
                            identity_coverage="complete" if context.get("operation_id") else "partial")
         expired = []
         with self.lock:
+            if actor_execution is not None and (actor_key in self.actor_fences or (owner,holder_id) in self.actor_fence_saturated):
+                raise ActorCaptureFenced('actor logging outcome unavailable')
             now = time.monotonic()
             for pool in (self.admissions, self.finished):
                 for token, record in list(pool.items()):
@@ -196,10 +224,67 @@ class LoggingCaptureStore:
                     "identityCoverage": attribution["identity_coverage"],
                     "transportMode": "advanced_proxy" if policy["advanced_enabled"] and persistence["content"] else "direct"}}
             self.admissions[token] = {"key": key, "context": attribution, "policy": policy,
-                "persistence": persistence, "expires": now + 24*3600, "dispatches": {}, "result": result}
+                "persistence": persistence, "expires": now + 24*3600, "dispatches": {}, "result": result,
+                'refresh_binding':{'credential_revision':getattr(binding,'credential_revision',None),
+                    'credential_owner':getattr(binding,'credential_owner',None),'grant_id':getattr(binding,'grant_id',None),
+                    'state':getattr(binding,'state',None),
+                    'grant_revision':original_grant_revision if type(original_grant_revision) is int and original_grant_revision > 0 else None}}
         for record in expired:
             self._close_gap(record, "delivery_timeout")
         return copy.deepcopy(result)
+
+    def refresh_continuity_current(self, db, *, owner, holder_id, admission_id, binding, previous_revision, dispatch_id, binding_revision_delta=1):
+        """Verify one live captured dispatch inside the existing attempt transaction."""
+        from core.provider_models import ProviderShareGrant
+        from src.openclank.provider_store import AccountSelector, ModelSelector
+        from routes.prefs_routes import PREFERENCE_LOCK
+        captured = preference = False
+        try:
+            if type(binding_revision_delta) is not int or binding_revision_delta not in (1, 2): return False
+            captured = self.lock.acquire(blocking=False)
+            if not captured: return False
+            preference = PREFERENCE_LOCK.try_enter()
+            if not preference: return False
+            scope=self.admissions.get(admission_id)
+            if (not scope or scope.get('expires',0)<=time.monotonic() or scope.get('actor_closed') or scope.get('erased')
+                or scope['key'][:2]!=(owner,holder_id) or scope['persistence'].get('numeric') is not True): return False
+            context=scope['context']; frozen=scope.get('refresh_binding') or {}
+            if binding_revision_delta == 2 and frozen.get('state') != 'uncommitted': return False
+            actor={'sessionID':binding.engine_session_id,'rootOperationID':binding.root_operation_id,
+                   'actorID':binding.actor_id,'executionRevision':binding.execution_revision}
+            if (binding.actor_id is None or context.get('actor_execution')!=actor
+                or frozen.get('credential_revision')!=previous_revision or frozen.get('credential_owner')!=binding.credential_owner
+                or frozen.get('grant_id')!=binding.grant_id or context.get('binding_id')!=binding.id
+                or context.get('binding_revision')!=binding.revision-binding_revision_delta or context.get('root_operation_id')!=binding.root_operation_id
+                or context.get('connection_id')!=binding.connection_id or context.get('provider_id')!=binding.provider_id
+                or context.get('billing_lane')!=binding.billing_lane or context.get('requested_model')!=binding.model_id
+                or context.get('binding_route_id')!=binding.model_route_id or context.get('account_id')!=binding.selected_account_id
+                or context.get('instance_id')!=holder_id or self.policy.private_operation(owner,context.get('policy_pin_id') or binding.root_operation_id)
+                or self.policy.private_operation(owner,binding.root_operation_id)): return False
+            record=scope['dispatches'].get(dispatch_id)
+            if not record: return False
+            detail=db.query(LoggingAttemptDetail).filter_by(id=record['detail_id'],owner=owner,instance_id=holder_id,
+                root_operation_id=binding.root_operation_id,attempt_id=dispatch_id).first()
+            if detail is None or detail.capture_state not in ('pending','complete') or not isinstance(detail.attribution,dict): return False
+            if any(detail.attribution.get(k)!=context.get(k) for k in ('binding_id','binding_revision','binding_route_id','connection_id','account_id','actor_execution')): return False
+            if binding.grant_id:
+                grant=db.query(ProviderShareGrant).filter_by(id=binding.grant_id,owner=binding.credential_owner,
+                    recipient=owner,connection_id=binding.connection_id,state='active').first()
+                if (grant is None or (binding_revision_delta == 2 and (frozen.get('grant_revision') is None
+                    or grant.revision != frozen['grant_revision'])) or grant.billing_lane!=binding.billing_lane
+                    or not AccountSelector.parse(grant.account_selector).includes(binding.selected_account_id)
+                    or not ModelSelector.parse(grant.model_selector).includes(binding.model_route_id)): return False
+            elif binding.credential_owner!=owner: return False
+            return True
+        except Exception:
+            return False
+        finally:
+            try:
+                if preference: PREFERENCE_LOCK.__exit__(None, None, None)
+            except Exception:
+                pass
+            finally:
+                if captured: self.lock.release()
 
     def observe_probe(self, *, owner, provider_id, endpoint_id, model_id, url, headers, body, send):
         """Authenticated app-owned probe transport; no external interception.
@@ -343,12 +428,116 @@ class LoggingCaptureStore:
             health = self.health.setdefault(owner, {"last_successful_write": None, "losses": {}})
             health["losses"][kind] = health["losses"].get(kind, 0)+1
 
+    def _malformed_diagnostic(self, *, owner, holder_id, payload):
+        """Best-effort annotation of one already-persisted self-owned first commit."""
+        import re
+        from routes.prefs_routes import PREFERENCE_LOCK
+        from core.provider_models import ProviderOperationBinding, ProviderAccount
+        value = payload.get("diagnosticOnly")
+        fields = {"version", "kind", "profile", "httpStatus", "upstreamDispatchID"}
+        uuid = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+        if (set(payload) != {"admissionID", "dispatchID", "source", "sequence", "diagnosticOnly"}
+                or type(value) is not dict or type(value.get("version")) is not int
+                or not ((value["version"] == 1 and set(value) == fields)
+                        or (value["version"] == 2 and set(value) == fields | {"previousCredentialRevision", "credentialRevision"}
+                            and type(value["previousCredentialRevision"]) is int and value["previousCredentialRevision"] >= 1
+                            and type(value["credentialRevision"]) is int and value["credentialRevision"] == value["previousCredentialRevision"] + 1))
+                or value["kind"] != "malformed_success" or value["profile"] != "openai.codex.responses.v1"
+                or type(value["httpStatus"]) is not int or not 200 <= value["httpStatus"] <= 299
+                or any(type(x) is not str or re.fullmatch(uuid, x) is None for x in (payload.get("dispatchID"), value["upstreamDispatchID"]))
+                or payload["dispatchID"] == value["upstreamDispatchID"] or payload.get("source") != "sdk" or payload.get("sequence") != 0):
+            return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+        captured = preference = record_locked = False
+        db = None
+        connection = None
+        previous_busy = None
+        try:
+            captured = self.lock.acquire(blocking=False)
+            if not captured: return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+            preference = PREFERENCE_LOCK.try_enter()
+            if not preference: return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+            scope = self.admissions.get(payload.get("admissionID"))
+            if (not scope or scope["key"][:2] != (owner, holder_id) or scope.get("actor_closed") or scope.get("erased")
+                    or scope.get("expires", 0) <= time.monotonic() or scope["persistence"].get("numeric") is not True
+                    or not scope["policy"].get("advanced_enabled")):
+                return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+            context, frozen = scope["context"], scope.get("refresh_binding") or {}
+            if (self.policy.private_operation(owner, context.get("policy_pin_id") or context.get("root_operation_id"))
+                    or self.policy.private_operation(owner, context.get("root_operation_id"))):
+                return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+            record = scope["dispatches"].get(payload["dispatchID"])
+            if not record or not record["lock"].acquire(blocking=False):
+                return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+            record_locked = True
+            db = self.session_factory()
+            connection = db.connection()
+            previous_busy = connection.exec_driver_sql("PRAGMA busy_timeout").scalar()
+            connection.exec_driver_sql("PRAGMA busy_timeout=0")
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            binding = db.query(ProviderOperationBinding).filter_by(id=context.get("binding_id"), owner=owner).first()
+            actor = context.get("actor_execution")
+            if (binding is None or binding.state != "committed" or frozen.get("state") != "uncommitted"
+                    or binding.revision != context.get("binding_revision", 0) + 1 or binding.grant_id is not None
+                    or binding.credential_owner != owner
+                    or (value["version"] == 1 and binding.credential_revision != frozen.get("credential_revision"))
+                    or (value["version"] == 2 and (frozen.get("credential_revision") != value["previousCredentialRevision"]
+                        or binding.credential_revision != value["credentialRevision"]))
+                    or context.get("instance_id") != holder_id or context.get("root_operation_id") != binding.root_operation_id
+                    or context.get("connection_id") != binding.connection_id or context.get("provider_id") != "openai"
+                    or context.get("billing_lane") != "subscription" or binding.provider_id != "openai" or binding.billing_lane != "subscription"
+                    or context.get("requested_model") != binding.model_id or context.get("binding_route_id") != binding.model_route_id
+                    or context.get("account_id") != binding.selected_account_id
+                    or actor != {"sessionID":binding.engine_session_id,"rootOperationID":binding.root_operation_id,"actorID":binding.actor_id,"executionRevision":binding.execution_revision}):
+                return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+            account = db.query(ProviderAccount).filter_by(id=binding.selected_account_id, owner=owner, connection_id=binding.connection_id, enabled=True, deleted_at=None).first()
+            detail = db.query(LoggingAttemptDetail).filter_by(id=record["detail_id"], owner=owner, instance_id=holder_id, root_operation_id=binding.root_operation_id, attempt_id=payload["dispatchID"]).first()
+            if (account is None or account.credential_version != binding.credential_revision or detail is None
+                    or detail.capture_state not in ("pending", "complete") or not isinstance(detail.attribution, dict)
+                    or any(detail.attribution.get(k) != context.get(k) for k in ("binding_id", "binding_revision", "binding_route_id", "connection_id", "account_id", "actor_execution"))
+                    or (detail.attribution.get("http") or {}).get("status") != value["httpStatus"]):
+                return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+            if (scope.get("expires", 0) <= time.monotonic() or scope.get("actor_closed") or scope.get("erased")
+                    or self.admissions.get(payload.get("admissionID")) is not scope
+                    or self.policy.private_operation(owner, context.get("policy_pin_id") or binding.root_operation_id)
+                    or self.policy.private_operation(owner, binding.root_operation_id)):
+                return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+            metadata = dict(detail.attribution); prior = metadata.get("malformed_success")
+            if prior is not None:
+                return {"accepted": prior == value, "replayed": prior == value, "captureState": "ready" if prior == value else "unavailable"}
+            metadata["malformed_success"] = dict(value); detail.attribution = metadata
+            db.flush()
+            # Keep zero busy-wait through the actual commit, then restore the
+            # pooled connection before returning it. The session rollback below
+            # only closes SQLAlchemy's wrapper after the explicit SQLite COMMIT.
+            connection.exec_driver_sql("COMMIT")
+            connection.exec_driver_sql("PRAGMA busy_timeout=" + str(int(previous_busy)))
+            previous_busy = None
+            return {"accepted": True, "replayed": False, "captureState": "ready"}
+        except Exception:
+            return {"accepted": False, "replayed": False, "captureState": "unavailable"}
+        finally:
+            if db is not None:
+                try:
+                    if connection is not None and previous_busy is not None:
+                        connection.exec_driver_sql("PRAGMA busy_timeout=" + str(int(previous_busy)))
+                except Exception:
+                    pass
+                try: db.rollback()
+                except Exception: pass
+                try: db.close()
+                except Exception: pass
+            if record_locked: record["lock"].release()
+            if preference: PREFERENCE_LOCK.__exit__(None, None, None)
+            if captured: self.lock.release()
+
     def events(self, *, owner, holder_id, payload):
         """Persist ordinary facts and optional detail under a scope capability.
 
         Only map bookkeeping uses the global lock. Each dispatch owns its own
         write lock; database, compression and retention never block admission.
         """
+        if "diagnosticOnly" in payload:
+            return self._malformed_diagnostic(owner=owner, holder_id=holder_id, payload=payload)
         token, dispatch_id = payload.get("admissionID"), payload.get("dispatchID")
         if not isinstance(dispatch_id, str) or not 1 <= len(dispatch_id) <= 128:
             raise CaptureError("invalid dispatch identity")
@@ -361,7 +550,10 @@ class LoggingCaptureStore:
             scope = self.admissions.get(token) or self.finished.get(token)
             if not scope or scope["key"][:2] != (owner, holder_id) or scope["expires"] < time.monotonic():
                 raise CaptureError("invalid capture admission")
-            if not scope["persistence"]["numeric"] or self.policy.private_operation(owner, scope["context"]["root_operation_id"]):
+            if scope.get('actor_closed'):
+                return {'accepted':False,'replayed':False,'captureState':'execution_finished'}
+            if (not scope["persistence"]["numeric"] or self.policy.private_operation(owner, scope["context"]["root_operation_id"])
+                or self.policy.private_operation(owner,scope['context'].get('policy_pin_id') or scope['context']['root_operation_id'])):
                 return {"accepted": True, "replayed": False, "captureState": "private"}
             record = scope["dispatches"].get(dispatch_id)
             if record is None:
@@ -374,6 +566,8 @@ class LoggingCaptureStore:
                     "event_bytes": 0, "lock": threading.RLock(), "gap_sequence": 0}
                 scope["dispatches"][dispatch_id] = record
         with record["lock"]:
+            if scope.get('actor_closed'):
+                return {'accepted':False,'replayed':False,'captureState':'execution_finished'}
             if scope.get("erased"):
                 return {"accepted": False, "replayed": False, "captureState": "erased"}
             if sequence <= record["sequences"].get(source, -1):
@@ -516,7 +710,8 @@ class LoggingCaptureStore:
 
     def _close_gap(self, scope, reason="delivery_timeout"):
         owner = scope["key"][0]
-        if not scope["persistence"]["numeric"] or self.policy.private_operation(owner, scope["context"]["root_operation_id"]):
+        if (not scope["persistence"]["numeric"] or self.policy.private_operation(owner, scope["context"]["root_operation_id"])
+            or self.policy.private_operation(owner,scope['context'].get('policy_pin_id') or scope['context']['root_operation_id'])):
             return
         for record in list(scope["dispatches"].values()):
             with record["lock"]:
@@ -541,7 +736,8 @@ class LoggingCaptureStore:
     def finish_operation(self, owner, holder_id, root_operation_id):
         with self.lock:
             records = [(token, rec) for token, rec in self.admissions.items()
-                       if rec["key"][:2] == (owner, holder_id) and rec["context"]["root_operation_id"] == root_operation_id]
+                       if rec["key"][:2] == (owner, holder_id) and rec["context"]["root_operation_id"] == root_operation_id
+                       and not rec['context'].get('actor_execution')]
             for token, record in records:
                 record["expires"] = time.monotonic()+300
                 self.finished[token] = record
@@ -549,6 +745,84 @@ class LoggingCaptureStore:
         for _, record in records:
             self._close_gap(record)
         self.policy.release_pin(owner, root_operation_id, holder_id=holder_id)
+
+    def finish_actor_execution(self, owner, holder_id, identity):
+        with self.lock:
+            records = [(token,rec) for token,rec in self.admissions.items()
+                       if rec['key'][:2] == (owner,holder_id) and rec['context'].get('actor_execution') == identity]
+            for token,record in records:
+                record['actor_closed'] = True
+                record['expires'] = time.monotonic()+300
+                self.finished[token] = record
+                self.admissions.pop(token,None)
+        for _,record in records:
+            self._close_gap(record)
+            self.policy.release_pin(owner,record['context']['policy_pin_id'],holder_id=holder_id)
+
+    def actor_final_context(self, owner, holder_id, identity, binding_id, binding_revision):
+        """Return only the exact live host-admitted numeric actor context."""
+        with self.lock:
+            records = [record for record in self.admissions.values()
+                       if record['key'][:2] == (owner,holder_id)
+                       and record['context'].get('actor_execution') == identity
+                       and record['context'].get('binding_id') == binding_id
+                       and record['context'].get('binding_revision') == binding_revision
+                       and not record.get('actor_closed')]
+            if len(records) != 1:
+                return None
+            record = records[0]
+            pin = record['context'].get('policy_pin_id') or identity['rootOperationID']
+            if (not record['persistence']['numeric'] or self.policy.private_operation(owner,pin)
+                or self.policy.private_operation(owner,identity['rootOperationID'])):
+                return None
+            return copy.deepcopy(record['context'])
+
+    def actor_diagnostic_policy(self, owner, holder_id, identity, account_id, account_current):
+        """Read an existing exact nonprivate numeric admission and its immutable pin."""
+        from routes.prefs_routes import PREFERENCE_LOCK
+        if (type(owner) is not str or not owner or type(holder_id) is not str or not holder_id
+                or type(account_id) is not str or not account_id or type(identity) is not dict
+                or set(identity) != {'sessionID','rootOperationID','actorID','executionRevision'}
+                or not callable(account_current) or account_current() is not True): return None
+        now = time.monotonic()
+        with self.lock:
+            records = [record for pool in (self.admissions, self.finished) for record in pool.values()
+                if record['key'][:2] == (owner, holder_id) and record.get('expires',0) > now
+                and record['context'].get('actor_execution') == identity]
+            # An admission can be pinned before C2 exists. The caller must join
+            # this exact tuple to the separately verified current C2 account;
+            # an admission that names a different account is never usable.
+            if any(record['context'].get('host_account_id') not in (None, account_id) for record in records): return None
+            if len(records) != 1: return None
+            record = records[0]; context = record['context']; pin_id = context.get('policy_pin_id')
+            if (record.get('persistence',{}).get('numeric') is not True or type(pin_id) is not str
+                    or not pin_id.startswith('actor-binding:') or type(context.get('binding_id')) is not str
+                    or pin_id != 'actor-binding:' + context['binding_id']
+                    or type(context.get('binding_revision')) is not int or context['binding_revision'] < 1): return None
+            key = (self.policy._owner(owner), pin_id)
+            with PREFERENCE_LOCK:
+                active = self.policy.pins.get(key); closed = self.policy.completed.get(key)
+                if active is not None:
+                    if holder_id not in active.get('holders', ()) or active.get('private') is not False or active.get('policy') != record.get('policy'): return None
+                elif (not closed or closed[1] <= now or closed[2] is not False or closed[0] != record.get('policy')):
+                    return None
+                if self.policy.private_operation(owner, identity['rootOperationID']): return None
+            if account_current() is not True: return None
+            return {'bindingID':context['binding_id'], 'bindingRevision':context['binding_revision'],
+                    'policyRevision':record['policy']['revision'], 'holderID':holder_id}
+
+    def fence_actor_execution(self, owner, holder_id, identity):
+        """Fence uncertain capture only; actor control/occupancy stays independent."""
+        key = (owner,holder_id,identity['sessionID'],identity['rootOperationID'],identity['actorID'],identity['executionRevision'])
+        with self.lock:
+            if len(self.actor_fences) >= 4096 and key not in self.actor_fences:
+                self.actor_fence_saturated.add((owner,holder_id))
+            else:
+                self.actor_fences.add(key)
+            for pool in (self.admissions,self.finished):
+                for record in pool.values():
+                    if record['key'][:2] == (owner,holder_id) and record['context'].get('actor_execution') == identity:
+                        record['actor_closed'] = True
 
     def recover_generation(self, owner, holder_id):
         """One-owner startup repair; old capture gaps are not provider outcomes."""
@@ -574,6 +848,8 @@ class LoggingCaptureStore:
             records = [rec for pool in (self.admissions, self.finished) for rec in pool.values() if rec["key"][:2] == (owner, holder_id)]
             self.admissions = {token: rec for token, rec in self.admissions.items() if rec["key"][:2] != (owner, holder_id)}
             self.finished = {token: rec for token, rec in self.finished.items() if rec["key"][:2] != (owner, holder_id)}
+            self.actor_fences = {key for key in self.actor_fences if key[:2] != (owner,holder_id)}
+            self.actor_fence_saturated.discard((owner,holder_id))
         for record in records:
             self._close_gap(record, "interrupted")
         self.policy.release_holder(owner, holder_id)
@@ -607,6 +883,15 @@ class LoggingCaptureStore:
                       "dispatch_id": row.attempt_id, "dispatch_index": context.get("dispatch_index"),
                       "retry_of_dispatch_id": context.get("retry_of_dispatch_id"),
                       "identity_coverage": context.get("identity_coverage", "partial")}
+            diagnostic = context.get("malformed_success")
+            if (type(diagnostic) is dict and set(diagnostic) == {"version", "kind", "profile", "httpStatus", "upstreamDispatchID"}
+                    and type(diagnostic.get("version")) is int and diagnostic["version"] == 1
+                    and diagnostic.get("kind") == "malformed_success" and diagnostic.get("profile") == "openai.codex.responses.v1"
+                    and type(diagnostic.get("httpStatus")) is int and 200 <= diagnostic["httpStatus"] <= 299
+                    and isinstance(diagnostic.get("upstreamDispatchID"), str)
+                    and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", diagnostic["upstreamDispatchID"])):
+                public["malformed_success"] = dict(diagnostic)
+            public["provider_attempts"] = self._provider_attempts(db, owner, row)
             try:
                 from services.stats.ledger import read_attempt_measurements
                 public["measurement"] = read_attempt_measurements(db, owner=owner, instance_id=row.instance_id,
@@ -614,6 +899,9 @@ class LoggingCaptureStore:
             except Exception:
                 public["measurement"] = {"metrics": {}, "metric_coverage": {}, "coverage": "unavailable",
                     "loss_reasons": ["measurement_read_unavailable"], "provenance": []}
+            if isinstance(public['measurement'], dict) and 'dispatch_match' in public['provider_attempts']:
+                public['measurement']['provider_attempt'] = (public['provider_attempts'].get('dispatch_match', {'state':'unavailable'})
+                    if public['measurement'].get('coverage') not in ('missing','unavailable') else {'state':'unavailable'})
             retained = {category for (category,) in db.query(LoggingCaptureBody.category).filter_by(owner=owner, attempt_detail_id=row.id)}
             events_retained = db.query(LoggingCaptureEvent.id).filter_by(owner=owner, attempt_detail_id=row.id).first() is not None
             preferences = context.get("content_preferences") or {}
@@ -633,6 +921,40 @@ class LoggingCaptureStore:
             return {"schema": "open-clank.logging.v1", "owner_scope": owner_scope(owner), "resource": public}
         finally:
             db.close()
+
+    @staticmethod
+    def _provider_attempts(db, owner, detail):
+        """Bounded operation-level evidence; never infer a dispatch match."""
+        from core.provider_models import ProviderOperationBinding
+        from src.openclank.provider_store import _validated_attempt_evidence, _validated_dispatch_observation, ProviderValidationError
+
+        context = detail.attribution if isinstance(detail.attribution, dict) else {}
+        binding_id, revision, route_id = context.get("binding_id"), context.get("binding_revision"), context.get("binding_route_id")
+        if (not isinstance(binding_id, str) or not binding_id or type(revision) is not int or revision < 1
+                or not isinstance(route_id, str) or not route_id or not isinstance(context.get("connection_id"), str)):
+            return {"state": "unavailable", "reason": "binding_evidence_missing", "items": []}
+        binding = db.query(ProviderOperationBinding).filter_by(id=binding_id, owner=owner,
+            root_operation_id=detail.root_operation_id, connection_id=context["connection_id"], model_route_id=route_id).first()
+        if binding is None or binding.revision < revision or not isinstance(binding.attempts, list):
+            return {"state": "unavailable", "reason": "binding_evidence_unavailable", "items": []}
+        attempts = binding.attempts
+        items = []
+        for attempt in attempts[-32:]:
+            if (not isinstance(attempt, dict) or type(attempt.get("attempt")) is not int or attempt["attempt"] < 1
+                    or attempt.get("outcome") not in {"success", "auth", "quota", "entitlement", "transient", "unknown"}):
+                return {"state": "unavailable", "reason": "binding_evidence_invalid", "items": []}
+            try:
+                evidence = _validated_attempt_evidence(attempt.get("evidence"), attempt["outcome"])
+                observation = _validated_dispatch_observation(attempt.get('dispatch_observation'), attempt['outcome'], evidence)
+            except ProviderValidationError:
+                return {"state": "unavailable", "reason": "binding_evidence_invalid", "items": []}
+            items.append({"attempt": attempt["attempt"], "outcome": attempt["outcome"], **({"evidence": evidence} if evidence else {}),
+                          **({'dispatchObservation':observation} if observation else {})})
+        matches=[item for item in items if item.get('dispatchObservation',{}).get('captureDispatchID')==detail.attempt_id]
+        result={"state": "reported", "scope": "operation", "items": items, "truncated": len(attempts) > 32}
+        if any('dispatchObservation' in item for item in items):
+            result['dispatch_match'] = {'state':'exact','attempt':matches[0]['attempt']} if len(attempts)<=32 and len(matches)==1 else {'state':'unavailable'}
+        return result
 
     @staticmethod
     def _session_detail_query(db, owner, session_id):

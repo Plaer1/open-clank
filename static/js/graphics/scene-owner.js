@@ -46,6 +46,7 @@ export function createSceneOwner(options = {}) {
     win = typeof window !== 'undefined' ? window : globalThis,
     doc = typeof document !== 'undefined' ? document : null,
     renderMode = 'continuous',
+    maxFps = 0,
   } = options;
 
   if (!id) throw new Error('scene owner requires an id');
@@ -67,6 +68,7 @@ export function createSceneOwner(options = {}) {
   const reducedMotionOf = () => localReduced || !!(motionQuery && motionQuery.matches);
 
   let animationFrame = 0;
+  let cadenceTimer = 0;
   let paintOnceFrame = 0;
   let paintOnceToken = 0;
   let disposed = false;
@@ -78,6 +80,8 @@ export function createSceneOwner(options = {}) {
   let frames = 0;
 
   function cancelFrame() {
+    if (cadenceTimer) win.clearTimeout(cadenceTimer);
+    cadenceTimer = 0;
     if (animationFrame && typeof win.cancelAnimationFrame === 'function') {
       win.cancelAnimationFrame(animationFrame);
     }
@@ -90,11 +94,25 @@ export function createSceneOwner(options = {}) {
   }
 
   function scheduleFrame() {
-    if (disposed || suspended) return;
+    if (disposed || suspended || doc?.hidden) return;
     if (demand && animationUntil<=performanceNow()) return; // finite work only
-    if (animationFrame || paintOnceFrame) return; // already scheduled — never stack loops
+    if (animationFrame || paintOnceFrame || cadenceTimer) return; // already scheduled — never stack loops
     if (reducedMotionOf()) return;
     if (typeof win.requestAnimationFrame !== 'function') return;
+    // A throttled scene should let the browser compositor sleep between
+    // paints. Polling RAF every refresh still wakes software compositors.
+    if (!demand && maxFps > 0 && lastTime && typeof win.setTimeout === 'function') {
+      const delay = lastPaintTime + 1000 / maxFps - performanceNow() - 1;
+      if (delay > 1) {
+        cadenceTimer = win.setTimeout(() => {
+          cadenceTimer = 0;
+          if (!disposed && !suspended && !doc?.hidden) {
+            animationFrame = win.requestAnimationFrame(frame);
+          }
+        }, delay);
+        return;
+      }
+    }
     animationFrame = win.requestAnimationFrame(frame);
   }
 
@@ -110,11 +128,18 @@ export function createSceneOwner(options = {}) {
     const reduced = reducedMotionOf();
     if(demand&&animationUntil&&time<animationUntil&&requestedFps>0&&lastPaintTime&&time-lastPaintTime<1000/requestedFps-1){scheduleFrame();return;}
     if (!demand && !reduced && lastTime && scene && typeof scene.advance === 'function') {
-      scene.advance(Math.min(34, Math.max(0, time - lastTime)), false);
+      const maxStep = maxFps > 0 ? Math.max(34, 1000 / maxFps + 17) : 34;
+      scene.advance(Math.min(maxStep, Math.max(0, time - lastTime)), false);
     } else if (!demand && reduced && scene && typeof scene.advance === 'function') {
       scene.advance(0, true);
     }
+    const skipPaint = !demand && !reduced && maxFps > 0 && lastTime && lastPaintTime
+      && time - lastPaintTime < 1000 / maxFps - 1;
     lastTime = demand ? 0 : time;
+    if (skipPaint) {
+      scheduleFrame();
+      return;
+    }
     painting = true;
     try {
       paint(demand && !animationUntil ? 0 : time, reduced, scene);
@@ -211,7 +236,7 @@ export function createSceneOwner(options = {}) {
     id,
     get disposed() { return disposed; },
     get suspended() { return suspended; },
-    get running() { return !!(animationFrame || demand && paintOnceFrame) && !disposed && !suspended; },
+    get running() { return !!(animationFrame || cadenceTimer || demand && paintOnceFrame) && !disposed && !suspended; },
     get renderMode() { return renderMode; },
     get frames() { return frames; },
     get reducedMotion() { return reducedMotionOf(); },

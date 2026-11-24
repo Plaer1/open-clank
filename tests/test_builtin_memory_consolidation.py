@@ -1,5 +1,6 @@
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,58 +28,45 @@ def _read_memories(data_dir):
 
 
 @pytest.mark.asyncio
-async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monkeypatch, tmp_path):
-    from src import constants
+async def test_frankenmemory_tidy_unavailable_before_any_mutation(monkeypatch):
+    from src import ai_interaction, memory
     from src.openclank import modality_facade
-    action_consolidate_memory = _import_consolidate_action()
+    from services.memory import memory_extractor
 
-    long_alice_text = "Alice private project context. " + ("A" * 2200)
-    data_dir = _write_memories(
-        tmp_path,
-        [
-            {"id": "alice-long", "owner": "alice", "text": long_alice_text, "category": "project"},
-            {"id": "alice-short", "owner": "alice", "text": "Alice likes quiet summaries.", "category": "preference"},
-            {"id": "bob-keep", "owner": "bob", "text": "Bob secret deployment note.", "category": "project"},
-            {"id": "bob-drop", "owner": "bob", "text": "Bob secret deployment note duplicate.", "category": "project"},
-        ],
-    )
+    action = _import_consolidate_action()
+
+    class Provider:
+        provider_id = "memery"
+
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected provider access: {name}")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unexpected memory or model operation")
+
+    monkeypatch.setattr(ai_interaction, "_memory_provider", Provider())
+    monkeypatch.setattr(memory, "MemoryManager", forbidden)
+    monkeypatch.setattr(modality_facade, "complete_text", forbidden)
+    monkeypatch.setattr(memory_extractor, "audit_provider_memories", forbidden)
+
+    message, success = await action("alice")
+    assert success is False
+    assert "unavailable" in message.lower()
+    assert "admission and review" in message.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner,provider", [("", SimpleNamespace(provider_id="native")), ("alice", None)])
+async def test_consolidate_memory_missing_scope_is_unavailable(monkeypatch, tmp_path, owner, provider):
+    from src import ai_interaction, constants
+    action = _import_consolidate_action()
+    data_dir = _write_memories(tmp_path, [{"id": "a", "owner": "alice", "text": "private"}])
+    before = (data_dir / "memory.json").read_bytes()
     monkeypatch.setattr(constants, "DATA_DIR", str(data_dir))
-    prompts = []
-
-    async def fake_complete_text(**kwargs):
-        prompt = kwargs["messages"][0]["content"]
-        prompts.append(prompt)
-        if "alice-long" in prompt:
-            assert "bob-keep" not in prompt
-            return json.dumps(
-                {
-                    "keep": [
-                        {"id": "alice-long", "text": "TRUNCATED REWRITE", "category": "project"},
-                        {"id": "alice-short", "text": "Alice likes concise summaries.", "category": "preference"},
-                    ],
-                    "drop": [],
-                }
-            )
-        assert "bob-keep" in prompt
-        assert "alice-long" not in prompt
-        return json.dumps(
-            {
-                "keep": [{"id": "bob-keep", "text": "Bob secret deployment note.", "category": "project"}],
-                "drop": [{"id": "bob-drop", "reason": "duplicate"}],
-            }
-        )
-
-    monkeypatch.setattr(modality_facade, "complete_text", fake_complete_text)
-
-    message, ok = await action_consolidate_memory("")
-
-    assert ok is True
-    assert "removed 1" in message.lower()
-    assert len(prompts) == 2
-    saved = {m["id"]: m for m in _read_memories(data_dir)}
-    assert set(saved) == {"alice-long", "alice-short", "bob-keep"}
-    assert saved["alice-long"]["text"] == long_alice_text
-    assert saved["alice-short"]["text"] == "Alice likes concise summaries."
+    monkeypatch.setattr(ai_interaction, "_memory_provider", provider)
+    message, ok = await action(owner)
+    assert not ok and "unavailable" in message.lower()
+    assert (data_dir / "memory.json").read_bytes() == before
 
 
 @pytest.mark.asyncio
@@ -99,7 +87,7 @@ async def test_consolidate_memory_specific_owner_does_not_absorb_ownerless_rows(
     )
     monkeypatch.setattr(constants, "DATA_DIR", str(data_dir))
     monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", lambda *args, **kwargs: ("", "", {}))
-    monkeypatch.setattr(ai_interaction, "_memory_provider", None)
+    monkeypatch.setattr(ai_interaction, "_memory_provider", SimpleNamespace(provider_id="native"))
 
     message, ok = await action_consolidate_memory("alice")
 
@@ -117,7 +105,7 @@ async def test_consolidate_memory_removes_near_duplicates_before_ai(monkeypatch,
     from src import constants
     from src.openclank import modality_facade
     action_consolidate_memory = _import_consolidate_action()
-    monkeypatch.setattr(ai_interaction, "_memory_provider", None)
+    monkeypatch.setattr(ai_interaction, "_memory_provider", SimpleNamespace(provider_id="native"))
 
     data_dir = _write_memories(
         tmp_path,

@@ -1,8 +1,8 @@
 """Tests for endpoint_resolver — endpoint/model selection and enabled-model filtering."""
 import json
-import sqlite3
 
-import core.database as database
+import pytest
+
 from src.endpoint_resolver import (
     _first_chat_model,
     _endpoint_hidden_models,
@@ -18,16 +18,16 @@ class _Ep:
         self.hidden_models = json.dumps(hidden) if hidden is not None else None
 
 
-class TestFirstChatModel:
-    def test_skips_embedding_and_tts(self):
-        models = ["text-embedding-ada-002", "whisper-large-v3", "gpt-4o"]
-        assert _first_chat_model(models) == "gpt-4o"
-
-    def test_falls_back_to_first_when_all_non_chat(self):
-        assert _first_chat_model(["whisper-large-v3"]) == "whisper-large-v3"
-
-    def test_empty(self):
-        assert _first_chat_model([]) is None
+@pytest.mark.parametrize(("models", "expected"), [
+    (["text-embedding-ada-002", "whisper-large-v3", "gpt-4o"], "gpt-4o"),
+    (["text-embedding-ada-002", "whisper-1", "gpt-4o", "dall-e-3"], "gpt-4o"),
+    (["whisper-large-v3"], "whisper-large-v3"),
+    (["text-embedding-3-large", "text-embedding-3-small"], "text-embedding-3-large"),
+    ([], None),
+    (None, None),
+])
+def test_first_chat_model(models, expected):
+    assert _first_chat_model(models) == expected
 
 
 class TestEnabledModels:
@@ -105,30 +105,3 @@ def test_model_list_normalizer_accepts_json_and_legacy_csv():
     assert normalize_model_list('["a", "b", "a"]') == ["a", "b"]
     assert normalize_model_list(" a, b ,, a ") == ["a", "b"]
     assert normalize_model_list(["a", " b ", None, "a"]) == ["a", "b"]
-
-
-def test_legacy_model_lists_migrate_once_to_canonical_json(tmp_path, monkeypatch):
-    path = tmp_path / "model-lists.db"
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "CREATE TABLE model_endpoints ("
-            "id TEXT PRIMARY KEY, cached_models TEXT, pinned_models TEXT, hidden_models TEXT"
-            ")"
-        )
-        conn.execute(
-            "INSERT INTO model_endpoints VALUES (?, ?, ?, ?)",
-            ("legacy", "a, b, a", '["p", " q "]', None),
-        )
-        conn.execute(
-            "INSERT INTO model_endpoints VALUES (?, ?, ?, ?)",
-            ("current", '["x"]', None, "[]"),
-        )
-    monkeypatch.setattr(database, "DATABASE_URL", f"sqlite:///{path}")
-
-    assert database._migrate_model_endpoint_model_lists() == 1
-    assert database._migrate_model_endpoint_model_lists() == 0
-    with sqlite3.connect(path) as conn:
-        assert conn.execute(
-            "SELECT cached_models, pinned_models FROM model_endpoints "
-            "WHERE id = 'legacy'"
-        ).fetchone() == ('["a","b"]', '["p","q"]')

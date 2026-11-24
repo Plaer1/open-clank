@@ -340,7 +340,7 @@ describe("AppFileSystem", () => {
     )
 
     it(
-      "sends one authenticated Lore action for a multi-target agent batch",
+      "settles private multi-target History after a lost completion response",
       Effect.gen(function* () {
         // Bun's macOS AF_UNIX client closes before delivering a peer response;
         // the same hook is exercised end-to-end on Linux in the qualification matrix.
@@ -353,13 +353,14 @@ describe("AppFileSystem", () => {
         const socketPath = path.join("/tmp", `mimo-history-${Date.now()}.sock`)
         yield* filesys.writeFileString(first, "before")
         const serverScript = `
-import socket, sys
+import json, socket, sys
 path = sys.argv[1]
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind(path)
 server.listen(8)
 log = open(path + ".log", "wb")
-for _ in range(3):
+action = {}
+while True:
     conn, _ = server.accept()
     body = b""
     while b"\\n" not in body:
@@ -369,8 +370,32 @@ for _ in range(3):
         body += chunk
     log.write(body)
     log.flush()
-    conn.sendall(b"{}")
+    name, frame = next(iter(json.loads(body).items()))
+    if name == "RegisterResource":
+        result = {"Resource":{"handle":{"account_id":frame["account_id"], "workspace_id":frame["workspace_id"], "resource_id":"file:"+frame["relative_path"]}}}
+    elif name == "PrepareBatch":
+        parent = frame["envelope"]["request"]
+        rows = [dict(entry, before={"version_id":"before","fingerprint":entry["fingerprint"]}) for entry in frame["entries"]]
+        action = dict(parent, state="BeforeDurable", recovery_only=True, before_resources=rows,
+            mutation_batch={"resources":rows,"prepare":{"batch_version":1,"parent_action_id":parent["action_id"],"resource_count":len(rows),"acknowledged":True}})
+        result = {"Action":action}
+    elif name == "RecordLive":
+        action["live"] = frame["receipt"]
+        result = {"Action":action}
+    elif name == "CompleteBatch":
+        action.update(state="Complete", after_resources=[dict(entry, after={"fingerprint":entry["fingerprint"]}) for entry in frame["entries"]])
+        conn.close()
+        continue
+    elif name == "GetCaptureAction":
+        result = {"Action":action}
+    elif name == "SettleRecovery":
+        action["recovery_settled"] = True
+        result = {"Action":action}
+    else:
+        raise ValueError(name)
+    conn.sendall(json.dumps(result).encode())
     conn.close()
+    if name == "SettleRecovery": break
 log.close()
 server.close()
 `
@@ -396,7 +421,7 @@ server.close()
             { path: first, content: "after", actionId: "mimo-batch-1", history },
             { path: second, content: "created", actionId: "mimo-batch-1", history },
           ])
-          expect(history.status.status).toBe("complete")
+          expect(history.status).toEqual({status:"skipped", history_status:"skipped", action_id:"mimo-batch-1", capture_phase:"recovery_settled", durable:false})
         } finally {
           if (historyServer.exitCode === null) historyServer.kill()
           yield* Effect.promise(() => new Promise<void>((resolve) => {
@@ -408,14 +433,15 @@ server.close()
         const frames = frameBytes.toString("utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
         expect(yield* filesys.readFileString(first)).toBe("after")
         expect(yield* filesys.readFileString(second)).toBe("created")
-        expect(frames).toHaveLength(3)
-        expect(frames.map((frame) => Object.keys(frame)[0])).toEqual(["PrepareBatch", "RecordLive", "CompleteBatch"])
-        expect(frames.every((frame) => {
-          const envelope = frame[Object.keys(frame)[0]!].envelope
-          return envelope.auth.actor_id === "agent-1" && envelope.auth.account_id === "acct-1" && envelope.auth.token === "opaque-token" && envelope.action_id === "mimo-batch-1"
+        const mutations = frames.filter((frame) => !frame.RegisterResource)
+        expect(mutations.map((frame) => Object.keys(frame)[0])).toEqual(["PrepareBatch", "RecordLive", "CompleteBatch", "GetCaptureAction", "SettleRecovery"])
+        expect(mutations.every((frame) => {
+          const body = frame[Object.keys(frame)[0]!], envelope = body.envelope ?? body
+          return envelope.auth.actor_id === "agent-1" && envelope.auth.account_id === "acct-1" && envelope.auth.token === "opaque-token" && (envelope.action_id ?? envelope.request.action_id) === "mimo-batch-1"
         })).toBe(true)
-        const prepare = frames[0].PrepareBatch
+        const prepare = mutations[0].PrepareBatch
         const request = prepare.envelope.request
+        expect(request.coverage.metadata.required_recovery).toBe(true)
         expect(request.operation).toBe("replace")
         expect(request.modified_resource_ids).toHaveLength(2)
         expect(request.coverage.kind).toBe("ObservedAfterOnly")
@@ -423,8 +449,8 @@ server.close()
         expect(prepare.entries).toHaveLength(2)
         expect(prepare.entries[0].content).toBe(Buffer.from("before").toString("base64"))
         expect(prepare.entries[1].content).toBeNull()
-        expect(frames[1].RecordLive.receipt.status).toBe("Committed")
-        const complete = frames[2].CompleteBatch
+        expect(mutations[1].RecordLive.receipt.status).toBe("Committed")
+        const complete = mutations[2].CompleteBatch
         expect(complete.batch_version).toBe(1)
         expect(complete.entries).toHaveLength(2)
         expect(Buffer.from(complete.entries[0].content, "base64").toString()).toBe("after")
@@ -885,10 +911,19 @@ server.close()
       expect(AppFileSystem.contains("/a/b", "/a/c")).toBe(false)
     })
 
+    // Cross-drive containment is a Windows contract (path.relative returns the
+    // absolute `to`); on POSIX the host relative() already yields "..". Lock the
+    // predicate here so a future regress to `!rel.startsWith("..")` stays visible
+    // from any host when someone exercises win32-style pairs via contains.
+    test("contains treats an absolute relative() result as outside", () => {
+      expect(AppFileSystem.contains("C:\\a", "D:\\b")).toBe(false)
+    })
+
     test("overlaps detects overlapping paths", () => {
       expect(AppFileSystem.overlaps("/a/b", "/a/b/c")).toBe(true)
       expect(AppFileSystem.overlaps("/a/b/c", "/a/b")).toBe(true)
       expect(AppFileSystem.overlaps("/a", "/b")).toBe(false)
+      expect(AppFileSystem.overlaps("C:\\a", "D:\\b")).toBe(false)
     })
   })
 })

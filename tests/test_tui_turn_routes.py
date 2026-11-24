@@ -91,8 +91,8 @@ def test_turn_submission_is_durable_and_idempotent(monkeypatch):
         assert first.headers["x-agent-run-id"] == "turn-run-1"
         assert '"delta":"hello"' in first.text
         second = client.post("/api/tui/v1/sessions/session-1/turns", json=body)
-        assert second.status_code == 200
-        assert '"status":"complete"' in second.text
+        assert second.status_code == 409
+        assert second.json()['detail']['code'] == 'TURN_RECONCILIATION_REQUIRED'
     assert len(calls) == 1
     assert calls[0]["mode"] == "agent"
     with factory() as db:
@@ -105,8 +105,8 @@ def test_tui_run_identity_reaches_replay_active_stream_and_stop(monkeypatch):
     """A stale TUI controller cannot stop the run that replaced its turn.
 
     This drives the TUI router's public responses: initial turn forwards the
-    canonical chat header, replay and active-stream publish the retained
-    identity, and stop forwards that exact identity into the run manager.
+    canonical chat header, replay refuses an unproven replacement, and
+    active-stream and stop use the exact selected run identity.
     ``agent_runs`` separately verifies the manager rejects the stale ID; this
     test covers the controller-to-router wiring that makes that protection live.
     """
@@ -136,10 +136,15 @@ def test_tui_run_identity_reaches_replay_active_stream_and_stop(monkeypatch):
         assert initial.headers["x-agent-run-id"] == "turn-run-1"
 
         replay = client.post("/api/tui/v1/sessions/session-1/turns", json=body)
-        assert replay.headers["x-agent-run-id"] == "replacement-run"
+        assert replay.status_code == 409
+        assert replay.json()['detail']['code'] == 'TURN_RECONCILIATION_REQUIRED'
         active = client.get("/api/tui/v1/sessions/session-1/turns/active")
         assert active.json()["run_id"] == "replacement-run"
-        stream = client.get("/api/tui/v1/sessions/session-1/turns/active/stream")
+        assert client.get("/api/tui/v1/sessions/session-1/turns/active/stream").status_code == 400
+        assert client.post("/api/tui/v1/sessions/session-1/turns/active/stop").status_code == 400
+        stale_stream = client.get("/api/tui/v1/sessions/session-1/turns/active/stream", headers={"X-Agent-Run-ID": "turn-run-1"})
+        assert stale_stream.status_code == 409
+        stream = client.get("/api/tui/v1/sessions/session-1/turns/active/stream", headers={"X-Agent-Run-ID": "replacement-run"})
         assert stream.headers["x-agent-run-id"] == "replacement-run"
 
         stale = client.post(
@@ -158,6 +163,39 @@ def test_tui_run_identity_reaches_replay_active_stream_and_stop(monkeypatch):
         assert current.json()["stopped"] is True
 
     assert seen_stop_ids == ["turn-run-1", "replacement-run"]
+
+    # The real thin client freezes the requested flags and exact run identity.
+    import json
+    import httpx
+    from src.openclank.client_profiles import ClientProfile
+    from src.openclank.tui_client import OpenClankTuiClient
+    from src.openclank.client_handoff import existing_chat_handoff
+    from src.openclank.client_capabilities import project_client_capabilities
+    seen = []
+    def transport(request):
+        seen.append(request)
+        if request.url.path.endswith('/turns'):
+            return httpx.Response(200, headers={'content-type':'text/event-stream'}, text='data: {"delta":"ok"}\n\n')
+        if request.url.path.endswith('/stream'):
+            return httpx.Response(200, headers={'content-type':'text/event-stream','X-Agent-Run-ID':'replacement-run'}, text='id: 7\ndata: {"delta":"continued"}\n\n')
+        return httpx.Response(200, json={'stopped':True})
+    with OpenClankTuiClient(ClientProfile.create('fixture','https://clank.example.test'), token='oct_fixture', transport=httpx.MockTransport(transport)) as client:
+        assert list(client.stream_turn('session-1', 'hello', idempotency_key='a'*16, attachments=['upload-1'], allow_bash=True, allow_web_search=True)) == [{'delta':'ok'}]
+        assert json.loads(seen[-1].content)['attachments'] == ['upload-1']
+        assert json.loads(seen[-1].content)['allow_bash'] is True and json.loads(seen[-1].content)['allow_web_search'] is True
+        assert list(client.stream_active_turn('session-1', run_id='replacement-run', after=6))[0]['id'] == 7
+        assert seen[-1].headers['X-Agent-Run-ID'] == 'replacement-run'
+        client.stop_active_turn('session-1', run_id='replacement-run')
+        assert seen[-1].headers['X-Agent-Run-ID'] == 'replacement-run'
+    snapshot={'mapRevision':3,'chats':{'session-1':{'owner':'alice','current':'native-1','revision':2}}}
+    assert existing_chat_handoff(snapshot, owner='alice', host_chat_id='session-1', expected_map_revision=3)['engine_session_id'] == 'native-1'
+    from src.openclank.orchestration_projection import ProjectionError
+    try: existing_chat_handoff(snapshot, owner='alice', host_chat_id='session-1', expected_map_revision=2)
+    except ProjectionError as error: assert error.code == 'STALE_MAP'
+    else: raise AssertionError('stale map accepted')
+    capabilities=project_client_capabilities({'tui:sessions'},turn_service=True,engine_status='not_running',run_active=False)
+    assert capabilities['engine']['status']=='not_running' and capabilities['operations']['stop_active_turn']['status']=='idle'
+    assert capabilities['operations']['providers']['status']=='unsupported_scope'
 
 
 def test_idempotency_key_cannot_be_rebound(monkeypatch):

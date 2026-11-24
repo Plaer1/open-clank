@@ -9,7 +9,7 @@ from routes.personal_routes import (
     PersonalRagLifecycleError,
     _write_personal_upload,
 )
-from src.frankenmemory_rag import FrankenmemoryRAG
+from src.memery_rag import MemeryRAG
 from src.rag_manager import RAGManager
 
 
@@ -150,7 +150,7 @@ def test_personal_rag_purge_retains_bytes_until_rag_purge_succeeds_and_preserves
 
 
 def test_personal_rag_lifecycle_uses_real_manager_wrapper_and_tracks_generations(tmp_path):
-    backend = FrankenmemoryRAG(str(tmp_path / "frankenmemory.db"))
+    backend = MemeryRAG(str(tmp_path / "frankenmemory.db"))
     manager = RAGManager.__new__(RAGManager)
     manager.vector_rag = backend
     lifecycle = PersonalRagLifecycle(
@@ -185,7 +185,7 @@ def test_personal_rag_lifecycle_uses_real_manager_wrapper_and_tracks_generations
 
 
 def test_account_mode_uses_one_canonical_db_rename_and_purge_then_rewrites_paths(tmp_path):
-    backend = FrankenmemoryRAG(str(tmp_path / "frankenmemory.db"))
+    backend = MemeryRAG(str(tmp_path / "frankenmemory.db"))
     manager = RAGManager.__new__(RAGManager)
     manager.vector_rag = backend
     docs = _Manager()
@@ -262,7 +262,7 @@ def test_account_mode_uses_one_canonical_db_rename_and_purge_then_rewrites_paths
 
 
 def test_account_mode_compensation_retries_external_path_rewrite_after_bytes_restore(tmp_path):
-    backend = FrankenmemoryRAG(str(tmp_path / "frankenmemory.db"))
+    backend = MemeryRAG(str(tmp_path / "frankenmemory.db"))
     manager = RAGManager.__new__(RAGManager)
     manager.vector_rag = backend
     docs = _Manager()

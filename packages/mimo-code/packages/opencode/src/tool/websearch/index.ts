@@ -6,6 +6,8 @@ import * as McpExa from "../mcp-exa"
 import * as MimoWebsearch from "./mimo"
 import { Auth } from "@/auth"
 import { Provider } from "@/provider"
+import { ManagedProvider } from "@/acp/managed-provider"
+import { managedSearch } from "@/acp/managed-search"
 import DESCRIPTION from "./websearch.txt"
 
 const WEBFETCH_FALLBACK =
@@ -30,6 +32,7 @@ const Parameters = z.object({
     .number()
     .optional()
     .describe("Maximum characters for context string optimized for LLMs (default: 10000)"),
+  freshness: z.enum(["day", "week", "month", "year"]).optional().describe("Optional freshness filter"),
 })
 
 export const WebSearchTool = Tool.define(
@@ -56,11 +59,23 @@ export const WebSearchTool = Tool.define(
               type: params.type,
               contextMaxCharacters: params.contextMaxCharacters,
               timeout: params.timeout,
+              freshness: params.freshness,
             },
           })
 
           const model = (ctx.extra as { model?: Provider.Model })?.model
           const timeout = params.timeout === undefined ? undefined : Math.min(params.timeout * 1000, MAX_TIMEOUT)
+
+          if (ManagedProvider.enabled()) {
+            const count = params.numResults
+            if (count !== undefined && (!Number.isSafeInteger(count) || count < 1 || count > 50)) throw new Error("managed web search result count must be between 1 and 50")
+            const response = yield* Effect.tryPromise(() => managedSearch(
+              { sessionID: ctx.sessionID, actorID: (ctx.extra?.actorExecution as { actorID?: string } | undefined)?.actorID, executionRevision: (ctx.extra?.actorExecution as { executionRevision?: number } | undefined)?.executionRevision, callID: ctx.callID, abort: ctx.abort },
+              { query: params.query, count, freshness: params.freshness },
+              timeout ?? 30_000,
+            ))
+            return { output: JSON.stringify(response), title: `Web search: ${params.query}`, metadata: {} }
+          }
 
           const result =
             model?.providerID === "xiaomi"

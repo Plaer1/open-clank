@@ -6,7 +6,7 @@ import { withCopalBrowser } from './helpers/copal_browser_fixture.mjs';
 const page = `<!doctype html><meta charset="utf-8"><body>
 <main id="a"></main><main id="b"></main><main id="typed"></main><main id="locked"></main>
 <script type="module">
-  import { initCustomContextMenu } from '/static/js/custom-context-menu.js';
+  import { initCustomContextMenu, captureContextCommandTarget, executeCapturedContextCommand } from '/static/js/custom-context-menu.js';
   import { createTableWidget, parseTable, applyTableEdit } from '/static/js/copal/tableModel.js?table-menu';
   initCustomContextMenu();
   const source = new Map([
@@ -34,6 +34,11 @@ const page = `<!doctype html><meta charset="utf-8"><body>
   };
   window.__run = () => { mount('a'); mount('b'); mount('typed'); mount('locked', false); };
   window.__state = () => ({ calls, source:Object.fromEntries(source) });
+  window.__lockedMutationRejected = async () => {
+    const request = captureContextCommandTarget(document.querySelector('#locked td .copal-table-cell-content'));
+    try { await executeCapturedContextCommand('table-insert-row-below', request); return false; }
+    catch (_) { return true; }
+  };
 </script></body>`;
 
 await withCopalBrowser({ page }, async ({ evaluate, until }) => {
@@ -46,7 +51,7 @@ await withCopalBrowser({ page }, async ({ evaluate, until }) => {
     await until('!!document.querySelector("#openclank-context-menu")');
   };
 
-  await open('#b td[data-row="1"][data-col="0"]');
+  await open('#b td[data-row="1"][data-col="0"] .copal-table-cell-content');
   assert.equal(await evaluate('[...document.querySelectorAll("#openclank-context-menu button")].some(b => b.dataset.command === "table-insert-row-below")'), true);
   assert.equal(await evaluate('[...document.querySelectorAll("#openclank-context-menu button")].some(b => b.dataset.command === "table-insert-column-right")'), false);
   await evaluate('document.querySelector("#openclank-context-menu button[data-command=table-insert-row-below]").click()');
@@ -62,13 +67,23 @@ await withCopalBrowser({ page }, async ({ evaluate, until }) => {
   assert.equal(afterHeader.calls.at(-1).edit.type, 'insertColumn');
   assert.equal(afterHeader.source.b, '| X    | Y     |\n| :--- | :--- |\n| left | right |\n|      |       |');
 
-  // ── S18 typed table: header menu exposes sort, type and move commands ──
+  // The compact header keeps structural actions at root and groups column choices.
+  const commandIds = async (menu = '#openclank-context-menu') => evaluate(
+    `[...document.querySelectorAll(${JSON.stringify(menu + ' button[data-command]')})].map(button => button.dataset.command)`);
+  const group = async (name) => {
+    await evaluate(`[...document.querySelectorAll('#openclank-context-menu button[aria-haspopup="menu"]')]
+      .find(button => button.querySelector('.openclank-context-label').textContent === ${JSON.stringify(name)}).click()`);
+    await until('!!document.getElementById("openclank-context-menu-child")');
+    return commandIds('#openclank-context-menu-child');
+  };
   await open('#typed th[data-row="0"][data-col="0"]');
-  const headerCommands = await evaluate('[...document.querySelectorAll("#openclank-context-menu button")].map(b => b.dataset.command)');
-  for (const id of ['table-sort-asc', 'table-sort-desc', 'table-type-date', 'table-type-currency', 'table-move-column-right', 'table-align-center']) {
-    assert.equal(headerCommands.includes(id), true, `header menu should expose ${id}`);
-  }
-  await evaluate('document.querySelector("#openclank-context-menu button[data-command=table-sort-asc]").click()');
+  assert.equal((await commandIds()).includes('table-move-column-right'), true);
+  const types = await group('Column type');
+  assert.equal(types.includes('table-type-date'), true);
+  assert.equal(types.includes('table-type-currency'), true);
+  assert.equal((await group('Alignment')).includes('table-align-center'), true);
+  assert.deepEqual(await group('Sort'), ['table-sort-asc', 'table-sort-desc']);
+  await evaluate('document.querySelector("#openclank-context-menu-child button[data-command=table-sort-asc]").click()');
   const afterSort = await evaluate('window.__state()');
   assert.equal(afterSort.calls.at(-1).edit.type, 'sort');
   assert.deepEqual(afterSort.calls.at(-1).edit, { type:'sort', col:0, direction:'asc' });
@@ -83,9 +98,11 @@ await withCopalBrowser({ page }, async ({ evaluate, until }) => {
   // ── S18 typed table: body menu exposes row ops and typed sort ──
   await open('#typed td[data-row="1"][data-col="2"]');
   const bodyCommands = await evaluate('[...document.querySelectorAll("#openclank-context-menu button")].map(b => b.dataset.command)');
-  for (const id of ['table-insert-row-above', 'table-insert-row-below', 'table-delete-row', 'table-move-row-up', 'table-move-row-down', 'table-sort-desc']) {
+  for (const id of ['table-insert-row-above', 'table-insert-row-below', 'table-delete-row', 'table-move-row-down']) {
     assert.equal(bodyCommands.includes(id), true, `body menu should expose ${id}`);
   }
+  assert.equal((await group('Sort')).includes('table-sort-desc'), true);
+  assert.equal(bodyCommands.includes('table-move-row-up'), false, 'the first data row cannot move above the header');
   await evaluate('document.querySelector("#openclank-context-menu button[data-command=table-insert-row-below]").click()');
   const afterRowInsert = await evaluate('window.__state()');
   assert.equal(afterRowInsert.calls.at(-1).edit.type, 'insertRow');
@@ -109,19 +126,18 @@ await withCopalBrowser({ page }, async ({ evaluate, until }) => {
   assert.equal(cellStatus.type, 'date', 'column 0 is typed date');
   assert.equal(cellStatus.status, 'valid');
 
-  // ── S18: read-only widgets refuse mutation ──
-  await open('#locked td[data-row="1"][data-col="0"]');
-  const lockedCommands = await evaluate('[...document.querySelectorAll("#openclank-context-menu button")].filter(b => b.dataset.command === "table-delete-row").map(b => b.disabled)');
-  assert.deepEqual(lockedCommands, [true], 'delete row is disabled on a read-only widget');
-  const lockedInsert = await evaluate('[...document.querySelectorAll("#openclank-context-menu button")].filter(b => b.dataset.command === "table-insert-row-below").map(b => b.disabled)');
-  assert.deepEqual(lockedInsert, [true], 'insert row is disabled on a read-only widget');
-  // The disabled command must not mutate the source when activated programmatically.
-  await evaluate('window.__openClankTableContextCommand("table-insert-row-below", document.querySelector("#locked td"))');
-  const afterLocked = await evaluate('window.__state()');
-  assert.equal(afterLocked.source.locked, '| L | M |\n| --- | --- |\n| keep | me |', 'read-only table source unchanged');
-  await evaluate('document.getElementById("openclank-context-menu")?.remove()');
+  // Read-only cells leave secondary-click to the browser and reject captured writes.
+  const locked = await evaluate(`(() => {
+    const cell = document.querySelector('#locked td[data-row="1"][data-col="0"] .copal-table-cell-content');
+    const event = new MouseEvent('contextmenu', { bubbles:true, cancelable:true });
+    cell.dispatchEvent(event);
+    return { prevented:event.defaultPrevented, menu:!!document.querySelector('#openclank-context-menu') };
+  })()`);
+  assert.deepEqual(locked, { prevented:false, menu:false });
+  assert.equal(await evaluate('window.__lockedMutationRejected()'), true);
+  assert.equal((await evaluate('window.__state()')).source.locked, '| L | M |\n| --- | --- |\n| keep | me |');
 
-  await evaluate('localStorage.setItem("odysseus-custom-context-menu", "off")');
+  await evaluate('localStorage.setItem("openclank-custom-context-menu", "off")');
   // Dispatch from a real table cell and observe that no app-owned menu or
   // preventDefault remains when the shared setting is disabled.
   const native = await evaluate(`(() => { let prevented = null; const cell=document.querySelector('#a td[data-row="1"][data-col="0"]'); const event=new MouseEvent('contextmenu',{bubbles:true,cancelable:true}); cell.dispatchEvent(event); return { prevented:event.defaultPrevented, menu:!!document.querySelector('#openclank-context-menu') }; })()`);

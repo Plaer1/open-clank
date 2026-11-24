@@ -1,0 +1,204 @@
+---
+name: compose-next
+description: Use for multi-step feature work, bug fixes, or refactors where requirements need to settle, a feature document should carry design + tasks + delivery evidence, and the change deserves independent review before merge. Use it only when the user explicitly requests this workflow, whether with `/compose-next`, by name, or in any other clear natural language; do not infer the request from task complexity alone. Not for one-shot edits, single-file tweaks, or answering questions — those need no orchestration overhead.
+---
+
+# Compose Next
+
+Compact end-to-end contract for grill → workspace → spec → implement → verify → review → finalize → finish. One skill load, no internal skill hand-offs.
+
+When writing a checkpoint or compacting context, preserve this recovery instruction in the checkpoint or compacted summary: on resumption, if the Compose Next instructions are absent, reload the `compose-next` skill before continuing.
+
+Enter this workflow only on an explicit user request. Any clear natural-language instruction to use this workflow counts just like `/compose-next`; the user does not need to know or name the skill. If the user has not clearly requested the workflow, do the work directly and run none of the phases below; do not infer consent merely because the task is large or resembles a Compose task.
+
+## Step 0 — Orient
+
+Inspect the repository, its instructions (`AGENTS.md`, `README`, existing spec files), and recent changes before asking anything. Do not ask the user for facts the environment already answers.
+
+Decide the shape of the work:
+
+- **Fully constrained mechanical change with no durable design surface** → skip Grill and Spec, go to Workspace then Implement.
+- **Requirements or design ambiguous** → Grill first.
+- **Requirements clear, feature deserves a durable document** → Workspace then Spec.
+
+User gates and project overrides:
+
+- If the user explicitly requests `without worktree` or specifies a worktree or workspace path, use that workspace choice and skip the default worktree gate. Do not ask again for worktree consent.
+- If the user explicitly says `without spec`, "no spec needed", "this is a small fix", or gives an equivalent instruction, skip the durable feature document and its spec gate. Keep verification and review when the task still warrants them.
+- An explicit project instruction, `AGENTS.md`, or user-provided agent/worktree configuration may define a project-specific worktree path, branch convention, spec path, or spec format. Use that configuration instead of the defaults in this skill. Record the override in the feature document or final report when it changes the normal artifact location.
+
+Every path passes through Workspace before Spec or Implement; no branch skips it.
+
+## Grill — resolve decisions
+
+Resolve one decision axis at a time. A single decision may bundle multiple dependent fields in one structured question; unrelated decisions require separate turns.
+
+Use the Question tool for every user decision:
+
+- Put known choices in `options`. Each option gets a concise `label` and a `description` explaining the consequence. List the recommendation first and mark its label `(Recommended)`.
+- For consequential choices, include 2–3 viable alternatives.
+- When choices cannot be enumerated, still call Question with `options: []` for free-text.
+- Do not ask for permission to continue when no decision remains.
+
+Split requests spanning independent subsystems before refining each part. Do not begin implementation until requirements and scope are settled.
+
+### When user input is unavailable
+
+If user input cannot be obtained — the Question tool is absent, a question gets no reply, or the run cannot stop and wait (for example a goal that keeps running) — and the decision is not a dangerous action that requires explicit user consent, resolve **this one decision** yourself and continue:
+
+1. Choose the option marked `(Recommended)` when repository evidence still supports it and it can run unattended.
+2. Otherwise choose the closest minimal-scope option supported by the evidence; prefer text-only, non-interactive work.
+3. If the decision includes destructive or irreversible work, choose a non-destructive path that preserves progress; never auto-approve the destructive option.
+4. State the option selected and the reason in the response.
+
+## Workspace — worktree ownership
+
+Respect the integration checkout already agreed with the user or project. Keep a suitable active workspace. Use the steps below when isolation is needed and authorized.
+
+- Compare `git rev-parse --git-dir` with `git rev-parse --git-common-dir`. If they differ, use the current linked worktree; do not nest another. A non-empty `git rev-parse --show-superproject-working-tree` indicates a submodule, not a linked worktree.
+- Create an authorized linked worktree at `.worktrees/{{slug}}` only for a concrete isolation need. Base the new branch on the latest mainline (e.g. `origin/main`). If the current checkout makes the base unclear (detached HEAD, an unrelated feature branch, unknown default branch), ask the user explicitly which base to use before creating the worktree. Run `git check-ignore -q "$path"`; if it is not ignored, write `*` to `.worktrees/.gitignore`. Then run `git worktree add "$path" -b "$branch" "$base"`.
+- When targeting the worktree with a command, pass its absolute path as `workdir`; omitted `workdir` uses the current session directory.
+- When dependencies are required and authorized, use repository instructions and prefer lockfile-frozen modes. Follow the current scope for any toolchain execution.
+
+## Spec — one document per feature
+
+Maintain one document per feature at `docs/compose/spec/{{feature-name}}.md` from the workspace root. Do not add a date to the filename. A user-specified location overrides this path. Edit an existing document in place; never create a separate plan or report. Do not write the feature document before Workspace owns the active workspace.
+
+Requests spanning unrelated concerns get separate top-level documents, one per feature. Only for a long-running, large task that must be decomposed into parts, you may keep `{{feature-name}}.md` as the entry document and put sub-documents in the same-named directory (`{{feature-name}}/{{sub-feature}}.md`) so no single document grows too large. Each entry task maps to one sub-document or an anchor range within one (for example `(spec: {{feature-name}}/{{sub-feature}}.md S2.1–S2.3)`). Each sub-document follows the same template and rules on its own, with its own `status`, `Report`, and `source`, so sub-documents may be delivered independently across separate PRs or MRs; check off an entry task once the sub-document work it maps to is delivered.
+
+### Template
+
+```markdown
+---
+feature: {{feature-name}}
+status: designed | in-progress | delivered
+updated: YYYY-MM-DD
+source: {{branch-name}} | {{pr-url}} | {{mr-url}}
+---
+
+# {{Feature Name}}
+
+## Report
+[Not finalized yet]
+
+## [S1] Problem
+Describe the user-visible problem.
+
+## [S2] Design
+Record the chosen behavior and the contracts needed to implement it.
+
+## [S3] Out of Scope
+State explicit boundaries.
+
+## Tasks
+- [ ] T1: {{work item}} — acceptance: {{observable result}} (covers: S2.1)
+- [ ] T2: {{work item}} — acceptance: {{observable result}} (depends: T1)
+
+## Journey log
+None
+```
+
+### Design-time rules
+
+- Set `status: designed` and keep `Report` as `[Not finalized yet]` until finalized.
+- When a dead end, pivot, or transferable lesson worth future work appears, add it to `Journey log` at any phase, replacing its `None` line. Do not pad an uncomplicated change by splitting it into several thin entries.
+- Set `source` to the form that best names where the spec's source lives — `{{branch-name}}`, `{{pr-url}}`, or `{{mr-url}}` — and update it whenever that changes.
+- Record settled decisions and precise contracts, not exploration history or file-level code dumps. Include architecture, interfaces, data flow, error behavior, and testing boundaries when they affect the change.
+- Make each task the smallest independently verifiable work item; give it an observable acceptance criterion. Add `depends:` only for real prerequisites; dependencies must be acyclic.
+- Under Design, give each contract or behavior its own subsection `S2.1`, `S2.2`, …
+- Keep `Sn` and `Sn.m` anchors stable when headings change; never renumber existing anchors.
+- `covers:` on a task is optional (for example `covers: S2.1`).
+- Scale detail to the change; do not pad small designs.
+
+Before implementation, fix ambiguous requirements, contradictions, unresolved references, and unverifiable acceptance criteria. If the user is available, request document approval with the Question tool; otherwise continue. When requesting approval, present the feature document if a Present tool is available; otherwise, such as in a CLI environment, give its path in text.
+
+### Amendments
+
+Update only affected sections, bump `updated:`, preserve anchors, and keep only the tasks required by the amendment and their dependents. Do not regenerate the document or create duplicate tasks.
+
+## Implement
+
+Use the feature document as the source of requirements, or the conversation for an undocumented mechanical change. When a feature document exists, set its `status: in-progress` on the first implementation commit. Execute tasks in dependency order. Track multi-step work with the Task tool.
+
+For behavior changes with a cheap reproduction, write a failing test, confirm it fails for the intended reason, implement the smallest fix, and confirm it passes. A bug fix requires a regression test when one can be written. Skip test-first for generated code, configuration-only changes, throwaway prototypes, or explicit user direction.
+
+Test public behavior. Do not duplicate production logic in expected values, add test-only production APIs, or assert only that mocks were called. Prefer real implementations over mocks.
+
+For failures, reproduce before editing and identify the root cause from errors, diffs, recent commits, or boundary instrumentation. After two failed fixes, stop patching and re-derive the cause.
+
+### Parallel work
+
+Dispatch independent tasks in parallel when isolation prevents collisions; keep tightly coupled work together. Prefer giving parallel subagents disjoint file sets and keeping commits with the orchestrator. Give each subagent the workspace path, task, acceptance criteria, relevant spec sections, and required verification. Do not pass session history. Treat its report as a claim and inspect the resulting diff.
+
+Continue through tasks without routine approval pauses. Stop only for an unresolved product decision, a blocker that cannot be worked around, a destructive action requiring consent, or completion.
+
+## Verify
+
+Use checks appropriate to the authorized scope in the correct directory. During a testing pause, inspect the changed source and mark runtime verification pending. Record only checks and results you actually observed.
+
+Verification and review are strictly sequential. Wait for all verification commands to exit before dispatching the reviewer. Never overlap review with a resource-heavy test or application process in the same environment.
+
+## Review
+
+Review the complete change before finalizing the feature document. Delegate review only when authorized and use the existing reviewer if assigned.
+
+Provide the reviewer:
+
+- the applicable spec sections and acceptance criteria;
+- the workspace path, base branch, base SHA, head SHA, and exact diff command or precomputed diff;
+- a compact verification summary: one line per command with `PASS`, `FAIL`, or `PRE-EXISTING`, plus test counts when available. Do not paste full command output unless a specific failure requires it.
+
+If there is no feature document, take acceptance criteria from the conversation. If none are explicit, ask the user for them before dispatching the reviewer.
+
+Do not provide an implementer-authored narrative. The reviewer may inspect the diff and run additional commands needed to validate its conclusions. It must not repeat a command already reported as passing, especially a heavy E2E suite, unless the result is stale, the code changed afterward, or concrete evidence makes the result suspect. Before any justified rerun, confirm no equivalent command is still running. Missing evidence should be reported or gathered with the cheapest non-duplicative command.
+
+Inherit the parent model and reasoning by default. Use an explicit user or project model selection when provided.
+
+Require separate conclusions for:
+
+- **Spec compliance** — every acceptance criterion is met and points to evidence in the diff or reviewer-observed command output.
+- **Correctness** — logic, boundaries, error handling, regressions, and tests are sound, including issues outside the written spec.
+- **Codebase consistency** — naming, structure, and local conventions match surrounding code.
+
+Classify unmet or unverifiable acceptance criteria and correctness bugs as critical. Fix critical findings, re-verify, and re-review affected areas. Reject incorrect findings with technical evidence. When necessary, return to Spec and record the pivot in the Journey log. If the fix-and-re-review loop stops converging — repeated findings on the same area, or fixes that introduce new criticals — stop looping and report the impasse with the remaining findings instead of forcing a pass.
+
+For human review feedback, verify each item against the codebase, clarify ambiguous items before editing, and implement validated items one at a time with verification. Check actual usage before expanding an unused path, and surface conflicts with prior user decisions instead of silently complying.
+
+For parallel task work, review integrated task diffs at useful boundaries only when delaying review would compound risk.
+
+## Finalize — commit the feature document
+
+If a feature document exists, after review passes and before finishing the branch:
+
+1. Set `status: delivered` and bump `updated:`.
+2. Check off completed tasks; leave incomplete tasks unchecked and do not claim delivery if they block acceptance.
+3. When finalized, fill `Journey log` when needed and replace `Report` with:
+
+```markdown
+## Report
+
+**What was built** — concise description of the final behavior.
+
+**Verification** — commands run and their observed results.
+```
+
+Update a design section only when it contradicts the delivered behavior. Commit the finalized document on the feature branch before finishing. This documentation-only commit does not restart verification or review; CI re-running on it is expected.
+
+## Finish
+
+Do not auto-finish: confirm with the user before any irreversible action, including opening a PR or MR, merging, or pushing.
+
+Report branch, base, head SHA, workspace, feature-doc path when available, and ask the user which way to finish — for example:
+
+- local merge / open PR / push only / keep the branch;
+- which base branch to merge or target;
+- keep or remove the worktree.
+
+Open PR or MR does not imply merge: unless the user also asked to merge, stop after opening — the merge always needs its own confirmation, whether the PR or MR was created here or already existed.
+
+When the closing action changes where the spec lives, update `source` and commit it as documentation only: `{{pr-url}}` or `{{mr-url}}` after opening one, `{{branch-name}}` before a local merge.
+
+Worktree pitfalls:
+
+- Local merge and `gh pr merge` run from the main repository checkout — the base branch cannot be checked out while another worktree holds it.
+- `git worktree remove` only on `.worktrees/` or the path scoped by the prompt / `AGENTS.md`.

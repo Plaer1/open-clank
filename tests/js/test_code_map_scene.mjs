@@ -144,7 +144,27 @@ test('responsive relayout never repositions protected expansion seeds or changes
  const expanded=map();expanded.nodes.push({id:'new',kind:'file',label:'new.py',parent:'structure_preview-repo'});f.scene.select('structure_preview-file');f.scene.update(expanded);assert.deepEqual(f.sent[2].previous.slice().sort((a,b)=>a.id.localeCompare(b.id)),packed.positions);f.w.onmessage({data:layoutCodeMap(f.sent[2])});const before=f.sent.length;f.scene.resize(155,198);assert.equal(f.sent.length,before,'Resize cannot discard expansion/selection seeds');f.scene.zoom(1.1);const user=f.scene.snapshot().camera;f.scene.resize(200,250);assert.equal(f.scene.snapshot().camera.scale,user.scale);assert.equal(f.sent.length,before);f.scene.dispose();
 });
 test('physical camera or selection during queued responsive layout protects already visible geometry',()=>{
- for(const action of ['zoom','selection']){const f=fixture({worker:true});f.scene.update(map());const old=layoutCodeMap(f.sent[0]);f.w.onmessage({data:old});f.scene.resize(155,198);const responsive=f.sent[1];if(action==='zoom')f.scene.zoom(1.1);else f.scene.select('structure_preview-file');const camera=f.scene.snapshot().camera;f.w.onmessage({data:layoutCodeMap(responsive)});assert.equal(f.sent.length,3);assert.deepEqual(f.sent[2].previous.slice().sort((a,b)=>a.id.localeCompare(b.id)),old.positions);f.w.onmessage({data:layoutCodeMap(f.sent[2])});assert.deepEqual(f.scene.snapshot().camera,camera);f.scene.dispose();}
+ for (const action of ['zoom','selection']) {
+   const f=fixture({worker:true});
+   f.scene.setSettings({preserveCamera:false});
+   f.scene.update(map());
+   const old=layoutCodeMap(f.sent[0]);
+   f.w.onmessage({data:old});
+   f.scene.resize(155,198);
+   if (action==='zoom') f.scene.zoom(1.1);
+   else f.scene.select('structure_preview-file');
+   const camera=f.scene.snapshot().camera;
+   f.w.onmessage({data:layoutCodeMap(f.sent[1])});
+   if (action==='selection') {
+     assert.deepEqual(f.sent[2].previous.slice().sort((a,b)=>a.id.localeCompare(b.id)),old.positions);
+     f.w.onmessage({data:layoutCodeMap(f.sent[2])});
+   } else {
+     assert.equal(f.sent.length,2);
+     assert.deepEqual(f.scene.positions(),old.positions);
+   }
+   assert.deepEqual(f.scene.snapshot().camera,camera);
+   f.scene.dispose();
+ }
 });
 test('label collision boxes use real weight-aware text advance/ink, not character estimates',()=>{
  const context={measureText:text=>{const width=Array.from(text).reduce((sum,c)=>sum+(c==='W'?19:4),0);return {width,actualBoundingBoxLeft:3,actualBoundingBoxRight:width+5};}},f=fixture({textContext:context}),data=map();data.nodes[0].label='WWWWWW';data.nodes[1].label='iiiiiiii';f.scene.update(data);f.draw();
@@ -173,4 +193,53 @@ test('actual software demand owner reallocates DPR while suspended without sched
 test('presentation remount uses current transformed DPR and retained namespace/camera with allocation cap',()=>{
  const policy=graphicalPresentationPolicy();policy.set('auto');const calls=[],surface=canvas(),win=events({devicePixelRatio:1}),mount={clientWidth:800,clientHeight:600,getBoundingClientRect:()=>({width:1600,height:1200})};
  const scene=createCodeMapScene({mount,canvas:surface,win,doc:null,ownerHost:{},workerFactory:()=>null,ResizeObserverClass:null,consumerFactory:()=>({canvas:surface,resize:(...args)=>calls.push(args),invalidate(){},dispose(){}})});scene.update(map());scene.select('structure_preview-file');scene.zoom(1.2);const before=scene.snapshot();assert.deepEqual(calls.at(-1),[800,600,2]);policy.set('ordinary');assert.deepEqual(calls.at(-1),[800,600,2]);assert.deepEqual(scene.snapshot().camera,before.camera);assert.equal(scene.snapshot().namespace,before.namespace);assert.equal(scene.snapshot().selected,before.selected);const count=calls.length;win.devicePixelRatio=3;win.emit('resize');assert.equal(calls.length,count,'Already capped effective DPR does not reallocate');scene.dispose();policy.set('auto');
+});
+
+test('queued discoveries reveal one at a time across overlapping pages and delayed frames',()=>{
+  const f=fixture({worker:true}),data=map();
+  let clock=100;
+  f.win.performance={now:()=>clock};
+  const project=discovered=>{
+    f.scene.update(data,{discovered});
+    const job=f.sent.at(-1);
+    f.w.onmessage({data:{...layoutCodeMap(job),positions:data.nodes.map((n,i)=>({id:n.id,x:i*32,y:0}))}});
+  };
+  const count=()=>{f.draw();return f.scene.snapshot().drawn.nodes;};
+  project(data.nodes.map(n=>n.id));
+  assert.equal(count(),2,'root and first discovery');
+  assert.equal(count(),2,'same frame');
+  data.nodes.push({id:'late',kind:'file',label:'late',parent:data.nodes[0].id});
+  project(['late']);
+  clock+=1000;
+  assert.equal(count(),3,'a delayed frame cannot reveal two queued files');
+  clock+=40;
+  assert.equal(count(),4);
+  f.scene.dispose();
+});
+
+test('Gravity resize and camera gestures preserve world positions during discovery', () => {
+  const f = fixture({worker:true});
+  f.scene.setSettings({}, 'gravity');
+  const graph = map();
+  f.scene.update(graph);
+  f.w.onmessage({data:layoutCodeMap(f.sent[0])});
+  const settled = f.scene.positions();
+  assert.equal(settled.length, 3);
+  f.scene.resize(410, 300);
+  const gesture = () => {
+    f.c.emit('keydown', {key:'ArrowLeft', preventDefault(){}});
+    f.c.emit('wheel', {deltaY:30, clientX:100, clientY:100, preventDefault(){}});
+  };
+  gesture();
+  assert.deepEqual(f.scene.positions(), settled);
+  assert.equal(f.sent.length, 1);
+  graph.nodes.push({id:'new-file',kind:'file',label:'new.py',parent:graph.nodes[0].id});
+  f.scene.update(graph);
+  gesture();
+  const camera = f.scene.snapshot().camera;
+  f.w.onmessage({data:layoutCodeMap(f.sent[1])});
+  assert.equal(f.sent.length, 2);
+  assert.deepEqual(f.scene.positions().filter(p => p.id !== 'new-file'), settled);
+  assert.deepEqual(f.scene.snapshot().camera, camera);
+  f.scene.dispose();
 });

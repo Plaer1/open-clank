@@ -36,7 +36,11 @@
 
 /* Editor compact classes describe its drawers, not Wiki page navigation.
    Wiki responds to the actual applet body width, independently of the shell. */
-.copal-wiki-window .copal-view { container-type:inline-size; }
+.copal-editor-wiki { display:grid; flex:1; min-width:0; min-height:0; grid-template-columns:40px minmax(0,1fr); grid-template-rows:auto minmax(0,1fr); }
+.copal-editor-wiki[hidden], .copal-editor-wiki-body[hidden] { display:none; }
+.copal-editor-wiki > .workbench-menubar { grid-column:1 / -1; grid-row:1; }
+.copal-editor-wiki > .copal-editor-activity-rail { grid-column:1; grid-row:2; }
+.copal-editor-wiki > .copal-editor-wiki-body { grid-column:2; grid-row:2; min-width:0; min-height:0; container-type:inline-size; }
 .copal-notes-workspace.copal-wiki-workspace:is(.narrow,.compact) { grid-template-columns:180px minmax(0,1fr) auto; grid-template-rows:auto minmax(0,1fr); }
 .copal-wiki-workspace:is(.narrow,.compact) > .copal-wiki-navigation { grid-column:1; grid-row:2; max-height:none; }
 .copal-wiki-workspace:is(.narrow,.compact) > .copal-notes-main { grid-column:2; grid-row:2; }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "version": "0.1.9",
+  "version": "0.1.16",
   "name": "@mimo-ai/shared",
   "type": "module",
   "license": "MIT",
@@ -23,7 +23,8 @@
     "@tsconfig/bun": "catalog:",
     "@types/semver": "catalog:",
     "@types/bun": "catalog:",
-    "@types/npmcli__arborist": "6.3.3"
+    "@types/npmcli__arborist": "6.3.3",
+    "@typescript/native-preview": "catalog:"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

@@ -1,4 +1,5 @@
 # routes/session_routes.py
+import asyncio
 import os
 import re
 import html
@@ -197,6 +198,16 @@ _HIDDEN_SYSTEM_SESSION_NAMES = {
 }
 
 
+async def _bounded_transfer_json(request: Request, limit: int):
+    """Read only the bounded request stream for selected-history endpoints."""
+    data = bytearray()
+    async for chunk in request.stream():
+        if not isinstance(chunk, bytes) or len(chunk) > limit - len(data):
+            raise ValueError('request exceeds limit')
+        data.extend(chunk)
+    return json.loads(data)
+
+
 def setup_session_routes(
     session_manager: SessionManager,
     config: dict,
@@ -204,6 +215,9 @@ def setup_session_routes(
     upload_handler=None,
 ):
     """Setup session routes with the provided manager and config"""
+
+    from routes.prompt_suggestion_routes import setup_prompt_suggestion_routes
+    router.include_router(setup_prompt_suggestion_routes(session_manager, _verify_session_owner))
 
     REQUEST_TIMEOUT = config.get("REQUEST_TIMEOUT", 20)
     SESSION_MODEL_VALIDATION_TIMEOUT = min(float(REQUEST_TIMEOUT or 20), 3.0)
@@ -246,7 +260,10 @@ def setup_session_routes(
             _purge_db = SessionLocal()
             try:
                 from core.database import ChatMessage as _DbMsg
-                _ghosts = _purge_db.query(DbSession).filter(
+                from src.openclank.chat_source_bridge import canonical_source_provider
+                # Names do not prove an erased source; guarded stores use the
+                # canonical chat-erasure lifecycle instead of this raw purge.
+                _ghosts = [] if canonical_source_provider(request.app.state) is not None else _purge_db.query(DbSession).filter(
                     DbSession.name.in_(("Nobody", "Incognito")),
                     DbSession.created_at < _cutoff,
                 ).all()
@@ -273,6 +290,7 @@ def setup_session_routes(
             folder_map = {}
             token_map = {}
             important_map = {}
+            style_map = {}
             created_map = {}
             updated_map = {}
             last_msg_map = {}
@@ -280,13 +298,14 @@ def setup_session_routes(
             msg_count_map = {}
             persona_map = {}
             workspace_map = {}
-            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count, DbSession.persona, DbSession.workspace_id).filter(DbSession.archived == False)
+            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count, DbSession.persona, DbSession.workspace_id, DbSession.response_style, DbSession.response_style_revision).filter(DbSession.archived == False)
             q = owner_filter(q, DbSession, user)
             rows = q.all()
             for row in rows:
                 folder_map[row.id] = row.folder
                 token_map[row.id] = (row.total_input_tokens or 0) + (row.total_output_tokens or 0)
                 important_map[row.id] = row.is_important or False
+                style_map[row.id] = (row.response_style, row.response_style_revision)
                 created_map[row.id] = row.created_at.isoformat() if row.created_at else None
                 updated_map[row.id] = row.updated_at.isoformat() if row.updated_at else None
                 # Fall back to updated_at then created_at so sessions that
@@ -346,6 +365,8 @@ def setup_session_routes(
                      "mode": mode_map.get(s.id),
                      "message_count": msg_count_map.get(s.id, 0),
                      "workspace_id": workspace_map.get(s.id),
+                     "response_style": style_map.get(s.id, ("normal", 0))[0],
+                     "response_style_revision": style_map.get(s.id, ("normal", 0))[1],
                      "persona": persona_map.get(s.id)}
                     for s in user_sessions.values()
                     if not s.archived
@@ -366,7 +387,11 @@ def setup_session_routes(
         api_key: str = Form(""),
         endpoint_id: str = Form(""),
         workspace_id: str = Form(""),
+        response_style: str = Form("normal"),
     ):
+        from src.openclank.response_style import normalize_mode
+        try: response_style = normalize_mode(response_style)
+        except ValueError as exc: raise HTTPException(422, "Invalid response style") from exc
         user = effective_user(request)
         workspace_value = (
             str(workspace_id or "").strip()
@@ -424,10 +449,39 @@ def setup_session_routes(
         ):
             raise HTTPException(403, f"Your account is not allowed to use model {model_to_use!r}")
         
-        sid = str(uuid.uuid4())
+        connector = getattr(request.state, "connector_create", None)
+        sid = connector["session_id"] if connector else str(uuid.uuid4())
         user = effective_user(request)
+        def connector_replay():
+            if connector is None:
+                return None
+            db = SessionLocal()
+            try:
+                row = db.query(DbSession).filter(DbSession.id == sid).first()
+                if row is None:
+                    return None
+                if (row.owner != user or row.connector_create_digest != connector["digest"]
+                        or row.workspace_id != (workspace_value or None)
+                        or row.endpoint_id != (endpoint_id.strip() or None)
+                        or row.model != model_to_use or row.name != (name or "")
+                        or row.provider_model_route_id != (selected_route.model_route_id if selected_route else None)):
+                    raise HTTPException(409, "Operation key already bound to another session request")
+                if not connector["identity"].current():
+                    raise HTTPException(401, "Connector credential changed")
+                return SessionResponse(id=sid, name=row.name, model=row.model, endpoint_url=row.endpoint_url,
+                    endpoint_id=row.endpoint_id, rag=row.rag, archived=row.archived, workspace_id=row.workspace_id,
+                    response_style=row.response_style, response_style_revision=row.response_style_revision)
+            finally:
+                db.close()
+        if connector is not None:
+            if user != connector["identity"].owner or not connector["identity"].current():
+                raise HTTPException(401, "Connector credential changed")
+            replay = connector_replay()
+            if replay is not None:
+                return replay
         is_incognito = str(incognito).lower() == "true"
         if is_incognito:
+            if response_style != 'normal': raise HTTPException(409, 'Response style unavailable for incognito')
             from core.models import Session
 
             session = Session(
@@ -443,10 +497,12 @@ def setup_session_routes(
                 owner=user,
                 incognito=True,
                 workspace_id=workspace_value or None,
+                response_style=response_style, response_style_revision=0,
             )
             session_manager.sessions[sid] = session
         else:
-            session = session_manager.create_session(
+            try:
+                session = session_manager.create_session(
                 session_id=sid,
                 name=name or "",
                 endpoint_url=endpoint_url or "",
@@ -458,7 +514,17 @@ def setup_session_routes(
                     selected_route.model_route_id if selected_route else None
                 ),
                 workspace_id=workspace_value or None,
-            )
+                response_style=response_style,
+                connector_create_digest=connector["digest"] if connector else None,
+                connector_current=connector["identity"].current if connector else None,
+                )
+            except Exception:
+                if connector is None:
+                    raise
+                replay = connector_replay()
+                if replay is None:
+                    raise
+                return replay
         # Managed provider credentials are leased inside the engine. Session
         # metadata is always secret-free.
         session.headers = {}
@@ -482,7 +548,85 @@ def setup_session_routes(
             rag=False if is_incognito else (str(rag).lower() == "true" if rag else False),
             archived=False,
             workspace_id=workspace_value or None,
+            response_style=response_style, response_style_revision=0,
         )    
+    def _response_style_identity(request: Request):
+        from src.auth_helpers import require_user, is_internal_tool_identity
+        owner = require_user(request)
+        state = request.app.state
+        auth = getattr(state, 'auth_manager', None)
+        barrier = getattr(state, 'account_request_barrier', None)
+        factory = getattr(state, 'capture_original_credential', None)
+        if (is_internal_tool_identity(owner) or getattr(request.state, 'api_token', False)
+                or getattr(request.state, 'internal_tool_authenticated', False)
+                or auth is None or barrier is None or not callable(factory)):
+            raise HTTPException(403, 'Named human authority unavailable')
+        account = auth.account_id(owner)
+        if not account or auth.username_for_account_id(account) != owner:
+            raise HTTPException(403, 'Named human authority unavailable')
+        try: credential = factory(request, owner, account)
+        except Exception as exc: raise HTTPException(403, 'Named human authority unavailable') from exc
+        if not callable(credential): raise HTTPException(403, 'Named human authority unavailable')
+        return owner, account, state, auth, barrier, factory, credential
+
+    async def _response_style_access(request: Request, sid: str, identity, body=None):
+        from src.openclank.response_style import normalize_mode, style_snapshot, MAX_REVISION
+        owner, account, state, auth, barrier, factory, credential = identity
+        if body is not None:
+            if type(body) is not dict or set(body) != {'mode', 'expected_revision'}:
+                raise HTTPException(422, 'Invalid response style request')
+            try:
+                mode = normalize_mode(body['mode'])
+                expected = style_snapshot(mode, body['expected_revision'])['revision']
+            except ValueError as exc:
+                raise HTTPException(422, 'Invalid response style request') from exc
+        async with barrier.admitted(owner):
+            if (getattr(state,'auth_manager',None) is not auth or getattr(state,'account_request_barrier',None) is not barrier
+                    or getattr(state,'capture_original_credential',None) is not factory or credential() is not True
+                    or auth.account_id(owner) != account or auth.username_for_account_id(account) != owner):
+                raise HTTPException(403, 'Named human authority unavailable')
+            ghost = session_manager.sessions.get(sid)
+            if ghost is not None and getattr(ghost, 'incognito', False):
+                raise HTTPException(404, 'Session not found')
+            with SessionLocal() as db:
+                row = db.query(DbSession).filter(DbSession.id == sid, DbSession.owner == owner).first()
+                if row is None: raise HTTPException(404, 'Session not found')
+                current = style_snapshot(row.response_style, row.response_style_revision)
+                if body is None: return current
+                if current['revision'] != expected: raise HTTPException(409, 'Response style changed')
+                if mode == current['mode']:
+                    matched = db.query(DbSession).filter(DbSession.id == sid, DbSession.owner == owner,
+                        DbSession.response_style == mode, DbSession.response_style_revision == expected).update(
+                        {DbSession.response_style: mode}, synchronize_session=False)
+                    if matched != 1:
+                        db.rollback(); raise HTTPException(409, 'Response style changed')
+                    db.commit()
+                    return current
+                if expected == MAX_REVISION: raise HTTPException(409, 'Response style revision exhausted')
+                changed = db.query(DbSession).filter(DbSession.id == sid, DbSession.owner == owner,
+                    DbSession.response_style_revision == expected).update(
+                    {DbSession.response_style: mode, DbSession.response_style_revision: expected + 1}, synchronize_session=False)
+                if changed != 1:
+                    db.rollback(); raise HTTPException(409, 'Response style changed')
+                db.commit()
+                return style_snapshot(mode, expected + 1)
+
+    @router.get('/session/{sid}/response-style')
+    async def get_response_style(request: Request, sid: str):
+        return await _response_style_access(request, sid, _response_style_identity(request))
+
+    @router.put('/session/{sid}/response-style')
+    async def put_response_style(request: Request, sid: str):
+        identity = _response_style_identity(request)
+        try:
+            raw = await request.body()
+            if len(raw) > 4096: raise ValueError('response style request too large')
+            body = json.loads(raw)
+        except (ValueError, UnicodeError) as exc:
+            raise HTTPException(422, 'Invalid response style request') from exc
+        if type(body) is not dict: raise HTTPException(422, 'Invalid response style request')
+        return await _response_style_access(request, sid, identity, body)
+
     @router.patch("/session/{sid}")
     async def rename_session(
         request: Request, sid: str,
@@ -625,67 +769,204 @@ def setup_session_routes(
             return {"available": False, "native_route_selected": True, "reason": "SESSION_NOT_READY", "retryable": True}
         return {"available": True, "native_route_selected": True, **state}
 
+    async def _plan_write(request: Request, sid: str, operation: str):
+        # Freeze the authenticated account before the first suspension.
+        owner = effective_user(request)
+        auth = getattr(request.app.state, "auth_manager", None)
+        barrier = getattr(request.app.state, "account_request_barrier", None)
+        account = auth.account_id(owner) if auth and owner and getattr(request.state, "authenticated", False) else None
+        if not account or not barrier or auth.username_for_account_id(account) != owner:
+            raise HTTPException(403, "Plan account unavailable")
+        async with barrier.admitted(owner):
+            def current():
+                return auth.account_id(owner) == account and auth.username_for_account_id(account) == owner
+            if not current(): raise HTTPException(409, "Plan account changed")
+            _verify_session_owner(request, sid, session_manager)
+            try:
+                body = await request.json() if operation != "clear" else {}
+                if not isinstance(body, dict): raise ValueError("invalid request")
+                if not current(): raise ValueError("plan account changed")
+                from src.plan_approval import approve_plan, save_plan_draft, clear_plan
+                if operation == "approve":
+                    revision, digest = int(body.get("revision")), str(body.get("digest") or "")
+                    if revision <= 0 or len(digest) != 64: raise ValueError("revision and digest are required")
+                    plan = approve_plan(sid, owner, revision=revision, digest=digest, current_authority=current)
+                elif operation == "draft":
+                    plan = save_plan_draft(sid, owner, str(body.get("plan") or ""), current_authority=current)
+                else:
+                    plan = clear_plan(sid, owner, current_authority=current)
+                return {"ok": True, "plan_state": plan}
+            except KeyError as exc:
+                raise HTTPException(404, "Session plan is unavailable") from exc
+            except (TypeError, ValueError, AttributeError, json.JSONDecodeError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+
     @router.post("/session/{sid}/plan/approve")
     async def approve_plan(request: Request, sid: str):
-        """CAS-approve the exact server-persisted plan revision for this session."""
-        _verify_session_owner(request, sid, session_manager)
-        owner = effective_user(request)
-        if not owner:
-            raise HTTPException(403, "Plan approval requires an authenticated owner")
-        try:
-            body = await request.json()
-            revision = int(body.get("revision"))
-            digest = str(body.get("digest") or "")
-        except (TypeError, ValueError, AttributeError, json.JSONDecodeError) as exc:
-            raise HTTPException(400, "revision and digest are required") from exc
-        if revision <= 0 or len(digest) != 64:
-            raise HTTPException(400, "revision and digest are required")
-        from src.plan_approval import approve_plan as _approve_plan
-
-        try:
-            plan_state = _approve_plan(sid, owner, revision=revision, digest=digest)
-        except KeyError as exc:
-            raise HTTPException(404, "Session plan is unavailable") from exc
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        return {"ok": True, "plan_state": plan_state}
+        return await _plan_write(request, sid, "approve")
 
     @router.post("/session/{sid}/plan/draft")
     async def save_plan_draft(request: Request, sid: str):
-        """Persist a displayed draft; this endpoint never grants execution."""
-        _verify_session_owner(request, sid, session_manager)
-        owner = effective_user(request)
-        if not owner:
-            raise HTTPException(403, "Plan drafts require an authenticated owner")
-        try:
-            body = await request.json()
-            plan = str(body.get("plan") or "")
-        except (TypeError, AttributeError, json.JSONDecodeError) as exc:
-            raise HTTPException(400, "plan is required") from exc
-        from src.plan_approval import save_plan_draft as _save_plan_draft
-
-        try:
-            plan_state = _save_plan_draft(sid, owner, plan)
-        except KeyError as exc:
-            raise HTTPException(404, "Session plan is unavailable") from exc
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return {"ok": True, "plan_state": plan_state}
+        return await _plan_write(request, sid, "draft")
 
     @router.post("/session/{sid}/plan/clear")
     async def clear_plan(request: Request, sid: str):
-        """Clear server draft/approval state without deleting materialized files."""
-        _verify_session_owner(request, sid, session_manager)
-        owner = effective_user(request)
-        if not owner:
-            raise HTTPException(403, "Plan clearing requires an authenticated owner")
-        from src.plan_approval import clear_plan as _clear_plan
+        return await _plan_write(request, sid, "clear")
 
+    async def _plan_feedback_request(request: Request, sid: str, *, write: bool):
+        owner = effective_user(request)
+        auth = getattr(request.app.state, "auth_manager", None)
+        barrier = getattr(request.app.state, "account_request_barrier", None)
+        account = auth.account_id(owner) if auth and owner and getattr(request.state, "authenticated", False) else None
+        if not account or not barrier or auth.username_for_account_id(account) != owner:
+            raise HTTPException(403, "Feedback account unavailable")
+        repository = getattr(request.app.state, 'files_policy_repository', None)
+        capture = getattr(request.app.state, 'capture_original_credential', None)
         try:
-            plan_state = _clear_plan(sid, owner)
-        except KeyError as exc:
-            raise HTTPException(404, "Session plan is unavailable") from exc
-        return {"ok": True, "plan_state": plan_state}
+            credential_current = capture(request, owner, account)
+        except Exception as exc:
+            raise HTTPException(403, "Feedback credential unavailable") from exc
+        async with barrier.admitted(owner):
+            files_generation=None
+            def current():
+                return (request.app.state.auth_manager is auth and request.app.state.account_request_barrier is barrier
+                    and getattr(request.app.state, 'files_policy_repository', None) is repository
+                    and credential_current() and auth.account_id(owner) == account and auth.username_for_account_id(account) == owner
+                    and (files_generation is None or repository.generation()==files_generation))
+            if not current(): raise HTTPException(409, "Feedback account changed")
+            _verify_session_owner(request, sid, session_manager)
+            try:
+                from src.openclank import plan_feedback
+                if not write:
+                    if request.query_params.get('scope') == '1':
+                        actor=request.query_params.get('actor'); actor_session=request.query_params.get('actor_session')
+                        return {'scope':await plan_feedback.capture_feedback_scope(request,sid,owner,account,session_manager,actor_id=actor,actor_session_id=actor_session,current_authority=current)}
+                    return {"entries": plan_feedback.read(sid, owner, account, current_authority=current)}
+                body = await request.json()
+                if type(body) is not dict or set(body) - {"request_key", "text", "revision", "digest", "feedback_id", "comment_revision", "fileTarget", "resourceTarget", "retarget", "batchMembers"}:
+                    raise ValueError("invalid feedback request")
+                if 'batchMembers' in body:
+                    if set(body)!={'request_key','batchMembers'}:raise ValueError('invalid feedback batch')
+                    prepared=plan_feedback.inspect_batch_members(sid,owner,account,request_key=body['request_key'],members=body['batchMembers'],current_authority=current)
+                    if 'existing' in prepared:return {'entry':prepared['existing']}
+                    target=prepared['target'];files_generation=repository.generation()
+                    if await plan_feedback.recapture_feedback_scope(request,sid,owner,account,session_manager,target['scope'],current_authority=current)!=target['scope']:
+                        raise ValueError('feedback scope changed')
+                    from src.openclank.plan_feedback_files import capture_feedback_resource
+                    verified=[]
+                    for item in target['items']:
+                        frozen={k:item[k] for k in ('resource','anchor','anchorVerification') if k in item}
+                        verified.append(await capture_feedback_resource(request,target['binding'],account,frozen=frozen))
+                        if not current():raise ValueError('feedback account changed')
+                    for index,item in enumerate(target['items']):
+                        frozen={k:item[k] for k in ('resource','anchor','anchorVerification') if k in item}
+                        if await capture_feedback_resource(request,target['binding'],account,frozen=frozen)!=verified[index] or not current():raise ValueError('feedback batch changed')
+                    if not current() or await plan_feedback.recapture_feedback_scope(request,sid,owner,account,session_manager,target['scope'],current_authority=current)!=target['scope']:
+                        raise ValueError('feedback scope changed')
+                    return {'entry':plan_feedback.save_resource_batch(sid,owner,account,request_key=body['request_key'],members=body['batchMembers'],observed_target=target,verified_members=verified,current_authority=current)}
+                if 'resourceTarget' in body:
+                    if 'fileTarget' in body or 'revision' in body or 'digest' in body: raise ValueError('invalid feedback target')
+                    spec=body['resourceTarget']
+                    if type(spec) is not dict or set(spec) not in ({'resourceRef','expectedRevision','anchor','scope'},{'resourceRef','expectedRevision','anchor','scope','designContext'}): raise ValueError('invalid feedback target')
+                    observed_scope=await plan_feedback.recapture_feedback_scope(request,sid,owner,account,session_manager,spec['scope'],current_authority=current)
+                    if plan_feedback._scope(spec['scope'])!=observed_scope: raise ValueError('feedback scope changed')
+                    binding=plan_feedback.inspect_resource_binding(sid,owner,current_authority=current)
+                    from src.openclank.plan_feedback_files import capture_feedback_resource
+                    files_generation=request.app.state.files_policy_repository.generation()
+                    if 'designContext' in spec and (type(spec['designContext']) is not dict or type(spec['designContext'].get('output')) is not dict): raise ValueError('design context unavailable')
+                    require_source_write='designContext' in spec and spec['designContext']['output'].get('destination')!='new-file'
+                    resource=await capture_feedback_resource(request,binding,account,resource_ref=spec['resourceRef'],expected_revision=spec['expectedRevision'],anchor=spec['anchor'],require_write=require_source_write)
+                    design=None
+                    if 'designContext' in spec:
+                        from src.openclank.plan_feedback_files import capture_design_context
+                        design=await capture_design_context(request,binding,account,spec['designContext'],resource['resource'])
+                        if await capture_feedback_resource(request,binding,account,frozen=resource,require_write=require_source_write)!=resource: raise ValueError('design source changed')
+                        if await capture_design_context(request,binding,account,design,resource['resource'],frozen=True)!=design: raise ValueError('design assets changed')
+                    if not current() or await plan_feedback.recapture_feedback_scope(request,sid,owner,account,session_manager,observed_scope,current_authority=current)!=observed_scope: raise ValueError('feedback scope changed')
+                    return {'entry':plan_feedback.save_resource(sid,owner,account,request_key=body.get('request_key'),text=body.get('text'),resource=resource,observed_binding=binding,observed_scope=observed_scope,design_context=design,feedback_id=body.get('feedback_id'),comment_revision=body.get('comment_revision'),retarget=body.get('retarget',False),current_authority=current)}
+                if 'retarget' in body: raise ValueError('invalid feedback target')
+                file_target=None;observed_base=None
+                if 'fileTarget' in body:
+                    spec=body['fileTarget']
+                    if type(spec) is not dict or set(spec) not in ({'resourceRef','expectedRevision'},{'resourceRef','expectedRevision','selection'}):raise ValueError('invalid feedback target')
+                    base=plan_feedback.inspect(sid,owner,account,current_authority=current)
+                    if base['revision']!=body.get('revision') or base['digest']!=body.get('digest'):raise ValueError('plan target changed')
+                    observed_base=base
+                    from src.openclank.plan_feedback_files import capture_feedback_file
+                    files_generation=request.app.state.files_policy_repository.generation()
+                    file_target=await capture_feedback_file(request,base,account,resource_ref=spec['resourceRef'],expected_revision=spec['expectedRevision'],selection=spec.get('selection'))
+                    if not current():raise ValueError('feedback account changed')
+                entry = plan_feedback.save(sid, owner, account, request_key=body.get("request_key"),
+                    text=body.get("text"), revision=body.get("revision"), digest=body.get("digest"),
+                    feedback_id=body.get("feedback_id"), comment_revision=body.get("comment_revision"),
+                    file_target=file_target,observed_base=observed_base,current_authority=current)
+                return {"entry": entry}
+            except KeyError as exc: raise HTTPException(404, "Feedback unavailable") from exc
+            except (ValueError, TypeError, RuntimeError) as exc: raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/session/{sid}/plan/feedback")
+    async def read_plan_feedback(request: Request, sid: str):
+        return await _plan_feedback_request(request, sid, write=False)
+
+    @router.post("/session/{sid}/plan/feedback")
+    async def save_plan_feedback(request: Request, sid: str):
+        return await _plan_feedback_request(request, sid, write=True)
+
+    @router.post('/session/{sid}/plan/feedback/{feedback_id}/verify-file')
+    async def verify_plan_feedback_file(request: Request, sid: str, feedback_id: str):
+        from src.openclank import plan_feedback
+        from src.openclank.plan_feedback_files import capture_feedback_file
+        owner=effective_user(request);auth=getattr(request.app.state,'auth_manager',None);barrier=getattr(request.app.state,'account_request_barrier',None)
+        account=auth.account_id(owner) if auth and owner and getattr(request.state,'authenticated',False) else None
+        if not account or not barrier or auth.username_for_account_id(account)!=owner:raise HTTPException(403,'Feedback account unavailable')
+        repository=getattr(request.app.state,'files_policy_repository',None)
+        capture=getattr(request.app.state,'capture_original_credential',None)
+        try:
+            credential_current=capture(request,owner,account)
+        except Exception as exc:
+            raise HTTPException(403,'Feedback credential unavailable') from exc
+        try:
+            async with barrier.admitted(owner):
+                current=lambda: (request.app.state.auth_manager is auth and request.app.state.account_request_barrier is barrier
+                    and getattr(request.app.state,'files_policy_repository',None) is repository and credential_current()
+                    and auth.account_id(owner)==account and auth.username_for_account_id(account)==owner)
+                _verify_session_owner(request,sid,session_manager)
+                saved=plan_feedback.inspect(sid,owner,account,feedback_id=feedback_id,current_authority=current)
+                if saved['target'].get('kind')=='resource':
+                    from src.openclank.plan_feedback_files import capture_feedback_resource
+                    binding=plan_feedback.inspect_resource_binding(sid,owner,current_authority=current)
+                    if binding!=saved['target']['binding']: raise ValueError('feedback target changed')
+                    if 'designContext' in saved['target']:
+                        from src.openclank.plan_feedback_files import compare_design_input
+                        repository=request.app.state.files_policy_repository; generation=repository.generation()
+                        inputs=[saved['target']['resource'],*saved['target']['designContext']['assets']]
+                        standard_source=saved['target']['designContext'].get('standardSource')
+                        if standard_source: inputs.append(standard_source['resource'])
+                        comparisons=[await compare_design_input(request,binding,account,item) for item in inputs]
+                        if not current() or request.app.state.files_policy_repository is not repository or repository.generation()!=generation or plan_feedback.inspect_resource_binding(sid,owner,current_authority=current)!=binding: raise ValueError('feedback target changed')
+                        destination_state=None
+                        if saved['target']['designContext']['output']['destination']=='new-file':
+                            from src.openclank.plan_feedback_files import capture_design_folder
+                            try:
+                                await capture_design_folder(request,binding,account,saved['target']['designContext']['output']['folder'],frozen=True)
+                                destination_state={'state':'current'}
+                            except Exception:
+                                destination_state={'state':'unavailable'}
+                        result={'state':'current' if all(x['state']=='current' for x in comparisons) and (destination_state is None or destination_state['state']=='current') else 'changed',
+                            'designInputs':comparisons,**({'standardInputIndex':len(comparisons)-1} if standard_source else {}),**({'designDestination':destination_state} if destination_state is not None else {}),'anchorState':'verified' if saved['target']['anchor']['kind'] in ('whole','text') or 'anchorVerification' in saved['target'] else 'unverified'}
+                        if comparisons[0]['state']=='current':
+                            _,result['resourceRef']=await capture_feedback_resource(request,binding,account,frozen=saved['target'],return_ref=True)
+                        if not current() or request.app.state.files_policy_repository is not repository or repository.generation()!=generation or plan_feedback.inspect_resource_binding(sid,owner,current_authority=current)!=binding: raise ValueError('feedback target changed')
+                        return result
+                    _,ref=await capture_feedback_resource(request,binding,account,frozen=saved['target'],return_ref=True)
+                    if not current() or plan_feedback.inspect_resource_binding(sid,owner,current_authority=current)!=binding: raise ValueError('feedback target changed')
+                    return {'state':'current','resourceRef':ref,'anchorState':'verified' if saved['target']['anchor']['kind'] in ('whole','text') or 'anchorVerification' in saved['target'] else 'unverified'}
+                base=plan_feedback.inspect(sid,owner,account,current_authority=current)
+                if plan_feedback._base(saved['target'])!=base or not saved['target'].get('file'):raise ValueError('feedback target changed')
+                _,ref=await capture_feedback_file(request,saved['target'],account,frozen=saved['target']['file'],return_ref=True)
+                if not current() or plan_feedback.inspect(sid,owner,account,current_authority=current)!=base:raise ValueError('feedback target changed')
+                return {'state':'current','resourceRef':ref}
+        except (ValueError,TypeError,RuntimeError,KeyError):raise HTTPException(409,'Feedback file is stale or unavailable')
 
     async def _goal_proxy(
         request: Request,
@@ -695,6 +976,7 @@ def setup_session_routes(
         suffix: str = "goal",
         payload: dict | None = None,
         timeout: float = 20.0,
+        before_issue=None,
     ):
         _verify_session_owner(request, sid, session_manager)
         try:
@@ -718,6 +1000,7 @@ def setup_session_routes(
                 owner=owner,
                 payload=payload,
                 timeout=timeout,
+                **({'before_issue':before_issue} if before_issue is not None else {}),
             )
         except HTTPException:
             raise
@@ -749,27 +1032,83 @@ def setup_session_routes(
     @router.post("/session/{sid}/mimo-operation")
     async def native_session_operation(request: Request, sid: str):
         """Bounded native operations under canonical host session ownership."""
-        _verify_session_owner(request, sid, session_manager)
+        owner = _verify_session_owner(request, sid, session_manager)
         body = await request.json()
         if not isinstance(body, dict): raise HTTPException(400, "Operation must be an object")
         operation = body.get("operation")
         allowed_keys = {
             "commands-refresh": {"operation", "reload_skills"},
             "compact": {"operation"}, "btw": {"operation", "question"},
-            "recovery": {"operation"}, "recover": {"operation", "assistantMessageID"},
+            "recovery": {"operation"}, "recover": {"operation", "assistantMessageID", "turnPolicy"},
+            "rebuild": {"operation", "requestID", "turnPolicy"},
             "timeline": {"operation"}, "undo": {"operation", "host_message_id", "expected_transcript_revision"},
             "redo": {"operation", "expected_transcript_revision"}, "history-reconcile": {"operation", "expected_transcript_revision"},
-            "fork": {"operation", "expected_transcript_revision", "host_message_id", "title"},
+            "fork-source": {"operation"},
+            "fork": {"operation", "expected_transcript_revision", "expected_source_key", "host_message_id", "title", "request_id"},
+            "fork-status": {"operation", "child_session_id"},
             "fork-reconcile": {"operation", "expected_transcript_revision", "child_session_id"},
         }
-        if operation not in allowed_keys: raise HTTPException(400, "Unsupported native session operation")
+        if not isinstance(operation, str) or operation not in allowed_keys:
+            raise HTTPException(400, "Unsupported native session operation")
         if set(body) - allowed_keys[operation]: raise HTTPException(400, "Unsupported operation fields")
+        if operation in {"fork-source", "fork", "fork-status", "fork-reconcile"}:
+            from src.openclank.session_fork import ForkOperationError, fork_receipt_status, fork_source_key, fork_source_kind
+            with SessionLocal() as db:
+                row = db.query(DbSession).filter(DbSession.id == sid, DbSession.owner == owner).first()
+                if row is None or row.archived:
+                    raise HTTPException(409, "Fork requires an active saved chat")
+                kind = fork_source_kind(row)
+                source = {"kind": kind, "workspace_id": row.workspace_id,
+                          "transcript_revision": int(row.transcript_revision or 0)}
+                if kind == "native":
+                    source["source_key"] = fork_source_key(row)
+            if operation == "fork-source":
+                from src.openclank.conversation_archive import get_conversation_archive
+                if get_conversation_archive().chat_erasure_started(owner=owner, chat_id=sid):
+                    raise HTTPException(409, "Original fork source is unavailable")
+                return {"operation": operation, "result": source}
+            if kind != "native":
+                raise HTTPException(409, "This chat only supports transcript copies")
+            auth = getattr(request.app.state, "auth_manager", None)
+            account = auth.account_id(owner) if auth else None
+            if not account or auth.username_for_account_id(account) != owner:
+                raise HTTPException(403, "Original fork account is unavailable")
+            candidate_id = body.get("child_session_id") if operation != "fork" else body.get("request_id")
+            if candidate_id is not None or operation == "fork-reconcile":
+                try:
+                    if not isinstance(candidate_id, str) or str(uuid.UUID(candidate_id)) != candidate_id:
+                        raise ValueError("invalid candidate selector")
+                except (ValueError, AttributeError) as exc:
+                    raise HTTPException(400, "Invalid original fork selector") from exc
+            if operation == "fork":
+                if ("expected_source_key" in body and body["expected_source_key"] != source["source_key"]):
+                    raise HTTPException(409, "The original Native source changed. Select it again.")
+                host_message = body.get("host_message_id")
+                if host_message is not None and (not isinstance(host_message, str) or not host_message or len(host_message) > 256):
+                    raise HTTPException(400, "Invalid original source message ID")
+            if operation in {"fork-status", "fork-reconcile"}:
+                if not source["workspace_id"]:
+                    raise HTTPException(409, "Original fork workspace is unavailable")
+                _validated_session_workspace(request, owner, source["workspace_id"])
+                try:
+                    receipt = fork_receipt_status(sid=sid, owner=owner, account_id=account, candidate_id=candidate_id)
+                except ForkOperationError as exc:
+                    raise HTTPException(exc.status, {"code": exc.code, "message": str(exc)}) from exc
+                if operation == "fork-status" or receipt["status"] == "settled":
+                    return {"operation": operation, "result": receipt}
+                if receipt["status"] != "pending":
+                    raise HTTPException(409, {"code": "FORK_RECEIPT_UNAVAILABLE",
+                                              "message": "The original fork receipt is unavailable or stale",
+                                              "candidate_id": candidate_id})
+            if operation == "fork":
+                body["expected_source_key"] = source["source_key"]
+            body["_source_account_id"] = account
         if operation in {"timeline", "undo", "redo", "history-reconcile", "fork", "fork-reconcile"}:
             session = session_manager.get_session(sid, allow_pending_history=True)
         else:
             session = session_manager.get_session(sid)
-        if not session.provider_model_route_id: raise HTTPException(409, "Session does not use Open Clank agent")
-        owner = effective_user(request)
+        if not session.provider_model_route_id and operation not in {"fork", "fork-reconcile"}:
+            raise HTTPException(409, "Session does not use Open Clank agent")
         if operation == "commands-refresh":
             reload_skills = body.get("reload_skills", False)
             if type(reload_skills) is not bool: raise HTTPException(400, "reload_skills must be boolean")
@@ -780,17 +1119,23 @@ def setup_session_routes(
             except SupervisorAdmissionError as exc: raise HTTPException(exc.status, {"code": exc.code, "message": "Catalog target is not ready", "retryable": exc.retryable}) from exc
             return {"operation": operation, "result": result}
         if operation in {"fork", "fork-reconcile"}:
-            _reject_compact_during_active_run(sid)
-            from src.openclank.session_fork import ForkOperationError
+            from src import agent_runs
+            if agent_runs.is_active(sid):
+                raise HTTPException(409, "Wait for the active chat turn to finish before forking")
             control = getattr(getattr(request.app.state, "mimo_supervisor", None), "session_fork_operation", None)
-            if not callable(control): raise HTTPException(503, "Native fork controls are unavailable")
+            if not callable(control):
+                raise HTTPException(503, {"code": "FORK_OWNER_UNAVAILABLE", "message": "Native fork controls are unavailable",
+                                          "not_issued": operation == "fork"})
             try:
                 result = await control(sid, owner=owner, operation=operation, payload=body, manager=session_manager)
             except ForkOperationError as exc:
                 raise HTTPException(exc.status, {"code": exc.code, "message": str(exc), "candidate_id": exc.candidate_id}) from exc
             except Exception as exc:
                 from src.openclank.agent_supervisor import AgentSupervisorAdmissionError
-                if isinstance(exc, AgentSupervisorAdmissionError): raise HTTPException(exc.status, {"code": exc.code, "message": "Native fork owner is unavailable", "retryable": exc.retryable}) from exc
+                if isinstance(exc, AgentSupervisorAdmissionError):
+                    raise HTTPException(exc.status, {"code": exc.code, "message": "Native fork owner is unavailable",
+                                                      "retryable": exc.retryable, "candidate_id": body.get("child_session_id"),
+                                                      "not_issued": operation == "fork"}) from exc
                 raise
             return {"operation": operation, "result": result}
         if operation in {"timeline", "undo", "redo", "history-reconcile"}:
@@ -798,8 +1143,17 @@ def setup_session_routes(
             from src.openclank.session_operations import HistoryOperationError
             control = getattr(getattr(request.app.state, "mimo_supervisor", None), "session_history_operation", None)
             if not callable(control): raise HTTPException(503, "Native history controls are unavailable")
+            file_authority = None
+            if operation in {"undo", "redo", "history-reconcile"}:
+                # A missing human/Files owner leaves transcript controls usable,
+                # but cannot grant a file effect or synthesize a human request.
+                try:
+                    from src.openclank.session_file_history import human_file_authority
+                    file_authority = human_file_authority(request, sid=sid, owner=owner, session_manager=session_manager)
+                except Exception:
+                    file_authority = None
             try:
-                result = await control(sid, owner=owner, operation=operation, payload=body)
+                result = await control(sid, owner=owner, operation=operation, payload=body, file_authority=file_authority)
             except HistoryOperationError as exc:
                 raise HTTPException(exc.status, {"code": exc.code, "message": str(exc), "choices": exc.choices}) from exc
             except Exception as exc:
@@ -822,15 +1176,154 @@ def setup_session_routes(
             return {"operation": operation, "result": result}
         if operation == "recovery":
             return {"operation": operation, "result": await _goal_proxy(request, sid, "GET", suffix="recovery")}
-        if operation in {"compact", "recover"}: _reject_compact_during_active_run(sid)
-        if operation == "recover":
-            candidate_id = body.get("assistantMessageID")
-            if not isinstance(candidate_id, str) or not re.fullmatch(r"msg_[A-Za-z0-9]+", candidate_id):
-                raise HTTPException(400, "assistantMessageID must identify an interrupted candidate")
-            candidates = await _goal_proxy(request, sid, "GET", suffix="recovery")
-            if not isinstance(candidates, list) or not any(item.get("assistantMessageID") == candidate_id for item in candidates if isinstance(item, dict)):
-                raise HTTPException(409, "Interrupted candidate is no longer recoverable")
-            result = await _goal_proxy(request, sid, "POST", suffix=f"turn/{candidate_id}/resume")
+        if operation in {"compact", "recover", "rebuild"}: _reject_compact_during_active_run(sid)
+        if operation in {"recover", "rebuild"}:
+            candidate_id = body.get("assistantMessageID") if operation == "recover" else body.get("requestID")
+            if operation == "recover":
+                if not isinstance(candidate_id, str) or not re.fullmatch(r"msg_[A-Za-z0-9]+", candidate_id):
+                    raise HTTPException(400, "assistantMessageID must identify an interrupted candidate")
+            elif not isinstance(candidate_id, str) or not re.fullmatch(r"rebuild_[0-9a-f]{32}", candidate_id):
+                raise HTTPException(400, "requestID must identify the original human rebuild request")
+            from src.tool_policy import normalize_turn_policy_snapshot
+            try:
+                policy = normalize_turn_policy_snapshot(body.get("turnPolicy"))
+            except ValueError as exc:
+                raise HTTPException(409, {"code": "RECOVERY_POLICY_UNAVAILABLE",
+                    "message": "Recovery requires explicit current chat policy; reload and retry."}) from exc
+            if policy["incognito"] or policy["noMemory"] or policy["useResearch"] or policy["compareMode"]:
+                raise HTTPException(409, {"code": "RECOVERY_POLICY_UNSUPPORTED",
+                    "message": "This recovery mode is unavailable; recovery has not started."})
+            state=request.app.state; auth=getattr(state,'auth_manager',None)
+            barrier=getattr(state,'account_request_barrier',None); factory=getattr(state,'capture_original_credential',None)
+            reset_factory=getattr(state,'memory_reset_coordinator',None); lifecycle=getattr(state,'account_owner_lifecycle',None)
+            if (auth is None or barrier is None or not callable(factory) or not callable(reset_factory) or lifecycle is None
+                    or getattr(request.state,'api_token',False) or getattr(request.state,'internal_tool_authenticated',False)):
+                raise HTTPException(403,"Named human recovery authority is unavailable")
+            account=auth.account_id(owner)
+            if not account or auth.username_for_account_id(account)!=owner:
+                raise HTTPException(403,"Named human recovery authority is unavailable")
+            credential=factory(request,owner,account)
+            admission=await barrier.acquire(owner)
+            def recovery_current():
+                try:
+                    barrier.assert_live_admission(owner, admission)
+                    return (getattr(state, 'auth_manager', None) is auth
+                        and getattr(state, 'account_request_barrier', None) is barrier
+                        and getattr(state, 'capture_original_credential', None) is factory
+                        and getattr(state, 'memory_reset_coordinator', None) is reset_factory
+                        and getattr(state, 'account_owner_lifecycle', None) is lifecycle)
+                except Exception:
+                    return False
+            async def recovery_preflight():
+                from src.openclank.analysis_snapshot_host import _owned
+                if not recovery_current(): return False
+                def durable_current():
+                    try:
+                        return (credential() is True and auth.account_id(owner)==account
+                            and auth.username_for_account_id(account)==owner
+                            and not lifecycle.owner_has_active_operation(owner)
+                            and not reset_factory().owner_is_fenced(owner)
+                            and _verify_session_owner(request,sid,session_manager)==owner)
+                    except Exception:
+                        return False
+                checked = await _owned(durable_current)
+                return checked is True and recovery_current()
+            try:
+                if not await recovery_preflight(): raise HTTPException(409,"Managed recovery authority changed")
+                if operation == "recover":
+                    candidates = await _goal_proxy(request, sid, "GET", suffix="recovery")
+                    if not isinstance(candidates, list) or not any(item.get("assistantMessageID") == candidate_id for item in candidates if isinstance(item, dict)):
+                        raise HTTPException(409, "Interrupted candidate is no longer recoverable")
+                supervisor = getattr(request.app.state, "mimo_supervisor", None)
+                install = getattr(supervisor, "set_managed_policy_installer", None)
+                if callable(install):
+                    from routes.orchestration_routes import install_input_policy_resolver
+                    from types import SimpleNamespace
+                    policy_app = request.app
+                    install(owner, lambda bridge: install_input_policy_resolver(SimpleNamespace(app=policy_app), bridge, session_manager))
+                runtime_home = getattr(supervisor, "_runtime_home", None)
+                prepare = getattr(supervisor, "prepare_managed_handoff", None)
+                if not callable(runtime_home) or not callable(prepare):
+                    raise HTTPException(503, "Managed recovery authority is unavailable")
+                from src.openclank.session_map import OwnerSessionMap
+                from src.openclank.orchestration_projection import resolve_binding, validate_actors, find_session_actor
+                try:
+                    mapping = OwnerSessionMap(runtime_home(owner) / "session-map.json", owner)
+                    snapshot = mapping.read()
+                    binding = resolve_binding(snapshot, owner, sid, snapshot["mapRevision"])
+                    actors = validate_actors(await _goal_proxy(request, sid, "GET", suffix="actors"), binding.engine_session_id)
+                    actor = find_session_actor(actors, "main", binding.engine_session_id)
+                    if not actor or actor.get("mode") != "main":
+                        raise ValueError("main actor is unavailable")
+                    revision = actor.get("executionRevision")
+                    if type(revision) is not int or revision < 0:
+                        raise ValueError("main actor revision is unavailable")
+                    actor_agent = actor.get("agent")
+                    if not isinstance(actor_agent, str) or not actor_agent:
+                        raise HTTPException(409, {"code": "RECOVERY_MODE_UNAVAILABLE", "message": "The current actor mode is unavailable."})
+                    actor_mode = actor_agent if actor_agent in {"chat", "plan"} else "agent"
+                    if actor_mode != policy["mode"]:
+                        raise HTTPException(409, {"code": "RECOVERY_MODE_UNSUPPORTED", "message": "Recovery cannot change the actor mode."})
+                    from routes.orchestration_routes import effective_receipt_policy_ceiling
+                    ceiling = effective_receipt_policy_ceiling(request, owner, sid, {"turnPolicy": policy, "text": ""}, session_manager)
+                    if ceiling["blockAllToolCalls"]:
+                        raise HTTPException(409, {"code": "RECOVERY_POLICY_UNAVAILABLE", "message": "Current recovery authority is unavailable."})
+                    route = resolve_chat_route(owner=owner, endpoint_id=session.endpoint_id,
+                        model_id=session.model, model_route_id=session.provider_model_route_id)
+                    model, context = actor.get("effectiveModel") or {}, actor.get("hostContext") or {}
+                    if (model.get("providerID") != route.connection_id or model.get("modelID") != route.provider_model_id
+                        or context.get("chatID") != sid or context.get("grantID") != route.provider_grant_id):
+                        raise ValueError("main actor route or grant changed")
+                    grant_revision = None
+                    if route.provider_grant_id:
+                        from src.openclank.provider_store import ProviderStore
+                        grant_revision = ProviderStore().resolve_share_scope(recipient=owner, grant_id=route.provider_grant_id).revision
+                        if context.get("grantRevision") != grant_revision:
+                            raise ValueError("main actor grant revision changed")
+                    recovery_id = uuid.uuid5(uuid.NAMESPACE_URL, f"openclank-{'recovery' if operation == 'recover' else 'manual-rebuild'}:{owner}:{sid}:{candidate_id}").hex
+                    root_id, handoff_id = "recovery_" + recovery_id, recovery_id
+                    managed_route = {"rootOperationID": root_id, "connectionID": route.connection_id,
+                        "providerID": route.connection_id, "billingLane": route.billing_lane,
+                        "modelID": route.provider_model_id, "modelRouteID": route.model_route_id,
+                        **({"grantID": route.provider_grant_id, "grantRevision": grant_revision} if route.provider_grant_id else {}),
+                        **({"inheritedAccountID": context["accountID"]} if context.get("accountID") else {})}
+                    try:
+                        if not await recovery_preflight(): raise ValueError("recovery human authority changed")
+                        prepared = await prepare(owner=owner, host_chat_id=sid, engine_session_id=binding.engine_session_id,
+                            root_session_id=binding.engine_session_id, root_operation_id=root_id,
+                            request_id=candidate_id, handoff_id=handoff_id, actor_id="main", expected_execution_revision=revision,
+                            admission_ceiling=ceiling, turn_policy=policy, input_text="",
+                            recovery_human=(account,barrier,admission,recovery_current,recovery_preflight))
+                        if not isinstance(prepared, dict) or prepared.get("prepared") is not True or prepared.get("replayed") is not False:
+                            raise HTTPException(409, "Recovery status is unknown; reconcile the original request")
+                    except ValueError as exc:
+                        if "conflict" in str(exc) or "already reserved at another revision" in str(exc):
+                            raise HTTPException(409, {"code": "RECOVERY_POLICY_CONFLICT",
+                                "message": "This recovery identity is already bound to another policy or revision."}) from exc
+                        raise
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    raise HTTPException(409, "Managed recovery authority is unavailable or changed") from exc
+                # Keep the reservation on transport/unknown outcomes for exact reconciliation.
+                if not recovery_current(): raise HTTPException(409, "Managed recovery authority changed")
+                issue=asyncio.create_task(_goal_proxy(request, sid, "POST", suffix=f"turn/{candidate_id}/resume" if operation == "recover" else "manual-rebuild",
+                    payload={"managedRecovery": {"rootOperationID": root_id, "handoffID": handoff_id,
+                        "expectedExecutionRevision": revision, "managedRoute": managed_route, "turnPolicy": policy}},
+                    before_issue=recovery_preflight, timeout=360.0 if operation == "rebuild" else 20.0))
+                try:
+                    result=await asyncio.shield(issue)
+                except asyncio.CancelledError:
+                    while not issue.done():
+                        try: await asyncio.shield(issue)
+                        except asyncio.CancelledError: continue
+                        except Exception: break
+                    issue.result()
+                    raise
+                if operation == "rebuild" and not await recovery_preflight():
+                    raise HTTPException(409, "The original rebuild outcome is unknown; current authority changed")
+            finally:
+                await barrier.release(admission)
         else:
             route = resolve_chat_route(owner=owner, endpoint_id=session.endpoint_id, model_route_id=session.provider_model_route_id)
             payload = {"providerID": route.connection_id, "modelID": route.provider_model_id}
@@ -843,7 +1336,11 @@ def setup_session_routes(
                 payload["question"] = question
                 suffix = "ask"
             result = await _goal_proxy(request, sid, "POST", suffix=suffix, payload=payload, timeout=120.0)
-        return {"operation": operation, "result": result}
+        if operation == "rebuild" and (type(result) is not dict or set(result) != {"outcome"}
+                or result.get("outcome") not in {"rebuilt", "unavailable", "insert-failed", "compaction-requested"}):
+            raise HTTPException(502, "The original rebuild outcome is unknown; do not retry automatically")
+        return {"operation": operation, "result": result,
+                **({"deliveryState": "pending"} if operation == "recover" else {})}
 
     @router.get("/session/{sid}/goal")
     async def get_session_goal(request: Request, sid: str):
@@ -936,8 +1433,8 @@ def setup_session_routes(
             db.close()
         return {"success": True}
 
-    @router.patch("/session/{sid}/mimo-config")
-    async def set_mimo_config(request: Request, sid: str):
+    @router.patch("/session/{sid}/engine-config")
+    async def set_engine_config(request: Request, sid: str):
         """Validate, acknowledge, and persist one negotiated Open Clank agent option."""
         _verify_session_owner(request, sid)
         try:
@@ -1079,7 +1576,12 @@ def setup_session_routes(
                 mimo_supervisor=getattr(request.app.state, "mimo_supervisor", None),
                 memory_provider=getattr(request.app.state, "memory_provider", None))
             try:
-                return await service.erase(owner=owner, session_id=sid)
+                auth=getattr(request.app.state,'auth_manager',None)
+                account_for=getattr(auth,'account_id',None); owner_for=getattr(auth,'username_for_account_id',None)
+                account_id=account_for(owner) if callable(account_for) and callable(owner_for) else None
+                if account_id and owner_for(account_id) != owner:
+                    account_id=None
+                return await service.erase(owner=owner, session_id=sid,current_account_id=account_id)
             except ChatLifecycleError as exc:
                 status = 409 if exc.code == "active_run" else 503
                 raise HTTPException(status, {"error": "SESSION_DELETE_INCOMPLETE", "message": str(exc), "retryable": exc.code == "erasure_pending"}) from exc
@@ -1201,6 +1703,402 @@ def setup_session_routes(
         finally:
             db.close()
 
+    async def _selected_history_snapshot(request: Request, *, source_body=None, selection=None):
+        """Stage and reauthorize one selected Files snapshot for preview or private selection."""
+        import asyncio, hashlib, tempfile, sys
+        from fastapi.responses import JSONResponse
+        from src.openclank.files_principal import files_principal
+        from src.openclank.files_facade import ProviderContext
+        from src.openclank.resource_refs import resolve_resource_ref
+        from src.openclank.session_transfer_preview import MAX_SOURCE, MAX_RESULT, PreviewUnavailable, copy_path, inspect_snapshot, inspect_selected_snapshot
+
+        account, owner, is_admin = files_principal(request)
+        from src.auth_helpers import is_internal_tool_identity
+        if is_internal_tool_identity(owner) or getattr(request.state, 'internal_tool_authenticated', False):
+            raise HTTPException(403, 'Selected history requires a human account')
+        auth = getattr(request.app.state, 'auth_manager', None)
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        factory = getattr(request.app.state, 'files_facade_factory', None)
+        if not auth or not barrier or not callable(factory) or auth.account_id(owner) != account or auth.username_for_account_id(account) != owner:
+            raise HTTPException(403, 'Selected history is unavailable')
+
+        async def owned(fn):
+            task = asyncio.create_task(asyncio.to_thread(fn))
+            cancelled = False
+            while True:
+                try:
+                    result = await asyncio.shield(task)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
+                    if task.done(): result = task.result(); break
+            if cancelled: raise asyncio.CancelledError
+            return result
+
+        async with barrier.admitted(owner):
+            try:
+                if source_body is None:
+                    body = await _bounded_transfer_json(request, 8192)
+                else:
+                    body = source_body
+                allowed = {'resourceRef','expectedRevision','threadID','cursor','sourceKind','workspaceID'}
+                if type(body) is not dict or set(body) - allowed or body.get('sourceKind') != 'standalone-snapshot':
+                    raise PreviewUnavailable('invalid snapshot request')
+                token, expected = body.get('resourceRef'), body.get('expectedRevision')
+                if type(token) is not str or len(token) > 4096 or type(expected) is not dict or set(expected) != {'kind','value'} or any(type(expected[k]) is not str or not expected[k] or len(expected[k]) > 512 for k in expected):
+                    raise PreviewUnavailable('resource revision unavailable')
+                if expected['kind'] != 'hostObjectIdentity': raise PreviewUnavailable('resource revision unavailable')
+                if body.get('threadID') is not None and type(body['threadID']) is not str: raise PreviewUnavailable('invalid thread')
+                if body.get('cursor') is not None and type(body['cursor']) is not str: raise PreviewUnavailable('invalid cursor')
+                repo = FilePolicyRepository(); generation = repo.generation()
+                ref = resolve_resource_ref(token, expected_owner_subject_id=account, current_policy_generation=generation, required_capability='download')
+                workspace_id = body.get('workspaceID')
+                if (sys.platform not in {'linux','darwin'} or os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_NONBLOCK')
+                        or ref.provider != 'host' or ref.kind not in {'file','exact_file'}
+                        or type(workspace_id) is not str or not workspace_id.strip()
+                        or workspace_id != workspace_id.strip() or len(workspace_id) > 256):
+                    raise PreviewUnavailable('selected workspace unavailable')
+                workspace = resolve_owned_workspace(repo, workspace_id=workspace_id, owner_username=owner,
+                    auth_manager=auth, purpose='app_folder', observation_only=True)
+                from src.openclank.files_host_provider import _path as host_path
+                source_path = host_path(ref.origin_id)
+                root_path = os.path.realpath(workspace.path)
+                def inside_workspace():
+                    candidate = os.path.realpath(source_path)
+                    return bool(len(candidate) <= 4096 and os.path.commonpath((root_path, candidate)) == root_path and candidate != root_path)
+                if not inside_workspace(): raise PreviewUnavailable('source outside workspace')
+                context = ProviderContext(account, owner, generation, is_admin, workspace.workspace.id)
+                files = factory(request, context)
+                def current():
+                    try:
+                        return (auth.account_id(owner) == account and auth.username_for_account_id(account) == owner
+                            and repo.generation() == generation and inside_workspace()
+                            and resolve_owned_workspace(repo, workspace_id=workspace_id,
+                                owner_username=owner, auth_manager=auth, purpose='app_folder', observation_only=True) == workspace)
+                    except Exception: return False
+                if not current(): raise PreviewUnavailable('source authority changed')
+                before = await asyncio.wait_for(files.stat(context, resource_ref=token, purpose='inspect_sqlite'), timeout=10)
+                if not current() or before.get('id') != ref.stable_id or before.get('revision') != expected:
+                    raise PreviewUnavailable('source changed')
+                size = before.get('size')
+                if type(size) is not int or size < 0 or size > MAX_SOURCE: raise PreviewUnavailable('source size unavailable')
+                source = await asyncio.wait_for(files.content(context, resource_ref=token, capability='download', expected_revision=expected), timeout=10)
+                if not current() or source.size != size or source.etag != expected['value']:
+                    raise PreviewUnavailable('source changed')
+                with tempfile.TemporaryDirectory(prefix='openclank-history-preview-') as temporary:
+                    path = os.path.join(temporary, 'snapshot.sqlite')
+                    if source.path is not None:
+                        digest = await owned(lambda: copy_path(source, path, size))
+                    elif source.stream is not None:
+                        digest_state = hashlib.sha256(); total = 0
+                        with open(path, 'wb') as output:
+                            async with asyncio.timeout(30):
+                                async for chunk in source.stream(0, size):
+                                    if not current() or not isinstance(chunk, bytes) or len(chunk) > 1024 * 1024:
+                                        raise PreviewUnavailable('source stream unavailable')
+                                    total += len(chunk)
+                                    if total > size or total > MAX_SOURCE: raise PreviewUnavailable('source exceeds limit')
+                                    digest_state.update(chunk)
+                                    await owned(lambda chunk=chunk: output.write(chunk))
+                        if total != size: raise PreviewUnavailable('source changed')
+                        digest = digest_state.hexdigest()
+                    else: raise PreviewUnavailable('source transport unavailable')
+                    if not current(): raise PreviewUnavailable('source authority changed')
+                    scope = hashlib.sha256(json.dumps({'account':account,'resource':ref.stable_id,'workspace':workspace.workspace.id,
+                        'policy':generation,'revision':expected,'sha256':digest,'schema':'codex-thread-history-v6'},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                    page = await owned(lambda: inspect_selected_snapshot(path, thread_id=body.get('threadID'), selectors=selection)
+                        if selection is not None else inspect_snapshot(path, scope=scope, thread_id=body.get('threadID'), cursor=body.get('cursor')))
+                after = await asyncio.wait_for(files.stat(context, resource_ref=token, purpose='inspect_sqlite'), timeout=10)
+                if not current() or after.get('id') != ref.stable_id or after.get('revision') != expected or after.get('size') != size:
+                    raise PreviewUnavailable('source changed')
+                result = {'version':1,'available':True,'source':{'kind':'codex-thread-history-v6','snapshotSHA256':digest,
+                    'snapshotBytes':size,'resourceID':ref.stable_id,'workspaceID':workspace.workspace.id,'resourceRevision':expected,'walCoverage':'unknown'},'page':page}
+                if selection is not None:
+                    async def source_current():
+                        if not current(): return False
+                        try:
+                            final = await asyncio.wait_for(files.stat(context, resource_ref=token, purpose='inspect_sqlite'), timeout=10)
+                            return (current() and final.get('id') == ref.stable_id and final.get('revision') == expected
+                                    and final.get('size') == size)
+                        except Exception:
+                            return False
+                    return result, current, source_current, workspace
+                if len(json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > MAX_RESULT:
+                    raise PreviewUnavailable('result exceeds limit')
+                return JSONResponse(result, headers={'Cache-Control':'private, no-store'})
+            except (ValueError, TypeError, OSError, UnicodeError, KeyError) as exc:
+                if selection is not None:
+                    raise PreviewUnavailable('selected source unavailable') from exc
+                detail = str(exc) if isinstance(exc, PreviewUnavailable) else ''
+                reason = ('unsupported_schema' if detail in {'unsupported schema','unsupported migrations','unsupported indexes'}
+                    else 'stale_cursor' if detail == 'cursor unavailable'
+                    else 'source_changed' if detail in {'source changed','source authority changed'}
+                    else 'unavailable')
+                return JSONResponse({'version':1,'available':False,'reason':reason}, status_code=409,
+                    headers={'Cache-Control':'private, no-store'})
+
+    @router.post('/session-transfer/backup-preference')
+    async def selected_backup_preference(request: Request):
+        """Preview or explicitly apply one account preference from a selected Files object."""
+        import hashlib
+        from fastapi.responses import JSONResponse
+        from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user, _mutate_user
+        from src.auth_helpers import is_internal_tool_identity
+        from src.openclank.backup_preference_preview import MAX_SOURCE_BYTES, preview_backup
+        from src.openclank.files_facade import ProviderContext
+        from src.openclank.files_host_provider import _path as host_path
+        from src.openclank.files_principal import files_principal
+        from src.openclank.resource_refs import resolve_resource_ref
+
+        field='deliverable_reduced_motion'
+        issued=False
+        try:
+            account, owner, is_admin = files_principal(request)
+            if (is_internal_tool_identity(owner) or getattr(request.state,'internal_tool_authenticated',False)
+                    or getattr(request.state,'api_token',False)):
+                raise ValueError('human account required')
+            state=request.app.state
+            auth=getattr(state,'auth_manager',None)
+            barrier=getattr(state,'account_request_barrier',None)
+            factory=getattr(state,'files_facade_factory',None)
+            repo=getattr(state,'files_policy_repository',None)
+            credential_factory=getattr(state,'capture_original_credential',None)
+            if not auth or not barrier or not repo or not callable(factory) or not callable(credential_factory):
+                raise ValueError('source unavailable')
+            credential=credential_factory(request,owner,account)
+            if not callable(credential) or credential() is not True:raise ValueError('account unavailable')
+            body=await _bounded_transfer_json(request,8192)
+            common={'phase','resourceRef','expectedRevision','workspaceID','expectedAccountID'}
+            if type(body) is not dict or body.get('phase') not in ('preview','apply'):
+                raise ValueError('request unavailable')
+            expected_keys=common | ({'sourceSHA256','value','destinationBefore'} if body['phase']=='apply' else set())
+            if set(body)!=expected_keys or body['expectedAccountID']!=account:raise ValueError('request unavailable')
+            token,revision,workspace_id=body['resourceRef'],body['expectedRevision'],body['workspaceID']
+            if (type(token) is not str or not token or len(token)>4096 or type(workspace_id) is not str
+                    or not workspace_id or workspace_id!=workspace_id.strip() or len(workspace_id)>256
+                    or type(revision) is not dict or set(revision)!={'kind','value'} or revision['kind']!='hostObjectIdentity'
+                    or type(revision['value']) is not str or re.fullmatch(r'[0-9a-f]{64}',revision['value']) is None):
+                raise ValueError('source unavailable')
+            if body['phase']=='apply':
+                before_value=body['destinationBefore']
+                if (type(body['value']) is not bool or type(body['sourceSHA256']) is not str
+                        or re.fullmatch(r'[0-9a-f]{64}',body['sourceSHA256']) is None
+                        or type(before_value) is not dict or set(before_value)!={'present','value'}
+                        or type(before_value['present']) is not bool
+                        or (type(before_value['value']) is not bool if before_value['present'] else before_value['value'] is not None)):
+                    raise ValueError('selection unavailable')
+            def destination(prefs):
+                if field not in prefs:return {'present':False,'value':None}
+                if type(prefs[field]) is not bool:raise ValueError('destination unavailable')
+                return {'present':True,'value':prefs[field]}
+            async with barrier.admitted(owner):
+                generation=repo.generation()
+                ref=resolve_resource_ref(token,expected_owner_subject_id=account,current_policy_generation=generation,required_capability='download')
+                if ref.provider!='host' or ref.kind not in {'file','exact_file'}:raise ValueError('source unavailable')
+                workspace=resolve_owned_workspace(repo,workspace_id=workspace_id,owner_username=owner,auth_manager=auth,
+                    purpose='app_folder',observation_only=True)
+                path=host_path(ref.origin_id);root=os.path.realpath(workspace.path)
+                def current():
+                    try:
+                        candidate=os.path.realpath(path)
+                        return (getattr(state,'auth_manager',None) is auth and getattr(state,'account_request_barrier',None) is barrier
+                            and getattr(state,'files_policy_repository',None) is repo and getattr(state,'files_facade_factory',None) is factory
+                            and getattr(state,'capture_original_credential',None) is credential_factory and credential() is True
+                            and auth.account_id(owner)==account and auth.username_for_account_id(account)==owner
+                            and repo.generation()==generation and len(candidate)<=4096 and candidate!=root
+                            and os.path.commonpath((root,candidate))==root
+                            and resolve_owned_workspace(repo,workspace_id=workspace_id,owner_username=owner,
+                                auth_manager=auth,purpose='app_folder',observation_only=True)==workspace)
+                    except Exception:return False
+                if not current():raise ValueError('source unavailable')
+                context=ProviderContext(account,owner,generation,is_admin,workspace.workspace.id)
+                files=factory(request,context)
+                first=await asyncio.wait_for(files.stat(context,resource_ref=token,purpose='snapshot'),timeout=10)
+                if (not current() or first.get('id')!=ref.stable_id or first.get('revision')!=revision
+                        or first.get('kind') not in ('file','exact_file')):raise ValueError('source changed')
+                size=first.get('size')
+                if type(size) is not int or not 1<=size<=MAX_SOURCE_BYTES:raise ValueError('source unavailable')
+                source=await asyncio.wait_for(files.content(context,resource_ref=token,capability='download',expected_revision=revision),timeout=10)
+                if not current() or source.size!=size or source.etag!=revision['value']:raise ValueError('source changed')
+                raw=bytearray()
+                if source.data is not None:
+                    if type(source.data) is not bytes or len(source.data)!=size:raise ValueError('source unavailable')
+                    raw.extend(source.data)
+                elif source.stream is not None:
+                    async with asyncio.timeout(30):
+                        async for chunk in source.stream(0,size):
+                            if not current() or type(chunk) is not bytes or len(chunk)>1024*1024 or len(raw)+len(chunk)>size:
+                                raise ValueError('source changed')
+                            raw.extend(chunk)
+                else:raise ValueError('source transport unavailable')
+                if len(raw)!=size:raise ValueError('source changed')
+                digest=hashlib.sha256(raw).hexdigest(); preview=preview_backup(bytes(raw));raw.clear()
+                last=await asyncio.wait_for(files.stat(context,resource_ref=token,purpose='snapshot'),timeout=10)
+                if (not current() or last.get('id')!=ref.stable_id or last.get('revision')!=revision or last.get('size')!=size):
+                    raise ValueError('source changed')
+                source_view={'resourceID':ref.stable_id,'workspaceID':workspace.workspace.id,'resourceRevision':revision,
+                    'sourceSHA256':digest,'sourceBytes':size}
+                if body['phase']=='preview':
+                    with PREFERENCE_LOCK:
+                        if not current():raise ValueError('account changed')
+                        before_value=destination(_load_for_user(owner))
+                    if not current():raise ValueError('account changed')
+                    return {'version':1,'state':'preview','accountID':account,'source':source_view,'mapping':preview,'destinationBefore':before_value}
+                if body['sourceSHA256']!=digest or body['value'] is not preview['value']:
+                    raise ValueError('source changed')
+                class DestinationConflict(Exception):pass
+                def prepare(prefs):
+                    if destination(prefs)!=before_value:raise DestinationConflict()
+                    prefs[field]=preview['value']
+                    return prefs,None
+                try:
+                    issued=True
+                    saved,_=_mutate_user(owner,prepare,before_save=current)
+                except DestinationConflict:
+                    issued=False
+                    return JSONResponse({'version':1,'state':'conflict'},status_code=409)
+                # A post-issue source/account change cannot revoke a completed
+                # preference write; report unknown rather than assert its outcome.
+                after=await asyncio.wait_for(files.stat(context,resource_ref=token,purpose='snapshot'),timeout=10)
+                if (not current() or after.get('id')!=ref.stable_id or after.get('revision')!=revision
+                        or after.get('size')!=size or destination(saved)!={'present':True,'value':preview['value']}):
+                    raise ValueError('outcome unavailable')
+                return {'version':1,'state':'complete','accountID':account,'value':preview['value'],'sourceSHA256':digest}
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return JSONResponse({'version':1,'state':'unknown' if issued else 'unavailable'},status_code=409)
+
+    @router.post("/session-transfer/preview")
+    async def preview_selected_session_history(request: Request):
+        return await _selected_history_snapshot(request)
+
+    @router.post("/session-transfer/import")
+    async def import_selected_session_history(request: Request):
+        import asyncio
+        from fastapi.responses import JSONResponse
+        from src.openclank.files_principal import files_principal
+        from src.openclank.session_transfer_import import prepare_import, execute_selected_import, publish_import_map, hydrate_import_visibility, _hash
+        from src.memory_scope import chat_workspace
+        from src.model_dispatch import get_agent_supervisor
+        account, owner, _ = files_principal(request)
+        from src.auth_helpers import is_internal_tool_identity
+        if is_internal_tool_identity(owner) or getattr(request.state, 'internal_tool_authenticated', False):
+            raise HTTPException(403, 'Selected history requires a human account')
+        auth = getattr(request.app.state, 'auth_manager', None)
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        if not auth or not barrier or auth.account_id(owner) != account or auth.username_for_account_id(account) != owner:
+            raise HTTPException(403, 'Selected history is unavailable')
+        selector = None
+        async with barrier.admitted(owner):
+            try:
+                body = await _bounded_transfer_json(request, 65536)
+                common = {'phase','resourceRef','expectedRevision','sourceKind','workspaceID','sourceSHA256','threadID','items','name'}
+                if type(body) is not dict or body.get('phase') not in ('prepare','issue') or set(body) != (common | ({'selector'} if body.get('phase') == 'issue' else set())):
+                    raise ValueError('invalid import request')
+                if type(body['name']) is not str or body['name'].strip() in ({'Nobody','Incognito'} | _HIDDEN_SYSTEM_SESSION_NAMES):
+                    raise ValueError('destination name is unavailable')
+                source_body = {key:body[key] for key in ('resourceRef','expectedRevision','sourceKind','workspaceID','threadID')}
+                selected, source_sync, source_current, workspace = await _selected_history_snapshot(request, source_body=source_body, selection=body['items'])
+                source = selected['source']
+                if body['sourceSHA256'] != source['snapshotSHA256'] or not await source_current(): raise ValueError('source changed')
+                intent = prepare_import(account=account, owner=owner, resource_id=source['resourceID'],
+                    snapshot_sha=source['snapshotSHA256'], workspace_id=source['workspaceID'], workspace_path=workspace.path,
+                    thread_id=body['threadID'], name=body['name'], items=selected['page']['items'])
+                p = intent['provenance']
+                selector = {'sourceKey':intent['key'], 'snapshotSHA256':p['snapshotSHA256'],
+                            'selectionSHA256':p['selectionSHA256'], 'intentSHA256':_hash(p)}
+                if body['phase'] == 'prepare':
+                    return JSONResponse({'version':1,'state':'prepared','selector':selector},headers={'Cache-Control':'private, no-store'})
+                if body['selector'] != selector: raise ValueError('selection changed')
+                supervisor = get_agent_supervisor()
+                pool = supervisor.owner_lifecycle_pool()
+                async def perform(phase, host_commit, utility):
+                    reserved = await phase('reserve')
+                    if reserved.get('state') != 'reserved' or reserved.get('fresh') is not True: return {'state':'unknown'}
+                    issued = await phase('issue')
+                    if issued.get('state') != 'host_issuing' or issued.get('fresh') is not True: return {'state':'unknown'}
+                    if await host_commit() not in ('inserted','already_present'): return {'state':'unknown'}
+                    host = await phase('ack_host')
+                    if host.get('state') != 'host_committed': return {'state':'unknown'}
+                    result = await publish_import_map(intent=intent, utility=utility, phase=phase, host_commit=host_commit,
+                        receipt=host, current=lambda: utility._selected_import_current() and source_sync(),
+                        memory_workspace_id=chat_workspace(), copal_workspace='default')
+                    if result.get('state') == 'complete' and not await hydrate_import_visibility(session_manager, p, utility._selected_import_current):
+                        return {'state':'visibility_unavailable'}
+                    return result
+                outcome = await execute_selected_import(pool=pool, barrier=barrier, auth=auth, owner=owner, account=account,
+                    intent=intent, continuation=perform, source_current=source_current, source_current_sync=source_sync)
+                state = outcome.get('state') if outcome.get('state') in ('complete','unknown','conflict','visibility_unavailable') else 'unknown'
+                result = {'version':1,'state':state,'selector':selector}
+                if state == 'complete': result['chatID'] = p['hostChatID']
+                return JSONResponse(result,headers={'Cache-Control':'private, no-store'})
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return JSONResponse({'version':1,'state':'unknown' if selector is not None else 'unavailable',
+                    **({'selector':selector} if selector is not None else {})},status_code=409,headers={'Cache-Control':'private, no-store'})
+
+    @router.post("/session-transfer/reconcile")
+    async def reconcile_selected_session_history(request: Request):
+        import asyncio
+        from fastapi.responses import JSONResponse
+        from src.openclank.files_principal import files_principal
+        from src.openclank.session_transfer_import import execute_selected_import, reconcile_import_map, settle_reconciled_import, hydrate_import_visibility
+        from src.model_dispatch import get_agent_supervisor
+        account, owner, _ = files_principal(request)
+        from src.auth_helpers import is_internal_tool_identity
+        if is_internal_tool_identity(owner) or getattr(request.state, 'internal_tool_authenticated', False):
+            raise HTTPException(403, 'Selected history requires a human account')
+        auth = getattr(request.app.state, 'auth_manager', None)
+        barrier = getattr(request.app.state, 'account_request_barrier', None)
+        if not auth or not barrier or auth.account_id(owner) != account or auth.username_for_account_id(account) != owner:
+            raise HTTPException(403, 'Selected history is unavailable')
+        async with barrier.admitted(owner):
+            try:
+                body = await _bounded_transfer_json(request, 4096)
+                if type(body) is not dict or set(body) != {'selector'} or type(body['selector']) is not dict:
+                    raise ValueError('invalid selector')
+                selector = body['selector']
+                if (set(selector) != {'sourceKey','snapshotSHA256','selectionSHA256','intentSHA256'}
+                        or not re.fullmatch(r'v1:[a-f0-9]{64}:[a-f0-9]{64}', selector.get('sourceKey',''))
+                        or any(type(selector.get(k)) is not str or not re.fullmatch(r'[a-f0-9]{64}',selector[k])
+                               for k in ('snapshotSHA256','selectionSHA256','intentSHA256'))):
+                    raise ValueError('invalid selector')
+                intent = {'key':selector['sourceKey'], 'selector':selector, 'provenance':{'owner':owner,'account':account}}
+                pool = get_agent_supervisor().owner_lifecycle_pool()
+                async def observe(phase, _host_commit, utility):
+                    receipt = await phase('reconcile')
+                    p = receipt.get('provenance')
+                    if type(p) is not dict or p.get('account') != account or p.get('owner') != owner:
+                        return {'state':'unknown'}
+                    repo = FilePolicyRepository()
+                    generation = repo.generation()
+                    workspace = resolve_owned_workspace(repo, workspace_id=p.get('workspaceID'), owner_username=owner,
+                        auth_manager=auth, purpose='app_folder', observation_only=True)
+                    binding = receipt.get('mapBinding') or {}
+                    if binding.get('physicalCwd') != workspace.path:
+                        return {'state':'unknown'}
+                    result = await reconcile_import_map(provenance=p, receipt=receipt, utility=utility)
+                    if (repo.generation() != generation or auth.account_id(owner) != account
+                            or auth.username_for_account_id(account) != owner
+                            or resolve_owned_workspace(repo, workspace_id=p.get('workspaceID'), owner_username=owner,
+                                auth_manager=auth, purpose='app_folder', observation_only=True) != workspace):
+                        return {'state':'unknown'}
+                    if result.get('state') == 'complete':
+                        await settle_reconciled_import(p, utility)
+                        if not await hydrate_import_visibility(session_manager, p, utility._selected_import_current):
+                            return {'state':'visibility_unavailable'}
+                        result['chatID'] = p['hostChatID']
+                    return result
+                result = await execute_selected_import(pool=pool, barrier=barrier, auth=auth, owner=owner,
+                    account=account, intent=intent, continuation=observe)
+                return JSONResponse({'version':1,'selector':selector,**result},headers={'Cache-Control':'private, no-store'})
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return JSONResponse({'version':1,'state':'unknown'},status_code=409,headers={'Cache-Control':'private, no-store'})
+
     @router.get("/session/{sid}/export")
     def export_session(request: Request, sid: str, fmt: str = "md", filename: str = ""):
         """Export conversation history as a downloadable file.
@@ -1226,9 +2124,36 @@ def setup_session_routes(
             data = {
                 "name": session.name,
                 "model": session.model,
+                "response_style": session.response_style,
                 "exported": datetime.now().isoformat(),
                 "messages": [{"role": m.role, "content": m.content} for m in session.history],
             }
+            # This optional history is scoped to the authenticated immutable account.
+            from src.auth_helpers import require_user, is_internal_tool_identity
+            from src.openclank.chat_ratings import export_chat
+            user = require_user(request)
+            auth = getattr(request.app.state, "auth_manager", None)
+            account = auth.account_id(user) if auth and not is_internal_tool_identity(user) else None
+            if account and auth.username_for_account_id(account) == user and not getattr(session, "incognito", False):
+                db = SessionLocal()
+                try:
+                    data["chat_ratings"] = export_chat(db, account=account, chat_id=sid)
+                    source_row = db.query(DbSession).filter(DbSession.id == sid, DbSession.owner == user).first()
+                    source = (source_row.mimo_state or {}).get("selected_history_import") if source_row else None
+                    if (type(source) is dict and source.get("version") == 1 and source.get("account") == account
+                            and source.get("hostChatID") == sid and source.get("coverage") == "selected_partial"
+                            and source.get("sourceTime") == "unknown" and source.get("ordering") == "import_order"
+                            and type(source.get("selection")) is list and 1 <= len(source["selection"]) <= 100
+                            and all(type(source.get(k)) is str and re.fullmatch(r"[0-9a-f]{64}", source[k])
+                                    for k in ("snapshotSHA256", "selectionSHA256"))):
+                        data["import_provenance"] = {"version": 1, "source": "codex-thread-history-v6",
+                            "coverage": "selected_partial", "sourceTime": "unknown", "ordering": "import_order",
+                            "snapshotSHA256": source["snapshotSHA256"], "selectionSHA256": source["selectionSHA256"],
+                            "selectedCount": len(source["selection"])}
+                finally:
+                    db.close()
+            else:
+                data["chat_ratings"] = {"version": 1, "state": "unavailable", "events": []}
             out_name = filename or f"conversation_{safe_name}_{timestamp}.json"
             return Response(
                 content=_json.dumps(data, indent=2, ensure_ascii=False),
@@ -1265,7 +2190,7 @@ def setup_session_routes(
                 cls = "user" if m.role == "user" else "ai"
                 content = _content_to_text(m.content).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 content = content.replace("\n", "<br>")
-                html_parts.append(f'<div class="msg {cls}"><div class="role">{m.role}</div>{content}</div>')
+                html_parts.append(f'<div class="msg {cls}"><div class="role">{html.escape(str(m.role))}</div>{content}</div>')
             html_parts.append("</body></html>")
             out_name = filename or f"conversation_{safe_name}_{timestamp}.html"
             return Response(
@@ -1414,7 +2339,12 @@ def setup_session_routes(
                 .filter(DbMsg.role == "assistant").group_by(DbMsg.session_id).all()
             )
             cleanup_now = utcnow_naive()
+            from src.openclank.chat_source_bridge import canonical_source_provider
+            source_protected = canonical_source_provider(request.app.state) is not None
             for row in rows:
+                # Raw tidy deletion cannot prove retirement of archived sources.
+                if source_protected:
+                    continue
                 # Never delete important sessions
                 if getattr(row, 'is_important', False):
                     continue
@@ -1478,6 +2408,7 @@ def setup_session_routes(
                 "folders": [],
                 "deleted_empty": deleted_empty,
                 "deleted_throwaway": deleted_throwaway,
+                "cleanup_unavailable": source_protected,
                 "unfiled_remaining": 0,
                 "skipped_llm": True,
             }
@@ -1517,6 +2448,7 @@ def setup_session_routes(
                     "folders": [],
                     "deleted_empty": deleted_empty,
                     "deleted_throwaway": deleted_throwaway,
+                "cleanup_unavailable": source_protected,
                     "unfiled_remaining": unfiled_total,
                 }
             return {"status": "skipped", "reason": "No unfiled sessions to sort"}
@@ -1652,6 +2584,7 @@ def setup_session_routes(
             "updated": updated,
             "deleted_empty": deleted_empty,
             "deleted_throwaway": deleted_throwaway,
+            "cleanup_unavailable": source_protected,
             "unfiled_remaining": unfiled_remaining_after,
         }
 

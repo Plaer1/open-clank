@@ -64,7 +64,6 @@ def runtime_asset_paths(
         if data_dir is None:
             from src.runtime_paths import get_default_data_dir
             data_dir = Path(os.environ.get("OPEN_CLANK_DATA_DIR")
-                            or os.environ.get("ODYSSEUS_DATA_DIR")
                             or get_default_data_dir())
         pack = Path(data_dir).expanduser().absolute() / "assets/google-emoji/emoji-assets.pack"
     else:

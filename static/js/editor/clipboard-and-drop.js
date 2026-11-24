@@ -26,7 +26,14 @@
  *   uiModule:             object,
  * }} deps
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
+
+export function createImportAbortController() {
+  if (typeof AbortController === 'function') return new AbortController();
+  const listeners = new Set();
+  const signal = { aborted: false, addEventListener(type, fn) { if (type === 'abort') listeners.add(fn); }, removeEventListener(type, fn) { if (type === 'abort') listeners.delete(fn); } };
+  return { signal, abort() { if (signal.aborted) return; signal.aborted = true; for (const fn of [...listeners]) fn(); listeners.clear(); } };
+}
 
 export const CANVAS_MAX_IMPORT_BYTES = 32 * 1024 * 1024;
 export const CANVAS_MAX_IMPORT_DIMENSION = 8192;
@@ -297,7 +304,7 @@ function _checkDecodedDimensions(width, height, { maxDimension, maxPixels }) {
   return { width: Math.round(w), height: Math.round(h) };
 }
 
-async function _blobBounded(response, maxBytes, signal = null) {
+export async function readBoundedImportBlob(response, maxBytes, signal = null) {
   if (!response?.ok) throw Object.assign(new Error('The image could not be read by the current account.'), { code: 'source_unavailable' });
   const advertised = Number(response.headers?.get?.('content-length') || 0);
   if (advertised > maxBytes) throw Object.assign(new Error('Canvas rejected the image because it exceeds the import limit.'), { code: 'oversize' });
@@ -326,16 +333,19 @@ async function _blobBounded(response, maxBytes, signal = null) {
   return new Blob(chunks, { type: response.headers?.get?.('content-type') || 'application/octet-stream' });
 }
 
-function _decodeBlob(blob, limits, { signal = null } = {}) {
+export function decodeCanvasImportBlob(blob, limits, { signal = null } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(Object.assign(new Error('Canvas image import was cancelled.'), { name: 'AbortError' }));
     if (typeof Image !== 'function' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return reject(new Error('Canvas image decoder is unavailable.'));
     const url = URL.createObjectURL(blob);
     const img = new Image();
     let settled = false;
+    const onAbort = () => finish(Object.assign(new Error('Canvas image import was cancelled.'), { name: 'AbortError' }));
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      img.onload = null; img.onerror = null;
       try { URL.revokeObjectURL(url); } catch (_) {}
       if (error) reject(error); else resolve(value);
     };
@@ -345,7 +355,7 @@ function _decodeBlob(blob, limits, { signal = null } = {}) {
       catch (error) { finish(error); }
     };
     img.onerror = () => finish(Object.assign(new Error('Canvas could not decode that image.'), { code: 'decode_failed' }));
-    if (signal) signal.addEventListener('abort', () => finish(Object.assign(new Error('Canvas image import was cancelled.'), { name: 'AbortError' })), { once: true });
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
     img.src = url;
   });
 }
@@ -363,6 +373,7 @@ export async function importFilesImageToCanvas(payload, {
   maxDimension = CANVAS_MAX_IMPORT_DIMENSION,
   maxPixels = CANVAS_MAX_IMPORT_PIXELS,
   onImage,
+  onBytes,
   getContext = null,
 } = {}) {
   const classification = classifyCanvasDrop({ types: [FILES_CANVAS_IMAGE_MIME], getData: () => JSON.stringify(payload) }, { maxBytes, maxDimension, maxPixels });
@@ -379,7 +390,8 @@ export async function importFilesImageToCanvas(payload, {
     if (live.owner !== captured.account || live.workspace !== captured.workspace || live.provider !== captured.provider) throw Object.assign(new Error('File access changed; choose the image again.'), { code: 'stale_context' });
   };
   assertLive('before-open');
-  const opened = await filesClient.openResource(classification.ref, { signal });
+  const transportSignal = typeof AbortSignal === 'function' && signal instanceof AbortSignal ? signal : undefined;
+  const opened = await filesClient.openResource(classification.ref, { signal: transportSignal });
   assertLive('after-open');
   const resource = opened?.resource || {};
   const currentRef = typeof resource.ref === 'string' ? resource.ref.trim() : '';
@@ -399,16 +411,17 @@ export async function importFilesImageToCanvas(payload, {
   try { currentRevision = _strictRevision(resource.revision || opened?.payload?.revision, 'Files current revision'); }
   catch (_) { throw Object.assign(new Error('This Files image changed; choose it again.'), { code: 'stale_revision' }); }
   if (currentRevision.kind !== captured.revision.kind || currentRevision.value !== captured.revision.value) throw Object.assign(new Error('This Files image changed; choose it again.'), { code: 'stale_revision' });
-  const response = await (fetchImpl || fetch)(filesClient.contentUrl(currentRef, { purpose: 'download' }), { credentials: 'same-origin', signal });
-  const blob = await _blobBounded(response, maxBytes, signal);
-  assertLive('after-fetch');
+  const response = await (fetchImpl || fetch)(filesClient.contentUrl(currentRef, { purpose: 'download' }), { credentials: 'same-origin', signal: transportSignal });
+  const blob = await readBoundedImportBlob(response, maxBytes, signal);
   if (!_imageMime(blob.type || currentMime)) throw Object.assign(new Error('Canvas accepts image resources only.'), { code: 'unsupported' });
-  const img = await _decodeBlob(blob, { maxDimension, maxPixels }, { signal });
-  assertLive('after-decode');
   const provenance = Object.freeze({ domain: 'files', source: 'authorized-files-image', resource_ref: currentRef, resource_key: captured.resourceKey, provider: captured.provider, account: captured.account, workspace: captured.workspace, revision: currentRevision, operation_id: String(payload.operation_id || '') });
+  if (onBytes) await onBytes(blob.type ? blob : new Blob([blob],{type:currentMime}),provenance);
+  assertLive('after-fetch');
+  const img = await decodeCanvasImportBlob(blob, { maxDimension, maxPixels }, { signal });
+  assertLive('after-decode');
   assertLive('before-layer');
-  if (typeof onImage === 'function') onImage(img, provenance);
-  return { status: 'imported', resourceRef: currentRef, bytes: blob.size, provenance, image: img };
+  const applied=typeof onImage === 'function' ? await onImage(img, provenance) : true;
+  return { status: applied===false ? 'retained' : 'imported', resourceRef: currentRef, bytes: blob.size, provenance, image: img };
 }
 
 /** Explicit Canvas layer → Files export.  The destination operation is the
@@ -513,7 +526,7 @@ export async function exportCanvasLayerToFiles(layer, {
 }
 
 function wireClipboardAndDropLegacy({
-  container, saveState, createLayer, renderLayerPanel, composite,
+  state = legacyState,   container, saveState, createLayer, renderLayerPanel, composite,
   handleImportedImage, uiModule,
 }) {
   // ── Paste ──
@@ -619,22 +632,25 @@ function wireClipboardAndDropLegacy({
 /** Hardened mounted wiring. The legacy function above is retained as a
  * compatibility reference; production callers use this disposable adapter. */
 export function wireClipboardAndDrop({
-  container, saveState, createLayer, renderLayerPanel, composite,
+  state = legacyState, container, saveState, createLayer, renderLayerPanel, composite,
   handleImportedImage, uiModule, filesClient = null, context = null,
-  limits = {}, getContext = null,
+  limits = {}, getContext = null, markSceneChanged = () => {}, captureImport = () => () => 'current', startImport = null,
+  isFocused = () => true, capturePaste = () => null, pasteCurrent = () => true, withSceneMutation = (_name, fn) => fn(), acceptLegacyBroadcast = true,
 }) {
   if (!container || typeof container.addEventListener !== 'function') return { dispose() {} };
   const maxBytes = Number(limits.maxBytes || CANVAS_MAX_IMPORT_BYTES);
   const maxDimension = Number(limits.maxDimension || CANVAS_MAX_IMPORT_DIMENSION);
   const maxPixels = Number(limits.maxPixels || CANVAS_MAX_IMPORT_PIXELS);
-  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const controller = createImportAbortController();
   const seen = new Set();
   const objectUrls = new Set();
   let dragDepth = 0;
   let disposed = false;
   const signal = controller?.signal;
+  const removers = [];
   const listen = (target, type, listener, options = {}) => {
-    target.addEventListener(type, listener, { ...options, ...(signal ? { signal } : {}) });
+    target.addEventListener(type, listener, options);
+    removers.push(() => target.removeEventListener(type, listener, options));
   };
   const toast = message => { try { uiModule?.showToast?.(_boundedText(message)); } catch (_) {} };
   const annotate = (before, provenance) => {
@@ -642,8 +658,9 @@ export function wireClipboardAndDrop({
     const layer = state.layers[state.layers.length - 1];
     if (layer) layer.provenance = provenance;
   };
-  const addImage = (img, label, provenance = null) => {
-    if (disposed || !state.editorOpen) return false;
+  const addImage = (img, label, provenance = null, check = () => 'current') => {
+    if (disposed || !state.editorOpen || check() === 'retired') return false;
+    if (check() === 'edited') { toast('Image import stopped because this image was edited; choose it again.'); return false; }
     const before = state.layers.length;
     if (typeof handleImportedImage === 'function') handleImportedImage(img, { provenance });
     else {
@@ -654,16 +671,21 @@ export function wireClipboardAndDrop({
       layer.provenance = provenance;
       state.layers.push(layer);
       state.activeLayerId = layer.id;
+      markSceneChanged();
       renderLayerPanel?.(); composite?.();
     }
     annotate(before, provenance);
     return true;
   };
-  const decodeAndAdd = async (blob, label, provenance) => {
+  const decodeAndAdd = async (blob, label, provenance, check) => {
+    let operation;
     try {
-      const img = await _decodeBlob(blob, { maxDimension, maxPixels }, { signal });
-      addImage(img, label, provenance);
+      operation=startImport?.(check); if (operation) await operation.receive(blob,{label,provenance});
+      const img = await decodeCanvasImportBlob(blob, { maxDimension, maxPixels }, { signal });
+      if (operation) { if (!operation.apply(() => { if (!addImage(img,label,provenance,()=>'current')) throw new Error('Image import was superseded.'); })) toast('Image retained for this session.'); }
+      else addImage(img, label, provenance, check);
     } catch (error) {
+      operation?.cancel(error?.name!=='AbortError');
       if (error?.name !== 'AbortError') toast(error?.message || 'Canvas could not import that image.');
     }
   };
@@ -685,15 +707,25 @@ export function wireClipboardAndDrop({
   const onPaste = event => {
     if (disposed || !state.editorOpen || !container.getClientRects().length) return;
     if (state.internalClipboard) {
+      if (!isFocused()) return;
       event.preventDefault(); event.stopImmediatePropagation();
       const clip = state.internalClipboard;
       let dims;
       try { dims = _checkDecodedDimensions(clip.naturalWidth || clip.width, clip.naturalHeight || clip.height, { maxDimension, maxPixels }); }
       catch (error) { toast(error?.message || 'Canvas rejected the clipboard image.'); return; }
-      saveState?.('Paste selection');
-      const layer = createLayer('Pasted Selection', dims.width, dims.height);
-      layer.ctx?.drawImage(clip, 0, 0); layer.provenance = Object.freeze({ domain: 'canvas', source: 'internal-clipboard' });
-      state.layers.push(layer); state.activeLayerId = layer.id; renderLayerPanel?.(); composite?.(); toast('Pasted as new layer');
+      const origin = capturePaste();
+      if (!isFocused() || !pasteCurrent(origin) || state.internalClipboard !== clip) return;
+      let staged;
+      try { staged = container.ownerDocument.createElement('canvas'); staged.width = dims.width; staged.height = dims.height; staged.getContext('2d').drawImage(clip, 0, 0); }
+      catch (error) { toast(error?.message || 'Canvas could not stage the clipboard image.'); return; }
+      const applied = withSceneMutation('internal-paste', () => {
+        if (disposed || !state.editorOpen || !isFocused() || !pasteCurrent(origin) || state.internalClipboard !== clip) return false;
+        saveState?.('Paste selection');
+        const layer = createLayer('Pasted Selection', dims.width, dims.height);
+        layer.ctx?.drawImage(staged, 0, 0); layer.provenance = Object.freeze({ domain: 'canvas', source: 'internal-clipboard' });
+        state.layers.push(layer); state.activeLayerId = layer.id; markSceneChanged(); renderLayerPanel?.(); composite?.(); return true;
+      });
+      if (applied === true) toast('Pasted as new layer');
       return;
     }
     const items = Array.from(event.clipboardData?.items || []);
@@ -703,8 +735,9 @@ export function wireClipboardAndDrop({
     const blob = item.getAsFile?.();
     if (!blob) { toast('Clipboard image is unavailable.'); return; }
     if (Number(blob.size) > maxBytes) { toast('Canvas rejected the image because it exceeds the import limit.'); return; }
-    void decodeAndAdd(blob, 'Pasted', Object.freeze({ domain: 'canvas', source: 'os-clipboard', mime_type: String(blob.type || ''), bytes: Number(blob.size) || 0 }));
+    void decodeAndAdd(blob, 'Pasted', Object.freeze({ domain: 'canvas', source: 'os-clipboard', mime_type: String(blob.type || ''), bytes: Number(blob.size) || 0 }), captureImport());
   };
+  listen(container.ownerDocument, 'openclank:auth-context-changed', () => dispose());
   listen(window, 'paste', onPaste, { capture: true });
 
   const onDragEnter = event => {
@@ -727,27 +760,36 @@ export function wireClipboardAndDrop({
     dragDepth = Math.max(0, dragDepth - 1);
     if (dragDepth === 0) hideOverlay();
   };
-  const onFilesCanvasRequest = event => {
-    if (disposed || !state.editorOpen) return;
-    const payload = event.detail?.payload;
-    if (!payload || payload.type !== FILES_CANVAS_IMAGE_MIME) return;
-    const key = canvasDropOperationKey(payload);
-    if (!key || seen.has(key)) return;
+  const deliverFilesImage = async (payload, capturedContext, readContext = getContext) => {
+    if (disposed || !state.editorOpen) throw new Error('The target image view is unavailable.');
+    if (!payload || payload.type !== FILES_CANVAS_IMAGE_MIME || typeof readContext !== 'function') throw new Error('The Files image handoff is invalid.');
+    const key=canvasDropOperationKey(payload);
+    if (!key) throw new Error('The Files image operation is invalid.');
+    if (seen.has(key)) return {status:'duplicate'};
     seen.add(key);
-    void importFilesImageToCanvas(payload, {
-      filesClient, context: event.detail?.context || context, getContext, signal,
-      maxBytes, maxDimension, maxPixels,
-      onImage: (img, provenance) => addImage(img, 'Imported', provenance),
-    }).catch(error => {
-      seen.delete(key);
-      if (error?.name !== 'AbortError') toast(error?.message || 'This Files image is no longer available to Canvas.');
-    });
+    const check=captureImport(); let operation;
+    try {
+      operation=startImport?.(check);
+      return await importFilesImageToCanvas(payload, {
+        filesClient, context:capturedContext || context, getContext:readContext, signal,
+        maxBytes,maxDimension,maxPixels,
+        onBytes:operation ? (blob,provenance)=>operation.receive(blob,{label:'Imported',provenance}) : null,
+        onImage:(img,provenance)=>operation ? operation.apply(()=>{if (!addImage(img,'Imported',provenance,()=> 'current')) throw new Error('Image import was superseded.');}) : addImage(img,'Imported',provenance,check),
+      });
+    } catch (error) {
+      if (operation?.received) return {status:'retained',reason:error?.code || error?.name || 'import_interrupted'};
+      operation?.cancel(); seen.delete(key); throw error;
+    }
   };
-  listen(window, 'openclank-files-image-to-canvas', onFilesCanvasRequest);
+  const onFilesCanvasRequest = event => {
+    void deliverFilesImage(event.detail?.payload,event.detail?.context).then(result=>{if (!disposed && result.status==='retained') toast('Image retained for this session.');}).catch(error=>{if (error?.name!=='AbortError') toast(error?.message || 'This Files image is no longer available to Canvas.');});
+  };
+  if (acceptLegacyBroadcast) listen(window, 'openclank-files-image-to-canvas', onFilesCanvasRequest);
 
   const onDrop = event => {
     if (disposed || !state.editorOpen) return;
     event.preventDefault(); event.stopPropagation(); dragDepth = 0; hideOverlay();
+    const check = captureImport();
     const classification = classifyCanvasDrop(event, { maxBytes, maxDimension, maxPixels });
     if (!classification.ok) { toast(classification.reason); return; }
     if (classification.kind === 'files-image') {
@@ -755,7 +797,9 @@ export function wireClipboardAndDrop({
       const key = canvasDropOperationKey({ operation_id: payload.operation_id, item_id: payload.item_id });
       if (seen.has(key)) return;
       seen.add(key);
-      void importFilesImageToCanvas(payload, { filesClient, context, getContext, signal, maxBytes, maxDimension, maxPixels, onImage: (img, provenance) => addImage(img, 'Imported', provenance) }).catch(error => {
+      let operation; try {operation=startImport?.(check);} catch(error) {seen.delete(key); toast(error.message); return;}
+      void importFilesImageToCanvas(payload, { filesClient, context, getContext, signal, maxBytes, maxDimension, maxPixels, onBytes:operation ? (blob,provenance) => operation.receive(blob,{label:'Imported',provenance}) : null, onImage: (img, provenance) => operation ? operation.apply(() => {if (!addImage(img,'Imported',provenance,()=>'current')) throw new Error('Image import was superseded.');}) : addImage(img, 'Imported', provenance, check) }).then(result => {if (!disposed && result.status==='retained') toast('Image retained for this session.');}).catch(error => {
+        operation?.cancel(['decode_failed','oversize_dimensions'].includes(error?.code));
         seen.delete(key);
         if (error?.name !== 'AbortError') toast(error?.message || 'This Files image is no longer available to Canvas.');
       });
@@ -765,7 +809,7 @@ export function wireClipboardAndDrop({
       const key = osDropOperationKey(file, event.dataTransfer, 0);
       if (seen.has(key)) continue;
       seen.add(key);
-      void decodeAndAdd(file, 'Imported', Object.freeze({ domain: 'canvas', source: 'os-drop', name: _boundedText(file.name), mime_type: String(file.type || ''), bytes: Number(file.size) || 0 }));
+      void decodeAndAdd(file, 'Imported', Object.freeze({ domain: 'canvas', source: 'os-drop', name: _boundedText(file.name), mime_type: String(file.type || ''), bytes: Number(file.size) || 0 }), check);
     }
   };
   listen(container, 'dragenter', onDragEnter);
@@ -776,6 +820,7 @@ export function wireClipboardAndDrop({
   const dispose = () => {
     if (disposed) return;
     disposed = true; try { controller?.abort(); } catch (_) {}
+    for (const remove of removers.splice(0)) remove();
     for (const url of objectUrls) { try { URL.revokeObjectURL(url); } catch (_) {} }
     objectUrls.clear(); seen.clear(); hideOverlay(); dragDepth = 0;
     try { observer?.disconnect?.(); } catch (_) {}
@@ -787,5 +832,5 @@ export function wireClipboardAndDrop({
     if (!state.editorOpen && (container.style.display === 'none' || !container.isConnected)) dispose();
   }) : null;
   observer?.observe(container, { attributes: true, attributeFilter: ['style'], childList: true });
-  return Object.freeze({ dispose, classify: input => classifyCanvasDrop(input, { maxBytes, maxDimension, maxPixels }) });
+  return Object.freeze({ dispose, deliverFilesImage, classify: input => classifyCanvasDrop(input, { maxBytes, maxDimension, maxPixels }) });
 }

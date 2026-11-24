@@ -1,3 +1,4 @@
+import { classifyFailure, isExhaustion, retryAfter } from "@/provider/failure-classification"
 import type { NamedError } from "@mimo-ai/shared/util/error"
 import { Cause, Clock, Duration, Effect, Schedule } from "effect"
 import { MessageV2 } from "./message-v2"
@@ -30,18 +31,7 @@ export function isRateLimitMessage(message: string): boolean {
 // (weekly/monthly caps, spent credit balance). Retrying before the reset
 // burns requests and hangs the turn in an invisible loop, so these are
 // terminal even though the transport status says "retryable".
-const QUOTA_EXHAUSTED_PATTERNS = [
-  /limit exhausted/i, // z.ai "Weekly/Monthly Limit Exhausted. Your limit will reset at …"
-  /insufficient_quota/i, // openai error code
-  /exceeded your current quota/i, // openai message
-  /credit balance is too low/i, // anthropic
-  /out of credits/i, // openrouter
-  /quota exceeded/i, // google + generic
-]
-
-export function isQuotaExhaustedMessage(text: string): boolean {
-  return QUOTA_EXHAUSTED_PATTERNS.some((pattern) => pattern.test(text))
-}
+export function isQuotaExhaustedMessage(text: string): boolean { return isExhaustion(text) }
 
 export const RETRY_INITIAL_DELAY = 2000
 export const RETRY_BACKOFF_FACTOR = 2
@@ -65,24 +55,8 @@ const RETRYABLE_HTTP_STATUS = new Set([429, 500, 502, 503, 504, 529])
 export function isRetryableTransientError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
 
-  const detail = `${error.message} ${(error as { responseBody?: string }).responseBody ?? ""}`
-  if (isQuotaExhaustedMessage(detail)) return false
-
-  const status =
-    (error as { status?: number | string }).status ??
-    (error as { statusCode?: number | string }).statusCode ??
-    (error as { response?: { status?: number | string } }).response?.status
-  // Some providers surface the HTTP status as a numeric string (e.g. "429")
-  // rather than a number — coerce before matching so the 429 path is not missed.
-  const statusNum = typeof status === "string" ? Number.parseInt(status, 10) : status
-  if (typeof statusNum === "number" && !Number.isNaN(statusNum) && RETRYABLE_HTTP_STATUS.has(statusNum)) return true
-
-  const code = (error as { code?: string }).code
-  if (typeof code === "string" && NETWORK_ERROR_CODES.has(code)) return true
-
-  if (error.message === SSE_TIMEOUT_MESSAGE) return true
-
-  return false
+  const failure = classifyFailure(error)
+  return failure.kind === "throttle" || failure.kind === "transient"
 }
 
 function cap(ms: number) {
@@ -90,35 +64,8 @@ function cap(ms: number) {
 }
 
 export function delay(attempt: number, error?: MessageV2.APIError) {
-  if (error) {
-    const headers = error.data.responseHeaders
-    if (headers) {
-      const retryAfterMs = headers["retry-after-ms"]
-      if (retryAfterMs) {
-        const parsedMs = Number.parseFloat(retryAfterMs)
-        if (!Number.isNaN(parsedMs)) {
-          return cap(parsedMs)
-        }
-      }
-
-      const retryAfter = headers["retry-after"]
-      if (retryAfter) {
-        const parsedSeconds = Number.parseFloat(retryAfter)
-        if (!Number.isNaN(parsedSeconds)) {
-          // convert seconds to milliseconds
-          return cap(Math.ceil(parsedSeconds * 1000))
-        }
-        // Try parsing as HTTP date format
-        const parsed = Date.parse(retryAfter) - Date.now()
-        if (!Number.isNaN(parsed) && parsed > 0) {
-          return cap(Math.ceil(parsed))
-        }
-      }
-
-      return cap(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1))
-    }
-  }
-
+  const hint = retryAfter(error?.data.responseHeaders)
+  if (hint !== undefined) return hint
   return cap(Math.min(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1), RETRY_MAX_DELAY_NO_HEADERS))
 }
 
@@ -231,15 +178,20 @@ export function retryable(error: Err) {
 
 export function policy(opts: {
   parse: (error: unknown) => Err
+  canRetry?: () => boolean
   set: (input: { attempt: number; message: string; next: number }) => Effect.Effect<void>
 }) {
+  let cumulativeWait = 0
   return Schedule.fromStepWithMetadata(
     Effect.succeed((meta: Schedule.InputMetadata<unknown>) => {
+      if (opts.canRetry && !opts.canRetry()) return Cause.done(meta.attempt)
       const error = opts.parse(meta.input)
       const message = retryable(error)
       if (!message) return Cause.done(meta.attempt)
+      const wait = delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
+      if (wait > RETRY_MAX_DELAY_NO_HEADERS - cumulativeWait) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
-        const wait = delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
+        cumulativeWait += wait
         const now = yield* Clock.currentTimeMillis
         yield* opts.set({ attempt: meta.attempt, message, next: now + wait })
         return [meta.attempt, Duration.millis(wait)] as [number, Duration.Duration]

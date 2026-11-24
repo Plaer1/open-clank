@@ -1,3 +1,4 @@
+import { editorIdSelector } from './dom-identity.js';
 /**
  * AI inpaint subsystem — Generate, Remove, and Outpaint variants
  * all share a single `runInpaint` core; only the prompt, strength,
@@ -39,27 +40,46 @@
  *   uiModule:               object | null,
  * }} deps
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 
-export function wireInpaintButtons({
+export function wireInpaintButtons({ state = legacyState, root = null, lifetime = null, captureOrigin = null,
   buildMergedMaskCanvas, dilateMask, applyInpaintFeather,
   getSelectedAIEndpoint, ensureActiveMaskLayer,
   saveState, createLayer, composite, renderLayerPanel,
-  spinnerModule, uiModule,
+  spinnerModule, uiModule, markSceneChanged = () => {}, resultHooks = null, beginMutation = () => true, endMutation = () => {}, canCapture = () => true, sceneRevision = () => state.sceneRevision,
 }) {
+  if (state !== legacyState && (!root || !lifetime || typeof captureOrigin !== 'function')) throw new TypeError('isolated AI wiring requires ownership');
+  captureOrigin ||= () => () => 'current';
+  const ownerRoot = root || state.container;
+  const ownerDocument = ownerRoot?.ownerDocument || globalThis.document;
+  const find = id => ownerRoot?.querySelector(editorIdSelector(id));
+  const removers = [];
+  const listen = (node, type, fn) => { if (!node) return; const guarded = (...args) => { if (!lifetime?.disposed) fn(...args); }; node.addEventListener(type, guarded); removers.push(() => node.removeEventListener(type, guarded)); };
+  lifetime?.add(() => { for (const remove of removers.splice(0)) remove(); });
+
   // Shared inpaint runner — used by Generate, Remove, and Outpaint.
-  async function runInpaint({ prompt, strength, btnId, labelId, idleLabel, busyLabel }) {
+  async function runInpaint({ prompt, strength, btnId, labelId, idleLabel, busyLabel, maskOverride = null }) {
+    if (!canCapture()) {uiModule?.showToast('Finish the current image edit first.'); return;}
+    const check = captureOrigin(), controller = new AbortController();
+    let resultId=null, submitted=false, received=false;
+    let image = null, rejectDecode = null;
+    let spinnersCleaned = false;
+    const cleanSpinners = () => { if (spinnersCleaned) return; spinnersCleaned = true; try { runWp?.destroy(); canvasWp?.destroy(); canvasWpEl?.remove(); } catch {} };
+    const unregister = lifetime?.add(() => { cleanSpinners(); controller.abort(); if (image) { image.onload = null; image.onerror = null; image.src = ''; } rejectDecode?.(Object.assign(new Error('retired'), {name:'AbortError'})); }) || (() => {});
+    const requireCurrent = () => { if (lifetime?.disposed || check() !== 'current') throw Object.assign(new Error('Image changed while AI was working; run it again.'), {code:'origin_changed'}); };
+    const route = getSelectedAIEndpoint('inpaint').modelRouteId || undefined;
     // Pre-check: build the union mask the AI will receive and verify
     // at least one pixel is painted.
-    const preMerged = buildMergedMaskCanvas();
-    if (!preMerged) { if (uiModule) uiModule.showToast('Draw the area you want to inpaint first'); return; }
+    const preMerged = maskOverride || buildMergedMaskCanvas();
+    if (!preMerged) { unregister(); if (uiModule) uiModule.showToast('Draw the area you want to inpaint first'); return; }
     const pmCtx = preMerged.getContext('2d');
     const maskData = pmCtx.getImageData(0, 0, preMerged.width, preMerged.height).data;
     let hasMask = false;
     for (let i = 3; i < maskData.length; i += 4) { if (maskData[i] > 0) { hasMask = true; break; } }
-    if (!hasMask) { if (uiModule) uiModule.showToast('Draw the area you want to inpaint first'); return; }
-    const btn = document.getElementById(btnId);
-    const btnLabel = labelId ? document.getElementById(labelId) : null;
+    if (!hasMask) { unregister(); if (uiModule) uiModule.showToast('Draw the area you want to inpaint first'); return; }
+    try { resultId=resultHooks?.reserve(); } catch(error) {unregister(); uiModule?.showToast(error.message); return;}
+    const btn = find(btnId);
+    const btnLabel = labelId ? find(labelId) : null;
     btn.disabled = true;
     if (btnLabel) btnLabel.textContent = busyLabel;
     let runWp = null;
@@ -103,13 +123,14 @@ export function wireInpaintButtons({
         canvasWp = spinnerModule.create('', 'clean', 'whirlpool');
         canvasWpEl = canvasWp.createElement();
         canvasWpEl.style.cssText = `position:fixed;left:${vpX}px;top:${vpY}px;transform:translate(-50%,-50%);z-index:12;pointer-events:none;`;
-        document.body.appendChild(canvasWpEl);
+        ownerDocument.body.appendChild(canvasWpEl);
         canvasWp.start();
       }
     } catch (_) { /* overlay is decorative */ }
     try {
+      requireCurrent();
       // Flatten current image.
-      const flatCanvas = document.createElement('canvas');
+      const flatCanvas = ownerDocument.createElement('canvas');
       flatCanvas.width = state.imgWidth; flatCanvas.height = state.imgHeight;
       const flatCtx = flatCanvas.getContext('2d');
       for (const layer of state.layers) {
@@ -131,23 +152,30 @@ export function wireInpaintButtons({
       // This way, if the user built up the inpaint region across
       // multiple masks, the final generation sees the combined
       // region instead of just the currently-active mask.
-      const mergedMask = buildMergedMaskCanvas() || state.maskCanvas;
+      const mergedMask = maskOverride || buildMergedMaskCanvas() || state.maskCanvas;
+      const maskSnap=ownerDocument.createElement('canvas'); maskSnap.width=mergedMask.width; maskSnap.height=mergedMask.height; maskSnap.getContext('2d').drawImage(mergedMask,0,0);
+      const width=state.imgWidth, height=state.imgHeight, revision=sceneRevision();
+      const participants=maskOverride ? [] : state.layers.flatMap(layer => (layer.masks || []).filter(mask=>mask.visible && mask.canvas?.width && mask.canvas?.height).map(mask => ({layer:String(layer.id),mask:String(mask.id)})));
+      const metadata={label:'Inpaint result',inpaint:{width,height,pad:padPx,revision,participants}};
+      if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width<1 || height<1 || width>16384 || height>16384 || participants.some(item=>item.layer.length>256 || item.mask.length>256) || JSON.stringify(metadata).length>16384) throw new Error('Inpaint source metadata exceeds the recovery limit');
       const dilatedMask = dilateMask(mergedMask, padPx);
       const imageB64 = flatCanvas.toDataURL('image/png').split(',')[1];
       const maskB64 = dilatedMask.toDataURL('image/png').split(',')[1];
-      const baseSnap = document.createElement('canvas');
+      const baseSnap = ownerDocument.createElement('canvas');
       baseSnap.width = state.imgWidth;
       baseSnap.height = state.imgHeight;
       baseSnap.getContext('2d').drawImage(flatCanvas, 0, 0);
+      const sidecars={base:imageB64,mask:maskSnap.toDataURL('image/png').split(',')[1]};
+      if (resultId) {resultHooks.submit(resultId); submitted=true;}
       const res = await fetch('/api/image/inpaint', {
-        method: 'POST', credentials: 'same-origin',
+        method: 'POST', credentials: 'same-origin', signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify((() => {
-          const sel = getSelectedAIEndpoint('inpaint');
-          return { image: imageB64, mask: maskB64, prompt, width: state.imgWidth, height: state.imgHeight, strength, feather: 0, model_route_id: sel.modelRouteId || undefined };
+          return { image: imageB64, mask: maskB64, prompt, width: state.imgWidth, height: state.imgHeight, strength, feather: 0, model_route_id: route };
         })()),
       });
       if (!res.ok) {
+        if (resultId) {resultHooks.reject(resultId); submitted=false;}
         let errDetail = res.statusText;
         try { const errBody = await res.json(); errDetail = errBody.detail || errBody.error || errDetail; } catch {}
         throw new Error(errDetail);
@@ -155,14 +183,19 @@ export function wireInpaintButtons({
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (!data.image) throw new Error('No image returned from inpaint endpoint');
+      if (resultId) {resultHooks.receive(resultId,{bytes:data.image,mime:'image/png',metadata,sidecars}); received=true;}
+      if (lifetime?.disposed || check()!=='current') {if (!lifetime?.disposed && check()!=='retired') uiModule?.showToast('Inpaint result retained for this image.'); return;}
       // Load result as a new layer and clip with the user-drawn mask
       // so only the inpainted region is visible. Cache the
       // unfeathered (AI image + hard mask) on the layer so the live
       // Feather slider can re-derive the alpha on each input event
       // without re-running the model.
-      const resultImg = new Image();
+      const resultImg = image = new Image();
+      await new Promise((resolve, reject) => {
+      rejectDecode = reject;
       resultImg.onload = () => {
-        if (!state.editorOpen) return; // user closed mid-decode
+        try { requireCurrent(); } catch (error) { reject(error); return; }
+        const mutation=beginMutation(); if (!mutation) {uiModule?.showToast('Inpaint result retained for this image.'); resolve(); return;}
         try {
           saveState('Inpaint result');
           // OpenAI returns at one of its allowed sizes (1024²,
@@ -176,13 +209,9 @@ export function wireInpaintButtons({
           resultLayer.ctx.imageSmoothingQuality = 'high';
           resultLayer.ctx.drawImage(resultImg, 0, 0, state.imgWidth, state.imgHeight);
           // Snapshot the AI result + hard mask used for this run.
-          const aiSnap = document.createElement('canvas');
+          const aiSnap = ownerDocument.createElement('canvas');
           aiSnap.width = state.imgWidth; aiSnap.height = state.imgHeight;
           aiSnap.getContext('2d').drawImage(resultLayer.canvas, 0, 0);
-          const maskSnap = document.createElement('canvas');
-          maskSnap.width = state.maskCanvas.width;
-          maskSnap.height = state.maskCanvas.height;
-          maskSnap.getContext('2d').drawImage(state.maskCanvas, 0, 0);
           resultLayer.inpaintSource = { ai: aiSnap, mask: maskSnap, base: baseSnap, padPx };
           // Apply initial alpha = hard mask (no feather, no edge shift).
           applyInpaintFeather(resultLayer, 0, 0);
@@ -195,31 +224,33 @@ export function wireInpaintButtons({
           // on each sub-row's eye icon.
           for (const ly of state.layers) {
             if (!ly.masks || !ly.masks.length) continue;
-            for (const mk of ly.masks) mk.visible = false;
+            for (const mk of ly.masks) if (participants.some(item=>item.layer===String(ly.id) && item.mask===String(mk.id))) mk.visible = false;
           }
+          markSceneChanged();
+          if (resultId) resultHooks.resolve(resultId);
           composite();
           renderLayerPanel();
           // Reveal post-generation Feather + Edge Stroke sliders.
           // Cap Edge Stroke at ±padPx so the slider can't ask for
           // more AI buffer than we generated.
-          const fRow = document.getElementById('ge-inpaint-postfeather-row');
-          const fSlider = document.getElementById('ge-feather-slider');
-          const fLabel = document.getElementById('ge-feather-label');
+          const fRow = find('ge-inpaint-postfeather-row');
+          const fSlider = find('ge-feather-slider');
+          const fLabel = find('ge-feather-label');
           // Divider + heading are always visible; once Generate
           // succeeds we hide the "Available after Generate" hint.
-          const divEl = document.getElementById('ge-inpaint-postedge-divider');
-          const titleEl = document.getElementById('ge-inpaint-postedge-title');
-          const hintEl = document.getElementById('ge-inpaint-postedge-hint');
+          const divEl = find('ge-inpaint-postedge-divider');
+          const titleEl = find('ge-inpaint-postedge-title');
+          const hintEl = find('ge-inpaint-postedge-hint');
           if (divEl) divEl.style.display = '';
           if (titleEl) titleEl.style.display = '';
           if (hintEl) hintEl.style.display = 'none';
           if (fRow) fRow.style.display = '';
           if (fSlider) fSlider.value = '0';
           if (fLabel) fLabel.textContent = '0px';
-          const eRow = document.getElementById('ge-inpaint-edgestroke-row');
-          const eSlider = document.getElementById('ge-edgestroke-slider');
-          const eLabel = document.getElementById('ge-edgestroke-label');
-          const autoRow = document.getElementById('ge-inpaint-automatch-row');
+          const eRow = find('ge-inpaint-edgestroke-row');
+          const eSlider = find('ge-edgestroke-slider');
+          const eLabel = find('ge-edgestroke-label');
+          const autoRow = find('ge-inpaint-automatch-row');
           if (eRow) eRow.style.display = '';
           if (autoRow) autoRow.style.display = '';
           if (eSlider) {
@@ -229,33 +260,33 @@ export function wireInpaintButtons({
           }
           if (eLabel) eLabel.textContent = '0px';
           if (uiModule) uiModule.showToast('Inpaint complete — drag Edge feather / Edge stroke to blend', 5000);
+          resolve();
         } catch (renderErr) {
           console.error('[inpaint] render error', renderErr);
-          if (uiModule) uiModule.showToast('Inpaint render failed: ' + (renderErr.message || renderErr), 6000);
-        }
+          reject(renderErr);
+        } finally {endMutation(mutation);}
       };
-      resultImg.onerror = (e) => {
-        console.error('[inpaint] base64 decode failed', e);
-        if (uiModule) uiModule.showToast('Inpaint result failed to decode', 6000);
-      };
+      resultImg.onerror = () => reject(new Error('Inpaint result failed to decode'));
       resultImg.src = 'data:image/png;base64,' + data.image;
+      });
+      image = null; rejectDecode = null;
     } catch (e) {
-      if (uiModule) uiModule.showToast('Inpaint failed: ' + e.message, 6000);
+      if (resultId && !received) {try {if (submitted) resultHooks.unknown(resultId); else resultHooks.resolve(resultId);} catch (_) {}}
+      if (received) {if (!lifetime?.disposed && check()!=='retired') uiModule?.showToast('Inpaint result retained for this image.',6000); return;}
+      if (!lifetime?.disposed && check() !== 'retired' && e.name !== 'AbortError') uiModule?.showToast(e.code === 'origin_changed' ? e.message : 'Inpaint failed: ' + e.message, 6000);
     } finally {
-      btn.disabled = false;
-      if (btnLabel) btnLabel.textContent = idleLabel;
-      if (runWp) { try { runWp.destroy(); } catch (_) {} }
-      if (canvasWp) { try { canvasWp.destroy(); } catch (_) {} }
-      if (canvasWpEl) { try { canvasWpEl.remove(); } catch (_) {} }
-      window.dispatchEvent(new CustomEvent('ge:inpaint-done'));
+      unregister();
+      if (!lifetime?.disposed && check() !== 'retired') { btn.disabled = false; if (btnLabel) btnLabel.textContent = idleLabel; }
+      cleanSpinners();
+      if (!lifetime?.disposed && check() !== 'retired') window.dispatchEvent(new CustomEvent('ge:inpaint-done'));
     }
   }
 
   // Generate.
-  document.getElementById('ge-inpaint-run').addEventListener('click', async () => {
-    const prompt = document.getElementById('ge-inpaint-prompt')?.value?.trim();
+  listen(find('ge-inpaint-run'), 'click', async () => {
+    const prompt = find('ge-inpaint-prompt')?.value?.trim();
     if (!prompt) { if (uiModule) uiModule.showToast('Enter a prompt for inpainting'); return; }
-    const strength = (parseInt(document.getElementById('ge-strength-slider')?.value || '75')) / 100;
+    const strength = (parseInt(find('ge-strength-slider')?.value || '75')) / 100;
     await runInpaint({
       prompt, strength,
       btnId: 'ge-inpaint-run',
@@ -266,12 +297,12 @@ export function wireInpaintButtons({
 
   // Remove is expressed semantically; provider adapters and registered local
   // recipes own any backend-specific request normalization.
-  document.getElementById('ge-inpaint-remove').addEventListener('click', async () => {
-    const userP = document.getElementById('ge-inpaint-prompt')?.value?.trim();
+  listen(find('ge-inpaint-remove'), 'click', async () => {
+    const userP = find('ge-inpaint-prompt')?.value?.trim();
     const prompt = userP
       ? `Remove ${userP}. Fill seamlessly with the surrounding background, photorealistic, no objects, no people.`
       : 'Remove the masked area. Fill seamlessly with the surrounding background, photorealistic, no objects, no people.';
-    const strength = (parseInt(document.getElementById('ge-strength-slider')?.value || '75')) / 100;
+    const strength = (parseInt(find('ge-strength-slider')?.value || '75')) / 100;
     await runInpaint({
       prompt, strength,
       btnId: 'ge-inpaint-remove',
@@ -284,9 +315,10 @@ export function wireInpaintButtons({
   // areas of the flattened composite, then run inpaint to fill them
   // seamlessly. Mask is dilated ~12px so the AI sees adjacent
   // opaque pixels as context. Ignores the user's drawn mask.
-  document.getElementById('ge-inpaint-outpaint').addEventListener('click', async () => {
+  listen(find('ge-inpaint-outpaint'), 'click', async () => {
+    if (!canCapture()) {uiModule?.showToast('Finish the current image edit first.'); return;}
     // 1) Flatten visible layers to detect alpha=0 (empty) regions.
-    const flat = document.createElement('canvas');
+    const flat = ownerDocument.createElement('canvas');
     flat.width = state.imgWidth; flat.height = state.imgHeight;
     const fctx = flat.getContext('2d');
     for (const layer of state.layers) {
@@ -298,7 +330,7 @@ export function wireInpaintButtons({
     fctx.globalAlpha = 1;
     const flatData = fctx.getImageData(0, 0, state.imgWidth, state.imgHeight).data;
     // 2) White wherever the composite is transparent.
-    const maskRaw = document.createElement('canvas');
+    const maskRaw = ownerDocument.createElement('canvas');
     maskRaw.width = state.imgWidth; maskRaw.height = state.imgHeight;
     const mrCtx = maskRaw.getContext('2d');
     const mrImg = mrCtx.createImageData(state.imgWidth, state.imgHeight);
@@ -319,7 +351,7 @@ export function wireInpaintButtons({
     mrCtx.putImageData(mrImg, 0, 0);
     // 3) Dilate the mask outward 12px so it overlaps a band of
     //    opaque pixels — context for the model to blend cleanly.
-    const expanded = document.createElement('canvas');
+    const expanded = ownerDocument.createElement('canvas');
     expanded.width = state.imgWidth; expanded.height = state.imgHeight;
     const ectx = expanded.getContext('2d');
     ectx.filter = 'blur(12px)';
@@ -335,30 +367,13 @@ export function wireInpaintButtons({
       expData.data[i + 3] = v;
     }
     ectx.putImageData(expData, 0, 0);
-    // 4) Temporarily replace the active mask sub-layer with the
-    //    outpaint mask. Snapshot the previous so we can restore.
-    const mask = ensureActiveMaskLayer();
-    if (!mask) { if (uiModule) uiModule.showToast('No active layer for outpaint'); return; }
-    const savedMask = mask.ctx.getImageData(0, 0, mask.canvas.width, mask.canvas.height);
-    mask.ctx.clearRect(0, 0, mask.canvas.width, mask.canvas.height);
-    mask.ctx.drawImage(expanded, 0, 0);
-    // 5) Prompt: prefer user input, else a generic fill.
-    const userP = document.getElementById('ge-inpaint-prompt')?.value?.trim();
+    // Pass the generated mask as request input without changing saved mask pixels.
+    const userP = find('ge-inpaint-prompt')?.value?.trim();
     const prompt = userP || 'seamless natural continuation of the surrounding image, photorealistic, matching style, no objects, no people, no text';
-    const strength = 0.99;
-    try {
-      await runInpaint({
-        prompt, strength,
-        btnId: 'ge-inpaint-outpaint',
-        labelId: 'ge-inpaint-outpaint-label',
-        idleLabel: 'Outpaint', busyLabel: 'Outpainting',
-      });
-    } finally {
-      // Restore the user's previous mask drawing so subsequent
-      // Generate/Remove operates on what they actually drew.
-      mask.ctx.clearRect(0, 0, mask.canvas.width, mask.canvas.height);
-      mask.ctx.putImageData(savedMask, 0, 0);
-      composite();
-    }
+    await runInpaint({
+      prompt, strength: 0.99, maskOverride: expanded,
+      btnId: 'ge-inpaint-outpaint', labelId: 'ge-inpaint-outpaint-label',
+      idleLabel: 'Outpaint', busyLabel: 'Outpainting',
+    });
   });
 }

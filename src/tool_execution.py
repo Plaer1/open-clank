@@ -20,6 +20,7 @@ import shlex
 import subprocess
 import sys
 import time
+import weakref
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 
@@ -45,6 +46,8 @@ _TOOL_CAPABILITY_REGISTRY = {
     "shell_execution": frozenset({"bash", "python"}),
     "local_read": frozenset({"search_code", "read_file", "grep", "glob", "ls", "get_workspace"}),
     "local_mutation": frozenset({"write_file", "apply_patch", "todowrite", "manage_files"}),
+    "external_read_observation": frozenset({"browser_status", "browser_observe"}),
+    "external_interaction": frozenset({"browser_control"}),
 }
 _RAW_TOOL_RESULT_FIELDS = frozenset({"output", "stdout", "stderr"})
 _DISPATCHER_ONLY_TOOL_NAMES = frozenset({
@@ -54,7 +57,7 @@ _DISPATCHER_ONLY_TOOL_NAMES = frozenset({
     "list_cookbook_servers", "list_downloads", "list_serve_presets",
     "list_served_models", "list_sessions", "manage_bg_jobs", "manage_calendar",
     "manage_copal", "manage_endpoints", "manage_mcp", "manage_memory",
-    "manage_notes", "manage_research", "manage_session", "manage_settings",
+    "manage_notes", "manage_rag", "manage_research", "manage_session", "manage_settings",
     "manage_skills", "manage_tasks", "manage_tokens", "manage_webhooks",
     "pipeline", "publish_file", "read_copal", "recall_memory", "resolve_contact",
     "search_chats", "search_hf_models", "send_to_session", "serve_model",
@@ -672,7 +675,7 @@ def _control_data_roots() -> list[str]:
     """Canonical roots owned by Open Clank rather than the active workspace."""
     from src.constants import AUTH_FILE, DATA_DIR, FM_DB_PATH
 
-    mimocode_home = os.environ.get("MIMOCODE_HOME")
+    mimocode_home = os.environ.get("OPENCLANK_HOME")
     candidates = [
         DATA_DIR,
         os.path.dirname(AUTH_FILE),
@@ -689,8 +692,9 @@ def _control_data_roots() -> list[str]:
     candidates.extend(
         os.path.join(
             os.environ.get(env_name) or os.path.join(home, fallback),
-            "mimocode",
+            engine_folder,
         )
+        for engine_folder in ("openclank-engine", "mimocode")
         for env_name, fallback in (
             ("XDG_DATA_HOME", ".local/share"),
             ("XDG_CONFIG_HOME", ".config"),
@@ -1092,9 +1096,6 @@ _MCP_TOOL_MAP = {
 }
 _EMAIL_MCP_OWNER_ARG = "_odysseus_owner"
 _EMAIL_MCP_ROOT_ARG = "_open_clank_root_operation_id"
-_RAG_MCP_OWNER_ARG = "_open_clank_owner"
-_RAG_MCP_WORKSPACE_ARG = "_open_clank_workspace_id"
-_RAG_MCP_PROJECT_ARG = "_open_clank_project_id"
 
 
 def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[str]]:
@@ -1241,6 +1242,48 @@ def _authenticated_run_id(session_id: Optional[str]) -> Optional[str]:
     return str(value).strip() or None if value else None
 
 
+def _note_uncaptured_history(tool, session_id, run_id, exc) -> None:
+    """The tool still runs when capture setup fails; make that explicit."""
+    logger.warning(
+        "history capture setup failed; tool runs uncaptured "
+        "tool=%s session=%s run=%s error=%s",
+        tool, session_id, run_id, type(exc).__name__,
+    )
+    try:
+        from src.openclank.history_capture import _set_status
+        _set_status(history_status="unavailable", capture_phase="unavailable",
+                    error=f"capture setup failed: {type(exc).__name__}")
+    except Exception:
+        pass  # import of the capture module itself failed; the warning stands
+
+
+# publish_file requirement check: the lifetools child sets the contextvar (broker call); the Host
+# process registers the hook (called by owner). Neither is ever read from tool arguments.
+PUBLISH_REQUIREMENT_CHECKER: contextvars.ContextVar = contextvars.ContextVar("publish_requirement_checker", default=None)
+HOST_PUBLISH_REQUIREMENT_CHECK: Optional[Callable[[str], Awaitable[dict]]] = None
+
+
+_legacy_plan_children = weakref.WeakKeyDictionary()
+
+
+def _bind_legacy_plan_child(child, session_id, owner):
+    """Bind one actual tool task while called by its admitted drain task."""
+    from src import agent_runs
+    run=agent_runs.get_run(str(session_id or ""));parent=asyncio.current_task()
+    try:
+        if (not isinstance(child,asyncio.Task) or child.done() or run is None or run.task is not parent
+                or parent.cancelling() or run.status!="running" or run.owner!=str(owner or "").strip().lower()
+                or run.admission is None or run.admission_barrier is not agent_runs._ACCOUNT_REQUEST_BARRIER
+                or run.admission.stop.is_set()): return
+        run.admission_barrier.assert_live_admission(run.owner,run.admission)
+        _legacy_plan_children[child]=(run,parent,run.admission,run.admission_barrier)
+    except Exception:return
+
+
+def _release_legacy_plan_child(child):
+    _legacy_plan_children.pop(child,None)
+
+
 async def _direct_fallback(
     tool: str,
     content: str,
@@ -1251,6 +1294,7 @@ async def _direct_fallback(
     files_importer: Optional[Callable[..., Any]] = None,
     run_id: Optional[str] = None,
     task_id: Optional[str] = None,
+    publish_requirement_check: Optional[Callable[[], Awaitable[dict]]] = None,
 ) -> Optional[Dict]:
     from src.shell_policy import minimal_shell_env
 
@@ -1275,8 +1319,8 @@ async def _direct_fallback(
                         task_id=authenticated_task_id or "",
                         tool_id=str(tool or "filesystem"),
                     )
-            except Exception:
-                # History is best-effort; normal live tool dispatch continues.
+            except Exception as exc:
+                _note_uncaptured_history(tool, session_id, authenticated_run_id, exc)
                 history_context = None
         ctx = {
             "progress_cb": progress_cb,
@@ -1289,7 +1333,40 @@ async def _direct_fallback(
             "run_id": authenticated_run_id,
             "task_id": authenticated_task_id,
             "files_importer": files_importer,
+            "publish_requirement_check": publish_requirement_check,
         }
+
+        if tool == "update_plan" and session_id and owner:
+            # Bind this legacy draft mutation to the actual current drain task,
+            # its account admission, and the same owned session object. Values
+            # supplied in tool arguments cannot create this authority.
+            from src import agent_runs
+            from core.models import get_session_manager_instance
+            manager = get_session_manager_instance()
+            run = agent_runs.get_run(str(session_id))
+            session = getattr(manager, "sessions", {}).get(str(session_id)) if manager is not None else None
+            normalized_owner, account, _ = _copal_account_id(owner)
+            task = asyncio.current_task()
+            binding = _legacy_plan_children.get(task)
+            parent = binding[1] if binding else None
+            admission = binding[2] if binding else None
+            barrier = binding[3] if binding else None
+            def current_authority():
+                try:
+                    if (run is None or session is None or not account or task is None or asyncio.current_task() is not task
+                            or binding is None or _legacy_plan_children.get(task) is not binding or binding[0] is not run
+                            or parent is None or parent.done() or parent.cancelling() or task.cancelling() or agent_runs.get_run(str(session_id)) is not run
+                            or run.task is not parent or run.status != "running" or run.owner != normalized_owner.lower()
+                            or run.admission is not admission or run.admission_barrier is not barrier or barrier is None
+                            or barrier is not agent_runs._ACCOUNT_REQUEST_BARRIER or admission is None or admission.stop.is_set()
+                            or getattr(manager, "sessions", {}).get(str(session_id)) is not session
+                            or str(getattr(session, "owner", "")).strip().lower() != normalized_owner.lower()
+                            or _copal_account_id(owner)[1] != account): return False
+                    barrier.assert_live_admission(normalized_owner, admission)
+                    return not barrier._fenced(normalized_owner)
+                except Exception:
+                    return False
+            if current_authority(): ctx["current_authority"] = current_authority
 
         from src.agent_tools import TOOL_HANDLERS
         if tool in TOOL_HANDLERS:
@@ -1563,7 +1640,8 @@ async def _execute_tool_block_impl(
             pass
 
     # Reject tools that the user has disabled for this request
-    if disabled_tools and not policy_names.isdisjoint(disabled_tools):
+    if disabled_tools and (not policy_names.isdisjoint(disabled_tools)
+                           or (tool in {"browser_status", "browser_observe", "browser_control"} and "browser" in disabled_tools)):
         desc = f"{tool}: BLOCKED"
         result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
@@ -1599,6 +1677,33 @@ async def _execute_tool_block_impl(
         }
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
+
+    if tool in {"browser_status", "browser_observe", "browser_control"}:
+        try:
+            arguments = json.loads(content) if content.strip() else {}
+            if not isinstance(arguments, dict):
+                raise ValueError("Browser arguments must be an object")
+            if not owner or not session_id or not authority_workspace_id:
+                raise ValueError("Browser requires an admitted managed chat and Workspace")
+            from src.openclank.transcript_projection import get_managed_binding
+            binding = get_managed_binding(session_id, owner=owner)
+            revision = binding.get("workspaceRevision")
+            if (binding.get("owner") != owner or binding.get("stableChatID") != session_id
+                    or binding.get("authorityWorkspaceID") != authority_workspace_id
+                    or type(revision) is not int or binding.get("transition") is not None):
+                raise ValueError("Browser session binding is unavailable")
+            from src.openclank.browser_control_service import configured_browser_control_service
+            service = configured_browser_control_service()
+            if service is None:
+                raise RuntimeError("Browser is unavailable")
+            result = await service.call(
+                owner=owner, host_session_id=session_id,
+                workspace_id=authority_workspace_id, binding_revision=revision,
+                tool_name=tool, arguments=arguments, require_active_policy=True,
+            )
+            return f"{tool}: {arguments.get('action', 'observe')}", result
+        except Exception as exc:
+            return f"{tool}: BLOCKED", {"error": str(exc)[:512], "exit_code": 1, "blocked": True}
 
 
     # Background execution: a `bash` block whose first line is the `#!bg`
@@ -1662,7 +1767,8 @@ async def _execute_tool_block_impl(
                             task_id="",
                             tool_id="bash",
                         )
-                except Exception:
+                except Exception as exc:
+                    _note_uncaptured_history("bash", session_id, run_id, exc)
                     history_context = None
                 rec = bg_jobs.launch(
                     _bg_cmd,
@@ -1733,7 +1839,10 @@ async def _execute_tool_block_impl(
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "publish_file":
         desc = "publish_file"
-        result = await _direct_fallback(tool, content, owner=owner) \
+        checker = PUBLISH_REQUIREMENT_CHECKER.get()
+        if checker is None and HOST_PUBLISH_REQUIREMENT_CHECK is not None and owner:
+            checker = (lambda hook=HOST_PUBLISH_REQUIREMENT_CHECK, who=str(owner): hook(who))
+        result = await _direct_fallback(tool, content, owner=owner, publish_requirement_check=checker) \
             or {"error": "publish_file: execution failed", "exit_code": 1}
         if result.get("filename"):
             desc = f"publish_file: {result['filename']}"
@@ -1937,6 +2046,15 @@ async def _execute_tool_block_impl(
     elif tool == "vault_unlock":
         desc = "vault_unlock"
         result = await do_vault_unlock(content, owner=owner)
+    elif tool in {"manage_rag", "mcp__rag__manage_rag"}:
+        from src.ai_interaction import do_manage_rag
+
+        desc = "manage_rag"
+        args, error = _parse_qualified_mcp_args(tool, content)
+        if error:
+            result = {"error": error, "exit_code": 1}
+        else:
+            result = await do_manage_rag(args, owner=owner, workspace_id=get_active_workspace())
     elif tool in BUILTIN_EMAIL_TOOLS:
         # Bare email tool name from fenced-block models (e.g. Ollama) — route to MCP email server.
         # Non-admin owners never reach here: BUILTIN_EMAIL_TOOLS ⊆ NON_ADMIN_BLOCKED_TOOLS,
@@ -1993,11 +2111,6 @@ async def _execute_tool_block_impl(
             args, parse_error = _parse_qualified_mcp_args(tool, content)
             if parse_error:
                 result = {"error": parse_error, "exit_code": 1}
-            elif tool.startswith("mcp__rag__") and not owner:
-                result = {
-                    "error": "RAG MCP tool requires an authenticated owner",
-                    "exit_code": 1,
-                }
             else:
                 if tool.startswith("mcp__email__") and (owner or root_operation_id):
                     args = dict(args)
@@ -2005,14 +2118,6 @@ async def _execute_tool_block_impl(
                         args[_EMAIL_MCP_OWNER_ARG] = owner
                     if root_operation_id:
                         args[_EMAIL_MCP_ROOT_ARG] = root_operation_id
-                if tool.startswith("mcp__rag__"):
-                    # The global RAG MCP process must not trust tenant scope
-                    # supplied by the model. Overwrite every private field from
-                    # the authenticated turn and its vetted workspace binding.
-                    args = dict(args)
-                    args[_RAG_MCP_OWNER_ARG] = owner
-                    args[_RAG_MCP_WORKSPACE_ARG] = get_active_workspace() or ""
-                    args[_RAG_MCP_PROJECT_ARG] = ""
                 result = await mcp.call_tool(tool, args)
         else:
             desc = f"mcp: {tool}"

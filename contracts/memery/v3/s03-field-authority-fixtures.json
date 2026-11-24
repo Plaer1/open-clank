@@ -1,0 +1,857 @@
+{
+  "fixture_version": "s03.field-authority.v1",
+  "status": "inactive_semantic_contract_no_runtime_authority",
+  "cases": [
+    {
+      "name": "manual false replacement",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/enabled": "manual"
+        },
+        "current": {
+          "enabled": false
+        },
+        "proposed": {
+          "enabled": true
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/enabled"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      }
+    },
+    {
+      "name": "manual zero replacement",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/count": "manual"
+        },
+        "current": {
+          "count": 0
+        },
+        "proposed": {
+          "count": 1
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/count"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      }
+    },
+    {
+      "name": "manual empty string replacement",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/label": "manual"
+        },
+        "current": {
+          "label": ""
+        },
+        "proposed": {
+          "label": "x"
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/label"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      }
+    },
+    {
+      "name": "explicit null removed",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/choice": "manual"
+        },
+        "current": {
+          "choice": null
+        },
+        "proposed": {}
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/choice"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      },
+      "expected_changes": [
+        {
+          "path": "/choice",
+          "before": {
+            "present": true,
+            "value": null
+          },
+          "after": {
+            "present": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "null differs from false",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/choice": "manual"
+        },
+        "current": {
+          "choice": null
+        },
+        "proposed": {
+          "choice": false
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/choice"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      }
+    },
+    {
+      "name": "false differs from zero",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/choice": "manual"
+        },
+        "current": {
+          "choice": false
+        },
+        "proposed": {
+          "choice": 0
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/choice"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      },
+      "expected_changes": [
+        {
+          "path": "/choice",
+          "before": {
+            "present": true,
+            "value": false
+          },
+          "after": {
+            "present": true,
+            "value": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "legacy unknown requires review",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/x": "legacy_unknown"
+        },
+        "current": {
+          "x": "old"
+        },
+        "proposed": {
+          "x": "new"
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/x"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      }
+    },
+    {
+      "name": "missing provenance defaults legacy unknown",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {},
+        "current": {
+          "x": "old"
+        },
+        "proposed": {
+          "x": "new"
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/x"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      }
+    },
+    {
+      "name": "unrelated inferred field changes",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/manual": "manual",
+          "/auto": "inferred"
+        },
+        "current": {
+          "manual": "a",
+          "auto": "x"
+        },
+        "proposed": {
+          "manual": "a",
+          "auto": "y"
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [
+          "/auto"
+        ],
+        "review_paths": [],
+        "origins": {
+          "/auto": "inferred"
+        },
+        "outcome": "allowed"
+      }
+    },
+    {
+      "name": "new origin claim cannot grant manual",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {},
+        "current": {},
+        "proposed": {
+          "origin": "manual"
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [
+          "/origin"
+        ],
+        "review_paths": [],
+        "origins": {
+          "/origin": "legacy_unknown"
+        },
+        "outcome": "allowed"
+      },
+      "expected_changes": [
+        {
+          "path": "/origin",
+          "before": {
+            "present": false
+          },
+          "after": {
+            "present": true,
+            "value": "manual"
+          }
+        }
+      ]
+    },
+    {
+      "name": "parent removal covers protected child",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/profile/secret": "manual",
+          "/profile/auto": "inferred"
+        },
+        "current": {
+          "profile": {
+            "secret": "x",
+            "auto": 1
+          }
+        },
+        "proposed": {}
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/profile"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      }
+    },
+    {
+      "name": "protected ancestor covers child change",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/profile": "manual"
+        },
+        "current": {
+          "profile": {
+            "theme": "a"
+          }
+        },
+        "proposed": {
+          "profile": {
+            "theme": "b"
+          }
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [
+          "/profile/theme"
+        ],
+        "origins": {},
+        "outcome": "review_required"
+      }
+    },
+    {
+      "name": "JSON pointer escaping prevents false sibling overlap",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/a~1b": "inferred",
+          "/a/b": "manual"
+        },
+        "current": {
+          "a/b": 1,
+          "a": {
+            "b": 1
+          }
+        },
+        "proposed": {
+          "a/b": 2,
+          "a": {
+            "b": 1
+          }
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [
+          "/a~1b"
+        ],
+        "review_paths": [],
+        "origins": {
+          "/a~1b": "inferred"
+        },
+        "outcome": "allowed"
+      }
+    },
+    {
+      "name": "owner approves subset and other field waits",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/manual": "manual",
+          "/pending": "legacy_unknown",
+          "/auto": "inferred"
+        },
+        "current": {
+          "manual": "a",
+          "pending": "a",
+          "auto": "x"
+        },
+        "proposed": {
+          "manual": "b",
+          "pending": "b",
+          "auto": "y"
+        },
+        "review": {
+          "authenticated_owner": "alice",
+          "reviewer_id": "alice",
+          "expected_revision": 2,
+          "proposal_key": "p-1",
+          "payload_hash": "hash-1",
+          "approved_paths": [
+            "/manual"
+          ]
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [
+          "/manual"
+        ],
+        "review_paths": [
+          "/auto",
+          "/pending"
+        ],
+        "origins": {
+          "/manual": "manual"
+        },
+        "outcome": "partial"
+      }
+    },
+    {
+      "name": "wrong reviewer cannot approve",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/manual": "manual"
+        },
+        "current": {
+          "manual": "a"
+        },
+        "proposed": {
+          "manual": "b"
+        },
+        "review": {
+          "authenticated_owner": "alice",
+          "reviewer_id": "mallory",
+          "expected_revision": 2,
+          "proposal_key": "p-1",
+          "payload_hash": "hash-1",
+          "approved_paths": [
+            "/manual"
+          ]
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [],
+        "origins": {},
+        "outcome": "review_denied"
+      }
+    },
+    {
+      "name": "stale revision denies before review",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 1,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/x": "inferred"
+        },
+        "current": {
+          "x": 1
+        },
+        "proposed": {
+          "x": 2
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [],
+        "origins": {},
+        "outcome": "stale_revision"
+      }
+    },
+    {
+      "name": "stale approval denies",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/manual": "manual"
+        },
+        "current": {
+          "manual": "a"
+        },
+        "proposed": {
+          "manual": "b"
+        },
+        "review": {
+          "authenticated_owner": "alice",
+          "reviewer_id": "alice",
+          "expected_revision": 1,
+          "proposal_key": "p-1",
+          "payload_hash": "hash-1",
+          "approved_paths": [
+            "/manual"
+          ]
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [],
+        "origins": {},
+        "outcome": "stale_approval"
+      }
+    },
+    {
+      "name": "approval payload mismatch",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/manual": "manual"
+        },
+        "current": {
+          "manual": "a"
+        },
+        "proposed": {
+          "manual": "b"
+        },
+        "review": {
+          "authenticated_owner": "alice",
+          "reviewer_id": "alice",
+          "expected_revision": 2,
+          "proposal_key": "p-1",
+          "payload_hash": "other",
+          "approved_paths": [
+            "/manual"
+          ]
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [],
+        "origins": {},
+        "outcome": "payload_conflict"
+      }
+    },
+    {
+      "name": "same-key same-payload replay",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/x": "manual"
+        },
+        "current": {
+          "x": 1
+        },
+        "proposed": {
+          "x": 2
+        },
+        "existing_payload_hash": "hash-1"
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [],
+        "origins": {},
+        "outcome": "replay"
+      }
+    },
+    {
+      "name": "same-key changed-payload conflict",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/x": "manual"
+        },
+        "current": {
+          "x": 1
+        },
+        "proposed": {
+          "x": 2
+        },
+        "existing_payload_hash": "different"
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [],
+        "origins": {},
+        "outcome": "payload_conflict"
+      }
+    },
+    {
+      "name": "approval cannot widen selected paths",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/manual": "manual"
+        },
+        "current": {
+          "manual": "a"
+        },
+        "proposed": {
+          "manual": "b"
+        },
+        "review": {
+          "authenticated_owner": "alice",
+          "reviewer_id": "alice",
+          "expected_revision": 2,
+          "proposal_key": "p-1",
+          "payload_hash": "hash-1",
+          "approved_paths": [
+            ""
+          ]
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [],
+        "origins": {},
+        "outcome": "invalid_review_subset"
+      }
+    },
+    {
+      "name": "unchanged null stays unchanged",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/choice": "manual"
+        },
+        "current": {
+          "choice": null
+        },
+        "proposed": {
+          "choice": null
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [],
+        "origins": {},
+        "outcome": "unchanged"
+      }
+    },
+    {
+      "name": "explicit correction remains classification",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {
+          "/x": "inferred"
+        },
+        "current": {
+          "x": 1
+        },
+        "proposed": {
+          "x": 2
+        },
+        "classification": "correction"
+      },
+      "expected": {
+        "classification": "correction",
+        "allowed_paths": [
+          "/x"
+        ],
+        "review_paths": [],
+        "origins": {
+          "/x": "inferred"
+        },
+        "outcome": "allowed"
+      }
+    },
+    {
+      "name": "stale approval cannot replay",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "existing_payload_hash": "hash-1",
+        "provenance": {},
+        "current": {},
+        "proposed": {},
+        "review": {
+          "authenticated_owner": "alice",
+          "reviewer_id": "alice",
+          "expected_revision": 1,
+          "proposal_key": "p-1",
+          "payload_hash": "hash-1",
+          "approved_paths": []
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [],
+        "review_paths": [],
+        "origins": {},
+        "outcome": "stale_approval"
+      }
+    },
+    {
+      "name": "trusted automatic new field remains inferred",
+      "input": {
+        "owner": "alice",
+        "current_revision": 2,
+        "expected_revision": 2,
+        "proposal_key": "p-1",
+        "payload_hash": "hash-1",
+        "provenance": {},
+        "current": {},
+        "proposed": {
+          "value": 42
+        },
+        "producer": {
+          "kind": "automatic"
+        }
+      },
+      "expected": {
+        "classification": "unresolved",
+        "allowed_paths": [
+          "/value"
+        ],
+        "review_paths": [],
+        "origins": {
+          "/value": "inferred"
+        },
+        "outcome": "allowed"
+      }
+    }
+  ],
+  "candidate_states": {
+    "proposed": "pending",
+    "awaiting_review": "pending",
+    "eligible_auto": "pending",
+    "activated": "activated_not_owner_approval",
+    "conflicted": "unresolved",
+    "rejected": "rejected",
+    "cancelled": "cancelled"
+  },
+  "conflict_states": {
+    "open": "unresolved",
+    "resolved": "resolved_requires_audit",
+    "dismissed": "dismissed_requires_audit"
+  },
+  "receipt_vectors": [
+    {
+      "operation_json": "{\"name\":\"雪\",\"nested\":{\"value\":0}}",
+      "sha256": "32e8cfd4edb80571936cebfb04cbc9d0c7bfbc13f3cbc628b8248260a97a2ace"
+    },
+    {
+      "operation_json": "{\"name\":\"雪\",\"nested\":{\"value\":0.0}}",
+      "sha256": "52f292c2d52ec0608ec05f7e4d4f8ffd133aad3da011f0a184c5a490b1baff3c"
+    }
+  ],
+  "guarded_creation_vectors": [
+    {
+      "name": "mixed owner and automatic creation",
+      "approved_paths": [
+        "/value"
+      ],
+      "producer_kind": "automatic",
+      "expected_origins": {
+        "/value": "manual",
+        "/confidence": "inferred"
+      }
+    },
+    {
+      "name": "unselected legacy field remains unknown",
+      "approved_paths": [
+        "/value"
+      ],
+      "producer_kind": "legacy_import",
+      "expected_origins": {
+        "/value": "manual",
+        "/confidence": "legacy_unknown"
+      }
+    }
+  ]
+}

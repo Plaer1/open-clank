@@ -1,3 +1,4 @@
+import { editorIdSelector } from './dom-identity.js';
 /**
  * Lasso + Magic Wand panel controls — sliders, mode toggles, and the
  * panel action buttons (Invert / Clear / Delete / Copy / To Mask /
@@ -38,61 +39,71 @@
  *   uiModule:                object,
  * }} deps
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 
 const EYE_OPEN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF  = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>';
 
-export function wireSelectionControls({
+export function wireSelectionControls({ state = legacyState, root = null, lifetime = null,
   composite,
   invertSelection,
   lassoDeleteSelection, lassoCopyToLayer, lassoToMask,
-  runMagicWand,
+  runMagicWand, captureWandOrigin = () => null,
   wandClear, wandDeleteSelection, wandCopyToNewLayer, wandToMask,
   buildSelectionHintMask, applyImageTool,
   uiModule,
 }) {
+  if (state !== legacyState && (!root || !lifetime)) throw new TypeError('isolated controls require ownership');
+  const ownerRoot = root || state.container;
+  const win = ownerRoot?.ownerDocument?.defaultView || window;
+  const find = id => ownerRoot?.querySelector(editorIdSelector(id));
+  const removers = [];
+  const listen = (node, type, fn) => { if (!node) return; const guarded = (...args) => { if (!lifetime?.disposed) fn(...args); }; node.addEventListener(type, guarded); removers.push(() => node.removeEventListener(type, guarded)); };
+  const frames = new Set();
+  const frame = fn => { const id = win.requestAnimationFrame(() => { frames.delete(id); if (!lifetime?.disposed) fn(); }); frames.add(id); return id; };
+  lifetime?.add(() => { for (const id of frames) win.cancelAnimationFrame(id); for (const remove of removers.splice(0)) remove(); });
+
   // ── Lasso section ──
-  const lassoFPrev = document.getElementById('ge-lasso-feather-preview');
+  const lassoFPrev = find('ge-lasso-feather-preview');
   function syncLassoFeather(v) {
     if (!lassoFPrev) return;
     const inner = Math.max(0, 50 - v * 1.0);
     lassoFPrev.style.background = `radial-gradient(circle, var(--fg) 0%, var(--fg) ${inner}%, transparent 75%)`;
   }
   syncLassoFeather(0);
-  document.getElementById('ge-lasso-feather')?.addEventListener('input', (e) => {
-    document.getElementById('ge-lasso-feather-label').textContent = e.target.value + 'px';
+  listen(find('ge-lasso-feather'), 'input', (e) => {
+    find('ge-lasso-feather-label').textContent = e.target.value + 'px';
     syncLassoFeather(parseInt(e.target.value, 10));
     composite();
   });
-  document.getElementById('ge-lasso-grow')?.addEventListener('input', (e) => {
-    document.getElementById('ge-lasso-grow-label').textContent = e.target.value + 'px';
+  listen(find('ge-lasso-grow'), 'input', (e) => {
+    find('ge-lasso-grow-label').textContent = e.target.value + 'px';
     composite();
   });
-  document.getElementById('ge-lasso-delete')?.addEventListener('click', () => {
+  listen(find('ge-lasso-delete'), 'click', () => {
     if (state.lassoPoints.length >= 3 && !state.lassoActive) lassoDeleteSelection();
     else if (state.wandMask) wandDeleteSelection();
   });
-  document.getElementById('ge-lasso-copy')?.addEventListener('click', () => {
+  listen(find('ge-lasso-copy'), 'click', () => {
     if (state.lassoPoints.length >= 3 && !state.lassoActive) lassoCopyToLayer();
     else if (state.wandMask) wandCopyToNewLayer();
   });
-  document.getElementById('ge-lasso-mask')?.addEventListener('click', () => {
+  listen(find('ge-lasso-mask'), 'click', () => {
     if (state.lassoPoints.length >= 3 && !state.lassoActive) lassoToMask();
     else if (state.wandMask) wandToMask();
   });
-  document.getElementById('ge-lasso-invert')?.addEventListener('click', invertSelection);
+  listen(find('ge-lasso-invert'), 'click', invertSelection);
 
   // ── Wand section ──
-  document.getElementById('ge-wand-feather')?.addEventListener('input', (e) => {
+  listen(find('ge-wand-feather'), 'input', (e) => {
     const v = parseInt(e.target.value, 10) || 0;
-    document.getElementById('ge-wand-feather-label').textContent = v + 'px';
-    const prev = document.getElementById('ge-wand-feather-preview');
+    find('ge-wand-feather-label').textContent = v + 'px';
+    const prev = find('ge-wand-feather-preview');
     if (prev) prev.style.setProperty('--feather-blur', Math.min(v / 14, 8) + 'px');
     composite();
   });
-  document.getElementById('ge-wand-grow')?.addEventListener('input', (e) => {
-    document.getElementById('ge-wand-grow-label').textContent = e.target.value + 'px';
+  listen(find('ge-wand-grow'), 'input', (e) => {
+    find('ge-wand-grow-label').textContent = e.target.value + 'px';
     composite();
   });
 
@@ -103,43 +114,44 @@ export function wireSelectionControls({
   const retuneWand = () => {
     if (!state.wandLastSeed || !state.wandMask) return;
     if (wandRetuneRaf) return;
-    wandRetuneRaf = requestAnimationFrame(() => {
+    const expected=captureWandOrigin(), seed={...state.wandLastSeed};
+    wandRetuneRaf = frame(() => {
       wandRetuneRaf = null;
-      runMagicWand(state.wandLastSeed.x, state.wandLastSeed.y, 'replace', { retune: true });
+      runMagicWand(seed.x, seed.y, 'replace', { retune: true, expected });
     });
   };
-  const liveBtn = document.getElementById('ge-wand-live');
-  liveBtn?.addEventListener('click', () => {
+  const liveBtn = find('ge-wand-live');
+  listen(liveBtn, 'click', () => {
     state.wandLiveRetune = !state.wandLiveRetune;
     liveBtn.classList.toggle('active', state.wandLiveRetune);
     liveBtn.setAttribute('aria-pressed', state.wandLiveRetune ? 'true' : 'false');
     if (state.wandLiveRetune) retuneWand();
   });
-  document.getElementById('ge-wand-tolerance')?.addEventListener('input', (e) => {
+  listen(find('ge-wand-tolerance'), 'input', (e) => {
     state.wandTolerance = parseInt(e.target.value, 10);
-    const lbl = document.getElementById('ge-wand-tol-label');
+    const lbl = find('ge-wand-tol-label');
     if (lbl) lbl.textContent = state.wandTolerance;
-    const wp = document.getElementById('ge-wand-tol-preview');
+    const wp = find('ge-wand-tol-preview');
     if (wp) wp.style.opacity = (state.wandTolerance / 100).toFixed(2);
     if (state.wandLiveRetune) retuneWand();
   });
 
   // Wand mode segmented toggle (New / Add / Subtract).
-  document.querySelectorAll('.ge-wand-mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+  ownerRoot.querySelectorAll('.ge-wand-mode-btn').forEach(btn => {
+    listen(btn, 'click', () => {
       const mode = btn.dataset.wandMode;
       if (!mode) return;
       state.wandMode = mode;
-      document.querySelectorAll('.ge-wand-mode-btn').forEach(b => {
+      ownerRoot.querySelectorAll('.ge-wand-mode-btn').forEach(b => {
         b.classList.toggle('active', b.dataset.wandMode === mode);
       });
     });
   });
 
   // Toggle the translucent red overlay for the wand selection.
-  document.getElementById('ge-wand-vis')?.addEventListener('click', () => {
+  listen(find('ge-wand-vis'), 'click', () => {
     state.wandMaskVisible = !state.wandMaskVisible;
-    const btn = document.getElementById('ge-wand-vis');
+    const btn = find('ge-wand-vis');
     if (btn) {
       btn.innerHTML = state.wandMaskVisible ? EYE_OPEN : EYE_OFF;
       btn.title = state.wandMaskVisible ? 'Hide selection overlay' : 'Show selection overlay';
@@ -148,23 +160,23 @@ export function wireSelectionControls({
     composite();
   });
 
-  document.getElementById('ge-wand-clear')?.addEventListener('click', wandClear);
-  document.getElementById('ge-wand-invert')?.addEventListener('click', invertSelection);
-  document.getElementById('ge-wand-delete')?.addEventListener('click', wandDeleteSelection);
-  document.getElementById('ge-wand-copy')?.addEventListener('click', wandCopyToNewLayer);
-  document.getElementById('ge-wand-mask')?.addEventListener('click', wandToMask);
+  listen(find('ge-wand-clear'), 'click', wandClear);
+  listen(find('ge-wand-invert'), 'click', invertSelection);
+  listen(find('ge-wand-delete'), 'click', wandDeleteSelection);
+  listen(find('ge-wand-copy'), 'click', wandCopyToNewLayer);
+  listen(find('ge-wand-mask'), 'click', wandToMask);
   // Selection-constrained Bg Remove — reuses the same path the toolbar
   // Bg Remove button does. buildSelectionHintMask picks the active
   // wand/lasso selection, so this just kicks off the existing flow.
-  document.getElementById('ge-wand-rembg')?.addEventListener('click', async () => {
-    const btn = document.getElementById('ge-wand-rembg');
+  listen(find('ge-wand-rembg'), 'click', async () => {
+    const btn = find('ge-wand-rembg');
     const hint = buildSelectionHintMask();
     if (!hint) { if (uiModule) uiModule.showToast('Click to make a wand selection first'); return; }
-    await applyImageTool('/api/image/remove-bg', { hint_mask: hint }, 'BG Removed', btn);
-    wandClear();
+    const result = await applyImageTool('/api/image/remove-bg', { hint_mask: hint }, 'BG Removed', btn);
+    if (!lifetime?.disposed && result?.status === 'applied') wandClear();
   });
 
   // Live tolerance preview (just opacity-tracking like sharpen).
-  const wandTolPrev = document.getElementById('ge-wand-tol-preview');
+  const wandTolPrev = find('ge-wand-tol-preview');
   if (wandTolPrev) wandTolPrev.style.opacity = (state.wandTolerance / 100).toFixed(2);
 }

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mergeSearchRows, type SearchRow } from "../../src/memory/service"
 
 // Real producer shapes, not fabricated symmetry:
-// - FM (frankenmemory.ts callSearch over native.rs ingest_authored records):
+// - FM (memery.ts callSearch over native.rs ingest_authored records):
 //   one row PER SECTION — path is the stable record id, source_uri carries
 //   `file://path#anchor`, content_hash is the section content hash, and
 //   metadata.authored_path carries the file path.
@@ -47,7 +47,7 @@ describe("memory provenance merge", () => {
     const rows = mergeSearchRows([fmSection({})], [nativeFile({})], 10)
     expect(rows).toHaveLength(2)
     expect(rows.every((item) => item.provenance_conflict)).toBe(true)
-    expect(rows.map((item) => item.backend).sort()).toEqual(["frankenmemory", "mimo"])
+    expect(rows.map((item) => item.backend).sort()).toEqual(["memery", "mimo"])
   })
 
   test("a native row collapses onto the FM section when the hash matches a section hash", () => {
@@ -59,7 +59,7 @@ describe("memory provenance merge", () => {
       10,
     )
     expect(rows).toHaveLength(1)
-    expect(rows[0].backend).toBe("frankenmemory")
+    expect(rows[0].backend).toBe("memery")
     expect(rows[0].path).toBe("authored_9f8e7d6c5b4a")
     expect(rows[0].provenance_conflict).toBeFalsy()
   })
@@ -94,7 +94,7 @@ describe("memory provenance merge", () => {
     )
 
     const duplicate = rows.find((item) => item.authored_path === "/brain/MEMORY.md")
-    expect(duplicate?.backend).toBe("frankenmemory")
+    expect(duplicate?.backend).toBe("memery")
     expect(duplicate?.path).toBe("fm-canonical-id")
   })
 })

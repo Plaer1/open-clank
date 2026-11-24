@@ -84,7 +84,10 @@ def coalesce_facts(owner, facts):
             raise ValueError("tool evidence owner does not match scope")
         # Explicit operation/attempt identity merges started/result snapshots.
         # Without it only the same canonical part can be merged safely.
-        if fact.get("operation_id") and fact.get("attempt_id"):
+        if fact.get("qualified_tool"):
+            source = fact.get("source_ref") or {}
+            key = ("qualified_part", fact.get("session_id"), fact.get("actor_id"), source.get("message_id"), source.get("part_id"))
+        elif fact.get("operation_id") and fact.get("attempt_id"):
             key = (fact.get("runtime_generation"), fact.get("session_id"), fact.get("actor_id"),
                    fact["operation_id"], fact["attempt_id"], fact.get("tool_name"))
         else:
@@ -117,29 +120,34 @@ def cohort(facts, coverage):
             "duration_method": "canonical_tool_start_end", "coverage": coverage}
 
 
-def measured_concurrency(owner, facts):
-    clocks = defaultdict(list)
+def measured_concurrency(owner, facts, linked=None):
+    receipt = linked or {"links": {}, "reason": "usage_unavailable"}
+    linked = receipt.get("links") or {}
+    groups = defaultdict(list)
     unclocked = 0
     for fact in facts:
-        start, end = fact.get("started_ms"), fact.get("completed_ms")
-        generation = fact.get("runtime_generation")
-        if generation in {None, "", "0"} or measured_duration(fact) is None or not all(
-                isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-                for value in (start, end)) or end < start:
+        proof = fact.get("qualified_tool")
+        if not isinstance(proof, dict):
             unclocked += 1
             continue
-        if end > start:
-            clocks[generation].extend(((start, 1), (end, -1)))
+        groups[(proof["root_handle"], proof["clock_handle"])].append((proof["start_us"],proof["end_us"],proof.get("join_handle")))
     rows = []
-    for generation, boundaries in clocks.items():
-        active = peak = 0
-        for _, change in sorted(boundaries):
+    for (root,clock), intervals in groups.items():
+        boundaries = sorted([(a,1) for a,b,_ in intervals if b>a] + [(b,-1) for a,b,_ in intervals if b>a])
+        active=peak=elapsed=0
+        previous=None
+        for point,change in boundaries:
+            if previous is not None and active>0: elapsed += point-previous
             active += change
-            peak = max(peak, active)
-        rows.append({"clock_handle": "clock_" + hashlib.sha256(f"l02-clock\0{owner}\0{generation}".encode()).hexdigest()[:24], "peak": peak,
-                     "timed_calls": len(boundaries) // 2})
-    return {"state": "reported" if rows else "unavailable", "method": "same_runtime_tool_intervals",
-            "clocks": rows, "unclocked_calls": unclocked}
+            peak=max(peak,active)
+            previous=point
+        rows.append({"root_handle":root,"clock_handle":clock,"peak":peak,"timed_calls":len(intervals),
+                     "aggregate_call_ms":sum(b-a for a,b,_ in intervals)/1000,
+                     "elapsed_union_ms":elapsed/1000,
+                     "usage_link": "linked" if all(linked.get(k) == "linked" for _,_,k in intervals) else "partial" if any(linked.get(k) == "linked" for _,_,k in intervals) else "unlinked",
+                     "usage_link_reason": receipt.get("reason") or (None if all(linked.get(k) == "linked" for _,_,k in intervals) else "exact_attribution_unavailable")})
+    return {"state":"partial" if rows and unclocked else "reported" if rows else "unavailable",
+            "method":"qualified_same_process_monotonic_intervals","clocks":rows,"unclocked_calls":unclocked}
 
 
 def quality_events(owner, evidence):

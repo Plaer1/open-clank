@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
+import { Effect, Fiber } from "effect"
+import { createOpenAI } from "@ai-sdk/openai"
+import { JSONParseError } from "@ai-sdk/provider"
+import { notePinnedResponsesSDK, notePinnedResponsesModel } from "../../src/provider/malformed-origin"
 import { ManagedProvider } from "../../src/acp/managed-provider"
+import { captureFetch, withSdkDispatches, observeCodexInnerSend, recordSdkFailure, markSdkSuccessStep, takeSdkSuccessStep, markMalformedResponse, hasMalformedResponse, hasObservedMalformedResponse, emitMalformedDiagnostic } from "../../src/provider/logging-transport"
 import { requestManagedCwdForTest } from "../../src/tool/change-directory"
 import { beginManagedSessionTransition, managedSessionBinding, markManagedSessionReconciling, registerMemorySessionScope, unregisterMemorySessionScope } from "../../src/memory/session-scope"
 
@@ -80,6 +85,60 @@ test("managed turns bind and lease through the host and discard scope afterward"
   ])
   expect(calls.at(-1)?.params).toEqual({ bindingID: "binding-1", rootOperationID: "root-1" })
   expect(JSON.stringify(calls)).not.toContain("leased-secret")
+})
+
+test("managed operation delegate is fail-closed and uninstallable", async () => {
+  expect(() => ManagedProvider.managedOperationDelegate()).toThrow("unavailable")
+  const delegate = {
+    execute: async (request: any) => ({ operationID: "op", rootOperationID: request.rootOperationID, operation: request.operation, modelRouteID: "route", connectionID: "conn", billingLane: "subscription", state: "complete", committed: true, output: {}, artifacts: [], replayed: false }),
+    cancel: async (request: any) => ({ operationID: "op", rootOperationID: request.rootOperationID, state: "pending" }),
+  }
+  const dispose = ManagedProvider.installManagedOperationDelegate(delegate as any)
+  expect(ManagedProvider.managedOperationDelegate()).toBe(delegate as any)
+  expect(() => ManagedProvider.installManagedOperationDelegate(delegate as any)).toThrow("already installed")
+  dispose()
+  expect(() => ManagedProvider.managedOperationDelegate()).toThrow("unavailable")
+})
+
+test("fresh operation lease reserves one session and releases after transfer", async () => {
+  let entered!: () => void
+  let continueBind!: () => void
+  const bindingStarted = new Promise<void>((resolve) => { entered = resolve })
+  const bindingGate = new Promise<void>((resolve) => { continueBind = resolve })
+  const localRoute = {
+    rootOperationID: "root-1", connectionID: "ollama-local", providerID: "ollama",
+    billingLane: "local" as const, modelID: "qwen-local", modelRouteID: "route-qwen-local",
+  }
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (method.endsWith("/account/bind")) {
+        entered()
+        await bindingGate
+        return {
+          bindingID: "binding-fresh", bindingRevision: 1, rootOperationID: "root-1",
+          connectionID: "ollama-local", providerID: "ollama", billingLane: "local",
+          modelID: "qwen-local", credentialRequired: false, source: "keyless", attempt: 1, committed: false,
+        }
+      }
+      if (method.endsWith("/logging/admit")) return { bindingID: "binding-fresh", rootOperationID: "root-1" }
+      throw new Error(`unexpected callback ${method}`)
+    },
+  } as any)
+  const pending = Effect.runFork(ManagedProvider.acquireOperationEffect({
+    sessionID: "session-fresh", route: localRoute, model: { providerID: "ollama-local", modelID: "qwen-local" },
+    hostContext: { accountID: "account-a", chatID: "chat-a" },
+  }))
+  await bindingStarted
+  expect(ManagedProvider.operationScopeAvailable("session-fresh")).toBe(false)
+  await expect(Effect.runPromise(ManagedProvider.acquireOperationEffect({
+    sessionID: "session-fresh", route: localRoute, model: { providerID: "ollama-local", modelID: "qwen-local" },
+    hostContext: { accountID: "account-a", chatID: "chat-a" },
+  }))).rejects.toThrow("already active")
+  continueBind()
+  const lease = await Effect.runPromise(Fiber.join(pending))
+  expect(ManagedProvider.requireScope("session-fresh").accountID).toBeUndefined()
+  await Effect.runPromise(lease.release)
+  expect(ManagedProvider.operationScopeAvailable("session-fresh")).toBe(true)
 })
 
 test("host context is isolated by session and cleaned up after overlap or failure", async () => {
@@ -944,4 +1003,148 @@ test("a pending binding read rejects a same-generation re-registration with chan
   await expect(admitted).rejects.toThrow("registration changed")
   expect(managedSessionBinding(sessionID)?.copalWorkspace).toBe("copal-new")
   unregisterMemorySessionScope(sessionID)
+})
+
+test("Codex failure retains only the initiating capture across an accepted refresh CAS", async () => {
+  const bootstrap = { stableChatID: "chat", owner: "alice", rootSessionID: "session", sessionID: "session", actorID: "main", rootOperationID: "root", expectedExecutionRevision: 0, mapRevision: 1, mappingRevision: 1, workspaceRevision: 1, modelRouteID: "route" }
+  const preflight = { bootstrap, connectionID: "conn", providerID: "openai", billingLane: "subscription" as const, modelID: "model", modelRouteID: "route" }
+  const identity = { sessionID: "session", actorID: "main", executionRevision: 1, rootOperationID: "root" }
+  const base = { ...preflight, ...identity, bindingID: "binding", bindingRevision: 1, scopeKind: "actor_execution", credentialRequired: true, accountID: "account", source: "round_robin", attempt: 1, committed: false }
+  let revision = 1
+  let attempt: any
+  const credential = { type: "oauth" as const, access: "synthetic", refresh: "synthetic", expires: Date.now()+600_000 }
+  ManagedProvider.installHostConnection({ async extMethod(method: string, params: any) {
+    if (method.endsWith('/account/bind')) return { ...base, credentialRevision: revision }
+    if (method.endsWith('/credential/lease')) return { leaseID:'lease',connectionID:'conn',accountID:'account',credentialRevision:revision,expiresAt:Date.now()+60_000,credential }
+    if (method.endsWith('/logging/v1/admit')) return { admissionID:'admission', policy:{revision:1,advanced_enabled:true,request_body_enabled:false,response_body_enabled:false,binary_body_enabled:false}, context:{instanceID:'holder',providerID:'openai',operationID:'operation',rootOperationID:'root',bindingID:'binding',bindingRevision:1,identityCoverage:'complete',transportMode:'advanced_proxy',persistence:{numeric:true,content:true,reason:'normal'}} }
+    if (method.endsWith('/refresh/acquire')) return { leaseID:'refresh',connectionID:'conn',accountID:'account',credentialRevision:revision,expiresAt:Date.now()+60_000,renewable:true }
+    if (method.endsWith('/refresh/commit')) { revision++; return {id:'account',label:'A',enabled:true,order:0,revision:2,credentialRevision:revision,credential:params.credential} }
+    if (method.endsWith('/account/attempt')) { attempt=params; return {...base,bindingRevision:2,credentialRevision:revision} }
+    if (method.includes('/logging/v1/')) return {accepted:true,replayed:false,captureState:'complete'}
+    throw new Error('unexpected callback')
+  }} as any)
+  const active = await ManagedProvider.activateActorOperation(identity, preflight, {providerID:'conn',modelID:'model'}, {chatID:'chat'})
+  const scope=active.scope, ids:string[]=[], error=Object.assign(new Error('synthetic'),{statusCode:429})
+  const endpoint=new URL('https://chatgpt.com/backend-api/codex/responses'), request={method:'POST',body:'{}'}
+  const response=(status:number)=>{const value=new Response(null,{status});Object.defineProperty(value,'url',{value:endpoint.href});return value}
+  await withSdkDispatches(scope,ids,()=>captureFetch((async()=>{
+    await observeCodexInnerSend(endpoint,request,async()=>response(401))
+    await ManagedProvider.refreshOAuthCredential({connectionID:'conn',accountID:'account',expectedRevision:1,credential,bindingID:'binding',captureScope:scope,exchange:async()=>credential})
+    return observeCodexInnerSend(endpoint,request,async()=>response(429))
+  }) as unknown as typeof fetch,scope)('https://example.invalid/v1/responses',request))
+  recordSdkFailure(error,scope,ids)
+  await ManagedProvider.recordSessionAttempt('session',error,'main',1)
+  expect(attempt.refreshContinuity).toEqual({version:1,admissionID:'admission',previousCredentialRevision:1,credentialRevision:2})
+  expect(attempt.dispatchObservation).toMatchObject({profile:'openai.codex.responses.v1',captureDispatchID:ids[0],httpStatus:429})
+  expect(attempt.dispatchObservation.upstreamDispatchID).not.toBe(ids[0])
+  await active.release()
+})
+
+test("Claude actor refresh preserves scope authority for a subsequent dispatch", async () => {
+  const proof = { version: 1 as const, methodID: "anthropic.claude_subscription" as const, credentialOwner: "alice", policyRevision: 1 }
+  const bootstrap = { stableChatID: "chat", owner: "bob", rootSessionID: "session", sessionID: "session", actorID: "main", rootOperationID: "root", expectedExecutionRevision: 0, mapRevision: 1, mappingRevision: 1, workspaceRevision: 1, modelRouteID: "route" }
+  const preflight = { bootstrap, connectionID: "conn", providerID: "anthropic", billingLane: "subscription" as const, modelID: "model", modelRouteID: "route", methodPolicy: proof }
+  const identity = { sessionID: "session", actorID: "main", executionRevision: 1, rootOperationID: "root" }
+  let credential = { type: "oauth" as const, access: "old", refresh: "old-refresh", expires: Date.now() + 600_000 }
+  let revision = 1
+  const calls: string[] = []
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string, params: any) {
+      calls.push(method)
+      if (method.endsWith("/account/bind")) return { ...preflight, ...identity, bindingID: "binding", bindingRevision: 1, scopeKind: "actor_execution", credentialRequired: true, accountID: "account", credentialRevision: revision, source: "round_robin", attempt: 1, committed: false }
+      if (method.endsWith("/credential/lease")) return { leaseID: "lease", connectionID: "conn", accountID: "account", credentialRevision: revision, expiresAt: Date.now() + 60_000, credential, methodPolicy: proof }
+      if (method.endsWith("/refresh/acquire")) return { leaseID: "refresh", connectionID: "conn", accountID: "account", credentialRevision: revision, expiresAt: Date.now() + 60_000, renewable: true, methodPolicy: proof }
+      if (method.endsWith("/refresh/commit")) { credential = params.credential; revision++; return { id: "account", label: "A", enabled: true, order: 0, revision: 2, credentialRevision: revision, credential } }
+      throw new Error("unavailable")
+    },
+  } as any)
+  const active = await ManagedProvider.activateActorOperation(identity, preflight, { providerID: "conn", modelID: "model" }, { chatID: "chat" })
+  const refreshed = await ManagedProvider.refreshOAuthCredential({ connectionID: "conn", accountID: "account", expectedRevision: 1, credential, bindingID: "binding", methodPolicy: proof, exchange: async () => ({ type: "oauth", access: "new", refresh: "new-refresh", expires: Date.now() + 600_000 }) })
+  const nextScope = ManagedProvider.requireScope("session", "main", 1)
+  expect(nextScope.credentialRevision).toBe(2)
+  await ManagedProvider.admitClaudeDispatch(nextScope, identity, refreshed.credential)
+  expect(calls.filter((item) => item.endsWith("/credential/lease"))).toHaveLength(2)
+  await active.release()
+})
+
+test("managed throttle retains its account and respects the interactive wait budget", async () => {
+  const { classifyFailure } = await import("../../src/provider/failure-classification")
+  const bootstrap = { stableChatID: "chat", owner: "alice", rootSessionID: "session", sessionID: "session", actorID: "main", rootOperationID: "root", expectedExecutionRevision: 0, mapRevision: 1, mappingRevision: 1, workspaceRevision: 1, modelRouteID: "route" }
+  const preflight = { bootstrap, connectionID: "conn", providerID: "openai", billingLane: "metered_api" as const, modelID: "model", modelRouteID: "route" }
+  const identity = { sessionID: "session", actorID: "main", executionRevision: 1, rootOperationID: "root" }
+  const binding = { ...identity, connectionID: "conn", providerID: "openai", billingLane: "metered_api", modelID: "model", modelRouteID: "route", bindingID: "binding", bindingRevision: 1, scopeKind: "actor_execution", credentialRequired: true, accountID: "account", credentialRevision: 1, source: "round_robin", attempt: 1, committed: false }
+  const attempts: any[] = []
+  ManagedProvider.installHostConnection({ async extMethod(method: string, params: any) {
+    if (method.endsWith("/account/bind")) return binding
+    if (method.endsWith("/account/attempt")) { attempts.push(params); return binding }
+    if (method.endsWith("/credential/lease")) return { leaseID: "lease", connectionID: "conn", accountID: "account", credentialRevision: 1, expiresAt: Date.now() + 60_000, credential: { type: "api", key: "fake" } }
+    throw new Error("unavailable")
+  } } as any)
+  const active = await ManagedProvider.activateActorOperation(identity, preflight, { providerID: "conn", modelID: "model" }, { chatID: "chat" })
+  const error = { status: 429, responseHeaders: new Headers({ "Retry-After": "10" }) }
+  const decision = await ManagedProvider.recordSessionAttempt("session", error, "main", 1)
+  expect(decision).toMatchObject({ outcome: "transient", retry: true, rotated: false, retryAfterMs: 10_000 })
+  expect(attempts[0].outcome).toBe("transient")
+  expect(ManagedProvider.reserveRetryWait("session", "main", 1, 29_000)).toBe(true)
+  expect(ManagedProvider.reserveRetryWait("session", "main", 1, 1_001)).toBe(false)
+  expect(classifyFailure({ status: 429, message: "insufficient_quota" }).kind).toBe("throttle")
+  expect(classifyFailure({ status: 429, message: "quota exceeded" }).kind).toBe("throttle")
+  expect(classifyFailure({ status: 429, message: "SubscriptionUsageLimitError" }).kind).toBe("throttle")
+  expect(classifyFailure({ message: "limit exhausted" }).kind).toBe("unknown")
+  expect(classifyFailure({ status: 429, responseHeaders: { "retry-after": "999999999999999999999999" } }).retryAfterMs).toBeGreaterThan(30_000)
+  expect(classifyFailure({ status: "429oops", responseHeaders: { "retry-after": "12seconds" } })).toEqual({ kind: "unknown" })
+  await active.release()
+})
+
+
+test("refreshed Codex success retains only its original owned capture", async () => {
+  const bootstrap = { stableChatID:"chat", owner:"alice", rootSessionID:"session", sessionID:"session", actorID:"main", rootOperationID:"root", expectedExecutionRevision:0, mapRevision:1, mappingRevision:1, workspaceRevision:1, modelRouteID:"route" }
+  const preflight = { bootstrap, connectionID:"conn", providerID:"openai", billingLane:"subscription" as const, modelID:"model", modelRouteID:"route" }
+  const identity = {sessionID:"session",actorID:"main",executionRevision:1,rootOperationID:"root"}
+  const base = {...preflight,...identity,bindingID:"binding",bindingRevision:1,scopeKind:"actor_execution",credentialRequired:true,accountID:"account",source:"round_robin",attempt:1,committed:false}
+  let revision=1, attempt:any, diagnostic:any
+  const credential={type:"oauth" as const,access:"synthetic",refresh:"synthetic",expires:Date.now()+600000}
+  ManagedProvider.installHostConnection({async extMethod(method:string,params:any){
+    if(method.endsWith('/account/bind'))return {...base,credentialRevision:revision}
+    if(method.endsWith('/credential/lease'))return {leaseID:'lease',connectionID:'conn',accountID:'account',credentialRevision:revision,expiresAt:Date.now()+60000,credential}
+    if(method.endsWith('/logging/v1/admit'))return {admissionID:'admission',policy:{revision:1,advanced_enabled:true,request_body_enabled:false,response_body_enabled:false,binary_body_enabled:false},context:{instanceID:'holder',providerID:'openai',operationID:'operation',rootOperationID:'root',bindingID:'binding',bindingRevision:1,identityCoverage:'complete',transportMode:'advanced_proxy',persistence:{numeric:true,content:true,reason:'normal'}}}
+    if(method.endsWith('/refresh/acquire'))return {leaseID:'refresh',connectionID:'conn',accountID:'account',credentialRevision:revision,expiresAt:Date.now()+60000,renewable:true}
+    if(method.endsWith('/refresh/commit')){revision++;return {id:'account',label:'A',enabled:true,order:0,revision:2,credentialRevision:revision,credential:params.credential}}
+    if(method.endsWith('/account/commit'))return {...base,bindingRevision:2,credentialRevision:revision,committed:true}
+    if(method.endsWith('/account/attempt')){attempt=params;return {...base,bindingRevision:3,credentialRevision:revision,committed:true}}
+    if(method.includes('/logging/v1/')){if(params.diagnosticOnly)diagnostic=params.diagnosticOnly;return {accepted:true,replayed:false,captureState:'complete'}}
+    throw new Error('unexpected callback')
+  }} as any)
+  const active=await ManagedProvider.activateActorOperation(identity,preflight,{providerID:'conn',modelID:'model'},{chatID:'chat'})
+  const scope=active.scope, ids:string[]=[], endpoint=new URL('https://chatgpt.com/backend-api/codex/responses'), request={method:'POST',body:'{}'}
+  const response=(status:number)=>{const v=new Response(null,{status});Object.defineProperty(v,'url',{value:endpoint.href});return v}
+  await withSdkDispatches(scope,ids,()=>captureFetch((async()=>{
+    await observeCodexInnerSend(endpoint,request,async()=>response(401))
+    await ManagedProvider.refreshOAuthCredential({connectionID:'conn',accountID:'account',expectedRevision:1,credential,bindingID:'binding',captureScope:scope,exchange:async()=>credential})
+    return observeCodexInnerSend(endpoint,request,async()=>response(200))
+  }) as unknown as typeof fetch,scope)('https://example.invalid/v1/responses',request))
+  expect(markSdkSuccessStep(scope,[...ids,'extra'],{})).toEqual({})
+  expect(ManagedProvider.originalRefreshObservationScope('session','other',1)).toBeUndefined()
+  const metadata=markSdkSuccessStep(scope,ids,{})
+  const sdk=createOpenAI({apiKey:'synthetic',baseURL:'https://unused.invalid/v1'}), model=sdk.responses('test')
+  notePinnedResponsesSDK(sdk as object);notePinnedResponsesModel(sdk as object,model as object)
+  const malformed=new JSONParseError({text:'{',cause:new Error('synthetic')}), signal=new AbortController().signal
+  markMalformedResponse(malformed,scope,ids,signal,model as object)
+  expect(hasMalformedResponse(malformed,ManagedProvider.currentScope('session','main',1))).toBe(false)
+  expect(hasMalformedResponse(malformed,ManagedProvider.originalRefreshObservationScope('session','main',1))).toBe(true)
+  await ManagedProvider.commitSessionOperation('session','main',1)
+  emitMalformedDiagnostic(malformed,scope,ManagedProvider.committedRefreshDiagnostic('session','main',1))
+  await new Promise(resolve=>setTimeout(resolve,20))
+  expect(diagnostic).toMatchObject({version:2,previousCredentialRevision:1,credentialRevision:2,httpStatus:200})
+  const invalidated = new AbortController(), second = new JSONParseError({text:'{',cause:new Error('synthetic')})
+  markMalformedResponse(second,scope,ids,invalidated.signal,model as object)
+  invalidated.abort()
+  expect(hasMalformedResponse(second,scope)).toBe(false)
+  expect(hasObservedMalformedResponse(second,ManagedProvider.originalRefreshObservationScope('session','main',1))).toBe(true)
+  const selected=takeSdkSuccessStep(ManagedProvider.successObservationScope('session','main',1),metadata)
+  expect(selected.observation?.httpStatus).toBe(200)
+  await ManagedProvider.recordSessionSuccess('session','main',1,selected.observation)
+  expect(attempt.successContinuity).toEqual({version:2,admissionID:'admission',previousCredentialRevision:1,credentialRevision:2})
+  expect(attempt.dispatchObservation).toEqual(selected.observation)
+  await active.release()
 })

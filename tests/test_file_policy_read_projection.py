@@ -265,3 +265,36 @@ def test_once_operation_still_requires_writer_and_consumes_exactly_once(policy, 
     assert first.allowed and first.consumed_binding_id == approval.id
     assert not repository.resolve(**arguments).allowed
     assert snapshot(repository)[:2] == (before[0] + 1, before[1] + 1)
+
+
+def test_active_deletion_preserves_source_and_tombstone_during_subject_sync(policy):
+    repository, users, _, _ = policy
+    tombstone = 'deleted:alice:operation'
+    repository.move_subject_alias('alice', tombstone, 'account-alice')
+    with repository._connect() as db:
+        db.execute('CREATE TABLE account_lifecycle_operations (source_owner, target_owner, tombstone_owner, active_account_id)')
+        db.execute('INSERT INTO account_lifecycle_operations VALUES (?, NULL, ?, ?)', ('alice', tombstone, 'account-alice'))
+    before = repository.generation()
+    # Auth still carries the original name until the saga commits.
+    repository.sync_subjects(users)
+    repository.sync_subjects({tombstone: {'account_id':'wrong', 'is_admin':True}}, complete=False)
+    assert repository.subject_for_username('alice') is None
+    assert repository.subject_for_username(tombstone) == 'account-alice'
+    assert repository.generation() == before
+    # Startup may provide only the active accounts. Preserve the source too
+    # when deletion compensation moved the alias back under its original name.
+    repository.move_subject_alias(tombstone, 'alice', 'account-alice')
+    repository.sync_subjects({'bob': users['bob']})
+    assert repository.subject_for_username('alice') == 'account-alice'
+    assert repository.subject_for_username(tombstone) is None
+
+
+def test_separate_files_database_uses_host_deletion_ledger(policy, monkeypatch):
+    from src.openclank import file_policy_compat
+    repository, users, _, _ = policy
+    tombstone = 'deleted:alice:isolated'
+    repository.move_subject_alias('alice', tombstone, 'account-alice')
+    monkeypatch.setattr(file_policy_compat, '_external_lifecycle_aliases', lambda: {'alice', tombstone})
+    repository.sync_subjects(users)
+    assert repository.subject_for_username('alice') is None
+    assert repository.subject_for_username(tombstone) == 'account-alice'

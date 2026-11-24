@@ -4,12 +4,12 @@ import copy
 
 import pytest
 
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_provider import MemoryRequestRejectedError, MemoryTransportError
 
 
 def provider(call):
-    value = FrankenmemoryProvider.__new__(FrankenmemoryProvider)
+    value = MemeryProvider.__new__(MemeryProvider)
     value._broker_url = None
     value._scope = lambda owner: None
     value._call_tool = call

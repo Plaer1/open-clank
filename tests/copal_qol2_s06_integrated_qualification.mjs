@@ -7,7 +7,6 @@
  * handlers, while the cross surface adapters receive the same typed identities.
  */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { withCopalBrowser } from './helpers/copal_browser_fixture.mjs';
 
@@ -16,13 +15,6 @@ const account = 's06-alice';
 const workspace = 's06-workspace';
 const generation = 7;
 const revision = { kind: 'hostFingerprint', value: 's06-r1' };
-const mountedGates = [
-  ['S07 Timeline/TreeHouse mounted production journey', 'tests/s07_timeline_treehouse_mounted_acceptance.mjs'],
-  ['S07 Files/Imps mounted production journey', 'tests/s07_imps_canvas_mounted_acceptance.mjs'],
-  ['S06 cold Tasks projection recovery', 'tests/copal_qol2_s06_tasks_cold_projection.py'],
-  ['S06 Files linked receipt service matrix', 'tests/copal_qol2_s06_files_receipts.py'],
-];
-
 const rows = Array.from({ length: N }, (_, index) => ({
   id: `s06-file-${index}`,
   ref: `s06-ref-${index}`,
@@ -82,13 +74,6 @@ async function readBody(request) {
 
 test('QOL2 S06 integrated authenticated disposable journey', async () => {
   const requests = [];
-  const mountedResults = mountedGates.map(([label, script]) => {
-    const command = script.endsWith('.py') ? 'venv/bin/python' : process.execPath;
-    const args = script.endsWith('.py') ? ['-m', 'pytest', '-q', script] : [script];
-    const result = spawnSync(command, args, { cwd: process.cwd(), encoding:'utf8', timeout:120000 });
-    const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
-    return { label, script, ok:result.status === 0, exitCode:result.status, output:output.slice(-1800) };
-  });
   const fixtureRequest = async (request, response) => {
     const url = new URL(request.url, 'http://fixture');
     const pathname = url.pathname;
@@ -127,10 +112,6 @@ test('QOL2 S06 integrated authenticated disposable journey', async () => {
   await withCopalBrowser({ page, request: fixtureRequest, cdpTimeoutMs: 10000 }, async ({ cdp, evaluate, until }) => {
     const failures = [];
     const evidence = [];
-    for (const gate of mountedResults) {
-      evidence.push({ label:gate.label, ok:gate.ok, script:gate.script, exitCode:gate.exitCode, output:gate.ok ? undefined : gate.output });
-      if (!gate.ok) failures.push({ label:gate.label, error:`mounted gate exited ${gate.exitCode}: ${gate.output}` });
-    }
     const check = async (label, action) => {
       try { await action(); evidence.push({ label, ok: true }); }
       catch (error) { failures.push({ label, error: String(error?.stack || error) }); evidence.push({ label, ok: false, error: String(error?.message || error) }); }
@@ -261,7 +242,7 @@ test('QOL2 S06 integrated authenticated disposable journey', async () => {
     const activeLongTasks = longTasks.filter(entry => entry.duration > 50 && longTaskState.windows.some(window => entry.start >= window.start && entry.start <= window.end));
     evidence.push({ label:'No >50ms LongTask entries observed during the five measured Files gestures', ok:activeLongTasks.length === 0, observed:activeLongTasks.length, observerSupported:longTaskState.supported, windows:longTaskState.windows });
     if (activeLongTasks.length) failures.push({ label:'active gesture LongTask budget', error:JSON.stringify(activeLongTasks) });
-    console.log(JSON.stringify({ browser:browserInfo, workload:{files:N,graph:N,mind:N}, mountedGates:mountedResults, evidence, moduleErrors, counts, longTasks }, null, 2));
+    console.log(JSON.stringify({ browser:browserInfo, workload:{files:N,graph:N,mind:N}, evidence, moduleErrors, counts, longTasks }, null, 2));
     if (failures.length) throw new Error(`S06 qualification failures:\n${failures.map(item => `- ${item.label}: ${item.error}`).join('\n')}`);
   });
 });

@@ -445,7 +445,7 @@ assert.ok(!workspacePanelsForSide(panelWs, 'right').includes('outline'));
   assert.equal(navigationIntentFromEvent({ altKey:true, shiftKey:true }), 'splitBelow');
 }
 
-console.log('copal notes workspace tests passed');
+console.log('journal pages workspace tests passed');
 
 function groupFor(workspace, leaf) {
   return workspaceGroups(workspace).find((candidate) => candidate.tabs.some((item) => item.id === leaf.id));

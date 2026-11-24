@@ -95,13 +95,13 @@ export const HISTORY_ICON = uiIcon('restore', 14);
 
 
 /** Quick downsampled-alpha check: are there any opaque pixels on this canvas? */
-export function isMaskCanvasEmpty(canvas) {
+export function isMaskCanvasEmpty(canvas, ownerDocument = canvas?.ownerDocument || globalThis.document) {
   if (!canvas) return true;
   try {
     const w = canvas.width, h = canvas.height;
     if (!w || !h) return true;
     const sw = Math.min(200, w), sh = Math.min(200, h);
-    const tmp = document.createElement('canvas');
+    const tmp = ownerDocument.createElement('canvas');
     tmp.width = sw; tmp.height = sh;
     tmp.getContext('2d').drawImage(canvas, 0, 0, sw, sh);
     const d = tmp.getContext('2d').getImageData(0, 0, sw, sh).data;

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Open Clank
+Comment=Learn, explore, and work with your personal AI assistant
+Icon=open-clank-launcher
+Exec=open-clank-launch
+Terminal=false
+Categories=Education;
+Keywords=learning;journal;research;AI;

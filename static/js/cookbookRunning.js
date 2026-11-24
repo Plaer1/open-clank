@@ -1,3 +1,5 @@
+import {readCookbookState} from './cookbookEntry.js';
+import { bindCardActionMenu } from './cardActionMenu.js';
 import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK RUNNING SUB-MODULE
@@ -7,10 +9,8 @@ import { uiIcon } from './uiIcons.js';
 
 import uiModule from './ui.js';
 import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis.js';
-import { registerMenuDismiss } from './escMenuStack.js';
 import { computeProgressSignal } from './cookbookProgressSignal.js';
 import { portOf, nextFreePort } from './cookbookPorts.js';
-import { topPortalZ } from './toolWindowZOrder.js';
 
 // Human-friendly badge label for a task's internal status. Avoids surfacing
 // the word "error" in the sidebar — a server the user stopped or one that
@@ -1031,20 +1031,20 @@ export function _tmuxCmd(task, tmuxArgs) {
 
 function _winSessionCmd(task, tmuxArgs) {
   const host = _taskRemoteHost(task);
-  const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
+  const sd = host ? '$env:TEMP\\open-clank-sessions' : '$env:TEMP\\open-clank-tmux';
   const sid = task.sessionId;
   const pf = _sshPrefix(_getPort(task));
   if (tmuxArgs.includes('capture-pane')) {
     const lines = tmuxArgs.match(/-S\s*-?(\d+)/)?.[1] || '200';
     const ps = host
       ? `Get-Content '${sd}\\${sid}.log' -Tail ${lines} -ErrorAction SilentlyContinue`
-      : `Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.log') -Tail ${lines} -ErrorAction SilentlyContinue`;
+      : `Get-Content (Join-Path $env:TEMP 'open-clank-tmux\\${sid}.log') -Tail ${lines} -ErrorAction SilentlyContinue`;
     return _winPowerShellCmd(task, ps);
   }
   if (tmuxArgs.includes('has-session')) {
     const ps = host
       ? `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } else { exit 1 } } else { exit 1 }`
-      : `$p = Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } else { exit 1 } } else { exit 1 }`;
+      : `$p = Get-Content (Join-Path $env:TEMP 'open-clank-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } else { exit 1 } } else { exit 1 }`;
     return _winPowerShellCmd(task, ps);
   }
   if (tmuxArgs.includes('kill-session')) {
@@ -1054,7 +1054,7 @@ function _winSessionCmd(task, tmuxArgs) {
   if (tmuxArgs.includes('send-keys') && tmuxArgs.includes('C-c')) {
     const ps = host
       ? `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -ErrorAction SilentlyContinue }`
-      : `$p = Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -ErrorAction SilentlyContinue }`;
+      : `$p = Get-Content (Join-Path $env:TEMP 'open-clank-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -ErrorAction SilentlyContinue }`;
     return _winPowerShellCmd(task, ps);
   }
   return host ? `ssh ${pf}${host} '${_remoteTmuxPrefix()}tmux ${tmuxArgs}' 2>/dev/null` : `tmux ${tmuxArgs} 2>/dev/null`;
@@ -1069,12 +1069,12 @@ function _winPowerShellCmd(task, ps) {
 
 function _winSessionStopTreePs(task) {
   const host = _taskRemoteHost(task);
-  const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
+  const sd = host ? '$env:TEMP\\open-clank-sessions' : '$env:TEMP\\open-clank-tmux';
   const sid = task.sessionId;
   const stopTree = `function Stop-Tree([int]$Id) { Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $Id) -ErrorAction SilentlyContinue | ForEach-Object { Stop-Tree ([int]$_.ProcessId) }; Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue }`;
   return host
     ? `${stopTree}; $p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p -match '^\\d+$') { Stop-Tree ([int]$p) }; Remove-Item '${sd}\\${sid}.*' -Force -ErrorAction SilentlyContinue`
-    : `${stopTree}; $p = Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p -match '^\\d+$') { Stop-Tree ([int]$p) }; Remove-Item (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.*') -Force -ErrorAction SilentlyContinue`;
+    : `${stopTree}; $p = Get-Content (Join-Path $env:TEMP 'open-clank-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p -match '^\\d+$') { Stop-Tree ([int]$p) }; Remove-Item (Join-Path $env:TEMP 'open-clank-tmux\\${sid}.*') -Force -ErrorAction SilentlyContinue`;
 }
 
 export function _tmuxGracefulKill(task) {
@@ -1399,9 +1399,7 @@ function _normalizeState(state) {
 
 export async function _syncFromServer() {
   try {
-    const res = await fetch('/api/cookbook/state', { credentials: 'same-origin' });
-    if (!res.ok) return false;
-    const state = _normalizeState(await res.json());
+    const state = _normalizeState(await readCookbookState());
     if (!state || !state.env) return false;
 
     const localTasks = _loadTasks();
@@ -2098,7 +2096,7 @@ export function _renderRunningTab() {
   });
 
   const tasks = _loadTasks();
-  const hasContent = tasks.length > 0;
+  const hasContent = true; // Pinned acquisitions are held in the server-owned Cookbook state.
   // Count anything that's really active: explicit 'running'/'queued' status,
   // OR a download whose tmux output is still showing live shard progress.
   // Without the output check, a task whose status got stuck at 'done' /
@@ -2172,6 +2170,22 @@ export function _renderRunningTab() {
   }
 
   const _adminCard = group.querySelector('.admin-card');
+  if (_adminCard && !_adminCard.querySelector('.pinned-acquisition-status')) {
+    const section=document.createElement('div'); section.className='pinned-acquisition-status';
+    const refresh=document.createElement('button'); refresh.type='button'; refresh.textContent='Refresh pinned downloads';
+    const display=document.createElement('pre'); display.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere';
+    refresh.addEventListener('click', async()=>{
+      const owner=document.body?.dataset?.accountId || '';
+      try {
+        const response=await fetch('/api/cookbook/pinned',{credentials:'same-origin',cache:'no-store'});
+        if(!response.ok) throw new Error('Pinned downloads unavailable');
+        const result=await response.json();
+        if(!section.isConnected || !owner || owner !== (document.body?.dataset?.accountId || '')) return;
+        display.textContent=[...result.items.map(item=>`${item.repoID} · ${item.operationID} · ${item.state}${item.receipt ? ` · ${item.receipt.files.length} verified files` : ''}`), ...(result.omitted ? [`${result.omitted} additional operations omitted`] : [])].join('\n') || 'No pinned downloads.';
+      } catch(error) { if(section.isConnected && owner === (document.body?.dataset?.accountId || '')) display.textContent=error.message; }
+    });
+    section.append(refresh,display); _adminCard.append(section);
+  }
   function _ensureSection(cls, label, items) {
     let sec = group.querySelector('.' + cls);
     if (!sec) {
@@ -2578,57 +2592,9 @@ export function _renderRunningTab() {
       }
     });
 
-    // Wire menu button (also fire from a long-press anywhere on the card so
-    // mobile users don't have to hit the small ⋮ target precisely).
     const menuBtn = el.querySelector('.cookbook-task-menu-btn');
     if (menuBtn) {
-      // Long-press detection on the card: ~500ms hold without scroll movement
-      // re-uses the menu button's click path (so we don't duplicate logic).
-      let _lpTimer = null;
-      let _lpStartY = 0;
-      let _lpCanceled = false;
-      const _lpStart = (e) => {
-        _lpCanceled = false;
-        _lpStartY = (e.touches?.[0]?.clientY) ?? 0;
-        _lpTimer = setTimeout(() => {
-          if (_lpCanceled) return;
-          _lpCanceled = true;  // suppress the subsequent click-through
-          try { menuBtn.click(); } catch {}
-        }, 500);
-      };
-      const _lpCancel = () => {
-        if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
-      };
-      const _lpMove = (e) => {
-        const y = (e.touches?.[0]?.clientY) ?? 0;
-        if (Math.abs(y - _lpStartY) > 8) _lpCancel();
-      };
-      el.addEventListener('touchstart', (e) => {
-        // Skip if the user is starting touch on a button / link inside the
-        // card — those already have their own tap handlers.
-        if (e.target.closest('button, a, input, textarea, .cookbook-task-dropdown')) return;
-        _lpStart(e);
-      }, { passive: true });
-      el.addEventListener('touchmove', _lpMove, { passive: true });
-      el.addEventListener('touchend', _lpCancel, { passive: true });
-      el.addEventListener('touchcancel', _lpCancel, { passive: true });
-      let _lastTouchMenuOpenAt = 0;
-      const _openTaskMenu = (e) => {
-        e.stopPropagation();
-        if (e.type === 'click' && Date.now() - _lastTouchMenuOpenAt < 550) return;
-        const existing = document.querySelector('.cookbook-task-dropdown');
-        if (existing && existing._anchor === menuBtn) {
-          if (typeof existing._dismiss === 'function') existing._dismiss();
-          else existing.remove();
-          return;
-        }
-        document.querySelectorAll('.cookbook-task-dropdown').forEach(d => { if (typeof d._dismiss === 'function') d._dismiss(); else d.remove(); });
-
-        const dropdown = document.createElement('div');
-        dropdown.className = 'cookbook-task-dropdown';
-        dropdown._anchor = menuBtn;
-        menuBtn.classList.add('cookbook-menu-active');
-
+      bindCardActionMenu(el, { button: menuBtn, exclude: '.cookbook-output-pre', items: () => {
         const items = [];
         // ── Run section ─────────────────────────────────────────────
         // Queued download: let the user jump the queue and start it immediately
@@ -2649,7 +2615,7 @@ export function _renderRunningTab() {
         // cmd & relaunch" raw-text dialog is now reachable from inside
         // that panel (Show command). Single entry-point per task.
         if (task.type === 'serve' && task.payload?.repo_id) {
-          items.push({ group: 'edit', label: 'Edit & relaunch', action: 'edit-panel', tooltip: 'Open the Serve config panel pre-filled with this task — pick a different backend, change GPUs, edit env vars or the raw cmd, then Launch.', custom: () => _openEdit() });
+          items.push({ group: 'edit', label: 'Edit & relaunch', action: 'edit-panel', custom: () => _openEdit() });
         }
         if (task.type === 'serve' && task.payload?._cmd) {
           items.push({ group: 'edit', label: 'Save serve', action: 'save', custom: () => {
@@ -2682,10 +2648,10 @@ export function _renderRunningTab() {
         // ── Copy section ────────────────────────────────────────────
         if (_isWindows(task)) {
           const host = task.remoteHost;
-          const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
+          const sd = host ? '$env:TEMP\\open-clank-sessions' : '$env:TEMP\\open-clank-tmux';
           const logCmd = host
             ? `ssh ${_sshPrefix(_getPort(task))}${host} "powershell -Command \\"Get-Content '${sd}\\${task.sessionId}.log' -Wait\\""`
-            : `powershell -Command "Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${task.sessionId}.log') -Wait"`;
+            : `powershell -Command "Get-Content (Join-Path $env:TEMP 'open-clank-tmux\\${task.sessionId}.log') -Wait"`;
           items.push({ group: 'copy', label: 'Copy log cmd', action: 'copy-tmux', custom: () => {
             _copyText(logCmd);
           }});
@@ -2724,114 +2690,35 @@ export function _renderRunningTab() {
           group: 'danger',
           label: _isLive ? 'Stop and remove' : 'Remove',
           action: 'kill',
-          tooltip: _isLive
-            ? 'Kill the live tmux session, deregister the chat endpoint, and remove this row'
-            : 'Remove this row',
           danger: true,
         });
-        // Cancel = mobile-only dismiss item. Same pattern as the email kebab.
-        items.push({ group: 'danger', label: 'Cancel', action: 'cancel', mobileOnly: true, custom: () => {} });
-
-        const _MENU_ICONS = {
-  "start-now": "play",
-  "reconnect": "refresh",
-  "retry": "refresh",
-  "stop": "stop",
-  "edit": "edit",
-  "edit-panel": "edit",
-  "register-provider": "add",
-  "save": "save",
-  "copy-tmux": "copy",
-  "copy-crash-report": "warning",
-  "copy-log": "copy",
-  "kill": "trash",
-  "cancel": "close"
-};
-        let _lastGroup = null;
+        const icons = {
+          'start-now': 'play',
+          reconnect: 'refresh',
+          retry: 'refresh',
+          'edit-panel': 'edit',
+          'register-provider': 'add',
+          save: 'save',
+          'copy-tmux': 'copy',
+          'copy-crash-report': 'warning',
+          'copy-log': 'copy',
+          kill: 'trash',
+        };
+        const commands = [];
+        let previousGroup;
         for (const item of items) {
-          // Insert a thin divider whenever the group changes, so the
-          // user can visually scan Run / Edit / Endpoint / Copy / Danger
-          // blocks instead of one long undifferentiated list.
-          if (item.group && _lastGroup && item.group !== _lastGroup) {
-            const sep = document.createElement('div');
-            sep.className = 'cookbook-dropdown-divider';
-            sep.style.cssText = 'height:1px;margin:4px 6px;background:color-mix(in srgb, var(--fg) 12%, transparent);pointer-events:none;';
-            dropdown.appendChild(sep);
-          }
-          _lastGroup = item.group || _lastGroup;
-          const div = document.createElement('div');
-          div.className = 'dropdown-item-compact'
-            + (item.danger ? ' cookbook-dropdown-danger' : '')
-            + (item.mobileOnly ? ' dropdown-cancel-mobile' : '');
-          div.style.cssText = 'display:flex;align-items:center;gap:8px;';
-          if (item.tooltip) div.title = item.tooltip;
-          const ic = _MENU_ICONS[item.action] || '';
-          div.innerHTML = `<span style="display:inline-flex;flex-shrink:0;opacity:0.7;">${ic ? uiIcon(ic, 14) : ""}</span><span>${item.label}</span>`;
-          div.addEventListener('click', () => {
-            _cleanup();
-            if (item.custom) { item.custom(); return; }
-            el.querySelector('.cookbook-task-action-' + item.action)?.click();
+          if (previousGroup && previousGroup !== item.group) commands.push({ separator: true });
+          previousGroup = item.group;
+          commands.push({
+            id: item.action,
+            label: item.label,
+            icon: icons[item.action],
+            destructive: !!item.danger,
+            run: item.custom || (() => el.querySelector('.cookbook-task-action-' + item.action)?.click()),
           });
-          dropdown.appendChild(div);
         }
-
-        const rect = menuBtn.getBoundingClientRect();
-        dropdown.style.position = 'fixed';
-        dropdown.style.zIndex = String(topPortalZ());
-        dropdown.style.top = rect.bottom + 2 + 'px';
-        dropdown.style.right = (window.innerWidth - rect.right) + 'px';
-        document.body.appendChild(dropdown);
-        // Clamp into the *visible* area. On mobile (esp. Firefox) window.innerHeight
-        // includes the strip hidden under the dynamic toolbar, so a menu that "fits"
-        // by innerHeight still lands off-screen at the bottom. visualViewport gives
-        // the real visible region. Flip above the button if there's no room below,
-        // else clamp to the bottom edge.
-        {
-          const vv = window.visualViewport;
-          const viewTop = vv ? vv.offsetTop : 0;
-          const viewBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
-          const dh = dropdown.offsetHeight;
-          const m = 8;
-          let top = rect.bottom + 2;
-          if (top + dh > viewBottom - m) {
-            const above = rect.top - 2 - dh;
-            top = above >= viewTop + m ? above : Math.max(viewTop + m, viewBottom - dh - m);
-          }
-          dropdown.style.top = top + 'px';
-        }
-
-        const closeHandler = (ev) => {
-          if (!dropdown.contains(ev.target) && ev.target !== menuBtn && !menuBtn.contains(ev.target)) {
-            _cleanup();
-          }
-        };
-        // Close on scroll too — once the page scrolls, the dropdown's
-        // fixed position no longer matches the originating ⋮ button, so
-        // it visually drifts. Matches the email kebab behaviour.
-        const scrollClose = () => _cleanup();
-        let _unreg = () => {};
-        const _cleanup = () => {
-          _unreg(); _unreg = () => {};
-          dropdown.remove();
-          menuBtn.classList.remove('cookbook-menu-active');
-          document.removeEventListener('click', closeHandler);
-          window.removeEventListener('scroll', scrollClose, true);
-          window.visualViewport?.removeEventListener('scroll', scrollClose);
-        };
-        dropdown._dismiss = _cleanup;
-        setTimeout(() => {
-          document.addEventListener('click', closeHandler);
-          window.addEventListener('scroll', scrollClose, true);
-          window.visualViewport?.addEventListener('scroll', scrollClose);
-        }, 0);
-        _unreg = registerMenuDismiss(_cleanup);
-      };
-      menuBtn.addEventListener('click', _openTaskMenu);
-      menuBtn.addEventListener('touchend', (e) => {
-        e.preventDefault();
-        _lastTouchMenuOpenAt = Date.now();
-        _openTaskMenu(e);
-      }, { passive: false });
+        return commands;
+      } });
     }
 
     // Hidden action buttons for menu dispatch
@@ -3673,7 +3560,7 @@ async function _reconnectTask(el, task) {
 
 let _bgMonitorInterval = null;
 let _bgPollInFlight = false;
-const BG_LEADER_KEY = 'odysseus-cookbook-bg-leader';
+const BG_LEADER_KEY = 'openclank-cookbook-bg-leader';
 const BG_LEADER_ID = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const BG_LEADER_TTL_MS = 15000;
 

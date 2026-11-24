@@ -84,8 +84,17 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
             *([DbSession.owner == owner] if owner else []),
         ).all()
 
+        from core.models import get_session_manager_instance
+        from src.openclank.chat_source_bridge import canonical_source_provider
+        manager = get_session_manager_instance()
+        context = getattr(manager, 'lifecycle_context', None)
+        source_protected = context is not None and canonical_source_provider(context) is not None
+        if source_protected and skip_llm:
+            raise RuntimeError("Chat cleanup deletion is unavailable for guarded memory sources")
         cleanup_now = _utcnow_naive()
         for row in rows:
+            if source_protected:
+                continue
             if getattr(row, 'is_important', False):
                 continue
             created_at = _as_naive_utc(row.created_at or row.updated_at) or _utcnow_naive()
@@ -161,7 +170,7 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
             })
 
         if len(session_list) < 2:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Too few remaining to sort."
+            return f"{'Chat cleanup deletion unavailable. ' if source_protected else ''}Cleaned {deleted_empty + deleted_throwaway} sessions. Too few remaining to sort."
 
         # Background built-in sweep skips folder-sort to stay pure infra.
         if skip_llm:
@@ -198,7 +207,7 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
             )
         except Exception as e:
             logger.warning(f"Auto-sort LLM call failed: {e}")
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."
+            return f"{'Chat cleanup deletion unavailable. ' if source_protected else ''}Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."
 
         # Parse JSON from response
         text = raw.strip()
@@ -223,11 +232,11 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
                 except json.JSONDecodeError:
                     pass
         if result is None:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. AI returned unparseable response."
+            return f"{'Chat cleanup deletion unavailable. ' if source_protected else ''}Cleaned {deleted_empty + deleted_throwaway} sessions. AI returned unparseable response."
 
         folders = result.get("folders", {})
         if not folders:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. No folder groupings found."
+            return f"{'Chat cleanup deletion unavailable. ' if source_protected else ''}Cleaned {deleted_empty + deleted_throwaway} sessions. No folder groupings found."
 
         # Apply assignments
         id_prefix_map = {s["id"][:8]: s["id"] for s in session_list}
@@ -255,7 +264,7 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
         db.commit()
 
         folder_summary = ", ".join(f"{k} ({len(v)})" for k, v in folders.items())
-        return f"Deleted {deleted_empty} empty + {deleted_throwaway} throwaway. Sorted {updated} sessions into: {folder_summary}"
+        return f"{'Chat cleanup deletion unavailable. ' if source_protected else ''}Deleted {deleted_empty} empty + {deleted_throwaway} throwaway. Sorted {updated} sessions into: {folder_summary}"
 
     finally:
         db.close()

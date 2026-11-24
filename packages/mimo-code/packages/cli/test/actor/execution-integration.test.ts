@@ -1,0 +1,521 @@
+import { afterEach, expect, test } from "bun:test"
+import { Deferred, Effect, Fiber, type Layer, type Scope } from "effect"
+import path from "node:path"
+import { pathToFileURL } from "node:url"
+import { tmpdir } from "../fixture/fixture"
+import { Instance } from "../../src/project/instance"
+import { Session } from "../../src/session"
+import { Actor } from "../../src/actor/spawn"
+import { ActorRegistry } from "../../src/actor/registry"
+import { ActorStatusChanged } from "../../src/actor/events"
+import { Bus } from "../../src/bus"
+import { TaskRegistry } from "../../src/task/registry"
+import { ActorWaiter } from "../../src/actor/waiter"
+import { Inbox } from "../../src/inbox"
+import { schedulerRef } from "../../src/inbox"
+import { SessionPrompt } from "../../src/session/prompt"
+import { SessionStatus } from "../../src/session/status"
+import { Config } from "../../src/config"
+import { ModelID, ProviderID } from "../../src/provider/schema"
+import { AppLayer } from "../../src/effect/app-runtime"
+import { attach } from "../../src/effect/run-service"
+import { startScriptedLLMServer, textStopResponse } from "../lib/scripted-llm-server"
+
+type Services = Layer.Success<typeof AppLayer>
+
+// Each test owns its app services; the process runtime can outlive other fixtures.
+const run = <A, E>(effect: Effect.Effect<A, E, Services | Scope.Scope>) =>
+  Effect.runPromise(attach(effect).pipe(Effect.scoped, Effect.provide(AppLayer)))
+
+afterEach(() => Instance.disposeAll())
+
+test("new main messages preserve four background actors awaiting model responses", async () => {
+  const entered = Array.from({ length: 4 }, () => Promise.withResolvers<void>())
+  const release = Promise.withResolvers<void>()
+  const server = startScriptedLLMServer(
+    entered.map((barrier, i) => ({
+      lines: textStopResponse(`CHILD-RESULT-${i}`),
+      beforeReply: async () => {
+        barrier.resolve()
+        await release.promise
+      },
+    })),
+  )
+  await using tmp = await tmpdir({
+    git: true,
+    config: {
+      enabled_providers: ["alibaba"],
+      provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${server.origin}/v1` } } },
+      agent: { custom: { model: "alibaba/qwen-plus", mode: "subagent", completionGate: false } },
+    },
+  })
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const actors = yield* Actor.Service
+            const sessions = yield* Session.Service
+            const prompt = yield* SessionPrompt.Service
+            const status = yield* SessionStatus.Service
+            const parent = yield* sessions.create({ title: "Background progress" })
+            const children = []
+            for (let i = 0; i < 4; i++) {
+              children.push(
+                yield* actors.spawn({
+                  mode: "subagent",
+                  sessionID: parent.id,
+                  agentType: "custom",
+                  task: `Explore module ${i}`,
+                  context: "none",
+                  tools: [],
+                  background: true,
+                }),
+              )
+              yield* Effect.promise(() => entered[i]!.promise)
+            }
+            expect(yield* status.get(parent.id)).toEqual({ type: "idle" })
+            const initialConfig = yield* Config.Service.use((cfg) => cfg.get())
+            yield* Effect.promise(() => Bun.write(path.join(tmp.path, "openclank.json"), JSON.stringify({ model: "test/changed" })))
+            yield* Effect.promise(() => Instance.disposeAll())
+            expect(Instance.refreshStatus(tmp.path).state).toBe("pending")
+            expect(yield* Config.Service.use((cfg) => cfg.get())).toBe(initialConfig)
+            const before = yield* sessions.messages({ sessionID: parent.id, agentID: "*" })
+            expect(before.filter((m) => m.info.role === "assistant")).toHaveLength(4)
+            for (const text of ["How is progress?", "Keep working"]) {
+              yield* prompt.prompt({
+                sessionID: parent.id,
+                agent: "build",
+                noReply: true,
+                model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
+                parts: [{ type: "text", text }],
+              })
+              const after = yield* sessions.messages({ sessionID: parent.id, agentID: "*" })
+              for (const child of children) {
+                expect(after.filter((m) => m.info.agentID === child.actorID)).toEqual(
+                  before.filter((m) => m.info.agentID === child.actorID),
+                )
+              }
+            }
+            release.resolve()
+            for (const child of children) {
+              const outcome = yield* Deferred.await(child.outcome)
+              expect(outcome.status).toBe("success")
+              if (outcome.status === "success") expect(outcome.finalText).toContain("CHILD-RESULT-")
+              const messages = yield* sessions.messages({ sessionID: parent.id, agentID: child.actorID })
+              const assistant = messages.find((m) => m.info.role === "assistant")
+              expect(assistant?.info.role).toBe("assistant")
+              if (assistant?.info.role === "assistant") {
+                expect(assistant.info.error).toBeUndefined()
+                expect(assistant.info.finish).toBe("stop")
+              }
+            }
+          }),
+        ),
+    })
+  } finally {
+    release.resolve()
+    await server.stop()
+  }
+}, 30000)
+
+// Desktop tool-step-schema [TP-R14-07] [TP-R14-11].
+test("a pending wait receives a preStop failure's partial delivery before terminal publication", async () => {
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const server = startScriptedLLMServer([
+    { lines: textStopResponse("PRESERVED-MAIN-RESULT") },
+    {
+      lines: [],
+      status: 400,
+      beforeReply: async () => {
+        entered.resolve()
+        await release.promise
+      },
+    },
+  ])
+  await using tmp = await tmpdir({
+    git: true,
+    init: async (dir) => {
+      const hook = path.join(dir, "hook.ts")
+      await Bun.write(
+        hook,
+        `export default async () => ({ 'actor.preStop': async (input, output) => { if (input.iteration === 0) { output.continue = true; output.reason = 'required verification'; } } });`,
+      )
+      await Bun.write(
+        path.join(dir, "openclank.json"),
+        JSON.stringify({
+          plugin: [pathToFileURL(hook).href],
+          enabled_providers: ["alibaba"],
+          provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${server.origin}/v1` } } },
+          agent: { custom: { model: "alibaba/qwen-plus" } },
+        }),
+      )
+    },
+  })
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const actors = yield* Actor.Service
+            const sessions = yield* Session.Service
+            const registry = yield* ActorRegistry.Service
+            const parent = yield* sessions.create({ title: "partial delivery" })
+            const child = yield* actors.spawn({
+              mode: "subagent",
+              sessionID: parent.id,
+              agentType: "custom",
+              task: "work",
+              context: "none",
+              tools: [],
+              background: true,
+            })
+            yield* Effect.promise(() => entered.promise)
+            const pending = yield* ActorWaiter.Service.use((waiter) =>
+              waiter.wait({ sessionID: child.sessionID, actor_id: child.actorID, timeout_ms: 10000 }),
+            ).pipe(Effect.provide(ActorWaiter.layer), Effect.forkChild)
+            yield* Effect.sleep("25 millis")
+            const start = Date.now()
+            release.resolve()
+            const waited = yield* Fiber.join(pending)
+            expect(Date.now() - start).toBeLessThan(8000)
+            expect(waited.lastOutcome).toBe("failure")
+            expect(waited.result).toBe("PRESERVED-MAIN-RESULT")
+            expect(waited.error).toBeDefined()
+            const outcome = yield* Deferred.await(child.outcome)
+            expect(outcome.status).toBe("failure")
+            if (outcome.status === "failure") expect(outcome.finalText).toBe(waited.result)
+            expect((yield* registry.get(child.sessionID, child.actorID))?.resultMessageID).toBeDefined()
+          }).pipe(Effect.scoped),
+        ),
+    })
+  } finally {
+    release.resolve()
+    await server.stop()
+  }
+}, 30000)
+
+for (const scenario of [
+  { reported: "failed", taskStatus: "done", expected: "failed" },
+  { reported: "blocked", taskStatus: "done", expected: "blocked" },
+  { reported: "success", taskStatus: "done", expected: "success" },
+  { reported: undefined, taskStatus: "done", expected: undefined },
+  { reported: "success", taskStatus: "blocked", expected: "success" },
+  { reported: "success", taskStatus: "open", expected: "success" },
+  { reported: "failed", taskStatus: "open", expected: "failed" },
+] as const) {
+  test(`[TP-R14-07] reported status is model-self-report only: ${scenario.reported}/${scenario.taskStatus}`, async () => {
+    let settleTask: () => Promise<unknown> = async () => undefined
+    const server = startScriptedLLMServer([
+      {
+        lines: textStopResponse(`${scenario.reported ? `**Status**: ${scenario.reported}\n` : ""}MAIN-RESULT`),
+        beforeReply: () => settleTask(),
+      },
+    ])
+    await using tmp = await tmpdir({
+      git: true,
+      config: {
+        enabled_providers: ["alibaba"],
+        provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${server.origin}/v1` } } },
+        agent: {
+          custom: { model: "alibaba/qwen-plus", mode: "subagent", completionGate: true, permission: { "*": "deny" } },
+        },
+      },
+    })
+    try {
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const actors = yield* Actor.Service
+              const sessions = yield* Session.Service
+              const tasks = yield* TaskRegistry.Service
+              const context = yield* Effect.context<Services>()
+              const parent = yield* sessions.create({ title: "no gate priority" })
+              const task = yield* tasks.create({ session_id: parent.id, summary: "concurrently settled task" })
+              // Settle BEFORE the delivery turn returns. Task state must NOT
+              // affect reportedStatus — TaskGate/downgrade is gone.
+              settleTask = () =>
+                scenario.taskStatus === "open"
+                  ? Promise.resolve()
+                  : Instance.provide({
+                      directory: tmp.path,
+                      fn: () =>
+                        Effect.runPromiseWith(context)(
+                          attach(
+                            scenario.taskStatus === "done"
+                              ? tasks.done({ session_id: parent.id, id: task.id })
+                              : tasks.block({ session_id: parent.id, id: task.id }),
+                          ),
+                        ),
+                    })
+              const child = yield* actors.spawn({
+                mode: "subagent",
+                sessionID: parent.id,
+                agentType: "custom",
+                task: "work",
+                task_id: task.id,
+                context: "none",
+                tools: [],
+                background: false,
+              })
+              const outcome = yield* Deferred.await(child.outcome)
+              expect(outcome.status).toBe("success")
+              if (outcome.status === "success") {
+                expect(outcome.reportedStatus).toBe(scenario.expected)
+                // Original delivery preserved; no gate re-entry, no gate warning.
+                expect(outcome.finalText).toContain("MAIN-RESULT")
+                expect(outcome.warnings?.join(" ") ?? "").not.toContain("completion gate")
+              }
+            }),
+          ),
+      })
+    } finally {
+      await server.stop()
+    }
+  }, 30000)
+}
+
+// Desktop tool-step-schema [TP-R14-11]: delivery body is never rewritten when
+// owned tasks remain open — no suffix, no re-emit.
+test("leftover owned task leaves delivery body untouched", async () => {
+  const server = startScriptedLLMServer([{ lines: textStopResponse("MAIN-RESULT") }])
+  await using tmp = await tmpdir({
+    git: true,
+    config: {
+      enabled_providers: ["alibaba"],
+      provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${server.origin}/v1` } } },
+      agent: {
+        custom: { model: "alibaba/qwen-plus", mode: "subagent", completionGate: true, permission: { "*": "deny" } },
+      },
+    },
+  })
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const actors = yield* Actor.Service
+            const sessions = yield* Session.Service
+            const tasks = yield* TaskRegistry.Service
+            const parent = yield* sessions.create({ title: "no gate leftover" })
+            const task = yield* tasks.create({ session_id: parent.id, summary: "unfinished work" })
+            const child = yield* actors.spawn({
+              mode: "subagent",
+              sessionID: parent.id,
+              agentType: "custom",
+              task: "work",
+              task_id: task.id,
+              context: "none",
+              tools: [],
+              background: false,
+            })
+            const outcome = yield* Deferred.await(child.outcome)
+            expect(outcome.status).toBe("success")
+            if (outcome.status === "success") {
+              expect(outcome.finalText).toBe("MAIN-RESULT")
+              expect(outcome.reportedStatus).toBeUndefined()
+              expect(outcome.warnings?.join(" ") ?? "").not.toContain("completion gate")
+            }
+            const waited = yield* ActorWaiter.Service.use((waiter) =>
+              waiter.wait({ sessionID: child.sessionID, actor_id: child.actorID }),
+            ).pipe(Effect.provide(ActorWaiter.defaultLayer))
+            expect(waited.result).toBe("MAIN-RESULT")
+          }),
+        ),
+    })
+  } finally {
+    await server.stop()
+  }
+}, 30000)
+
+// Desktop tool-step-schema [TP-R14-08] [TP-R14-11].
+test("hook steps claim queued inbox inputs and late inputs continue after execution release", async () => {
+  const server = startScriptedLLMServer([
+    { lines: textStopResponse("SPAWN-RESULT") },
+    { lines: textStopResponse("POST-RESULT") },
+    { lines: textStopResponse("LATE-WOKEN-RESULT") },
+  ])
+  await using tmp = await tmpdir({
+    git: true,
+    init: async (dir) => {
+      const hook = path.join(dir, "hook.ts")
+      await Bun.write(
+        hook,
+        `import fs from 'node:fs/promises'; export default async () => ({'actor.postStop': async (input, output) => { await fs.writeFile(${JSON.stringify(path.join(dir, "entered"))}, '1'); while (!await fs.stat(${JSON.stringify(path.join(dir, "release"))}).then(() => true, () => false)) await new Promise(r => setTimeout(r, 10)); if (input.iteration === 0) { output.continue = true; output.reason = 'postStop housekeeping'; } }});`,
+      )
+      await Bun.write(
+        path.join(dir, "openclank.json"),
+        JSON.stringify({
+          plugin: [pathToFileURL(hook).href],
+          enabled_providers: ["alibaba"],
+          provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${server.origin}/v1` } } },
+          agent: { custom: { model: "alibaba/qwen-plus" } },
+        }),
+      )
+    },
+  })
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const actors = yield* Actor.Service
+            const sessions = yield* Session.Service
+            const registry = yield* ActorRegistry.Service
+            const inbox = yield* Inbox.Service
+            const previousScheduler = schedulerRef.current
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                schedulerRef.current = previousScheduler
+              }),
+            )
+            const parent = yield* sessions.create({
+              title: "execution overlap",
+              permission: [{ permission: "*", pattern: "*", action: "allow" }],
+            })
+            const child = yield* actors.spawn({
+              mode: "subagent",
+              sessionID: parent.id,
+              agentType: "custom",
+              task: "spawn probe",
+              context: "none",
+              tools: [],
+              background: true,
+            })
+            for (
+              let i = 0;
+              i < 500 && !(yield* Effect.promise(() => Bun.file(path.join(tmp.path, "entered")).exists()));
+              i++
+            )
+              yield* Effect.sleep("10 millis")
+            expect(yield* Effect.promise(() => Bun.file(path.join(tmp.path, "entered")).exists())).toBe(true)
+            // Spawn initialization can replace global refs with another runtime's services.
+            schedulerRef.current = previousScheduler
+            const bus = yield* Bus.Service
+            const context = yield* Effect.context<Services>()
+            let completions = 0
+            let lateSend: Promise<unknown> | undefined
+            const unsubscribe = yield* bus.subscribeCallback(ActorStatusChanged, (event) => {
+              if (
+                event.properties.sessionID !== child.sessionID ||
+                event.properties.actorID !== child.actorID ||
+                event.properties.status !== "idle"
+              )
+                return
+              completions++
+              if (completions === 1)
+                lateSend = Effect.runPromiseWith(context)(
+                  attach(
+                    inbox.accept({
+                      receiverSessionID: child.sessionID,
+                      receiverActorID: child.actorID,
+                      senderSessionID: parent.id,
+                      senderActorID: "main",
+                      content: "late wake at terminal boundary",
+                    }),
+                  ),
+                )
+            })
+            yield* Effect.addFinalizer(() => Effect.sync(unsubscribe))
+            yield* inbox.accept({
+              receiverSessionID: child.sessionID,
+              receiverActorID: child.actorID,
+              senderSessionID: parent.id,
+              senderActorID: "main",
+              content: "woken probe",
+            })
+            yield* inbox.accept({
+              receiverSessionID: child.sessionID,
+              receiverActorID: child.actorID,
+              senderSessionID: parent.id,
+              senderActorID: "main",
+              content: "another queued message",
+            })
+            yield* Effect.sleep("150 millis")
+            const duringHook = yield* registry.get(child.sessionID, child.actorID)
+            expect(duringHook?.status).toBe("running")
+            expect(server.captures.length).toBe(1)
+            yield* Effect.promise(() => Bun.write(path.join(tmp.path, "release"), "1"))
+            const outcome = yield* Deferred.await(child.outcome)
+            expect(outcome.status).toBe("success")
+            if (outcome.status === "success") expect(outcome.finalText).toBe("SPAWN-RESULT")
+            let texts: string[] = []
+            for (let i = 0; i < 500; i++) {
+              const messages = yield* sessions.messages({ sessionID: child.sessionID, agentID: child.actorID })
+              texts = messages.flatMap((m) =>
+                m.info.role === "assistant" ? m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])) : [],
+              )
+              if (texts.includes("LATE-WOKEN-RESULT")) break
+              yield* Effect.sleep("10 millis")
+            }
+            expect(texts.filter((text) => text === "POST-RESULT")).toHaveLength(1)
+            expect(texts.filter((text) => text === "LATE-WOKEN-RESULT")).toHaveLength(1)
+            yield* Effect.promise(() => lateSend!)
+            yield* Effect.sleep("100 millis")
+            const after = yield* sessions.messages({ sessionID: child.sessionID, agentID: child.actorID })
+            expect(after.filter((message) => message.info.role === "assistant")).toHaveLength(3)
+            expect(JSON.stringify(server.captures[1].messages)).toContain("woken probe")
+            expect(JSON.stringify(server.captures[1].messages)).toContain("another queued message")
+            expect(JSON.stringify(server.captures[2].messages)).toContain("late wake at terminal boundary")
+          }).pipe(Effect.scoped, Effect.provide(Inbox.defaultLayer)),
+        ),
+    })
+  } finally {
+    await Bun.write(path.join(tmp.path, "release"), "1")
+    await server.stop()
+  }
+}, 30000)
+
+// Desktop tool-step-schema [TP-R14-09].
+test("cancellation at onActorID is retained before the spawn fiber is attached", async () => {
+  const server = startScriptedLLMServer([{ lines: textStopResponse("MUST-NOT-RUN") }])
+  await using tmp = await tmpdir({
+    git: true,
+    config: {
+      enabled_providers: ["alibaba"],
+      provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${server.origin}/v1` } } },
+      agent: { custom: { model: "alibaba/qwen-plus" } },
+    },
+  })
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const actor = yield* Actor.Service
+            const sessions = yield* Session.Service
+            const registry = yield* ActorRegistry.Service
+            const context = yield* Effect.context<Services>()
+            const parent = yield* sessions.create({ title: "cancel before attachment" })
+            let cancellation: Promise<void> | undefined
+            const child = yield* actor.spawn({
+              mode: "subagent",
+              sessionID: parent.id,
+              agentType: "custom",
+              task: "must not execute",
+              context: "none",
+              tools: [],
+              background: false,
+              onActorID: (actorID) => {
+                cancellation = Effect.runPromiseWith(context)(attach(actor.cancel(parent.id, actorID, "forced")))
+              },
+            })
+            yield* Effect.promise(() => cancellation!)
+            expect((yield* Deferred.await(child.outcome)).status).toBe("cancelled")
+            expect((yield* registry.get(child.sessionID, child.actorID))?.lastOutcome).toBe("cancelled")
+            expect(server.captures.length).toBe(0)
+          }),
+        ),
+    })
+  } finally {
+    await server.stop()
+  }
+}, 30000)

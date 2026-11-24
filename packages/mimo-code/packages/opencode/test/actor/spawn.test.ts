@@ -35,6 +35,8 @@ import { ToolRegistry } from "../../src/tool"
 import { Truncate } from "../../src/tool"
 import { ActorTool } from "../../src/tool/actor"
 import { ActorRegistry } from "../../src/actor/registry"
+import { ActorForkContextTable } from "../../src/actor/actor.sql"
+import { UserInputReceiptTable } from "../../src/inbox/inbox.sql"
 import { ActorWaiter } from "../../src/actor/waiter"
 import { Actor } from "../../src/actor/spawn"
 import { Worktree } from "../../src/worktree"
@@ -60,6 +62,7 @@ import { TestLLMServer } from "../lib/llm-server"
 import { reply } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
 import { InboxTable } from "../../src/inbox/inbox.sql"
+import * as UserInput from "../../src/session/user-input"
 import { inboxServiceRef } from "../../src/inbox/inbox-ref"
 import { Flag } from "../../src/flag/flag"
 
@@ -72,6 +75,7 @@ const summary = Layer.succeed(
   SessionSummary.Service.of({
     summarize: () => Effect.void,
     diff: () => Effect.succeed([]),
+    diffResult: () => Effect.succeed({ diffs: [] }),
     computeDiff: () => Effect.succeed([]),
   }),
 )
@@ -120,7 +124,7 @@ const lsp = Layer.succeed(
 )
 
 const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
-const run = SessionRunState.layer.pipe(Layer.provide(status))
+const run = SessionRunState.layer.pipe(Layer.provide(status), Layer.provide(ActorRegistry.defaultLayer))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
 
 function makeLayer(runLayer: Layer.Layer<SessionRunState.Service> = run) {
@@ -211,7 +215,7 @@ const cancelGate: { target?: string; entered?: Deferred.Deferred<void>; release?
 
 function makeGenerationGateLayer() {
   const ensureRunningCounts = new Map<string, number>()
-  const baseRun = SessionRunState.layer.pipe(Layer.provide(status))
+  const baseRun = SessionRunState.layer.pipe(Layer.provide(status), Layer.provide(ActorRegistry.defaultLayer))
   const gatedRun = Layer.effect(
     SessionRunState.Service,
     Effect.gen(function* () {
@@ -427,6 +431,7 @@ const ref = {
   providerID: ProviderID.make("test"),
   modelID: ModelID.make("test-model"),
 }
+const cheapRef = { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model-cheap") }
 
 // Config that registers a custom "test" provider with a "test-model" model
 // so provider model lookup succeeds inside the loop.
@@ -441,6 +446,18 @@ const cfg = {
         "test-model": {
           id: "test-model",
           name: "Test Model",
+          attachment: false,
+          reasoning: false,
+          temperature: false,
+          tool_call: true,
+          release_date: "2025-01-01",
+          limit: { context: 100000, output: 10000 },
+          cost: { input: 0, output: 0 },
+          options: {},
+        },
+        "test-model-cheap": {
+          id: "test-model-cheap",
+          name: "Cheap Test Model",
           attachment: false,
           reasoning: false,
           temperature: false,
@@ -1285,7 +1302,249 @@ describe("Actor.spawn description field (F2a)", () => {
 })
 
 describe("Actor forkContext lifecycle", () => {
-  it.live("forkContext is cleared after actor is cancelled (cancel path)", () =>
+  it.live("keeps ancestor permission and tool-whitelist restrictions in nested full-context actors", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const registry = yield* ActorRegistry.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({ title: "nested fork restrictions" })
+        const hostContext = { chatID: "nested-fork-chat", workspaceID: "nested-fork-workspace", cwd: "/tmp" }
+        yield* registry.updateModel(parent.id, "main", undefined, ref)
+        yield* registry.updateHostContext(parent.id, "main", hostContext)
+        const sourceUserID = MessageID.ascending()
+        yield* session.updateMessage({
+          id: sourceUserID,
+          sessionID: parent.id,
+          role: "user",
+          agentID: "main",
+          agent: "explore",
+          model: ref,
+          time: { created: Date.now() },
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: parent.id,
+          messageID: sourceUserID,
+          type: "text",
+          text: "readonly ancestor source",
+        })
+        const firstContext = {
+          system: ["frozen-system"],
+          tools: {},
+          parentPermission: [],
+          inheritedMessages: [{ role: "user" as const, content: "readonly ancestor source" }],
+          watermarkMsgID: sourceUserID,
+          model: cheapRef,
+        }
+        yield* llm.text("first nested actor finished")
+        const first = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          parentSessionID: parent.id,
+          parentActorID: "main",
+          forkContextSource: { sessionID: parent.id, actorID: "main" },
+          agentType: "build",
+          task: "first child",
+          context: "full",
+          tools: ["read"],
+          background: true,
+          model: cheapRef,
+          hostContext,
+          forkContext: firstContext,
+        })
+        yield* Deferred.await(first.outcome)
+        const firstMessages = yield* session.messages({ sessionID: parent.id, agentID: first.actorID })
+        const firstUser = firstMessages.findLast((message) => message.info.role === "user")
+        if (!firstUser || firstUser.info.role !== "user") throw new Error("first child origin is missing")
+        const secondContext = {
+          ...firstContext,
+          inheritedMessages: [{ role: "user" as const, content: "nested child prefix" }],
+          watermarkMsgID: firstUser.info.id,
+        }
+        yield* llm.text("second nested actor finished")
+        const second = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          parentSessionID: parent.id,
+          parentActorID: first.actorID,
+          forkContextSource: { sessionID: parent.id, actorID: first.actorID },
+          agentType: "build",
+          task: "second child requests broader tools",
+          context: "full",
+          tools: ["read", "write"],
+          background: true,
+          model: cheapRef,
+          hostContext,
+          forkContext: secondContext,
+        })
+        yield* Deferred.await(second.outcome)
+        const secondRow = yield* registry.get(parent.id, second.actorID)
+        const secondProjection = yield* actor.getForkContext(parent.id, second.actorID)
+        expect(secondRow?.tools).toEqual(["read"])
+        expect(secondProjection?.effectiveToolWhitelist).toEqual(["read"])
+        expect(Permission.evaluateIntersection("write", "*", secondProjection?.permissionRulesets ?? []).denied).toBe(true)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("reloads a settled fork snapshot and resumes the same actor after parent history changes", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const registry = yield* ActorRegistry.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({ title: "durable fork resume" })
+        const hostContext = { chatID: "fork-chat", workspaceID: "fork-workspace", cwd: "/tmp" }
+        yield* registry.updateModel(parent.id, "main", undefined, ref)
+        yield* registry.updateHostContext(parent.id, "main", hostContext)
+        const sourceUserID = MessageID.ascending()
+        yield* session.updateMessage({
+          id: sourceUserID,
+          sessionID: parent.id,
+          role: "user",
+          agentID: "main",
+          agent: "build",
+          model: ref,
+          time: { created: Date.now() },
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: parent.id,
+          messageID: sourceUserID,
+          type: "text",
+          text: "SOURCE_FROZEN_PREFIX",
+        })
+        yield* llm.text("initial fork turn completed")
+        const fakeForkCtx = {
+          system: ["frozen-system"],
+          tools: {},
+          parentPermission: [],
+          inheritedMessages: [{ role: "user" as const, content: "SOURCE_FROZEN_PREFIX" }],
+          watermarkMsgID: sourceUserID,
+          model: cheapRef,
+        }
+        const spawned = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          parentSessionID: parent.id,
+          parentActorID: "main",
+          forkContextSource: { sessionID: parent.id, actorID: "main" },
+          agentType: "explore",
+          task: "first same-actor turn",
+          context: "full",
+          tools: [],
+          background: true,
+          model: cheapRef,
+          hostContext,
+          forkContext: fakeForkCtx,
+        })
+        yield* Deferred.await(spawned.outcome)
+        const afterFirst = yield* registry.get(parent.id, spawned.actorID)
+        expect(afterFirst?.status).toBe("idle")
+        // Settlement drops the process-local cache. A read must decode the
+        // immutable DB snapshot rather than rebuilding from the current parent.
+        const frozen = yield* actor.getForkContext(parent.id, spawned.actorID)
+        expect(frozen?.context.inheritedMessages[0]).toEqual({ role: "user", content: "SOURCE_FROZEN_PREFIX" })
+        const changedParentID = MessageID.ascending()
+        yield* session.updateMessage({
+          id: changedParentID,
+          sessionID: parent.id,
+          role: "user",
+          agentID: "main",
+          agent: "build",
+          model: ref,
+          time: { created: Date.now() },
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: parent.id,
+          messageID: changedParentID,
+          type: "text",
+          text: "PARENT_CHANGED_AFTER_FORK",
+        })
+        const actorMessages = yield* session.messages({ sessionID: parent.id, agentID: spawned.actorID })
+        const origin = actorMessages.findLast((message) => message.info.role === "user")
+        if (!origin || origin.info.role !== "user") throw new Error("spawned actor user origin is missing")
+        const current = yield* registry.get(parent.id, spawned.actorID)
+        if (!current) throw new Error("spawned actor row is missing after settlement")
+        UserInput.admit({
+          owner: "fork-owner", stableChatID: "fork-chat", mapRevision: 1, mappingRevision: 1, workspaceRevision: 1,
+          requestID: "fork-resume-request", sessionID: parent.id, actorID: spawned.actorID,
+          executionRevision: current.executionRevision, originTurnID: origin.info.id,
+          text: "RESUMED_FORK_INPUT", attachmentRefs: [], questionRefs: [], mode: "after-turn",
+        })
+        yield* llm.textMatch(
+          (hit) => JSON.stringify(hit.body).includes("SOURCE_FROZEN_PREFIX") &&
+            !JSON.stringify(hit.body).includes("PARENT_CHANGED_AFTER_FORK") &&
+            JSON.stringify(hit.body).includes(ref.modelID),
+          "resumed from frozen context",
+        )
+        if (!actor.resumeInput) throw new Error("same-actor resume is unavailable")
+        const result = yield* actor.resumeInput({
+          sessionID: parent.id,
+          actorID: spawned.actorID,
+          claim: {
+            owner: "fork-owner", stableChatID: "fork-chat", mapRevision: 1, mappingRevision: 1, workspaceRevision: 1,
+            requestID: "fork-resume-request", handoffID: "fork-resume-handoff", rootOperationID: "fork-resume-root",
+            expectedExecutionRevision: current.executionRevision,
+            agent: current.agent,
+            effectiveModel: current.effectiveModel,
+            hostContext,
+          },
+        })
+        expect(result.kind).toBe("fresh-claim")
+        const deadline = Date.now() + 10_000
+        let settled = false
+        while (Date.now() < deadline) {
+          const row = yield* registry.get(parent.id, spawned.actorID)
+          if (row?.status === "idle" && row.executionRevision > current.executionRevision) {
+            settled = true
+            break
+          }
+          yield* Effect.sleep("20 millis")
+        }
+        expect(settled).toBe(true)
+
+        const resumedActor = yield* registry.get(parent.id, spawned.actorID)
+        if (!resumedActor) throw new Error("resumed actor row is missing")
+        const afterResumeMessages = yield* session.messages({ sessionID: parent.id, agentID: spawned.actorID })
+        const retryOrigin = afterResumeMessages.findLast((message) => message.info.role === "user")
+        if (!retryOrigin || retryOrigin.info.role !== "user") throw new Error("resumed actor origin is missing")
+        UserInput.admit({
+          owner: "fork-owner", stableChatID: "fork-chat", mapRevision: 1, mappingRevision: 1, workspaceRevision: 1,
+          requestID: "fork-missing-snapshot-request", sessionID: parent.id, actorID: spawned.actorID,
+          executionRevision: resumedActor.executionRevision, originTurnID: retryOrigin.info.id,
+          text: "must remain pending when snapshot is missing", attachmentRefs: [], questionRefs: [], mode: "after-turn",
+        })
+        Database.use((db) => db.delete(ActorForkContextTable).where(and(
+          eq(ActorForkContextTable.session_id, parent.id), eq(ActorForkContextTable.actor_id, spawned.actorID),
+        )).run())
+        const missing = yield* actor.resumeInput({
+          sessionID: parent.id,
+          actorID: spawned.actorID,
+          claim: {
+            owner: "fork-owner", stableChatID: "fork-chat", mapRevision: 1, mappingRevision: 1, workspaceRevision: 1,
+            requestID: "fork-missing-snapshot-request", handoffID: "fork-missing-snapshot-handoff",
+            rootOperationID: "fork-missing-snapshot-root", expectedExecutionRevision: resumedActor.executionRevision,
+            agent: resumedActor.agent, effectiveModel: resumedActor.effectiveModel, hostContext,
+          },
+        })
+        expect(missing.kind).toBe("unavailable")
+        const notClaimed = Database.use((db) => db.select().from(UserInputReceiptTable).where(and(
+          eq(UserInputReceiptTable.owner, "fork-owner"),
+          eq(UserInputReceiptTable.stable_chat_id, "fork-chat"),
+          eq(UserInputReceiptTable.request_id, "fork-missing-snapshot-request"),
+        )).get())
+        expect(notClaimed?.claimed_execution_revision).toBeNull()
+        expect((yield* registry.get(parent.id, spawned.actorID))?.executionRevision).toBe(resumedActor.executionRevision)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("forkContext remains durable after actor is cancelled", () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
         const actor = yield* Actor.Service
@@ -1295,6 +1554,27 @@ describe("Actor forkContext lifecycle", () => {
           title: "forkCtx lifecycle",
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
+        const hostContext = { chatID: "cancel-fork-chat", workspaceID: "cancel-fork-workspace", cwd: "/tmp" }
+        const registry = yield* ActorRegistry.Service
+        yield* registry.updateModel(parent.id, "main", undefined, ref)
+        yield* registry.updateHostContext(parent.id, "main", hostContext)
+        const sourceUserID = MessageID.ascending()
+        yield* session.updateMessage({
+          id: sourceUserID,
+          sessionID: parent.id,
+          role: "user",
+          agentID: "main",
+          agent: "build",
+          model: ref,
+          time: { created: Date.now() },
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: parent.id,
+          messageID: sourceUserID,
+          type: "text",
+          text: "cancel snapshot source",
+        })
 
         // Hang the LLM so the fiber stays alive while we verify pre-cancel state.
         yield* llm.hang
@@ -1302,9 +1582,9 @@ describe("Actor forkContext lifecycle", () => {
         const fakeForkCtx = {
           system: ["test-system"],
           tools: {},
-          inheritedMessages: [],
+          inheritedMessages: [{ role: "user" as const, content: "cancel snapshot source" }],
           parentPermission: [],
-          watermarkMsgID: MessageID.ascending(),
+          watermarkMsgID: sourceUserID,
           model: ref,
         }
 
@@ -1313,24 +1593,28 @@ describe("Actor forkContext lifecycle", () => {
           sessionID: parent.id,
           agentType: "explore",
           task: "noop",
-          context: "none",
+          context: "full",
           tools: [],
           background: true,
           model: ref,
+          parentActorID: "main",
+          forkContextSource: { sessionID: parent.id, actorID: "main" },
+          hostContext,
           forkContext: fakeForkCtx,
         })
 
         // Before cancel: forkContext must be present.
-        const before = yield* actor.getForkContext(result.actorID)
+        const before = yield* actor.getForkContext(result.sessionID, result.actorID)
         expect(before).toBeDefined()
-        expect(before?.system).toEqual(["test-system"])
+        expect(before?.context.system).toEqual(["test-system"])
 
         // Cancel forces immediate termination.
         yield* actor.cancel(result.sessionID, result.actorID, "forced")
 
-        // After cancel: forkContext must be gone.
-        const after = yield* actor.getForkContext(result.actorID)
-        expect(after).toBeUndefined()
+        // Cancellation removes the process cache, but the immutable row stays
+        // for explicit recovery/export and same-actor resume.
+        const after = yield* actor.getForkContext(result.sessionID, result.actorID)
+        expect(after?.context.system).toEqual(["test-system"])
       }),
       { git: true, config: providerCfg },
     ),
@@ -1341,10 +1625,10 @@ describe("mode × contextMode matrix", () => {
   const fakeForkCtx: Actor.ForkContext = {
     system: ["test-system"],
     tools: {},
-    inheritedMessages: [],
+    inheritedMessages: [{ role: "user", content: "captured source user" }],
     parentPermission: [],
     watermarkMsgID: MessageID.make("msg_test_watermark"),
-    model: { providerID: ProviderID.make("test") as ProviderID, modelID: ModelID.make("test") as ModelID },
+    model: ref,
   }
 
   it.live("subagent + full: forkContext stored under actorID", () =>
@@ -1356,6 +1640,16 @@ describe("mode × contextMode matrix", () => {
         const parent = yield* session.create({
           title: "matrix subagent+full",
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        const registry = yield* ActorRegistry.Service
+        yield* registry.updateModel(parent.id, "main", undefined, ref)
+        const sourceUserID = MessageID.ascending()
+        yield* session.updateMessage({
+          id: sourceUserID, sessionID: parent.id, role: "user", agentID: "main", agent: "build", model: ref,
+          time: { created: Date.now() },
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(), sessionID: parent.id, messageID: sourceUserID, type: "text", text: "captured source user",
         })
 
         yield* llm.hang
@@ -1369,12 +1663,14 @@ describe("mode × contextMode matrix", () => {
           tools: [],
           background: true,
           model: ref,
+          parentActorID: "main",
+          forkContextSource: { sessionID: parent.id, actorID: "main" },
           forkContext: fakeForkCtx,
         })
 
-        const ctx = yield* actor.getForkContext(result.actorID)
+        const ctx = yield* actor.getForkContext(result.sessionID, result.actorID)
         expect(ctx).toBeDefined()
-        expect(ctx?.system).toEqual(["test-system"])
+        expect(ctx?.context.system).toEqual(["test-system"])
 
         yield* actor.cancel(result.sessionID, result.actorID, "forced")
       }),
@@ -1407,7 +1703,7 @@ describe("mode × contextMode matrix", () => {
           // no forkContext
         })
 
-        const ctx = yield* actor.getForkContext(result.actorID)
+        const ctx = yield* actor.getForkContext(result.sessionID, result.actorID)
         expect(ctx).toBeUndefined()
 
         yield* actor.cancel(result.sessionID, result.actorID, "forced")
@@ -1426,6 +1722,16 @@ describe("mode × contextMode matrix", () => {
           title: "matrix peer+full",
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
+        const registry = yield* ActorRegistry.Service
+        yield* registry.updateModel(parent.id, "main", undefined, ref)
+        const sourceUserID = MessageID.ascending()
+        yield* session.updateMessage({
+          id: sourceUserID, sessionID: parent.id, role: "user", agentID: "main", agent: "build", model: ref,
+          time: { created: Date.now() },
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(), sessionID: parent.id, messageID: sourceUserID, type: "text", text: "captured source user",
+        })
 
         yield* llm.hang
 
@@ -1438,14 +1744,16 @@ describe("mode × contextMode matrix", () => {
           tools: [],
           background: true,
           model: ref,
+          parentActorID: "main",
+          forkContextSource: { sessionID: parent.id, actorID: "main" },
           forkContext: fakeForkCtx,
         })
 
         // For peer, result.actorID === child.id (the new session id)
         expect(result.actorID).not.toBe(parent.id)
-        const ctx = yield* actor.getForkContext(result.actorID)
+        const ctx = yield* actor.getForkContext(result.sessionID, result.actorID)
         expect(ctx).toBeDefined()
-        expect(ctx?.system).toEqual(["test-system"])
+        expect(ctx?.context.system).toEqual(["test-system"])
 
         yield* actor.cancel(result.sessionID, result.actorID, "forced")
       }),
@@ -1478,7 +1786,7 @@ describe("mode × contextMode matrix", () => {
           // no forkContext
         })
 
-        const ctx = yield* actor.getForkContext(result.actorID)
+        const ctx = yield* actor.getForkContext(result.sessionID, result.actorID)
         expect(ctx).toBeUndefined()
 
         yield* actor.cancel(result.sessionID, result.actorID, "forced")

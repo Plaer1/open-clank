@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Iterable, Mapping, Optional, Set, Tuple
+from typing import Any, Iterable, Mapping, Optional, Set, Tuple
 
 
 GUIDE_ONLY_DIRECTIVE = (
@@ -17,6 +17,12 @@ GUIDE_ONLY_DIRECTIVE = (
 )
 
 WEB_TOOL_NAMES = frozenset({"web_search", "web_fetch"})
+BROWSER_TOOL_NAMES = frozenset({"browser_status", "browser_observe", "browser_control"})
+TURN_POLICY_VERSION = 1
+TURN_POLICY_KEYS = frozenset({
+    "version", "mode", "allowBash", "allowWebSearch", "useWeb",
+    "useResearch", "compareMode", "incognito", "noMemory",
+})
 
 def tool_toggle_enabled(value: object) -> bool:
     """Return true only for explicit true-like tool toggle values."""
@@ -50,7 +56,9 @@ def web_search_enabled_for_turn(allow_web_search: object, use_web: object = None
 
 
 _COMMON_TOOL_NAMES = {
+    "evolve_hexes",
     "search_code",
+    "shared_text",
     "api_call",
     "app_api",
     "archive_email",
@@ -71,6 +79,10 @@ _COMMON_TOOL_NAMES = {
     "generate_image",
     "glob",
     "grep",
+    "gcf_arguments",
+    "json_preview",
+    "toon_preview",
+    "gcf_preview",
     "list_cached_models",
     "list_cookbook_servers",
     "list_downloads",
@@ -122,6 +134,7 @@ _COMMON_TOOL_NAMES = {
     "web_fetch",
     "web_search",
     "write_file",
+    "workflow_artifact",
 }
 
 
@@ -242,4 +255,121 @@ def build_effective_tool_policy(
         disabled_tools=frozenset(disabled),
         hidden_tools=frozenset(hidden),
         reasons=MappingProxyType(dict(reasons)),
+    )
+
+
+def normalize_turn_policy_snapshot(value: object) -> dict[str, Any]:
+    """Validate and canonicalize immutable request choices for one turn."""
+    if not isinstance(value, dict) or set(value) != TURN_POLICY_KEYS:
+        raise ValueError("turnPolicy must contain exactly the version 1 fields")
+    version = value.get("version")
+    if isinstance(version, bool) or version != TURN_POLICY_VERSION:
+        raise ValueError("turnPolicy version is unsupported")
+    mode = value.get("mode")
+    if not isinstance(mode, str) or mode not in {"agent", "chat", "plan"}:
+        raise ValueError("turnPolicy mode is invalid")
+    for key in ("allowBash", "allowWebSearch"):
+        if value.get(key) is not None and not isinstance(value.get(key), bool):
+            raise ValueError(f"turnPolicy {key} must be boolean or null")
+    for key in ("useWeb", "useResearch", "compareMode", "incognito", "noMemory"):
+        if not isinstance(value.get(key), bool):
+            raise ValueError(f"turnPolicy {key} must be boolean")
+    return {
+        "version": TURN_POLICY_VERSION,
+        "mode": mode,
+        "allowBash": value.get("allowBash"),
+        "allowWebSearch": value.get("allowWebSearch"),
+        "useWeb": value["useWeb"],
+        "useResearch": value["useResearch"],
+        "compareMode": value["compareMode"],
+        "incognito": value["incognito"],
+        "noMemory": value["noMemory"],
+    }
+
+
+def conservative_legacy_turn_policy() -> dict[str, Any]:
+    """Effective fallback for old receipts; never rewrite their identity."""
+    return {
+        "version": TURN_POLICY_VERSION,
+        "mode": "chat",
+        "allowBash": False,
+        "allowWebSearch": False,
+        "useWeb": False,
+        "useResearch": False,
+        "compareMode": False,
+        "incognito": False,
+        "noMemory": True,
+    }
+
+
+@dataclass(frozen=True)
+class TurnPolicyResolution:
+    snapshot: Mapping[str, Any]
+    policy: ToolPolicy
+    allowed_tools: Optional[frozenset[str]]
+    research_requested: bool
+
+
+def resolve_turn_policy(
+    snapshot: Mapping[str, Any],
+    *,
+    disabled_tools: Optional[Iterable[str]] = None,
+    last_user_message: object = "",
+    memory_read_allowed: bool = True,
+    theme_status_only: bool = False,
+) -> TurnPolicyResolution:
+    """Resolve request choices against caller-supplied live deny authority.
+
+    The function is pure apart from importing the server-owned mode allowlists.
+    Callers must supply current privilege, global, email, and workspace denies;
+    this resolver never treats request choices as authority.
+    """
+    choices = normalize_turn_policy_snapshot(dict(snapshot))
+    disabled = {str(tool) for tool in (disabled_tools or ()) if tool}
+    allowed_tools: Optional[Set[str]] = None
+
+    if choices["allowBash"] is not None and not choices["allowBash"]:
+        disabled.add("bash")
+    if not web_search_enabled_for_turn(choices["allowWebSearch"], choices["useWeb"]):
+        disabled.update(WEB_TOOL_NAMES)
+    if choices["incognito"]:
+        disabled.update({
+            "manage_memory", "recall_memory", "manage_rag", "workflow_artifact", "search_chats", "manage_skills",
+            "create_session", "list_sessions", "manage_session", "send_to_session",
+            "chat_with_model",
+        })
+    if choices["noMemory"] or not memory_read_allowed:
+        disabled.update({"manage_memory", "recall_memory", "manage_rag", "workflow_artifact"})
+
+    # Preserve the pre-mode decision: never remove an explicit denial from
+    # a merged set. This exception describes only the status operation.
+    theme_status = bool(theme_status_only and "theme_emoji_assets" not in disabled and not choices["incognito"])
+    if choices["compareMode"]:
+        from src.tool_security import COMPARE_READONLY_TOOLS, compare_mode_disabled_tools
+        allowed_tools = set(COMPARE_READONLY_TOOLS)
+        mode_denied = compare_mode_disabled_tools()
+        if theme_status:
+            mode_denied = mode_denied - {"theme_emoji_assets"}
+            allowed_tools.add("theme_emoji_assets")
+        disabled.update(mode_denied)
+    if choices["mode"] == "plan":
+        from src.tool_security import plan_mode_disabled_tools
+        mode_denied = plan_mode_disabled_tools()
+        if theme_status: mode_denied = mode_denied - {"theme_emoji_assets"}
+        disabled.update(mode_denied)
+    elif choices["mode"] == "chat":
+        from src.tool_security import chat_mode_disabled_tools
+        mode_denied = chat_mode_disabled_tools()
+        if theme_status: mode_denied = mode_denied - {"theme_emoji_assets"}
+        disabled.update(mode_denied)
+
+    effective = build_effective_tool_policy(
+        disabled_tools=disabled,
+        last_user_message=last_user_message,
+    )
+    return TurnPolicyResolution(
+        snapshot=MappingProxyType(choices),
+        policy=effective,
+        allowed_tools=frozenset(allowed_tools) if allowed_tools is not None else None,
+        research_requested=choices["useResearch"],
     )

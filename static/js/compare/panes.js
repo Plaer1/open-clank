@@ -574,6 +574,7 @@ function _showModelSwapDropdown(paneIdx, titleBtn) {
 
       // Update the model for this pane and persist
       state._selectedModels[paneIdx] = {
+        appendNoMistakes: state._selectedModels[paneIdx]?.appendNoMistakes === true,
         model: m.id, endpoint: m.url, endpointId: m.endpointId, name: m.name,
       };
       _persistSelections();

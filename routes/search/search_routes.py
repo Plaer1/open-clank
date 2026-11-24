@@ -13,6 +13,11 @@ from services.search.core import _call_provider
 from services.search.providers import _get_provider_key, _get_search_instance, _get_search_settings
 from src.auth_helpers import effective_user, require_authenticated_request
 
+
+def _is_xiaomi_family(value: object) -> bool:
+    """Match the canonical family, retaining only the established legacy label."""
+    return str(value or "").strip().casefold() in {"xiaomi", "mimo"}
+
 logger = logging.getLogger(__name__)
 
 
@@ -132,12 +137,12 @@ def setup_search_routes(config) -> APIRouter:
         providers.append({
             "id": "mimo",
             "label": "MiMo hosted search",
-            "available": bool(mimo_preflight.get("configured") and mimo_preflight.get("selected_provider_family") == "mimo"),
-            "configured": bool(mimo_preflight.get("configured") and mimo_preflight.get("selected_provider_family") == "mimo"),
-            "status": "unverified" if mimo_preflight.get("configured") and mimo_preflight.get("selected_provider_family") == "mimo" else "unavailable",
-            "unverified": bool(mimo_preflight.get("configured") and mimo_preflight.get("selected_provider_family") == "mimo"),
+            "available": bool(mimo_preflight.get("configured") and _is_xiaomi_family(mimo_preflight.get("selected_provider_family"))),
+            "configured": bool(mimo_preflight.get("configured") and _is_xiaomi_family(mimo_preflight.get("selected_provider_family"))),
+            "status": "unverified" if mimo_preflight.get("configured") and _is_xiaomi_family(mimo_preflight.get("selected_provider_family")) else "unavailable",
+            "unverified": bool(mimo_preflight.get("configured") and _is_xiaomi_family(mimo_preflight.get("selected_provider_family"))),
             "selected": settings.get("search_provider") == "mimo",
-            "reason": None if mimo_preflight.get("configured") and mimo_preflight.get("selected_provider_family") == "mimo" else "select a qualified MiMo Search purpose binding in Provider Control",
+            "reason": None if mimo_preflight.get("configured") and _is_xiaomi_family(mimo_preflight.get("selected_provider_family")) else "select a qualified MiMo Search purpose binding in Provider Control",
         })
         providers.append({
             "id": "antigravity",

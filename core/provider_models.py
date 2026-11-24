@@ -72,6 +72,9 @@ class ProviderConnection(ProviderTimestampMixin, ProviderBase):
         nullable=False,
         default="equal_round_robin",
     )
+    # Null preserves the deployed legacy account-selection behavior. Explicit
+    # v1 policy lives separately from provider adapter settings.
+    account_pool_policy = Column(JSON, nullable=True)
     enabled = Column(Boolean, nullable=False, default=True)
     revision = Column(Integer, nullable=False, default=1)
     deleted_at = Column(DateTime, nullable=True)
@@ -101,6 +104,7 @@ class ProviderAccount(ProviderTimestampMixin, ProviderBase):
     owner = Column(String, nullable=False, index=True)
     label = Column(String, nullable=False)
     auth_method = Column(String, nullable=False)
+    acquisition_method = Column(String, nullable=True)
     auth_class = Column(String, nullable=False)
     sort_order = Column(Integer, nullable=False, default=0)
     enabled = Column(Boolean, nullable=False, default=True)
@@ -232,7 +236,7 @@ class ProviderAccountModelHealth(ProviderTimestampMixin, ProviderBase):
 
 
 class ProviderOperationBinding(ProviderTimestampMixin, ProviderBase):
-    """Sticky account selection for a root operation and connection/lane."""
+    """Sticky account selection for one actor execution and provider route."""
 
     __tablename__ = "provider_operation_bindings"
 
@@ -240,6 +244,14 @@ class ProviderOperationBinding(ProviderTimestampMixin, ProviderBase):
     owner = Column(String, nullable=False)
     credential_owner = Column(String, nullable=False)
     root_operation_id = Column(String, nullable=False)
+    # A normalized per-actor-execution affinity key. Legacy rows retain the
+    # reserved "legacy" scope; new bindings derive this from session, actor,
+    # and execution revision. It is an index key, never an authorization token.
+    actor_scope_key = Column(String, nullable=False, default="legacy")
+    engine_session_id = Column(String, nullable=True)
+    actor_id = Column(String, nullable=True)
+    execution_revision = Column(Integer, nullable=True)
+    operation_id = Column(String, nullable=True)
     connection_id = Column(
         String,
         ForeignKey("provider_connections.id", ondelete="CASCADE"),
@@ -248,6 +260,7 @@ class ProviderOperationBinding(ProviderTimestampMixin, ProviderBase):
     provider_id = Column(String, nullable=False)
     billing_lane = Column(String, nullable=False)
     model_id = Column(String, nullable=False)
+    model_route_id = Column(String, nullable=True)
     grant_id = Column(String, nullable=True)
     selected_account_id = Column(
         String,
@@ -262,14 +275,19 @@ class ProviderOperationBinding(ProviderTimestampMixin, ProviderBase):
     committed_at = Column(DateTime, nullable=True)
     fallback_reason = Column(String, nullable=True)
     attempts = Column(JSON, nullable=False, default=list)
+    # Immutable admission-time account policy and bounded candidate order.
+    # Null is retained for pre-policy bindings and their legacy retry behavior.
+    policy_snapshot = Column(JSON, nullable=True)
     revision = Column(Integer, nullable=False, default=1)
 
     __table_args__ = (
         UniqueConstraint(
             "owner",
             "root_operation_id",
+            "actor_scope_key",
             "connection_id",
             "billing_lane",
+            "model_id",
             name="uq_provider_operation_binding_affinity",
         ),
         Index(

@@ -24,7 +24,11 @@ TOKEN_FIELDS = {
     "cache_write_tokens": ("cache_write_tokens", "cacheWriteTokens"),
     "reasoning_tokens": ("reasoning_tokens", "reasoningTokens"),
 }
-EXTRA_METRICS = {"totalTokens", "audioInputTokens", "audioOutputTokens", "imageInputTokens", "imageOutputTokens", "searchRequests"}
+EXTRA_METRICS = {"totalTokens", "audioInputTokens", "audioOutputTokens", "imageInputTokens", "imageOutputTokens", "searchRequests",
+                 "mediaInputsEvaluated", "mediaInputsNotSent"}
+# Per-turn media-input counts (media-input-v1 receipts): image inputs evaluated and image inputs not sent to the model. A row written before
+# these existed, or a turn without images, counts zero (applied where the report aggregates: services/stats/query.py query_summary). The closed reason codes stay on the attachment record: this record carries scalars only.
+COUNT_METRICS = frozenset({"mediaInputsEvaluated", "mediaInputsNotSent"})
 ALLOWED_KINDS = {"request", "provider_attempt", "partial", "response", "failure", "cancellation"}
 
 
@@ -62,6 +66,21 @@ def _metric(metadata: Mapping[str, Any], key: str) -> Any:
     return None
 
 
+_WIRE_MILESTONES = ("queued_ms", "admitted_ms", "dispatch_ms", "headers_ms", "first_byte_ms", "first_output_ms", "last_output_ms", "terminal_ms")
+
+
+def _wire_timing(value: Any) -> dict[str, Any] | None:
+    """Keep only actual engine-clock attempt offsets; never infer missing points."""
+    if not isinstance(value, Mapping) or value.get("clock_domain") != "engine":
+        return None
+    result: dict[str, Any] = {"version": 1, "clock_domain": "engine"}
+    for key in _WIRE_MILESTONES:
+        item = value.get(key)
+        if isinstance(item, (int, float)) and not isinstance(item, bool) and 0 <= item <= 2**53 - 1 and math.isfinite(item):
+            result[key] = item
+    return result
+
+
 def _safe_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {"event_kind", "status", "terminal", "billable", "observation_kind", "sequence",
                "supersedes_replay_key", "actor_kind", "source", "producer_revision", "attempt_id",
@@ -78,10 +97,21 @@ def _safe_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         value = metadata.get(key)
         if isinstance(value, (str, bool, int, float)) and not (isinstance(value, float) and not math.isfinite(value)):
             result[key] = value
-    for key in ("metric_coverage", "covered_dispatch_ids", "loss_reasons", "extra_metrics", "raw_metrics"):
+    for key in ("metric_coverage", "covered_dispatch_ids", "loss_reasons", "extra_metrics", "raw_metrics", "context_receipt", "host_stage_timing", "tool_usage_attribution"):
         value = metadata.get(key)
         if isinstance(value, (dict, list)):
             result[key] = value
+    if metadata.get("operation_purpose") == "next_prompt":
+        result["operation_purpose"] = "next_prompt"
+    if metadata.get("actual_model_state") in ("unknown", "verified_alternative"):
+        result["actual_model_state"] = metadata["actual_model_state"]
+        options = metadata.get("actual_model_options")
+        if (metadata["actual_model_state"] == "verified_alternative" and type(options) is dict
+                and not set(options) - {"reasoning_effort"} and all(type(v) is str and 0 < len(v) <= 32 for v in options.values())):
+            result["actual_model_options"] = dict(options)
+    wire = _wire_timing(metadata.get("wire_timing"))
+    if wire is not None:
+        result["wire_timing"] = wire
     for key in ("instance_id", "identity_coverage", "dispatch_index", "retry_of_dispatch_id"):
         value = metadata.get(key)
         if isinstance(value, (str, int)) and not isinstance(value, bool):
@@ -263,6 +293,8 @@ def capture_operation_result(db, request, result, *, selected_route=None):
             result.normalization_profile
         ),
         "model_fingerprint": result.model_fingerprint, "source": "operation_router"}
+    if request.purpose == "next_prompt":
+        metadata["operation_purpose"] = "next_prompt"
     metadata.update(metric_coverage=getattr(result, "metric_coverage", {}),
                     covered_dispatch_ids=getattr(result, "covered_dispatch_ids", []),
                     loss_reasons=getattr(result, "loss_reasons", []),
@@ -279,6 +311,47 @@ def capture_operation_result(db, request, result, *, selected_route=None):
         account_id=result.selected_account_id, metadata=metadata, source="operation_router",
         observation_scope="operation")
     return _insert_once(db, values)
+
+
+def _tool_usage_attribution(context):
+    identity = context.get("actor_execution")
+    if not isinstance(identity, dict) or set(identity) != {"sessionID", "rootOperationID", "actorID", "executionRevision"}:
+        return None
+    account, chat, holder = context.get("host_account_id"), context.get("session_id"), context.get("instance_id")
+    binding, revision = context.get("binding_id"), context.get("binding_revision")
+    if (not all(isinstance(v, str) and 0 < len(v) <= 512 for v in (account, chat, holder, binding, identity.get("sessionID"), identity.get("rootOperationID"), identity.get("actorID")))
+            or type(identity.get("executionRevision")) is not int or identity["executionRevision"] < 0
+            or type(revision) is not int or revision < 1 or context.get("root_operation_id") != identity["rootOperationID"]):
+        return None
+    return {"version": 1, "account": account, "chat": chat, "holder": holder,
+            "session": identity["sessionID"], "root": identity["rootOperationID"],
+            "actor": identity["actorID"], "execution": identity["executionRevision"],
+            "binding": binding, "binding_revision": revision}
+
+
+def capture_context_receipt(db, *, owner, context, identity, binding, receipt):
+    """Immutable content-free exact main dispatch pointer, not usage."""
+    if context.get("actor_kind") != "foreground" or receipt.get("complete") is not True:
+        raise ValueError("invalid context receipt")
+    payload = {"version":1, "identity":dict(identity), "binding_id":binding.id,
+               "binding_revision":binding.revision, "mapping_revision":context["mapping_revision"],
+               "instance_id":context["instance_id"], "dispatch_id":receipt["dispatchID"]}
+    attribution = _tool_usage_attribution(context)
+    if attribution is not None:
+        payload["tool_usage_attribution"] = attribution
+    key = _replay_key("context_receipt", f"{owner}:{binding.id}:{binding.revision}:{identity['executionRevision']}", "v1")
+    values = _event_values(owner=owner,event_kind="response",event_time=_now(),replay_key=key,
+        session_id=context.get("session_id"),root_operation_id=identity["rootOperationID"],
+        operation_id=context.get("operation_id"),metadata={"context_receipt":payload},source="context_receipt",observation_scope="operation")
+    values["event_kind"] = "context_receipt"
+    event = _insert_once(db,values)
+    stored = (event.event_metadata or {}).get("context_receipt")
+    if stored != payload:
+        # An old receipt is historical evidence, never promoted by a new replay.
+        legacy = dict(payload); legacy.pop("tool_usage_attribution", None)
+        if stored != legacy:
+            raise ValueError("context receipt replay conflict")
+    return event
 
 
 def capture_chat_metrics(db, *, owner, context, metrics, outcome="completed"):
@@ -303,6 +376,17 @@ def capture_chat_metrics(db, *, owner, context, metrics, outcome="completed"):
         "duration_ms": _measured_duration(metrics.get("response_time") * 1000) if isinstance(metrics.get("response_time"), (int, float)) and not isinstance(metrics.get("response_time"), bool) else None,
         "status": "complete" if outcome == "completed" else outcome,
     }
+    if metrics.get("actual_model_state") in ("unknown", "verified_alternative"):
+        metadata["actual_model_state"] = metrics["actual_model_state"]
+        if metrics["actual_model_state"] == "verified_alternative":
+            metadata["actual_model_options"] = metrics.get("actual_model_options")
+    attribution = _tool_usage_attribution(context)
+    if attribution is not None and context.get("actor_kind") != "foreground":
+        metadata["tool_usage_attribution"] = attribution
+    metadata["extra_metrics"] = {key: value for key, value in metrics.items() if key in EXTRA_METRICS and _nonnegative(value) is not None}
+    timing = metrics.get("host_stage_timing")
+    if isinstance(timing, dict) and timing.get("version") == 1 and timing.get("clock") == "host_monotonic":
+        metadata["host_stage_timing"] = {"version": 1, "clock": "host_monotonic", **{key: value for key in ("chat_transcript_snapshot_ms", "preparation_ms", "result_processing_ms") if (value := _measured_duration(timing.get(key))) is not None}}
     identity = f"{owner}:{context['instance_id']}:{context['root_operation_id']}:{context['operation_id']}"
     values = _event_values(owner=owner, event_kind="response" if outcome == "completed" else "cancellation" if outcome in {"cancelled", "interrupted"} else "failure",
         event_time=_now(), replay_key=_replay_key("chat_usage", identity, "l01-chat-usage-v1"),
@@ -334,6 +418,10 @@ def capture_attempt_event(db, *, owner, context, attempt_id, payload):
                 "duration_ms": _measured_duration((payload.get("timing") or {}).get("terminal_ms")),
                 "retry": bool(payload.get("retry_of_dispatch_id")) or context.get("retry", False), "billable": payload.get("billable")}
     source = str(payload.get("source") or "wire")
+    if source == "wire":
+        timing = _wire_timing(payload.get("timing"))
+        if timing is not None:
+            metadata["wire_timing"] = timing
     metadata.update({key: payload.get(key) for key in ("metric_coverage", "covered_dispatch_ids", "loss_reasons", "dispatch_index", "retry_of_dispatch_id")})
     metadata.update(instance_id=context["instance_id"], identity_coverage=payload.get("identity_coverage") or context.get("identity_coverage", "partial"),
                     observation_kind=payload.get("observation_kind") or metadata["observation_kind"])
@@ -388,6 +476,8 @@ def project_admitted_events(events: Iterable[StatsEvent], *, cancel_event=None, 
     grouped = defaultdict(list)
     for row in events:
         _check_projection_interrupt(cancel_event, deadline)
+        if row.event_kind == "context_receipt":
+            continue
         metadata = row.event_metadata or {}
         namespace = "attempt" if row.attempt_id else "operation" if row.observation_scope == "operation" else "root" if row.root_operation_id and row.observation_scope == "root" else "message"
         identifier = row.attempt_id if namespace == "attempt" else row.operation_id if namespace == "operation" else row.root_operation_id if namespace == "root" else row.replay_key
@@ -407,6 +497,30 @@ def project_admitted_events(events: Iterable[StatsEvent], *, cancel_event=None, 
             billable = [row for row in rows if row.billable is not None]
             if billable: view.billable = max(billable, key=_order).billable
         view.event_metadata = dict(representative.event_metadata or {})
+        # Purpose comes only from the fixed Host operation owner, not a wire
+        # observation selected as the representative for this same operation.
+        purposes = {(row.event_metadata or {}).get("operation_purpose") for row in rows
+                    if row.source == "operation_router" and (row.event_metadata or {}).get("operation_purpose")}
+        if purposes == {"next_prompt"}:
+            view.event_metadata["operation_purpose"] = "next_prompt"
+        else:
+            view.event_metadata.pop("operation_purpose", None)
+        host_timings = [row for row in rows if isinstance((row.event_metadata or {}).get("host_stage_timing"), dict)]
+        if len(host_timings) == 1:
+            view.event_metadata["host_stage_timing"] = host_timings[0].event_metadata["host_stage_timing"]
+            view.event_metadata["host_stage_as_of"] = host_timings[0].event_time.isoformat() + "Z"
+        else:
+            view.event_metadata.pop("host_stage_timing", None)
+        # Wire offsets are one independent attempt snapshot, never selected
+        # from an SDK token authority or assembled across different clocks.
+        wire_rows = [row for row in rows if row.source == "wire" and _wire_timing((row.event_metadata or {}).get("wire_timing")) is not None]
+        if wire_rows and key[4] == "attempt":
+            latest_wire = max(wire_rows, key=lambda row: (row.sequence if row.sequence is not None else -1, row.ingested_at or row.event_time))
+            view.event_metadata["wire_timing"] = _wire_timing(latest_wire.event_metadata["wire_timing"])
+            view.event_metadata["wire_timing_as_of"] = latest_wire.event_time.isoformat() + "Z"
+        else:
+            view.event_metadata.pop("wire_timing", None)
+            view.event_metadata.pop("wire_timing_as_of", None)
         view.event_metadata["metric_coverage"] = {}
         view.event_metadata["metric_provenance"] = {}
         view.event_metadata["loss_reasons"] = sorted({reason for row in rows for reason in (row.event_metadata or {}).get("loss_reasons", [])})

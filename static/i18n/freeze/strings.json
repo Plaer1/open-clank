@@ -1,9 +1,9 @@
 {
   "schema": 1,
-  "source_hash": "e4eb86793347ea199d18b4516563effb540f122af6107914ae58ba06572dd771",
-  "source_count": 9622,
-  "current_source_count": 8416,
-  "compatibility_count": 1206,
+  "source_hash": "b24d472d991b24d2cb9940e4ff928eb080b8095fa7634cfb737a6b51fc1e708c",
+  "source_count": 9759,
+  "current_source_count": 8538,
+  "compatibility_count": 1221,
   "keys": [
     {
       "key": "ui.0.0.enabled",
@@ -9527,13 +9527,13 @@
     {
       "key": "ui.copal.notes",
       "placeholders": [],
-      "length": 11,
+      "length": 13,
       "complexity": "label"
     },
     {
       "key": "ui.copal.notes.1f3ce475",
       "placeholders": [],
-      "length": 11,
+      "length": 13,
       "complexity": "label"
     },
     {
@@ -11298,9 +11298,9 @@
       "complexity": "label"
     },
     {
-      "key": "ui.current.open.clank.frankenmemory.mimo.provider.and.integration.state",
+      "key": "ui.current.open.clank.memery.mimo.provider.and.integration.state",
       "placeholders": [],
-      "length": 73,
+      "length": 66,
       "complexity": "label"
     },
     {
@@ -13538,9 +13538,9 @@
       "complexity": "label"
     },
     {
-      "key": "ui.digest.unavailable.is.the.frankenmemory.provider.running",
+      "key": "ui.digest.unavailable.is.the.memery.provider.running",
       "placeholders": [],
-      "length": 59,
+      "length": 52,
       "complexity": "label"
     },
     {
@@ -21197,9 +21197,9 @@
       "complexity": "label"
     },
     {
-      "key": "ui.frankenmemory.keeps.raw.evidence.separate",
+      "key": "ui.memery.keeps.raw.evidence.separate",
       "placeholders": [],
-      "length": 42,
+      "length": 35,
       "complexity": "label"
     },
     {
@@ -22066,9 +22066,9 @@
       "complexity": "label"
     },
     {
-      "key": "ui.graph.unavailable.is.the.frankenmemory.provider.running",
+      "key": "ui.graph.unavailable.is.the.memery.provider.running",
       "placeholders": [],
-      "length": 58,
+      "length": 51,
       "complexity": "label"
     },
     {
@@ -58800,7 +58800,7 @@
     {
       "key": "award.oc.selective-menmery.title",
       "placeholders": [],
-      "length": 17,
+      "length": 16,
       "complexity": "label"
     },
     {
@@ -58950,7 +58950,7 @@
     {
       "key": "docs.openclank-docs-accounts-models.body",
       "placeholders": [],
-      "length": 1505,
+      "length": 1821,
       "complexity": "prose"
     },
     {
@@ -58962,7 +58962,7 @@
     {
       "key": "docs.openclank-docs-chat-workspaces.body",
       "placeholders": [],
-      "length": 1563,
+      "length": 4095,
       "complexity": "prose"
     },
     {
@@ -58974,25 +58974,25 @@
     {
       "key": "docs.openclank-docs-editor.body",
       "placeholders": [],
-      "length": 1983,
+      "length": 1807,
       "complexity": "prose"
     },
     {
       "key": "docs.openclank-docs-files-imps.body",
       "placeholders": [],
-      "length": 1546,
+      "length": 1919,
       "complexity": "prose"
     },
     {
       "key": "docs.openclank-docs-files-imps.title",
       "placeholders": [],
-      "length": 14,
+      "length": 23,
       "complexity": "label"
     },
     {
       "key": "docs.openclank-docs-formatting-demo.body",
       "placeholders": [],
-      "length": 1349,
+      "length": 910,
       "complexity": "prose"
     },
     {
@@ -59004,7 +59004,7 @@
     {
       "key": "docs.openclank-docs-getting-work-done.body",
       "placeholders": [],
-      "length": 1582,
+      "length": 728,
       "complexity": "prose"
     },
     {
@@ -59016,25 +59016,25 @@
     {
       "key": "docs.openclank-docs-graph.body",
       "placeholders": [],
-      "length": 1575,
+      "length": 4364,
       "complexity": "prose"
     },
     {
       "key": "docs.openclank-docs-home.body",
       "placeholders": [],
-      "length": 1455,
+      "length": 1136,
       "complexity": "prose"
     },
     {
       "key": "docs.openclank-docs-home.title",
       "placeholders": [],
-      "length": 19,
+      "length": 18,
       "complexity": "label"
     },
     {
       "key": "docs.openclank-docs-limits.body",
       "placeholders": [],
-      "length": 1829,
+      "length": 1461,
       "complexity": "prose"
     },
     {
@@ -59046,7 +59046,7 @@
     {
       "key": "docs.openclank-docs-memory-lore.body",
       "placeholders": [],
-      "length": 1514,
+      "length": 4354,
       "complexity": "prose"
     },
     {
@@ -59058,7 +59058,7 @@
     {
       "key": "docs.openclank-docs-recovery.body",
       "placeholders": [],
-      "length": 1460,
+      "length": 1474,
       "complexity": "prose"
     },
     {
@@ -59070,7 +59070,7 @@
     {
       "key": "docs.openclank-docs-settings-themes.body",
       "placeholders": [],
-      "length": 2075,
+      "length": 2724,
       "complexity": "prose"
     },
     {
@@ -59082,7 +59082,7 @@
     {
       "key": "docs.openclank-docs-tasks.body",
       "placeholders": [],
-      "length": 1377,
+      "length": 1641,
       "complexity": "prose"
     },
     {
@@ -59100,7 +59100,7 @@
     {
       "key": "treehouse.class.house-collaborate.summary",
       "placeholders": [],
-      "length": 100,
+      "length": 99,
       "complexity": "label"
     },
     {
@@ -59292,13 +59292,13 @@
     {
       "key": "treehouse.lesson.house-collaborate.menmery-and-lore.body",
       "placeholders": [],
-      "length": 347,
+      "length": 346,
       "complexity": "prose"
     },
     {
       "key": "treehouse.lesson.house-collaborate.menmery-and-lore.explanation",
       "placeholders": [],
-      "length": 282,
+      "length": 281,
       "complexity": "prose"
     },
     {
@@ -59310,13 +59310,13 @@
     {
       "key": "treehouse.lesson.house-collaborate.menmery-and-lore.title",
       "placeholders": [],
-      "length": 46,
+      "length": 45,
       "complexity": "label"
     },
     {
       "key": "treehouse.lesson.house-collaborate.menmery-and-lore.whyThisHelps",
       "placeholders": [],
-      "length": 196,
+      "length": 195,
       "complexity": "prose"
     },
     {
@@ -60637,6 +60637,828 @@
       "key": "treehouse.section.house-system.title",
       "placeholders": [],
       "length": 13,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-home.body.compat-e5114082a798",
+      "placeholders": [],
+      "length": 1455,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-getting-work-done.body.compat-d63669914d75",
+      "placeholders": [],
+      "length": 1582,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-accounts-models.body.compat-7024ed5d4ec7",
+      "placeholders": [],
+      "length": 1505,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-chat-workspaces.body.compat-5fe5af10dc02",
+      "placeholders": [],
+      "length": 1563,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-editor.title",
+      "placeholders": [],
+      "length": 6,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-editor.body.compat-76063038a95d",
+      "placeholders": [],
+      "length": 1983,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-formatting-demo.body.compat-10f3abdfbbd8",
+      "placeholders": [],
+      "length": 1349,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-files-imps.title.compat-ba963ad7d9be",
+      "placeholders": [],
+      "length": 14,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-files-imps.body.compat-dc5792d9e5bd",
+      "placeholders": [],
+      "length": 1546,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-graph.title",
+      "placeholders": [],
+      "length": 5,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-graph.body.compat-9f2dec33b355",
+      "placeholders": [],
+      "length": 1575,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-memory-lore.body.compat-26319d6b9ace",
+      "placeholders": [],
+      "length": 1514,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-tasks.body.compat-0ebb48a52247",
+      "placeholders": [],
+      "length": 1377,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-settings-themes.body.compat-52bb1b006c5b",
+      "placeholders": [],
+      "length": 2075,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-recovery.body.compat-d1f14f7b85b9",
+      "placeholders": [],
+      "length": 1460,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-limits.body.compat-22e146872a45",
+      "placeholders": [],
+      "length": 1831,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-setup.title",
+      "placeholders": [],
+      "length": 19,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-setup.body",
+      "placeholders": [],
+      "length": 1568,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-agent-settings.title",
+      "placeholders": [],
+      "length": 29,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-agent-settings.body",
+      "placeholders": [],
+      "length": 1457,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-search-media.title",
+      "placeholders": [],
+      "length": 16,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-search-media.body",
+      "placeholders": [],
+      "length": 2443,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-desktop-host.title",
+      "placeholders": [],
+      "length": 32,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-desktop-host.body",
+      "placeholders": [],
+      "length": 1751,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-usage.title",
+      "placeholders": [],
+      "length": 15,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-usage.body",
+      "placeholders": [],
+      "length": 1794,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-wiki-recipes.title",
+      "placeholders": [],
+      "length": 12,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-wiki-recipes.body",
+      "placeholders": [],
+      "length": 1813,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-treehouse.title",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-treehouse.body",
+      "placeholders": [],
+      "length": 2807,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-workspace-hexes.title",
+      "placeholders": [],
+      "length": 15,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-workspace-hexes.body",
+      "placeholders": [],
+      "length": 1591,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-app-windows.title",
+      "placeholders": [],
+      "length": 26,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-app-windows.body",
+      "placeholders": [],
+      "length": 1328,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-source-editing.title",
+      "placeholders": [],
+      "length": 14,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-source-editing.body",
+      "placeholders": [],
+      "length": 2001,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-calendar-email.title",
+      "placeholders": [],
+      "length": 18,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-calendar-email.body",
+      "placeholders": [],
+      "length": 1837,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-compare-cookbook.title",
+      "placeholders": [],
+      "length": 20,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-compare-cookbook.body",
+      "placeholders": [],
+      "length": 1346,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-credits.title",
+      "placeholders": [],
+      "length": 31,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-credits.body",
+      "placeholders": [],
+      "length": 1170,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-journal.title",
+      "placeholders": [],
+      "length": 7,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-journal.body",
+      "placeholders": [],
+      "length": 1876,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-deliverables.title",
+      "placeholders": [],
+      "length": 12,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-deliverables.body",
+      "placeholders": [],
+      "length": 2921,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-buddy.title",
+      "placeholders": [],
+      "length": 5,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-buddy.body",
+      "placeholders": [],
+      "length": 492,
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-clankshop.title",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-clankshop.body",
+      "placeholders": [],
+      "length": 1375,
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.workspace.collections",
+      "placeholders": [],
+      "length": 21,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.an.active.folder.under.workspace.collections",
+      "placeholders": [],
+      "length": 52,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.navigation.is.unavailable.reopen.appearance.to.retry",
+      "placeholders": [],
+      "length": 60,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.journal.settings.are.unavailable.select.manage.journals",
+      "placeholders": [],
+      "length": 66,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.editor.panel.settings.are.unavailable.reopen.appearance",
+      "placeholders": [],
+      "length": 66,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.access.changed.open.the.applet.again",
+      "placeholders": [],
+      "length": 61,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.open.this.applet.open.it.again.to.retry",
+      "placeholders": [],
+      "length": 51,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.open.the.journal.select.journal.to.retry",
+      "placeholders": [],
+      "length": 52,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.memory.consolidation.interval.in.days",
+      "placeholders": [],
+      "length": 74,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sets.how.often.memery.automatically.consolidates.chat.records",
+      "placeholders": [],
+      "length": 62,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.memory.consolidation.interval.saved",
+      "placeholders": [],
+      "length": 41,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.note.in.folder",
+      "placeholders": [],
+      "length": 18,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.journal.page",
+      "placeholders": [],
+      "length": 16,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.journal.page.in.folder",
+      "placeholders": [],
+      "length": 26,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.journal",
+      "placeholders": [],
+      "length": 13,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.file.ellipsis",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.journal.page.ellipsis",
+      "placeholders": [],
+      "length": 17,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.note.ellipsis",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.from.template.ellipsis",
+      "placeholders": [],
+      "length": 18,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-home.title.compat-ee6bca83e1df",
+      "placeholders": [],
+      "length": 19,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-index.title",
+      "placeholders": [],
+      "length": 12,
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-index.body",
+      "placeholders": [],
+      "length": 1714,
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.code.graph",
+      "placeholders": [],
+      "length": 10,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rendered.source.comment.press.enter.or.choose.see.source.to.edit.raw.comment",
+      "placeholders": [],
+      "length": 77,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.inspect.processes",
+      "placeholders": [],
+      "length": 17,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.preset.f307af85",
+      "placeholders": [],
+      "length": 13,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.export.knowledge.snapshot",
+      "placeholders": [],
+      "length": 25,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reviewed.metadata",
+      "placeholders": [],
+      "length": 17,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tip.right.click.a.session.to.see.its.actions",
+      "placeholders": [],
+      "length": 46,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tip.long.press.a.session.to.see.its.actions",
+      "placeholders": [],
+      "length": 45,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.context.actions",
+      "placeholders": [],
+      "length": 15,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.see.source",
+      "placeholders": [],
+      "length": 10,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.link",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.make.editable.copy",
+      "placeholders": [],
+      "length": 18,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.captured.documentation.region.is.available",
+      "placeholders": [],
+      "length": 46,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.original.menu.target.changed.reopen.its.menu",
+      "placeholders": [],
+      "length": 50,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.context.menu.command.could.not.be.completed",
+      "placeholders": [],
+      "length": 48,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.selected.spelling.locally",
+      "placeholders": [],
+      "length": 31,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retry.spelling",
+      "placeholders": [],
+      "length": 14,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.spelling",
+      "placeholders": [],
+      "length": 8,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.cursor.above",
+      "placeholders": [],
+      "length": 16,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.cursor.below",
+      "placeholders": [],
+      "length": 16,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.keep.primary.selection",
+      "placeholders": [],
+      "length": 22,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.spelling.locally",
+      "placeholders": [],
+      "length": 22,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.selected.files",
+      "placeholders": [],
+      "length": 23,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.paste.into.this.folder",
+      "placeholders": [],
+      "length": 22,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.selected.items",
+      "placeholders": [],
+      "length": 19,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cut.selected.items",
+      "placeholders": [],
+      "length": 18,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archive.selected.items",
+      "placeholders": [],
+      "length": 22,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restore.selected.items",
+      "placeholders": [],
+      "length": 22,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.selected.items.to.favorites",
+      "placeholders": [],
+      "length": 31,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.selected.items.from.favorites",
+      "placeholders": [],
+      "length": 36,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.duplicate.selected.files",
+      "placeholders": [],
+      "length": 24,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clone.selected.documents",
+      "placeholders": [],
+      "length": 24,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.selected.documents",
+      "placeholders": [],
+      "length": 26,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.folder.to.favorites",
+      "placeholders": [],
+      "length": 23,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.folder.from.favorites",
+      "placeholders": [],
+      "length": 28,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.library.document",
+      "placeholders": [],
+      "length": 23,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.library.documents",
+      "placeholders": [],
+      "length": 25,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sort.by",
+      "placeholders": [],
+      "length": 7,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.view.mode",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.icon.size",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.transfer",
+      "placeholders": [],
+      "length": 8,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.with",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.media",
+      "placeholders": [],
+      "length": 5,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.c7f93783",
+      "placeholders": [],
+      "length": 6,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.action.is.available.for.the.selection",
+      "placeholders": [],
+      "length": 40,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.canvas",
+      "placeholders": [],
+      "length": 12,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fit.image",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.selection.to.layer",
+      "placeholders": [],
+      "length": 23,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.invert.selection",
+      "placeholders": [],
+      "length": 16,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.selected.pixels",
+      "placeholders": [],
+      "length": 22,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.layer",
+      "placeholders": [],
+      "length": 12,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.column.type",
+      "placeholders": [],
+      "length": 11,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.alignment",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sort.bec69036",
+      "placeholders": [],
+      "length": 4,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.task",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.course",
+      "placeholders": [],
+      "length": 11,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.module",
+      "placeholders": [],
+      "length": 11,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.quest",
+      "placeholders": [],
+      "length": 10,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.inspect.code.node",
+      "placeholders": [],
+      "length": 17,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.view",
+      "placeholders": [],
+      "length": 11,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.duplicate.view",
+      "placeholders": [],
+      "length": 14,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.cell",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.cell",
+      "placeholders": [],
+      "length": 10,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.cell",
+      "placeholders": [],
+      "length": 9,
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.source.note",
+      "placeholders": [],
+      "length": 16,
       "complexity": "label"
     }
   ]

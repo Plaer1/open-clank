@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
+use std::time::Duration;
+
 use bytes::Bytes;
 use lore_base::types::*;
 use serde::Deserialize;
@@ -13,11 +15,21 @@ use serde::Deserialize;
 pub struct EnvironmentConfig {
     pub endpoint: Option<Endpoint>,
     pub config: Option<EnvironmentServerConfig>,
+    pub oidc: Option<Oidc>,
 }
 
 impl EnvironmentConfig {
     pub fn max_query_batch(&self) -> Option<usize> {
         self.config.as_ref().and_then(|c| c.max_query_batch)
+    }
+
+    /// The compression mode the server states it prefers, as the number it sent. The codec that
+    /// number names is `lore_storage::CompressionMode`, which this crate does not depend on.
+    pub fn compression_mode(&self) -> Option<u32> {
+        self.config
+            .as_ref()
+            .and_then(|config| config.compression_mode.as_ref())
+            .map(ServerCompressionMode::as_u32)
     }
 
     /// Per-service endpoint URL. If the environment's `endpoint.storage_url`
@@ -83,15 +95,43 @@ pub struct Endpoint {
     pub revision_url: Option<String>,
     pub lock_url: Option<String>,
     pub notification_url: Option<String>,
+    /// User directory endpoint: resolves user IDs to display names and back.
+    /// Falls back to `auth_url` if empty.
+    pub user_url: Option<String>,
 }
 
+/// The OIDC provider a server advertises.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
+pub struct Oidc {
+    /// Issuer URL. The provider's endpoints come from its discovery document,
+    /// `<issuer>/.well-known/openid-configuration`.
+    pub issuer: String,
+    /// The public client ID presented to the provider.
+    pub client_id: String,
+    /// Default scopes to request at an interactive (device) login. Empty leaves the choice to the client.
+    pub scopes: Vec<String>,
+    /// Whether a client takes the OIDC path by default rather than `auth_url`.
+    pub preferred: bool,
+    /// Maps a partition to an RFC 8707 resource, `{id}` standing for the partition ID.
+    pub resource_template: Option<String>,
+    /// Maps a partition to a scope value, `{id}` standing for the partition ID.
+    pub scope_template: Option<String>,
+    /// The issuer of the RFC 8693 token-exchange endpoint that mints partition-scoped tokens.
+    pub token_exchange_issuer: Option<String>,
+    /// Scopes to request with the client credentials grant. Empty requests none.
+    pub client_credentials_scopes: Vec<String>,
+}
+
+/// A compression mode as it arrives from a server, held as the number it was sent as: the codec
+/// it names is `lore_storage::CompressionMode`, which this crate does not depend on.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(bound(deserialize = "'de: 'static"))]
-pub struct CompressionMode(u32);
+pub struct ServerCompressionMode(u32);
 
-impl CompressionMode {
+impl ServerCompressionMode {
     pub fn from_u32(value: u32) -> Self {
-        CompressionMode(value)
+        ServerCompressionMode(value)
     }
 
     pub fn as_u32(&self) -> u32 {
@@ -103,7 +143,7 @@ impl CompressionMode {
 #[serde(bound(deserialize = "'de: 'static"))]
 pub struct EnvironmentServerConfig {
     pub max_query_batch: Option<usize>,
-    pub compression_mode: Option<CompressionMode>,
+    pub compression_mode: Option<ServerCompressionMode>,
 }
 
 // ---------------------------------------------------------------------------
@@ -121,26 +161,55 @@ pub struct BranchPushResponse {
     pub message: Option<String>,
 }
 
-pub struct BranchQueryResponse {
-    /// Branch ID
+/// A branch as Lore Server records it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BranchRecord {
+    /// Branch identifier.
     pub id: BranchId,
-    /// Latest revision
+    /// Branch name.
+    pub name: String,
+    /// Category the branch belongs to.
+    pub category: String,
+    /// Identity that created the branch.
+    pub creator: String,
+    /// Creation time, in milliseconds since the Unix epoch.
+    pub created: u64,
+    /// Latest revision on the branch.
     pub latest: Hash,
-    /// Metadata hash
+    /// Hash of the branch's metadata blob.
     pub metadata: Hash,
-    /// Whether the branch has been deleted (name->id mapping removed)
+    /// Whether the branch is archived: the record remains, and its name no longer maps to it.
     pub deleted: bool,
+    /// Branch points the branch is built on, from its parent's to the root's.
+    pub stack: Vec<BranchPoint>,
 }
+
+/// The answer to a branch query: the branch's record.
+pub type BranchQueryResponse = BranchRecord;
 
 pub struct BranchListResponse {
     /// Branch list
-    pub list: Vec<BranchMetadata>,
+    pub list: Vec<BranchRecord>,
 }
 
 pub struct RevisionListResponse {
     pub items: Vec<RevisionItem>,
     pub next_revision: Hash,
     pub previous_revision: Hash,
+}
+
+impl RevisionListResponse {
+    /// The items from the revision `anchor` down to the oldest in the page.
+    ///
+    /// A page holds the anchor it was asked for, but not necessarily first: a page aligned on
+    /// a wider boundary also holds revisions newer than the anchor, which are not its
+    /// ancestors. Empty when the page does not hold `anchor`.
+    pub fn items_from(&self, anchor: Hash) -> &[RevisionItem] {
+        self.items
+            .iter()
+            .position(|item| item.signature == anchor)
+            .map_or(&[], |first| &self.items[first..])
+    }
 }
 
 #[derive(Debug)]
@@ -196,10 +265,32 @@ pub struct MetadataSetResult {
 /// Result of an interactive login session initiation.
 #[derive(Clone, Debug)]
 pub struct AuthSession {
-    /// Opaque session identifier for polling.
+    /// Opaque session identifier for polling. The device grant's
+    /// `device_code`.
     pub session_code: String,
-    /// URL the user should visit to authenticate.
+    /// URL the user should visit to authenticate. The device grant's
+    /// `verification_uri_complete`.
     pub login_url: String,
+    /// Code the user types at `login_url` from another machine. Empty when
+    /// the backend embeds it in `login_url` and offers no other entry.
+    pub user_code: String,
+    /// Minimum time between two polls of the session.
+    pub interval: Duration,
+    /// How long the session stays open for approval, counted from when it
+    /// was started.
+    pub expires_in: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub enum AuthSessionPoll {
+    /// The user has not approved the login yet. Poll again after the
+    /// session's `interval`.
+    Pending,
+    /// The user has not approved the login yet, and the backend wants a
+    /// longer gap before the next poll than the session's `interval`.
+    SlowDown,
+    /// The user approved the login and the backend issued a token.
+    Complete(AuthenticationToken),
 }
 
 /// Authentication token with user identity metadata.
@@ -224,11 +315,17 @@ pub struct AuthenticationToken {
     /// without re-authenticating. `None` if the auth backend does not support
     /// refresh. Consumed on use -- the next refresh returns a new one.
     pub refresh_token: Option<String>,
+    /// When `refresh_token` stops working, in milliseconds since the UNIX epoch. 0
+    /// if there is no refresh token, or if the provider did not give a deadline.
+    pub refresh_expires_ms: u64,
+    /// The scope the backend granted, space-delimited as RFC 6749 §3.3 has
+    /// it. `None` when the backend reports no scope.
+    pub scope: Option<String>,
 }
 
 /// Authorization token scoped to a specific resource.
 ///
-/// Returned from `exchange_for_repository` or `exchange_for_custom_resource`.
+/// Returned from `exchange_for_repository` or `exchange_for_custom_resources`.
 /// Shorter-lived than the authentication token and re-obtained via exchange
 /// when expired.
 #[derive(Clone, Debug)]
@@ -248,75 +345,4 @@ pub struct ResolvedUser {
     pub user_id: String,
     /// Human-readable display name.
     pub user_name: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const FALLBACK: &str = "grpc://fallback.example:1234";
-
-    fn env_with(endpoint: Endpoint) -> EnvironmentConfig {
-        EnvironmentConfig {
-            endpoint: Some(endpoint),
-            config: None,
-        }
-    }
-
-    #[test]
-    fn service_url_returns_override_when_set() {
-        let env = env_with(Endpoint {
-            storage_url: Some("quic://storage.example:7000".into()),
-            ..Default::default()
-        });
-        assert_eq!(env.storage_url(FALLBACK), "quic://storage.example:7000");
-    }
-
-    #[test]
-    fn service_url_falls_back_when_field_is_none() {
-        let env = env_with(Endpoint::default());
-        assert_eq!(env.storage_url(FALLBACK), FALLBACK);
-        assert_eq!(env.revision_url(FALLBACK), FALLBACK);
-        assert_eq!(env.lock_url(FALLBACK), FALLBACK);
-        assert_eq!(env.repository_url(FALLBACK), FALLBACK);
-        assert_eq!(env.notification_url(FALLBACK), FALLBACK);
-    }
-
-    #[test]
-    fn service_url_falls_back_when_field_is_empty_string() {
-        // An empty Option<String> from proto decoding must behave identically
-        // to None — the field is "unset."
-        let env = env_with(Endpoint {
-            storage_url: Some(String::new()),
-            revision_url: Some(String::new()),
-            ..Default::default()
-        });
-        assert_eq!(env.storage_url(FALLBACK), FALLBACK);
-        assert_eq!(env.revision_url(FALLBACK), FALLBACK);
-    }
-
-    #[test]
-    fn service_url_falls_back_when_endpoint_section_missing() {
-        let env = EnvironmentConfig {
-            endpoint: None,
-            config: None,
-        };
-        assert_eq!(env.storage_url(FALLBACK), FALLBACK);
-        assert_eq!(env.repository_url(FALLBACK), FALLBACK);
-    }
-
-    #[test]
-    fn per_service_overrides_are_independent() {
-        // Only some services have overrides; the others must fall back.
-        let env = env_with(Endpoint {
-            storage_url: Some("quic://storage.example:7000".into()),
-            lock_url: Some("grpc://lock.example:8000".into()),
-            ..Default::default()
-        });
-        assert_eq!(env.storage_url(FALLBACK), "quic://storage.example:7000");
-        assert_eq!(env.lock_url(FALLBACK), "grpc://lock.example:8000");
-        assert_eq!(env.revision_url(FALLBACK), FALLBACK);
-        assert_eq!(env.repository_url(FALLBACK), FALLBACK);
-        assert_eq!(env.notification_url(FALLBACK), FALLBACK);
-    }
 }

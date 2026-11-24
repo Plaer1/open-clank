@@ -6,9 +6,21 @@ publish = false
 
 [lib]
 name = "lore_base"
+test = false
+
+# Writes the build version into finished artifacts; see src/version.rs.
+[[bin]]
+name = "lore-stamp"
+path = "src/bin/lore-stamp.rs"
 
 [features]
 trace_log = []
+# The shared test temp-directory helper in src/test_util.rs. Crates whose tests
+# need scratch space on disk enable it from their dev-dependencies, so it stays
+# out of every normal build.
+test-util = ["dep:tempfile"]
+# Tells build.rs to compile the rpmalloc C code with -mcpu=neoverse-512tvb.
+neoverse-512tvb = []
 
 [dependencies]
 # allocator
@@ -26,10 +38,16 @@ thiserror = { workspace = true }
 lore-error-set = { workspace = true }
 
 # types
+bitcode = { workspace = true }
 bitflags = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+# Built only when `test-util` is on, so it stays out of normal builds. It is a
+# normal optional dependency rather than a dev-dependency because a dependent
+# enabling the feature compiles lore-base normally, and a normal build cannot see
+# dev-dependencies.
+tempfile = { workspace = true, optional = true }
 serde = { workspace = true }
 uuid = { workspace = true, features = ["zerocopy"] }
 
@@ -41,16 +59,24 @@ lore-io = { workspace = true }
 pin-project = { workspace = true }
 tokio = { workspace = true }
 
+# tests
+lore-macro = { workspace = true }
+
 # fs
 [target.'cfg(target_family = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_ProjectedFileSystem", "Win32_Storage_FileSystem", "Win32_System_Diagnostics", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_Security"] }
 
 [dev-dependencies]
-# The non-self-describing format the identifier types must round-trip through.
-bitcode = { workspace = true }
+# The crate's tests, the unit tests and the lore-stamp tests included, are built against the
+# library as other crates see it, without the `test` cfg, so they reach test_util through the feature.
+lore-base = { path = ".", features = ["test-util"] }
+# Its serde integration: the non-self-describing format the identifier types' serde impls must
+# round-trip through.
+bitcode = { workspace = true, features = ["serde"] }
 serde_json = { workspace = true, features = ["std"] }
 
 [build-dependencies]
-anyhow = { workspace = true }
 cc = "1.2.32"
-vergen = { workspace = true }
+
+[lints]
+workspace = true

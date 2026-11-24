@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-binary = os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN")
+binary = os.environ.get("OPEN_CLANK_TEST_MEMERY_WORKER_BIN")
 expected = os.environ.get("OPENCLANK_S04_NATIVE_SHA256")
 if not binary or not expected:
     pytest.skip("Explicit matching S04 s03-fixtures binary and SHA required", allow_module_level=True)
@@ -21,7 +21,7 @@ from tests.test_code_query_root_transport import _assert_isolated_startup
 
 _assert_isolated_startup()
 from tests import test_code_index_lifecycle as lifecycle
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_provider import MemoryRequestRejectedError
 from src.openclank.code_index_settings import (
     THREADS_KEY, configured, prepare_settings, readback, validate_status,
@@ -104,7 +104,7 @@ async def test_actual_saved_limit_restores_on_explicit_owner_restart_without_ind
         assert pending["native_status"] == "unavailable" and pending["effective"] is None
         assert provider._owner_task is None or provider._owner_task.done()
         # A deliberate test-owned restart, not Settings GET or an automatic watchdog.
-        provider = FrankenmemoryProvider(command=binary, env=environment)
+        provider = MemeryProvider(command=binary, env=environment)
         await provider.initialize()
         restored = await readback(provider, isolated_settings.load_settings())
         assert restored["status"] == "applied" and restored["effective"] == desired

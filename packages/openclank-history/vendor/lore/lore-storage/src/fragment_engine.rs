@@ -27,6 +27,7 @@ use crate::types::Fragment;
 use crate::types::FragmentReference;
 use crate::types::Partition;
 use crate::write::FusedPublish;
+use crate::write::Payload;
 use crate::write::StoreResult;
 use crate::write::store_fragment;
 use crate::write::store_fragment_publishing;
@@ -36,6 +37,7 @@ use crate::write_tracker::WriteContext;
 ///
 /// `cut_size` comes from [`WriteOptions::cut_size`], which is where the bound on a fixed chunk
 /// size is applied; this cuts at whatever it is given.
+#[lore_macro::test_pub]
 fn chunk_boundaries(
     buffer: Bytes,
     cut_size: Option<usize>,
@@ -66,7 +68,7 @@ fn chunk_boundaries(
 /// fragment list. Returns the root address.
 ///
 /// When the entire buffer fits in a single chunk, the single-fragment fast path
-/// is used and no fragment list is created. In `hash_only` mode, fragments are
+/// is used and no fragment list is created. Under [`WriteOptions::hash_only`], fragments are
 /// not actually stored — only their hashes are computed.
 ///
 /// `publish` asks for a `KeyType::Resolve` mapping to ride along with the upload of the tree's
@@ -79,7 +81,6 @@ pub async fn write_fragmented(
     context: Context,
     buffer: Bytes,
     flags: WriteOptions,
-    hash_only: bool,
     remote_session: Option<Arc<StorageSession>>,
     writes: WriteContext,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -104,7 +105,7 @@ pub async fn write_fragmented(
             size_content: chunk_size as u64,
         };
 
-        let chunk_permit = if hash_only {
+        let chunk_permit = if flags.hash_only {
             None
         } else {
             let needed = crate::concurrency::fragment_permit_count(chunk_size) as usize;
@@ -116,13 +117,17 @@ pub async fn write_fragmented(
 
         if chunk_offset == 0 && chunk_size == size {
             let hash = hash::hash_slice(chunk_buffer.as_ref());
+            if flags.hash_only {
+                return Ok((Address { context, hash }, false, false));
+            }
+
             let result = store_fragment_publishing(
                 store,
                 partition,
                 Address { context, hash },
                 fragment,
-                chunk_buffer,
-                flags.local_cache_priority,
+                Payload::Shared(chunk_buffer),
+                flags.cache_local(),
                 remote_session,
                 writes,
                 chunk_permit,
@@ -138,7 +143,7 @@ pub async fn write_fragmented(
         let task_writes = writes.clone();
         lore_base::lore_spawn!(tasks, async move {
             let hash = hash::hash_slice(chunk_buffer.as_ref());
-            let (chunk_address, chunk_local, chunk_remote) = if hash_only {
+            let (chunk_address, chunk_local, chunk_remote) = if flags.hash_only {
                 (Address { context, hash }, false, false)
             } else {
                 let result = store_fragment(
@@ -147,7 +152,7 @@ pub async fn write_fragmented(
                     Address { context, hash },
                     fragment,
                     chunk_buffer,
-                    flags.local_cache_priority,
+                    flags.cache_local(),
                     session,
                     task_writes,
                     chunk_permit,
@@ -177,7 +182,6 @@ pub async fn write_fragmented(
         context,
         size,
         flags,
-        hash_only,
         remote_session,
         writes,
         publish,
@@ -212,15 +216,15 @@ pub async fn write_fragmented(
 /// `publish` fuses a `KeyType::Resolve` mapping into the upload of the tree's top-level fragment,
 /// as it does in [`write_fragmented`]: publishing a file costs no round trip beyond the ones its
 /// content already costs.
+#[lore_macro::test_pub]
 #[allow(clippy::too_many_arguments)]
-pub async fn write_fragmented_from_file(
+pub(crate) async fn write_fragmented_from_file(
     store: Arc<dyn ImmutableStore>,
     partition: Partition,
     context: Context,
-    file: lore_io::IoFile,
+    handle: crate::content::ContentHandle,
     size: usize,
     flags: WriteOptions,
-    hash_only: bool,
     remote_session: Option<Arc<StorageSession>>,
     writes: WriteContext,
     publish: Option<Arc<FusedPublish>>,
@@ -233,9 +237,9 @@ pub async fn write_fragmented_from_file(
 
     let file_size = size as u64;
     let mut chunker = if let Some(step) = flags.cut_size() {
-        FileChunker::fixed_size(file, file_size, step).await
+        FileChunker::fixed_size(handle, file_size, step).await
     } else {
-        FileChunker::content_defined(file, file_size).await
+        FileChunker::content_defined(handle, file_size).await
     };
 
     // The chunk the chunker pre-paid, as a slot so its use is tracked rather than inferred.
@@ -267,7 +271,7 @@ pub async fn write_fragmented_from_file(
         let task_writes = writes.clone();
         lore_base::lore_spawn!(tasks, async move {
             let hash = hash::hash_slice(chunk_buffer.as_ref());
-            let (chunk_address, chunk_local, chunk_remote) = if hash_only {
+            let (chunk_address, chunk_local, chunk_remote) = if flags.hash_only {
                 (Address { context, hash }, false, false)
             } else {
                 let result = store_fragment(
@@ -276,7 +280,7 @@ pub async fn write_fragmented_from_file(
                     Address { context, hash },
                     fragment,
                     chunk_buffer,
-                    flags.local_cache_priority,
+                    flags.cache_local(),
                     session,
                     task_writes,
                     chunk_budget,
@@ -308,7 +312,6 @@ pub async fn write_fragmented_from_file(
         context,
         size,
         flags,
-        hash_only,
         remote_session,
         writes,
         publish,
@@ -380,7 +383,6 @@ async fn write_chunk_list(
     context: Context,
     size: usize,
     flags: WriteOptions,
-    hash_only: bool,
     remote_session: Option<Arc<StorageSession>>,
     writes: WriteContext,
     publish: Option<Arc<FusedPublish>>,
@@ -424,7 +426,6 @@ async fn write_chunk_list(
         list_buffer.freeze(),
         size,
         flags,
-        hash_only,
         remote_session,
         writes,
         list_permit,
@@ -461,6 +462,18 @@ fn record_published(publish: Option<&Arc<FusedPublish>>, result: &StoreResult) {
     }
 }
 
+/// The size of the next chunk of a fragment list with `remaining` bytes of references left: at most
+/// `max_chunk_size`, and one reference less when a full chunk would leave a single reference. A
+/// fragment list holds at least two references, so the last chunk is never one reference.
+fn list_chunk_size(remaining: usize, max_chunk_size: usize) -> usize {
+    let reference_size = std::mem::size_of::<FragmentReference>();
+    if remaining == max_chunk_size + reference_size {
+        max_chunk_size - reference_size
+    } else {
+        min(remaining, max_chunk_size)
+    }
+}
+
 /// Helper function to write a list of fragment references
 ///
 /// `permit` covers `buffer`, which the caller reserved before allocating it. It is reused for a
@@ -483,7 +496,6 @@ async fn write_fragmentlist_impl(
     buffer: Bytes,
     content_size: usize,
     flags: WriteOptions,
-    hash_only: bool,
     remote_session: Option<Arc<StorageSession>>,
     writes: WriteContext,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -498,7 +510,7 @@ async fn write_fragmentlist_impl(
             size_payload: size as u32,
             size_content: content_size as u64,
         };
-        if hash_only {
+        if flags.hash_only {
             Ok((Address { context, hash }, false, false))
         } else {
             let permit = match permit {
@@ -510,7 +522,7 @@ async fn write_fragmentlist_impl(
                 partition,
                 Address { context, hash },
                 fragment,
-                buffer,
+                Payload::Shared(buffer),
                 true, /* Fragment lists have local priority */
                 remote_session,
                 writes,
@@ -537,7 +549,7 @@ async fn write_fragmentlist_impl(
         let fragment_references = buffer.as_type_slice::<FragmentReference>();
 
         while chunk_offset < size {
-            let chunk_size = min(size - chunk_offset, max_chunk_size);
+            let chunk_size = list_chunk_size(size - chunk_offset, max_chunk_size);
             let chunk_buffer = buffer.slice(chunk_offset..(chunk_offset + chunk_size));
 
             let chunk_fragment_ref_index = chunk_offset / std::mem::size_of::<FragmentReference>();
@@ -557,7 +569,7 @@ async fn write_fragmentlist_impl(
                 size_content: chunk_content_size as u64,
             };
 
-            let chunk_permit = if hash_only {
+            let chunk_permit = if flags.hash_only {
                 None
             } else {
                 let needed = crate::concurrency::fragment_permit_count(chunk_size) as usize;
@@ -572,7 +584,7 @@ async fn write_fragmentlist_impl(
             let task_writes = writes.clone();
             lore_base::lore_spawn!(tasks, async move {
                 let hash = hash::hash_slice(chunk_buffer.as_ref());
-                let (chunk_address, chunk_local, chunk_remote) = if hash_only {
+                let (chunk_address, chunk_local, chunk_remote) = if flags.hash_only {
                     (Address { context, hash }, false, false)
                 } else {
                     let permit = chunk_permit;
@@ -582,7 +594,7 @@ async fn write_fragmentlist_impl(
                         Address { context, hash },
                         fragment,
                         chunk_buffer,
-                        flags.local_cache_priority,
+                        flags.cache_local(),
                         session,
                         task_writes,
                         permit,
@@ -649,7 +661,6 @@ async fn write_fragmentlist_impl(
             buffer,
             content_size,
             flags,
-            hash_only,
             remote_session,
             writes,
             next_permit,
@@ -674,7 +685,6 @@ pub fn write_fragmentlist(
     buffer: Bytes,
     content_size: usize,
     flags: WriteOptions,
-    hash_only: bool,
     remote_session: Option<Arc<StorageSession>>,
     writes: WriteContext,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -689,144 +699,9 @@ pub fn write_fragmentlist(
         buffer,
         content_size,
         flags,
-        hash_only,
         remote_session,
         writes,
         permit,
         publish,
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-
-    use super::*;
-
-    /// Make a buffer of random bytes so chunking has to actually cut it.
-    fn mixed_pattern_buffer(size: usize) -> Bytes {
-        use rand::Rng;
-        let mut data = vec![0u8; size];
-        rand::rng().fill(&mut data[..]);
-        Bytes::from(data)
-    }
-
-    /// The builder clamps, but `fixed_size_chunk` is `pub`, so a struct literal reaches the
-    /// cutting paths without passing through it. Both paths ask `cut_size`, which is why an
-    /// oversized request cannot produce a leaf chunk that no store would accept.
-    #[tokio::test]
-    async fn an_oversized_fixed_chunk_request_is_bounded_on_both_paths() {
-        let flags = WriteOptions {
-            fixed_size_chunk: 4 * FRAGMENT_SIZE_THRESHOLD,
-            ..WriteOptions::default()
-        };
-        assert_eq!(flags.cut_size(), Some(FRAGMENT_SIZE_THRESHOLD));
-
-        let buffer = mixed_pattern_buffer(3 * FRAGMENT_SIZE_THRESHOLD);
-        let actual = chunk_boundaries(buffer.clone(), flags.cut_size()).expect("chunking succeeds");
-
-        assert!(
-            actual
-                .iter()
-                .all(|&(start, end)| end - start <= FRAGMENT_SIZE_THRESHOLD),
-            "a leaf chunk above the threshold is unstorable and reads back as a sublist"
-        );
-        assert_eq!(actual.first().copied(), Some((0, FRAGMENT_SIZE_THRESHOLD)));
-        assert_eq!(actual.last().unwrap().1, buffer.len());
-    }
-
-    /// Content-defined chunking is what a zero request means, not a zero-length cut.
-    #[tokio::test]
-    async fn a_zero_fixed_chunk_request_means_content_defined() {
-        assert_eq!(WriteOptions::default().cut_size(), None);
-    }
-
-    #[tokio::test]
-    async fn fastcdc_batch_handles_buffer_smaller_than_min_chunk() {
-        // Tiny buffer — should be one chunk covering the whole thing.
-        let buffer = mixed_pattern_buffer(1024);
-        let actual = chunk_boundaries(buffer.clone(), None).expect("chunking succeeds");
-        assert_eq!(actual, vec![(0, buffer.len())]);
-    }
-
-    /// A file holding less than the size it was measured at is the truncation race: the size
-    /// comes from `metadata()`, taken before the chunker ever opens the file. The chunker reads
-    /// exactly the length that size promises, so the read itself rejects the file. Either way it
-    /// has to fail rather than describe content that was never written, since zero-length
-    /// content is the zero hash and no fragment list stands in for nothing.
-    #[tokio::test]
-    async fn a_file_holding_less_than_its_measured_size_is_rejected() {
-        let dir = crate::test_util::TempDir::new("lore-storage-truncated-");
-        let path = std::path::Path::new(dir.as_ref()).join("truncated");
-        std::fs::write(&path, b"").expect("create empty file");
-        let (file, _) = crate::chunker::open_read(&path).await.expect("open file");
-        let store = crate::local::immutable_store::LocalImmutableStore::new(
-            Some(std::path::PathBuf::from(dir.as_ref())),
-            crate::local::immutable_store::ImmutableStoreSettings::default(),
-        )
-        .await
-        .expect("create test store");
-
-        let err = write_fragmented_from_file(
-            store,
-            Partition::from([1u8; 16]),
-            Context::from([1u8; 16]),
-            file,
-            4 * FRAGMENT_SIZE_THRESHOLD,
-            WriteOptions::default(),
-            true,
-            None,
-            crate::write_tracker::WriteContext::none(),
-            None,
-        )
-        .await
-        .expect_err("a fragment list with no entries must not be written");
-
-        assert!(
-            format!("{err}").contains("file ended before the requested read length"),
-            "unexpected failure: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn fastcdc_batch_handles_empty_buffer() {
-        let buffer = Bytes::new();
-        let actual = chunk_boundaries(buffer, None).expect("chunking succeeds");
-        assert!(actual.is_empty());
-    }
-
-    #[tokio::test]
-    async fn fastcdc_batch_handles_pathological_all_zero_buffer() {
-        // All-zero input — the rolling hash never matches, but the split should still be clean.
-        let buffer = Bytes::from(vec![0u8; 512 * 1024]);
-        let actual = chunk_boundaries(buffer.clone(), None).expect("chunking succeeds");
-        let reconstructed_size: usize = actual.iter().map(|(s, e)| e - s).sum();
-        assert_eq!(reconstructed_size, buffer.len());
-        assert!(actual.iter().all(|&(s, e)| s < e));
-        assert_eq!(actual.first().copied(), Some((0, actual[0].1)));
-        assert_eq!(actual.last().unwrap().1, buffer.len());
-    }
-
-    #[tokio::test]
-    async fn fixed_size_chunking_covers_whole_buffer() {
-        let buffer = mixed_pattern_buffer(10 * 1024 + 17);
-        let step = 1024;
-        let actual = chunk_boundaries(buffer.clone(), Some(step)).expect("chunking succeeds");
-
-        let expected: Vec<(usize, usize)> = (0..buffer.len())
-            .step_by(step)
-            .map(|o| (o, (o + step).min(buffer.len())))
-            .collect();
-        assert_eq!(actual, expected);
-
-        let reconstructed_size: usize = actual.iter().map(|(s, e)| e - s).sum();
-        assert_eq!(reconstructed_size, buffer.len());
-    }
-
-    #[tokio::test]
-    async fn fixed_size_chunking_handles_buffer_smaller_than_step() {
-        let buffer = Bytes::from(vec![1u8; 100]);
-        let actual = chunk_boundaries(buffer.clone(), Some(1024)).expect("chunking succeeds");
-        assert_eq!(actual, vec![(0, buffer.len())]);
-    }
 }

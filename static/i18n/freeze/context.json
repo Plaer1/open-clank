@@ -615,71 +615,259 @@
     {
       "key": "docs.openclank-docs-accounts-models.body",
       "locations": [
-        "src/openclank/official_docs.py:154"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-accounts-models body"
     },
     {
+      "key": "docs.openclank-docs-accounts-models.body.compat-7024ed5d4ec7",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-accounts-models.title",
       "locations": [
-        "src/openclank/official_docs.py:154"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-accounts-models title"
     },
     {
+      "key": "docs.openclank-docs-agent-settings.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-agent-settings body"
+    },
+    {
+      "key": "docs.openclank-docs-agent-settings.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-agent-settings title"
+    },
+    {
+      "key": "docs.openclank-docs-app-windows.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-app-windows body"
+    },
+    {
+      "key": "docs.openclank-docs-app-windows.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-app-windows title"
+    },
+    {
+      "key": "docs.openclank-docs-buddy.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-buddy body"
+    },
+    {
+      "key": "docs.openclank-docs-buddy.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-buddy title"
+    },
+    {
+      "key": "docs.openclank-docs-calendar-email.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-calendar-email body"
+    },
+    {
+      "key": "docs.openclank-docs-calendar-email.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-calendar-email title"
+    },
+    {
       "key": "docs.openclank-docs-chat-workspaces.body",
       "locations": [
-        "src/openclank/official_docs.py:203"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-chat-workspaces body"
     },
     {
+      "key": "docs.openclank-docs-chat-workspaces.body.compat-5fe5af10dc02",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-chat-workspaces.title",
       "locations": [
-        "src/openclank/official_docs.py:203"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-chat-workspaces title"
     },
     {
+      "key": "docs.openclank-docs-clankshop.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-clankshop body"
+    },
+    {
+      "key": "docs.openclank-docs-clankshop.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-clankshop title"
+    },
+    {
+      "key": "docs.openclank-docs-compare-cookbook.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-compare-cookbook body"
+    },
+    {
+      "key": "docs.openclank-docs-compare-cookbook.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-compare-cookbook title"
+    },
+    {
+      "key": "docs.openclank-docs-credits.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-credits body"
+    },
+    {
+      "key": "docs.openclank-docs-credits.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-credits title"
+    },
+    {
+      "key": "docs.openclank-docs-deliverables.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-deliverables body"
+    },
+    {
+      "key": "docs.openclank-docs-deliverables.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-deliverables title"
+    },
+    {
+      "key": "docs.openclank-docs-desktop-host.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-desktop-host body"
+    },
+    {
+      "key": "docs.openclank-docs-desktop-host.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-desktop-host title"
+    },
+    {
       "key": "docs.openclank-docs-editor.body",
       "locations": [
-        "src/openclank/official_docs.py:252"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-editor body"
     },
     {
+      "key": "docs.openclank-docs-editor.body.compat-76063038a95d",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
+      "key": "docs.openclank-docs-editor.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-editor title"
+    },
+    {
       "key": "docs.openclank-docs-files-imps.body",
       "locations": [
-        "src/openclank/official_docs.py:391"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-files-imps body"
     },
     {
+      "key": "docs.openclank-docs-files-imps.body.compat-dc5792d9e5bd",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-files-imps.title",
       "locations": [
-        "src/openclank/official_docs.py:391"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-files-imps title"
     },
     {
+      "key": "docs.openclank-docs-files-imps.title.compat-ba963ad7d9be",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-formatting-demo.body",
       "locations": [
-        "src/openclank/official_docs.py:311"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-formatting-demo body"
     },
     {
+      "key": "docs.openclank-docs-formatting-demo.body.compat-10f3abdfbbd8",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-formatting-demo.title",
       "locations": [
-        "src/openclank/official_docs.py:311"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-formatting-demo title"
@@ -687,15 +875,21 @@
     {
       "key": "docs.openclank-docs-getting-work-done.body",
       "locations": [
-        "src/openclank/official_docs.py:105"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-getting-work-done body"
     },
     {
+      "key": "docs.openclank-docs-getting-work-done.body.compat-d63669914d75",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-getting-work-done.title",
       "locations": [
-        "src/openclank/official_docs.py:105"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-getting-work-done title"
@@ -703,39 +897,103 @@
     {
       "key": "docs.openclank-docs-graph.body",
       "locations": [
-        "src/openclank/official_docs.py:439"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-graph body"
     },
     {
+      "key": "docs.openclank-docs-graph.body.compat-9f2dec33b355",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
+      "key": "docs.openclank-docs-graph.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-graph title"
+    },
+    {
       "key": "docs.openclank-docs-home.body",
       "locations": [
-        "src/openclank/official_docs.py:61"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-home body"
     },
     {
+      "key": "docs.openclank-docs-home.body.compat-e5114082a798",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-home.title",
       "locations": [
-        "src/openclank/official_docs.py:61"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-home title"
     },
     {
+      "key": "docs.openclank-docs-home.title.compat-ee6bca83e1df",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
+      "key": "docs.openclank-docs-index.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-index body"
+    },
+    {
+      "key": "docs.openclank-docs-index.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-index title"
+    },
+    {
+      "key": "docs.openclank-docs-journal.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-journal body"
+    },
+    {
+      "key": "docs.openclank-docs-journal.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-journal title"
+    },
+    {
       "key": "docs.openclank-docs-limits.body",
       "locations": [
-        "src/openclank/official_docs.py:687"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-limits body"
     },
     {
+      "key": "docs.openclank-docs-limits.body.compat-22e146872a45",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-limits.title",
       "locations": [
-        "src/openclank/official_docs.py:687"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-limits title"
@@ -743,15 +1001,21 @@
     {
       "key": "docs.openclank-docs-memory-lore.body",
       "locations": [
-        "src/openclank/official_docs.py:487"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-memory-lore body"
     },
     {
+      "key": "docs.openclank-docs-memory-lore.body.compat-26319d6b9ace",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-memory-lore.title",
       "locations": [
-        "src/openclank/official_docs.py:487"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-memory-lore title"
@@ -759,50 +1023,180 @@
     {
       "key": "docs.openclank-docs-recovery.body",
       "locations": [
-        "src/openclank/official_docs.py:638"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-recovery body"
     },
     {
+      "key": "docs.openclank-docs-recovery.body.compat-d1f14f7b85b9",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-recovery.title",
       "locations": [
-        "src/openclank/official_docs.py:638"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-recovery title"
     },
     {
+      "key": "docs.openclank-docs-search-media.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-search-media body"
+    },
+    {
+      "key": "docs.openclank-docs-search-media.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-search-media title"
+    },
+    {
       "key": "docs.openclank-docs-settings-themes.body",
       "locations": [
-        "src/openclank/official_docs.py:579"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-settings-themes body"
     },
     {
+      "key": "docs.openclank-docs-settings-themes.body.compat-52bb1b006c5b",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-settings-themes.title",
       "locations": [
-        "src/openclank/official_docs.py:579"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-settings-themes title"
     },
     {
+      "key": "docs.openclank-docs-setup.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-setup body"
+    },
+    {
+      "key": "docs.openclank-docs-setup.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-setup title"
+    },
+    {
+      "key": "docs.openclank-docs-source-editing.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-source-editing body"
+    },
+    {
+      "key": "docs.openclank-docs-source-editing.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-source-editing title"
+    },
+    {
       "key": "docs.openclank-docs-tasks.body",
       "locations": [
-        "src/openclank/official_docs.py:535"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-prose",
       "context": "structured extraction: docs openclank-docs-tasks body"
     },
     {
+      "key": "docs.openclank-docs-tasks.body.compat-0ebb48a52247",
+      "locations": [],
+      "kind": "compatibility",
+      "context": "previous manual wording and translations retained outside the live guide"
+    },
+    {
       "key": "docs.openclank-docs-tasks.title",
       "locations": [
-        "src/openclank/official_docs.py:535"
+        "src/openclank/official_docs_content.py"
       ],
       "kind": "structured-label",
       "context": "structured extraction: docs openclank-docs-tasks title"
+    },
+    {
+      "key": "docs.openclank-docs-treehouse.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-treehouse body"
+    },
+    {
+      "key": "docs.openclank-docs-treehouse.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-treehouse title"
+    },
+    {
+      "key": "docs.openclank-docs-usage.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-usage body"
+    },
+    {
+      "key": "docs.openclank-docs-usage.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-usage title"
+    },
+    {
+      "key": "docs.openclank-docs-wiki-recipes.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-wiki-recipes body"
+    },
+    {
+      "key": "docs.openclank-docs-wiki-recipes.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-wiki-recipes title"
+    },
+    {
+      "key": "docs.openclank-docs-workspace-hexes.body",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-prose",
+      "context": "structured extraction: docs openclank-docs-workspace-hexes body"
+    },
+    {
+      "key": "docs.openclank-docs-workspace-hexes.title",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "kind": "structured-label",
+      "context": "structured extraction: docs openclank-docs-workspace-hexes title"
     },
     {
       "key": "treehouse.class.house-collaborate.description",
@@ -4088,6 +4482,22 @@
       "context": ""
     },
     {
+      "key": "ui.add.cursor.above",
+      "locations": [
+        "static/js/custom-context-menu.js:1010"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
+      "key": "ui.add.cursor.below",
+      "locations": [
+        "static/js/custom-context-menu.js:1011"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.add.directory",
       "locations": [
         "static/js/admin.js:1124"
@@ -4191,6 +4601,14 @@
       ],
       "kind": "server-string",
       "context": ""
+    },
+    {
+      "key": "ui.add.folder.to.favorites",
+      "locations": [
+        "static/js/files.js:8133"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.add.gpu.value.value",
@@ -4457,6 +4875,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.add.selected.items.to.favorites",
+      "locations": [
+        "static/js/files.js:8062"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.add.selection.to.the.inpaint.mask",
@@ -5761,6 +6187,14 @@
       "locations": [],
       "kind": "compatibility",
       "context": "retained catalog key absent from current first-party census"
+    },
+    {
+      "key": "ui.alignment",
+      "locations": [
+        "static/js/copal/tableModel.js:1514"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.all",
@@ -7107,6 +7541,14 @@
       ],
       "kind": "html-attribute",
       "context": ""
+    },
+    {
+      "key": "ui.archive.selected.items",
+      "locations": [
+        "static/js/files.js:8061"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.archive.value",
@@ -11309,6 +11751,22 @@
       "context": ""
     },
     {
+      "key": "ui.chat.memory.consolidation.interval.in.days",
+      "locations": [
+        "static/index.html:659"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
+      "key": "ui.chat.memory.consolidation.interval.saved",
+      "locations": [
+        "static/js/memory.js:518"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
       "key": "ui.chat.mode.read.only.tools",
       "locations": [
         "static/app.js:1856"
@@ -11502,6 +11960,14 @@
       "context": ""
     },
     {
+      "key": "ui.check.selected.spelling.locally",
+      "locations": [
+        "static/js/custom-context-menu.js:299"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.check.settings.tool.permissions",
       "locations": [
         "static/treehouse-troubleshooting.html:113"
@@ -11516,6 +11982,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.check.spelling.locally",
+      "locations": [
+        "static/js/custom-context-menu.js:1013"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.check.ssh.connection",
@@ -11777,6 +12251,14 @@
       "context": ""
     },
     {
+      "key": "ui.choose.an.active.folder.under.workspace.collections",
+      "locations": [
+        "static/js/files.js"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
       "key": "ui.choose.an.authorized.location.then.select.one.file",
       "locations": [
         "static/js/contextualHelp.js:12"
@@ -11839,6 +12321,14 @@
       ],
       "kind": "server-string",
       "context": ""
+    },
+    {
+      "key": "ui.choose.c7f93783",
+      "locations": [
+        "static/js/files.js:7901"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.choose.cached.adapter",
@@ -12308,6 +12798,14 @@
       ],
       "kind": "js-template-html-attribute",
       "context": ""
+    },
+    {
+      "key": "ui.clear.cell",
+      "locations": [
+        "static/js/copal/sheetView.js:199"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.clear.chat.display",
@@ -12865,6 +13363,14 @@
       "context": ""
     },
     {
+      "key": "ui.clone.selected.documents",
+      "locations": [
+        "static/js/files.js:8064"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.clone.source.set",
       "locations": [
         "static/js/editor/tools/clone.js:53"
@@ -13053,6 +13559,17 @@
         "static/js/editor/build/controls.js:137"
       ],
       "kind": "js-template-html-attribute",
+      "context": ""
+    },
+    {
+      "key": "ui.close.journal",
+      "locations": [
+        "static/js/copal/notesFeature.js:4079",
+        "static/js/copal/notesFeature.js:4633",
+        "static/js/copal/notesFeature.js:5076",
+        "static/js/copal/notesFeature.js:8416"
+      ],
+      "kind": "js-string",
       "context": ""
     },
     {
@@ -13351,6 +13868,15 @@
       "context": ""
     },
     {
+      "key": "ui.code.graph",
+      "locations": [
+        "static/js/copal.js:4543",
+        "static/js/copal/codeMapWorkbench.js:221"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
       "key": "ui.code.or.run",
       "locations": [
         "static/js/document.js:4987"
@@ -13643,6 +14169,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.column.type",
+      "locations": [
+        "static/js/copal/tableModel.js:1502"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.column.unavailable",
@@ -14814,6 +15348,14 @@
       "context": ""
     },
     {
+      "key": "ui.context.actions",
+      "locations": [
+        "static/js/custom-context-menu.js:675"
+      ],
+      "kind": "js-string",
+      "context": "Context menu accessibility"
+    },
+    {
       "key": "ui.context.capped.to.value",
       "locations": [
         "static/js/cookbookServe.js:2019"
@@ -15887,6 +16429,19 @@
       "context": ""
     },
     {
+      "key": "ui.copal.navigation.is.unavailable.reopen.appearance.to.retry",
+      "locations": [
+        "static/js/settings.js:2686",
+        "static/js/settings.js:2720",
+        "static/js/copal.js:4621",
+        "static/js/copal.js:4628",
+        "static/js/copal.js:4640",
+        "static/js/copal.js:4645"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
       "key": "ui.copal.note.group.value",
       "locations": [
         "static/js/copal/notesFeature.js:1709"
@@ -16469,6 +17024,15 @@
       "context": ""
     },
     {
+      "key": "ui.copy.cell",
+      "locations": [
+        "static/js/copal.js:3482",
+        "static/js/copal/sheetView.js:201"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.copy.chat",
       "locations": [
         "static/index.html:915",
@@ -16837,12 +17401,29 @@
       "context": ""
     },
     {
+      "key": "ui.copy.selected.items",
+      "locations": [
+        "static/js/files.js:8036"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.copy.selection.to.a.new.layer",
       "locations": [
         "static/js/editor/build/controls.js:94"
       ],
       "kind": "js-template-html-attribute",
       "context": ""
+    },
+    {
+      "key": "ui.copy.selection.to.layer",
+      "locations": [
+        "static/js/copal/notesFeature.js:8852",
+        "static/js/imps.js:1007"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.copy.selection.to.new.layer",
@@ -17169,6 +17750,23 @@
       "key": "ui.could.not.open.source.chat",
       "locations": [
         "static/js/gallery.js:1538"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
+      "key": "ui.could.not.open.the.journal.select.journal.to.retry",
+      "locations": [
+        "static/js/copal.js:4701"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
+      "key": "ui.could.not.open.this.applet.open.it.again.to.retry",
+      "locations": [
+        "static/js/copal.js:482",
+        "static/js/copal.js:4890"
       ],
       "kind": "js-string",
       "context": ""
@@ -17737,6 +18335,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.create.library.document",
+      "locations": [
+        "static/js/files.js:7892"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.create.new.blank.document",
@@ -18362,7 +18968,7 @@
       "context": ""
     },
     {
-      "key": "ui.current.open.clank.frankenmemory.mimo.provider.and.integration.state",
+      "key": "ui.current.open.clank.memery.mimo.provider.and.integration.state",
       "locations": [],
       "kind": "compatibility",
       "context": "retained catalog key absent from current first-party census"
@@ -18573,6 +19179,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.cut.selected.items",
+      "locations": [
+        "static/js/files.js:8036"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.cut.to.clipboard",
@@ -20187,6 +20801,14 @@
       "context": ""
     },
     {
+      "key": "ui.delete.preset.f307af85",
+      "locations": [
+        "static/js/group.js:399"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.delete.project",
       "locations": [
         "static/js/gallery.js:939"
@@ -20255,6 +20877,14 @@
       "context": ""
     },
     {
+      "key": "ui.delete.selected.documents",
+      "locations": [
+        "static/js/files.js:8065"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.delete.selected.duplicates.generic.irrelevant.skills.failed.audits.and.s",
       "locations": [
         "static/index.html:262"
@@ -20269,6 +20899,15 @@
       ],
       "kind": "html-text",
       "context": ""
+    },
+    {
+      "key": "ui.delete.selected.pixels",
+      "locations": [
+        "static/js/copal/notesFeature.js:8852",
+        "static/js/imps.js:1009"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.delete.selected.pixels.from.the.layer",
@@ -21365,7 +22004,7 @@
       "context": ""
     },
     {
-      "key": "ui.digest.unavailable.is.the.frankenmemory.provider.running",
+      "key": "ui.digest.unavailable.is.the.memery.provider.running",
       "locations": [
         "static/js/memory.js:1981"
       ],
@@ -23075,6 +23714,14 @@
       "context": ""
     },
     {
+      "key": "ui.download.selected.files",
+      "locations": [
+        "static/js/files.js:7905"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.download.source.is.not.part.of.this.open.clank.session",
       "locations": [
         "static/js/files.js:2264"
@@ -23824,6 +24471,14 @@
       "context": ""
     },
     {
+      "key": "ui.duplicate.selected.files",
+      "locations": [
+        "static/js/files.js:8063"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.duplicate.shortcut",
       "locations": [
         "static/js/settings.js:2301"
@@ -23844,6 +24499,14 @@
       ],
       "kind": "js-template",
       "context": ""
+    },
+    {
+      "key": "ui.duplicate.view",
+      "locations": [
+        "static/js/copal/sheetView.js:240"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.durable.events",
@@ -24248,6 +24911,15 @@
       "context": ""
     },
     {
+      "key": "ui.edit.cell",
+      "locations": [
+        "static/js/copal.js:3481",
+        "static/js/copal/sheetView.js:198"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.edit.code",
       "locations": [
         "static/js/document.js:2218",
@@ -24414,6 +25086,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.edit.module",
+      "locations": [
+        "static/js/copal/treehouse.js:843"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.edit.name",
@@ -24833,6 +25513,14 @@
       "key": "ui.editor.navigation",
       "locations": [
         "static/js/copal/notesFeature.js:1550"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
+      "key": "ui.editor.panel.settings.are.unavailable.reopen.appearance",
+      "locations": [
+        "static/js/settings.js:2738"
       ],
       "kind": "js-string",
       "context": ""
@@ -26497,13 +27185,13 @@
         "src/chat_helpers.py:313",
         "src/chatgpt_subscription.py:200",
         "src/clanker_layout_migration.py:351",
-        "src/frankenmemory_rag.py:1995",
-        "src/frankenmemory_rag.py:2003",
-        "src/frankenmemory_rag.py:2014",
-        "src/frankenmemory_rag.py:2030",
-        "src/frankenmemory_rag.py:2057",
-        "src/frankenmemory_v2.py:1685",
-        "src/frankenmemory_v2.py:1688",
+        "src/memery_rag.py:1995",
+        "src/memery_rag.py:2003",
+        "src/memery_rag.py:2014",
+        "src/memery_rag.py:2030",
+        "src/memery_rag.py:2057",
+        "src/memery_v2.py:1685",
+        "src/memery_v2.py:1688",
         "src/integrations.py:369",
         "src/integrations.py:372",
         "src/integrations.py:377",
@@ -27853,6 +28541,14 @@
       "context": ""
     },
     {
+      "key": "ui.export.knowledge.snapshot",
+      "locations": [
+        "static/js/memory.js:4148"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.export.markdown",
       "locations": [
         "static/js/document.js:9819"
@@ -28299,9 +28995,9 @@
         "routes/email_routes.py:2793",
         "routes/email_routes.py:2796",
         "services/memory/nuke_coordinator.py:899",
-        "src/frankenmemory_rag.py:1231",
-        "src/frankenmemory_rag.py:1289",
-        "src/frankenmemory_rag.py:1335",
+        "src/memery_rag.py:1231",
+        "src/memery_rag.py:1289",
+        "src/memery_rag.py:1335",
         "src/personal_docs.py:525",
         "src/tools/cookbook.py:850",
         "static/app.js:500",
@@ -31683,6 +32379,15 @@
       "context": ""
     },
     {
+      "key": "ui.fit.image",
+      "locations": [
+        "static/js/copal/notesFeature.js:8849",
+        "static/js/imps.js:1011"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.fit.to.view",
       "locations": [
         "static/js/editor/build/topbar.js:39"
@@ -32634,7 +33339,7 @@
       "context": ""
     },
     {
-      "key": "ui.frankenmemory.keeps.raw.evidence.separate",
+      "key": "ui.memery.keeps.raw.evidence.separate",
       "locations": [
         "static/js/memory.js:2314"
       ],
@@ -33769,7 +34474,7 @@
       "context": ""
     },
     {
-      "key": "ui.graph.unavailable.is.the.frankenmemory.provider.running",
+      "key": "ui.graph.unavailable.is.the.memery.provider.running",
       "locations": [
         "static/js/memory.js:1633"
       ],
@@ -35420,6 +36125,16 @@
       "context": ""
     },
     {
+      "key": "ui.icon.size",
+      "locations": [
+        "static/js/files.js:7350",
+        "static/js/files.js:7354",
+        "static/js/files.js:7795"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.id.assignmentid.profileid.answer.grade.status",
       "locations": [
         "static/treehouse-architecture-map.html:102"
@@ -35589,6 +36304,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.image.canvas",
+      "locations": [
+        "static/js/imps.js:3376"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.image.de5851f6",
@@ -36048,6 +36771,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.import.library.documents",
+      "locations": [
+        "static/js/files.js:7893"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.import.markdown.or.obsidian.backup",
@@ -37089,6 +37820,22 @@
       "context": ""
     },
     {
+      "key": "ui.inspect.code.node",
+      "locations": [
+        "static/js/copal/codeMapWorkbench.js:1839"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
+      "key": "ui.inspect.processes",
+      "locations": [
+        "static/js/cookbookServe.js:2844"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.inspect.the.app.startup.health.provider.tool.verification",
       "locations": [
         "static/treehouse-course-overview.html:111"
@@ -37558,6 +38305,15 @@
       "context": ""
     },
     {
+      "key": "ui.invert.selection",
+      "locations": [
+        "static/js/copal/notesFeature.js:8852",
+        "static/js/imps.js:1008"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.invert.selection.ctrl.alt.i",
       "locations": [
         "static/js/editor/build/controls.js:37",
@@ -37789,6 +38545,15 @@
       "context": "retained catalog key absent from current first-party census"
     },
     {
+      "key": "ui.journal.settings.are.unavailable.select.manage.journals",
+      "locations": [
+        "static/js/settings.js:2711",
+        "static/js/copal.js:4706"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
       "key": "ui.json",
       "locations": [
         "static/js/document.js:4923"
@@ -37992,6 +38757,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.keep.primary.selection",
+      "locations": [
+        "static/js/custom-context-menu.js:1012"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.keep.prose.comfortably.narrow",
@@ -40483,6 +41256,18 @@
       "context": ""
     },
     {
+      "key": "ui.make.editable.copy",
+      "locations": [
+        "static/js/copal.js:1316",
+        "static/js/copal/notesFeature.js:3928",
+        "static/js/copal/notesFeature.js:5679",
+        "static/js/copal/notesFeature.js:6348",
+        "static/js/copal/wikiWorkspace.js:66"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.make.mask.from.current.selection",
       "locations": [
         "static/js/editor/layer-panel.js:286"
@@ -41248,6 +42033,15 @@
       ],
       "kind": "js-template",
       "context": ""
+    },
+    {
+      "key": "ui.media",
+      "locations": [
+        "static/js/copal/wikiAuthoring.js:134",
+        "static/js/files.js:7828"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.medium",
@@ -44383,6 +45177,14 @@
       "context": ""
     },
     {
+      "key": "ui.new.file.ellipsis",
+      "locations": [
+        "static/js/copal/notesFeature.js"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
       "key": "ui.new.file.name",
       "locations": [
         "static/js/codeEditor.js:1051"
@@ -44425,6 +45227,14 @@
       "context": ""
     },
     {
+      "key": "ui.new.from.template.ellipsis",
+      "locations": [
+        "static/js/copal/notesFeature.js:8410"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
       "key": "ui.new.goals.queue.behind.the.active.one",
       "locations": [
         "static/index.html:1227"
@@ -44438,6 +45248,31 @@
         "static/js/notes.js:2157"
       ],
       "kind": "js-template-html-attribute",
+      "context": ""
+    },
+    {
+      "key": "ui.new.journal.page",
+      "locations": [
+        "static/js/copal/notesFeature.js:3490",
+        "static/js/copal/notesFeature.js:4369"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
+      "key": "ui.new.journal.page.ellipsis",
+      "locations": [
+        "static/js/copal/notesFeature.js"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
+      "key": "ui.new.journal.page.in.folder",
+      "locations": [
+        "static/js/copal/notesFeature.js:4369"
+      ],
+      "kind": "js-string",
       "context": ""
     },
     {
@@ -44471,6 +45306,22 @@
         "static/js/copal/notesFeature.js:1391",
         "static/js/copal/notesFeature.js:1571",
         "static/js/copal/notesFeature.js:2540"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
+      "key": "ui.new.note.ellipsis",
+      "locations": [
+        "static/js/copal/notesFeature.js"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
+      "key": "ui.new.note.in.folder",
+      "locations": [
+        "static/js/copal/notesFeature.js:4369"
       ],
       "kind": "js-string",
       "context": ""
@@ -44730,6 +45581,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.no.action.is.available.for.the.selection",
+      "locations": [
+        "static/js/files.js:5420"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.no.action.specified",
@@ -45114,6 +45973,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.no.captured.documentation.region.is.available",
+      "locations": [
+        "static/js/custom-context-menu.js:1009"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.no.changes",
@@ -50611,6 +51478,15 @@
       "context": ""
     },
     {
+      "key": "ui.open.course",
+      "locations": [
+        "static/js/copal/treehouse.js:784",
+        "static/js/copal/treehouseLearner.js:107"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.open.deep.research",
       "locations": [
         "static/js/settings.js:2203",
@@ -50981,6 +51857,14 @@
       "context": ""
     },
     {
+      "key": "ui.open.link",
+      "locations": [
+        "static/js/copal/notesFeature.js:3922"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.open.link.in.new.tab",
       "locations": [
         "static/js/custom-context-menu.js:13",
@@ -51087,6 +51971,16 @@
       "context": ""
     },
     {
+      "key": "ui.open.quest",
+      "locations": [
+        "static/js/copal/treehouseLearningExtensions.js:78",
+        "static/js/copal/treehouseProgression.js:192",
+        "static/js/copal/treehouseTopicWeb.js:244"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.open.question",
       "locations": [
         "static/js/memory.js:2256",
@@ -51180,6 +52074,24 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.open.source.note",
+      "locations": [
+        "static/js/copal.js:3483",
+        "static/js/copal/sheetView.js:202"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
+      "key": "ui.open.task",
+      "locations": [
+        "static/js/copal/planning.js:1431",
+        "static/js/copal/treehouseLearner.js:140"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.open.task.note",
@@ -51406,6 +52318,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.open.with",
+      "locations": [
+        "static/js/files.js:7815"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.open.workspace.folder",
@@ -52781,6 +53701,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.paste.into.this.folder",
+      "locations": [
+        "static/js/files.js:8051"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.paste.it.below.and.click.connect",
@@ -56810,8 +57738,8 @@
         "routes/cookbook_helpers.py:1133",
         "routes/cookbook_routes.py:1483",
         "services/memory/skills.py:1366",
-        "src/frankenmemory_rag.py:1192",
-        "src/frankenmemory_rag.py:1383",
+        "src/memery_rag.py:1192",
+        "src/memery_rag.py:1383",
         "src/openclank/copal_loose.py:1335",
         "static/js/contextualHelp.js:49",
         "static/js/cookbook-hwfit.js:1718",
@@ -58066,6 +58994,14 @@
       "context": ""
     },
     {
+      "key": "ui.remove.folder.from.favorites",
+      "locations": [
+        "static/js/files.js:8133"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.remove.from.favorites",
       "locations": [
         "static/js/modelPicker.js:764",
@@ -58114,6 +59050,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.remove.selected.items.from.favorites",
+      "locations": [
+        "static/js/files.js:8062"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.remove.signature.from.this.field",
@@ -58407,6 +59351,14 @@
       "context": ""
     },
     {
+      "key": "ui.rename.layer",
+      "locations": [
+        "static/js/editor/layer-panel.js:441"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.rename.or.move",
       "locations": [
         "static/js/copal/notesFeature.js:1489"
@@ -58453,6 +59405,15 @@
       "context": ""
     },
     {
+      "key": "ui.rename.view",
+      "locations": [
+        "static/js/copal.js:3996",
+        "static/js/copal/sheetView.js:239"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.rename.workspace",
       "locations": [
         "static/js/files.js:773"
@@ -58486,6 +59447,14 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.rendered.source.comment.press.enter.or.choose.see.source.to.edit.raw.comment",
+      "locations": [
+        "packages/Copal/src/openclank-codemirror.ts:709"
+      ],
+      "kind": "js-string",
+      "context": "Context menu accessibility"
     },
     {
       "key": "ui.rendered.source.comment.press.enter.to.edit.raw.comment",
@@ -59676,6 +60645,14 @@
       "context": ""
     },
     {
+      "key": "ui.restore.selected.items",
+      "locations": [
+        "static/js/files.js:8061"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.restore.the.factory.default.persona",
       "locations": [
         "static/index.html:1375"
@@ -59981,6 +60958,15 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.retry.spelling",
+      "locations": [
+        "static/js/custom-context-menu.js:1015",
+        "static/js/custom-context-menu.js:300"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.retry.value.s",
@@ -60461,6 +61447,14 @@
       ],
       "kind": "js-string-html-text",
       "context": ""
+    },
+    {
+      "key": "ui.reviewed.metadata",
+      "locations": [
+        "static/js/skills.js:476"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.reviewing",
@@ -64264,6 +65258,15 @@
       "context": ""
     },
     {
+      "key": "ui.see.source",
+      "locations": [
+        "static/js/custom-context-menu.js:1009",
+        "static/js/custom-context-menu.js:980"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.seek.audio.preview",
       "locations": [
         "static/js/files.js:1614"
@@ -65787,6 +66790,14 @@
         "static/js/memory.js:3127"
       ],
       "kind": "js-template",
+      "context": ""
+    },
+    {
+      "key": "ui.sets.how.often.memery.automatically.consolidates.chat.records",
+      "locations": [
+        "static/js/memory.js:508"
+      ],
+      "kind": "js-string",
       "context": ""
     },
     {
@@ -67850,6 +68861,26 @@
       "context": "retained catalog key absent from current first-party census"
     },
     {
+      "key": "ui.sort.bec69036",
+      "locations": [
+        "static/index.html:593",
+        "static/js/copal.js:3958",
+        "static/js/copal/sheetView.js:17",
+        "static/js/copal/tableModel.js:1498",
+        "static/js/copal/tableModel.js:1499"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
+      "key": "ui.sort.by",
+      "locations": [
+        "static/js/files.js:7793"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.sort.by.due",
       "locations": [
         "static/js/copal/planning.js:1051"
@@ -68273,6 +69304,15 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.spelling",
+      "locations": [
+        "static/js/custom-context-menu.js:748",
+        "static/js/custom-context-menu.js:749"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.spinner",
@@ -71608,6 +72648,16 @@
       "context": ""
     },
     {
+      "key": "ui.the.context.menu.command.could.not.be.completed",
+      "locations": [
+        "static/js/custom-context-menu.js:335",
+        "static/js/custom-context-menu.js:346",
+        "static/js/custom-context-menu.js:561"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.the.default.persona.is.who.the.assistant.is.everywhere.chat",
       "locations": [
         "static/index.html:1358"
@@ -71738,6 +72788,15 @@
       ],
       "kind": "html-text",
       "context": ""
+    },
+    {
+      "key": "ui.the.original.menu.target.changed.reopen.its.menu",
+      "locations": [
+        "static/js/custom-context-menu.js:322",
+        "static/js/custom-context-menu.js:556"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.the.regular.expression.given.to.matchdecorator.should.have.its.g",
@@ -72537,6 +73596,24 @@
       ],
       "kind": "js-template-html-text",
       "context": ""
+    },
+    {
+      "key": "ui.tip.long.press.a.session.to.see.its.actions",
+      "locations": [
+        "static/index.html:1317",
+        "static/js/models.js:659"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
+      "key": "ui.tip.right.click.a.session.to.see.its.actions",
+      "locations": [
+        "static/index.html:1314",
+        "static/js/models.js:669"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.title",
@@ -73728,6 +74805,15 @@
       ],
       "kind": "js-string",
       "context": ""
+    },
+    {
+      "key": "ui.transfer",
+      "locations": [
+        "static/js/files.js:7801",
+        "static/js/files.js:7823"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
     },
     {
       "key": "ui.transform.applied",
@@ -75286,7 +76372,7 @@
     {
       "key": "ui.unknown.mcp.error",
       "locations": [
-        "src/frankenmemory_provider.py:434"
+        "src/memery_provider.py:434"
       ],
       "kind": "server-string",
       "context": ""
@@ -75495,7 +76581,7 @@
     {
       "key": "ui.unknown.vector.generation",
       "locations": [
-        "src/frankenmemory_rag.py:1185"
+        "src/memery_rag.py:1185"
       ],
       "kind": "server-string",
       "context": ""
@@ -79256,6 +80342,15 @@
       "context": ""
     },
     {
+      "key": "ui.view.mode",
+      "locations": [
+        "static/js/copal/clankshop.js:1322",
+        "static/js/files.js:7794"
+      ],
+      "kind": "js-string",
+      "context": "Context menu label or action feedback"
+    },
+    {
       "key": "ui.view.name",
       "locations": [
         "static/js/copal.js:1782",
@@ -80761,6 +81856,14 @@
       "context": ""
     },
     {
+      "key": "ui.workspace.access.changed.open.the.applet.again",
+      "locations": [
+        "static/js/copal.js:387"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
       "key": "ui.workspace.access.could.not.be.revalidated.unsaved.changes.were.retained",
       "locations": [
         "static/js/codeEditor.js:263",
@@ -80796,6 +81899,15 @@
       "key": "ui.workspace.cleared.1346fb67",
       "locations": [
         "static/js/workspace.js:180"
+      ],
+      "kind": "js-string",
+      "context": ""
+    },
+    {
+      "key": "ui.workspace.collections",
+      "locations": [
+        "static/js/files.js:183",
+        "static/js/files.js:7339"
       ],
       "kind": "js-string",
       "context": ""

@@ -540,7 +540,9 @@ async function syncWorkspaceLoop(space: Info, signal: AbortSignal) {
       log.info("global sync connected", { workspace: space.name })
       setStatus(space.id, "connected")
 
-      await parseSSE(stream, signal, (evt: any) => {
+      const guardedConflict = new AbortController()
+      let queuedSourceRefused = false
+      await parseSSE(stream, AbortSignal.any([signal,guardedConflict.signal]), (evt: any) => {
         try {
           if (!("payload" in evt)) return
           if (evt.payload.type === "server.heartbeat") return
@@ -556,6 +558,12 @@ async function syncWorkspaceLoop(space: Info, signal: AbortSignal) {
             payload: evt.payload,
           })
         } catch (err) {
+          if (err instanceof Error && err.message.includes('enrolled queued source requires a host fence')) {
+            queuedSourceRefused = true
+            guardedConflict.abort()
+            setStatus(space.id, "error")
+            return
+          }
           log.info("failed to replay global event", {
             workspaceID: space.id,
             error: err,
@@ -563,6 +571,7 @@ async function syncWorkspaceLoop(space: Info, signal: AbortSignal) {
         }
       })
 
+      if (queuedSourceRefused) return
       log.info("disconnected from global sync: " + space.id)
       setStatus(space.id, "disconnected")
     }

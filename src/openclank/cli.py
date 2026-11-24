@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ import time
 import webbrowser
 from pathlib import Path
 
+from src.openclank.cli_output import clean_text
 from src.openclank.client_profiles import (
     ClientCredentialVault,
     ClientProfile,
@@ -32,6 +34,7 @@ if getattr(sys, "frozen", False) and sys.platform == "darwin":
     DEFAULT_LOCAL_URL = "http://127.0.0.1:" + os.environ.get("APP_PORT", "7777")
 RESERVED_COMMANDS = {
     "tui",
+    "run",
     "profile",
     "login",
     "logout",
@@ -43,11 +46,23 @@ RESERVED_COMMANDS = {
 }
 
 
+def _terminal_print(*values, **kwargs):
+    """Keep server/profile text from becoming terminal control sequences."""
+    builtins.print(*(clean_text(str(value)) for value in values), **kwargs)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="openclank", description="Open Clank terminal client and service manager")
     parser.add_argument("--profile", dest="global_profile", help="use a named client profile")
     parser.add_argument("--version", action="store_true")
     sub = parser.add_subparsers(dest="command")
+
+    run = sub.add_parser("run", help="run one prompt in an existing chat")
+    run.add_argument("--profile")
+    run.add_argument("--session", required=True)
+    run.add_argument("--prompt")
+    run.add_argument("--quiet", "-quiet", action="store_true")
+    run.add_argument("--format", choices=("text", "json", "jsonl"), default="text")
 
     tui = sub.add_parser("tui", help="open the Open Clank terminal interface")
     tui.add_argument("--profile")
@@ -69,6 +84,8 @@ def _parser() -> argparse.ArgumentParser:
     login.add_argument("--profile")
     login.add_argument("--no-browser", action="store_true")
     login.add_argument("--label", default="Open Clank TUI")
+    login.add_argument("--questions", action="store_true", help="request permission to answer questions")
+    login.add_argument("--approvals", action="store_true", help="request permission to approve actions once or reject them")
 
     logout = sub.add_parser("logout", help="revoke the current terminal credential")
     logout.add_argument("--profile")
@@ -95,6 +112,37 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_once(args, store, vault) -> int:
+    from src.openclank.cli_run import run_one_shot
+
+    try:
+        piped = "" if sys.stdin.isatty() else sys.stdin.read(200001)
+        parts = [part for part in (args.prompt, piped) if part]
+        prompt = "\n".join(parts)
+        if not prompt.strip() or len(prompt) > 200000:
+            _terminal_print("openclank: provide a nonempty prompt of at most 200000 characters", file=sys.stderr)
+            return 2
+        profile = store.get(args.profile or args.global_profile or None)
+        token = vault.get(profile.name)
+        if not token:
+            _terminal_print("openclank: profile is not logged in; use openclank login", file=sys.stderr)
+            return 3
+        with OpenClankTuiClient(profile, token=token) as client:
+            bootstrap = client.bootstrap()
+            client.messages(args.session, limit=1)
+            owner = bootstrap.get("principal", {}).get("owner")
+            return run_one_shot(client, args.session, prompt, args.format, sys.stdout, sys.stderr, owner)
+    except KeyboardInterrupt:
+        _terminal_print("openclank: interrupted before a run identity was received; outcome unknown", file=sys.stderr)
+        return 6
+    except ProfileError as exc:
+        _terminal_print(f"openclank: {exc}", file=sys.stderr)
+        return 2
+    except TuiClientError as exc:
+        _terminal_print(f"openclank: {exc}", file=sys.stderr)
+        return 3 if exc.status_code in (401, 403) else 2 if exc.status_code == 404 else 6
+
+
 def _run_assets(args) -> int:
     from scripts.emoji_asset_bundle import BundleError, assemble, expected_manifest, runtime_asset_paths, verify
 
@@ -109,7 +157,7 @@ def _run_assets(args) -> int:
             verify(pack, expected)
     except (BundleError, OSError, ValueError, KeyError) as exc:
         raise ProfileError("Offline artwork verification or assembly failed; existing installed artwork was preserved") from exc
-    print("Complete offline artwork verified.")
+    _terminal_print("Complete offline artwork verified.")
     return 0
 
 
@@ -158,18 +206,22 @@ def _connected_client(
     return client
 
 
-def _authorize(client: OpenClankTuiClient, *, label: str, open_browser: bool) -> str:
-    flow = client.start_device_authorization(device_label=label)
-    print(f"Open this address and approve the terminal:\n  {flow.verification_uri_complete}")
-    print(f"Device code: {flow.user_code}")
+def _authorize(client: OpenClankTuiClient, *, label: str, open_browser: bool, questions: bool = False, approvals: bool = False) -> str:
+    scopes = None
+    if questions or approvals:
+        scopes = ["tui:diagnostics", "tui:providers", "tui:sessions", "tui:shares", "tui:tasks", "tui:workspaces"]
+        scopes += (["tui:questions"] if questions else []) + (["tui:approvals"] if approvals else [])
+    flow = client.start_device_authorization(device_label=label, scopes=scopes)
+    _terminal_print(f"Open this address and approve the terminal:\n  {flow.verification_uri_complete}")
+    _terminal_print(f"Device code: {flow.user_code}")
     if open_browser:
         webbrowser.open(flow.verification_uri_complete)
-    print("Waiting for approval", end="", flush=True)
+    _terminal_print("Waiting for approval", end="", flush=True)
     result = client.poll_device_authorization(
         flow,
-        on_wait=lambda count: print("." if count % 12 else ".\n", end="", flush=True),
+        on_wait=lambda count: _terminal_print("." if count % 12 else ".\n", end="", flush=True),
     )
-    print(" approved")
+    _terminal_print(" approved")
     return str(result["access_token"])
 
 
@@ -180,7 +232,7 @@ def _run_tui(args, store: ProfileStore, vault: ClientCredentialVault) -> int:
             token = _authorize(client, label="Open Clank TUI", open_browser=True)
             vault.set(profile.name, token)
             if not vault.persistent:
-                print("No OS credential vault is available; this login lasts only for this process.")
+                _terminal_print("No OS credential vault is available; this login lasts only for this process.")
         return OpenClankTui(client).run()
 
 
@@ -190,22 +242,22 @@ def _run_profile(args, store: ProfileStore, vault: ClientCredentialVault) -> int
         for item in store.list():
             marker = "*" if item.name == active else " "
             mode = "local, auto-start" if item.auto_start else ("local" if item.local else "remote")
-            print(f"{marker} {item.name:<20} {item.url:<40} {mode}")
+            _terminal_print(f"{marker} {item.name:<20} {item.url:<40} {mode}")
         return 0
     if args.profile_command == "add":
         item = ClientProfile.create(args.name, args.url, auto_start=args.auto_start)
         store.put(item, make_active=args.use)
-        print(f"Saved profile {item.name!r} ({item.url})")
+        _terminal_print(f"Saved profile {item.name!r} ({item.url})")
         return 0
     if args.profile_command == "use":
         item = store.use(args.name)
-        print(f"Active profile: {item.name}")
+        _terminal_print(f"Active profile: {item.name}")
         return 0
     if args.profile_command == "remove":
         if not store.remove(args.name):
             raise ProfileError(f"unknown profile {args.name!r}")
         vault.delete(args.name)
-        print(f"Removed profile {args.name!r}")
+        _terminal_print(f"Removed profile {args.name!r}")
         return 0
     return 2
 
@@ -213,9 +265,9 @@ def _run_profile(args, store: ProfileStore, vault: ClientCredentialVault) -> int
 def _run_login(args, store: ProfileStore, vault: ClientCredentialVault) -> int:
     profile = _profile_for(args, store)
     with _connected_client(profile, vault, auto_start=True) as client:
-        token = _authorize(client, label=args.label, open_browser=not args.no_browser)
+        token = _authorize(client, label=args.label, open_browser=not args.no_browser, questions=args.questions, approvals=args.approvals)
         vault.set(profile.name, token)
-    print(f"Logged in to {profile.name!r}; credential storage: {vault.status}.")
+    _terminal_print(f"Logged in to {profile.name!r}; credential storage: {vault.status}.")
     return 0
 
 
@@ -230,7 +282,7 @@ def _run_logout(args, store: ProfileStore, vault: ClientCredentialVault) -> int:
             if exc.status_code not in {401, 404}:
                 raise
     vault.delete(profile.name)
-    print(f"Logged out of {profile.name!r}.")
+    _terminal_print(f"Logged out of {profile.name!r}.")
     return 0
 
 
@@ -250,7 +302,7 @@ def _run_server(args, store: ProfileStore) -> int:
         status = manager.status(profile)
     state = "ready" if status.ready else ("running" if status.running else "stopped")
     pid = f" pid={status.pid}" if status.pid else ""
-    print(f"Open Clank {state} at {status.url}{pid}: {status.detail}")
+    _terminal_print(f"Open Clank {state} at {status.url}{pid}: {status.detail}")
     if args.action == "stop":
         return 0
     if args.action == "status" and status.running:
@@ -274,7 +326,7 @@ def _run_engine(args) -> int:
 
                 verify_portable_payload()
             except Exception as exc:
-                print(f"openclank engine: {exc}", file=sys.stderr)
+                _terminal_print(f"openclank engine: {exc}", file=sys.stderr)
                 return 1
 
         return int(engine_main(values))
@@ -297,17 +349,17 @@ def _run_managed_server(values: list[str]) -> int:
     """
 
     if not getattr(sys, "frozen", False):
-        print("openclank: private server entrypoint is available only in a packaged build", file=sys.stderr)
+        _terminal_print("openclank: private server entrypoint is available only in a packaged build", file=sys.stderr)
         return 2
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--host", default=os.environ.get("APP_BIND", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("APP_PORT", "7777")))
     args = parser.parse_args(values)
     if not 1 <= args.port <= 65535:
-        print("openclank: server port must be between 1 and 65535", file=sys.stderr)
+        _terminal_print("openclank: server port must be between 1 and 65535", file=sys.stderr)
         return 2
     if str(args.host).lower().rstrip(".") not in {"localhost", "127.0.0.1", "::1"}:
-        print("openclank: packaged server startup is restricted to loopback", file=sys.stderr)
+        _terminal_print("openclank: packaged server startup is restricted to loopback", file=sys.stderr)
         return 2
     phase = "bootstrap"
     try:
@@ -326,11 +378,11 @@ def _run_managed_server(values: list[str]) -> int:
         if sys.platform == "darwin":
             from scripts.macos_entry import STARTUP_DIAGNOSTIC_PREFIX, startup_failure_record
 
-            print(STARTUP_DIAGNOSTIC_PREFIX + json.dumps(startup_failure_record(exc, phase), sort_keys=True), file=sys.stderr, flush=True)
+            _terminal_print(STARTUP_DIAGNOSTIC_PREFIX + json.dumps(startup_failure_record(exc, phase), sort_keys=True), file=sys.stderr, flush=True)
         # Bootstrap exceptions contain invariant names and paths, never
         # provider credential values.  Do not expose tracebacks in the normal
         # packaged startup path.
-        print(f"openclank: packaged server startup failed: {exc}", file=sys.stderr)
+        _terminal_print(f"openclank: packaged server startup failed: {exc}", file=sys.stderr)
         return 1
 
 
@@ -359,17 +411,19 @@ def main(argv: list[str] | None = None) -> int:
         return private
     args = _parser().parse_args(values)
     if args.version:
-        print(f"Open Clank {_version()}")
+        _terminal_print(f"Open Clank {_version()}")
         return 0
     if args.command == "assets":
         try:
             return _run_assets(args)
         except ProfileError as exc:
-            print(f"openclank: {exc}", file=sys.stderr)
+            _terminal_print(f"openclank: {exc}", file=sys.stderr)
             return 1
     store = ProfileStore()
     vault = ClientCredentialVault()
     try:
+        if args.command == "run":
+            return _run_once(args, store, vault)
         if args.command in {None, "tui"}:
             return _run_tui(args, store, vault)
         if args.command == "profile":
@@ -386,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             return _run_hex(args)
         return 2
     except (ProfileError, ServerManagerError, TuiClientError) as exc:
-        print(f"openclank: {exc}", file=sys.stderr)
+        _terminal_print(f"openclank: {exc}", file=sys.stderr)
         return 1
 
 

@@ -135,6 +135,8 @@ interface State {
   servers: Record<string, LSPServer.Info>
   broken: Set<string>
   spawning: Map<string, Promise<LSPClient.Info | undefined>>
+  recoveryGeneration: bigint
+  recoveryActive: boolean
 }
 
 export interface Interface {
@@ -152,6 +154,7 @@ export interface Interface {
   readonly prepareCallHierarchy: (input: LocInput) => Effect.Effect<any[]>
   readonly incomingCalls: (input: LocInput) => Effect.Effect<any[]>
   readonly outgoingCalls: (input: LocInput) => Effect.Effect<any[]>
+  readonly recoveryWitness?: () => Effect.Effect<import("../session/recovery-profile").EffectOwnerWitness>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/LSP") {}
@@ -212,10 +215,14 @@ export const layer = Layer.effect(
           servers,
           broken: new Set(),
           spawning: new Map(),
+          recoveryGeneration: 0n,
+          recoveryActive: true,
         }
 
         yield* Effect.addFinalizer(() =>
           Effect.promise(async () => {
+            s.recoveryActive = false
+            s.recoveryGeneration++
             await Promise.all(s.clients.map((client) => client.shutdown()))
           }),
         )
@@ -274,6 +281,7 @@ export const layer = Layer.effect(
           }
 
           s.clients.push(client)
+          s.recoveryGeneration++
           return client
         }
 
@@ -300,10 +308,12 @@ export const layer = Layer.effect(
 
           const task = schedule(server, root, root + server.id)
           s.spawning.set(root + server.id, task)
+          s.recoveryGeneration++
 
           task.finally(() => {
             if (s.spawning.get(root + server.id) === task) {
               s.spawning.delete(root + server.id)
+              s.recoveryGeneration++
             }
           })
 
@@ -495,6 +505,19 @@ export const layer = Layer.effect(
       return yield* callHierarchyRequest(input, "callHierarchy/outgoingCalls")
     })
 
+    const recoveryWitness: NonNullable<Interface["recoveryWitness"]> = Effect.fn("LSP.recoveryWitness")(function* () {
+      const captured = yield* InstanceState.get(state)
+      const configured = yield* config.get()
+      const generation = captured.recoveryGeneration
+      const empty = (s: State) => s.recoveryActive && Object.keys(s.servers).length === 0 && s.clients.length === 0 && s.spawning.size === 0
+      const eligible = configured.lsp === false && empty(captured)
+      return Object.freeze({ eligible, current: () => Effect.gen(function* () {
+        const now = yield* InstanceState.get(state)
+        const cfg = yield* config.get()
+        return eligible && now === captured && cfg.lsp === false && empty(now) && now.recoveryGeneration === generation
+      }) })
+    })
+
     return Service.of({
       init,
       status,
@@ -510,6 +533,7 @@ export const layer = Layer.effect(
       prepareCallHierarchy,
       incomingCalls,
       outgoingCalls,
+      recoveryWitness,
     })
   }),
 )

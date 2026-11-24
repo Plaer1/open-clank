@@ -735,7 +735,7 @@ async def do_serve_model(content: str, owner: Optional[str] = None) -> Dict:
             )
             note = "" if registered else " (state-write failed — task may not show in UI)"
             where = host or "local"
-            log_path = f"/tmp/odysseus-tmux/{sid}.log"
+            log_path = f"/tmp/open-clank-tmux/{sid}.log"
             return {
                 "output": (
                     f"Serving {repo_id} on {where} (session: {sid}){note}\n"
@@ -1040,7 +1040,7 @@ async def do_tail_serve_output(content: str, owner: Optional[str] = None) -> Dic
         except HTTPException as e:
             return {"error": str(getattr(e, "detail", e)), "exit_code": 1}
 
-    # Prefer the persisted /tmp/odysseus-tmux/SESSION.log file over the
+    # Prefer the persisted /tmp/open-clank-tmux/SESSION.log file over the
     # live tmux pane. The pane is what the user would see scrolling on
     # their screen — including the post-crash neofetch banner and the
     # idle bash prompt that overwrites the actual traceback the moment
@@ -1048,7 +1048,7 @@ async def do_tail_serve_output(content: str, owner: Optional[str] = None) -> Dic
     # process and survives the crash unchanged. We only fall back to
     # the pane when the log file doesn't exist (older sessions launched
     # before the tmux+tee wrapper was added).
-    log_path = f"/tmp/odysseus-tmux/{session_id}.log"
+    log_path = f"/tmp/open-clank-tmux/{session_id}.log"
     pane_inner = f"tmux capture-pane -t {shlex.quote(session_id)} -p -S -{tail} 2>/dev/null"
     file_inner = f"tail -n {tail} {shlex.quote(log_path)} 2>/dev/null"
     inner = (
@@ -1176,6 +1176,7 @@ async def do_search_hf_models(content: str, owner: Optional[str] = None) -> Dict
     params: Dict[str, str] = {}
     if query:
         params["search"] = query
+        params["pipeline"] = ""
     if limit:
         params["limit"] = str(limit)
     try:
@@ -1183,6 +1184,8 @@ async def do_search_hf_models(content: str, owner: Optional[str] = None) -> Dict
             resp = await client.get(f"{_INTERNAL_BASE}/api/cookbook/hf-latest",
                                     params=params, headers=_internal_headers())
             data = resp.json()
+        if resp.status_code != 200 or (isinstance(data, dict) and data.get('error')):
+            return {"error": "Public Hub discovery unavailable", "exit_code": 1}
         models = data.get("models") if isinstance(data, dict) else data
         if not models:
             return {"output": f"No models found for query: {query!r}", "exit_code": 0}

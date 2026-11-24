@@ -1,0 +1,800 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
+import path from "path"
+import { Effect, Stream, ManagedRuntime, Layer } from "effect"
+import { LLM } from "../../src/session/llm"
+import { isOpenCodeGoTarget, openCodeGoSessionHeaders } from "../../src/provider/opencode-go"
+import { ActorRegistry } from "../../src/actor/registry"
+import { Session as SessionNs } from "../../src/session"
+import { Instance } from "../../src/project/instance"
+import { Provider } from "../../src/provider"
+import { ProviderID, ModelID } from "../../src/provider/schema"
+import { Filesystem } from "../../src/util"
+import { tmpdir } from "../fixture/fixture"
+import type { Agent } from "../../src/agent/agent"
+import { MessageV2 } from "../../src/session/message-v2"
+import { SessionID, MessageID } from "../../src/session/schema"
+import { AppRuntime } from "../../src/effect/app-runtime"
+import { Global } from "../../src/global"
+
+// Reuses the same HTTP-mock approach from llm.test.ts to capture the
+// system prompt the LLM layer assembled before sending. The system prompt
+// is the only place buildMemoryInstructions content lands ("# Memory system");
+// asserting on body.system gives a concrete check that the agentID guard
+// fired without having to extract the private helper.
+
+type Capture = { url: URL; headers: Headers; body: Record<string, unknown> }
+
+const queueState = {
+  server: null as ReturnType<typeof Bun.serve> | null,
+  queue: [] as Array<{
+    path: string
+    response: Response
+    resolve: (value: Capture) => void
+  }>,
+}
+
+function deferred<T>() {
+  const result = {} as { promise: Promise<T>; resolve: (value: T) => void }
+  result.promise = new Promise((resolve) => (result.resolve = resolve))
+  return result
+}
+
+function waitRequest(pathname: string, response: Response) {
+  const pending = deferred<Capture>()
+  queueState.queue.push({ path: pathname, response, resolve: pending.resolve })
+  return pending.promise
+}
+
+function createChatStream(text: string) {
+  const payload =
+    [
+      `data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] })}`,
+      `data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", choices: [{ delta: { content: text } }] })}`,
+      `data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "stop" }] })}`,
+      "data: [DONE]",
+    ].join("\n\n") + "\n\n"
+  const encoder = new TextEncoder()
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(payload))
+      controller.close()
+    },
+  })
+}
+
+async function loadFixture(providerID: string, modelID: string) {
+  const fixturePath = path.join(import.meta.dir, "../tool/fixtures/models-api.json")
+  const data = await Filesystem.readJson<Record<string, any>>(fixturePath)
+  const provider = data[providerID]
+  if (!provider) throw new Error(`Missing provider in fixture: ${providerID}`)
+  const model = provider.models[modelID]
+  if (!model) throw new Error(`Missing model in fixture: ${modelID}`)
+  return { provider, model }
+}
+
+beforeAll(() => {
+  queueState.server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const next = queueState.queue.shift()
+      if (!next) return new Response("unexpected request", { status: 500 })
+      const url = new URL(req.url)
+      const body = (await req.json()) as Record<string, unknown>
+      next.resolve({ url, headers: req.headers, body })
+      if (!url.pathname.endsWith(next.path)) return new Response("not found", { status: 404 })
+      return next.response
+    },
+  })
+})
+
+beforeEach(() => {
+  queueState.queue.length = 0
+})
+
+afterAll(() => {
+  void queueState.server?.stop()
+})
+
+async function getModel(providerID: ProviderID, modelID: ModelID) {
+  return AppRuntime.runPromise(
+    Effect.gen(function* () {
+      const provider = yield* Provider.Service
+      return yield* provider.getModel(providerID, modelID)
+    }),
+  )
+}
+
+function makeBaseUser(sessionID: SessionID, providerID: string, modelID: ModelID): MessageV2.User {
+  return {
+    id: MessageID.make("user-llm-sysprompt"),
+    sessionID,
+    role: "user",
+    time: { created: Date.now() },
+    agent: "test",
+    model: { providerID: ProviderID.make(providerID), modelID },
+  } satisfies MessageV2.User
+}
+
+function makeAgent(): Agent.Info {
+  return {
+    name: "test",
+    mode: "primary",
+    options: {},
+    permission: [{ permission: "*", pattern: "*", action: "allow" }],
+  } satisfies Agent.Info
+}
+
+function tmpConfig(providerID: string, baseURL: string) {
+  return JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    enabled_providers: [providerID],
+    provider: {
+      [providerID]: { options: { apiKey: "test-key", baseURL } },
+    },
+  })
+}
+
+/** OpenCode Go-shaped provider: identity/URL say zen/go, traffic goes to the mock. */
+function goTmpConfig(providerID: string, mockBaseURL: string, modelID: string, model: unknown) {
+  return JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    enabled_providers: [providerID],
+    provider: {
+      [providerID]: {
+        name: "OpenCode Go",
+        npm: "@ai-sdk/openai-compatible",
+        api: "https://opencode.ai/zen/go/v1",
+        models: { [modelID]: model },
+        options: { apiKey: "test-key", baseURL: mockBaseURL },
+      },
+    },
+  })
+}
+
+describe("session.llm system prompt — memory-instructions guard", () => {
+  test("main agent (no agentID) — '# Memory system' IS appended", async () => {
+    const server = queueState.server!
+    const providerID = "alibaba"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture(providerID, modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "openclank.json"), tmpConfig(providerID, `${server.url.origin}/v1`))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        const messages = capture.body.messages as Array<{ role: string; content: string }>
+        const sysMsgs = messages.filter((m) => m.role === "system")
+        // buildSystemArray now collapses everything into a single system message.
+        expect(sysMsgs.length).toBe(1)
+        const allSys = sysMsgs.map((m) => m.content).join("\n")
+        expect(allSys).toContain("# Memory system")
+      },
+    })
+  })
+
+  test("system-spawned actor — '# Memory system' is NOT appended", async () => {
+    const server = queueState.server!
+    const providerID = "alibaba"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture(providerID, modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "openclank.json"), tmpConfig(providerID, `${server.url.origin}/v1`))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        // Create a real session row first — actor_registry.session_id is a FK to session.id.
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+
+        // Register a system-spawn actor at this session BEFORE the stream call.
+        // ActorRegistry uses the global Database, which is shared with the
+        // LLM-runtime's actorRegistry layer instance, so the row is visible
+        // to isSystemSpawned() during stream assembly.
+        const regRt = ManagedRuntime.make(ActorRegistry.defaultLayer)
+        try {
+          await regRt.runPromise(
+            ActorRegistry.Service.use((svc) =>
+              svc.register({
+                sessionID,
+                actorID: "checkpoint-writer-1",
+                mode: "subagent",
+                agent: "checkpoint-writer",
+                description: "writer fixture",
+                contextMode: "full",
+                background: true,
+                lifecycle: "ephemeral",
+              }),
+            ),
+          )
+        } finally {
+          await regRt.dispose()
+        }
+
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                  agentID: "checkpoint-writer-1",
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        const messages = capture.body.messages as Array<{ role: string; content: string }>
+        const sysMsgs = messages.filter((m) => m.role === "system")
+        const allSys = sysMsgs.map((m) => m.content).join("\n")
+        expect(allSys).not.toContain("# Memory system")
+      },
+    })
+  })
+
+  test("main agent (no agentID) — Active recall protocol IS in system prompt (F4a)", async () => {
+    const server = queueState.server!
+    const providerID = "alibaba"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture(providerID, modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "openclank.json"), tmpConfig(providerID, `${server.url.origin}/v1`))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        const messages = capture.body.messages as Array<{ role: string; content: string }>
+        const sysMsgs = messages.filter((m) => m.role === "system")
+        const allSys = sysMsgs.map((m) => m.content).join("\n")
+        expect(allSys).toContain("Active recall protocol")
+        expect(allSys).toContain("use the Grep tool with a keyword pattern")
+      },
+    })
+  })
+
+  test("v8.1 buildMemoryInstructions reflects writer-as-curator ownership (F22)", async () => {
+    const server = queueState.server!
+    const providerID = "alibaba"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture(providerID, modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "openclank.json"), tmpConfig(providerID, `${server.url.origin}/v1`))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        const messages = capture.body.messages as Array<{ role: string; content: string }>
+        const sysMsgs = messages.filter((m) => m.role === "system")
+        const allSys = sysMsgs.map((m) => m.content).join("\n")
+
+        // F22 v8.1 assertions:
+        // (1) writer-as-sole-curator language
+        expect(allSys).toContain("sole curator")
+
+        // (2) Active recall protocol still present (carried over from v8 F8)
+        expect(allSys).toContain("Active recall protocol")
+        expect(allSys).toContain("already in your context")
+
+        // (3) Subagent return format lives on spawn task injection, not the main memory block
+        expect(allSys).not.toContain("Subagent return format")
+        expect(allSys).not.toContain("**Status**:")
+
+        // (4) Agent's mid-task writing duties removed (v8.0 sections):
+        expect(allSys).not.toContain("Maintaining task progress")
+        expect(allSys).not.toContain("Notes.md format")
+
+        // v8.2: notes.md is back as the agent's only legal scratchpad (F26b).
+        expect(allSys).toContain("Notes scratchpad")
+        expect(allSys).toContain("notes.md")
+
+        // (5) MEMORY.md exception still present
+        expect(allSys).toContain("MEMORY.md")
+        expect(allSys).toContain("User states a project-level rule")
+      },
+    })
+  })
+
+  test("main agent memory instructions keep session paths stable across sessions", async () => {
+    const server = queueState.server!
+    const providerID = "alibaba"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture(providerID, modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "openclank.json"), tmpConfig(providerID, `${server.url.origin}/v1`))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        const allSys = (capture.body.messages as Array<{ role: string; content: string }>)
+          .filter((m) => m.role === "system")
+          .map((m) => m.content)
+          .join("\n")
+        expect(allSys).toContain(path.join(Global.Path.data, "memory", "projects", "<project_id>", "MEMORY.md"))
+        const sessionTemplate = path.join(Global.Path.data, "memory", "sessions", "<session_id>")
+        expect(allSys).toContain(path.join(sessionTemplate, "checkpoint.md"))
+        expect(allSys).toContain(path.join(sessionTemplate, "notes.md"))
+        expect(allSys).toContain(path.join(sessionTemplate, "tasks", "<id>", "progress.md"))
+        expect(allSys).toContain("Their real paths are given in a system reminder")
+        expect(allSys).not.toContain(sessionID)
+        expect(allSys).not.toContain(Instance.current.project.id)
+        expect(allSys).not.toContain("current_session_id")
+        // Global memory is taught (read-side) and points at the canonical path.
+        expect(allSys).toContain("# Global memory")
+        expect(allSys).toContain(path.join(Global.Path.data, "memory", "global", "MEMORY.md"))
+        expect(allSys).not.toContain("<data>/memory/projects")
+        expect(allSys).not.toContain("<data>/memory/sessions")
+      },
+    })
+  })
+
+  test("OPENCLANK_DISABLE_CHECKPOINT=true — core memory instructions still appended; ckpt extras omitted", async () => {
+    const previous = process.env.OPENCLANK_DISABLE_CHECKPOINT
+    process.env.OPENCLANK_DISABLE_CHECKPOINT = "true"
+    const server = queueState.server!
+    const providerID = "alibaba"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture(providerID, modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    try {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(path.join(dir, "openclank.json"), tmpConfig(providerID, `${server.url.origin}/v1`))
+        },
+      })
+
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const resolved = await getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+          const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+          let sessionID: SessionID
+          try {
+            const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+            sessionID = info.id
+          } finally {
+            await sessionRt.dispose()
+          }
+          const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+          try {
+            await rt.runPromise(
+              LLM.Service.use((svc) =>
+                svc
+                  .stream({
+                    user: makeBaseUser(sessionID, providerID, resolved.id),
+                    sessionID,
+                    model: resolved,
+                    agent: makeAgent(),
+                    system: ["You are a helpful assistant."],
+                    messages: [{ role: "user", content: "Hello" }],
+                    tools: {},
+                  })
+                  .pipe(Stream.runDrain),
+              ),
+            )
+          } finally {
+            await rt.dispose()
+          }
+          const capture = await request
+          const allSys = (capture.body.messages as Array<{ role: string; content: string }>)
+            .filter((m) => m.role === "system")
+            .map((m) => m.content)
+            .join("\n")
+
+          // Memory write/read contract is NOT gated on checkpoint.
+          expect(allSys).toContain("# Memory system")
+          expect(allSys).toContain("Notes scratchpad")
+          expect(allSys).not.toContain("Subagent return format")
+          expect(allSys).toContain(
+            path.join(Global.Path.data, "memory", "projects", "<project_id>", "MEMORY.md"),
+          )
+          expect(allSys).toContain(path.join(Global.Path.data, "memory", "global", "MEMORY.md"))
+          expect(allSys).toContain("Two file types")
+          expect(allSys).toContain("When to edit MEMORY.md directly")
+          expect(allSys).toContain("search first via the Grep and Read tools")
+
+          // Checkpoint-write ownership extras stay off when the flag is on.
+          // (Base agent.prompt may mention the checkpoint-writer agent name;
+          // assert on memory-system-specific copy instead.)
+          expect(allSys).not.toContain("Active recall protocol")
+          expect(allSys).not.toContain("sole curator")
+          expect(allSys).not.toContain("Session checkpoint")
+          expect(allSys).toContain(path.join(Global.Path.data, "memory", "sessions", "<session_id>", "notes.md"))
+          expect(allSys).not.toContain(path.join(Global.Path.data, "memory", "sessions", "<session_id>", "checkpoint.md"))
+        },
+      })
+    } finally {
+      if (previous === undefined) delete process.env.OPENCLANK_DISABLE_CHECKPOINT
+      else process.env.OPENCLANK_DISABLE_CHECKPOINT = previous
+    }
+  })
+})
+
+// https://github.com/XiaomiMiMo/MiMo-Code/issues/2317 — OpenCode Go rejects
+// requests with no per-conversation ID (400 MissingSessionID) from 09/05.
+// Only Go targets get the extra header; other providers stay unchanged.
+describe("session.llm outbound headers", () => {
+  test("isOpenCodeGoTarget uses identity or effective baseURL (provider.options.baseURL ?? model.api.url)", () => {
+    const shape = (providerID: string, url: string) =>
+      ({
+        providerID,
+        api: { id: "m", url, npm: "@ai-sdk/openai-compatible" },
+      }) as unknown as Parameters<typeof isOpenCodeGoTarget>[0]
+    expect(isOpenCodeGoTarget(shape("opencode-go", ""))).toBe(true)
+    expect(isOpenCodeGoTarget(shape("opencode-go-chat", ""))).toBe(true)
+    // effective URL = provider.options.baseURL when set, else model.api.url
+    expect(isOpenCodeGoTarget(shape("oc", "https://opencode.ai/zen/go/v1"))).toBe(true)
+    expect(isOpenCodeGoTarget(shape("oc", "https://elsewhere.example/v1"), { baseURL: "https://opencode.ai/zen/go/v1" })).toBe(true)
+    // provider.options.baseURL wins over model.api.url — same as resolveSDK
+    expect(isOpenCodeGoTarget(shape("oc", "https://opencode.ai/zen/go/v1"), { baseURL: "https://proxy.example/v1" })).toBe(false)
+    expect(isOpenCodeGoTarget(shape("alibaba", "https://dashscope.aliyuncs.com"))).toBe(false)
+    expect(isOpenCodeGoTarget(shape("opencode", "https://opencode.ai/zen/v1"))).toBe(false)
+  })
+
+  test("openCodeGoSessionHeaders only emits for Go targets with a sessionID", () => {
+    const go = {
+      providerID: "opencode-go",
+      api: { id: "m", url: "", npm: "" },
+    } as unknown as Parameters<typeof openCodeGoSessionHeaders>[0]
+    const other = {
+      providerID: "alibaba",
+      api: { id: "m", url: "https://x", npm: "" },
+    } as unknown as Parameters<typeof openCodeGoSessionHeaders>[0]
+    expect(openCodeGoSessionHeaders(go, "ses_1")).toEqual({ "x-opencode-session": "ses_1" })
+    expect(openCodeGoSessionHeaders(go, "")).toEqual({})
+    expect(openCodeGoSessionHeaders(go, undefined)).toEqual({})
+    expect(openCodeGoSessionHeaders(other, "ses_1")).toEqual({})
+  })
+
+  test("OpenCode Go non-ephemeral call carries x-opencode-session and x-session-affinity", async () => {
+    const server = queueState.server!
+    const providerID = "opencode-go"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture("alibaba", modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "openclank.json"),
+          goTmpConfig(providerID, `${server.url.origin}/v1`, modelID, fixture.model),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(modelID))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        expect(capture.headers.get("x-opencode-session")).toBe(sessionID)
+        expect(capture.headers.get("x-session-affinity")).toBe(sessionID)
+      },
+    })
+  })
+
+  test("OpenCode Go ephemeral call still carries x-opencode-session but not x-session-affinity", async () => {
+    const server = queueState.server!
+    const providerID = "opencode-go"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture("alibaba", modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "openclank.json"),
+          goTmpConfig(providerID, `${server.url.origin}/v1`, modelID, fixture.model),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(modelID))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                  ephemeral: true,
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        expect(capture.headers.get("x-opencode-session")).toBe(sessionID)
+        expect(capture.headers.get("x-session-affinity")).toBeNull()
+      },
+    })
+  })
+
+  test("non-Go provider requests gain no x-opencode-session header", async () => {
+    const server = queueState.server!
+    const providerID = "alibaba"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture(providerID, modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "openclank.json"), tmpConfig(providerID, `${server.url.origin}/v1`))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        expect(capture.headers.get("x-opencode-session")).toBeNull()
+        expect(capture.headers.get("x-session-affinity")).toBe(sessionID)
+      },
+    })
+  })
+})

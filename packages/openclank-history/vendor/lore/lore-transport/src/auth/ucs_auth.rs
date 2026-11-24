@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
+use std::time::Duration;
+
 use async_trait::async_trait;
 use lore_base::error::NotSupported;
 use lore_base::types::RepositoryId;
@@ -14,24 +16,74 @@ use lore_proto::auth::urc_auth_api_client::UrcAuthApiClient;
 use crate::error::ProtocolError;
 use crate::grpc::CorrelationInterceptor;
 use crate::traits::Authentication;
+use crate::traits::UserService;
 use crate::types::*;
 
-/// Strips the custom scheme from an auth URL and returns an HTTPS URL
-/// suitable for gRPC connection.
+/// The auth URL schemes [`UcsAuthentication`] is registered under. `https` is the transition
+/// fallback. `http` serves local test auth services; The implementation only
+/// honours plaintext for loopback hosts and upgrades any other http URL to
+/// https (see [`grpc_endpoint`]).
+pub const SCHEMES: [&str; 3] = ["ucs-auth", "https", "http"];
+
+/// The polling cadence the UCS Auth API expects. The API does not report
+/// one, so the client supplies the default cadence.
+pub const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long a UCS Auth login session is polled before the client gives up.
+/// The API does not report a lifetime, so returns the default.
+pub const SESSION_LIFETIME: Duration = Duration::from_secs(150);
+
+/// Strips the custom scheme from an auth URL and returns a URL suitable for
+/// gRPC connection.
 ///
 /// `ucs-auth://auth.example.com` -> `https://auth.example.com`
 /// `https://auth.example.com` -> `https://auth.example.com` (unchanged)
-fn grpc_endpoint(auth_url: &str) -> String {
+/// `http://127.0.0.1:41339` -> `http://127.0.0.1:41339` (unchanged)
+/// `http://auth.example.com` -> `https://auth.example.com` (upgraded)
+///
+/// Plaintext `http` is honoured only for loopback hosts, where the traffic
+/// never leaves the machine — this lets a local test auth service run
+/// without a certificate. For any other host the scheme is upgraded to
+/// `https`: the auth URL arrives in the *remote server's* advertised
+/// environment config, so allowing http to an arbitrary host would let a rogue
+/// server downgrade the channel that carries login and exchange tokens.
+pub fn grpc_endpoint(auth_url: &str) -> String {
     match auth_url.split_once("://") {
         Some(("https", _)) => auth_url.to_string(),
+        Some(("http", _))
+            if url::Url::parse(auth_url).is_ok_and(|url| super::is_loopback_http_url(&url)) =>
+        {
+            auth_url.to_string()
+        }
         Some((_, rest)) => format!("https://{rest}"),
         None => format!("https://{auth_url}"),
     }
 }
 
+/// A UCS Auth `expires_at`, seconds since the UNIX epoch, in milliseconds.
+fn seconds_to_ms(expires_at: i64) -> u64 {
+    u64::try_from(expires_at).unwrap_or(0).saturating_mul(1000)
+}
+
 /// Formats a `RepositoryId` as a UCS Auth resource identifier.
+#[lore_macro::test_pub]
 fn resource_id(repository: RepositoryId) -> String {
     format!("urc-{repository}")
+}
+
+/// Connects a channel to a UCS Auth API endpoint.
+pub(super) async fn connect_channel(
+    auth_url: &str,
+) -> Result<tonic::transport::Channel, ProtocolError> {
+    let endpoint =
+        tonic::transport::Endpoint::new(crate::uds::channel_uri(grpc_endpoint(auth_url)))
+            .map_err(|e| ProtocolError::internal(format!("invalid auth endpoint: {e}")))?;
+    // Connect from a net-runtime task so the channel's driver tasks are
+    // bound to the net runtime.
+    lore_base::lore_spawn_net!(crate::uds::connect_channel(endpoint))
+        .await
+        .map_err(|e| ProtocolError::internal(format!("auth endpoint connect task: {e}")))?
+        .map_err(|e| ProtocolError::internal(format!("failed to connect to auth endpoint: {e}")))
 }
 
 /// Creates a gRPC client with correlation ID interceptor, connected to the
@@ -44,23 +96,17 @@ async fn connect_client(
     >,
     ProtocolError,
 > {
-    let endpoint = grpc_endpoint(auth_url);
-    let endpoint = tonic::transport::Endpoint::new(endpoint)
-        .map_err(|e| ProtocolError::internal(format!("invalid auth endpoint: {e}")))?;
-    // Connect from a net-runtime task so the channel's driver tasks are
-    // bound to the net runtime.
-    let channel = lore_base::lore_spawn_net!(async move { endpoint.connect().await })
-        .await
-        .map_err(|e| ProtocolError::internal(format!("auth endpoint connect task: {e}")))?
-        .map_err(|e| ProtocolError::internal(format!("failed to connect to auth endpoint: {e}")))?;
     Ok(UrcAuthApiClient::with_interceptor(
-        channel,
+        connect_channel(auth_url).await?,
         CorrelationInterceptor,
     ))
 }
 
 /// Sets the authorization header on a gRPC request.
-fn set_auth_header<T>(request: &mut tonic::Request<T>, token: &str) -> Result<(), ProtocolError> {
+pub(super) fn set_auth_header<T>(
+    request: &mut tonic::Request<T>,
+    token: &str,
+) -> Result<(), ProtocolError> {
     let mut header: tonic::metadata::MetadataValue<_> = format!("Bearer {token}")
         .parse()
         .map_err(|e| ProtocolError::internal(format!("invalid metadata value: {e}")))?;
@@ -69,9 +115,8 @@ fn set_auth_header<T>(request: &mut tonic::Request<T>, token: &str) -> Result<()
     Ok(())
 }
 
-/// Authentication implementation using UCS Auth API gRPC service.
+/// Authentication and user service over the UCS Auth API gRPC service.
 ///
-/// Registered under the `ucs-auth` scheme (and `https` during transition).
 /// All `lore_proto::auth` imports are confined to this module.
 ///
 /// The `correlation_id` parameter on trait methods is not used directly --
@@ -103,6 +148,9 @@ impl Authentication for UcsAuthentication {
         Ok(AuthSession {
             session_code: inner.session_code,
             login_url: inner.login_url,
+            user_code: String::new(),
+            interval: SESSION_POLL_INTERVAL,
+            expires_in: SESSION_LIFETIME,
         })
     }
 
@@ -112,7 +160,7 @@ impl Authentication for UcsAuthentication {
         client_state: &str,
         session_code: &str,
         _correlation_id: &str,
-    ) -> Result<Option<AuthenticationToken>, ProtocolError> {
+    ) -> Result<AuthSessionPoll, ProtocolError> {
         let mut client = connect_client(auth_url).await?;
 
         let request = GetAuthSessionRequest {
@@ -125,16 +173,18 @@ impl Authentication for UcsAuthentication {
             .map_err(ProtocolError::from)?;
 
         match res.into_inner().user_token {
-            Some(token) => Ok(Some(AuthenticationToken {
+            Some(token) => Ok(AuthSessionPoll::Complete(AuthenticationToken {
                 token: token.user_token,
                 user_id: token.user_id,
                 user_name: token.user_name,
-                expires_ms: token.expires_at.max(0) as u64,
+                expires_ms: seconds_to_ms(token.expires_at),
                 // Populated by orchestration layer via JWT decode, not the proto response
                 acceptable_root_domains: Vec::new(),
                 refresh_token: None,
+                refresh_expires_ms: 0,
+                scope: None,
             })),
-            None => Ok(None),
+            None => Ok(AuthSessionPoll::Pending),
         }
     }
 
@@ -165,11 +215,25 @@ impl Authentication for UcsAuthentication {
             token: user_token.user_token,
             user_id: user_token.user_id,
             user_name: user_token.user_name,
-            expires_ms: user_token.expires_at.max(0) as u64,
+            expires_ms: seconds_to_ms(user_token.expires_at),
             // Populated by orchestration layer via JWT decode, not the proto response
             acceptable_root_domains: Vec::new(),
             refresh_token: None,
+            refresh_expires_ms: 0,
+            scope: None,
         })
+    }
+
+    async fn authenticate_client(
+        &self,
+        _auth_url: &str,
+        _client_id: &str,
+        _client_secret: &str,
+        _correlation_id: &str,
+    ) -> Result<AuthenticationToken, ProtocolError> {
+        Err(ProtocolError::from(NotSupported {
+            operation: "client credentials login against the gRPC auth service".to_string(),
+        }))
     }
 
     async fn refresh_authentication(
@@ -183,6 +247,17 @@ impl Authentication for UcsAuthentication {
         }))
     }
 
+    async fn revoke_refresh_token(
+        &self,
+        _auth_url: &str,
+        _refresh_token: &str,
+        _correlation_id: &str,
+    ) -> Result<(), ProtocolError> {
+        Err(ProtocolError::from(NotSupported {
+            operation: "token revocation at the gRPC auth service".to_string(),
+        }))
+    }
+
     async fn exchange_for_repository(
         &self,
         auth_url: &str,
@@ -190,26 +265,27 @@ impl Authentication for UcsAuthentication {
         repository: RepositoryId,
         correlation_id: &str,
     ) -> Result<AuthorizationToken, ProtocolError> {
-        self.exchange_for_custom_resource(
+        self.exchange_for_custom_resources(
             auth_url,
             authn_token,
-            &resource_id(repository),
+            &[&resource_id(repository)],
             correlation_id,
         )
         .await
     }
 
-    async fn exchange_for_custom_resource(
+    async fn exchange_for_custom_resources(
         &self,
         auth_url: &str,
         authn_token: &str,
-        resource_id: &str,
+        resource_ids: &[&str],
         _correlation_id: &str,
     ) -> Result<AuthorizationToken, ProtocolError> {
+        super::require_custom_resources(resource_ids)?;
         let mut client = connect_client(auth_url).await?;
 
         let mut request = tonic::Request::new(ExchangeUserTokenForMultiresourceTokenRequest {
-            resource_id: vec![resource_id.to_string()],
+            resource_id: resource_ids.iter().map(|id| id.to_string()).collect(),
         });
         set_auth_header(&mut request, authn_token)?;
 
@@ -225,21 +301,24 @@ impl Authentication for UcsAuthentication {
 
         Ok(AuthorizationToken {
             token: token.user_token,
-            expires_ms: token.expires_at.max(0) as u64,
+            expires_ms: seconds_to_ms(token.expires_at),
             // Populated by orchestration layer via JWT decode, not the proto response
             acceptable_root_domains: Vec::new(),
         })
     }
+}
 
+#[async_trait]
+impl UserService for UcsAuthentication {
     async fn get_user_info(
         &self,
-        auth_url: &str,
+        user_url: &str,
         authz_token: &str,
         repository: RepositoryId,
         user_ids: &[String],
         _correlation_id: &str,
     ) -> Result<Vec<ResolvedUser>, ProtocolError> {
-        let mut client = connect_client(auth_url).await?;
+        let mut client = connect_client(user_url).await?;
 
         let mut request = tonic::Request::new(GetUserInfoRequest {
             resource_id: resource_id(repository),
@@ -265,13 +344,13 @@ impl Authentication for UcsAuthentication {
 
     async fn get_user_id(
         &self,
-        auth_url: &str,
+        user_url: &str,
         authz_token: &str,
         repository: RepositoryId,
         display_name: &str,
         _correlation_id: &str,
     ) -> Result<Option<ResolvedUser>, ProtocolError> {
-        let mut client = connect_client(auth_url).await?;
+        let mut client = connect_client(user_url).await?;
 
         let mut request = tonic::Request::new(GetUserIdRequest {
             resource_id: resource_id(repository),
@@ -288,61 +367,5 @@ impl Authentication for UcsAuthentication {
             user_id: u.user_id,
             user_name: u.display_name,
         }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn grpc_endpoint_ucs_auth() {
-        assert_eq!(
-            grpc_endpoint("ucs-auth://auth.example.com"),
-            "https://auth.example.com"
-        );
-    }
-
-    #[test]
-    fn grpc_endpoint_https() {
-        assert_eq!(
-            grpc_endpoint("https://auth.example.com"),
-            "https://auth.example.com"
-        );
-    }
-
-    #[test]
-    fn grpc_endpoint_no_scheme() {
-        assert_eq!(
-            grpc_endpoint("auth.example.com"),
-            "https://auth.example.com"
-        );
-    }
-
-    #[test]
-    fn grpc_endpoint_custom_scheme() {
-        assert_eq!(
-            grpc_endpoint("custom://auth.example.com:8443/path"),
-            "https://auth.example.com:8443/path"
-        );
-    }
-
-    #[test]
-    fn resource_id_format() {
-        let repo_id = RepositoryId::default();
-        let rid = resource_id(repo_id);
-        assert!(rid.starts_with("urc-"));
-        // Default RepositoryId is all zeros, displayed as hex
-        assert_eq!(rid, "urc-00000000000000000000000000000000");
-    }
-
-    #[tokio::test]
-    async fn refresh_returns_not_supported() {
-        let auth = UcsAuthentication;
-        let result = auth
-            .refresh_authentication("ucs-auth://auth.example.com", "refresh-tok", "corr-1")
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().is_not_supported());
     }
 }

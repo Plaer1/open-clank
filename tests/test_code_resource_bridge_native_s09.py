@@ -15,7 +15,7 @@ from src.openclank.code_query import query_code
 from src.openclank.code_resource_bridge import resolve_resource
 from src.openclank.files_service_client import close_all_clients
 
-assert hashlib.sha256(Path(os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"]).read_bytes()).hexdigest() == os.environ["OPEN_CLANK_TEST_FM_MCP_SHA256"]
+assert hashlib.sha256(Path(os.environ["OPEN_CLANK_TEST_MEMERY_WORKER_BIN"]).read_bytes()).hexdigest() == os.environ["OPEN_CLANK_TEST_FM_MCP_SHA256"]
 scope = lifecycle.scope
 
 
@@ -127,12 +127,12 @@ async def test_late_policy_change_after_real_query_refuses_destination(scope, tm
 async def test_existing_memory_and_document_producers_keep_real_revision_identity(scope, tmp_path, monkeypatch):
     provider, root = await prepared(scope, tmp_path, monkeypatch)
     try:
-        from src.frankenmemory_v2 import mirror_record
+        from src.memery_v2 import mirror_record
         import sqlite3
         record = dict(id="s09-record", text="A persisted claim, not source bytes", category="fact")
         assert mirror_record(record, owner="alice", workspace_id=scope[1]["alice"].id, db_path=provider._fm_db_path)
-        from src.frankenmemory_rag import FrankenmemoryRAG
-        rag = FrankenmemoryRAG(db_path=provider._fm_db_path)
+        from src.memery_rag import MemeryRAG
+        rag = MemeryRAG(db_path=provider._fm_db_path)
         assert rag.add_document("# Original\n\nA document paragraph.", dict(owner="alice", workspace_id=scope[1]["alice"].id, source_uri="file:///private/not-code-authority"))
         with sqlite3.connect(provider._fm_db_path) as c:
             evidence, revision = c.execute("SELECT evidence_id,source_revision FROM fm_v2_evidence WHERE owner_id='alice' ORDER BY created_at DESC LIMIT 1").fetchone()
@@ -144,7 +144,7 @@ async def test_existing_memory_and_document_producers_keep_real_revision_identit
             assert "file:///private" not in json.dumps(result)
         assert mirror_record({**record, "text": "New claim revision"}, owner="alice", workspace_id=scope[1]["alice"].id, db_path=provider._fm_db_path)
         stale = await resolve_resource(**args(scope, provider), body=dict(workspace_id=scope[1]["alice"].id, operation="resolve", reference=dict(kind="memory_evidence", evidence_id=evidence, source_revision=revision)))
-        assert stale["state"] == "stale" and stale["excerpt"] == record["text"]
+        assert stale["state"] == "stale" and stale["excerpt"] is None and stale["provenance"] is None
     finally:
         close_all_clients(); await provider.shutdown()
 

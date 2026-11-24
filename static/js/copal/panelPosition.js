@@ -24,18 +24,33 @@ export function restorePanelPositions(root, saved) {
     const position = saved.get(panel.dataset.notePanel);
     if (!position) continue;
     panel.scrollTop = position.top; panel.scrollLeft = position.left;
-    const rows = new Map([...panel.querySelectorAll('[data-note-tree-key]')].filter(row => row.getClientRects().length).map(row => [row.dataset.noteTreeKey, row]));
-    const anchor = position.anchors.find(item => rows.has(item.key));
+    // Index identities without forcing layout for every row. The saved anchor
+    // list is already ordered by viewport proximity; inspect visibility only
+    // until the first surviving visible candidate is found.
+    const rows = new Map([...panel.querySelectorAll('[data-note-tree-key]')].map(row => [row.dataset.noteTreeKey, row]));
+    const visibility = new Map();
+    const visibleRow = (key) => {
+      const row = rows.get(key);
+      if (!row) return null;
+      if (!visibility.has(row)) visibility.set(row, row.getClientRects().length > 0);
+      return visibility.get(row) ? row : null;
+    };
+    let anchor = null;
+    let anchorRow = null;
+    for (const candidate of position.anchors) {
+      anchorRow = visibleRow(candidate.key);
+      if (anchorRow) { anchor = candidate; break; }
+    }
     if (anchor) {
       const viewport = panel.getBoundingClientRect();
       const scale = panel.offsetHeight > 0 ? viewport.height / panel.offsetHeight : 1;
-      panel.scrollTop += (rows.get(anchor.key).getBoundingClientRect().top - viewport.top) / scale - anchor.top;
+      panel.scrollTop += (anchorRow.getBoundingClientRect().top - viewport.top) / scale - anchor.top;
     }
-    let focused = rows.get(position.focusKey);
+    let focused = visibleRow(position.focusKey);
     // A collapsed focused descendant falls back to its nearest visible parent.
     if (!focused && position.focusKey) {
       let parent = position.focusParent;
-      while (parent && !focused) { focused = rows.get(`folder:${parent}`); parent = parent.includes('/') ? parent.slice(0, parent.lastIndexOf('/')) : ''; }
+      while (parent && !focused) { focused = visibleRow(`folder:${parent}`); parent = parent.includes('/') ? parent.slice(0, parent.lastIndexOf('/')) : ''; }
     }
     if (!focused && position.focusLabel) focused = panel.querySelector(`[aria-label="${CSS.escape(position.focusLabel)}"]`);
     focused?.focus({ preventScroll:true });

@@ -221,8 +221,8 @@ try {
   const select = id => evaluate(`window.__workspaceSessions.selectSession(${JSON.stringify(id)}, { showLoading:false, keepSidebar:true })`);
   const display = () => evaluate(`(() => ({
     sessionId:window.__workspaceSessions.getCurrentSessionId(),
-    path:localStorage.getItem('odysseus-workspace'),
-    workspaceId:localStorage.getItem('odysseus-workspace-id'),
+    path:localStorage.getItem('openclank-workspace'),
+    workspaceId:localStorage.getItem('openclank-workspace-id'),
     pillVisible:document.getElementById('workspace-indicator-btn').style.display !== 'none',
     pillName:document.getElementById('workspace-indicator-name').textContent,
   }))()`);
@@ -329,20 +329,20 @@ try {
   const sendState = await evaluate(`(async () => {
     const chat = await import('/static/js/chat.js');
     chat.init(location.origin);
-    localStorage.setItem('odysseus-workspace', '/allowed/private-path');
-    localStorage.setItem('odysseus-workspace-id', 'workspace-pending');
+    localStorage.setItem('openclank-workspace', '/allowed/private-path');
+    localStorage.setItem('openclank-workspace-id', 'workspace-pending');
     window.__chatStreamFrames = 'data: {"type":"workspace_rejected","data":{}}\\n\\ndata: [DONE]\\n\\n';
     const patchCount = window.__workspacePatches.length;
     document.getElementById('message').value = 'workspace id only';
     await chat.handleChatSubmit({ preventDefault() {} });
-    for (let i = 0; i < 20 && localStorage.getItem('odysseus-workspace-id'); i++) {
+    for (let i = 0; i < 20 && localStorage.getItem('openclank-workspace-id'); i++) {
       await new Promise(resolve => setTimeout(resolve, 0));
     }
     return {
       body:window.__chatSends.at(-1),
       patchDelta:window.__workspacePatches.length - patchCount,
       cached:window.__workspaceSessions.getSessions().find(row => row.id === 'chat-pending')?.workspace_id || null,
-      displayedId:localStorage.getItem('odysseus-workspace-id'),
+      displayedId:localStorage.getItem('openclank-workspace-id'),
     };
   })()`);
   assert.equal(sendState.body.workspace_id, 'workspace-pending');

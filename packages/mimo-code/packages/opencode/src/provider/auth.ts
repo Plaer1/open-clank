@@ -41,6 +41,9 @@ const Prompt = Schema.Union([TextPrompt, SelectPrompt])
 
 export class Method extends Schema.Class<Method>("ProviderAuthMethod")({
   type: Schema.Literals(["oauth", "api"]),
+  acquisitionMethod: Schema.optional(Schema.Literals(["manual-key", "browser", "device"])),
+  credentialKinds: Schema.optional(Schema.Array(Schema.Literals(["api", "oauth"]))),
+  billingLanes: Schema.optional(Schema.Array(Schema.Literals(["metered_api", "subscription", "custom", "local"]))),
   label: Schema.String,
   prompts: Schema.optional(Schema.Array(Prompt)),
 }) {
@@ -100,6 +103,11 @@ export type Error =
   | InstanceType<typeof OauthCallbackFailed>
   | InstanceType<typeof ValidationFailed>
 
+const toAuthError = (error: unknown): Error =>
+  error instanceof globalThis.Error
+    ? new Auth.AuthError({ message: error.message })
+    : (error as Error)
+
 type Hook = NonNullable<Hooks["auth"]>
 const OPENCLANK_FLOW_INPUT = "__openclank_flow_id"
 const OPENCLANK_REDIRECT_INPUT = "__openclank_redirect_uri"
@@ -108,14 +116,30 @@ const OAUTH_FLOW_TTL_MS = 10 * 60 * 1000
 
 type PendingOAuth = {
   providerID: ProviderID
-  result: AuthOAuthResult & { userCode?: string }
+  result: AuthOAuthResult & { userCode?: string; dispose?: () => void | Promise<void> }
   expiresAt: number
   running: boolean
   cancelled: boolean
   abortController: AbortController
+  disposed: boolean
 }
 
 type AuthWriter = Pick<Auth.Interface, "get" | "set" | "remove">
+
+const disposeResult = (result: PendingOAuth["result"]) =>
+  Effect.tryPromise({
+    try: async () => {
+      await result.dispose?.()
+    },
+    catch: () => undefined,
+  }).pipe(Effect.catch(() => Effect.succeed(undefined)))
+
+const disposePending = (entry: PendingOAuth) =>
+  Effect.suspend(() => {
+    if (entry.disposed) return Effect.void
+    entry.disposed = true
+    return disposeResult(entry.result)
+  })
 
 function sameAuth(left: Auth.Info | undefined, right: Auth.Info): boolean {
   return left !== undefined && JSON.stringify(left) === JSON.stringify(right)
@@ -205,6 +229,9 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
         Record.map(hooks, (item) =>
           item.methods.map((method) => ({
             type: method.type,
+            ...(method.acquisitionMethod === undefined ? {} : { acquisitionMethod: method.acquisitionMethod }),
+            ...(method.credentialKinds === undefined ? {} : { credentialKinds: method.credentialKinds }),
+            ...(method.billingLanes === undefined ? {} : { billingLanes: method.billingLanes }),
             label: method.label,
             prompts: method.prompts?.map((prompt) => {
               if (prompt.type === "select") {
@@ -255,6 +282,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
         if (entry.expiresAt <= now) {
           entry.cancelled = true
           entry.abortController.abort()
+          yield* disposePending(entry)
           pending.delete(key)
         }
       }
@@ -262,9 +290,11 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       const pendingKey = flowID || input.providerID
       const expiresAt = input.expiresAt ?? now + OAUTH_FLOW_TTL_MS
       if (expiresAt <= now || expiresAt > now + OAUTH_FLOW_TTL_MS) {
+        yield* disposeResult(result)
         return yield* Effect.fail(new ValidationFailed({ field: "expiresAt", message: "Login flow has expired" }))
       }
       if (flowID && pending.has(pendingKey)) {
+        yield* disposeResult(result)
         return yield* Effect.fail(new ValidationFailed({ field: "flowID", message: "Login flow already exists" }))
       }
       pending.set(pendingKey, {
@@ -273,6 +303,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
         expiresAt,
         running: false,
         cancelled: false,
+        disposed: false,
         abortController: new AbortController(),
       })
       return {
@@ -283,7 +314,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       }
     })
 
-    const complete = Effect.fn("ProviderAuth.complete")(function* (
+    const completeBody = Effect.fn("ProviderAuth.completeBody")(function* (
       input: { providerID: ProviderID } & CallbackInput,
       persist: boolean,
     ) {
@@ -297,6 +328,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       if (entry.expiresAt <= Date.now() || entry.cancelled) {
         entry.cancelled = true
         entry.abortController.abort()
+        yield* disposePending(entry)
         pending.delete(pendingKey)
         return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
       }
@@ -311,12 +343,20 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
         code?: string,
         signal?: AbortSignal,
       ) => Promise<Awaited<ReturnType<AuthOAuthResult["callback"]>>>
-      const result = yield* Effect.promise(() => invoke(input.code, entry.abortController.signal))
+      const cleanup = disposePending(entry)
+      const result: Awaited<ReturnType<AuthOAuthResult["callback"]>> = yield* Effect.tryPromise(
+        () => invoke(input.code, entry.abortController.signal),
+      ).pipe(
+        Effect.tapError(() => Effect.sync(() => pending.delete(pendingKey))),
+        Effect.ensuring(cleanup),
+      )
       if (entry.cancelled || entry.expiresAt <= Date.now()) {
+        yield* disposePending(entry)
         pending.delete(pendingKey)
         return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
       }
       if (!result || result.type !== "success") {
+        yield* disposePending(entry)
         pending.delete(pendingKey)
         return yield* Effect.fail(new OauthCallbackFailed({}))
       }
@@ -329,13 +369,14 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
           ...("metadata" in result && result.metadata ? { metadata: result.metadata } : {}),
         }
       } else if ("refresh" in result) {
-        const { type: _, provider: __, refresh, access, expires, ...extra } = result
+        const { type: _, provider: __, refresh, access, expires, metadata: _legacyMetadata, credentialMetadata, ...extra } = result
         nextAuth = {
           type: "oauth",
           access,
           refresh,
           expires,
           ...extra,
+          ...(credentialMetadata ? { metadata: credentialMetadata } : {}),
         }
       }
       if (nextAuth) {
@@ -347,23 +388,41 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
             () => entry.cancelled || entry.expiresAt <= Date.now(),
           )
           if (!committed) {
+            yield* disposePending(entry)
             pending.delete(pendingKey)
             return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
           }
         }
+        yield* disposePending(entry)
         pending.delete(pendingKey)
         return nextAuth
       }
+      yield* disposePending(entry)
       pending.delete(pendingKey)
       return undefined
     })
 
+    const complete = Effect.fn("ProviderAuth.complete")(function* (
+      input: { providerID: ProviderID } & CallbackInput,
+      persist: boolean,
+    ) {
+      const pending = (yield* InstanceState.get(state)).pending
+      const pendingKey = input.flowID || input.providerID
+      const entry = pending.get(pendingKey)
+      if (!entry) return yield* completeBody(input, persist)
+      if (entry.running) return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
+      const cleanup = disposePending(entry).pipe(
+        Effect.tap(() => Effect.sync(() => pending.delete(pendingKey))),
+      )
+      return yield* completeBody(input, persist).pipe(Effect.ensuring(cleanup))
+    })
+
     const exchange = Effect.fn("ProviderAuth.exchange")(function* (input: { providerID: ProviderID } & CallbackInput) {
-      return yield* complete(input, false)
+      return yield* complete(input, false).pipe(Effect.mapError(toAuthError))
     })
 
     const callback = Effect.fn("ProviderAuth.callback")(function* (input: { providerID: ProviderID } & CallbackInput) {
-      yield* complete(input, true)
+      yield* complete(input, true).pipe(Effect.mapError(toAuthError))
     })
 
     const cancel = Effect.fn("ProviderAuth.cancel")(function* (input: { providerID: ProviderID; flowID: string }) {
@@ -372,6 +431,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       if (entry?.providerID === input.providerID) {
         entry.cancelled = true
         entry.abortController.abort()
+        yield* disposePending(entry)
         pending.delete(input.flowID)
       }
     })

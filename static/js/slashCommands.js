@@ -9,6 +9,8 @@ window.cancelActiveTour = function cancelActiveTour() {
   document.body?.classList.remove('tour-active');
 };
 
+import {responseStyle, RESPONSE_STYLES} from './responseStyle.js';
+import { catalogHasModelChoice } from './modelCatalog.js';
 import { buildCommandCatalog, resolveCatalogCommand, filterCommandCatalog } from './commandCatalog.js';
 import Storage from './storage.js';
 import uiModule from './ui.js';
@@ -20,8 +22,9 @@ import themeModule from './theme.js';
 import documentModule from './document.js?v=20260722emailfastindex1';
 import workspaceModule from './workspace.js';
 import settingsModule from './settings.js';
-import cookbookModule from './cookbook.js';
-import { EVAL_PROMPTS } from './compare/index.js';
+import cookbookModule from './cookbookEntry.js';
+import { EVAL_PROMPTS } from './compare/icons.js';
+import { captureContinuityScope, continuityScopeCurrent, showContinuityAnswer } from './chatContinuityPanel.js';
 
 // ── Module state ──────────────────────────────────────────────────────
 
@@ -34,6 +37,7 @@ let setupIntroShown = false;
 // External references set via initSlashCommands
 let _addMessage = chatRenderer.addMessage;
 let _hideWelcomeScreen = chatRenderer.hideWelcomeScreen;
+let _captureRecoveryTurnPolicy = null;
 let _isStreamingFn = () => false;  // callback to check streaming state
 
 // API key patterns for provider auto-detection
@@ -70,6 +74,24 @@ const SETUP_PROVIDER_HINT = SETUP_PROVIDER_HINT_NAMES.slice(0, -1).join(', ') + 
 const SETUP_LOCAL_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>';
 const SETUP_API_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>';
 const SETUP_SETTINGS_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+
+
+function historyFileOutcome(operation) {
+  const state=operation?.file_restore_state;
+  if(state==='unavailable')return ' File restoration is unavailable; files may remain changed.';
+  if(state!=='partial' && state!=='unknown')return '';
+  const members=Array.isArray(operation.file_restore_members)?operation.file_restore_members:[];
+  const counts={verified:0,conflict:0,unavailable:0,unknown:0};
+  for(const member of members){
+    if(member?.state==='complete' && member.verified===true)counts.verified++;
+    else if(member?.state==='conflict')counts.conflict++;
+    else if(member?.state==='unavailable' || member?.state==='refused')counts.unavailable++;
+    else counts.unknown++;
+  }
+  let text=` Recorded file outcomes have partial coverage: ${counts.verified} verified, ${counts.conflict} conflicts, ${counts.unavailable} unavailable, ${counts.unknown} unknown.`;
+  if(state==='unknown' || counts.unknown)text+=' Use /history-reconcile to check the original outcome.';
+  return text;
+}
 
 function _setupApiProviderChips() {
   return SETUP_PROVIDER_NAMES.map(name =>
@@ -164,7 +186,7 @@ function _normalizeSetupBaseUrl(raw) {
 }
 
 function _clearSetupGuideMessages() {
-  Storage.remove('odysseus-setup-guide-messages');
+  Storage.remove('openclank-setup-guide-messages');
 }
 
 async function _showSetupRetryPrompt() {
@@ -305,7 +327,7 @@ async function _persistMsg(role, content, metadata) {
   }).catch(() => {});
 }
 
-function slashReply(text) {
+function slashReply(text, { persist = true } = {}) {
   _hideWelcomeScreen();
   const chatBox = document.getElementById('chat-history');
   const div = document.createElement('div');
@@ -333,7 +355,7 @@ function slashReply(text) {
   div.appendChild(_slashFooter(div));
   chatBox.appendChild(div);
   uiModule.scrollHistory();
-  _persistMsg('assistant', body.textContent, { source: 'slash' });
+  if (persist) _persistMsg('assistant', body.textContent, { source: 'slash' });
   return { el: div, body };
 }
 
@@ -382,10 +404,10 @@ export async function loadMimoControlState(force = false, uncached = false) {
   }
 }
 
-async function _setMimoConfig(configId, value) {
+async function _setEngineConfig(configId, value) {
   const sid = sessionModule.getCurrentSessionId();
   if (!sid) throw new Error('No active session');
-  const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sid)}/mimo-config`, {
+  const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sid)}/engine-config`, {
     method: 'PATCH',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
@@ -820,67 +842,50 @@ function _resolveSession(idOrName) {
 
 async function _cmdSessionNew(args, ctx) {
   const name = args.join(' ') || `Chat ${new Date().toLocaleTimeString()}`;
-  const sessions = sessionModule.getSessions();
-  const curSess = sessions.find(s => s.id === ctx.sid);
-  let endpointUrl = curSess ? curSess.endpoint_url || '' : '';
-  let model = curSess ? curSess.model || '' : '';
-  let endpointId = curSess ? curSess.endpoint_id || '' : '';
-
-  // No current session — try default chat, then any recent session with a model
-  if (!endpointUrl || !model) {
+  const navigation = sessionModule.getSessionNavigationToken();
+  const account = window.chatModule?.ratingAccountScope?.();
+  const sessionID = sessionModule.getCurrentSessionId();
+  const pending = sessionModule.getPendingChat?.();
+  const capture = () => {
+    const route = sessionModule.getCurrentRoute();
+    const draft = sessionModule.getPendingChat?.();
+    return JSON.stringify([sessionModule.getCurrentSessionId(), sessionModule.getCurrentModel(), route.model, route.endpoint_id, route.endpoint_url,
+      draft?.modelId || '', draft?.endpointId || '', draft?.url || '']);
+  };
+  const original = capture();
+  const current = () => { const now=window.chatModule?.ratingAccountScope?.(); return !!account?.owner && now?.owner===account.owner
+    && now.authEpoch===account.authEpoch && now.sid===account.sid && document.body?.dataset?.accountId===account.owner
+    && sessionModule.getSessionNavigationToken()===navigation && sessionModule.getCurrentSessionId()===sessionID && capture()===original; };
+  if (!current()) return true;
+  const route=sessionModule.getCurrentRoute();
+  let model=sessionModule.getCurrentModel() || '', endpointUrl=pending?.url || route.endpoint_url || '', endpointId=pending?.endpointId || route.endpoint_id || '';
+  if (!model) {
     try {
-      const dcRes = await fetch(`${API_BASE}/api/default-chat`);
-      const dc = await dcRes.json();
-      if (dc.endpoint_url && dc.model) {
-        endpointUrl = dc.endpoint_url;
-        model = dc.model;
-        endpointId = dc.endpoint_id || '';
-      }
-    } catch (e) { /* ignore */ }
+      const response=await fetch(`${API_BASE}/api/default-chat`, {credentials:'same-origin'});
+      const value=response.ok ? await response.json() : null;
+      if (!current()) return true;
+      model=value?.model || ''; endpointUrl=value?.endpoint_url || ''; endpointId=value?.endpoint_id || '';
+    } catch (_) { if (!current()) return true; }
   }
-  if (!endpointUrl || !model) {
-    const withModel = sessions.filter(s => s.endpoint_url && s.model && !s.archived);
-    if (withModel.length > 0) {
-      endpointUrl = withModel[0].endpoint_url;
-      model = withModel[0].model;
-      endpointId = withModel[0].endpoint_id || '';
-    }
-  }
-  // Last resort — pull first model from /api/models
-  if (!endpointUrl || !model) {
-    try {
-      const mRes = await fetch(`${API_BASE}/api/models`, { credentials: 'same-origin' });
-      const mData = await mRes.json();
-      for (const ep of (mData.items || [])) {
-        if (ep.models && ep.models.length && ep.url) {
-          endpointUrl = ep.url;
-          model = ep.models[0];
-          endpointId = ep.endpoint_id || '';
-          break;
-        }
-      }
-    } catch (e) { /* ignore */ }
-  }
-  if (!endpointUrl || !model) {
-    slashReply('No model available — open the model picker and use the <code>+</code> button to add a model endpoint.');
-    return true;
-  }
-
-  const fd = new FormData();
-  fd.append('name', name);
-  fd.append('endpoint_url', endpointUrl);
-  fd.append('model', model);
-  fd.append('skip_validation', 'true');
-  if (endpointId) fd.append('endpoint_id', endpointId);
-  const res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd, credentials: 'same-origin' });
+  let items;
+  try {
+    const response=await fetch(`${API_BASE}/api/models`, {credentials:'same-origin'});
+    if (!response.ok) throw new Error('catalog unavailable');
+    items=(await response.json()).items;
+  } catch (_) { if (current()) slashReply('Select a model first.'); return true; }
+  if (!current()) return true;
+  if (!model || !catalogHasModelChoice(items,model,endpointId,endpointUrl)) { slashReply('Select a model first.'); return true; }
+  const fd=new FormData(); fd.append('name',name); fd.append('endpoint_url',endpointUrl); fd.append('model',model);
+  fd.append('skip_validation','true'); if(endpointId) fd.append('endpoint_id',endpointId);
+  if (!current()) return true;
+  const res=await fetch(`${API_BASE}/api/session`,{method:'POST',body:fd,credentials:'same-origin'});
+  if (!current()) return true;
   if (res.ok) {
-    const data = await res.json();
-    await sessionModule.loadSessions();
-    await sessionModule.selectSession(data.id, { showLoading: false });
-    _hideWelcomeScreen();
-    const shortModel = (model || '').split('/').pop();
-    await typewriterReply(`New session — ${shortModel || 'ready'}.`);
-  } else { const err = await res.json().catch(() => null); slashReply('Failed to create session' + (err?.detail ? ': ' + ctx.esc(err.detail) : '')); }
+    const data=await res.json(); if (!current()) return true;
+    await sessionModule.loadSessions(); if (!current()) return true;
+    await sessionModule.selectSession(data.id,{showLoading:false});
+    _hideWelcomeScreen(); await typewriterReply(`New session — ${(model || '').split('/').pop() || 'ready'}.`);
+  } else { const err=await res.json().catch(()=>null); if(current()) slashReply('Failed to create session'+(err?.detail ? ': '+ctx.esc(err.detail) : '')); }
   return true;
 }
 
@@ -962,19 +967,11 @@ async function _cmdSessionUnimportant(args, ctx) {
 }
 
 async function _cmdSessionFork(args, ctx) {
-  if (!ctx.sid) { slashReply('No active session'); return true; }
-  const keepCount = parseInt(args[0]) || 0;
-  const res = await fetch(`${API_BASE}/api/session/${ctx.sid}/fork`, {
-    method: 'POST', credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keep_count: keepCount })
-  });
-  if (res.ok) {
-    const data = await res.json();
-    await sessionModule.loadSessions();
-    await sessionModule.selectSession(data.id);
-    await typewriterReply(`Forked session (${data.kept || 0} messages)`);
-  } else { slashReply('Fork failed'); }
+  if (args.length > 1) {
+    uiModule.showError('Use /fork [user-message ID] for Native history or /fork [message count] for a transcript copy.');
+    return true;
+  }
+  await forkConversation({ sid: ctx.sid, selector: args[0], commandText: ctx.commandInput });
   return true;
 }
 
@@ -3349,7 +3346,7 @@ async function _cmdTourSettings(args, ctx) {
       text: '<b>Welcome to Settings.</b> HOW EXCITING.',
       placement: 'center-above' },
     { sel: '#settings-modal .settings-nav-item[data-settings-tab="services"]',
-      text: '<b>Add Models</b> — add a local endpoint first, like Ollama, vLLM, or llama.cpp. Cloud providers are optional.',
+      text: '<b>Add Provider</b> — add a local endpoint first, like Ollama, vLLM, or llama.cpp. Cloud providers are optional.',
       before: () => _clickNav('services') },
     { sel: '#settings-modal .settings-nav-item[data-settings-tab="ai"]',
       text: '<b>AI Defaults</b> — three roles share the work. Let\'s walk through them.',
@@ -3366,15 +3363,15 @@ async function _cmdTourSettings(args, ctx) {
     { sel: '#settings-modal .settings-nav-item[data-settings-tab="integrations"]',
       text: '<b>Integrations</b> — wire up email, calendar, contacts here (per-account).',
       before: () => _clickNav('integrations') },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="search"]',
+    { sel: '#settings-modal .settings-nav-item[data-settings-tab="services"]',
       text: '<b>Search</b> — plug in your own search provider, or use the bundled <b>SearXNG</b> out of the box.',
-      before: () => _clickNav('search') },
+      before: () => window.settingsModule?.open('search') },
     { sel: '#settings-modal .settings-nav-item[data-settings-tab="appearance"]',
       text: '<b>Appearance</b> — too many tools you don\'t need? Adjust them here! Toggle sidebar buttons, tool icons, and section visibility.',
       before: () => _clickNav('appearance') },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="email"]',
+    { sel: '#settings-modal .settings-nav-item[data-settings-tab="integrations"]',
       text: '<b>Email</b> — sync schedule, drafts, snooze defaults — everything email-flow related.',
-      before: () => _clickNav('email') },
+      before: () => window.settingsModule?.open('email') },
     { sel: '#settings-modal .settings-nav-item[data-settings-tab="reminders"]',
       text: '<b>Reminders</b> — quiet hours and how Open Clank nudges you about calendar + urgent email.',
       before: () => _clickNav('reminders') },
@@ -4286,7 +4283,7 @@ async function _cmdPrompt(args, ctx) {
     for (const p of list) all.push(p.prompt);
   }
   if (!all.length) { slashReply('No prompts available'); return true; }
-  const firstUseKey = 'odysseus_prompt_command_used';
+  const firstUseKey = 'openclank_prompt_command_used';
   const firstUse = localStorage.getItem(firstUseKey) !== '1';
   const prompt = firstUse
     ? 'i have no imagination help me'
@@ -4860,7 +4857,45 @@ async function _cmdHelp(args, ctx) {
 // directly; grouped commands use `subs`.  `default` is the sub run
 // when the command is invoked bare (e.g. `/chats` -> info).
 
+async function _cmdDream(args, ctx) {
+  if (args.length) { uiModule.showToast('Usage: /dream'); return true; }
+  const scope=captureContinuityScope(); const account=window.chatModule?.ratingAccountScope?.();
+  const current=()=>{const now=window.chatModule?.ratingAccountScope?.();return continuityScopeCurrent(scope) && !!account?.owner && now?.owner===account.owner && now.authEpoch===account.authEpoch && document.body?.dataset?.accountId===account.owner;};
+  if (!scope.chat || scope.chat!==ctx.sid || !current()) { uiModule.showToast('Open a current chat first.');return true; }
+  try {
+    const response=await fetch(`${API_BASE}/api/memory/consolidate-now`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:scope.chat})});
+    const result=await response.json();
+    if (!current()) return true;
+    uiModule.showToast(response.ok ? `Consolidation status: ${String(result.state || 'unavailable').replaceAll('_',' ')}.` : 'Consolidation is unavailable.',3500);
+  } catch (_) {if (current()) uiModule.showToast('Consolidation is unavailable.',3500);}
+  return true;
+}
+
+async function _cmdDistill(args, ctx) {
+  if (args.length) {uiModule.showToast('Usage: /distill');return true;}
+  const scope=captureContinuityScope();
+  if (!continuityScopeCurrent(scope) || scope.chat!==ctx.sid) {uiModule.showToast('Current account or chat unavailable.');return true;}
+  const modal=document.getElementById('memory-modal');
+  if (!modal || modal.classList.contains('hidden')) (document.getElementById('tool-memory-btn') || document.getElementById('rail-memory'))?.click();
+  if (!continuityScopeCurrent(scope)) return true;
+  document.querySelector('.memory-tab[data-memory-tab="skills"]')?.click();
+  const details=document.getElementById('skills-distill');
+  if (details) details.open=true; else uiModule.showToast('Skills selection is unavailable.');
+  return true;
+}
+
 const COMMANDS = {
+  dream: {alias:[],category:'Memory',help:'Consolidate the current chat through the admitted memory owner',usage:'/dream',noUserBubble:true,handler:_cmdDream},
+  distill: {alias:[],category:'Memory',help:'Select chats for a reviewable skill draft',usage:'/distill',noUserBubble:true,handler:_cmdDistill},
+  style: { alias:[], category:'Chats', help:'Choose this chat’s response style', usage:'/style [normal|concise|brief|minimal]', noUserBubble:true,
+    handler:async(args,ctx)=>{
+      if(args.length>1 || args.length===1 && !RESPONSE_STYLES.includes(args[0].toLowerCase())){uiModule.showToast('Usage: /style [normal|concise|brief|minimal]');return true;}
+      const scope=ctx.styleScope;if(!responseStyle.current(scope)){uiModule.showToast('Chat or account changed; style unavailable.');return true;}
+      const result=args.length ? await responseStyle.set(args[0].toLowerCase(),scope) : await responseStyle.read(scope);
+      if(!responseStyle.current(scope))return true;
+      const message=result.state==='saved' ? `Response style: ${result.mode}.${result.requested ? ` Unsaved choice: ${result.requested}.` : ''}` : result.state==='draft' ? `New chat style: ${result.mode}.` : result.state==='conflict' ? `Style changed elsewhere; ${result.requested} was not saved.` : result.state==='unknown' ? `Save outcome unknown; ${result.requested} remains your choice.` : 'Response style unavailable.';
+      uiModule.showToast(message,3000);return true;
+    }},
   chats: {
     alias: ['session', 'sessions', 's'],
     category: 'Chats',
@@ -4874,7 +4909,7 @@ const COMMANDS = {
       'rename':      { handler: _cmdSessionRename,      alias: ['mv'],             help: 'Rename current chat',         usage: '/chats rename Name' },
       'favorite':    { handler: _cmdSessionImportant,   alias: ['pin','important'], help: 'Mark as favorite',          usage: '/chats favorite' },
       'unfavorite':  { handler: _cmdSessionUnimportant, alias: ['unpin','unimportant'], help: 'Unmark favorite',       usage: '/chats unfavorite' },
-      'fork':        { handler: _cmdSessionFork,        alias: ['cp'],             help: 'Fork chat (keep first N msgs)', usage: '/chats fork [N]' },
+      'fork':        { handler: _cmdSessionFork,        alias: ['cp'],             help: 'Fork Native history before a user turn, or copy the first N messages of a legacy transcript', usage: '/chats fork [user-message-id|N]', noUserBubble: true },
       'truncate':    { handler: _cmdSessionTruncate,    alias: [],                 help: 'Delete older messages, keep last N', usage: '/chats truncate N' },
       'switch':      { handler: _cmdSessionSwitch,      alias: ['goto','cd'],      help: 'Switch to chat by name/id',    usage: '/chats switch name' },
       'sort':        { handler: _cmdSessionSort,        alias: [],                 help: 'Auto-sort into folders',      usage: '/chats sort' },
@@ -5306,6 +5341,7 @@ export const LEGACY_ALIASES = {
 function _makeCtx() {
   return {
     sid: sessionModule.getCurrentSessionId(),
+    styleScope: responseStyle.capture(),
     esc: uiModule.esc,
     t: value => window.openClankI18n?.t?.(value) || value
   };
@@ -5371,13 +5407,13 @@ function _fuzzyMatch(typed, maxDist) {
 
 function _isCmd(str) { return str.startsWith('/') || str.startsWith('!'); }
 
-async function _requestNativeOperation(payload, ctx) {
-  if (ctx.sid !== sessionModule.getCurrentSessionId()) throw Object.assign(new Error('Chat changed'), { contextChanged: true });
+async function _requestNativeOperation(payload, ctx, current = () => ctx.sid === sessionModule.getCurrentSessionId()) {
+  if (!current()) throw Object.assign(new Error('Chat changed'), { contextChanged: true });
   const response = await fetch(`${API_BASE}/api/session/${encodeURIComponent(ctx.sid)}/mimo-operation`, {
     method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
   });
   const data = await response.json().catch(() => ({}));
-  if (ctx.sid !== sessionModule.getCurrentSessionId()) throw Object.assign(new Error('Chat changed'), { contextChanged: true });
+  if (!current()) throw Object.assign(new Error('Chat changed'), { contextChanged: true });
   if (!response.ok) {
     const detail = data.detail || data.error || 'Native operation rejected';
     let message = typeof detail === 'string' ? detail : detail.message || 'Native operation rejected';
@@ -5385,17 +5421,165 @@ async function _requestNativeOperation(payload, ctx) {
     if (code === 'HISTORY_RECONCILIATION_REQUIRED' || code === 'NATIVE_HISTORY_REJECTED') message += ' Use /history-reconcile before another history change.';
     if (code === 'HISTORY_REVISION_CONFLICT') message += ' Reload /timeline before retrying.';
     if (code === 'SOURCE_BOUNDARY_UNMAPPED') message += ' Use /timeline to choose an available user-message boundary.';
-    if (code === 'FORK_RECONCILIATION_REQUIRED') message += detail.candidate_id ? ` Use /fork-reconcile ${detail.candidate_id} to explicitly settle this candidate.` : ' This fork needs explicit reconciliation before continuing.';
-    throw Object.assign(new Error(message), { code });
+    throw Object.assign(new Error(message), {
+      code, status: response.status, candidateId: detail?.candidate_id, notIssued: detail?.not_issued === true
+    });
   }
   return data;
+}
+
+const forkRequests = new Set();
+const forkCandidateId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+async function openCompletedFork(result, current, commandText) {
+  if (!current()) return;
+  await sessionModule.loadSessions();
+  if (!current()) return;
+
+  const label = result.kind === 'transcript-copy' ? 'Transcript copied' : 'Fork created';
+  const name = result.name || result.id;
+  const draft = window.chatModule?.captureComposerDraftState?.();
+  if (draft?.pending?.length || draft?.attachments?.length || (draft?.text && draft.text.trim() !== commandText)) {
+    uiModule.showToast(`${label} → ${name}. Your draft is still in this chat.`, 5000);
+    return;
+  }
+  await sessionModule.selectSession(result.id);
+  if (sessionModule.getCurrentSessionId() === result.id) uiModule.showToast(`${label} → ${name}`);
+}
+
+export async function forkConversation({ sid, selection, selector, commandText, operation = 'fork' }) {
+  const scope = captureContinuityScope();
+  const navigation = sessionModule.getSessionNavigationToken();
+  const current = () => sid === scope.chat && continuityScopeCurrent(scope) &&
+    navigation === sessionModule.getSessionNavigationToken();
+  if (!sid || !current()) {
+    uiModule.showError('Select the original saved chat before forking.');
+    return;
+  }
+  const storageKey = 'openclank.fork.v1:' + JSON.stringify([scope.account, sid, scope.workspace]);
+  if (forkRequests.has(storageKey)) {
+    uiModule.showToast('A fork request is already running in this chat.', 2400);
+    return;
+  }
+  forkRequests.add(storageKey);
+  const request = payload => _requestNativeOperation(payload, { sid }, current);
+  let issued = false;
+  let candidateId = null;
+  try {
+    const source = (await request({ operation: 'fork-source' })).result;
+    const original = source?.kind === 'native' ? sessionStorage.getItem(storageKey) : null;
+    if (original && !forkCandidateId.test(original)) throw new Error('The saved fork selector is invalid.');
+    if (source?.kind === 'native' && (!source.workspace_id || source.workspace_id !== scope.workspace)) {
+      throw new Error('Select the workspace of the original Native chat before forking.');
+    }
+
+    if (operation === 'fork-status' || operation === 'fork-reconcile') {
+      candidateId = selector || original;
+      if (candidateId && !forkCandidateId.test(candidateId)) throw new Error('Use the original fork candidate ID.');
+      if (operation === 'fork-reconcile' && !candidateId) {
+        throw new Error('Use /fork-status to find the original fork candidate ID.');
+      }
+      const payload = { operation };
+      if (candidateId) payload.child_session_id = candidateId;
+      const result = (await request(payload)).result;
+      if (result?.status === 'settled' && typeof result.id === 'string' && result.id) {
+        if (result.id === original) sessionStorage.removeItem(storageKey);
+        if (operation === 'fork-reconcile') await openCompletedFork(result, current, commandText);
+        else {
+          await sessionModule.loadSessions();
+          if (current()) uiModule.showToast(`Fork receipt confirmed → ${result.name || result.id}`, 4500);
+        }
+      } else if (result?.status === 'pending' && forkCandidateId.test(result.candidate_id)) {
+        uiModule.showError(`Fork pending. Use /fork-reconcile ${result.candidate_id} to check the original Native receipt.`);
+      } else if (result?.status === 'no-pending-candidate') {
+        uiModule.showToast('No pending fork candidate was found.', 2400);
+      } else {
+        uiModule.showError(result?.status === 'stale'
+          ? 'The original fork receipt is stale. The candidate remains closed.'
+          : 'The original fork outcome is unknown. The candidate remains closed.');
+      }
+      return;
+    }
+
+    if (original) throw new Error(`The previous fork outcome is unresolved. Use /fork-status ${original}.`);
+    if (source?.kind === 'transcript-copy' && operation === 'fork') {
+      if (selection && !selection.id) throw new Error('This message has no saved transcript ID.');
+      if (selector && !/^\d+$/.test(selector)) throw new Error('A transcript copy takes a message count.');
+      const keepCount = Number(selector || 0);
+      if (!Number.isSafeInteger(keepCount)) throw new Error('The transcript message count is too large.');
+      const body = {keep_count: keepCount, expected_transcript_revision: source.transcript_revision};
+      if (selection) {
+        body.host_message_id = selection.id;
+        body.boundary = selection.boundary;
+      }
+      if (!current()) return;
+      const response = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sid)}/fork`, {
+        method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+      });
+      if (!current()) return;
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || result.kind !== 'transcript-copy' || typeof result.id !== 'string' || !result.id) {
+        throw new Error(typeof result.detail === 'string' ? result.detail : 'Transcript copy could not be confirmed.');
+      }
+      await openCompletedFork(result, current, commandText);
+      return;
+    }
+
+    if (source?.kind !== 'native') throw new Error('This chat only supports transcript copies.');
+    if (selection?.boundary === 'through') {
+      throw new Error('To include this reply in a Native fork, choose Fork before this message on the next user turn, or use /fork for the current chat.');
+    }
+    const hostMessageId = selection?.id || selector;
+    if (selection && !hostMessageId) throw new Error('This user message has no saved Native boundary. Reload the chat or use /timeline.');
+    const timeline = (await request({ operation: 'timeline' })).result;
+    if (!Number.isSafeInteger(timeline?.transcript_revision) || timeline.transcript_revision < 0 ||
+        typeof source.source_key !== 'string' || !source.source_key) {
+      throw new Error('The Native source revision is unavailable.');
+    }
+    if (source.transcript_revision !== timeline.transcript_revision) {
+      throw new Error('The original Native transcript changed. Select the boundary again.');
+    }
+    if (timeline.history_operation?.status === 'pending') {
+      throw new Error('An earlier history operation is pending. Use /history-reconcile first.');
+    }
+    if (hostMessageId && (!Array.isArray(timeline.source_map) ||
+        !timeline.source_map.some(boundary => boundary?.host_message_id === hostMessageId))) {
+      throw new Error('Choose a mapped user-message ID from /timeline.');
+    }
+    if (!current()) return;
+
+    candidateId = crypto.randomUUID();
+    sessionStorage.setItem(storageKey, candidateId);
+    const payload = { operation: 'fork', request_id: candidateId, expected_source_key: source.source_key,
+      expected_transcript_revision: timeline.transcript_revision };
+    if (hostMessageId) payload.host_message_id = hostMessageId;
+    issued = true;
+    const result = (await request(payload)).result;
+    if (result?.status !== 'settled' || result.id !== candidateId) throw new Error('The Native fork outcome is unknown.');
+    sessionStorage.removeItem(storageKey);
+    issued = false;
+    await openCompletedFork(result, current, commandText);
+  } catch (error) {
+    const originalId = forkCandidateId.test(error.candidateId) ? error.candidateId : null;
+    let message = error.message;
+    if (issued && !originalId && (error.notIssued || (error.status >= 400 && error.status < 500))) {
+      sessionStorage.removeItem(storageKey);
+    } else if (issued || originalId) {
+      if (originalId && issued) sessionStorage.setItem(storageKey, originalId);
+      message += ` Use /fork-status ${originalId || candidateId} to inspect the original fork.`;
+    }
+    if (current()) uiModule.showError(message);
+  } finally {
+    forkRequests.delete(storageKey);
+  }
 }
 
 // ── Main dispatcher ───────────────────────────────────────────────
 
 async function handleSlashCommand(input) {
-  const ctx = _makeCtx();
+  const ctx = { ..._makeCtx(), commandInput: input };
   let userShown = false;
+  let timelineOnly = false;
   const showUser = () => { if (!userShown) { userShown = true; _addMessage('user', input); _persistMsg('user', input, { source: 'slash' }); } };
   try {
     const catalog = await loadCommandCatalog({ fresh: true });
@@ -5403,6 +5587,7 @@ async function handleSlashCommand(input) {
     const resolved = resolveCatalogCommand(catalog, input);
     if (!resolved) return false;
     const { entry } = resolved;
+    timelineOnly = entry?.executor === 'operation' && entry.name === 'timeline';
     if (!entry) {
       showUser();
       const suggestions = _fuzzyMatch(resolved.name);
@@ -5412,11 +5597,12 @@ async function handleSlashCommand(input) {
     const args = resolved.arguments.trim() ? resolved.arguments.trim().split(/\s+/) : [];
     const wantsHelp = args.includes('--help') || args.includes('-h');
     if (wantsHelp) {
-      showUser();
+      const readOnlyHelp = entry.definition?.noUserBubble || ['timeline', 'native-fork', 'fork-reconcile', 'fork-status'].includes(entry.name);
+      if (!readOnlyHelp) showUser();
       const lines = [entry.usage, entry.help, `${entry.origin} · ${entry.scope} · ${entry.availability}`];
       if (entry.reason && entry.availability !== 'available') lines.push(entry.reason);
       if (entry.definition?.subs) for (const [name, def] of Object.entries(entry.definition.subs)) if (!name.startsWith('_')) lines.push(`${def.usage || entry.token + ' ' + name} — ${def.help || ''}`);
-      slashReply(`<pre>${ctx.esc(lines.join('\n'))}</pre>`);
+      slashReply(`<pre>${ctx.esc(lines.join('\n'))}</pre>`, { persist: !readOnlyHelp });
       return true;
     }
     if (!['available', 'requires-start'].includes(entry.availability)) {
@@ -5439,8 +5625,13 @@ async function handleSlashCommand(input) {
       showUser(); settingsModule.open(entry.destination?.panel, { field: entry.destination?.field }); return true;
     }
     if (entry.executor === 'operation') {
-      showUser();
-      if (!ctx.sid) { slashReply('No active session.'); return true; }
+      if (['native-fork', 'fork-status', 'fork-reconcile'].includes(entry.name)) {
+        if (args.length > 1) { uiModule.showError(`Use ${entry.usage}`); return true; }
+        await forkConversation({ sid: ctx.sid, selector: args[0], commandText: input, operation: entry.name });
+        return true;
+      }
+      if (entry.name !== 'timeline') showUser();
+      if (!ctx.sid) { slashReply('No active session.', { persist: !timelineOnly }); return true; }
       if (entry.name === 'agent-profile') {
         if (args.length > 1) { slashReply('Usage: /agent-profile [id|reset]'); return true; }
         const state = await loadMimoControlState(false, true);
@@ -5452,7 +5643,7 @@ async function handleSlashCommand(input) {
         }
         const value = args[0] === 'reset' ? '' : args[0];
         if (value && !profiles.some(profile => profile.id === value)) throw new Error('That profile is not currently eligible. Use /agent-profile to list available profiles.');
-        const response = await fetch(`${API_BASE}/api/session/${ctx.sid}/mimo-config`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config_id: 'agent_profile', value }) });
+        const response = await fetch(`${API_BASE}/api/session/${ctx.sid}/engine-config`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config_id: 'agent_profile', value }) });
         const data = await response.json();
         if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : data.detail?.message || 'Profile selection was rejected.');
         if (ctx.sid !== sessionModule.getCurrentSessionId()) throw new Error('Chat changed; the response belongs to the previous chat.');
@@ -5460,9 +5651,12 @@ async function handleSlashCommand(input) {
         slashReply(value ? `Profile ${ctx.esc(value)} selected for the next Agent turn. The main model stays unchanged.` : 'Named profile reset for the next Agent turn. The main model stays unchanged.');
         return true;
       }
-      if (['timeline','undo','redo','history-reconcile','native-fork','fork-reconcile'].includes(entry.name)) {
+      if (['timeline','undo','redo','history-reconcile'].includes(entry.name)) {
         const draftBefore = window.chatModule?.captureComposerDraftState?.();
-        if ((['undo','native-fork'].includes(entry.name) && args.length > 1) || (entry.name === 'fork-reconcile' && args.length !== 1) || (!['undo','native-fork','fork-reconcile'].includes(entry.name) && args.length)) { slashReply(`Usage: ${ctx.esc(entry.usage)}`); return true; }
+        if (args.length > (entry.name === 'undo' ? 1 : 0)) {
+          slashReply(`Usage: ${ctx.esc(entry.usage)}`, { persist: entry.name !== 'timeline' });
+          return true;
+        }
         const timelineData = await _requestNativeOperation({ operation: 'timeline' }, ctx);
         const timeline = timelineData.result || {};
         if (!Number.isInteger(timeline.transcript_revision) || timeline.transcript_revision < 0) throw new Error('Native timeline did not return a valid history revision.');
@@ -5474,26 +5668,20 @@ async function handleSlashCommand(input) {
             const preview = message ? chatRenderer.copyMessageText(message).replace(/\s+/g, ' ').slice(0, 120) : 'User turn';
             return `${index + 1}. ${choice.host_message_id} — ${preview}`;
           });
-          if (!lines.length) lines.push('No user-turn boundaries are available for native undo.');
-          else lines.push('Use /undo <host-message-id>, or /undo for the latest available user turn.');
+          if (!lines.length) lines.push('No mapped user-turn boundaries are available.');
+          else lines.push('Use /fork <host-message-id> to fork before a user turn, or /undo <host-message-id> to revert to it.');
           if (timeline.history_operation?.status === 'pending') lines.push('A previous history change needs /history-reconcile.');
-          slashReply(`<pre>${ctx.esc(lines.join('\n'))}</pre>`);
+          slashReply(`<pre>${ctx.esc(lines.join('\n'))}</pre>`, { persist: false });
           return true;
         }
-        const request = { operation: entry.name === 'native-fork' ? 'fork' : entry.name, expected_transcript_revision: timeline.transcript_revision };
-        if (['undo','native-fork'].includes(entry.name) && args[0]) request.host_message_id = args[0];
-        if (entry.name === 'fork-reconcile') request.child_session_id = args[0];
+        const request = { operation: entry.name, expected_transcript_revision: timeline.transcript_revision };
+        if (entry.name === 'undo' && args[0]) request.host_message_id = args[0];
         const data = await _requestNativeOperation(request, ctx);
         const result = data.result || {};
-        if (result.status !== 'settled') throw new Error(['native-fork','fork-reconcile'].includes(entry.name) ? 'The fork is not settled. Use /fork-reconcile with the pending candidate ID before continuing.' : 'History change is not settled. Use /history-reconcile before continuing.');
-        if (['native-fork','fork-reconcile'].includes(entry.name)) {
-          if (typeof result.id !== 'string' || !result.id) throw new Error('The settled fork did not return a chat ID.');
-          await sessionModule.selectSession(result.id);
-          return true;
-        }
-        let message = entry.name === 'undo' ? 'Native chat history reverted.' : entry.name === 'redo' ? 'Native chat history restored.' : 'Native history reconciliation is settled.';
+        if (result.status !== 'settled') throw new Error('History change is not settled. Use /history-reconcile before continuing.');
+        let message = entry.name === 'undo' ? 'Chat transcript reverted.' : entry.name === 'redo' ? 'Chat transcript restored.' : 'Chat transcript reconciliation is settled.';
         if (result.history_operation?.outcome === 'unapplied') message = 'The interrupted history change was not applied.';
-        if (result.history_operation?.file_snapshot_available === false) message += ' No native file snapshot was available; files may remain changed.';
+        message += historyFileOutcome(result.history_operation);
         slashReply(ctx.esc(message));
         await sessionModule.selectSession?.(ctx.sid, { preserveComposer: true });
         if (result.restore_draft) {
@@ -5503,42 +5691,95 @@ async function handleSlashCommand(input) {
         if (ctx.sid === sessionModule.getCurrentSessionId()) document.dispatchEvent(new Event('odysseus:mimo-state-changed'));
         return true;
       }
+      if (entry.name === 'rebuild') {
+        if (args.length > 1 || (args.length === 1 && args[0] !== 'status')) { slashReply('Usage: /rebuild [status]'); return true; }
+        const scope = captureContinuityScope();
+        if (!continuityScopeCurrent(scope) || scope.chat !== ctx.sid || typeof _captureRecoveryTurnPolicy !== 'function')
+          throw new Error('Current rebuild policy is unavailable.');
+        const turnPolicy = _captureRecoveryTurnPolicy(ctx.sid);
+        const key = 'openclank.manual-rebuild.v1:' + JSON.stringify([scope.account, scope.chat, scope.workspace]);
+        let requestID;
+        try {
+          requestID = sessionStorage.getItem(key);
+          if (requestID && !/^rebuild_[0-9a-f]{32}$/.test(requestID)) throw new Error('Invalid stored selector');
+          if (args[0] === 'status' || requestID) {
+            slashReply(requestID ? `Rebuild outcome is unknown for original request ${ctx.esc(requestID)}. Inspect the current checkpoint before taking further action.` : 'No pending rebuild request is recorded in this browser tab.');
+            return true;
+          }
+          if (!requestID) {
+            if (!globalThis.crypto?.randomUUID) throw new Error('Identity unavailable');
+            requestID = 'rebuild_' + crypto.randomUUID().replaceAll('-', '');
+            sessionStorage.setItem(key, requestID);
+          }
+        } catch { throw new Error('Rebuild request recovery is unavailable.'); }
+        let data;
+        try { data = await _requestNativeOperation({ operation: 'rebuild', requestID, turnPolicy }, ctx); }
+        catch (error) {
+          if (!continuityScopeCurrent(scope)) return true;
+          throw Object.assign(new Error(`Rebuild outcome is unavailable; original request ${requestID} remains pending.`), { cause: error });
+        }
+        if (!continuityScopeCurrent(scope)) return true;
+        const messages = { rebuilt:'Context rebuilt from the current checkpoint.', unavailable:'Checkpoint context is unavailable; the context is unchanged.',
+          'insert-failed':'The checkpoint boundary could not be inserted; the context is unchanged.',
+          'compaction-requested':'Checkpoint rebuild could not run; compaction was requested.' };
+        const message = messages[data.result?.outcome];
+        if (!message) throw new Error(`Rebuild outcome is unknown; original request ${requestID} remains pending.`);
+        try { sessionStorage.removeItem(key); } catch { /* outcome already received; selector is not authority */ }
+        slashReply(ctx.esc(message));
+        document.dispatchEvent(new Event('odysseus:mimo-state-changed'));
+        return true;
+      }
       let payload;
       if (entry.name === 'btw') {
         if (!resolved.arguments.trim()) { slashReply('Usage: /btw <question>'); return true; }
         payload = { operation: 'btw', question: resolved.arguments };
       } else {
         if (args.length > 1) { slashReply('Usage: /recover [assistantMessageID]'); return true; }
-        payload = args[0] ? { operation: 'recover', assistantMessageID: args[0] } : { operation: 'recovery' };
+        if (args[0]) {
+          if (ctx.sid !== sessionModule.getCurrentSessionId() || typeof _captureRecoveryTurnPolicy !== 'function') throw new Error('Recovery policy is unavailable for this chat.');
+          const turnPolicy = _captureRecoveryTurnPolicy(ctx.sid);
+          if (ctx.sid !== sessionModule.getCurrentSessionId()) throw Object.assign(new Error('Chat changed'), { contextChanged: true });
+          payload = { operation: 'recover', assistantMessageID: args[0], turnPolicy };
+        } else payload = { operation: 'recovery' };
       }
-      const data = await _requestNativeOperation(payload, ctx);
+      const sideScope = payload.operation === 'btw' ? captureContinuityScope() : null;
+      if (sideScope && (!continuityScopeCurrent(sideScope) || sideScope.chat !== ctx.sid)) return true;
+      let data;
+      try { data = await _requestNativeOperation(payload, ctx); }
+      catch (error) { if (sideScope && !continuityScopeCurrent(sideScope, {panelLifetime:true})) return true; throw error; }
       if (payload.operation === 'btw') {
+        if (!continuityScopeCurrent(sideScope, {panelLifetime:true})) return true;
         if (typeof data.result?.answer !== 'string') throw new Error('Native side question returned no answer');
-        slashReply(`<div aria-label="Side question answer">${ctx.esc(data.result.answer)}</div>`);
+        showContinuityAnswer(sideScope, data.result.answer);
       } else if (payload.operation === 'recovery') {
         const candidates = Array.isArray(data.result) ? data.result : [];
         slashReply(candidates.length ? `<pre>${ctx.esc(candidates.map(candidate => `/recover ${candidate.assistantMessageID} — interrupted ${candidate.created || ''}`).join('\n'))}</pre>` : 'No recoverable interrupted candidates.');
       } else {
-        slashReply('Explicit recovery acknowledged.');
+        slashReply(data.deliveryState === 'pending' ? 'Recovery is pending.' : 'Recovery status is unavailable.');
         await sessionModule.selectSession?.(ctx.sid);
         document.dispatchEvent(new Event('odysseus:mimo-state-changed'));
       }
       return true;
     }
     if (entry.executor === 'skill') { showUser(); return await _invokeSkillByName(entry.name, resolved.arguments, ctx); }
-    if (!entry.definition.noUserBubble) showUser();
     const def = entry.definition;
-    if (def.handler) return await def.handler(args, ctx);
+    if (def.handler) {
+      if (!def.noUserBubble) showUser();
+      return await def.handler(args, ctx);
+    }
     if (def.subs) {
       const subKey = _resolveSubcommand(def, (args[0] || '').toLowerCase());
       const sub = subKey ? def.subs[subKey] : def.subs[def.default];
+      if (!def.noUserBubble && !sub?.noUserBubble) showUser();
       if (sub?.handler) return await sub.handler(subKey ? args.slice(1) : args, ctx);
       slashReply(`Unknown subcommand. Try ${ctx.esc(entry.token)} --help`); return true;
     }
+    if (!def.noUserBubble) showUser();
     slashReply(`Command ${ctx.esc(entry.token)} has no executor.`); return true;
   } catch (err) {
     if (err.contextChanged || ctx.sid !== sessionModule.getCurrentSessionId()) { uiModule.showToast('Chat changed; the command result belongs to the original chat.', 2400); return true; }
-    showUser(); slashReply(`Error: ${ctx.esc(err.message)}`); return true;
+    if (!timelineOnly) showUser();
+    slashReply(`Error: ${ctx.esc(err.message)}`, { persist: !timelineOnly }); return true;
   }
 }
 
@@ -5553,6 +5794,7 @@ async function handleSlashCommand(input) {
 export function initSlashCommands(deps) {
   API_BASE = deps.apiBase || '';
   if (deps.isStreaming) _isStreamingFn = deps.isStreaming;
+  _captureRecoveryTurnPolicy = typeof deps.captureRecoveryTurnPolicy === 'function' ? deps.captureRecoveryTurnPolicy : null;
 
   for (const event of ['odysseus:skills-changed', 'odysseus:skill-trust-changed', 'odysseus:workspace-changed', 'odysseus:provider-changed', 'odysseus:mcp-changed', 'odysseus:command-catalog-changed', 'openclank:languagechange']) document.addEventListener(event, () => {
     _skillCatalogCache = { at: 0, items: [] };

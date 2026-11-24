@@ -360,10 +360,10 @@ def test_vllm_preflight_reports_cli_and_version():
     script = "\n".join(lines)
 
     assert 'export PATH="$HOME/.local/bin:$PATH"' in script
-    assert 'ODYSSEUS_VLLM_BIN="$(command -v vllm 2>/dev/null || true)"' in script
-    assert 'echo "[odysseus] vLLM CLI: $ODYSSEUS_VLLM_BIN"' in script
-    assert '"$ODYSSEUS_VLLM_BIN" --version' in script
-    assert 'ODYSSEUS_PREFLIGHT_EXIT=127' in script
+    assert 'OPEN_CLANK_VLLM_BIN="$(command -v vllm 2>/dev/null || true)"' in script
+    assert 'echo "[odysseus] vLLM CLI: $OPEN_CLANK_VLLM_BIN"' in script
+    assert '"$OPEN_CLANK_VLLM_BIN" --version' in script
+    assert 'OPEN_CLANK_PREFLIGHT_EXIT=127' in script
 
 
 def test_venv_safe_local_pip_install_strips_user_flags_only_for_local_venv():
@@ -479,16 +479,16 @@ def test_serve_preflight_failure_keeps_tmux_pane_visible():
     capture the helpful error, leaving users with a blank "crashed" card.
     """
     runner_lines = [
-        'ODYSSEUS_PREFLIGHT_EXIT=""',
+        'OPEN_CLANK_PREFLIGHT_EXIT=""',
         'echo "ERROR: vLLM is not installed. Open Cookbook -> Dependencies and install vllm on this server, then launch again."',
-        'ODYSSEUS_PREFLIGHT_EXIT=127',
+        'OPEN_CLANK_PREFLIGHT_EXIT=127',
     ]
     _append_serve_preflight_exit_lines(runner_lines, keep_shell_open=True)
     script = "\n".join(runner_lines)
 
     assert "ERROR: vLLM is not installed" in script
-    assert 'ODYSSEUS_PREFLIGHT_EXIT=127' in script
-    assert 'echo "=== Process exited with code $ODYSSEUS_PREFLIGHT_EXIT ==="' in script
+    assert 'OPEN_CLANK_PREFLIGHT_EXIT=127' in script
+    assert 'echo "=== Process exited with code $OPEN_CLANK_PREFLIGHT_EXIT ==="' in script
     assert 'exec "${SHELL:-/bin/bash}"' in script
     assert "exit 127" not in script
 
@@ -499,8 +499,8 @@ def test_serve_runner_preserves_command_exit_code():
     _append_serve_exit_code_lines(runner_lines, keep_shell_open=True)
     script = "\n".join(runner_lines)
 
-    assert "ODYSSEUS_CMD_EXIT=$?" in script
-    assert 'echo "=== Process exited with code $ODYSSEUS_CMD_EXIT ==="' in script
+    assert "OPEN_CLANK_CMD_EXIT=$?" in script
+    assert 'echo "=== Process exited with code $OPEN_CLANK_CMD_EXIT ==="' in script
     assert 'echo "=== Process exited with code $? ==="' not in script
 
 
@@ -512,7 +512,7 @@ def test_pip_serve_runner_emits_download_ok_before_exit_marker():
 
     assert 'echo "DOWNLOAD_OK"' in script
     assert script.index('echo "DOWNLOAD_OK"') < script.index("=== Process exited with code")
-    assert 'exit "$ODYSSEUS_CMD_EXIT"' in script
+    assert 'exit "$OPEN_CLANK_CMD_EXIT"' in script
 
 
 def test_validate_serve_cmd_accepts_vllm_kv_cache_dtype():
@@ -799,7 +799,7 @@ def test_cached_model_scan_uses_ollama_api_before_cli_and_windows_opt_in():
     assert "scan_ollama_api()\nscan_ollama()" in script
     assert "if any(m.get('is_ollama') for m in models): return" in script
     assert "os.name == 'nt'" in script
-    assert "ODYSSEUS_ALLOW_OLLAMA_CLI_SCAN" in script
+    assert "OPEN_CLANK_ALLOW_OLLAMA_CLI_SCAN" in script
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Ollama CLI startup guard")
@@ -824,7 +824,7 @@ def test_cached_model_scan_does_not_launch_ollama_cli_on_windows(tmp_path):
     env = dict(os.environ)
     env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
     env["HOME"] = str(empty_home)
-    env.pop("ODYSSEUS_ALLOW_OLLAMA_CLI_SCAN", None)
+    env.pop("OPEN_CLANK_ALLOW_OLLAMA_CLI_SCAN", None)
     proc = subprocess.run(
         [sys.executable, str(scan_py)],
         check=True,

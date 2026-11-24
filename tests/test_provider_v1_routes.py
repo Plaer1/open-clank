@@ -1,11 +1,13 @@
 """Security and revision contracts for the normalized provider HTTP API."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import time
+import threading
+from types import SimpleNamespace
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 import httpx
 from sqlalchemy import create_engine
@@ -52,6 +54,126 @@ def test_oauth_flow_store_detaches_one_owner_atomically():
     assert len(flows.remove_owner("bob")) == 1
 
 
+def test_host_rejects_mimo_endpoint_policy_that_disagrees_with_subscription_lane():
+    connection = SimpleNamespace(
+        family_id="xiaomi",
+        adapter_id="mimo-native",
+        billing_lane="subscription",
+    )
+    result = {
+        "authMethod": "api_key",
+        "acquisitionMethod": "browser",
+        "credentialKind": "api",
+        "endpointPolicy": "mimo-metered-api-v1",
+        "credential": {"type": "api", "key": "synthetic-key"},
+    }
+    with pytest.raises(HTTPException, match="endpoint policy"):
+        provider_v1_module._validate_account_auth_result(result, connection=connection)
+
+
+def test_host_accepts_only_declared_opencode_account_lane_endpoint_pairs():
+    for family_id, adapter_id, lane, endpoint_policy in (
+        ("opencode-console", "opencode-native", "metered_api", "opencode-console-inference-v1"),
+        ("opencode-go", "opencode-native", "subscription", "opencode-go-inference-v1"),
+    ):
+        connection = SimpleNamespace(
+            family_id=family_id,
+            adapter_id=adapter_id,
+            billing_lane=lane,
+        )
+        result = {
+            "authMethod": "api_key",
+            "acquisitionMethod": "manual-key",
+            "credentialKind": "api",
+            "endpointPolicy": endpoint_policy,
+            "credential": {"type": "api", "key": "synthetic-key"},
+        }
+        provider_v1_module._validate_account_auth_result(result, connection=connection)
+        wrong = {**result, "endpointPolicy": "opencode-go-inference-v1" if family_id == "opencode-console" else "opencode-console-inference-v1"}
+        with pytest.raises(HTTPException, match="endpoint policy"):
+            provider_v1_module._validate_account_auth_result(wrong, connection=connection)
+
+
+def test_host_accepts_zai_coding_plan_only_as_declared_subscription_api_key():
+    connection = SimpleNamespace(
+        family_id="zai-coding-plan",
+        adapter_id="models-dev-openai-compatible",
+        billing_lane="subscription",
+    )
+    result = {
+        "authMethod": "api_key",
+        "acquisitionMethod": "manual-key",
+        "credentialKind": "api",
+        "endpointPolicy": "zai-coding-plan-openai-v1",
+        "credential": {"type": "api", "key": "synthetic-coding-plan-key"},
+    }
+    provider_v1_module._validate_account_auth_result(result, connection=connection)
+    with pytest.raises(HTTPException, match="endpoint policy"):
+        provider_v1_module._validate_account_auth_result(
+            {**result, "endpointPolicy": "opencode-go-inference-v1"},
+            connection=connection,
+        )
+
+
+def test_host_accepts_grok_only_as_device_oauth_on_its_declared_proxy_lane():
+    connection = SimpleNamespace(
+        family_id="grok",
+        adapter_id="grok-cli-chat",
+        billing_lane="subscription",
+    )
+    result = {
+        "authMethod": "oauth",
+        "acquisitionMethod": "device",
+        "credentialKind": "oauth",
+        "endpointPolicy": "grok-cli-proxy-v1",
+        "credential": {"type": "oauth", "access": "synthetic-access", "refresh": "synthetic-refresh"},
+    }
+    provider_v1_module._validate_account_auth_result(
+        result,
+        connection=connection,
+        expected_acquisition_method="device",
+        expected_credential_kind="oauth",
+    )
+    with pytest.raises(HTTPException, match="endpoint policy"):
+        provider_v1_module._validate_account_auth_result(
+            {**result, "endpointPolicy": "opencode-go-inference-v1"},
+            connection=connection,
+        )
+    with pytest.raises(HTTPException, match="endpoint policy"):
+        provider_v1_module._validate_account_auth_result(
+            {**result, "credentialKind": "api", "authMethod": "api_key", "credential": {"type": "api", "key": "synthetic"}},
+            connection=connection,
+        )
+
+
+def test_host_auth_method_catalog_accepts_only_opencode_endpoint_policy_declarations():
+    for family_id, lane, endpoint_policy in (
+        ("opencode-console", "metered_api", {"metered_api": "opencode-console-inference-v1"}),
+        ("opencode-go", "subscription", {"subscription": "opencode-go-inference-v1"}),
+        ("grok", "subscription", {"subscription": "grok-cli-proxy-v1"}),
+    ):
+        catalog = {
+            "schemaVersion": 1,
+            "families": [{
+                "id": family_id,
+                "billingLanes": [lane],
+                "endpointPolicies": endpoint_policy,
+                "authMethods": [{
+                    "id": "oauth:0" if family_id == "grok" else "api_key",
+                    "type": "oauth" if family_id == "grok" else "api",
+                    "label": "Grok device sign-in" if family_id == "grok" else "API key",
+                    "acquisitionMethod": "device" if family_id == "grok" else "manual-key",
+                    "credentialKinds": ["oauth" if family_id == "grok" else "api"],
+                    "billingLanes": [lane],
+                }],
+            }],
+        }
+        assert provider_v1_module._provider_catalog_auth_methods(catalog, family_id=family_id)[0]["billingLanes"] == [lane]
+        catalog["families"][0]["endpointPolicies"] = {lane: "wrong-policy"}
+        with pytest.raises(provider_v1_module.ProviderEngineValidationError, match="endpoint policy"):
+            provider_v1_module._provider_catalog_auth_methods(catalog, family_id=family_id)
+
+
 class FakeEngineControl:
     def __init__(self):
         self.connection_model_ids: list[str] = []
@@ -93,15 +215,64 @@ class FakeEngineControl:
                         "kinds": ["official", "subscription", "custom_gateway"],
                         "billingLanes": ["metered_api", "subscription", "custom"],
                         "authMethods": [
-                            {"id": "api_key", "type": "api", "label": "API key"},
-                            {"id": "oauth:0", "type": "oauth", "label": "Browser login"},
+                            {"id": "api_key", "type": "api", "label": "API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["metered_api", "subscription", "custom"]},
+                            {"id": "oauth:0", "type": "oauth", "label": "Browser login", "acquisitionMethod": "browser", "credentialKinds": ["oauth"], "billingLanes": ["subscription"]},
                         ],
                         "modelCount": 3,
-                    }
+                    },
+                    {
+                        "id": "xiaomi",
+                        "displayName": "Xiaomi",
+                        "adapters": ["mimo-native"],
+                        "kinds": ["official", "subscription"],
+                        "billingLanes": ["metered_api", "subscription"],
+                        "endpointPolicies": {"metered_api": "mimo-metered-api-v1", "subscription": "mimo-token-plan-v1"},
+                        "authMethods": [
+                            {"id": "api_key", "type": "api", "label": "API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["metered_api", "subscription"]},
+                            {"id": "oauth:0", "type": "oauth", "label": "Browser login", "acquisitionMethod": "browser", "credentialKinds": ["api"], "billingLanes": ["metered_api", "subscription"]},
+                        ],
+                        "modelCount": 3,
+                    },
+                    {
+                        "id": "kilo",
+                        "displayName": "Kilo Gateway",
+                        "adapters": ["models-dev-openai-compatible"],
+                        "kinds": ["official"],
+                        "billingLanes": ["metered_api"],
+                        "authMethods": [
+                            {"id": "api_key", "type": "api", "label": "API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["metered_api"]},
+                            {"id": "oauth:0", "type": "oauth", "label": "Kilo Gateway device sign-in", "acquisitionMethod": "device", "credentialKinds": ["api"], "billingLanes": ["metered_api"]},
+                        ],
+                        "modelCount": 335,
+                    },
+                    {
+                        "id": "llmgateway",
+                        "displayName": "LLM Gateway",
+                        "adapters": ["models-dev-openai-compatible"],
+                        "kinds": ["official"],
+                        "billingLanes": ["metered_api"],
+                        "authMethods": [
+                            {"id": "api_key", "type": "api", "label": "API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["metered_api"]},
+                            {"id": "oauth:0", "type": "oauth", "label": "Create Gateway key (choose project)", "acquisitionMethod": "browser", "credentialKinds": ["api"], "billingLanes": ["metered_api"]},
+                        ],
+                        "modelCount": 203,
+                    },
+                    {
+                        "id": "llmgateway-devpass",
+                        "displayName": "LLM Gateway DevPass",
+                        "adapters": ["models-dev-openai-compatible"],
+                        "kinds": ["subscription"],
+                        "billingLanes": ["subscription"],
+                        "authMethods": [
+                            {"id": "api_key", "type": "api", "label": "DevPass API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["subscription"]},
+                            {"id": "oauth:0", "type": "oauth", "label": "Connect DevPass", "acquisitionMethod": "browser", "credentialKinds": ["api"], "billingLanes": ["subscription"]},
+                        ],
+                        "modelCount": 0,
+                    },
                 ],
             }
         if method.endswith("/connection/validate"):
-            if payload["familyID"] not in {"openai", "openai-compatible", "ollama"}:
+            if payload["familyID"] not in {"openai", "openai-compatible", "ollama", "xiaomi", "kilo", "llmgateway", "llmgateway-devpass"}:
                 raise RuntimeError("unknown family")
             return {
                 "familyID": payload["familyID"],
@@ -130,21 +301,26 @@ class FakeEngineControl:
             finally:
                 self.inventory_active -= 1
             auth_method = payload["authMethod"]
+            self.last_account_validation = dict(payload)
+            credential = payload["credential"]
             model_routes = self._model_routes(self.account_model_ids)
             return {
                 "authMethod": auth_method,
+                "acquisitionMethod": payload["acquisitionMethod"],
+                "credentialKind": payload["credentialKind"],
                 "authClass": (
                     "subscription"
-                    if auth_method == "oauth"
+                    if payload["connection"]["billingLane"] == "subscription"
                     else "local"
                     if payload["connection"]["billingLane"] == "local"
                     else "metered"
                 ),
-                "credential": payload["credential"],
+                "credential": credential,
                 "safeIdentity": {},
                 "accountID": payload["accountID"],
                 "credentialRevision": payload["credentialRevision"],
                 "modelRoutes": model_routes,
+                **({"endpointPolicy": "mimo-token-plan-v1"} if payload["connection"]["familyID"] == "xiaomi" else {}),
                 "discovery": {
                     "status": "complete",
                     "accountID": payload["accountID"],
@@ -170,6 +346,7 @@ def provider_api(monkeypatch, tmp_path):
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     store = ProviderStore(factory, clock=lambda: NOW)
     app = FastAPI()
+    app.state.auth_manager = SimpleNamespace(users={"alice": {}, "bob": {}})
 
     @app.middleware("http")
     async def test_identity(request: Request, call_next):
@@ -190,6 +367,7 @@ def provider_api(monkeypatch, tmp_path):
         else:
             request.state.current_user = request.headers.get("x-test-user", "alice")
             request.state.api_token = False
+        request.state.authenticated = True
         return await call_next(request)
 
     control = FakeEngineControl()
@@ -207,6 +385,66 @@ class FakeOAuthLease:
         self.successful = None
 
     async def call(self, method, payload):
+        if method.endswith("/catalog"):
+            return {
+                "schemaVersion": 1,
+                "families": [{
+                    "id": "openai",
+                    "displayName": "OpenAI",
+                    "adapters": ["openai-responses", "openai-chat"],
+                    "kinds": ["official", "subscription", "custom_gateway"],
+                    "billingLanes": ["metered_api", "subscription", "custom"],
+                    "authMethods": [
+                        {"id": "api_key", "type": "api", "label": "API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["metered_api", "subscription", "custom"]},
+                        {"id": "oauth:0", "type": "oauth", "label": "Browser login", "acquisitionMethod": "browser", "credentialKinds": ["oauth"], "billingLanes": ["subscription"]},
+                    ],
+                    "modelCount": 3,
+                }, {
+                    "id": "xiaomi",
+                    "displayName": "Xiaomi",
+                    "adapters": ["mimo-native"],
+                    "kinds": ["official", "subscription"],
+                    "billingLanes": ["metered_api", "subscription"],
+                    "endpointPolicies": {"metered_api": "mimo-metered-api-v1", "subscription": "mimo-token-plan-v1"},
+                    "authMethods": [
+                        {"id": "oauth:0", "type": "oauth", "label": "Browser login", "acquisitionMethod": "browser", "credentialKinds": ["api"], "billingLanes": ["metered_api", "subscription"]},
+                    ],
+                    "modelCount": 3,
+                }, {
+                    "id": "kilo",
+                    "displayName": "Kilo Gateway",
+                    "adapters": ["models-dev-openai-compatible"],
+                    "kinds": ["official"],
+                    "billingLanes": ["metered_api"],
+                    "authMethods": [
+                        {"id": "api_key", "type": "api", "label": "API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["metered_api"]},
+                        {"id": "oauth:0", "type": "oauth", "label": "Kilo Gateway device sign-in", "acquisitionMethod": "device", "credentialKinds": ["api"], "billingLanes": ["metered_api"]},
+                    ],
+                    "modelCount": 335,
+                }, {
+                    "id": "llmgateway",
+                    "displayName": "LLM Gateway",
+                    "adapters": ["models-dev-openai-compatible"],
+                    "kinds": ["official"],
+                    "billingLanes": ["metered_api"],
+                    "authMethods": [
+                        {"id": "api_key", "type": "api", "label": "API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["metered_api"]},
+                        {"id": "oauth:0", "type": "oauth", "label": "Create Gateway key (choose project)", "acquisitionMethod": "browser", "credentialKinds": ["api"], "billingLanes": ["metered_api"]},
+                    ],
+                    "modelCount": 203,
+                }, {
+                    "id": "llmgateway-devpass",
+                    "displayName": "LLM Gateway DevPass",
+                    "adapters": ["models-dev-openai-compatible"],
+                    "kinds": ["subscription"],
+                    "billingLanes": ["subscription"],
+                    "authMethods": [
+                        {"id": "api_key", "type": "api", "label": "DevPass API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["subscription"]},
+                        {"id": "oauth:0", "type": "oauth", "label": "Connect DevPass", "acquisitionMethod": "browser", "credentialKinds": ["api"], "billingLanes": ["subscription"]},
+                    ],
+                    "modelCount": 0,
+                }],
+            }
         if method.endswith("/oauth/start"):
             self.control.flows[payload["flowID"]] = dict(payload)
             return {
@@ -249,6 +487,18 @@ class FakeOAuthControl(FakeEngineControl):
 
     def completion(self, payload):
         started = self.flows[payload["flowID"]]
+        is_mimo = started["providerID"] == "xiaomi"
+        credential = (
+            {"type": "api", "key": "synthetic-token-plan-key", "metadata": {"base_url": "https://token-plan-cn.xiaomimimo.com/v1"}}
+            if is_mimo
+            else {
+                "type": "oauth",
+                "refresh": f"refresh-{started['flowID']}",
+                "access": f"access-{started['flowID']}",
+                "expires": 2_000_000_000_000,
+                "accountId": f"external-{started['flowID'][-8:]}",
+            }
+        )
         result = {
             "flowID": started["flowID"],
             "connectionID": started["connectionID"],
@@ -256,19 +506,17 @@ class FakeOAuthControl(FakeEngineControl):
             "billingLane": started["billingLane"],
             "mode": started["mode"],
             "status": "complete",
-            "credential": {
-                "type": "oauth",
-                "refresh": f"refresh-{started['flowID']}",
-                "access": f"access-{started['flowID']}",
-                "expires": 2_000_000_000_000,
-                "accountId": f"external-{started['flowID'][-8:]}",
-            },
-            "authMethod": "oauth",
-            "authClass": "subscription",
+            "credential": credential,
+            "authMethod": "api_key" if is_mimo else "oauth",
+            "acquisitionMethod": started.get("acquisitionMethod", "browser"),
+            "credentialKind": credential["type"],
+            "authClass": "subscription" if started["billingLane"] == "subscription" else "metered",
             "safeIdentity": {
                 "provider_display_identity": f"external-{started['flowID'][-8:]}"
             },
         }
+        if is_mimo:
+            result["endpointPolicy"] = "mimo-token-plan-v1"
         if started["mode"] == "reauth":
             result["targetAccountID"] = started["targetAccountID"]
             result["expectedRevision"] = started["expectedRevision"]
@@ -289,11 +537,13 @@ def oauth_provider_api(monkeypatch, tmp_path):
     store = ProviderStore(factory, clock=lambda: NOW)
     control = FakeOAuthControl()
     app = FastAPI()
+    app.state.auth_manager = SimpleNamespace(users={"alice": {}, "bob": {}})
 
     @app.middleware("http")
     async def test_identity(request: Request, call_next):
         request.state.current_user = request.headers.get("x-test-user", "alice")
         request.state.api_token = False
+        request.state.authenticated = True
         return await call_next(request)
 
     app.include_router(setup_provider_v1_routes(store, control))
@@ -348,7 +598,7 @@ def test_family_catalog_is_bundled_and_never_calls_owner_engine(provider_api):
         "source": "managed-engine",
         "oauth_methods_complete": False,
     }
-    assert first.headers["cache-control"] == "private, max-age=300"
+    assert first.headers["cache-control"] == "private, no-store"
     assert first.headers["vary"] == "Cookie, Authorization"
 
 
@@ -358,10 +608,12 @@ def test_family_catalog_does_not_touch_provider_store_or_control():
             raise AssertionError("family reads must not cross the engine boundary")
 
     app = FastAPI()
+    app.state.auth_manager = SimpleNamespace(users={"alice": {}})
 
     @app.middleware("http")
     async def test_identity(request: Request, call_next):
         request.state.current_user = "alice"
+        request.state.authenticated = True
         request.state.api_token = False
         return await call_next(request)
 
@@ -370,7 +622,7 @@ def test_family_catalog_does_not_touch_provider_store_or_control():
         response = client.get("/api/v1/providers/families")
 
     assert response.status_code == 200
-    assert len(response.json()["families"]) == 82
+    assert {"openai", "anthropic", "xiaomi"} <= {f["id"] for f in response.json()["families"]}
 
 
 def test_family_auth_method_enrichment_is_explicit_validated_and_owner_scoped(
@@ -392,8 +644,8 @@ def test_family_auth_method_enrichment_is_explicit_validated_and_owner_scoped(
         "family_id": "openai",
         "source": "managed-engine",
         "auth_methods": [
-            {"id": "api_key", "type": "api", "label": "API key"},
-            {"id": "oauth:0", "type": "oauth", "label": "Browser login"},
+            {"id": "api_key", "type": "api", "label": "API key", "acquisitionMethod": "manual-key", "credentialKinds": ["api"], "billingLanes": ["metered_api", "subscription", "custom"]},
+            {"id": "oauth:0", "type": "oauth", "label": "Browser login", "acquisitionMethod": "browser", "credentialKinds": ["oauth"], "billingLanes": ["subscription"]},
         ],
         "auth_methods_complete": True,
     }
@@ -483,6 +735,7 @@ def test_model_compatibility_routes_project_only_normalized_state(provider_api):
     )
 
     catalogue = client.get("/api/models")
+    assert client.app.state.fake_provider_control.inventory_calls == 0
     assert catalogue.status_code == 200
     assert catalogue.json()["items"][0]["endpoint_id"] == connection["id"]
     assert catalogue.json()["items"][0]["url"] == "openclank://engine"
@@ -495,6 +748,56 @@ def test_model_compatibility_routes_project_only_normalized_state(provider_api):
         "endpoint_url": "openclank://engine",
         "model": "gpt-test",
     }
+
+
+def test_model_catalogue_projects_explicit_reasoning_options_with_route_revision(provider_api):
+    client, store, _ = provider_api
+    connection = _create_connection(client, key="reasoning-catalog-parent").json()
+    route = store.create_model_route(
+        owner="alice",
+        connection_id=connection["id"],
+        provider_model_id="copilot-reasoning-fixture",
+        display_name="Copilot reasoning fixture",
+        operations=("chat.stream", "chat.complete"),
+        capabilities={
+            "reasoning": True,
+            "reasoning_effort": ["low", "none", "0"],
+            "reasoning_default_effort": "low",
+        },
+    )
+    account = store.create_account(
+        owner="alice",
+        connection_id=connection["id"],
+        account_id="pac_reasoning_catalog_fixture",
+        label="Reasoning fixture",
+        auth_method="oauth",
+        auth_class="subscription",
+        credentials={"type": "oauth", "access": "synthetic", "refresh": "synthetic"},
+    )
+    store.set_entitlement(
+        owner="alice", account_id=account.id, model_route_id=route.id, eligible=True
+    )
+
+    response = client.get("/api/models")
+    assert response.status_code == 200
+    record = next(
+        entry
+        for item in response.json()["items"]
+        for entry in item["catalog"]
+        if entry.get("provider_model_id") == "copilot-reasoning-fixture"
+    )
+    assert record["catalog_revision"] == route.catalog_revision
+    assert record["capabilities"]["request_options"] == [{
+        "id": "reasoning_effort",
+        "type": "enum",
+        "label": "Thinking",
+        "values": ["low", "none", "0"],
+        "default": "inherit",
+        "scope": "model",
+        "source": "account-discovery",
+        "catalog_revision": route.catalog_revision,
+        "provider_default": "low",
+    }]
 
 
 def test_inventory_same_key_coalesces_on_one_async_flight(provider_api):
@@ -524,8 +827,8 @@ def test_inventory_same_key_coalesces_on_one_async_flight(provider_api):
         transport = httpx.ASGITransport(app=client.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
             return await asyncio.gather(
-                http.get("/api/models", headers={"x-test-user": "alice"}),
-                http.get("/api/models", headers={"x-test-user": "alice"}),
+                http.get("/api/models?refresh=true", headers={"x-test-user": "alice"}),
+                http.get("/api/models?refresh=true", headers={"x-test-user": "alice"}),
             )
 
     responses = asyncio.run(fetch())
@@ -561,7 +864,7 @@ def test_inventory_different_keys_run_in_parallel(provider_api):
     async def fetch():
         transport = httpx.ASGITransport(app=client.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-            return await http.get("/api/models", headers={"x-test-user": "alice"})
+            return await http.get("/api/models?refresh=true", headers={"x-test-user": "alice"})
 
     response = asyncio.run(fetch())
 
@@ -593,7 +896,7 @@ def test_inventory_cache_invalidates_on_connection_and_account_lifecycle_changes
         auth_class="metered",
         credentials={"type": "api_key", "key": "fixture"},
     )
-    assert client.get("/api/models").status_code == 200
+    assert client.get("/api/models?refresh=true").status_code == 200
     assert any(key[2] == account.id for key in provider_v1_module._ACCOUNT_INVENTORY_CACHE)
 
     updated = client.patch(
@@ -607,7 +910,7 @@ def test_inventory_cache_invalidates_on_connection_and_account_lifecycle_changes
     assert updated.status_code == 200
     assert not any(key[2] == account.id for key in provider_v1_module._ACCOUNT_INVENTORY_CACHE)
 
-    assert client.get("/api/models").status_code == 200
+    assert client.get("/api/models?refresh=true").status_code == 200
     disabled = client.post(
         f"/api/v1/providers/accounts/{account.id}/enable",
         headers={
@@ -648,7 +951,7 @@ def test_stale_inventory_refresh_cannot_reconcile_after_credential_rotation(prov
         transport = httpx.ASGITransport(app=client.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
             pending = asyncio.create_task(
-                http.get("/api/models", headers={"x-test-user": "alice"})
+                http.get("/api/models?refresh=true", headers={"x-test-user": "alice"})
             )
             await control.inventory_entered.wait()
             current = store.get_account(owner="alice", account_id=account.id)
@@ -676,7 +979,7 @@ def test_stale_inventory_refresh_cannot_reconcile_after_credential_rotation(prov
             )
             control.inventory_release.set()
             return await pending, await http.get(
-                "/api/models", headers={"x-test-user": "alice"}
+                "/api/models?refresh=true", headers={"x-test-user": "alice"}
             )
 
     first, second = asyncio.run(fetch_with_rotation())
@@ -781,6 +1084,37 @@ def test_connection_crud_is_owner_scoped_revisioned_and_idempotent(provider_api)
     )
     assert stale.status_code == 412
     assert stale.headers["etag"] == '"2"'
+
+
+def test_connection_policy_patch_is_revisioned_and_public(provider_api):
+    client, store, _ = provider_api
+    connection = _create_connection(client).json()
+    response = client.patch(
+        f"/api/v1/providers/connections/{connection['id']}",
+        headers={
+            "Idempotency-Key": "connection-pool-policy",
+            "If-Match": f'"{connection["revision"]}"',
+        },
+        json={
+            "account_pool_policy": {
+                "version": 1,
+                "mode": "round_robin",
+                "same_model_fallback": True,
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["account_pool_policy"] == {
+        "version": 1,
+        "mode": "round_robin",
+        "same_model_fallback": True,
+    }
+    assert response.json()["revision"] == connection["revision"] + 1
+    assert store.get_connection(owner="alice", connection_id=connection["id"]).account_pool_policy == {
+        "version": 1,
+        "mode": "round_robin",
+        "same_model_fallback": True,
+    }
 
 
 def test_api_key_is_write_only_and_rotation_is_atomic(provider_api):
@@ -1088,6 +1422,178 @@ def test_oauth_add_flows_append_accounts_and_ack_only_after_persistence(oauth_pr
     assert set(control.cancelled) == {item["flow_id"] for item in starts}
 
 
+def test_kilo_device_sign_in_requires_the_canonical_gateway_url(oauth_provider_api):
+    client, _, control = oauth_provider_api
+    legacy = client.post(
+        "/api/v1/providers/connections",
+        headers={"Idempotency-Key": "kilo-legacy-create"},
+        json={
+            "family_id": "kilo",
+            "adapter_id": "models-dev-openai-compatible",
+            "kind": "official",
+            "billing_lane": "metered_api",
+            "label": "Existing Kilo route",
+            "url": "https://api.kilo.ai/api/gateway",
+        },
+    )
+    assert legacy.status_code == 201
+    rejected = client.post(
+        f"/api/v1/providers/connections/{legacy.json()['id']}/oauth/start",
+        headers={"Idempotency-Key": "kilo-legacy-device-login"},
+        json={"label": "Kilo account", "method": 0, "inputs": {}},
+    )
+    assert rejected.status_code == 422
+    assert "canonical Gateway endpoint" in rejected.json()["detail"]
+    assert control.flows == {}
+
+    canonical = client.post(
+        "/api/v1/providers/connections",
+        headers={"Idempotency-Key": "kilo-canonical-create"},
+        json={
+            "family_id": "kilo",
+            "adapter_id": "models-dev-openai-compatible",
+            "kind": "official",
+            "billing_lane": "metered_api",
+            "label": "New Kilo route",
+            "url": "https://ai-gateway.kilo.ai/api/v1",
+        },
+    )
+    assert canonical.status_code == 201
+    started = client.post(
+        f"/api/v1/providers/connections/{canonical.json()['id']}/oauth/start",
+        headers={"Idempotency-Key": "kilo-canonical-device-login"},
+        json={"label": "Kilo account", "method": 0, "inputs": {}},
+    )
+    assert started.status_code == 201
+    assert started.json()["status"] == "pending"
+
+
+def test_llmgateway_browser_key_families_require_the_canonical_endpoint(oauth_provider_api):
+    client, _, control = oauth_provider_api
+    for family, lane, kind, key in (
+        ("llmgateway", "metered_api", "official", "gateway"),
+        ("llmgateway-devpass", "subscription", "subscription", "devpass"),
+    ):
+        legacy = client.post(
+            "/api/v1/providers/connections",
+            headers={"Idempotency-Key": f"{key}-legacy-create"},
+            json={
+                "family_id": family,
+                "adapter_id": "models-dev-openai-compatible",
+                "kind": kind,
+                "billing_lane": lane,
+                "label": f"Old {family} route",
+                "url": "https://gateway.example/v1",
+            },
+        )
+        assert legacy.status_code == 201
+        rejected = client.post(
+            f"/api/v1/providers/connections/{legacy.json()['id']}/oauth/start",
+            headers={"Idempotency-Key": f"{key}-legacy-oauth"},
+            json={"label": f"{family} account", "method": 0, "inputs": {}},
+        )
+        assert rejected.status_code == 422
+        assert "canonical API endpoint" in rejected.json()["detail"]
+
+        canonical = client.post(
+            "/api/v1/providers/connections",
+            headers={"Idempotency-Key": f"{key}-canonical-create"},
+            json={
+                "family_id": family,
+                "adapter_id": "models-dev-openai-compatible",
+                "kind": kind,
+                "billing_lane": lane,
+                "label": f"New {family} route",
+                "url": "https://api.llmgateway.io/v1",
+            },
+        )
+        assert canonical.status_code == 201
+        started = client.post(
+            f"/api/v1/providers/connections/{canonical.json()['id']}/oauth/start",
+            headers={"Idempotency-Key": f"{key}-canonical-oauth"},
+            json={"label": f"{family} account", "method": 0, "inputs": {}},
+        )
+        assert started.status_code == 201
+        assert started.json()["status"] == "pending"
+
+
+def test_mimo_browser_api_credential_persists_on_subscription_lane(oauth_provider_api):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice",
+        family_id="xiaomi",
+        adapter_id="mimo-native",
+        kind="subscription",
+        billing_lane="subscription",
+        label="MiMo Token Plan",
+    )
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "mimo-browser-subscription-start"},
+        json={"label": "MiMo browser account", "method": 0, "inputs": {}},
+    )
+    assert started.status_code == 201, started.text
+    flow_id = started.json()["flow_id"]
+    completed = client.post(
+        f"/api/v1/providers/oauth/flows/{flow_id}/callback",
+        json={"state": control.flows[flow_id]["state"], "code": "synthetic-mimo-code"},
+    )
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["status"] == "complete", f"{completed.text}; validation={getattr(control, 'last_account_validation', None)}"
+    assert "synthetic-token-plan-key" not in completed.text
+    accounts = store.list_accounts(owner="alice", connection_id=connection.id)
+    assert len(accounts) == 1
+    assert accounts[0].auth_method == "api_key"
+    assert control.last_account_validation["acquisitionMethod"] == "browser"
+    assert control.last_account_validation["credentialKind"] == "api"
+
+
+def test_mimo_browser_api_reauth_replaces_the_same_account_with_cas(oauth_provider_api):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice",
+        family_id="xiaomi",
+        adapter_id="mimo-native",
+        kind="subscription",
+        billing_lane="subscription",
+        label="MiMo Token Plan",
+    )
+    account = store.create_account(
+        owner="alice",
+        connection_id=connection.id,
+        label="Existing MiMo plan",
+        auth_method="api_key",
+        auth_class="subscription",
+        credentials={
+            "type": "api",
+            "key": "synthetic-old-token-plan-key",
+            "metadata": {"base_url": "https://token-plan-cn.xiaomimimo.com/v1"},
+        },
+    )
+    assert account.acquisition_method is None
+    assert client.get(f"/api/v1/providers/accounts/{account.id}").json()["acquisition_method"] is None
+    response = client.post(
+        f"/api/v1/providers/accounts/{account.id}/oauth/reauth",
+        headers={"If-Match": f'"{account.revision}"', "Idempotency-Key": "mimo-token-plan-reauth"},
+        json={"label": "Existing MiMo plan", "method": 0, "inputs": {}},
+    )
+    assert response.status_code == 201, response.text
+    flow_id = response.json()["flow_id"]
+    completed = client.post(
+        f"/api/v1/providers/oauth/flows/{flow_id}/callback",
+        json={"state": control.flows[flow_id]["state"], "code": "synthetic-mimo-reauth-code"},
+    )
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["status"] == "complete", completed.text
+    rows = store.list_accounts(owner="alice", connection_id=connection.id)
+    assert len(rows) == 1
+    assert rows[0].id == account.id
+    assert rows[0].credential_version == 2
+    assert rows[0].auth_method == "api_key"
+    assert rows[0].acquisition_method == "browser"
+    assert completed.json()["account"]["acquisition_method"] == "browser"
+
+
 def test_oauth_callback_is_single_flight_across_concurrent_endpoint_requests(
     oauth_provider_api,
 ):
@@ -1136,6 +1642,313 @@ def test_oauth_callback_is_single_flight_across_concurrent_endpoint_requests(
     assert "connected" in responses[1].text
     assert control.callback_calls == 1
     assert len(store.list_accounts(owner="alice", connection_id=connection.id)) == 1
+
+
+def test_oauth_validation_failure_is_terminal_and_successful_commit_is_idempotent(
+    oauth_provider_api,
+):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="subscription",
+        billing_lane="subscription",
+        label="ChatGPT subscriptions",
+    )
+    control.account_model_ids = ["subscription-model"]
+
+    original_call = control.call
+
+    async def malformed_validation(*, method, payload, **kwargs):
+        result = await original_call(method=method, payload=payload, **kwargs)
+        if method.endswith("/account/validate"):
+            result["modelRoutes"][0]["operations"] = ["not-an-operation"]
+            result["discovery"]["models"] = result["modelRoutes"]
+        return result
+
+    control.call = malformed_validation
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "oauth-invalid-result"},
+        json={"label": "Invalid", "method": 0, "inputs": {}},
+    )
+    flow_id = started.json()["flow_id"]
+    failed = client.post(
+        f"/api/v1/providers/oauth/flows/{flow_id}/callback",
+        json={"state": control.flows[flow_id]["state"], "code": "bad-result"},
+    )
+    assert failed.status_code == 200, failed.text
+    assert failed.json()["status"] == "failed"
+    assert failed.json()["error_code"] == "oauth_validation_failed"
+    assert store.list_accounts(owner="alice", connection_id=connection.id) == []
+
+    control.call = original_call
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "oauth-idempotent-result"},
+        json={"label": "Idempotent", "method": 0, "inputs": {}},
+    )
+    flow_id = started.json()["flow_id"]
+    callback_payload = {
+        "state": control.flows[flow_id]["state"],
+        "code": "same-result",
+    }
+    first = client.post(
+        f"/api/v1/providers/oauth/flows/{flow_id}/callback",
+        json=callback_payload,
+    )
+    second = client.post(
+        f"/api/v1/providers/oauth/flows/{flow_id}/callback",
+        json=callback_payload,
+    )
+    assert first.status_code == second.status_code == 200
+    assert first.json()["status"] == second.json()["status"] == "complete"
+    assert first.json()["account"]["id"] == second.json()["account"]["id"]
+    assert len(store.list_accounts(owner="alice", connection_id=connection.id)) == 1
+
+
+def test_oauth_discovery_transient_retries_then_commits_from_engine_result(
+    oauth_provider_api,
+):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice", family_id="openai", adapter_id="openai-responses",
+        kind="subscription", billing_lane="subscription", label="Retryable",
+    )
+    original_call = control.call
+    attempts = 0
+
+    async def transient_then_success(*, method, payload, **kwargs):
+        nonlocal attempts
+        result = await original_call(method=method, payload=payload, **kwargs)
+        if method.endswith("/account/validate") and attempts < 2:
+            attempts += 1
+            result["modelRoutes"] = []
+            result["discovery"] = {
+                **result["discovery"], "status": "unavailable", "models": [],
+                "authoritative": False, "retryable": True, "retryAfterMs": 0,
+            }
+        return result
+
+    control.call = transient_then_success
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "oauth-transient-success"},
+        json={"label": "Retryable", "method": 0, "inputs": {}},
+    ).json()
+    flow_id = started["flow_id"]
+    callback = client.post(
+        f"/api/v1/providers/oauth/flows/{flow_id}/callback",
+        json={"state": control.flows[flow_id]["state"], "code": "retry-code"},
+    )
+    assert callback.json()["status"] == "running", callback.text
+    for _ in range(2):
+        polled = client.get(f"/api/v1/providers/oauth/flows/{flow_id}")
+    assert polled.json()["status"] == "complete"
+    assert attempts == 2
+    assert len(store.list_accounts(owner="alice", connection_id=connection.id)) == 1
+
+
+def test_oauth_discovery_transient_budget_terminates_on_third_attempt(oauth_provider_api):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice", family_id="openai", adapter_id="openai-responses",
+        kind="subscription", billing_lane="subscription", label="Retry budget",
+    )
+    original_call = control.call
+    attempts = 0
+
+    async def always_transient(*, method, payload, **kwargs):
+        nonlocal attempts
+        result = await original_call(method=method, payload=payload, **kwargs)
+        if method.endswith("/account/validate"):
+            attempts += 1
+            result["modelRoutes"] = []
+            result["discovery"] = {
+                **result["discovery"], "status": "unavailable", "models": [],
+                "authoritative": False, "retryable": True, "retryAfterMs": 0,
+            }
+        return result
+
+    control.call = always_transient
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "oauth-transient-budget"},
+        json={"label": "Retry budget", "method": 0, "inputs": {}},
+    ).json()
+    flow_id = started["flow_id"]
+    flow_url = f"/api/v1/providers/oauth/flows/{flow_id}"
+    assert client.post(
+        flow_url + "/callback",
+        json={"state": control.flows[flow_id]["state"], "code": "budget-code"},
+    ).json()["status"] == "running", client.get(flow_url).text
+    assert client.get(flow_url).json()["status"] == "running"
+    terminal = client.get(flow_url).json()
+    assert terminal["status"] == "failed"
+    assert terminal["error_code"] == "oauth_discovery_unavailable"
+    assert attempts == 3
+    assert store.list_accounts(owner="alice", connection_id=connection.id) == []
+
+
+def test_oauth_discovery_long_retry_after_is_terminal_without_next_validation(oauth_provider_api):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice", family_id="openai", adapter_id="openai-responses",
+        kind="subscription", billing_lane="subscription", label="Long retry",
+    )
+    original_call = control.call
+    attempts = 0
+
+    async def long_retry(*, method, payload, **kwargs):
+        nonlocal attempts
+        result = await original_call(method=method, payload=payload, **kwargs)
+        if method.endswith("/account/validate"):
+            attempts += 1
+            result["modelRoutes"] = []
+            result["discovery"] = {
+                **result["discovery"], "status": "unavailable", "models": [],
+                "authoritative": False, "retryable": True, "retryAfterMs": 86_400_000,
+            }
+        return result
+
+    control.call = long_retry
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "oauth-long-retry-after"},
+        json={"label": "Long retry", "method": 0, "inputs": {}},
+    ).json()
+    flow_id = started["flow_id"]
+    response = client.post(
+        f"/api/v1/providers/oauth/flows/{flow_id}/callback",
+        json={"state": control.flows[flow_id]["state"], "code": "long-retry-code"},
+    )
+    assert response.json()["status"] == "failed"
+    assert response.json()["error_code"] == "oauth_discovery_unavailable"
+    assert attempts == 1
+
+
+def test_oauth_flow_deadline_reclaims_abandoned_flow_without_browser_poll(
+    oauth_provider_api,
+):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="subscription",
+        billing_lane="subscription",
+        label="ChatGPT subscriptions",
+    )
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "oauth-expiry-owner"},
+        json={"label": "Expiry", "method": 0, "inputs": {}},
+    )
+    flow_id = started.json()["flow_id"]
+    flow = provider_v1_module._PROVIDER_OAUTH_FLOWS.get(flow_id, owner="alice")
+    flow.expires_at = NOW.replace(tzinfo=timezone.utc) - timedelta(seconds=1)
+
+    expired = client.get(f"/api/v1/providers/oauth/flows/{flow_id}")
+    assert expired.status_code == 200
+    assert expired.json()["status"] == "expired"
+    assert expired.json()["error_code"] == "oauth_expired"
+    assert control.leases[-1].released is True
+
+
+def test_oauth_commit_wins_when_cache_cleanup_fails(oauth_provider_api, monkeypatch):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="subscription",
+        billing_lane="subscription",
+        label="ChatGPT subscriptions",
+    )
+    control.account_model_ids = ["cleanup-model"]
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "oauth-cleanup-owner"},
+        json={"label": "Cleanup", "method": 0, "inputs": {}},
+    )
+    flow_id = started.json()["flow_id"]
+    monkeypatch.setattr(
+        provider_v1_module,
+        "_invalidate_inventory_cache",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("cache cleanup failed")),
+    )
+    completed = client.post(
+        f"/api/v1/providers/oauth/flows/{flow_id}/callback",
+        json={"state": control.flows[flow_id]["state"], "code": "commit-first"},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "complete"
+    assert len(store.list_accounts(owner="alice", connection_id=connection.id)) == 1
+
+
+def test_oauth_cancel_during_validation_wins_before_commit(oauth_provider_api):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="subscription",
+        billing_lane="subscription",
+        label="ChatGPT subscriptions",
+    )
+    control.account_model_ids = ["cancel-during-validation"]
+    validation_started = threading.Event()
+    release_validation = threading.Event()
+    original_call = control.call
+
+    async def delayed_validation(*, method, payload, **kwargs):
+        if method.endswith("/account/validate"):
+            validation_started.set()
+            await asyncio.to_thread(release_validation.wait, 2)
+        return await original_call(method=method, payload=payload, **kwargs)
+
+    control.call = delayed_validation
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "oauth-cancel-validation"},
+        json={"label": "Cancel validation", "method": 0, "inputs": {}},
+    )
+    flow_id = started.json()["flow_id"]
+    payload = {"state": control.flows[flow_id]["state"], "code": "cancel-before-commit"}
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        callback = executor.submit(
+            lambda: client.post(
+                f"/api/v1/providers/oauth/flows/{flow_id}/callback", json=payload
+            )
+        )
+        assert validation_started.wait(2)
+        cancelled = client.delete(f"/api/v1/providers/oauth/flows/{flow_id}")
+        release_validation.set()
+        completed = callback.result(timeout=3)
+
+    assert cancelled.status_code == 200
+    assert completed.status_code == 200
+    assert completed.json()["status"] in {"cancelled", "expired"}
+    assert store.list_accounts(owner="alice", connection_id=connection.id) == []
+
+
+def test_cancelled_oauth_lock_waiter_reclaims_ownership_reference():
+    async def exercise():
+        flow_id = "cancelled-lock-waiter"
+        lock = await provider_v1_module._acquire_global_oauth_lock(flow_id)
+        waiter = asyncio.create_task(
+            provider_v1_module._acquire_global_oauth_lock(flow_id)
+        )
+        await asyncio.sleep(0.02)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        provider_v1_module._release_global_oauth_lock(flow_id, lock)
+        assert flow_id not in provider_v1_module._OAUTH_COMPLETION_LOCKS
+        assert flow_id not in provider_v1_module._OAUTH_COMPLETION_LOCK_REFS
+
+    asyncio.run(exercise())
 
 
 def test_provider_models_hide_invisible_and_unentitled_routes(provider_api):
@@ -1460,6 +2273,7 @@ def test_direct_model_share_is_immediate_attributed_revocable_and_secret_free(
         (),
         {
             "is_configured": True,
+            "users": {"alice": {}, "bob": {}, "carol": {}},
             "list_users": lambda _self: [
                 {
                     "username": "alice",
@@ -1715,3 +2529,48 @@ def test_shared_catalog_uses_authoritative_family_for_bare_duplicate_models(prov
     wire = response.text
     assert "same-model-connection" not in wire
     assert "same-model-route" not in wire
+
+
+def test_claude_oauth_policy_pin_rejects_late_disable(oauth_provider_api, monkeypatch, tmp_path):
+    from routes import prefs_routes
+    monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(tmp_path / "prefs-policy.json"))
+    client, store, control = oauth_provider_api
+    original = FakeOAuthLease.call
+    async def claude_catalog(self, method, payload):
+        result = await original(self, method, payload)
+        if method.endswith("/catalog"):
+            result["families"].append({"id":"anthropic", "displayName":"Anthropic", "adapters":["anthropic-messages"], "kinds":["subscription"], "billingLanes":["subscription"], "authMethods":[{"id":"oauth:0", "type":"oauth", "label":"Browser login", "acquisitionMethod":"browser", "credentialKinds":["oauth"], "billingLanes":["subscription"]}], "modelCount":1})
+        return result
+    monkeypatch.setattr(FakeOAuthLease, "call", claude_catalog)
+    monkeypatch.setattr(FakeOAuthLease, "require_method_policy_contract", lambda self: None, raising=False)
+    enabled = client.get("/api/v1/providers/method-policy")
+    assert enabled.status_code == 200
+    connection = store.create_connection(owner="alice", family_id="anthropic", adapter_id="anthropic-messages", kind="subscription", billing_lane="subscription", label="Claude")
+    started = client.post(f"/api/v1/providers/connections/{connection.id}/oauth/start", headers={"Idempotency-Key":"claude-policy-pin"}, json={"label":"Claude", "method":0, "inputs":{}})
+    assert started.status_code == 201, started.text
+    flow_id = started.json()["flow_id"]
+    disabled = client.put("/api/v1/providers/method-policy", json={"enabled":False, "expected_revision":1})
+    assert disabled.status_code == 200
+    callback = client.post(f"/api/v1/providers/oauth/flows/{flow_id}/callback", json={"state":control.flows[flow_id]["state"], "code":"synthetic"})
+    assert callback.status_code in (200, 409, 410)
+    assert store.list_accounts(owner="alice", connection_id=connection.id) == []
+
+
+def test_comfy_family_requires_installed_media_service(provider_api, monkeypatch):
+    from routes import provider_v1_routes
+
+    client, store, _ = provider_api
+    monkeypatch.setattr(provider_v1_routes, "bundled_provider_family_catalog", lambda: {
+        "families": [{"id": "comfyui"}, {"id": "openai"}],
+    })
+    state = client.app.state
+    assert [f["id"] for f in client.get("/api/v1/providers/families").json()["families"]] == ["openai"]
+    state.provider_store = store
+    state.account_request_barrier = object()
+    state.session_manager = object()
+    state.media_human_service_factory = lambda request, workspace: None
+    response = client.get("/api/v1/providers/families")
+    assert [f["id"] for f in response.json()["families"]] == ["comfyui", "openai"]
+    assert response.headers["cache-control"] == "private, no-store"
+    state.provider_store = object()
+    assert [f["id"] for f in client.get("/api/v1/providers/families").json()["families"]] == ["openai"]

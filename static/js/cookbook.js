@@ -1,4 +1,12 @@
+import './cookbookSchedule.js';
 import { uiIcon } from './uiIcons.js';
+import { createHubDetailController } from './cookbookHubDiscovery.js';
+let _clearHubDetail = () => {};
+if (typeof document !== 'undefined') document.addEventListener('openclank:auth-context-changed', () => _clearHubDetail());
+if (typeof window !== 'undefined') {
+  window.addEventListener('openclank:auth-context-changed', () => _clearHubDetail());
+  window.addEventListener('odysseus:modal-minimized', event => { if (event.detail?.id === 'cookbook-modal') _clearHubDetail(); });
+}
 // ============================================
 // COOKBOOK MODULE (v2 — simplified)
 // What Fits? + Saved presets, inline action panels
@@ -2623,8 +2631,53 @@ function _wireTabEvents(body) {
   const hfArrow = document.getElementById('cookbook-hf-latest-arrow');
   const hfList = document.getElementById('cookbook-hf-latest-list');
   const hfRefresh = document.getElementById('cookbook-hf-latest-refresh');
+  const hfSearch = document.getElementById('cookbook-hf-search');
   if (hfToggle && hfList) {
     let _loaded = false;
+    let listEpoch=0, listController=null;
+    let detail = null;
+    const detailController = createHubDetailController({
+      getOwner:()=>document.body?.dataset?.accountId || '',
+      isVisible:()=>isVisible() && hfList.isConnected && hfList.style.display !== 'none',
+      render:data=>{
+        detail?.remove(); detail=null;
+        if (!data) return;
+        detail=document.createElement('div'); detail.className='doclib-card memory-item';
+        const text=document.createElement('pre'); text.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px';
+        if (data.error) text.textContent=data.error;
+        else {
+          const files=data.files.map(file=>`${file.path} · ${file.size == null ? 'size unknown' : `${file.size} bytes`} · blob ${file.blobID || 'unknown'} · LFS SHA-256 ${file.lfsSHA256 || 'unknown'}`);
+          text.textContent=[`${data.repoID} @ ${data.revision}`,`Task: ${data.task || 'unknown'} · library: ${data.library || 'unknown'}`,
+            `License: ${data.license?.value || 'unknown'} (Hub declaration) · gating: ${data.gating?.state || 'unknown'}`,
+            `Files: ${data.coverage.returned} shown; coverage ${data.coverage.state}${data.coverage.omitted == null ? '' : `; ${data.coverage.omitted} omitted from returned declarations`}.`,
+            'Hashes and sizes are Hub metadata, not verified payloads.',
+            'The existing Download action is separate and does not pin this revision.',...files].join('\n');
+          const use=document.createElement('button'); use.type='button'; use.textContent='Use repository in Download (unpinned)';
+          use.addEventListener('click',()=>{if (dlInput && isVisible()) { dlInput.value=data.repoID; dlInput.focus(); }});
+          detail.append(text,use);
+          const cache=document.createElement('input'); cache.placeholder='Existing local Hub cache directory'; cache.setAttribute('aria-label','Existing local Hub cache directory');
+          const fileChoices=document.createElement('div');
+          const choices=data.files.map(file=>{ const label=document.createElement('label'), box=document.createElement('input'); box.type='checkbox'; box.disabled=file.size == null; label.append(box,document.createTextNode(` ${file.path} (${file.size ?? 'unknown'} bytes)`)); fileChoices.append(label,document.createElement('br')); return [box,file.path]; });
+          const prepare=document.createElement('button'); prepare.type='button'; prepare.textContent='Review pinned download';
+          const output=document.createElement('pre'); output.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere';
+          let prepared=null, reviewEpoch=0, started=false; const ownDetail=detail, owner=document.body?.dataset?.accountId || '';
+          const current=()=>isVisible() && detail === ownDetail && ownDetail.isConnected && owner && owner === (document.body?.dataset?.accountId || '');
+          async function call(url, payload) { const response=await fetch(url,{method:payload ? 'POST':'GET',credentials:'same-origin',cache:'no-store',headers:payload ? {'Content-Type':'application/json'}:{},body:payload ? JSON.stringify(payload):undefined}); const result=await response.json(); if(!response.ok) throw new Error(result.detail || 'Request unavailable'); return result; }
+          const invalidate=()=>{reviewEpoch++; prepared=null; run.disabled=true;};
+          cache.addEventListener('input', invalidate); choices.forEach(([box])=>box.addEventListener('change',invalidate));
+          prepare.addEventListener('click',async()=>{if(started || prepare.disabled) return; prepare.disabled=true; invalidate(); const epoch=reviewEpoch; try {const result=await call('/api/cookbook/pinned/prepare',{repoID:data.repoID,revision:data.revision,files:choices.filter(([box])=>box.checked).map(([,path])=>path),cacheRoot:cache.value}); if(!current() || epoch!==reviewEpoch || started) return; prepared=result; output.textContent=`Review: ${result.review.repoID} @ ${result.review.revision}\nLicense: ${result.review.license.value || 'unknown'}\nCache: ${result.review.destination.path}\n${result.notice}\n${result.review.files.map(f=>`${f.path} · ${f.size} bytes · declared LFS SHA-256 ${f.lfsSHA256 || 'unknown'}`).join('\n')}`; run.disabled=false; } catch(e) {if(current() && epoch===reviewEpoch) output.textContent=e.message;} finally {if(current() && !started) prepare.disabled=false;} });
+          const run=document.createElement('button'); run.type='button'; run.textContent='Start reviewed download'; run.disabled=true;
+          const status=document.createElement('button'); status.type='button'; status.textContent='Refresh pinned download status'; status.disabled=true;
+          run.addEventListener('click',async()=>{if(!prepared || !current()) return; started=true; reviewEpoch++; prepare.disabled=true; cache.disabled=true; choices.forEach(([box])=>box.disabled=true); run.disabled=true; status.disabled=false; try {const result=await call(`/api/cookbook/pinned/${encodeURIComponent(prepared.operationID)}/confirm`,{revision:prepared.revision}); if(current()) output.textContent += `\nStatus: ${result.state}`;} catch(e) {if(current()) output.textContent += `\nOutcome unknown: ${e.message}. Refresh status; do not start again.`;} });
+          status.addEventListener('click',async()=>{if(!prepared || !current()) return; try {const result=await call(`/api/cookbook/pinned/${encodeURIComponent(prepared.operationID)}`); if(current()) output.textContent += `\nStatus: ${result.state}${result.receipt ? ` · ${result.receipt.files.length} verified files` : ''}`;} catch(e){if(current()) output.textContent += `\nStatus unavailable: ${e.message}`;} });
+          detail.append(cache,fileChoices,prepare,run,status,output);
+        }
+        if (!detail.contains(text)) detail.append(text);
+        hfList.append(detail);
+      },
+    });
+    const retireHub=()=>{listEpoch++; listController?.abort(); listController=null; detailController.clear(); _loaded=false; hfList.replaceChildren();};
+    _clearHubDetail=retireHub;
     // Per-server VRAM cache so we don't re-probe on every expand
     const _hwCache = {};
     function _hfModelLooksAwqLike(m) {
@@ -2667,6 +2720,11 @@ function _wireTabEvents(body) {
       return _hwCache[cacheKey];
     }
     async function _loadLatest() {
+      retireHub(); _loaded=true;
+      const owner=String(document.body?.dataset?.accountId || ''), captured=++listEpoch;
+      const controller=new AbortController(); listController=controller;
+      const current=()=>Boolean(owner) && owner===String(document.body?.dataset?.accountId || '') && captured===listEpoch
+        && !controller.signal.aborted && isVisible() && hfList.isConnected && hfList.style.display !== 'none';
       // Match the Dependencies loader: whirlpool spinner + text label so the
       // user gets immediate feedback while the scan runs.
       hfList.innerHTML = '';
@@ -2684,18 +2742,23 @@ function _wireTabEvents(body) {
       } catch {
         hfList.innerHTML = '<div class="hwfit-loading">Scanning models…</div>';
       }
-      const hwInfo = await _getSelectedServerHw();
+      const hwInfo = hfSearch?.value.trim() ? {vram:0,backend:''} : await _getSelectedServerHw();
+      if (!current()) return;
       const vram = hwInfo.vram || 0;
       try {
         let lastErr = '';
         const _fetchLatest = async (v) => {
-          const res = await fetch(`/api/cookbook/hf-latest?vram_gb=${v}&limit=10`);
+          const search=hfSearch?.value.trim() || '';
+          const params = new URLSearchParams({vram_gb:String(search ? 0 : v),limit:'10'});
+          if (search) { params.set('search',search); params.set('pipeline',''); }
+          const res = await fetch(`/api/cookbook/hf-latest?${params}`, {signal:controller.signal});
           const data = await res.json();
           if (data.error) lastErr = data.error;   // HF API timeout/rate-limit etc.
           return data.models || [];
         };
         let models = await _fetchLatest(vram);
-        if (['rocm', 'metal', 'mps', 'apple', 'generic', 'cpu'].includes(hwInfo.backend)) {
+        if (!current()) return;
+        if (!hfSearch?.value.trim() && ['rocm', 'metal', 'mps', 'apple', 'generic', 'cpu'].includes(hwInfo.backend)) {
           models = models.filter(m => !_hfModelLooksAwqLike(m));
         }
         if (!models.length) {
@@ -2729,19 +2792,18 @@ function _wireTabEvents(body) {
         hfList.querySelectorAll('.cookbook-hf-latest-card').forEach(card => {
           card.addEventListener('click', (e) => {
             if (e.target.closest('a')) return;
-            if (dlInput) {
-              dlInput.value = card.dataset.repo;
-              dlInput.focus();
-            }
+            void detailController.select(card.dataset.repo).catch(()=>{});
           });
         });
       } catch (e) {
-        hfList.innerHTML = '<div class="hwfit-loading">Failed to load</div>';
+        if (current()) hfList.innerHTML = '<div class="hwfit-loading">Failed to load</div>';
       }
     }
     hfToggle.addEventListener('click', () => {
       const isOpen = hfList.style.display !== 'none';
+      if (isOpen) retireHub();
       hfList.style.display = isOpen ? 'none' : 'flex';
+      if (hfSearch) hfSearch.style.display = isOpen ? 'none' : 'block';
       if (hfArrow) hfArrow.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(90deg)';
       if (!isOpen && !_loaded) {
         _loaded = true;
@@ -2755,8 +2817,13 @@ function _wireTabEvents(body) {
       // If list is hidden, open it
       if (hfList.style.display === 'none') {
         hfList.style.display = 'flex';
+        if (hfSearch) hfSearch.style.display = 'block';
         if (hfArrow) hfArrow.style.transform = 'rotate(90deg)';
       }
+    });
+    hfSearch?.addEventListener('input', () => retireHub());
+    hfSearch?.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); _loaded=true; void _loadLatest(); }
     });
     // Re-fetch when a server dropdown changes — different server = different
     // hardware/VRAM. Mark the list stale so it reloads for the new server even
@@ -3076,6 +3143,7 @@ function _renderRecipes() {
   html += `<span id="cookbook-hf-latest-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;opacity:0.6;font-size:11px;">\u25B8</span>`;
   html += `</button>`;
   html += `</div>`;
+  html += `<input id="cookbook-hf-search" class="cookbook-field-input" type="search" maxlength="128" placeholder="Search public Hub models; press Enter" style="display:none;margin-top:4px;width:100%" />`;
   html += `<div id="cookbook-hf-latest-list" style="display:none;margin-top:4px;max-height:320px;overflow-y:auto;overscroll-behavior:contain;flex-direction:column;gap:4px;"></div>`;
   html += `</div>`;
   html += `</div>`;  // /#cookbook-dl-tab-fold-body (whole Download card body)
@@ -3461,6 +3529,7 @@ function _wireCookbookDrag(modal) {
 }
 
 function _doClose() {
+  _clearHubDetail();
   const modal = document.getElementById('cookbook-modal');
   if (!modal) return;
   const content = modal.querySelector('.modal-content');
@@ -3499,7 +3568,7 @@ export function isVisible() {
 
 let _sharedSyncInFlight = false;
 let _sharedSyncLast = 0;
-const SHARED_STATE_LEADER_KEY = 'odysseus-cookbook-shared-state-leader';
+const SHARED_STATE_LEADER_KEY = 'openclank-cookbook-shared-state-leader';
 const SHARED_STATE_LEADER_ID = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const SHARED_STATE_LEADER_TTL_MS = 12000;
 
@@ -3588,8 +3657,8 @@ setInterval(() => {
   if (activeTab === 'Running') _refreshSharedCookbookState('active-poll');
 }, 5000);
 
-// Close button
-document.addEventListener('DOMContentLoaded', () => {
+// A restored job can load this module before the shell finishes parsing.
+function bindCookbookClose() {
   const closeBtn = document.getElementById('close-cookbook-modal');
   if (closeBtn) closeBtn.addEventListener('click', close);
 
@@ -3600,7 +3669,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.target === modal) close();
     });
   }
-});
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindCookbookClose, {once:true});
+else bindCookbookClose();
 
 // ── Initialize sub-modules ──
 
@@ -3675,4 +3746,5 @@ export {
 
 const cookbookModule = { open, close, isVisible, startBackgroundMonitor: _startBackgroundMonitor };
 
+window.cookbookModule = cookbookModule;
 export default cookbookModule;

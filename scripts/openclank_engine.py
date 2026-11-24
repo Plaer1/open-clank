@@ -59,6 +59,10 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--skip-dependencies", action="store_true")
     build.add_argument("--force", action="store_true")
     build.add_argument("--skip-acp", action="store_true")
+    build.add_argument("--include-gcf", action="store_true")
+    build.add_argument("--gcf-cargo", type=Path)
+    build.add_argument("--gcf-rustc", type=Path)
+    build.add_argument("--gcf-cargo-home", type=Path)
     build.add_argument("--json", action="store_true")
 
     verify = subcommands.add_parser("verify", help="verify the activated artifact and provenance")
@@ -98,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "build":
+            if args.include_gcf and args.install_root is None:
+                raise EngineBuildError("GCF build requires an explicit install root")
             result = build_current(
                 repo_root,
                 install_root,
@@ -108,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 acp_smoke=not args.skip_acp,
                 target=args.target,
+                include_gcf=args.include_gcf, gcf_cargo=args.gcf_cargo,
+                gcf_rustc=args.gcf_rustc, gcf_cargo_home=args.gcf_cargo_home,
             )
             report = _verification_json(result)
             print(json.dumps(report, sort_keys=True) if args.json else f"Installed and verified: {result.binary}")

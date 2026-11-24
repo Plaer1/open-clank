@@ -1,8 +1,21 @@
+import { Instruction } from "./instruction"
+import { settleSourceStreamBeforeTeardown } from "./closed-source-provenance"
+import { captureFinalTools } from "./tool-definition-provenance"
+import { selectAnnotationView } from "./tool-schema-annotations"
+import { isPinnedAnthropicModel } from "@/provider/anthropic-origin"
+import { JSONParseError, TypeValidationError } from "@ai-sdk/provider"
+import { isPinnedResponsesModel, isPinnedChatModel, pinnedCompatibleChatEndpoint } from "@/provider/malformed-origin"
+import { observeAnthropicDoStream, drainAnthropicCallbacks, withAnthropicFailureProbe, issueAnthropicCallback } from "@/provider/fallback-terminal-witness"
+import { sourceAttemptLayout } from "./closed-source-provenance"
+import { sourceLayoutMessages } from "./source-layout"
+import { nativeSingleUserWire, nativeMembershipFrame, sameNativeMembershipIdentity, maintenanceCompactionWire, recallToolFrame, contextPrefaceFrame, standingGuidanceFrame, type NativeMembershipCapture, type NativeMembershipDelivery, type NativeMembershipFrame, type StandingGuidanceEvidence, type MaintenanceWireCandidate, type ContextPrefaceEvidence, type NativeTextDelivery, type NativeTextEvidence, type RecallToolEvidence } from "./context-inspection"
+import { contextFrame, type ContextFrame, type ContextSource } from "./context-inspection"
+import type { ActorExecutionIdentity } from "@/actor/turn"
 import path from "path"
 import { createHash } from "node:crypto"
 import { Provider } from "@/provider"
 import { Log } from "@/util"
-import { Context, Duration, Effect, Layer, Record, Schedule, Ref, Cause } from "effect"
+import { Context, Duration, Effect, Layer, Record, Schedule, Ref, Cause, Exit } from "effect"
 import * as Stream from "effect/Stream"
 import { streamText, wrapLanguageModel, type ModelMessage, type Tool, tool, jsonSchema } from "ai"
 import { mergeDeep, pipe } from "remeda"
@@ -35,15 +48,17 @@ import { Memory } from "@/memory"
 import { isRetryableTransientError } from "./retry"
 import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
 import { ManagedProvider } from "@/acp/managed-provider"
-import { withSdkDispatches } from "@/provider/logging-transport"
-import { contextWindow } from "./overflow"
+import { withSdkDispatches, recordSdkFailure, markSdkSuccessStep, markMalformedResponse, retireCaptureAttempt } from "@/provider/logging-transport"
+import { contextWindow, contextPressureLevel } from "./overflow"
+import { readWindowOrigin } from "../provider/model-window-origin"
+import { adaptiveSnapshot, adaptiveAdmissionSHA256, adaptiveModelWindowSHA256, ADAPTIVE_CONCISE_HINT } from "./adaptive-concision"
 
 /** Final actual request-frame hook, also exercised without a model/provider.
  * UTF8 bytes conservatively upper-bound text tokens, never image/audio cost. */
 export async function appendFinalCodeContext(input: {
   sessionID: string; messages: ModelMessage[]; system: string[]; options: Record<string, unknown>
   tools: Record<string, Tool>; activeTools: string[]; usable: number; abort: AbortSignal
-  ephemeral?: boolean; agentID?: string
+  ephemeral?: boolean; agentID?: string; actorExecution?: ActorExecutionIdentity
   resolvedTools?: unknown; providerFrame?: boolean
 }, read = ManagedProvider.readCodeContext): Promise<ModelMessage[]> {
   if (input.ephemeral || (input.agentID && input.agentID !== "main") || input.abort.aborted || !Number.isSafeInteger(input.usable) || input.usable <= 0 || input.messages.length > 512 || input.activeTools.length > 128) return input.messages
@@ -72,7 +87,7 @@ export async function appendFinalCodeContext(input: {
     const query = typeof latest?.content === "string" ? latest.content : Array.isArray(latest?.content) ? latest.content.filter((p) => p.type === "text").map((p) => "text" in p ? p.text : "").join("\n") : ""
     if (!query || Buffer.byteLength(query, "utf8") > 4096) return input.messages
     const fingerprint = createHash("sha256").update(initial).digest("hex")
-    const card = await read({ sessionID: input.sessionID, query, availableByteTokens: available, requestFingerprint: fingerprint, retainedMessages: input.messages as unknown as Record<string, unknown>[] }, input.abort)
+    const card = await read({ sessionID: input.sessionID, query, availableByteTokens: available, requestFingerprint: fingerprint, retainedMessages: input.messages as unknown as Record<string, unknown>[] }, input.abort, input.actorExecution)
     if (!card || input.abort.aborted || frame() !== initial || !card.includes("[code-evidence-v1 ")) return input.messages
     const message: ModelMessage = { role: "user", content: input.providerFrame ? [{ type: "text", text: card }] : card }
     if (Buffer.byteLength(JSON.stringify(message), "utf8") + 1 > available) return input.messages
@@ -165,6 +180,10 @@ export const persistentRetrySchedule = Schedule.exponential("500 millis", 2).pip
  * `memoryRoot` is the same absolute root returned by Memory.root(), so these
  * paths match the files used by checkpoint restore and memory/task detection.
  */
+function buildManagedMemoryInstructions(): string {
+  return "# Memory and operational continuity\nDurable knowledge is governed by current Memery policy and any advertised tools and receipts. Follow the user's and repository's agreements for plans and notes. Session checkpoints, task records, and notes support operational continuity."
+}
+
 function buildMemoryInstructions(sessionID: SessionID, projectID: ProjectID, memoryRoot: string): string {
   const memoryFile = path.join(memoryRoot, "projects", projectID, "MEMORY.md")
   const checkpointFile = path.join(memoryRoot, "sessions", sessionID, "checkpoint.md")
@@ -257,6 +276,9 @@ export type StreamInput = {
   permission?: Permission.Ruleset
   system: string[]
   prebuiltSystem?: string[]      // when set, skip buildSystemArray and use this verbatim
+  adaptiveStyle?: {admission:string; config:Config.Info; current:()=>boolean}
+  /** Dispatch-local opaque source evidence; never sent as model options. */
+  sameRequestRows?: Omit<import("@/provider/logging-transport").SameRequestRowsCarrier,"model">
   messages: ModelMessage[]
   small?: boolean
   tools: Record<string, Tool>
@@ -264,6 +286,27 @@ export type StreamInput = {
   retries?: number
   toolChoice?: "auto" | "required" | "none"
   agentID?: string
+  requestContext?: { actorExecution: ActorExecutionIdentity }
+  /** Private same-turn schema view; not sent to the model or a tool. */
+  schemaAnnotationView?: {names:string[]; canonicalTools:Record<string,Tool>; projectedSchemas:Record<string,Tool["inputSchema"]>; current:()=>Promise<boolean>; reanchor:()=>void}
+  maintenanceWire?: MaintenanceWireCandidate
+  onMaintenanceWire?: (receipt:{dispatchID:string;bodySHA256:string;wireProfile:"openai-chat"|"codex-responses";instructionsSHA256?:string;instructionsClass?:"builtin-compaction-v1"})=>Promise<void>
+  nativeTextSources?: import("./context-inspection").NativeTextSnapshot
+  nativeMembership?: NativeMembershipCapture
+  /** Original-loop private observation; never model input or a capture grant. */
+  sourceAttempt?: import("./closed-source-provenance").SourceAttemptHandle
+  sourceToolsCurrent?:()=>Promise<boolean>
+  onNativeMembership?: (receipt:NativeMembershipDelivery)=>Promise<void>
+  recallToolSource?: RecallToolEvidence
+  onRecallAdmission?: (evidence: { toolCallID: string; attestationID: string; resultSHA256: string; dispatchID: string; bodySHA256: string }) => Promise<void>
+  contextPreface?: ContextPrefaceEvidence
+  standingGuidance?: StandingGuidanceEvidence
+  onStandingGuidance?: (receipt:{attestationID:string;textSHA256:string;dispatchID:string;bodySHA256:string;systemSHA256:string;wireProfile:'openai-chat'|'codex-responses'})=>Promise<void>
+  onContextDelivery?: (evidence:{contextPartID:string;attestationID:string;textSHA256:string;dispatchID:string;bodySHA256:string})=>Promise<void>
+  onNativeTextDelivery?: (receipt: NativeTextDelivery) => Promise<void>
+  contextSources?: { sources: ContextSource[]; omittedSourceCount: number }
+  contextSequence?: { attempt: number; transform: number }
+  onContextFrame?: (frame: ContextFrame) => Promise<void>
   /** Isolated one-shot generation (titles and similar helpers). */
   ephemeral?: boolean
   /** Correlates an isolated request without changing the owning session. */
@@ -278,9 +321,56 @@ export type StreamRequest = StreamInput & {
   // proactive guard (ProviderTransform.ensureTrailingUserMessage in message())
   // normally makes this unnecessary; this is a last-resort backstop.
   dropAssistantPrefill?: boolean
+  /** Private to one actual scoped invocation; never supplied as model input. */
+  ownedAttemptCell?: { handle?: ReturnType<typeof ManagedProvider.beginOwnedAnthropicAttempt>; scope?: object; error?:object; sdkError?:object; returned?:boolean; invalid?:boolean }
 }
 
 export type Event = Result["fullStream"] extends AsyncIterable<infer T> ? T : never
+
+type PrefixInputWitness = {environment:import("./closed-source-provenance").EnvironmentProvenanceHandle; environmentStrings:string[]; skills?:SystemPrompt.SkillInvocation; instructions?:Instruction.InstructionResult; persona?:{result:import("../acp/openclank-protocol").OpenClankManagedProtocol.ManagedTurnStartResult;identity:ActorExecutionIdentity}}
+const prefixWitnesses = new WeakMap<object, {system:string[]; bytes:readonly string[]; additions:string[]; additionsBytes:readonly string[]; environmentStrings:string[]; environmentBytes:readonly string[]; environment:import("./closed-source-provenance").EnvironmentProvenanceHandle; agent:import("./closed-source-provenance").AgentProvenanceHandle; skills?:SystemPrompt.SkillInvocation; catalogSkill?:boolean; instructions?:Instruction.InstructionResult; managedMemory?:string; transformOutput?:{system:string[]}; transformCurrent?:()=>boolean; personaCurrent?:()=>import("./closed-source-provenance").LegacyPersonaEvidence | import("./closed-source-provenance").ComposedPersonaEvidence | import("./closed-source-provenance").StyledPersonaEvidence | undefined; adaptiveCurrent?:()=>import("./closed-source-provenance").AdaptiveHintEvidence | undefined; unknown:readonly string[]}>()
+/** Read-only, process-private partial evidence. It never establishes dispatch closure. */
+export function readPrefixAssembly(handle:import("./closed-source-provenance").PrefixProvenanceHandle):import("./closed-source-provenance").PrefixAssemblyEvidence | undefined {
+  const witness=prefixWitnesses.get(handle)
+  if (!witness || witness.system.length!==witness.bytes.length || witness.system.some((x,i)=>x!==witness.bytes[i]) ||
+      witness.additions.length!==witness.additionsBytes.length || witness.additions.some((x,i)=>x!==witness.additionsBytes[i]) ||
+      witness.environmentStrings.length!==witness.environmentBytes.length || witness.environmentStrings.some((x,i)=>x!==witness.environmentBytes[i])) return
+  if (witness.skills && !(witness.catalogSkill ? SystemPrompt.readCurrentSkillProvenance(witness.skills) : SystemPrompt.readEmptySkillProvenance(witness.skills))) return
+  const instructions = witness.instructions ? Instruction.readInstructionProvenance(witness.instructions) : undefined
+  if (witness.instructions && !instructions) return
+  if (witness.transformCurrent && !witness.transformCurrent()) return
+  const environment=SystemPrompt.readEnvironmentProvenance(witness.environment,witness.environmentStrings)
+  const agentSHA256=SystemPrompt.readAgentProvenance(witness.agent)
+  if (!environment || !agentSHA256) return
+  const persona = witness.personaCurrent?.()
+  if (witness.personaCurrent && !persona) return
+  const adaptive = witness.adaptiveCurrent?.()
+  if (witness.adaptiveCurrent && !adaptive) return
+  const skill = witness.skills ? (witness.skills.value === undefined ? {kind:"absent" as const} :
+    {kind:witness.catalogSkill ? "catalog" as const : "bundled_static" as const,outputSHA256:createHash("sha256").update(witness.skills.value,"utf8").digest("hex")}) : undefined
+  const base = {coverage:"partial" as const,environment,agentSHA256:Object.freeze([...agentSHA256]),
+    ...(skill ? {skill:Object.freeze(skill)} : {}), ...(persona ? {persona:Object.freeze(persona)} : {}),unknown:witness.unknown}
+  if (instructions) return Object.freeze({...base,version:2 as const,instructions,
+    ...(witness.managedMemory !== undefined ? {managedMemory:Object.freeze({constructor:"managed.memory-guidance.v1" as const,outputSHA256:createHash("sha256").update(witness.managedMemory,"utf8").digest("hex")})} : {}), ...(adaptive ? {adaptiveHint:adaptive} : {})})
+  if (adaptive || skill?.kind === "catalog" || environment.version !== 1 || (persona && persona.constructor !== "host.factory-persona.v1")) return
+  const legacySkill = skill?.kind === "absent" ? Object.freeze({kind:"absent" as const}) :
+    skill?.kind === "bundled_static" ? Object.freeze({kind:"bundled_static" as const,outputSHA256:skill.outputSHA256}) : undefined
+  return Object.freeze({version:1 as const,coverage:"partial" as const,environment,agentSHA256:Object.freeze([...agentSHA256]),
+    ...(legacySkill ? {skill:legacySkill} : {}),...(persona ? {persona:Object.freeze(persona)} : {}),unknown:witness.unknown})
+}
+const prefixHandles = new WeakMap<string[], import("./closed-source-provenance").PrefixProvenanceHandle>()
+export function prefixAssemblyHandle(system:string[]):import("./closed-source-provenance").PrefixProvenanceHandle | undefined { return prefixHandles.get(system) }
+/** Derive a turn-local prefix without mutating or persisting its base. */
+function deriveAdaptivePrefix(base:string[], current:()=>import("./closed-source-provenance").AdaptiveHintEvidence | undefined):string[] {
+  const derived=[...base]; derived[0]=derived[0]+'\n\n'+ADAPTIVE_CONCISE_HINT
+  const old=prefixHandles.get(base), witness=old && prefixWitnesses.get(old)
+  if (old && witness && readPrefixAssembly(old)?.version===2) {
+    const handle=Object.freeze({}) as import("./closed-source-provenance").PrefixProvenanceHandle
+    prefixWitnesses.set(handle,{...witness,system:derived,bytes:[...derived],adaptiveCurrent:current})
+    prefixHandles.set(derived,handle)
+  }
+  return derived
+}
 
 export interface Interface {
   readonly stream: (input: StreamInput) => Stream.Stream<Event, unknown>
@@ -291,6 +381,7 @@ export interface Interface {
     user: MessageV2.User
     sessionID: string
     agentID?: string
+    sourceWitness?: PrefixInputWitness
   }) => Effect.Effect<string[]>
 }
 
@@ -319,11 +410,13 @@ const live: Layer.Layer<
       sessionID: string
       agentID?: string
       ephemeral?: boolean
+      sourceWitness?: PrefixInputWitness
     }) {
       const system: string[] = []
+      const ownedAgent = input.sourceWitness ? SystemPrompt.agentWithProvenance(input.agent,input.model) : undefined
       system.push(
         [
-          ...SystemPrompt.agent(input.agent, input.model),
+          ...(ownedAgent?.strings ?? SystemPrompt.agent(input.agent, input.model)),
           // any custom prompt passed into this call
           ...input.system,
           // any custom prompt from last user message
@@ -347,6 +440,7 @@ const live: Layer.Layer<
       // The chat profile is a no-tools conversation lane (identity ruling
       // R2): it can't Edit MEMORY.md, so teaching it the file-memory manual
       // would assert capabilities the turn doesn't have.
+      let managedMemoryText:string | undefined
       const servesCheckpoint =
         !input.ephemeral &&
         input.agent.name !== "chat" &&
@@ -363,16 +457,23 @@ const live: Layer.Layer<
         // create an uppercase sibling and orphan the legacy content). The two
         // checkpoint-flow call sites cover the writer/rebuild paths; this covers
         // the "agent edits MEMORY.md before any checkpoint" path. Idempotent.
-        yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
-        system.push(buildMemoryInstructions(SessionID.make(input.sessionID), projectID, yield* memory.root()))
+        if (ManagedProvider.enabled()) {
+          managedMemoryText = buildManagedMemoryInstructions()
+          system.push(managedMemoryText)
+        } else {
+          yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
+          system.push(buildMemoryInstructions(SessionID.make(input.sessionID), projectID, yield* memory.root()))
+        }
       }
 
       // Plugins still see the multi-part array (base prompt as [0], memory as a
       // trailing element) so hooks that index or append parts keep working.
+      const transformOutput = { system }
+      if (input.sourceWitness) plugin.requestEmptySystemTransform?.(transformOutput)
       yield* plugin.trigger(
         "experimental.chat.system.transform",
         { sessionID: input.sessionID, model: input.model },
-        { system },
+        transformOutput,
       )
 
       // Collapse to a single system message. The historical 2-part split existed
@@ -383,13 +484,56 @@ const live: Layer.Layer<
       // spares subagents/providers a stray extra system turn. Join with a blank
       // line (\n\n) so adjacent markdown sections (base prompt, "# Memory system")
       // don't run together into one heading.
-      return system.length <= 1 ? system : [system.filter((x) => x).join("\n\n")]
+      const output = system.length <= 1 ? system : [system.filter((x) => x).join("\n\n")]
+      const source = input.sourceWitness
+      const environmentProof = source && ownedAgent?.handle ? SystemPrompt.readEnvironmentProvenance(source.environment,source.environmentStrings) : undefined
+      if (source && ownedAgent?.handle && environmentProof &&
+          source.environmentStrings.length <= input.system.length &&
+          source.environmentStrings.every((value,index) => value === input.system[index])) {
+        // This capsule explicitly remains partial: hooks, additional inputs and
+        // post-assembly provider transformations have not been qualified here.
+        const noTransform = plugin.readEmptySystemTransform?.(transformOutput,input.sessionID) === true
+        const skill = source.skills
+        const emptySkill = !!skill && SystemPrompt.readEmptySkillProvenance(skill)
+        const catalogSkill = !!skill && !emptySkill && SystemPrompt.readCurrentSkillProvenance(skill)
+        const legacySkill = !!skill && emptySkill && (skill.value === undefined ? input.system.length === source.environmentStrings.length :
+          input.system.length === source.environmentStrings.length + 1 && input.system[source.environmentStrings.length] === skill.value)
+        const qualifiedSkill = source.instructions ? !!skill && (emptySkill || catalogSkill) : legacySkill
+        const instructionSnapshot = source.instructions && Instruction.readInstructionProvenance(source.instructions)
+        const expected = [...source.environmentStrings,...(skill?.value ? [skill.value] : []),...(source.instructions?.content ?? [])]
+        const additionsMatch = source.instructions ? input.system.length === expected.length && expected.every((value,index)=>input.system[index]===value) :
+          (qualifiedSkill || input.system.length === source.environmentStrings.length)
+        const userSystem=input.user.system
+        const persona=source.persona
+        const personaCurrent = persona && userSystem ? () => input.user.system === userSystem
+          ? ManagedProvider.readFactoryPersonaStart(persona.result,persona.identity,userSystem) : undefined : undefined
+        const qualifiedPersona=personaCurrent?.()
+        const unknown = [...(!noTransform ? ["system_transform"] : []), ...(!qualifiedSkill ? ["skills"] : []),
+          ...(!additionsMatch || (source.instructions && !instructionSnapshot) ? ["additional_system"] : []),
+          ...(input.user.system && !qualifiedPersona ? ["user_system"] : []), ...(servesCheckpoint && (managedMemoryText === undefined || !instructionSnapshot) ? ["memory_instructions"] : [])]
+        try { log.debug("source_prefix_eligibility",{environment:true,agent:true,skills:qualifiedSkill,instruction:!!instructionSnapshot,
+          additions:additionsMatch,persona:!userSystem || !!qualifiedPersona,transform:noTransform,memory:!servesCheckpoint || managedMemoryText !== undefined}) } catch { /* diagnostic only */ }
+        const handle=Object.freeze({}) as import("./closed-source-provenance").PrefixProvenanceHandle
+        prefixWitnesses.set(handle,{system:output,bytes:[...output],additions:input.system,additionsBytes:[...input.system],
+          environmentStrings:source.environmentStrings,environmentBytes:[...source.environmentStrings],environment:source.environment,
+          agent:ownedAgent.handle,...(qualifiedSkill ? {skills:skill,catalogSkill} : {}),
+          ...(instructionSnapshot && source.instructions ? {instructions:source.instructions} : {}),
+          ...(managedMemoryText !== undefined ? {managedMemory:managedMemoryText} : {}),
+          ...(noTransform ? {transformOutput,transformCurrent:()=>plugin.readEmptySystemTransform?.(transformOutput,input.sessionID)===true} : {}),
+          ...(qualifiedPersona && personaCurrent ? {personaCurrent} : {}),unknown:Object.freeze(unknown)})
+        prefixHandles.set(output,handle)
+      } else if (source) {
+        try { log.debug("source_prefix_eligibility",{environment:!!environmentProof,agent:!!ownedAgent?.handle,skills:false,instruction:false,
+          additions:false,persona:false,transform:false,memory:false}) } catch { /* diagnostic only */ }
+      }
+      return output
     })
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
       const correlationID = input.requestID ?? input.sessionID
+      if (ManagedProvider.enabled() && !input.requestContext?.actorExecution) throw new Error("managed actor execution identity is unavailable")
       const managedScope = ManagedProvider.enabled()
-        ? ManagedProvider.requireScope(input.sessionID)
+        ? ManagedProvider.requireScope(input.sessionID, input.requestContext?.actorExecution.actorID, input.requestContext?.actorExecution.executionRevision)
         : undefined
       const l = log
         .clone()
@@ -406,17 +550,50 @@ const live: Layer.Layer<
 
       const [language, cfg, item, info] = yield* Effect.all(
         [
-          provider.getLanguage(input.model, managedScope),
+          provider.getLanguage(input.model, managedScope, {
+            sessionID: input.sessionID,
+            ...(input.requestContext?.actorExecution ? { actorID: input.requestContext.actorExecution.actorID, executionRevision: input.requestContext.actorExecution.executionRevision } : {}),
+            hostChatID: input.requestContext?.actorExecution
+              ? ManagedProvider.currentActorHostContext(input.sessionID, input.requestContext.actorExecution.actorID, input.requestContext.actorExecution.executionRevision)?.chatID
+              : ManagedProvider.currentHostContext(input.sessionID)?.chatID,
+          }),
           config.get(),
           provider.getProvider(input.model.providerID),
-          managedScope?.credential
+          managedScope
             ? Effect.succeed(managedScope.credential)
             : auth.get(input.model.providerID),
         ],
         { concurrency: "unbounded" },
       )
 
+      // Attach only the model actually returned for this managed scope and C2.
+      const identity=input.requestContext?.actorExecution
+      if (managedScope && identity?.actorID==='main' && identity.rootOperationID && identity.innerTurnID &&
+          ManagedProvider.isOwnedAlternativeActive({sessionID:identity.sessionID,rootOperationID:identity.rootOperationID,actorID:identity.actorID,
+            executionRevision:identity.executionRevision,innerTurnID:identity.innerTurnID},managedScope) && !isPinnedAnthropicModel(language as object))
+        throw new Error('Alternative provider implementation unavailable')
+      if (input.ownedAttemptCell && managedScope && identity?.actorID === "main" && identity.rootOperationID && identity.innerTurnID) {
+        const handle=ManagedProvider.beginOwnedAnthropicAttempt({sessionID:identity.sessionID,rootOperationID:identity.rootOperationID,actorID:identity.actorID,executionRevision:identity.executionRevision,innerTurnID:identity.innerTurnID},language as object,managedScope)
+        if (handle) { input.ownedAttemptCell.handle=handle; input.ownedAttemptCell.scope=managedScope }
+      }
+
       const managedMetadata = managedScope ? Provider.managedAdapterMetadata(item, input.model) : undefined
+      const compatibleContextEndpoint = input.contextPreface?.wireProfile === "compatible-chat" ? pinnedCompatibleChatEndpoint(language as object) : undefined
+      // Never send an inserted memory part through an unqualified compatible SDK.
+      if (input.contextPreface?.wireProfile === "compatible-chat" && (!compatibleContextEndpoint || input.ephemeral
+          || input.requestContext?.actorExecution?.actorID !== "main" || !input.requestContext.actorExecution.rootOperationID
+          || !input.requestContext.actorExecution.innerTurnID || input.model.api.npm !== "@ai-sdk/openai-compatible"
+          || managedMetadata?.familyID !== "openai-compatible" || managedMetadata.adapterID !== "openai-chat"
+          || managedMetadata.billingLane !== "local" || managedScope?.credentialRequired !== false
+          || managedScope.connectionID !== managedMetadata.connectionID))
+      {
+        // The context is optional. Remove only the exact inserted message when
+        // the selected model cannot prove the compatible transport; never send
+        // it or report a delivery on an unqualified route.
+        const inserted = contextPrefaceFrame(input.contextPreface, input.messages)
+        if (!inserted) throw new Error("Compatible context reanchor unavailable")
+        input = { ...input, messages: input.messages.filter((_, index) => index !== inserted.index), contextPreface: undefined }
+      }
 
       // ChatGPT subscription uses the Codex Responses transport, whose system
       // prompt belongs in `instructions`. Runtime provider IDs are normalized
@@ -488,6 +665,9 @@ const live: Layer.Layer<
               ),
               ...requestMessages,
             ]
+      const prefaceInput = input.contextPreface && requestMessages.length === input.contextPreface.count
+        ? contextPrefaceFrame({...input.contextPreface,index:input.contextPreface.index + messages.length - requestMessages.length,count:messages.length},messages)
+        : undefined
 
       const defaults = {
         temperature: input.model.capabilities.temperature
@@ -532,9 +712,7 @@ const live: Layer.Layer<
         },
       )
 
-      const tools = resolveTools(input)
-      const requestedActiveTools = new Set(input.activeTools ?? Object.keys(tools))
-      const activeTools = Object.keys(tools).filter((name) => name !== "invalid" && requestedActiveTools.has(name))
+      let {tools,activeTools} = selectFinalTools(input)
 
       // LiteLLM and some Anthropic proxies require the tools parameter to be present
       // when message history contains tool calls, even if no tools are being used.
@@ -551,24 +729,19 @@ const live: Layer.Layer<
       // calls but no tools param is present. When there are no active tools (e.g.
       // during compaction), inject a stub tool to satisfy the validation requirement.
       // The stub description explicitly tells the model not to call it.
-      if (
-        (isLiteLLMProxy ||
-          (managedMetadata ? managedMetadata.adapterID === "copilot-chat" : input.model.providerID.includes("github-copilot"))) &&
-        activeTools.length === 0 &&
-        hasToolCalls(input.messages)
-      ) {
-        tools["_noop"] = tool({
-          description: "Do not call this tool. It exists only for API compatibility and must never be invoked.",
-          inputSchema: jsonSchema({
-            type: "object",
-            properties: {
-              reason: { type: "string", description: "Unused" },
-            },
-          }),
-          execute: async () => ({ output: "", title: "", metadata: {} }),
-        })
-        activeTools.push("_noop")
+      const ensureNoop = () => {
+        if ((isLiteLLMProxy ||
+            (managedMetadata ? managedMetadata.adapterID === "copilot-chat" : input.model.providerID.includes("github-copilot"))) &&
+            activeTools.length === 0 && hasToolCalls(input.messages)) {
+          tools["_noop"] = tool({
+            description: "Do not call this tool. It exists only for API compatibility and must never be invoked.",
+            inputSchema: jsonSchema({type:"object",properties:{reason:{type:"string",description:"Unused"}}}),
+            execute: async () => ({ output: "", title: "", metadata: {} }),
+          })
+          activeTools.push("_noop")
+        }
       }
+      ensureNoop()
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
       // from the workflow service are executed via opencode's tool system
@@ -701,13 +874,39 @@ const live: Layer.Layer<
         )
         .pipe(Effect.ignore)
 
+      let adaptiveDispatch: {basePrompt:any;derivedPrompt:any;baseSystem:string[];derivedSystem:string[];current:()=>boolean} | undefined
       let sdkDispatchIDs: string[] = []
+      let maintenanceCandidate: MaintenanceWireCandidate | undefined
+      let standingCandidate: StandingGuidanceEvidence | undefined
+      let membershipCandidate: NativeMembershipFrame | undefined
+      let sourceFinalFrame: import("./closed-source-provenance").SourceFinalFrame | undefined
+      let nativeDeliveryCandidate: NativeTextEvidence | undefined
+      let recallDeliveryCandidate: RecallToolEvidence | undefined
+      let contextDeliveryCandidate: ContextPrefaceEvidence | undefined
+      if (input.schemaAnnotationView) {
+        const profile=input.schemaAnnotationView
+        const selected=selectFinalTools(input)
+        const resolved=yield* Effect.promise(()=>selectAnnotationView(selected,profile))
+        if (resolved.reanchored) {
+          tools=resolved.tools
+          activeTools=resolved.activeTools
+          ensureNoop()
+        }
+      }
       return streamText({
         onStepFinish(step) {
-          Session.getUsage({ model: input.model, usage: step.usage, metadata: step.providerMetadata,
+          if (input.ownedAttemptCell?.handle) input.ownedAttemptCell.invalid=true
+          const metadata=step.providerMetadata && Object.fromEntries(Object.entries(step.providerMetadata).filter(([key])=>key!=='_openclankSuccessStep'))
+          Session.getUsage({ model: input.model, usage: step.usage, metadata,
             captureScope: managedScope, captureDispatchIDs: sdkDispatchIDs, mainReply: !input.ephemeral })
         },
         onError(error) {
+          const cause = error && typeof error === "object" && "error" in error ? error.error : error
+          if (input.ownedAttemptCell?.handle) {
+            if (!cause || typeof cause!=="object" || input.ownedAttemptCell.sdkError) input.ownedAttemptCell.invalid=true
+            else input.ownedAttemptCell.sdkError=cause
+          }
+          if (!input.abort.aborted) recordSdkFailure(cause, managedScope, sdkDispatchIDs)
           l.debug("streamText error", {
             messageID: input.user.id,
             error: error instanceof Error ? error.message : String(error),
@@ -749,7 +948,7 @@ const live: Layer.Layer<
         topK: params.topK,
         providerOptions: ProviderTransform.providerOptions(input.model, params.options),
         activeTools,
-        tools: ProviderTransform.tools(tools, input.model),
+        tools: captureFinalTools(ProviderTransform.tools(tools, input.model), activeTools, input.sourceAttempt, !!sourceAttemptLayout(input.sourceAttempt), input.sourceToolsCurrent),
         toolChoice: input.toolChoice,
         maxOutputTokens: params.maxOutputTokens,
         abortSignal: input.abort,
@@ -779,9 +978,101 @@ const live: Layer.Layer<
           middleware: [
             {
               specificationVersion: "v3" as const,
-              async wrapStream({ doStream }) {
-                sdkDispatchIDs = []
-                return withSdkDispatches(managedScope, sdkDispatchIDs, doStream)
+              async wrapStream({ doStream, params }) {
+                if (adaptiveDispatch) { input={...input,prebuiltSystem:adaptiveDispatch.baseSystem}; adaptiveDispatch=undefined }
+                  // Attach only after the actual provider-frame context transform. The
+                  // unmodified base remains the cache/fork value; this clone is dispatch-local.
+                  const adaptive=input.adaptiveStyle, base=input.prebuiltSystem
+                  const adaptiveCurrent=adaptive?.current()===true
+                  if (adaptive && base?.length===1 && !input.ephemeral && !input.small && !isOpenaiOauth && !isWorkflow && !input.dropAssistantPrefill &&
+                      !input.standingGuidance && input.requestContext?.actorExecution?.actorID==='main' && !input.abort.aborted && adaptiveCurrent) {
+                    const prompt=params.prompt, first=prompt[0]
+                    if (first?.role==='system' && first.content===base[0] && Object.keys(first).every(key=>key==='content' || key==='role' || (key==='providerOptions' && first.providerOptions===undefined)) && !prompt.slice(1).some(item=>item.role==='system')) {
+                      const chosen=prompt.slice(1), snapshot=adaptiveSnapshot(base,chosen), descriptor=readWindowOrigin(input.model), window=contextWindow({cfg:adaptive.config,model:input.model})
+                      let admission:unknown; try { admission=JSON.parse(adaptive.admission) } catch {}
+                      const admissionSHA256=adaptiveAdmissionSHA256(admission), modelWindowSHA256=descriptor && adaptiveModelWindowSHA256(input.model,descriptor,window)
+                      const level=snapshot && contextPressureLevel({cfg:adaptive.config,model:input.model,tokens:{input:0,output:0,reasoning:0,cache:{read:0,write:0}},additionalTokens:snapshot.estimatedTokens})
+                      if (snapshot && admissionSHA256 && modelWindowSHA256 && (level===2 || level===3)) {
+                        const hintSHA256=createHash('sha256').update(ADAPTIVE_CONCISE_HINT,'utf8').digest('hex')
+                        const evidence=Object.freeze({constructor:'native.adaptive-concise-hint.v1' as const,hintSHA256,admissionSHA256,snapshotSHA256:snapshot.snapshotSHA256,modelWindowSHA256,pressureLevel:level})
+                        const current=()=>{try {const d=readWindowOrigin(input.model), w=contextWindow({cfg:adaptive.config,model:input.model}), snap=adaptiveSnapshot(base,chosen)
+                          return adaptive.current() && !!d && adaptiveModelWindowSHA256(input.model,d,w)===modelWindowSHA256 && snap?.snapshotSHA256===snapshot.snapshotSHA256
+                        } catch {return false}}
+                        const dispatchCurrent=()=>!input.abort.aborted && current()
+                        if (dispatchCurrent()) {
+                          const derived=deriveAdaptivePrefix(base,()=>current() ? evidence : undefined)
+                          const derivedPrompt=[{...first,content:derived[0]!},...chosen] as typeof prompt
+                          adaptiveDispatch={basePrompt:prompt,derivedPrompt,baseSystem:base,derivedSystem:derived,current:dispatchCurrent}
+                          params.prompt=derivedPrompt
+                          input={...input,prebuiltSystem:derived}
+                        }
+                      }
+                    }
+                  }
+                if (input.adaptiveStyle && input.onContextFrame && !input.ephemeral) {
+                  try {
+                    const frame=contextFrame({
+                      providerID: input.model.providerID, modelID: input.model.id,
+                      identity: { sessionID: input.sessionID,
+                        ...(input.requestContext?.actorExecution ? {
+                          actorID: input.requestContext.actorExecution.actorID,
+                          executionRevision: input.requestContext.actorExecution.executionRevision,
+                          rootOperationID: input.requestContext.actorExecution.rootOperationID,
+                          innerTurnID: input.requestContext.actorExecution.innerTurnID,
+                        } : {}) },
+                      window: contextWindow({ cfg, model: input.model }), sources: input.contextSources?.sources,
+                      omittedSourceCount: input.contextSources?.omittedSourceCount,
+                      sequence: { attempt: input.contextSequence?.attempt ?? 1, transform: input.contextSequence ? ++input.contextSequence.transform : 1 },
+                      prompt: params.prompt, instructions: isOpenaiOauth ? ((params.providerOptions?.openai as Record<string, unknown> | undefined)?.instructions ?? Symbol("unavailable")) : undefined,
+                      tools: params.tools,
+                    })
+                    const handle=input.ownedAttemptCell?.handle
+                    if (handle) await issueAnthropicCallback(handle.probe,()=>input.onContextFrame!(frame))
+                    else await input.onContextFrame(frame)
+                  } catch (error) {
+                    l.warn("context inspection unavailable", { error: String(error) })
+                  }
+                }
+                if (adaptiveDispatch) {
+                  sourceFinalFrame=undefined
+                  membershipCandidate = !input.ephemeral && !isOpenaiOauth && input.nativeMembership && sameNativeMembershipIdentity(input.nativeMembership.identity,input.requestContext?.actorExecution) && managedMetadata?.familyID==='openai' && managedMetadata.adapterID==='openai-chat' && managedMetadata.billingLane==='metered_api' && info?.type==='api' && item.options?.fetch===undefined && isPinnedChatModel(language as object) ? nativeMembershipFrame(input.nativeMembership,params.prompt,language as object) : undefined
+                  if (input.sourceAttempt && input.prebuiltSystem && membershipCandidate) {
+                    const capsule=prefixAssemblyHandle(input.prebuiltSystem), current=capsule ? ()=>readPrefixAssembly(capsule) : undefined, proof=current?.()
+                    if (proof && proof.unknown.length===0 && membershipCandidate.sources.length===1 && membershipCandidate.sources[0]?.role==='user' && membershipCandidate.roles.filter(role=>role!=='system').length===1 && current)
+                      sourceFinalFrame={frame:membershipCandidate,system:input.prebuiltSystem,current}
+                  }
+                  if (input.sourceAttempt && input.prebuiltSystem && !input.ephemeral && !isOpenaiOauth &&
+                      input.model.api.npm==='@ai-sdk/openai-compatible' && managedMetadata?.familyID==='openai-compatible' &&
+                      managedMetadata.adapterID==='openai-chat' && managedScope?.connectionID===managedMetadata.connectionID && item.options?.fetch===undefined) {
+                    const endpoint=pinnedCompatibleChatEndpoint(language as object), layout=sourceAttemptLayout(input.sourceAttempt)
+                    const capsule=prefixAssemblyHandle(input.prebuiltSystem), current=capsule ? ()=>readPrefixAssembly(capsule) : undefined
+                    const prefix=current?.(), full=layout ? [...layout.layout,...layout.generated.map(g=>({position:g.position,sha256:g.sha256,synthetic:true}))] : undefined
+                    if (endpoint && layout && full && prefix && prefix.unknown.length===0 && current && sourceLayoutMessages(full,params.prompt,false))
+                      sourceFinalFrame={version:2,model:language as object,endpoint,system:input.prebuiltSystem,layout,current}
+                  }
+                }
+                if (adaptiveDispatch && !adaptiveDispatch.current() && params.prompt===adaptiveDispatch.derivedPrompt) {
+                  params.prompt=adaptiveDispatch.basePrompt
+                  input={...input,prebuiltSystem:adaptiveDispatch.baseSystem}
+                  adaptiveDispatch=undefined
+                  sourceFinalFrame=undefined
+                }
+                const ids:string[] = []
+                sdkDispatchIDs = ids
+                const invoke=()=>observeAnthropicDoStream(language as object, () => withSdkDispatches(managedScope, ids, doStream, nativeDeliveryCandidate, input.onNativeTextDelivery, input.requestContext?.actorExecution, recallDeliveryCandidate, input.onRecallAdmission, contextDeliveryCandidate, input.onContextDelivery, maintenanceCandidate, input.onMaintenanceWire, standingCandidate, input.onStandingGuidance, membershipCandidate, input.onNativeMembership, input.sourceAttempt, input.abort, sourceFinalFrame, input.sameRequestRows ? {...input.sameRequestRows,model:language as object,current:()=>!input.abort.aborted && input.sameRequestRows!.current()} : undefined))
+                const handle=input.ownedAttemptCell?.handle
+                const result=await (handle && handle.current() ? withAnthropicFailureProbe(handle.probe,invoke) : invoke())
+                return {...result,stream:result.stream.pipeThrough(new TransformStream({transform(chunk,controller) {
+                  if (chunk.type === "error" && !input.abort.aborted && isPinnedResponsesModel(language as object) && (JSONParseError.isInstance(chunk.error) || TypeValidationError.isInstance(chunk.error))) {
+                    try { markMalformedResponse(chunk.error,managedScope,ids,input.abort,language as object) } catch {}
+                  }
+                  if (chunk.type==='finish' && typeof chunk.finishReason?.unified==='string' && chunk.finishReason.unified!=='error' && !input.abort.aborted) {
+                    try {
+                      const metadata=markSdkSuccessStep(managedScope,ids,chunk.providerMetadata)
+                      controller.enqueue({...chunk,...(metadata ? {providerMetadata:metadata} : {})})
+                    } catch { controller.enqueue(chunk) }
+                  } else controller.enqueue(chunk)
+                } }))}
               },
               async transformParams(args) {
                 if (args.type === "stream") {
@@ -793,8 +1084,88 @@ const live: Layer.Layer<
                       sessionID: input.sessionID, messages: prompt as unknown as ModelMessage[], system,
                       options: finalOptions as Record<string, unknown>, tools, activeTools, resolvedTools,
                       usable: contextWindow({ cfg, model: input.model }).usable, abort: input.abort,
-                      ephemeral: input.ephemeral, agentID: input.agentID, providerFrame: true,
+                      ephemeral: input.ephemeral, agentID: input.agentID, actorExecution: input.requestContext?.actorExecution, providerFrame: true,
                     }) as typeof prompt
+                  }
+                  const knownMaintenance = !input.ephemeral && input.requestContext?.actorExecution?.actorID === "main" &&
+                    input.requestContext.actorExecution.rootOperationID && input.requestContext.actorExecution.innerTurnID &&
+                    input.model.api.npm === "@ai-sdk/openai" && maintenanceCompactionWire(input.maintenanceWire,args.params.prompt)
+                  const codexInstructions = (args.params.providerOptions?.openai as Record<string,unknown> | undefined)?.instructions
+                  maintenanceCandidate = knownMaintenance && input.maintenanceWire && managedMetadata?.familyID === "openai" &&
+                    managedMetadata.billingLane === "subscription" && managedMetadata.adapterID === "openai-responses" &&
+                    isOpenaiOauth && typeof codexInstructions === "string" &&
+                    codexInstructions === options.instructions
+                    ? {...input.maintenanceWire,wireProfile:"codex-responses",instructionsSHA256:createHash("sha256").update(codexInstructions,"utf8").digest("hex")}
+                    : knownMaintenance && input.maintenanceWire && managedMetadata?.familyID === "openai" &&
+                      managedMetadata.billingLane === "metered_api" && managedMetadata.adapterID === "openai-chat" ? {...input.maintenanceWire,wireProfile:"openai-chat"} : undefined
+                  nativeDeliveryCandidate = !input.ephemeral && input.requestContext?.actorExecution?.actorID === "main" && input.requestContext.actorExecution.rootOperationID && input.requestContext.actorExecution.innerTurnID && input.model.api.npm === "@ai-sdk/openai"
+                    ? nativeSingleUserWire(input.nativeTextSources, args.params.prompt) : undefined
+                  recallDeliveryCandidate = !input.ephemeral && input.requestContext?.actorExecution?.actorID === "main" && input.requestContext.actorExecution.rootOperationID && input.requestContext.actorExecution.innerTurnID && input.model.api.npm === "@ai-sdk/openai"
+                    ? recallToolFrame(input.recallToolSource, args.params.prompt) : undefined
+                  const mainContext = !input.ephemeral && input.requestContext?.actorExecution?.actorID === "main" && input.requestContext.actorExecution.rootOperationID && input.requestContext.actorExecution.innerTurnID
+                  const knownContext = mainContext && ((input.model.api.npm === "@ai-sdk/openai" && managedMetadata?.familyID === "openai" &&
+                    ((prefaceInput?.wireProfile === "openai-chat" && managedMetadata.billingLane === "metered_api" && managedMetadata.adapterID === "openai-chat" && info?.type === "api") ||
+                     (prefaceInput?.wireProfile === "codex-responses" && managedMetadata.billingLane === "subscription" && managedMetadata.adapterID === "openai-responses" && info?.type === "oauth"))) ||
+                    (prefaceInput?.wireProfile === "compatible-chat" && !!compatibleContextEndpoint && input.model.api.npm === "@ai-sdk/openai-compatible" &&
+                     managedMetadata?.familyID === "openai-compatible" && managedMetadata.adapterID === "openai-chat" && managedMetadata.billingLane === "local" &&
+                     managedScope?.credentialRequired === false && managedScope.connectionID === managedMetadata.connectionID))
+                  const checkedContext = knownContext ? contextPrefaceFrame(prefaceInput, args.params.prompt) : undefined
+                  contextDeliveryCandidate = checkedContext?.wireProfile === "compatible-chat" ? {...checkedContext,expectedURL:compatibleContextEndpoint} : checkedContext
+                  const knownStanding = !input.ephemeral && input.requestContext?.actorExecution?.actorID === 'main' && input.requestContext.actorExecution.rootOperationID && input.requestContext.actorExecution.innerTurnID && input.model.api.npm === '@ai-sdk/openai' && managedMetadata?.familyID === 'openai' &&
+                    ((input.standingGuidance?.wireProfile === 'openai-chat' && managedMetadata.billingLane === 'metered_api' && managedMetadata.adapterID === 'openai-chat' && info?.type === 'api') ||
+                     (input.standingGuidance?.wireProfile === 'codex-responses' && managedMetadata.billingLane === 'subscription' && managedMetadata.adapterID === 'openai-responses' && info?.type === 'oauth'))
+                  standingCandidate = knownStanding && input.standingGuidance?.wireProfile === 'codex-responses'
+                    ? (typeof codexInstructions === 'string' && codexInstructions === options.instructions && codexInstructions === system.join('\n')
+                        ? standingGuidanceFrame(input.standingGuidance,[{role:'system',content:codexInstructions}]) : undefined)
+                    : knownStanding ? standingGuidanceFrame(input.standingGuidance,args.params.prompt) : undefined
+                  membershipCandidate = !input.ephemeral && !isOpenaiOauth && input.nativeMembership && sameNativeMembershipIdentity(input.nativeMembership.identity,input.requestContext?.actorExecution) && managedMetadata?.familyID==='openai' && managedMetadata.adapterID==='openai-chat' && managedMetadata.billingLane==='metered_api' && info?.type==='api' && item.options?.fetch===undefined && isPinnedChatModel(language as object) ? nativeMembershipFrame(input.nativeMembership,args.params.prompt,language as object) : undefined
+                  sourceFinalFrame = undefined
+                  if (input.sourceAttempt && input.prebuiltSystem && membershipCandidate) {
+                    const originalSystem=input.prebuiltSystem
+                    const capsule=prefixAssemblyHandle(originalSystem)
+                    if (capsule) {
+                      const current=()=>readPrefixAssembly(capsule)
+                      const proof=current()
+                      if (proof && proof.unknown.length===0 && membershipCandidate.sources.length===1 &&
+                          membershipCandidate.sources[0]?.role==='user' && membershipCandidate.roles.filter(role=>role!=='system').length===1)
+                        sourceFinalFrame={frame:membershipCandidate,system:originalSystem,current}
+                    }
+                  }
+                }
+                if (args.type === "stream" && input.sourceAttempt && input.prebuiltSystem && !input.ephemeral && !isOpenaiOauth &&
+                    input.model.api.npm === '@ai-sdk/openai-compatible' && managedMetadata?.familyID === 'openai-compatible' &&
+                    managedMetadata.adapterID === 'openai-chat' && managedScope?.connectionID === managedMetadata.connectionID && item.options?.fetch===undefined) {
+                  const endpoint=pinnedCompatibleChatEndpoint(language as object), layout=sourceAttemptLayout(input.sourceAttempt)
+                  const capsule=prefixAssemblyHandle(input.prebuiltSystem)
+                  const current=capsule ? ()=>readPrefixAssembly(capsule) : undefined
+                  const prefix=current?.(), full=layout ? [...layout.layout,...layout.generated.map(g=>({position:g.position,sha256:g.sha256,synthetic:true}))] : undefined
+                  const matchingLayout = !!(endpoint && layout && full && prefix && prefix.unknown.length===0 && sourceLayoutMessages(full,args.params.prompt,false))
+                  if(matchingLayout && endpoint && layout && prefix && current)
+                    sourceFinalFrame={version:2,model:language as object,endpoint,system:input.prebuiltSystem,layout,current}
+                  try { log.debug("source_frame_eligibility",{endpoint:!!endpoint,layout:!!layout,prefix:!!prefix,known:!!prefix && prefix.unknown.length===0,matchingLayout,frame:!!sourceFinalFrame}) } catch { /* diagnostic only */ }
+                }
+                if (args.type === "stream" && !input.adaptiveStyle && input.onContextFrame && !input.ephemeral) {
+                  try {
+                    const frame=contextFrame({
+                      providerID: input.model.providerID, modelID: input.model.id,
+                      identity: { sessionID: input.sessionID,
+                        ...(input.requestContext?.actorExecution ? {
+                          actorID: input.requestContext.actorExecution.actorID,
+                          executionRevision: input.requestContext.actorExecution.executionRevision,
+                          rootOperationID: input.requestContext.actorExecution.rootOperationID,
+                          innerTurnID: input.requestContext.actorExecution.innerTurnID,
+                        } : {}) },
+                      window: contextWindow({ cfg, model: input.model }), sources: input.contextSources?.sources,
+                      omittedSourceCount: input.contextSources?.omittedSourceCount,
+                      sequence: { attempt: input.contextSequence?.attempt ?? 1, transform: input.contextSequence ? ++input.contextSequence.transform : 1 },
+                      prompt: args.params.prompt, instructions: isOpenaiOauth ? ((args.params.providerOptions?.openai as Record<string, unknown> | undefined)?.instructions ?? Symbol("unavailable")) : undefined,
+                      tools: args.params.tools,
+                    })
+                    const handle=input.ownedAttemptCell?.handle
+                    if (handle) await issueAnthropicCallback(handle.probe,()=>input.onContextFrame!(frame))
+                    else await input.onContextFrame(frame)
+                  } catch (error) {
+                    l.warn("context inspection unavailable", { error: String(error) })
                   }
                 }
                 return args.params
@@ -822,9 +1193,29 @@ const live: Layer.Layer<
         Stream.scoped(
           Stream.unwrap(
             Effect.gen(function* () {
+              const ownedAttemptCell: NonNullable<StreamRequest["ownedAttemptCell"]> = {}
               const ctrl = yield* Effect.acquireRelease(
                 Effect.sync(() => new AbortController()),
-                (ctrl) => Effect.sync(() => ctrl.abort()),
+                (ctrl,exit) => ownedAttemptCell.handle
+                  ? Effect.promise(async () => {
+                      const handle=ownedAttemptCell.handle!
+                      const probe=handle.probe
+                      try {
+                        const drained=await drainAnthropicCallbacks(probe)
+                        const okay=drained && handle.current() && !ctrl.signal.aborted && !probe.signal?.aborted &&
+                          !(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)) && !ownedAttemptCell.invalid && ownedAttemptCell.returned===true &&
+                          !!ownedAttemptCell.error && ownedAttemptCell.sdkError===ownedAttemptCell.error && probe.adapterError===ownedAttemptCell.error && probe.originalEOF===true && probe.sends===1 && probe.state==="observed"
+                        if (okay) probe.localOutcome={error:ownedAttemptCell.error!}
+                        else handle.deny()
+                      }
+                      finally {
+                        if (probe.signal && probe.onAbort) probe.signal.removeEventListener("abort",probe.onAbort)
+                        if (!probe.localOutcome && ownedAttemptCell.scope) retireCaptureAttempt(ownedAttemptCell.scope,probe)
+                        settleSourceStreamBeforeTeardown(input.sourceAttempt,ctrl.signal,Exit.isSuccess(exit))
+                        ctrl.abort()
+                      }
+                    })
+                  : Effect.sync(() => { settleSourceStreamBeforeTeardown(input.sourceAttempt,ctrl.signal,Exit.isSuccess(exit)); ctrl.abort() }),
               )
               const attemptRef = yield* Ref.make(0)
 
@@ -850,7 +1241,7 @@ const live: Layer.Layer<
                   )
                 })
 
-              const streamWithTelemetry = run({ ...input, abort: ctrl.signal, dropAssistantPrefill }).pipe(
+              const streamWithTelemetry = run({ ...input, abort: ctrl.signal, dropAssistantPrefill, ownedAttemptCell }).pipe(
                 Effect.tapError((error) => {
                   if (!isTransientCapacityError(error)) return Effect.void
                   return Ref.updateAndGet(attemptRef, (n) => n + 1).pipe(
@@ -874,7 +1265,27 @@ const live: Layer.Layer<
               // AbortController scope teardown are exactly as before. The reactive
               // prefill retry is layered lazily below and only pays a cost when an
               // actual error surfaces.
-              return Stream.fromAsyncIterable(result.fullStream, (e) =>
+              const iterable = ownedAttemptCell.handle ? {
+                [Symbol.asyncIterator]() {
+                  const reader=result.fullStream[Symbol.asyncIterator]()
+                  return {
+                    async next() {
+                      try {
+                        const item=await reader.next()
+                        if (item.done) ownedAttemptCell.invalid=true
+                        else if (item.value.type === "error" && item.value.error && typeof item.value.error === "object" && !ownedAttemptCell.error) ownedAttemptCell.error=item.value.error
+                        else if (item.value.type !== "start") ownedAttemptCell.invalid=true
+                        return item
+                      } catch (error) { ownedAttemptCell.invalid=true; throw error }
+                    },
+                    async return() {
+                      try { if (!reader.return) { ownedAttemptCell.invalid=true; return {done:true as const,value:undefined} }; const value=await reader.return(); ownedAttemptCell.returned=true; return value }
+                      catch (error) { ownedAttemptCell.invalid=true; throw error }
+                    },
+                  }
+                },
+              } : result.fullStream
+              return Stream.fromAsyncIterable(iterable, (e) =>
                 e instanceof Error ? e : new Error(String(e)),
               )
             }),
@@ -940,6 +1351,13 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Memory.defaultLayer),
   ),
 )
+
+export function selectFinalTools(input: Pick<StreamInput, "tools" | "activeTools" | "agent" | "permission" | "user">) {
+  const tools=resolveTools(input)
+  const requestedActiveTools=new Set(input.activeTools ?? Object.keys(tools))
+  const activeTools=Object.keys(tools).filter(name=>name!=="invalid" && requestedActiveTools.has(name))
+  return {tools,activeTools}
+}
 
 function resolveTools(input: Pick<StreamInput, "tools" | "activeTools" | "agent" | "permission" | "user">) {
   const disabled = Permission.disabled(

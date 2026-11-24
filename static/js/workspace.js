@@ -7,6 +7,7 @@
 
 import Storage, { KEYS } from './storage.js';
 import uiModule from './ui.js';
+import { topPortalZ } from './toolWindowZOrder.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { observeCodeIndex } from './copal/codeIndexObserver.js';
 
@@ -20,13 +21,15 @@ let _displayGeneration = 0;
 const _persistQueueBySession = new Map();
 let _indexSubscription = null;
 
-async function _indexEvent(subscription, event, keepalive = false) {
+async function _indexEvent(subscription, event, keepalive = false, removalConfirmation = null, replaceStaleRoot = false) {
   const response = await fetch(
     `${API_BASE}/api/file-policy/workspaces/${encodeURIComponent(subscription.workspaceId)}/index/${event}`,
     { method: 'POST', credentials: 'same-origin', keepalive,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ subscriber_id: subscription.id, purpose: subscription.purpose || 'agent_workspace',
-        ...(subscription.sessionId ? { session_id: subscription.sessionId } : {}) }) },
+        ...(subscription.sessionId ? { session_id: subscription.sessionId } : {}),
+        ...(removalConfirmation ? { removal_confirmation: removalConfirmation } : {}),
+        ...(replaceStaleRoot ? { replace_stale_root:true } : {}) }) },
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -71,24 +74,59 @@ function _openIndexSubscription(workspaceId, generation) {
 window.addEventListener('pagehide', _releaseIndexSubscription);
 
 export function subscribeWorkspaceIndex(workspaceId, {
-  purpose = 'app_folder', sessionId = '', isCurrent = () => true, onStatus = () => {}, observe = false, automatic = false,
+  purpose = 'app_folder', sessionId = '', isCurrent = () => true, onStatus = () => {}, observe = false, automatic = false, replaceStaleRoot = false,
 } = {}) {
   if (!workspaceId || !isCurrent()) return () => {};
   const subscription = { workspaceId, purpose, sessionId, id: crypto.randomUUID() };
+  let visible = true, autoWatch = automatic, disposed = false, watcher = null, unavailable = false;
+  const stopWatch = () => { watcher?.close(); watcher = null; };
+  const syncWatch = () => {
+    if (disposed || !visible || !autoWatch || !isCurrent()) { unavailable = false; stopWatch(); return; }
+    if (purpose !== 'app_folder' || !observe || watcher || unavailable || typeof EventSource !== 'function') return;
+    const stream = new EventSource(`${API_BASE}/api/file-policy/workspaces/${encodeURIComponent(workspaceId)}/index/watch`);
+    watcher = stream;
+    stream.addEventListener('index-change', event => {
+      if(watcher!==stream || !isCurrent() || event.data!=='rescan')return;
+      const ticket=observer.captureSourceChange();
+      if(ticket)observer.sourceChanged(ticket);else observer.dirty();
+    });
+    stream.onerror = () => {
+      if(watcher===stream){unavailable=true;stopWatch();}
+    };
+  };
   const observer = observeCodeIndex({
-    request: event => _indexEvent(subscription, event, event === 'release'),
+    request: async (event, confirmation) => {
+      const replace = event === 'open' && replaceStaleRoot;
+      try {
+        const status = await _indexEvent(subscription,event,event==='release',confirmation,replace);
+        if (replace) replaceStaleRoot=false;
+        return status;
+      } catch(error) {
+        if (replace && [400,401,403,404,409,422].includes(error?.status)) replaceStaleRoot=false;
+        throw error;
+      }
+    },
     isCurrent, onStatus, observe, automatic,
-    onDispose: () => window.removeEventListener('pagehide', release),
+    onDispose: () => { disposed=true; stopWatch(); window.removeEventListener('pagehide', release); },
   });
   const release = () => {
     window.removeEventListener('pagehide', release);
     observer();
   };
   release.refresh = observer.refresh;
-  release.verify=observer.verify;release.dirty=observer.dirty;release.setVisible=observer.setVisible;release.configure=observer.configure;
+  release.verify=observer.verify;release.dirty=observer.dirty;
+  release.setVisible=value=>{visible=value===true;observer.setVisible(value);syncWatch();};
+  release.configure=patch=>{if(typeof patch.automatic==='boolean')autoWatch=patch.automatic;observer.configure(patch);syncWatch();};
   release.captureSourceChange=observer.captureSourceChange;release.sourceChanged=observer.sourceChanged;
   release.readmit = observer.readmit;
+  release.previewRemovals = async () => {
+    if(disposed||!isCurrent())return null;
+    const index=await _indexEvent(subscription,'preview-removals');
+    return !disposed&&isCurrent()?index?.removal_review||null:null;
+  };
+  release.confirmRemovals = observer.confirmRemovals;
   window.addEventListener('pagehide', release);
+  syncWatch();
   return release;
 }
 let _browserContext = {
@@ -151,7 +189,7 @@ function _applyWorkspaceDisplay(path, workspaceId = '') {
 async function _persistCurrentChatWorkspace(workspaceId) {
   const sessions = window.sessionModule;
   const sessionId = sessions?.getCurrentSessionId?.();
-  if (!sessionId || sessions?.isCurrentSessionIncognito?.()) return;
+  if (!sessionId || sessions?.isCurrentSessionIncognito?.()) return false;
   // Preserve click order for a single chat. Two quick workspace choices can
   // otherwise finish out of order and leave the server on the older choice.
   const prior = _persistQueueBySession.get(sessionId) || Promise.resolve();
@@ -175,6 +213,7 @@ async function _persistCurrentChatWorkspace(workspaceId) {
   _persistQueueBySession.set(sessionId, request);
   try {
     await request;
+    return true;
   } finally {
     if (_persistQueueBySession.get(sessionId) === request) {
       _persistQueueBySession.delete(sessionId);
@@ -188,13 +227,13 @@ export async function setWorkspace(path, workspaceId = '', options = {}) {
   const previousId = getWorkspaceId();
   _applyWorkspaceDisplay(path || '', workspaceId || '');
   _releaseIndexSubscription();
-  if (options.persist === false) {
-    _openIndexSubscription(path ? workspaceId : '', displayGeneration);
-    return;
-  }
+  // Restoring a saved selection updates the composer without launching an index job.
+  if (options.persist === false) return;
   try {
-    await _persistCurrentChatWorkspace(workspaceId || '');
-    if (displayGeneration === _displayGeneration) {
+    // Binding a chat already ensures its index server-side. A newly chosen
+    // folder without a chat still receives an explicit browser subscription.
+    const boundToChat = await _persistCurrentChatWorkspace(workspaceId || '');
+    if (!boundToChat && displayGeneration === _displayGeneration) {
       _openIndexSubscription(path ? workspaceId : '', displayGeneration);
     }
   } catch (error) {
@@ -202,7 +241,6 @@ export async function setWorkspace(path, workspaceId = '', options = {}) {
     // request may report its error, but it must never repaint that later chat.
     if (displayGeneration === _displayGeneration) {
       _applyWorkspaceDisplay(previousPath, previousId);
-      _openIndexSubscription(previousId, displayGeneration);
     }
     throw error;
   }
@@ -291,11 +329,11 @@ function _render(data) {
   }
   let rows = '';
   if (data.parent) {
-    rows += `<div class="workspace-row workspace-up" data-path="${encodeURIComponent(data.parent)}">↑ ..</div>`;
+    rows += `<button type="button" class="workspace-row workspace-up" data-path="${encodeURIComponent(data.parent)}" aria-label="Parent folder">↑ ..</button>`;
   }
   for (const d of data.dirs) {
     // Backend supplies the full child path (os.path.join → cross-platform).
-    rows += `<div class="workspace-row" data-path="${encodeURIComponent(d.path)}">${_FOLDER_SVG}<span>${uiModule.esc(d.name)}</span></div>`;
+    rows += `<button type="button" class="workspace-row" data-path="${encodeURIComponent(d.path)}">${_FOLDER_SVG}<span>${uiModule.esc(d.name)}</span></button>`;
   }
   if (data.truncated) {
     rows += '<div class="workspace-empty">Too many folders to list. Type or paste a path above to jump in.</div>';
@@ -343,6 +381,35 @@ async function _navigate(path, errorMessage = 'Could not open folder') {
   }
 }
 
+async function _chooseFolder(chosenPath) {
+  const context = _browserContext;
+  const current = () => context === _browserContext && context.active;
+  if (!current() || !chosenPath || context.submitting) return;
+  context.submitting = true;
+  const notice = _modal.querySelector('#workspace-result');
+  notice.textContent = 'Opening ' + chosenPath + '…';
+  try {
+    let message;
+    if (context.selectionKind !== 'agent_workspace' && context.onSelect) {
+      await context.onSelect(chosenPath);
+      message = (context.successLabel || 'Code folder opened') + ': ' + _basename(chosenPath);
+    } else {
+      const workspace = await bindWorkspacePath(chosenPath, 'agent_workspace');
+      if (!current()) return;
+      await setWorkspace(workspace.path, workspace.id);
+      message = 'Workspace set: ' + _basename(workspace.path);
+    }
+    if (!current()) return;
+    context.onCancel = null;
+    closeWorkspaceBrowser();
+    uiModule.showToast?.(message);
+  } catch (error) {
+    if (current()) notice.textContent = error?.message || 'Could not open folder';
+  } finally {
+    context.submitting = false;
+  }
+}
+
 function _getModal() {
   if (_modal) return _modal;
   _modal = document.createElement('div');
@@ -360,6 +427,7 @@ function _getModal() {
              placeholder="Type or paste a folder path, then press Enter" />
       <p class="muted workspace-note" id="workspace-browser-note">File tools are <strong>confined</strong> to this folder. Shell commands start here but are <strong>not sandboxed</strong> and can reach outside it. A workspace scopes the tools; it is not a security boundary.</p>
       <div class="modal-body workspace-body" id="workspace-body"></div>
+      <div id="workspace-result" role="status"></div>
       <div class="modal-footer workspace-footer">
         <button type="button" class="confirm-btn confirm-btn-secondary" id="workspace-cancel">Cancel</button>
         <button type="button" class="confirm-btn confirm-btn-primary" id="workspace-use">Use this folder</button>
@@ -388,35 +456,7 @@ function _getModal() {
       if (v) _navigate(v);
     }
   });
-  _modal.querySelector('#workspace-use').addEventListener('click', async () => {
-    const context = _browserContext, chosenPath = _curPath;
-    const current = () => context === _browserContext && context.active;
-    if (!current() || !chosenPath || _modal.querySelector('#workspace-use').disabled) return;
-    if (context.selectionKind === 'app_folder' && typeof context.onSelect === 'function') {
-      try {
-        await context.onSelect(chosenPath);
-        if (!current()) return;
-        if (uiModule && uiModule.showToast) uiModule.showToast(
-          `${context.successLabel || 'Code folder opened'}: ${_basename(chosenPath)}`,
-        );
-      } catch (_) {
-        if (current() && uiModule && uiModule.showError) uiModule.showError('Could not open folder');
-        return;
-      }
-    } else {
-      try {
-        const workspace = await bindWorkspacePath(chosenPath, 'agent_workspace');
-        if (!current()) return;
-        await setWorkspace(workspace.path, workspace.id);
-        if (!current()) return;
-        if (uiModule && uiModule.showToast) uiModule.showToast(`Workspace set: ${_basename(workspace.path)}`);
-      } catch (error) {
-        if (current() && uiModule && uiModule.showError) uiModule.showError(error?.message || 'This folder does not have Agent access');
-        return;
-      }
-    }
-    if (current()) closeWorkspaceBrowser();
-  });
+  _modal.querySelector('#workspace-use').addEventListener('click', () => _chooseFolder(_curPath));
   const content = _modal.querySelector('.modal-content');
   const header = _modal.querySelector('.modal-header');
   if (content && header) makeWindowDraggable(_modal, { content, header });
@@ -424,12 +464,13 @@ function _getModal() {
 }
 
 export async function openWorkspaceBrowser(options = {}) {
-  const appFolder = options?.selectionKind === 'app_folder';
+  const locationChooser = options?.selectionKind === 'register_location';
+  const appFolder = options?.selectionKind === 'app_folder' || locationChooser;
   _browserContext.active = false;
   _browserContext.onCancel?.();
   _browserContext = {
     active: true,
-    selectionKind: appFolder ? 'app_folder' : 'agent_workspace',
+    selectionKind: locationChooser ? 'register_location' : appFolder ? 'app_folder' : 'agent_workspace',
     onSelect: appFolder && typeof options.onSelect === 'function' ? options.onSelect : null,
     successLabel: String(options.successLabel || ''),
     onCancel: appFolder && typeof options.onCancel === 'function' ? options.onCancel : null,
@@ -446,6 +487,8 @@ export async function openWorkspaceBrowser(options = {}) {
   const initialPath = appFolder ? String(options.initialPath || '') : getWorkspace();
   const pathInput = modal.querySelector('#workspace-cur-path');
   if (pathInput) { pathInput.value = initialPath; pathInput.title = ''; }
+  modal.querySelector('#workspace-result').textContent = '';
+  modal.style.setProperty('z-index',String(topPortalZ({exclude:modal})),'important');
   modal.style.display = 'flex';
   await _navigate(initialPath || '', 'Could not browse folders');
 }
@@ -465,13 +508,14 @@ export async function initWorkspace() {
   // leaking an unassigned path through the workspace pill.
   const saved = Storage.get(KEYS.WORKSPACE, '') || '';
   const savedId = getWorkspaceId();
+  const generation = _displayGeneration;
   syncWorkspaceIndicator('');
   if (savedId) {
     try {
       const workspace = await resolveWorkspaceId(savedId, 'agent_workspace');
-      await setWorkspace(workspace.path, workspace.id, { persist: false });
+      if (generation === _displayGeneration) await setWorkspace(workspace.path, workspace.id, { persist: false });
     } catch (_) {
-      await clearWorkspace({ persist: false });
+      if (generation === _displayGeneration) await clearWorkspace({ persist: false });
     }
   } else if (saved) {
     console.info('Saved folder preference is preserved. Choose its folder again to select a current Workspace ID.');

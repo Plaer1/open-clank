@@ -1,6 +1,10 @@
+import { isDeepStrictEqual } from 'node:util'
+import { gitExecutable } from './index-physical'
 import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
-import { Effect, Layer, Context, Stream } from "effect"
+import { Effect, Layer, Context, Stream, Cause } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import type { ChildProcessHandle } from "effect/unstable/process/ChildProcessSpawner"
+import { previewPhysicalIndex, inspectPhysicalIndex, previewPhysicalCommit, applyPhysicalCommit, applyPhysicalIndex, type PhysicalIndexPreview, type PhysicalIndexInspection, type PhysicalCommitPreview, type CommitAction, type CommitPhase, type CommitResult, type IndexAction, type IndexPhase, type IndexResult } from './index-physical'
 
 const cfg = [
   "--no-optional-locks",
@@ -18,6 +22,11 @@ const cfg = [
 
 const out = (result: { text(): string }) => result.text().trim()
 const nuls = (text: string) => text.split("\0").filter(Boolean)
+export function inventoryPrefix(bytes: Buffer): { data: Buffer; truncated: boolean } {
+  let end = bytes.length, count = 0
+  for (let i = 0; i < bytes.length; i++) if (bytes[i] === 0 && ++count === 32) { end = i + 1; break }
+  return { data: bytes.subarray(0, end), truncated: end < bytes.length }
+}
 const fail = (err: unknown) =>
   ({
     exitCode: 1,
@@ -59,6 +68,14 @@ export interface Options {
 
 export interface Interface {
   readonly run: (args: string[], opts: Options) => Effect.Effect<Result>
+  readonly removeCleanup: (input:{cwd:string;target:string;expectedExecutable:{path:string;device:number;inode:number;size:number;sha256:string}}) => Effect.Effect<{issued:boolean;child:"settled"|"unknown";exitCode?:number}>
+  readonly readCleanup: (input:{cwd:string;operation:"config"|"registered"|"status"|"tracked"|"untracked"|"common"|"branch"|"head"|"headOID"|"direct";executable?:string;target?:string}) => Effect.Effect<Result>
+  readonly readWorkbench: (input: { cwd: string; operation: "root" | "objectFormat" | "head" | "index" | "indexPath" | "tree" | "indexEntry" | "treeEntry" | "blob" | "others" | "branches" | "log" | "worktrees" | "status" | "worktree" | "staged" | "headDiff"; path?: string }) => Effect.Effect<Result>
+  readonly applyPhysicalCommit: (root:string, expected:PhysicalCommitPreview, action:CommitAction, candidateToken:string, recheck:(phase:CommitPhase)=>Promise<boolean>) => Effect.Effect<CommitResult>
+  readonly previewPhysicalCommit: (root:string) => Effect.Effect<PhysicalCommitPreview | undefined>
+  readonly inspectPhysicalIndex: (root:string) => Effect.Effect<PhysicalIndexInspection | undefined>
+  readonly previewPhysicalIndex: (root:string) => Effect.Effect<PhysicalIndexPreview | undefined>
+  readonly applyPhysicalIndex: (root:string, expected:PhysicalIndexPreview, action:IndexAction, candidateToken:string, recheck:(phase:IndexPhase)=>Promise<boolean>) => Effect.Effect<IndexResult>
   readonly branch: (cwd: string) => Effect.Effect<string | undefined>
   readonly prefix: (cwd: string) => Effect.Effect<string>
   readonly defaultBranch: (cwd: string) => Effect.Effect<Base | undefined>
@@ -110,6 +127,216 @@ export const layer = Layer.effect(
       Effect.scoped,
       Effect.catch((err) => Effect.succeed(fail(err))),
     )
+
+    // Closed read-only workbench commands. Scoped interruption terminates the
+    // child; neither external diff drivers nor user hooks may be invoked.
+    const readWorkbench = Effect.fn("Git.readWorkbench")(
+      function* (input: { cwd: string; operation: "root" | "objectFormat" | "head" | "index" | "indexPath" | "tree" | "indexEntry" | "treeEntry" | "blob" | "others" | "branches" | "log" | "worktrees" | "status" | "worktree" | "staged" | "headDiff"; path?: string }) {
+        if (process.platform !== "linux") return fail(new Error("unavailable"))
+        const path = input.path
+        // Worktree status/diff can invoke repository-configured clean filters.
+        // They remain unavailable until a raw, filter-free comparison exists.
+        if (new Set<string>(["status", "worktree", "staged", "headDiff"]).has(input.operation)) return fail(new Error("unavailable"))
+        if (path !== undefined && (!path || path.startsWith("/") || path.includes("\0") || path.split("/").some((p) => !p || p === "." || p === ".." || p === ".git" || p === ".clanker" || p === ".references"))) return fail(new Error("unavailable"))
+        const args = input.operation === "root" ? ["rev-parse", "--show-toplevel", "--git-common-dir"]
+          : input.operation === "objectFormat" ? ["rev-parse", "--show-object-format"]
+          : input.operation === "head" ? ["rev-parse", "--verify", "HEAD"]
+          : input.operation === "index" ? ["ls-files", "--stage", "-z"]
+          : input.operation === "indexPath" ? ["rev-parse", "--git-path", "index"]
+          : input.operation === "tree" ? ["ls-tree", "-r", "-z", "--full-tree", "HEAD"]
+          : input.operation === "indexEntry" && path ? ["ls-files", "--stage", "-z", "--", path]
+          : input.operation === "treeEntry" && path ? ["ls-tree", "-r", "-z", "--full-tree", "HEAD", "--", path]
+          : input.operation === "others" ? ["ls-files", "--others", "--exclude-standard", "-z"]
+          : input.operation === "branches" ? ["for-each-ref", "--count=101", "--sort=refname", "--format=%(refname)%00%(objectname)%00%(HEAD)%00", "refs/heads/"]
+          : input.operation === "log" ? ["log", "-z", "-101", "--format=%H%x00%P%x00%ct%x00%s", "--no-show-signature"]
+          : input.operation === "worktrees" ? ["worktree", "list", "--porcelain", "-z"]
+          : input.operation === "blob" && path && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(path) ? ["cat-file", "blob", path]
+          : input.operation === "status" ? ["status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z", "--", "."]
+          : path ? ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", ...(input.operation === "staged" ? ["--cached"] : input.operation === "headDiff" ? ["HEAD"] : []), "--", path] : []
+        if (!args.length) return fail(new Error("unavailable"))
+        const proc = ChildProcess.make("git", [...cfg, "-c", "core.hooksPath=/dev/null", "-c", "diff.external=", "-c", "credential.helper=", ...args], {
+          cwd: input.cwd, env: { PATH: process.env.PATH ?? "/usr/bin:/bin",
+            GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0",
+            GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1", GIT_NO_LAZY_FETCH: "1", GIT_NO_REPLACE_OBJECTS: "1", GIT_PAGER: "cat", PAGER: "cat", LC_ALL: "C" }, extendEnv: false,
+          stdin: "ignore", stdout: "pipe", stderr: "pipe",
+        })
+        const handle = yield* spawner.spawn(proc)
+        const collect = (stream: typeof handle.stdout) => stream.pipe(Stream.runFold((): Buffer => Buffer.alloc(0), (acc, chunk) => {
+          if (acc.length + chunk.length > (input.operation === "index" || input.operation === "tree" || input.operation === "others" ? 4 * 1024 * 1024 : 262144)) throw new Error("output limit")
+          return Buffer.concat([acc, Buffer.from(chunk)])
+        }))
+        const [stdout] = yield* Effect.all([collect(handle.stdout), collect(handle.stderr)], { concurrency: 2 })
+        const exitCode = yield* handle.exitCode
+        return { exitCode, stdout, stderr: Buffer.alloc(0), text: () => stdout.toString("utf8") } satisfies Result
+      },
+      Effect.scoped,
+      Effect.timeout(3000),
+      Effect.catch(() => Effect.succeed(fail(new Error("unavailable")))),
+    )
+
+    // Both private operations share this bounded scoped child owner.
+    const cleanupChild = Effect.fn("Git.cleanupChild")(function* (
+      cwd: string,
+      args: readonly string[],
+      executable: string,
+      onIssued?: () => void,
+      onHandle?: (handle:ChildProcessHandle) => void,
+    ) {
+      onIssued?.();
+      const handle = yield* spawner.spawn(
+        ChildProcess.make(
+          executable,
+          [
+            ...cfg,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "diff.external=",
+            "-c",
+            "credential.helper=",
+            ...args,
+          ],
+          {
+            cwd,
+            env: {
+              PATH: process.env.PATH ?? "/usr/bin:/bin",
+              GIT_CONFIG_NOSYSTEM: "1",
+              GIT_CONFIG_GLOBAL: "/dev/null",
+              GIT_ATTR_NOSYSTEM: "1",
+              GIT_TERMINAL_PROMPT: "0",
+              GIT_OPTIONAL_LOCKS: "0",
+              GIT_LITERAL_PATHSPECS: "1",
+              GIT_NO_LAZY_FETCH: "1",
+              GIT_NO_REPLACE_OBJECTS: "1",
+              GIT_PAGER: "cat",
+              PAGER: "cat",
+              LC_ALL: "C",
+            },
+            extendEnv: false,
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        ),
+      );
+      onHandle?.(handle)
+      const collect = (stream: typeof handle.stdout) =>
+        stream.pipe(
+          Stream.runFold(
+            (): Buffer => Buffer.alloc(0),
+            (acc, chunk) => {
+              if (acc.length + chunk.length > 4 * 1024 * 1024)
+                throw Error("output limit");
+              return Buffer.concat([acc, Buffer.from(chunk)]);
+            },
+          ),
+        );
+      const [stdout] = yield* Effect.all(
+        [collect(handle.stdout), collect(handle.stderr)],
+        { concurrency: 2 },
+      );
+      const exitCode = yield* handle.exitCode;
+      return {
+        exitCode,
+        stdout,
+        stderr: Buffer.alloc(0),
+        text: () => stdout.toString("utf8"),
+      } satisfies Result;
+    }, Effect.scoped);
+    const readCleanup = Effect.fn("Git.readCleanup")(
+      function* (input: {
+        cwd: string;
+        operation:
+          | "config"
+          | "registered"
+          | "status"
+          | "tracked"
+          | "untracked"
+          | "common"
+          | "branch"
+          | "head"
+          | "headOID"
+          | "direct";
+        executable?: string;
+        target?: string;
+      }) {
+        if (process.platform !== "linux" || !input.cwd.startsWith("/"))
+          return fail(new Error("unavailable"));
+        const commands = {
+          config: ["config", "--local", "--no-includes", "--null", "--list"],
+          registered: ["worktree", "list", "--porcelain", "-z"],
+          status: [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored",
+          ],
+          tracked: ["ls-files", "--stage", "-z"],
+          untracked: ["ls-files", "--others", "-z"],
+          common: ["rev-parse", "--git-common-dir"],
+          branch: ["show-ref", "--verify", "--quiet", input.target ?? ""],
+          head: ["symbolic-ref", "--quiet", "--no-recurse", "HEAD"],
+          headOID: ["rev-parse", "--verify", "HEAD"],
+          direct: [
+            "for-each-ref",
+            "--format=%(refname)%00%(symref)",
+            input.target ?? "",
+          ],
+        } as const;
+        const args = commands[input.operation];
+        if (
+          !args ||
+          ((input.operation === "branch" || input.operation === "direct") &&
+            (!input.target || input.target.includes("\0"))) ||
+          (input.executable !== undefined && !input.executable.startsWith("/"))
+        )
+          return fail(new Error("unavailable"));
+        return yield* cleanupChild(input.cwd, args, input.executable ?? "git");
+      },
+      Effect.timeout(3000),
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.interrupt
+          : Effect.succeed(fail(new Error("unavailable"))),
+      ),
+    );
+    const removeCleanup = (input: {
+      cwd: string;
+      target: string;
+      expectedExecutable: {
+        path: string;
+        device: number;
+        inode: number;
+        size: number;
+        sha256: string;
+      };
+    }): Effect.Effect<{
+      issued: boolean;
+      child: "settled" | "unknown";
+      exitCode?: number;
+    }> => {
+      let issued = false;
+      const observed:{handle?:ChildProcessHandle} = {};
+      const unknown = () => ({ issued, child: "unknown" as const });
+      return Effect.uninterruptibleMask(restore => Effect.gen(function* () {
+        const outcome = yield* restore(Effect.gen(function* () {
+          if (process.platform !== "linux" || !input.cwd.startsWith("/") || !input.target.startsWith("/") || input.target.includes("\0")) return unknown()
+          const executable = yield* Effect.tryPromise({try:()=>gitExecutable(),catch:()=>new Error("unavailable")})
+          if (!isDeepStrictEqual(executable,input.expectedExecutable)) return unknown()
+          const result = yield* cleanupChild(input.cwd,["worktree","remove","--",input.target],executable.path,()=>{issued=true},value=>{observed.handle=value})
+          return {issued,child:"settled" as const,exitCode:result.exitCode}
+        }).pipe(Effect.timeout(30000))).pipe(Effect.exit)
+        if (outcome._tag === "Success") return outcome.value
+        // cleanupChild's scoped finalizer has completed. The original handle's
+        // isRunning reads the spawner's exact child-exit Deferred, not a PID.
+        if (observed.handle) {
+          const running = yield* observed.handle.isRunning.pipe(Effect.orElseSucceed(()=>true))
+          if (!running) return {issued,child:"settled" as const}
+        }
+        return unknown()
+      }))
+    };
 
     const text = Effect.fn("Git.text")(function* (args: string[], opts: Options) {
       return (yield* run(args, opts)).text()
@@ -242,6 +469,14 @@ export const layer = Layer.effect(
 
     return Service.of({
       run,
+      readWorkbench,
+      readCleanup,
+      removeCleanup,
+      applyPhysicalCommit: (root,expected,action,candidateToken,recheck) => Effect.uninterruptible(Effect.promise(()=>applyPhysicalCommit(root,expected,action,candidateToken,recheck).catch(()=>({state:'unknown' as const,tree:'unknown' as const,commit:'unknown' as const,ref:'unknown' as const,candidateRetained:true,cleanup:'unknown' as const})))),
+      previewPhysicalCommit: (root) => Effect.promise(()=>previewPhysicalCommit(root).catch(()=>undefined)),
+      inspectPhysicalIndex: (root) => Effect.promise(()=>inspectPhysicalIndex(root).catch(()=>undefined)),
+      previewPhysicalIndex: (root) => Effect.promise(()=>previewPhysicalIndex(root).catch(()=>undefined)),
+      applyPhysicalIndex: (root,expected,action,candidateToken,recheck) => Effect.uninterruptible(Effect.promise(()=>applyPhysicalIndex(root,expected,action,candidateToken,recheck).catch(()=>({state:'unknown' as const,object:'unknown' as const,candidateRetained:true})))),
       branch,
       prefix,
       defaultBranch,

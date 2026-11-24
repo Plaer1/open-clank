@@ -21,8 +21,9 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from services.memory.skills import SkillsManager
+from services.memory.skills import SkillsManager, SkillProtectedDeleteError
 from src.auth_helpers import get_current_user
+from src.openclank.analysis_snapshot_host import _owned
 from src.constants import DATA_DIR
 from core.atomic_io import atomic_write_json
 from core.middleware import require_admin
@@ -227,6 +228,9 @@ _VERDICT_PROSE_RE = re.compile(
 
 
 class SkillAddRequest(BaseModel):
+    # Recording provenance is qualified only by the dedicated human route arm.
+    recordingTarget: Optional[dict] = None
+    recordingRequestKey: Optional[str] = None
     # New schema (preferred)
     name: Optional[str] = Field(None, max_length=80)
     description: Optional[str] = Field(None, max_length=200)
@@ -647,9 +651,45 @@ _skill_test_jobs: dict = _restore_job_map("test")
 _skill_test_handles: dict = {}
 
 
+def _skill_foreground_origin(request, owner):
+    """Freeze only authenticated host account and original request admission."""
+    from src.openclank.account_request_barrier import _current_admission
+    auth = getattr(request.app.state, 'auth_manager', None)
+    barrier = getattr(request.app.state, 'account_request_barrier', None)
+    admission = _current_admission.get()
+    if not getattr(request.state, 'authenticated', False) or auth is None or barrier is None:
+        return None
+    account = auth.account_id(owner)
+    if not account or auth.username_for_account_id(account) != owner:
+        return None
+    return (account, auth, barrier, admission)
+
+
+async def _skill_prepare_detached(origin, owner):
+    if origin is None:
+        return None
+    account, auth, barrier, original = origin
+    if (auth.account_id(owner) != account or auth.username_for_account_id(account) != owner
+            or not await barrier.is_live(owner, original)):
+        raise ValueError('skill account admission unavailable')
+    admission = await barrier.acquire(owner)
+    if auth.account_id(owner) != account or auth.username_for_account_id(account) != owner:
+        await barrier.release(admission)
+        raise ValueError('skill account changed')
+    return (account, auth, barrier, admission)
+
+
+async def _skill_detached_admission(context, run):
+    try:
+        return await run(context)
+    finally:
+        if context is not None:
+            await context[2].release(context[3])
+
+
 async def _run_skill_test_job(
     key, name, md, task, route, owner,
-    skills_manager=None,
+    skills_manager=None, *, foreground_account_context=None,
 ):
     """Background coroutine: run the skill in an agent loop, capture a condensed
     log + transcript, then have the judge grade it. Writes into _skill_test_jobs."""
@@ -707,6 +747,7 @@ async def _run_skill_test_job(
                 session_id=f"skill-test-{_uuid.uuid4().hex}",
                 owner=owner,
                 cwd=workspace,
+                _foreground_account_context=foreground_account_context,
                 relevant_tools=COMPARE_READONLY_TOOLS,
                 max_tool_calls=12,
                 max_rounds=8,
@@ -1166,6 +1207,7 @@ async def _run_skill_test_once(
     owner,
     *,
     root_operation_id: Optional[str] = None,
+    foreground_account_context=None,
 ) -> tuple:
     """Run the skill once in the agent loop; return (transcript, verdict)."""
     import json as _json
@@ -1209,6 +1251,7 @@ async def _run_skill_test_once(
                 max_tool_calls=12,
                 owner=owner,
                 cwd=workspace,
+                _foreground_account_context=foreground_account_context,
                 relevant_tools=COMPARE_READONLY_TOOLS,
                 workload="background",
                 turn_envelope={
@@ -1316,7 +1359,7 @@ async def _improve_skill_md(
 
 async def _audit_one_skill(skills_manager, skill, worker_route,
                            teacher_route, owner, log, *,
-                           root_operation_id: Optional[str] = None) -> dict:
+                           root_operation_id: Optional[str] = None, foreground_account_context=None) -> dict:
     """Test → judge → self-edit+retry → (teacher edit+retry) → flag. Never deletes;
     a skill the teacher still can't fix is demoted to draft for manual review.
     ``teacher_route`` is a normalized route or None. ``log(msg)`` records progress."""
@@ -1439,7 +1482,7 @@ async def _audit_one_skill(skills_manager, skill, worker_route,
     log(f"{name}: testing…")
     transcript, verdict = await _run_skill_test_once(
         md, task, worker_route, owner,
-        root_operation_id=operation_root,
+        root_operation_id=operation_root, foreground_account_context=foreground_account_context,
     )
     v = verdict.get("verdict")
     log(f"{name}: verdict = {v} ({verdict.get('summary', '')[:80]})")
@@ -1493,7 +1536,7 @@ async def _audit_one_skill(skills_manager, skill, worker_route,
         md = new_md
         transcript, verdict = await _run_skill_test_once(
             md, task, worker_route, owner,
-            root_operation_id=operation_root,
+            root_operation_id=operation_root, foreground_account_context=foreground_account_context,
         )
         v = verdict.get("verdict")
         log(f"{name}: retry (self) = {v}")
@@ -1526,7 +1569,7 @@ async def _audit_one_skill(skills_manager, skill, worker_route,
         # Re-test with the STUDENT model (the model the skill runs under in use).
         transcript, verdict = await _run_skill_test_once(
             md, task, worker_route, owner,
-            root_operation_id=operation_root,
+            root_operation_id=operation_root, foreground_account_context=foreground_account_context,
         )
         v = verdict.get("verdict")
         log(f"{name}: retry on student after teacher rewrite = {v}")
@@ -1559,7 +1602,7 @@ async def _audit_one_skill(skills_manager, skill, worker_route,
 
 async def _run_audit_all_job(
     key, skills_manager, names, worker_route, teacher_route, owner,
-    *, root_operation_id: Optional[str] = None,
+    *, root_operation_id: Optional[str] = None, foreground_account_context=None,
 ):
     """Background: audit each named skill in sequence, recording progress."""
     import asyncio as _asyncio
@@ -1591,7 +1634,7 @@ async def _run_audit_all_job(
             try:
                 res = await _audit_one_skill(
                     skills_manager, sk, worker_route, teacher_route, owner, log,
-                    root_operation_id=root_operation_id,
+                    root_operation_id=root_operation_id, foreground_account_context=foreground_account_context,
                 )
             except _asyncio.CancelledError:
                 cancelled = True
@@ -1624,7 +1667,7 @@ async def _run_audit_all_job(
         cancelled = True
     finally:
         job["current"] = None
-        job["status"] = "cancelled" if cancelled or job.get("cancel") else "done"
+        job["status"] = "unknown" if cancelled or job.get("cancel") else "done"
         job["finished"] = _time.time()
         _persist_skill_job_state()
 
@@ -1821,6 +1864,296 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if skill.get("owner") != user:
             raise HTTPException(404, "Skill not found")
 
+    async def _skill_metadata_action(request: Request, skill_id: str, *, stage: bool, audit_input=False, audit_result=None, publish=None, inspect_current=False, recovery=None, protected_delete=None):
+        """Explicit human staging; publication and child loading stay separately gated."""
+        from src.auth_helpers import require_user, require_privilege, is_internal_tool_identity
+        from src.memory_scope import memory_owner, chat_workspace
+        from src.openclank.memory_job_admission import SingleHostProfile, TargetAuthority
+        from src.openclank.memory_policy import STORE
+        from src.openclank.memory_policy_projection import policy_coordinator
+        from src.openclank.chat_source_bridge import canonical_source_provider
+        from services.memory.skill_lifecycle import _SkillMetadataAuthority, _SKILL_METADATA_SEAL
+        require_privilege(request,'can_manage_memory');user=require_user(request)
+        if is_internal_tool_identity(user) or getattr(request.state,'api_token',False) or getattr(request.state,'internal_tool_authenticated',False):raise HTTPException(403,'A named user session is required')
+        state=request.app.state;auth=state.auth_manager;token=request.cookies.get('open_clank_session')
+        if not token or auth.get_username_for_token(token)!=user:raise HTTPException(403,'A named user session is required')
+        account=auth.account_id(user);workspace=chat_workspace();owner=memory_owner(user)
+        provider=canonical_source_provider(state);profile=getattr(state,'s05_profile',None);coordinator=policy_coordinator();barrier=getattr(state,'account_request_barrier',None)
+        reset_factory=getattr(state,'memory_reset_coordinator',None);supervisor=getattr(state,'mimo_supervisor',None)
+        if (not account or type(profile) is not SingleHostProfile or profile.provider is not provider or provider is None or coordinator is None
+            or coordinator.projection is not getattr(state,'memory_policy_projection',None) or barrier is None or not callable(reset_factory) or supervisor is None):raise HTTPException(503,'Skill metadata is unavailable')
+        body=None
+        if stage:
+            try:body=await request.json()
+            except Exception:raise HTTPException(400,'Invalid skill metadata request')
+            if type(body) is not dict or set(body)!={'revision','content_hash','published','request_key','metadata'}:raise HTTPException(400,'Invalid skill metadata request')
+        recovery_body = None
+        if recovery == 'action':
+            try: recovery_body = await request.json()
+            except Exception: raise HTTPException(400, 'Invalid skill recovery request')
+            if type(recovery_body) is not dict or set(recovery_body) != {'action','request_key','receipt_sha256','recovery_key'}: raise HTTPException(400, 'Invalid skill recovery request')
+        delete_body = None
+        if protected_delete in ('action','status'):
+            try: delete_body = await request.json()
+            except Exception: raise HTTPException(400, 'Invalid protected skill delete request')
+            if type(delete_body) is not dict or set(delete_body) != {'review','request_key'}: raise HTTPException(400, 'Invalid protected skill delete request')
+        target_authority=TargetAuthority(auth_manager=state.auth_manager,supervisor=supervisor.owner_lifecycle_pool());loop=asyncio.get_running_loop()
+        try:
+            async with barrier.admitted(user):
+                target=await asyncio.to_thread(target_authority.resolve,account)
+                refs=await _owned(coordinator.checked_refs,user,account,workspace)
+                def current(_=None):
+                    profile.assert_current()
+                    if require_privilege(request,'can_manage_memory')!=user:return False
+                    privileges=state.auth_manager.get_privileges(user)
+                    if type(privileges) is not dict or privileges.get('can_manage_memory') is not True:return False
+                    if (_owner(request)!=user or getattr(request.state,'api_token',False) or getattr(request.state,'internal_tool_authenticated',False)
+                        or state.auth_manager is not auth or request.cookies.get('open_clank_session')!=token or auth.get_username_for_token(token)!=user
+                        or auth.account_id(user)!=account or auth.username_for_account_id(account)!=user
+                        or state.account_owner_lifecycle.owner_has_active_operation(user) or reset_factory().owner_is_fenced(user)
+                        or canonical_source_provider(state) is not provider or target_authority.resolve(account)!=target
+                        or target.memory_owner!=owner or target.memory_workspace!=workspace or coordinator.checked_refs(user,account,workspace)!=refs):return False
+                    policy=STORE.effective_snapshot(user,read_privilege=True,write_privilege=True,incognito=False,no_memory=False,compare_mode=False)
+                    return bool(policy.get('read_allowed') and (not (stage or audit_result is not None or publish is not None or recovery == 'action' or protected_delete == 'action') or policy.get('direct_write_allowed')))
+                if not await _owned(current):raise ValueError('skill authority unavailable')
+                if not await provider._host_metadata_capability(owner=owner,workspace_id=workspace,deadline=loop.time()+0.5):raise ValueError('skill metadata capability unavailable')
+                async def domains_now():
+                    return await provider._host_metadata_read(owner=owner,workspace_id=workspace,account_id=account,refs=refs,deadline=loop.time()+0.5)
+                domain_list=await domains_now()
+                if not await _owned(current):raise ValueError('skill authority changed')
+                def domain_check(_,requested):
+                    if not current():return False
+                    future=asyncio.run_coroutine_threadsafe(domains_now(),loop)
+                    try:result=future.result(timeout=0.8)
+                    except Exception:future.cancel();return False
+                    available={(v.get('block_id'),v.get('revision')) for v in result.get('items',[]) if type(v) is dict}
+                    return type(requested) is list and all((v.get('block_id'),v.get('revision')) in available for v in requested if type(v) is dict) and all(type(v) is dict for v in requested) and current()
+                def history_scope(action, skill_id, directory, identity, scope):
+                    publisher = getattr(state, 'skill_history_scopes', None)
+                    if publisher is None: raise ValueError('skill History unavailable')
+                    if action == 'read':
+                        if not current(): raise ValueError('skill authority changed')
+                        return publisher.supervisor.client_for(user, account)
+                    if action == 'open':
+                        if not current(): raise ValueError('skill authority changed')
+                        original_process = publisher.supervisor.process
+                        try:
+                            future = asyncio.run_coroutine_threadsafe(publisher.open(owner=user, account=account, directory=directory, identity=identity), loop)
+                            selected = future.result()
+                        except BaseException:
+                            publisher.supervisor.fence_now(original_process)
+                            raise
+                        try:
+                            selected['client'] = publisher.supervisor.client_for(user, account)
+                            selected['is_current'] = lambda: (publisher.supervisor.process is selected['process'] and selected['process'].poll() is None and current())
+                            if not selected['is_current'](): raise ValueError('skill authority changed')
+                            return selected
+                        except BaseException:
+                            asyncio.run_coroutine_threadsafe(publisher.close(selected), loop).result()
+                            raise
+                    if action == 'close':
+                        try:
+                            return asyncio.run_coroutine_threadsafe(publisher.close(scope), loop).result()
+                        except BaseException:
+                            publisher.supervisor.fence_now(scope['process'])
+                            raise
+                    raise ValueError('skill History unavailable')
+                authority=_SkillMetadataAuthority(_SKILL_METADATA_SEAL,owner=user,account_id=account,actor=f'user:{user}',current=current,domains=domain_check,history=history_scope)
+                if protected_delete is not None:
+                    if protected_delete == 'preview':
+                        task = asyncio.create_task(asyncio.to_thread(skills_manager._protected_delete_preview, skill_id, user, authority=authority))
+                    elif protected_delete == 'action':
+                        task = asyncio.create_task(asyncio.to_thread(skills_manager._protected_delete_action, skill_id, user, authority=authority, **delete_body))
+                    elif protected_delete == 'status':
+                        task = asyncio.create_task(asyncio.to_thread(skills_manager._protected_delete_status, skill_id, user, authority=authority, **delete_body))
+                    else: raise ValueError('skill delete unavailable')
+                    try: result = await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        while not task.done():
+                            try: await asyncio.shield(task)
+                            except asyncio.CancelledError: continue
+                        task.result(); raise
+                    if not await _owned(current): raise ValueError('skill authority changed')
+                    return result
+                if recovery is not None:
+                    kwargs = recovery_body if recovery == 'action' else {'recovery_key':request.query_params.get('recovery_key')}
+                    task=asyncio.create_task(asyncio.to_thread(skills_manager._metadata_recovery,skill_id,owner=user,authority=authority,**kwargs))
+                    try: result=await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        while not task.done():
+                            try: await asyncio.shield(task)
+                            except asyncio.CancelledError: continue
+                        task.result(); raise
+                    if not await _owned(current): raise ValueError('skill authority changed')
+                    return result
+                if inspect_current:
+                    source=await asyncio.to_thread(skills_manager._current_published_source,skill_id,user,authority=authority)
+                    if source is None or not await _owned(current):raise ValueError('skill source unavailable')
+                    again=await asyncio.to_thread(skills_manager._current_published_source,skill_id,user,authority=authority)
+                    if source!=again or not await _owned(current):raise ValueError('skill source changed')
+                    return {'state':'ready',**{key:value for key,value in source.items() if key!='pointer_sha256'}}
+                if audit_input:
+                    return await asyncio.to_thread(skills_manager._metadata_audit_input,skill_id,user,authority=authority)
+                if audit_result is not None:
+                    snap,verdict,worker_model,necessity,precision=audit_result
+                    task=asyncio.create_task(asyncio.to_thread(skills_manager._metadata_audit_commit,skill_id,owner=user,authority=authority,expected_revision=snap['revision'],expected_hash=snap['content_hash'],expected_published=snap['published'],verdict=verdict['verdict'],worker_model=worker_model,results=verdict,necessity=necessity,precision=precision))
+                    try:await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        while not task.done():
+                            try:await asyncio.shield(task)
+                            except asyncio.CancelledError:continue
+                        task.result();raise
+                    if not await _owned(current):raise ValueError('skill authority changed')
+                    return {'state':'audited','revision':snap['revision'],'content_hash':snap['content_hash'],'verdict':verdict['verdict']}
+                if publish is not None:
+                    if type(publish) is not dict or set(publish)!={'revision','content_hash'}:raise ValueError('invalid publication')
+                    task=asyncio.create_task(asyncio.to_thread(skills_manager.publish_skill,skill_id,owner=user,expected_revision=publish['revision'],expected_hash=publish['content_hash'],publisher=f'user:{user}',_metadata_authority=authority))
+                    try:result=await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        while not task.done():
+                            try:await asyncio.shield(task)
+                            except asyncio.CancelledError:continue
+                        task.result();raise
+                    if not result or not await _owned(current):raise ValueError('skill publication unavailable')
+                    return {'state':'published','revision':publish['revision'],'content_hash':publish['content_hash']}
+                if not stage:
+                    snapshot=await asyncio.to_thread(skills_manager._metadata_review_snapshot,skill_id,user,authority=authority)
+                    if snapshot is None or not await _owned(current):raise ValueError('skill unavailable')
+                    return {'state':'ready','snapshot':snapshot,'domains':domain_list['items']}
+                task=asyncio.create_task(asyncio.to_thread(skills_manager._stage_reviewed_metadata,skill_id,owner=user,authority=authority,expected_revision=body['revision'],expected_hash=body['content_hash'],expected_published=body['published'],request_key=body['request_key'],metadata=body['metadata']))
+                try:result=await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    while not task.done():
+                        try:await asyncio.shield(task)
+                        except asyncio.CancelledError:continue
+                    task.result();raise
+                if not await _owned(current):raise ValueError('skill authority changed')
+                return result
+        except HTTPException:raise
+        except Exception:raise HTTPException(503,'Skill metadata is unavailable or changed')
+
+    @router.get('/{skill_id}/current-source')
+    async def current_skill_source(request: Request,skill_id: str):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(await _skill_metadata_action(request,skill_id,stage=False,inspect_current=True),headers={'Cache-Control':'private, no-store'})
+
+    @router.get('/{skill_id}/metadata-review')
+    async def skill_metadata_review(request:Request,skill_id:str):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(await _skill_metadata_action(request,skill_id,stage=False),headers={'Cache-Control':'private, no-store'})
+
+    @router.post('/{skill_id}/metadata-review')
+    async def stage_skill_metadata(request:Request,skill_id:str):return await _skill_metadata_action(request,skill_id,stage=True)
+
+    @router.get('/{skill_id}/metadata-recovery')
+    async def skill_metadata_recovery_status(request:Request,skill_id:str):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(await _skill_metadata_action(request,skill_id,stage=False,recovery='status'),headers={'Cache-Control':'private, no-store'})
+
+    @router.post('/{skill_id}/metadata-recovery')
+    async def skill_metadata_recovery_action(request:Request,skill_id:str):
+        return await _skill_metadata_action(request,skill_id,stage=False,recovery='action')
+
+    @router.get('/{skill_id}/protected-delete')
+    async def protected_skill_delete_preview(request:Request,skill_id:str):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(await _skill_metadata_action(request,skill_id,stage=False,protected_delete='preview'),headers={'Cache-Control':'private, no-store'})
+
+    @router.post('/{skill_id}/protected-delete')
+    async def protected_skill_delete_action(request:Request,skill_id:str):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(await _skill_metadata_action(request,skill_id,stage=False,protected_delete='action'),headers={'Cache-Control':'private, no-store'})
+
+    @router.post('/{skill_id}/protected-delete/status')
+    async def protected_skill_delete_status(request:Request,skill_id:str):
+        from fastapi.responses import JSONResponse
+        from routes.skill_recording_draft import _principal
+        from services.memory.skill_history_delete import _digest, delete_fact_status
+        state, user, account, barrier, principal_current = _principal(request)
+        try: body = await request.json()
+        except Exception: raise HTTPException(400, 'Invalid protected skill delete request')
+        if type(body) is not dict or set(body) != {'review','request_key'} or type(body['review']) is not dict or body['review'].get('skill_id') != skill_id:
+            raise HTTPException(400, 'Invalid protected skill delete request')
+        publisher = getattr(state, 'skill_history_scopes', None)
+        supervisor = getattr(publisher, 'supervisor', None)
+        process = getattr(supervisor, 'process', None)
+        def current():
+            try:
+                return bool(principal_current() and getattr(state, 'skill_history_scopes', None) is publisher
+                    and publisher is not None and publisher.supervisor is supervisor
+                    and supervisor.process is process and process is not None and process.poll() is None)
+            except Exception: return False
+        async with barrier.admitted(user):
+            if not current(): raise HTTPException(409, 'Skill authority changed')
+            try:
+                client = supervisor.client_for(user, account)
+                result = await asyncio.to_thread(delete_fact_status, owner=user, account=account,
+                    request_key=body['request_key'], review_sha256=_digest(body['review']), client=client, current=current)
+                if not current(): raise ValueError('Skill authority changed')
+                return JSONResponse(result,headers={'Cache-Control':'private, no-store'})
+            except Exception as exc:
+                raise HTTPException(409, 'Skill delete status unavailable') from exc
+
+    @router.post('/{skill_id}/metadata-audit')
+    async def audit_skill_metadata(request:Request,skill_id:str):
+        owner = _owner(request)
+        origin = _skill_foreground_origin(request, owner)
+        if origin is None:
+            raise HTTPException(503, 'Skill account admission unavailable')
+        account, auth, barrier, original = origin
+
+        async def current(context):
+            if (context is None or _owner(request) != owner or auth.account_id(owner) != account
+                    or auth.username_for_account_id(account) != owner
+                    or not await barrier.is_live(owner, context[3])):
+                return False
+            return (_owner(request) == owner and auth.account_id(owner) == account
+                    and auth.username_for_account_id(account) == owner)
+
+        try:
+            expected = await request.json()
+        except Exception:
+            raise HTTPException(400, 'Invalid audit request')
+        if type(expected) is not dict or set(expected) != {'revision','content_hash'}:
+            raise HTTPException(400, 'Invalid audit request')
+        if not await current(origin):
+            raise HTTPException(409, 'Account changed during audit')
+        try:
+            context = await _skill_prepare_detached(origin, owner)
+        except Exception:
+            raise HTTPException(503, 'Skill account admission unavailable')
+        try:
+            snapshot,text,skill = await _skill_metadata_action(request,skill_id,stage=False,audit_input=True)
+            if not await current(context):
+                raise HTTPException(409, 'Account changed during audit')
+            if expected != {'revision':snapshot['revision'],'content_hash':snapshot['content_hash']}:
+                raise HTTPException(409, 'Skill changed before audit')
+            worker,_ = _resolve_audit_models(owner=owner)
+            others = [{'name':s.get('name'),'description':s.get('description','')} for s in skills_manager.load(owner=owner) if s.get('name') and s.get('name') != skill.get('name')]
+            necessity = await _eval_skill_necessity(text,others,worker,owner=owner)
+            if not await current(context):
+                raise HTTPException(409, 'Account changed during audit')
+            precision = await _eval_skill_retrieval_precision(text,others,worker,owner=owner) if _should_check_retrieval_precision(skill) else {'ok':True,'summary':'separate retrieval check not required'}
+            if not await current(context):
+                raise HTTPException(409, 'Account changed during audit')
+            _,verdict = await _run_skill_test_once(text,_skill_test_task(skill),worker,owner,foreground_account_context=context)
+            if not await current(context):
+                raise HTTPException(409, 'Account changed during audit')
+            if not isinstance(necessity,dict) or not isinstance(precision,dict) or verdict.get('verdict') not in ('pass','fail','inconclusive'):
+                raise HTTPException(503, 'Audit did not complete')
+            result = await _skill_metadata_action(request,skill_id,stage=False,audit_result=(snapshot,verdict,worker.provider_model_id,necessity,{'ok':precision.get('ok') is True,'reason':precision.get('summary','')}))
+            if not await current(context):
+                raise HTTPException(409, 'Account changed during audit')
+            return result
+        finally:
+            await barrier.release(context[3])
+
+    @router.post('/{skill_id}/metadata-publish')
+    async def publish_skill_metadata(request:Request,skill_id:str):
+        try:body=await request.json()
+        except Exception:raise HTTPException(400,'Invalid publication request')
+        return await _skill_metadata_action(request,skill_id,stage=False,publish=body)
+
     def _fire_skill_added(user: Optional[str]):
         try:
             from src.event_bus import fire_event
@@ -1972,6 +2305,30 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             save_settings(settings)
         return {"ok": True, "name": name, "is_overridden": False}
 
+    @router.post("/snapshot/{action}")
+    async def skill_snapshot(request: Request, action: str):
+        from routes.skill_snapshot import snapshot_call
+        return await snapshot_call(request, action, skills_manager)
+
+    @router.get("/snapshot/status")
+    async def skill_snapshot_status(request: Request, request_key: str):
+        from routes.skill_snapshot import snapshot_status
+        return await snapshot_status(request, request_key, skills_manager)
+
+    @router.post("/marketplace/{action}")
+    async def skill_marketplace(request: Request, action: str):
+        from fastapi.responses import JSONResponse
+        from routes.skill_marketplace import marketplace_call
+        result = await marketplace_call(request, action, skills_manager)
+        return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
+    @router.get("/marketplace/status")
+    async def skill_marketplace_status(request: Request, request_key: str):
+        from fastapi.responses import JSONResponse
+        from routes.skill_marketplace import marketplace_status
+        result = await marketplace_status(request, request_key)
+        return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
     @router.post("/import-from-url")
     async def import_skill_from_url(request: Request, body: SkillImportUrlRequest):
         """Install a SKILL.md bundle from a public GitHub URL (skills.sh links supported)."""
@@ -2003,8 +2360,16 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         _fire_skill_added(user)
         return {"ok": True, "skill": entry, "files": len(files)}
 
+    @router.get("/recording-draft-status")
+    async def recording_draft_status(request: Request, request_key: str):
+        from routes.skill_recording_draft import original_recording_draft_status
+        return await original_recording_draft_status(request, request_key)
+
     @router.post("/add")
     async def add_skill(request: Request, body: SkillAddRequest):
+        if body.recordingTarget is not None or body.recordingRequestKey is not None:
+            from routes.skill_recording_draft import create_recording_draft
+            return await create_recording_draft(request, body, skills_manager)
         user = _owner(request)
         requested_publish = body.status == "published"
         entry = skills_manager.add_skill(
@@ -2274,6 +2639,13 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         skills = skills_manager.load(owner=user)
         for sk in skills:
             if sk.get("name") == skill_id or sk.get("id") == skill_id:
+                if request.query_params.get('include_recording_citation') == '1':
+                    try:
+                        from routes.skill_recording_draft import historical_recording_citation
+                        citation = await historical_recording_citation(request, sk, skills_manager)
+                        if citation is not None: return {**sk, 'recording_citation': citation}
+                    except Exception:
+                        pass
                 return sk
         raise HTTPException(404, "Skill not found")
 
@@ -2304,6 +2676,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         import asyncio as _asyncio
 
         user = _owner(request)
+        origin = _skill_foreground_origin(request, user)
         body = await request.json()
         task = (body.get("task") or "").strip()
 
@@ -2343,9 +2716,10 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "verdict": None,
         }
         _persist_skill_job_state()
-        handle = _asyncio.create_task(_run_skill_test_job(
-            key, name, md, task, route, user, skills_manager,
-        ))
+        detached_context = await _skill_prepare_detached(origin, user)
+        handle = _asyncio.create_task(_skill_detached_admission(detached_context, lambda context: _run_skill_test_job(
+            key, name, md, task, route, user, skills_manager, foreground_account_context=context,
+        )))
         track_skill_test_handle(key, handle)
         return {"ok": True, "status": "running", "skill": name, "model": model}
 
@@ -2382,7 +2756,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         handle.cancel()
         await _asyncio.gather(handle, return_exceptions=True)
         job = _skill_test_jobs.get(key) or {}
-        job["status"] = "cancelled"
+        job["status"] = "unknown"
         job["verdict"] = {
             "verdict": "manual_verification_required",
             "confidence": 0,
@@ -2390,7 +2764,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "issues": [],
         }
         _persist_skill_job_state()
-        return {"ok": True, "status": "cancelled"}
+        return {"ok": True, "status": "unknown"}
 
     @router.post("/audit-all")
     async def audit_all_skills(request: Request):
@@ -2405,6 +2779,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         import time as _time
 
         user = _owner(request)
+        origin = _skill_foreground_origin(request, user)
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         scope = (body.get("scope") or "all").lower()
         requested_names = body.get("names")
@@ -2469,11 +2844,10 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "started": _time.time(), "cancel": False,
         }
         _persist_skill_job_state()
-        handle = _asyncio.create_task(
-            _run_audit_all_job(
-                key, skills_manager, names, worker_route, teacher_route, user
-            )
-        )
+        detached_context = await _skill_prepare_detached(origin, user)
+        handle = _asyncio.create_task(_skill_detached_admission(detached_context, lambda context:
+            _run_audit_all_job(key, skills_manager, names, worker_route, teacher_route, user,
+                               foreground_account_context=context)))
         track_skill_audit_handle(key, handle)
         return {"ok": True, "status": "running", "total": len(names), "model": model}
 
@@ -2504,10 +2878,10 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             if handle and not handle.done():
                 handle.cancel()
                 await _asyncio.gather(handle, return_exceptions=True)
-            job["status"] = "cancelled"
+            job["status"] = "unknown"
             job["current"] = None
             _persist_skill_job_state()
-        return {"ok": True, "status": "cancelled" if job else "none"}
+        return {"ok": True, "status": "unknown" if job else "none"}
 
     @router.post("/{skill_id}/markdown")
     async def save_skill_markdown(request: Request, skill_id: str):
@@ -2621,7 +2995,10 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if not match:
             raise HTTPException(404, "Skill not found")
         _verify_owner(match, user)
-        ok = skills_manager.delete_skill(match.get("name"), owner=user)
+        try:
+            ok = skills_manager.delete_skill(match.get("name"), owner=user)
+        except SkillProtectedDeleteError:
+            raise HTTPException(409, "Skill deletion is unavailable for protected or unverifiable lifecycle metadata") from None
         if not ok:
             raise HTTPException(404, "Skill not found")
         return {"ok": True}

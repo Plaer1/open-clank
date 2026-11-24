@@ -1,7 +1,9 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { beforeEach, expect } from "bun:test"
-import { Cause, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
 import path from "path"
+import { tool } from "ai"
+import { z } from "zod"
 import type { Agent } from "../../src/agent/agent"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
@@ -18,9 +20,11 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { Snapshot } from "../../src/snapshot"
+import { ManagedProvider } from "../../src/acp/managed-provider"
+import * as EffectBridge from "../../src/effect/bridge"
 import { Log } from "../../src/util"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
-import { provideTmpdirServer } from "../fixture/fixture"
+import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { raw, reply, TestLLMServer } from "../lib/llm-server"
 import { resetAllMonitors } from "../../src/session/try-best-detector"
@@ -36,6 +40,7 @@ const summary = Layer.succeed(
   SessionSummary.Service.of({
     summarize: () => Effect.void,
     diff: () => Effect.succeed([]),
+    diffResult: () => Effect.succeed({ diffs: [] }),
     computeDiff: () => Effect.succeed([]),
   }),
 )
@@ -85,6 +90,21 @@ function providerCfg(url: string) {
           ...cfg.provider.test.options,
           baseURL: url,
         },
+      },
+    },
+  }
+}
+
+function providerCfgWithOpenAI(url: string) {
+  const base = providerCfg(url)
+  return {
+    ...base,
+    provider: {
+      ...base.provider,
+      openai: {
+        ...base.provider.test,
+        id: "openai",
+        name: "OpenAI fixture",
       },
     },
   }
@@ -176,7 +196,84 @@ const env = Layer.mergeAll(
   SessionProcessor.layer.pipe(Layer.provide(summary), Layer.provideMerge(deps)),
 )
 
+let fakeSnapshotTrack: (options?: Snapshot.CaptureOptions) => Effect.Effect<string | undefined> = () => Effect.succeed("a".repeat(40))
+let fakeSnapshotPatch: (hash: string) => Effect.Effect<Snapshot.Patch> = (hash) => Effect.succeed({ hash, files: [] })
+const fakeSnapshotService = Snapshot.Service.of({
+  init: () => Effect.void,
+  cleanup: () => Effect.void,
+  track: (options) => Effect.suspend(() => fakeSnapshotTrack(options)),
+  patch: (hash) => Effect.suspend(() => fakeSnapshotPatch(hash)),
+  restore: () => Effect.void,
+  revert: () => Effect.void,
+  diff: () => Effect.succeed(""),
+  diffFull: () => Effect.succeed([]),
+})
+const fakeSnapshotDeps = Layer.mergeAll(
+  Session.defaultLayer,
+  AgentSvc.defaultLayer,
+  Permission.defaultLayer,
+  Plugin.defaultLayer,
+  Config.defaultLayer,
+  LLM.defaultLayer,
+  Provider.defaultLayer,
+  status,
+).pipe(Layer.provideMerge(infra))
+const fakeSnapshotEnv = Layer.mergeAll(
+  TestLLMServer.layer,
+  SessionProcessor.layer
+    .pipe(Layer.provide(summary), Layer.provideMerge(fakeSnapshotDeps), Layer.provideMerge(Layer.succeed(Snapshot.Service, fakeSnapshotService))),
+)
+
+let fakeReplayHookActive = false
+const replayPluginService = {
+  trigger: (name: string, _input: unknown, output: unknown) =>
+    Effect.gen(function* () {
+      if (name === "experimental.text.complete") {
+        fakeReplayHookActive = true
+        const barrier = yield* Effect.serviceOption(Snapshot.CaptureBarrier)
+        if (Option.isSome(barrier)) yield* barrier.value()
+      }
+      return output
+    }),
+} as unknown as Plugin.Interface
+const replayPluginDeps = Layer.mergeAll(
+  Session.defaultLayer,
+  AgentSvc.defaultLayer,
+  Permission.defaultLayer,
+  Config.defaultLayer,
+  LLM.defaultLayer,
+  Provider.defaultLayer,
+  status,
+  Layer.succeed(Plugin.Service, replayPluginService),
+).pipe(Layer.provideMerge(infra))
+const replayPluginEnv = Layer.mergeAll(
+  TestLLMServer.layer,
+  SessionProcessor.layer
+    .pipe(Layer.provide(summary), Layer.provideMerge(replayPluginDeps), Layer.provideMerge(Layer.succeed(Snapshot.Service, fakeSnapshotService))),
+)
+
 const it = testEffect(env)
+const itFakeSnapshot = testEffect(fakeSnapshotEnv)
+const itReplaySnapshot = testEffect(replayPluginEnv)
+
+let fakeStepMode: "empty" | "valid" | "partial" = "empty"
+let fakeStepCalls = 0
+const fakeStepLLM = Layer.succeed(LLM.Service, LLM.Service.of({
+  stream: () => {
+    fakeStepCalls++
+    if (fakeStepMode === "empty") return Stream.empty
+    if (fakeStepMode === "partial") return Stream.fromIterable([
+      { type: "text-start", id: "t" }, { type: "text-delta", id: "t", text: "kept" },
+      { type: "error", error: Object.assign(new Error("network error"), { status: 503 }) },
+    ] as any[])
+    return Stream.fromIterable([{ type: "finish-step", finishReason: "stop", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }] as any[])
+  },
+} as unknown as LLM.Interface))
+const fakeStepDeps = Layer.mergeAll(Session.defaultLayer, AgentSvc.defaultLayer, Permission.defaultLayer,
+  Plugin.defaultLayer, Config.defaultLayer, fakeStepLLM, Provider.defaultLayer, status).pipe(Layer.provideMerge(infra))
+const fakeStepEnv = SessionProcessor.layer.pipe(
+  Layer.provide(summary), Layer.provideMerge(fakeStepDeps), Layer.provideMerge(Layer.succeed(Snapshot.Service, fakeSnapshotService)))
+const itFakeStep = testEffect(fakeStepEnv)
 
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
@@ -231,6 +328,525 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         expect(value).toBe("continue")
         expect(calls).toBe(1)
         expect(parts.some((part) => part.type === "text" && part.text === "hello")).toBe(true)
+        expect(parts.find((part) => part.type === "step-start")?.snapshot).toBeTruthy()
+        expect(parts.find((part) => part.type === "step-finish")?.snapshot).toBeTruthy()
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor preserves eager standalone snapshots around tool calls", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "inspect the workspace")
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+
+        const quiet = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const quietHandle = yield* processors.create({ assistantMessage: quiet, sessionID: chat.id, model: mdl })
+        yield* quietHandle.replay({ finishReason: "stop", toolCalls: [], tools: {}, messages: [] })
+        const quietParts = MessageV2.parts(quiet.id)
+        expect(quietParts.find((part) => part.type === "step-start")?.snapshot).toMatch(/^[0-9a-f]{40,64}$/i)
+        expect(quietParts.find((part) => part.type === "step-finish")?.snapshot).toMatch(/^[0-9a-f]{40,64}$/i)
+
+        const changed = yield* assistant(chat.id, quiet.id, path.resolve(dir))
+        const changedHandle = yield* processors.create({ assistantMessage: changed, sessionID: chat.id, model: mdl })
+        yield* changedHandle.replay({
+          finishReason: "tool-calls",
+          toolCalls: [{ toolCallId: "snapshot-call", toolName: "mutate", input: {} }],
+          tools: {
+            mutate: {
+              execute: async () => {
+                await Bun.write(path.join(dir, "snapshot-barrier-fixture.txt"), "captured before mutation")
+                return { title: "Mutated", metadata: {}, output: "done" }
+              },
+            },
+          },
+          messages: [],
+        })
+        const changedParts = MessageV2.parts(changed.id)
+        expect(changedParts.find((part) => part.type === "step-start")?.snapshot).toMatch(/^[0-9a-f]{40,64}$/i)
+        expect(changedParts.find((part) => part.type === "step-finish")?.snapshot).toMatch(/^[0-9a-f]{40,64}$/i)
+        expect(changedParts.some((part) => part.type === "patch" && part.files.some((file) => file.includes("snapshot-barrier-fixture.txt")))).toBe(true)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor skips snapshots for a tool-free managed step", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "hello")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const openaiID = ProviderID.make("openai")
+        const mdl = yield* provider.getModel(openaiID, ref.modelID)
+        msg.providerID = openaiID
+        msg.modelID = mdl.id
+        const bridge = yield* EffectBridge.make()
+        const previous = process.env.OPEN_CLANK_MANAGED
+        process.env.OPEN_CLANK_MANAGED = "1"
+        try {
+          return yield* Effect.tryPromise({
+            try: () =>
+              ManagedProvider.withHostContext(
+                chat.id,
+                { chatID: "chat-managed-fixture", workspaceID: "workspace-fixture", cwd: path.resolve(dir) },
+                () =>
+                  bridge.promise(
+                    Effect.gen(function* () {
+                      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+                      if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+                      else process.env.OPEN_CLANK_MANAGED = previous
+                      yield* llm.text("hello")
+                      yield* handle.process({
+                        user: {
+                          id: parent.id,
+                          sessionID: chat.id,
+                          role: "user",
+                          time: parent.time,
+                          agent: parent.agent,
+                          model: { providerID: mdl.providerID, modelID: mdl.id },
+                        },
+                        sessionID: chat.id,
+                        model: mdl,
+                        agent: agent(),
+                        system: [],
+                        messages: [{ role: "user", content: "hello" }],
+                        tools: {},
+                      })
+                      const parts = MessageV2.parts(msg.id)
+                      expect(parts.find((part) => part.type === "step-start")?.snapshot).toBeUndefined()
+                      expect(parts.find((part) => part.type === "step-finish")?.snapshot).toBeUndefined()
+
+                      const changed = yield* assistant(chat.id, msg.id, path.resolve(dir))
+                      changed.providerID = openaiID
+                      changed.modelID = mdl.id
+                      const changedHandle = yield* processors.create({
+                        assistantMessage: changed,
+                        sessionID: chat.id,
+                        model: mdl,
+                      })
+                      yield* changedHandle.replay({
+                        finishReason: "tool-calls",
+                        toolCalls: [{ toolCallId: "managed-snapshot-call", toolName: "mutate", input: {} }],
+                        tools: {
+                          mutate: {
+                            execute: async () => {
+                              await Bun.write(path.join(dir, "managed-snapshot-fixture.txt"), "captured before mutation")
+                              return { title: "Mutated", metadata: {}, output: "done" }
+                            },
+                          },
+                        },
+                        messages: [],
+                      })
+                      const changedParts = MessageV2.parts(changed.id)
+                      expect(changedParts.find((part) => part.type === "step-start")?.snapshot).toMatch(/^[0-9a-f]{40,64}$/i)
+                      expect(changedParts.find((part) => part.type === "step-finish")?.snapshot).toMatch(/^[0-9a-f]{40,64}$/i)
+                      expect(changedParts.some((part) => part.type === "patch" && part.files.some((file) => file.includes("managed-snapshot-fixture.txt")))).toBe(true)
+                      return { quiet: parts, changed: changedParts }
+                    }),
+                  ),
+              ),
+            catch: (error) => error,
+          })
+        } finally {
+          if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+          else process.env.OPEN_CLANK_MANAGED = previous
+        }
+      }),
+    { git: true, config: (url) => providerCfgWithOpenAI(url) },
+  ),
+)
+
+itFakeSnapshot.live("session.processor preserves tool results when the post-mutation snapshot fails", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let trackCalls = 0
+        fakeSnapshotTrack = () => {
+          trackCalls += 1
+          return trackCalls === 1
+            ? Effect.succeed("b".repeat(40))
+            : Effect.die(new Error("fixture final capture failure"))
+        }
+        fakeSnapshotPatch = () => Effect.die(new Error("fixture patch failure"))
+
+        yield* llm.push(
+          raw({
+            head: [
+              { id: "chatcmpl-snapshot", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+              {
+                id: "chatcmpl-snapshot",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { tool_calls: [{ index: 0, id: "call_snapshot", type: "function", function: { name: "mutate", arguments: "{}" } }] } }],
+              },
+              { id: "chatcmpl-snapshot", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+            ],
+          }),
+        )
+
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "change the workspace")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const bridge = yield* EffectBridge.make()
+        const previous = process.env.OPEN_CLANK_MANAGED
+        process.env.OPEN_CLANK_MANAGED = "1"
+        try {
+          return yield* Effect.tryPromise({
+            try: () =>
+              ManagedProvider.withHostContext(
+                chat.id,
+                { chatID: "chat-managed-failure-fixture", workspaceID: "workspace-failure-fixture", cwd: path.resolve(dir) },
+                () =>
+                  bridge.promise(
+                    Effect.gen(function* () {
+                      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+                      if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+                      else process.env.OPEN_CLANK_MANAGED = previous
+                      const mutateTool = tool({
+                        description: "mutate workspace",
+                        inputSchema: z.object({}),
+                        execute: async () => {
+                          await Bun.write(path.join(dir, "postcapture-fixture.txt"), "already applied")
+                          return "applied"
+                        },
+                      })
+                      const result = yield* handle.process({
+                        user: {
+                          id: parent.id,
+                          sessionID: chat.id,
+                          role: "user",
+                          time: parent.time,
+                          agent: parent.agent,
+                          model: { providerID: ref.providerID, modelID: ref.modelID },
+                        },
+                        sessionID: chat.id,
+                        model: mdl,
+                        agent: agent(),
+                        system: [],
+                        messages: [{ role: "user", content: "change the workspace" }],
+                        tools: { mutate: mutateTool },
+                      })
+                      const parts = MessageV2.parts(msg.id)
+                      expect(result).toBe("continue")
+                      expect(trackCalls).toBe(2)
+                      expect(parts.some((part) => part.type === "tool" && part.state.status === "completed")).toBe(true)
+                      expect(parts.some((part) => part.type === "text" && part.synthetic && part.metadata?.origin?.kind === "snapshot_recovery")).toBe(true)
+                      expect(handle.message.error).toBeUndefined()
+                      expect(yield* Effect.promise(() => Bun.file(path.join(dir, "postcapture-fixture.txt")).exists())).toBe(true)
+                      return parts
+                    }),
+                  ),
+              ),
+            catch: (error) => error,
+          })
+        } finally {
+          if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+          else process.env.OPEN_CLANK_MANAGED = previous
+          fakeSnapshotTrack = () => Effect.succeed("a".repeat(40))
+          fakeSnapshotPatch = (hash) => Effect.succeed({ hash, files: [] })
+        }
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+itFakeSnapshot.live("session.processor blocks tool execution when strict pre-capture fails", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let strictRequested = false
+        let toolStarted = false
+        fakeSnapshotTrack = (options) => {
+          strictRequested = options?.strict === true
+          return Effect.die(new Snapshot.CaptureError("index_stage"))
+        }
+        yield* llm.push(
+          raw({
+            head: [
+              { id: "chatcmpl-strict-capture", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+              {
+                id: "chatcmpl-strict-capture",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { tool_calls: [{ index: 0, id: "call_strict", type: "function", function: { name: "mutate", arguments: "{}" } }] } }],
+              },
+              { id: "chatcmpl-strict-capture", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+            ],
+          }),
+        )
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "run a tool")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const bridge = yield* EffectBridge.make()
+        const previous = process.env.OPEN_CLANK_MANAGED
+        process.env.OPEN_CLANK_MANAGED = "1"
+        try {
+          yield* Effect.tryPromise({
+            try: () =>
+              ManagedProvider.withHostContext(
+                chat.id,
+                { chatID: "chat-managed-strict-fixture", workspaceID: "workspace-strict-fixture", cwd: path.resolve(dir) },
+                () =>
+                  bridge.promise(
+                    Effect.gen(function* () {
+                      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+                      if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+                      else process.env.OPEN_CLANK_MANAGED = previous
+                      yield* handle.process({
+                        user: { id: parent.id, sessionID: chat.id, role: "user", time: parent.time, agent: parent.agent, model: { providerID: ref.providerID, modelID: ref.modelID } },
+                        sessionID: chat.id,
+                        model: mdl,
+                        agent: agent(),
+                        system: [],
+                        messages: [{ role: "user", content: "run a tool" }],
+                        tools: {
+                          mutate: tool({ description: "mutate", inputSchema: z.object({}), execute: async () => { toolStarted = true; return "applied" } }),
+                        },
+                      }).pipe(Effect.catchCause(() => Effect.void))
+                      expect(strictRequested).toBe(true)
+                      expect(toolStarted).toBe(false)
+                      expect(yield* llm.calls).toBe(1)
+                      expect(MessageV2.parts(msg.id).some((part) => part.type === "tool" && part.state.status === "completed")).toBe(false)
+                    }),
+                  ),
+              ),
+            catch: (error) => error,
+          })
+        } finally {
+          if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+          else process.env.OPEN_CLANK_MANAGED = previous
+          fakeSnapshotTrack = () => Effect.succeed("a".repeat(40))
+          fakeSnapshotPatch = (hash) => Effect.succeed({ hash, files: [] })
+        }
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+itReplaySnapshot.live("session.processor replay barriers active text hooks and cancels pending capture", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        let captureStarted = false
+        let captureCancelled = false
+        fakeReplayHookActive = false
+        fakeSnapshotTrack = () =>
+          Effect.sync(() => { captureStarted = true }).pipe(
+            Effect.andThen(Effect.never),
+            Effect.onInterrupt(() => Effect.sync(() => { captureCancelled = true })),
+          )
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "replay text")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const bridge = yield* EffectBridge.make()
+        const previous = process.env.OPEN_CLANK_MANAGED
+        process.env.OPEN_CLANK_MANAGED = "1"
+        try {
+          yield* Effect.tryPromise({
+            try: () =>
+              ManagedProvider.withHostContext(
+                chat.id,
+                { chatID: "chat-managed-replay-fixture", workspaceID: "workspace-replay-fixture", cwd: path.resolve(dir) },
+                () =>
+                  bridge.promise(
+                    Effect.gen(function* () {
+                      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+                      if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+                      else process.env.OPEN_CLANK_MANAGED = previous
+                      const running = yield* handle.replay({
+                        text: "replayed",
+                        toolCalls: [],
+                        tools: {},
+                        messages: [],
+                        finishReason: "stop",
+                      }).pipe(Effect.forkChild)
+                      const deadline = Date.now() + 3000
+                      while (!captureStarted && Date.now() < deadline) yield* Effect.sleep("10 millis")
+                      expect(captureStarted).toBe(true)
+                      expect(fakeReplayHookActive).toBe(true)
+                      yield* Fiber.interrupt(running)
+                      expect(captureCancelled).toBe(true)
+                    }),
+                  ),
+              ),
+            catch: (error) => error,
+          })
+        } finally {
+          if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+          else process.env.OPEN_CLANK_MANAGED = previous
+          fakeSnapshotTrack = () => Effect.succeed("a".repeat(40))
+          fakeSnapshotPatch = (hash) => Effect.succeed({ hash, files: [] })
+        }
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+itFakeSnapshot.live("session.processor shares one pre-capture across tool calls in a step", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let trackCalls = 0
+        fakeSnapshotTrack = () => Effect.sync(() => (++trackCalls === 1 ? "c".repeat(40) : "d".repeat(40)))
+        fakeSnapshotPatch = (hash) => Effect.succeed({ hash, files: [] })
+        yield* llm.push(
+          raw({
+            head: [
+              { id: "chatcmpl-parallel", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+              {
+                id: "chatcmpl-parallel",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { tool_calls: [
+                  { index: 0, id: "call_a", type: "function", function: { name: "first", arguments: "{}" } },
+                  { index: 1, id: "call_b", type: "function", function: { name: "second", arguments: "{}" } },
+                ] } }],
+              },
+              { id: "chatcmpl-parallel", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+            ],
+          }),
+        )
+
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "run both tools")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const bridge = yield* EffectBridge.make()
+        const previous = process.env.OPEN_CLANK_MANAGED
+        process.env.OPEN_CLANK_MANAGED = "1"
+        const started: string[] = []
+        try {
+          return yield* Effect.tryPromise({
+            try: () =>
+              ManagedProvider.withHostContext(
+                chat.id,
+                { chatID: "chat-managed-parallel-fixture", workspaceID: "workspace-parallel-fixture", cwd: path.resolve(dir) },
+                () =>
+                  bridge.promise(
+                    Effect.gen(function* () {
+                      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+                      if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+                      else process.env.OPEN_CLANK_MANAGED = previous
+                      const makeTool = (name: string) => tool({
+                        description: `run ${name}`,
+                        inputSchema: z.object({}),
+                        execute: async () => {
+                          started.push(name)
+                          return `${name} done`
+                        },
+                      })
+                      yield* handle.process({
+                        user: { id: parent.id, sessionID: chat.id, role: "user", time: parent.time, agent: parent.agent, model: { providerID: ref.providerID, modelID: ref.modelID } },
+                        sessionID: chat.id,
+                        model: mdl,
+                        agent: agent(),
+                        system: [],
+                        messages: [{ role: "user", content: "run both tools" }],
+                        tools: { first: makeTool("first"), second: makeTool("second") },
+                      })
+                      expect(trackCalls).toBe(2)
+                      expect(started.sort()).toEqual(["first", "second"])
+                      expect(MessageV2.parts(msg.id).filter((part) => part.type === "tool" && part.state.status === "completed")).toHaveLength(2)
+                    }),
+                  ),
+              ),
+            catch: (error) => error,
+          })
+        } finally {
+          if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+          else process.env.OPEN_CLANK_MANAGED = previous
+          fakeSnapshotTrack = () => Effect.succeed("a".repeat(40))
+          fakeSnapshotPatch = (hash) => Effect.succeed({ hash, files: [] })
+        }
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+itFakeSnapshot.live("session.processor cancellation interrupts a pending shared capture before tools run", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let captureStarted = false
+        let captureCancelled = false
+        let toolStarted = false
+        fakeSnapshotTrack = () =>
+          Effect.sync(() => { captureStarted = true }).pipe(
+            Effect.andThen(Effect.never),
+            Effect.onInterrupt(() => Effect.sync(() => { captureCancelled = true })),
+          )
+        yield* llm.push(
+          raw({
+            head: [
+              { id: "chatcmpl-cancel", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+              {
+                id: "chatcmpl-cancel",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { tool_calls: [{ index: 0, id: "call_cancel", type: "function", function: { name: "mutate", arguments: "{}" } }] } }],
+              },
+              { id: "chatcmpl-cancel", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+            ],
+          }),
+        )
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "cancel before execution")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const bridge = yield* EffectBridge.make()
+        const previous = process.env.OPEN_CLANK_MANAGED
+        process.env.OPEN_CLANK_MANAGED = "1"
+        try {
+          yield* Effect.tryPromise({
+            try: () =>
+              ManagedProvider.withHostContext(
+                chat.id,
+                { chatID: "chat-managed-cancel-fixture", workspaceID: "workspace-cancel-fixture", cwd: path.resolve(dir) },
+                () =>
+                  bridge.promise(
+                    Effect.gen(function* () {
+                      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+                      if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+                      else process.env.OPEN_CLANK_MANAGED = previous
+                      const running = yield* handle.process({
+                        user: { id: parent.id, sessionID: chat.id, role: "user", time: parent.time, agent: parent.agent, model: { providerID: ref.providerID, modelID: ref.modelID } },
+                        sessionID: chat.id,
+                        model: mdl,
+                        agent: agent(),
+                        system: [],
+                        messages: [{ role: "user", content: "cancel before execution" }],
+                        tools: {
+                          mutate: tool({ description: "mutate", inputSchema: z.object({}), execute: async () => { toolStarted = true; return "applied" } }),
+                        },
+                      }).pipe(Effect.forkChild)
+                      const deadline = Date.now() + 3000
+                      while (!captureStarted && Date.now() < deadline) yield* Effect.sleep("10 millis")
+                      expect(captureStarted).toBe(true)
+                      yield* Fiber.interrupt(running)
+                      expect(captureCancelled).toBe(true)
+                      expect(toolStarted).toBe(false)
+                    }),
+                  ),
+              ),
+            catch: (error) => error,
+          })
+        } finally {
+          if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+          else process.env.OPEN_CLANK_MANAGED = previous
+          fakeSnapshotTrack = () => Effect.succeed("a".repeat(40))
+          fakeSnapshotPatch = (hash) => Effect.succeed({ hash, files: [] })
+        }
       }),
     { git: true, config: (url) => providerCfg(url) },
   ),
@@ -946,4 +1562,29 @@ it.live.skip("session.processor preserves try-best blocking when denied tools ma
       }),
     },
   ),
+)
+
+
+itFakeStep.live("processor rejects a missing step but preserves committed partial output without replay", () =>
+  provideTmpdirInstance((dir) => Effect.gen(function* () {
+    const { processors, session, provider } = yield* boot()
+    const model = yield* provider.getModel(ref.providerID, ref.modelID)
+    for (const mode of ["empty", "valid", "partial"] as const) {
+      fakeStepMode = mode
+      fakeStepCalls = 0
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "test")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
+      yield* handle.process({ user: { id: parent.id, sessionID: chat.id, role: "user", time: parent.time, agent: parent.agent, model: { providerID: ref.providerID, modelID: ref.modelID } } satisfies MessageV2.User,
+        sessionID: chat.id, model, agent: agent(), system: [], messages: [{ role: "user", content: "test" }], tools: {} })
+      expect(fakeStepCalls).toBe(1)
+      const loaded = MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+      expect(loaded.info.role).toBe("assistant")
+      if (loaded.info.role !== "assistant") throw new Error("expected assistant message")
+      if (mode === "valid") expect(loaded.info.error).toBeUndefined()
+      else expect(loaded.info.error).toBeDefined()
+      if (mode === "partial") expect(MessageV2.parts(msg.id).some((part) => part.type === "text" && part.text === "kept")).toBe(true)
+    }
+  }), { git: true, config: cfg }),
 )

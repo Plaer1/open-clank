@@ -1,0 +1,11 @@
+[package]
+name = "memery-migrate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memery-core = { path = "../memery-core" }
+rusqlite = { version = "0.35", features = ["bundled", "vtab", "backup"] }
+chrono = { workspace = true }
+sha2 = "0.10"
+tracing = { workspace = true }

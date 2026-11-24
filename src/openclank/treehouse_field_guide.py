@@ -171,10 +171,10 @@ ACHIEVEMENT_RARITY = {
 APP_DESTINATIONS = {
     "chat": {"label": "Chat", "href": "/", "locator": "#message"},
     "editor": {"label": "Editor", "href": "/editor", "locator": "[data-copal-view=notes]"},
-    "wiki": {"label": "Wiki", "href": "/wiki", "locator": "[data-copal-view=wiki]"},
+    "wiki": {"label": "Wiki", "href": "/editor?view=wiki", "locator": "[data-editor-mode-button=wiki]"},
     "files": {"label": "Files", "href": "/files", "locator": "[data-files-launcher]"},
-    "graph": {"label": "Graph", "href": "/graph", "locator": "[data-copal-view=graph]"},
-    "galaxy": {"label": "Galaxy", "href": "/galaxy", "locator": "[data-copal-view=graph]"},
+    "graph": {"label": "Graph", "href": "/editor?view=graph", "locator": "[data-editor-mode-button=graph]"},
+    "galaxy": {"label": "Galaxy", "href": "/galaxy", "locator": "[data-editor-mode-button=graph]"},
     "timeline": {"label": "Timeline", "href": "/timeline", "locator": "[data-copal-view=timeline]"},
     "tasks": {"label": "Meatbag Tasks", "href": "/todo", "locator": "[data-copal-view=todo]"},
     "treehouse": {"label": "TreeHouse", "href": "/treehouse", "locator": "[data-copal-view=treehouse]"},

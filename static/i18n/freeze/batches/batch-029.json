@@ -2,33 +2,53 @@
   "id": "batch-029",
   "group": "docs.openclank-docs-home",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 1597,
+  "entry_count": 4,
+  "character_count": 2914,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-home.body",
-      "source": "# Open Clank Handbook\n\nWelcome. This is the maintained handbook that ships with Open Clank. It is\nread-only: use **Make editable copy** on any page to keep your own notes beside\nit. Updates replace these pages in place and never touch your personal copies.\n\n## Start here\n\n- [[Getting Work Done]] — the shape of a normal session\n- [[Editor]] — documents, Wiki pages, templates and media\n- [[Files and Imps]] — the file tree and managed image projects\n- [[Graph]] — how your documents connect\n\n## Your account and tools\n\n- [[Accounts and Models]] — identity, providers and model choice\n- [[Chat and Workspaces]] — conversations, drafts and context\n- [[Tasks and Continuations]] — turning notes into follow-through\n\n## The rest of the handbook\n\n- [[Memory and Lore]] — what the assistant remembers and how recovery works\n- [[Settings and Themes]] — appearance, panels and preferences\n- [[Recovery]] — history, backups and when things go wrong\n- [[Limits and Platform Support]] — honest capability limits\n- [[Markdown Formatting Demo]] — every rendered element with its source\n\n## Go somewhere in the app\n\nThese links open the real screen. They never close a window you already have\nopen and never start a chat on your behalf.\n\n- Open [Settings](clank://settings) or jump to [appearance](clank://settings/appearance)\n- Browse [Files](clank://files) or open the [Graph](clank://graph)\n- Continue in [Editor](clank://editor) or the [Wiki library](clank://wiki)",
+      "source": "# Open Clank\n\nOpen Clank is a self-hosted AI workspace for turning ideas into finished work. Your personal agent works with your notes and files from day one.\n\n[[Journal|Copal]] is an open-source alternative to Obsidian. Its built-in [[Editor|file editor]] handles text, code and images. [[Graph]] maps links between journal pages, dependencies in your workspace and the files your notes refer to.\n\nLearn in [[TreeHouse]], a pre-alpha learning management suite. Track milestones on [Timeline](clank://timeline), [[Tasks and Continuations|schedule tasks]] and [[Calendar and Email|sync your calendar]].\n\n![Editor activity rail → Graph → Graph view. Journal & Wiki uses saved workspace pages and links. For Code, use File → Open folder… to select an authorized code folder, then expand a file to load symbols.](/static/docs/media/manual-graph-source-scope/preview.webp)\n\n*Graph source diagram. Inspect saved links in Journal & Wiki. In Code, check index coverage before interpreting a gap in the graph.*\n\n[[Accounts and Models|Connect your first model]] · [[Chat and Workspaces|Start a project chat]] · [[Manual Index|Browse the manual]]\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:61"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
       "key": "docs.openclank-docs-home.title",
-      "source": "Open Clank Handbook",
+      "source": "Instruction Manual",
       "placeholders": [],
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:61"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-home.body.compat-e5114082a798",
+      "source": "# Open Clank Handbook\n\nWelcome. This is the maintained handbook that ships with Open Clank. It is\nread-only: use **Make editable copy** on any page to keep your own notes beside\nit. Updates replace these pages in place and never touch your personal copies.\n\n## Start here\n\n- [[Getting Work Done]] — the shape of a normal session\n- [[Editor]] — documents, Wiki pages, templates and media\n- [[Files and Imps]] — the file tree and managed image projects\n- [[Graph]] — how your documents connect\n\n## Your account and tools\n\n- [[Accounts and Models]] — identity, providers and model choice\n- [[Chat and Workspaces]] — conversations, drafts and context\n- [[Tasks and Continuations]] — turning notes into follow-through\n\n## The rest of the handbook\n\n- [[Memory and Lore]] — what the assistant remembers and how recovery works\n- [[Settings and Themes]] — appearance, panels and preferences\n- [[Recovery]] — history, backups and when things go wrong\n- [[Limits and Platform Support]] — honest capability limits\n- [[Markdown Formatting Demo]] — every rendered element with its source\n\n## Go somewhere in the app\n\nThese links open the real screen. They never close a window you already have\nopen and never start a chat on your behalf.\n\n- Open [Settings](clank://settings) or jump to [appearance](clank://settings/appearance)\n- Browse [Files](clank://files) or open the [Graph](clank://graph)\n- Continue in [Editor](clank://editor) or the [Wiki library](clank://wiki)",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-home.title.compat-ee6bca83e1df",
+      "source": "Open Clank Handbook",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
       "complexity": "label"
     }
   ]

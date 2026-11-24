@@ -247,7 +247,7 @@ class TestManageMemoryGateIntegration:
 
         # Wire up a stub provider so the function doesn't bail early
         provider = MagicMock()
-        provider.provider_id = "frankenmemory"
+        provider.provider_id = "memery"
         provider.remember = AsyncMock(return_value=SimpleNamespace(id="candidate_review"))
         monkeypatch.setattr(ai, "_memory_provider", provider)
 
@@ -270,7 +270,7 @@ class TestManageMemoryGateIntegration:
         from unittest.mock import MagicMock
 
         provider = MagicMock()
-        provider.provider_id = "frankenmemory"
+        provider.provider_id = "memery"
         monkeypatch.setattr(ai, "_memory_provider", provider)
 
         import routes.prefs_routes as prefs_mod

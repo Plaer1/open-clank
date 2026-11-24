@@ -69,6 +69,15 @@ def test_workspace_layout_mirrors_workspace_relative_document_stem():
     assert nested.media_dir == "media/projects/design"
     assert nested.origin == "workspace"
 
+    v2 = document_media_dir(
+        document_path="Projects/Game/Ideas.md", canonical_root="/project",
+        origin="workspace", layout_version=2,
+    )
+    assert v2.media_dir == ".media/Projects/Game/Ideas"
+    assert v2.layout_version == 2
+    with pytest.raises(MediaOwnershipError):
+        document_media_dir(document_path="Ideas.md", canonical_root="/project", origin="workspace", layout_version=3)
+
 
 def test_loose_layout_uses_the_documents_containing_folder():
     layout = document_media_dir(document_path="note.md", canonical_root="/stuff", origin="loose")
@@ -81,6 +90,8 @@ def test_loose_layout_refuses_directory_shaped_document_paths():
     with pytest.raises(MediaOwnershipError) as exc:
         document_media_dir(document_path="projects/note.md", canonical_root="/stuff", origin="loose")
     assert exc.value.code == "invalid_media_request"
+    with pytest.raises(MediaOwnershipError):
+        document_media_dir(document_path="note.md", canonical_root="/stuff", origin="loose", layout_version=2)
 
 
 def test_workspace_relative_folder_is_stripped_from_the_mirrored_stem():
@@ -151,6 +162,8 @@ def test_provenance_round_trips_and_verifies_binary_digest():
     assert restored == record
     assert restored.digest_matches(data)
     assert not restored.digest_matches(b"other")
+    legacy = MediaProvenance.from_receipt({key: value for key, value in record.as_receipt().items() if key != "layout_version"})
+    assert legacy.layout_version == 1
 
 
 def test_provenance_rejects_non_digest_values():
@@ -377,6 +390,73 @@ def test_move_plan_repairs_known_references_and_moves_owned_assets():
     self_edits = [edit for edit in plan.reference_edits if edit.site.target == "bar.md"]
     assert self_edits and self_edits[0].new_target == "projects/bar.md"
     assert "bar.md" in plan.preimages
+
+
+def test_mixed_media_move_rebases_preserved_legacy_links_from_new_depth():
+    source_path = "Projects/Game/Ideas.md"
+    text = (
+        "![v2](../../.media/Projects/Game/Ideas/image.png)\n"
+        "![legacy](../../media/Projects/Game/Ideas/legacy.png)\n"
+        "[shared](../../attachments/shared.png)\n"
+        "[root](/media/Projects/Game/Ideas/legacy.png) [web](https://example.test/x) [anchor](#part)\n"
+    )
+    plan = plan_document_move(
+        operation_id="mixed-depth-move",
+        document_id="doc-1",
+        source_document_path=source_path,
+        destination_document_path="Ideas.md",
+        canonical_root="/workspace",
+        origin="workspace",
+        owner_subject_id="alice",
+        source_layout_version=2,
+        preflight=_preflight(assets=[{
+            "asset_id": "asset-v2", "name": "image.png",
+            "digest": binary_digest(b"image"), "owner_document_id": "doc-1",
+        }]),
+        referencing_documents=[
+            ("doc-1", text, False, source_path),
+            ("other-doc", "[unrelated](bar.md) ![moved](../.media/Projects/Game/Ideas/image.png)", False, "Other/Links.md"),
+        ],
+    )
+
+    by_source = {item.site.target: item.new_target for item in plan.reference_edits}
+    assert by_source["../../.media/Projects/Game/Ideas/image.png"] == ".media/Ideas/image.png"
+    assert by_source["../../media/Projects/Game/Ideas/legacy.png"] == "media/Projects/Game/Ideas/legacy.png"
+    assert by_source["../../attachments/shared.png"] == "attachments/shared.png"
+    assert "/media/Projects/Game/Ideas/legacy.png" not in by_source
+    assert "https://example.test/x" not in by_source
+    assert "#part" not in by_source
+    external = {item.site.target: item.new_target for item in plan.reference_edits if item.document_id == "other-doc"}
+    assert external == {"../.media/Projects/Game/Ideas/image.png": "../.media/Ideas/image.png"}
+    import posixpath
+    assert posixpath.normpath(posixpath.join(".", by_source["../../.media/Projects/Game/Ideas/image.png"])) == ".media/Ideas/image.png"
+    assert posixpath.normpath(posixpath.join("Other", external["../.media/Projects/Game/Ideas/image.png"])) == ".media/Ideas/image.png"
+
+
+def test_v2_move_receipt_keeps_recorded_layout_and_reads_legacy_receipts_as_v1():
+    plan = plan_document_move(
+        operation_id="move-v2", document_id="Ideas.md",
+        source_document_path="Projects/Game/Ideas.md",
+        destination_document_path="Projects/Game/Plan.md",
+        canonical_root="/project", origin="workspace", owner_subject_id="alice",
+        preflight=_preflight(), source_layout_version=2,
+    )
+    assert plan.source_media_dir == ".media/Projects/Game/Ideas"
+    assert plan.destination_media_dir == ".media/Projects/Game/Plan"
+    restored = type(plan).from_receipt(plan.as_receipt())
+    assert restored.source_layout_version == restored.destination_layout_version == 2
+    legacy_plan = plan_document_move(
+        operation_id="move-v1", document_id="Ideas.md",
+        source_document_path="Projects/Game/Ideas.md",
+        destination_document_path="Projects/Game/Plan.md",
+        canonical_root="/project", origin="workspace", owner_subject_id="alice",
+        preflight=_preflight(),
+    )
+    legacy_receipt = {key: value for key, value in legacy_plan.as_receipt().items() if not key.endswith("layout_version")}
+    legacy = type(legacy_plan).from_receipt(legacy_receipt)
+    assert legacy.source_media_dir == "media/Projects/Game/Ideas"
+    assert legacy.destination_media_dir == "media/Projects/Game/Plan"
+    assert legacy.source_layout_version == legacy.destination_layout_version == 1
 
 
 def test_move_leaves_protected_references_unapplied_with_a_concrete_conflict():

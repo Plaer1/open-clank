@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import path from "node:path"
 import { OpenClankManagedProtocol } from "../../src/acp/openclank-protocol"
-import { ControlPlane, type AuthServices, validateConnection } from "../../src/acp/provider-control"
+import { ControlPlane, ProviderControlError, type AuthServices, validateConnection } from "../../src/acp/provider-control"
 
 const contractPath = path.resolve(
   import.meta.dir,
@@ -31,6 +31,32 @@ test("ACP initialize metadata declares all managed protocol versions and capabil
   expect(declaration.methods).toContain("_openclank/provider-store/v1/account/bind")
   expect(declaration.methods).toContain("_openclank/provider-store/v1/refresh/commit")
   expect(declaration.methods).toContain("_openclank/operations/v1/executor/invoke")
+})
+
+test("provider-control handle publishes the seven truthful local recipes", async () => {
+  const control = new ControlPlane(emptyAuth)
+  const validated = await control.handle("_openclank/provider-control/v1/connection/validate", {
+    familyID: "local-executor",
+    adapterID: "openclank-local-executor",
+    kind: "local",
+    billingLane: "local",
+    url: "",
+    settings: {},
+  } as any)
+  expect(validated.modelRoutes.map((route) => route.modelID)).toEqual([
+    "fastembed/default", "kokoro/Kokoro-82M", "faster-whisper/default",
+    "diffusion/default", "realesrgan/x4plus", "briaai/RMBG-1.4", "gfpgan/clean-v1",
+  ])
+  expect(validated.modelRoutes.every((route) => route.capabilities?.runtimeStatus === "unknown")).toBe(true)
+})
+
+test("Vertex remains visible as an unavailable adapter without new routes", async () => {
+  const control = new ControlPlane(emptyAuth)
+  const result = await control.connectionValidate({
+    familyID: "google", adapterID: "google-vertex", kind: "official", billingLane: "metered_api",
+    url: "", settings: {},
+  })
+  expect(result.modelRoutes).toEqual([])
 })
 
 test("managed peer negotiation requires the exact callback and operation sets", () => {
@@ -63,6 +89,103 @@ const emptyAuth: AuthServices = {
   cancel: async () => {},
   modelCatalog: async () => ({}),
 }
+
+test("MiMo browser completion classifies an API key and retains its selected subscription lane", async () => {
+  const codeVerifier = "synthetic-code-verifier"
+  const connectionID = "mimo-subscription-connection"
+  const flowID = "synthetic-mimo-flow-0001"
+  const nonce = "synthetic-mimo-nonce"
+  const expiresAt = Date.now() + 60_000
+  const control = new ControlPlane({
+    ...emptyAuth,
+    methods: async () => ({
+      xiaomi: [{
+        type: "oauth",
+        acquisitionMethod: "browser",
+        credentialKinds: ["api"],
+        billingLanes: ["metered_api", "subscription"],
+        label: "MiMo browser login",
+      }],
+    } as any),
+    authorize: async () => ({ url: "https://login.example/authorize", method: "code", instructions: "Paste the returned code" }),
+    exchange: async () => ({
+      type: "api",
+      key: "synthetic-token-plan-key",
+      metadata: { base_url: "https://token-plan-cn.xiaomimimo.com/v1" },
+    } as any),
+  })
+  const started = await control.oauthStart({
+    flowID,
+    connectionID,
+    providerID: "xiaomi",
+    billingLane: "subscription",
+    mode: "add",
+    nonce,
+    method: 0,
+    redirectURI: "https://openclank.test/oauth/callback",
+    state: "synthetic-state",
+    codeVerifierChallenge: createHash("sha256").update(codeVerifier).digest("base64url"),
+    expiresAt,
+    inputs: {},
+  })
+  const identity = {
+    flowID: started.flowID,
+    connectionID,
+    providerID: "xiaomi",
+    billingLane: "subscription",
+    mode: "add",
+    nonce,
+    codeVerifier,
+  }
+  await control.oauthCallback({ ...identity, code: "synthetic-code" })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const result = await control.oauthPoll(identity)
+  expect(result).toMatchObject({
+    status: "complete",
+    authMethod: "api_key",
+    acquisitionMethod: "browser",
+    credentialKind: "api",
+    endpointPolicy: "mimo-token-plan-v1",
+    billingLane: "subscription",
+  })
+})
+
+test("MiMo exchange failures retain only their bounded safe error code", async () => {
+  const codeVerifier = "synthetic-failing-code-verifier"
+  const connectionID = "mimo-failing-connection"
+  const control = new ControlPlane({
+    ...emptyAuth,
+    methods: async () => ({ xiaomi: [{ type: "oauth", acquisitionMethod: "browser", credentialKinds: ["api"], billingLanes: ["subscription"], label: "MiMo browser login" }] } as any),
+    authorize: async () => ({ url: "https://login.example/authorize", method: "code", instructions: "Continue" }),
+    exchange: async () => { throw new ProviderControlError("private upstream details", "oauth_endpoint_mismatch") },
+  })
+  const started = await control.oauthStart({
+    flowID: "synthetic-mimo-failing-flow",
+    connectionID,
+    providerID: "xiaomi",
+    billingLane: "subscription",
+    mode: "add",
+    nonce: "synthetic-failing-nonce",
+    method: 0,
+    redirectURI: "https://openclank.test/oauth/callback",
+    state: "synthetic-failing-state",
+    codeVerifierChallenge: createHash("sha256").update(codeVerifier).digest("base64url"),
+    expiresAt: Date.now() + 60_000,
+    inputs: {},
+  })
+  const identity = {
+    flowID: started.flowID,
+    connectionID,
+    providerID: "xiaomi",
+    billingLane: "subscription",
+    mode: "add",
+    nonce: "synthetic-failing-nonce",
+    codeVerifier,
+  }
+  await control.oauthCallback({ ...identity, code: "synthetic-code" })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(await control.oauthPoll(identity)).toMatchObject({ status: "failed", errorCode: "oauth_endpoint_mismatch" })
+})
 
 function catalogModel(id: string, npm?: string) {
   return {
@@ -385,9 +508,41 @@ test("migrated DeepSeek and Xiaomi API lanes are canonical managed families", as
     accountID: "account-xiaomi",
     credentialRevision: 1,
     authMethod: "api_key",
-    credential: { type: "api", key: "migrated-xiaomi-key" },
+    credential: { type: "api", key: "migrated-xiaomi-key", metadata: { base_url: "https://api.xiaomimimo.com/v1" } },
   })
   expect(xiaomi.authClass).toBe("metered")
+  expect(xiaomi.acquisitionMethod).toBeNull()
+  expect(xiaomi.endpointPolicy).toBe("mimo-metered-api-v1")
+
+  const tokenPlan = await control.accountValidate({
+    connection: {
+      familyID: "xiaomi",
+      adapterID: "mimo-native",
+      kind: "subscription",
+      billingLane: "subscription",
+      settings: {},
+    },
+    accountID: "account-xiaomi-plan",
+    credentialRevision: 1,
+    authMethod: "api_key",
+    acquisitionMethod: "browser",
+    credentialKind: "api",
+    credential: { type: "api", key: "synthetic-token-plan-key", metadata: { base_url: "https://token-plan-cn.xiaomimimo.com/v1" } },
+  })
+  expect(tokenPlan).toMatchObject({ acquisitionMethod: "browser", credentialKind: "api", endpointPolicy: "mimo-token-plan-v1" })
+  await expect(control.accountValidate({
+    connection: {
+      familyID: "xiaomi",
+      adapterID: "mimo-native",
+      kind: "subscription",
+      billingLane: "subscription",
+      settings: {},
+    },
+    accountID: "account-xiaomi-wrong-lane",
+    credentialRevision: 1,
+    authMethod: "api_key",
+    credential: { type: "api", key: "synthetic-metered-key", metadata: { base_url: "https://api.xiaomimimo.com/v1" } },
+  })).rejects.toThrow("MiMo credential endpoint does not match its billing lane")
 })
 
 test("protected local account discovery uses an authorization header", async () => {
@@ -436,12 +591,13 @@ function subscriptionRequest(familyID: string, adapterID: string, url?: string) 
     connection: {
       familyID,
       adapterID,
-      kind: "subscription",
-      billingLane: "subscription",
+      kind: "subscription" as const,
+      billingLane: "subscription" as const,
       ...(url === undefined ? {} : { url }),
       settings: {},
     },
-    authMethod: "oauth",
+    authMethod: "oauth" as const,
+    ...(familyID === "grok" ? { acquisitionMethod: "device" as const } : {}),
     credential: oauthCredential(),
     accountID: "host-account-a",
     credentialRevision: 7,
@@ -521,9 +677,60 @@ test("subscription discovery is credential-aware, excludes hidden rows, and acce
     voice_clone: false,
       limit: { context: 128_000, output: 16_384 },
     },
-    provenance: { metadataCatalog: "models.dev-snapshot" },
+    provenance: {
+      authority: "managed-engine",
+      origin: "account-discovery",
+      catalog: "codex-account-models",
+      familyID: "openai",
+      metadataCatalog: "models.dev-snapshot",
+    },
   })
   expect(result.modelRoutes[0]?.operations).toContain("vision.describe")
+})
+
+test("Claude subscription discovery uses the pinned OAuth catalog request and preserves account routes", async () => {
+  let requestedURL = ""
+  let headers = new Headers()
+  const fetcher = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    requestedURL = String(input)
+    headers = new Headers(init?.headers)
+    return new Response(JSON.stringify({
+      data: [{ id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" }],
+      has_more: false,
+    }))
+  }) as unknown as typeof fetch
+  const control = new ControlPlane(emptyAuth, () => 1_700_000_000_000, fetcher)
+  const result = await control.handle(
+    "_openclank/provider-control/v1/account/validate",
+    subscriptionRequest("anthropic", "anthropic-messages"),
+  )
+  expect(requestedURL).toBe("https://api.anthropic.com/v1/models?limit=1000")
+  expect(headers.get("authorization")).toBe("Bearer access-secret")
+  expect(headers.get("anthropic-version")).toBe("2023-06-01")
+  expect(headers.get("anthropic-beta")).toBe("oauth-2025-04-20")
+  expect(result.discovery.status).toBe("complete")
+  expect(result.modelRoutes).toEqual(result.discovery.models)
+  expect(result.modelRoutes[0]?.modelID).toBe("claude-sonnet-4-6")
+  expect(result.modelRoutes[0]?.provenance).toMatchObject({
+    authority: "managed-engine",
+    origin: "account-discovery",
+    catalog: "claude-account-models",
+  })
+})
+
+test("Claude discovery reports pagination as partial and malformed payloads unavailable", async () => {
+  const partial = new ControlPlane(emptyAuth, () => 1_700_000_000_000, (async () => new Response(JSON.stringify({
+    data: [{ id: "claude-haiku-4-5", display_name: "Claude Haiku" }], has_more: true,
+  }))) as unknown as typeof fetch)
+  const partialResult = await partial.accountValidate(subscriptionRequest("anthropic", "anthropic-messages"))
+  expect(partialResult.discovery.status).toBe("partial")
+  expect(partialResult.discovery.errorCode).toBe("discovery_partial")
+
+  const malformed = new ControlPlane(emptyAuth, () => 1_700_000_000_000, (async () => new Response("{}")) as unknown as typeof fetch)
+  const malformedResult = await malformed.accountValidate(subscriptionRequest("anthropic", "anthropic-messages"))
+  expect(malformedResult.discovery.status).toBe("unavailable")
+  expect(malformedResult.discovery.errorCode).toBe("discovery_unavailable")
+  expect(malformedResult.modelRoutes).toEqual([])
 })
 
 test("subscription discovery marks malformed mixed Copilot rows partial and uses refresh auth", async () => {
@@ -629,11 +836,70 @@ test("a valid empty subscription inventory is authoritative and distinct from fa
   const fetcher = (async () => new Response(JSON.stringify({ data: [] }))) as unknown as typeof fetch
   const control = new ControlPlane(emptyAuth, () => 1_700_000_000_002, fetcher)
 
-  const result = await control.accountValidate(subscriptionRequest("xai", "xai-responses", "https://xai.example"))
+  const result = await control.accountValidate(subscriptionRequest("grok", "grok-cli-chat"))
 
   expect(result.discovery).toMatchObject({ status: "complete", authoritative: true, models: [] })
   expect("errorCode" in result.discovery).toBe(false)
   expect(result.modelRoutes).toEqual([])
+})
+
+test("new Grok subscription binds only its proxy while legacy xAI subscription routes remain unchanged", () => {
+  const grok = validateConnection({
+    familyID: "grok",
+    adapterID: "grok-cli-chat",
+    kind: "subscription",
+    billingLane: "subscription",
+    settings: {},
+  })
+  expect(grok.normalizedURL).toBe("https://cli-chat-proxy.grok.com/v1")
+  expect(() => validateConnection({
+    familyID: "grok",
+    adapterID: "grok-cli-chat",
+    kind: "subscription",
+    billingLane: "subscription",
+    url: "https://api.x.ai/v1",
+    settings: {},
+  })).toThrow("endpoint does not match")
+
+  const legacyXai = validateConnection({
+    familyID: "xai",
+    adapterID: "xai-responses",
+    kind: "subscription",
+    billingLane: "subscription",
+    url: "https://api.x.ai/v1",
+    settings: {},
+  })
+  expect(legacyXai.normalizedURL).toBe("https://api.x.ai/v1")
+})
+
+test("Grok discovery uses the leased token, CLI auth header, redirect fence, and account capabilities", async () => {
+  let requestURL = ""
+  let requestHeaders = new Headers()
+  let requestRedirect: RequestRedirect | undefined
+  const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requestURL = String(input)
+    requestHeaders = new Headers(init?.headers)
+    requestRedirect = init?.redirect
+    return new Response(JSON.stringify({
+      data: [{
+        id: "account-grok-model",
+        capabilities: {
+          tool_call: true,
+          modalities: { input: ["text", "image"], output: ["text"] },
+        },
+      }],
+    }))
+  }) as unknown as typeof fetch
+  const result = await new ControlPlane(emptyAuth, () => 1_700_000_000_008, fetcher)
+    .accountValidate(subscriptionRequest("grok", "grok-cli-chat"))
+  expect(requestURL).toBe("https://cli-chat-proxy.grok.com/v1/models")
+  expect(requestHeaders.get("authorization")).toBe("Bearer access-secret")
+  expect(requestHeaders.get("x-xai-token-auth")).toBe("xai-grok-cli")
+  expect(requestRedirect).toBe("error")
+  expect(result.endpointPolicy).toBe("grok-cli-proxy-v1")
+  expect(result.modelRoutes.map((model) => model.modelID)).toEqual(["account-grok-model"])
+  expect(result.modelRoutes[0]?.operations).toContain("vision.describe")
+  expect(result.modelRoutes[0]?.capabilities.tool_call).toBe(true)
 })
 
 test("subscription discovery never falls back to the frozen global catalog", async () => {
@@ -642,9 +908,9 @@ test("subscription discovery never falls back to the frozen global catalog", asy
     {
       ...emptyAuth,
       modelCatalog: async () => ({
-        xai: {
-          id: "xai",
-          name: "xAI",
+        grok: {
+          id: "grok",
+          name: "Grok subscription",
           env: [],
           models: { frozen: catalogModel("frozen") },
         },
@@ -654,7 +920,7 @@ test("subscription discovery never falls back to the frozen global catalog", asy
     fetcher,
   )
 
-  const result = await control.accountValidate(subscriptionRequest("xai", "xai-responses", "https://xai.example"))
+  const result = await control.accountValidate(subscriptionRequest("grok", "grok-cli-chat"))
 
   expect(result.discovery.status).toBe("unavailable")
   expect(result.discovery.errorCode).toBe("discovery_unavailable")
@@ -671,7 +937,7 @@ test("discovery classifies malformed JSON, auth failure, throttling and oversize
   for (const item of cases) {
     const fetcher = (async () => new Response(item.body, { status: item.status })) as unknown as typeof fetch
     const control = new ControlPlane(emptyAuth, () => 1_700_000_000_004, fetcher)
-    const result = await control.accountValidate(subscriptionRequest("xai", "xai-responses", "https://xai.example"))
+    const result = await control.accountValidate(subscriptionRequest("grok", "grok-cli-chat"))
     expect(result.discovery.status === "reauth_required" ? "reauth_required" : result.discovery.errorCode).toBe(item.expected)
     expect(JSON.stringify(result.discovery)).not.toContain("secret")
   }
@@ -682,7 +948,7 @@ test("discovery caps account model inventories at 4096 routes", async () => {
   const fetcher = (async () => new Response(JSON.stringify({ data: models }))) as unknown as typeof fetch
   const control = new ControlPlane(emptyAuth, () => 1_700_000_000_005, fetcher)
 
-  const result = await control.accountValidate(subscriptionRequest("xai", "xai-responses", "https://xai.example"))
+    const result = await control.accountValidate(subscriptionRequest("grok", "grok-cli-chat"))
 
   expect(result.discovery.status).toBe("partial")
   expect(result.discovery.errorCode).toBe("discovery_partial")
@@ -705,7 +971,7 @@ test("discovery timeout and bounded response bodies are unavailable without secr
     })
   }) as unknown as typeof fetch
   const timedOut = await new ControlPlane(emptyAuth, () => 1_700_000_000_006, timeoutFetcher, 1).accountValidate(
-    subscriptionRequest("xai", "xai-responses", "https://xai.example"),
+    subscriptionRequest("grok", "grok-cli-chat"),
   )
   expect(aborted).toBe(true)
   expect(timedOut.discovery).toMatchObject({ status: "unavailable", errorCode: "discovery_unavailable", freshness: "unknown" })
@@ -714,7 +980,22 @@ test("discovery timeout and bounded response bodies are unavailable without secr
   const oversized = "{" + "x".repeat(2 * 1024 * 1024) + "}"
   const bodyFetcher = (async () => new Response(oversized)) as unknown as typeof fetch
   const tooLarge = await new ControlPlane(emptyAuth, () => 1_700_000_000_007, bodyFetcher).accountValidate(
-    subscriptionRequest("xai", "xai-responses", "https://xai.example"),
+    subscriptionRequest("grok", "grok-cli-chat"),
   )
   expect(tooLarge.discovery).toMatchObject({ status: "unavailable", errorCode: "discovery_unavailable" })
+})
+
+test("discovery preserves long Retry-After values and ignores missing or malformed headers", async () => {
+  const longDelay = (async () => new Response("busy", { status: 429, headers: { "Retry-After": "45" } })) as unknown as typeof fetch
+  const delayed = await new ControlPlane(emptyAuth, () => 1_700_000_000_000, longDelay).accountValidate(
+    subscriptionRequest("grok", "grok-cli-chat"),
+  )
+  expect(delayed.discovery).toMatchObject({ retryable: true, retryAfterMs: 45_000 })
+
+  const malformed = (async () => new Response("busy", { status: 429, headers: { "Retry-After": "not-a-delay" } })) as unknown as typeof fetch
+  const result = await new ControlPlane(emptyAuth, () => 1_700_000_000_000, malformed).accountValidate(
+    subscriptionRequest("grok", "grok-cli-chat"),
+  )
+  expect(result.discovery.retryable).toBe(true)
+  expect(result.discovery.retryAfterMs).toBeUndefined()
 })

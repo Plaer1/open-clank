@@ -35,9 +35,10 @@ function updateReview() {
   const kind = form.elements.kind.value;
   const path = form.elements.path.value.trim();
   const caps = [form.elements.read.checked ? 'Browse / download' : '', form.elements.write.checked ? 'Modify' : ''].filter(Boolean);
-  const agent = form.elements.agent.checked ? 'Agents may use it' : 'Agents cannot use it';
+  const personal = form.elements.app.checked ? 'Share with me in Files and Editor' : 'No personal Files and Editor grant';
+  const agent = form.elements.agent.checked ? 'Request Agent access' : 'No Agent grant';
   const label = kind === 'whole_root' ? 'Whole disk / volume' : kind === 'exact_file' ? 'Exact file' : 'Folder and descendants';
-  dialog.querySelector('[data-location-wizard-review]').textContent = `${label} · ${path || 'Choose a host path'} · ${caps.join(' + ') || 'No access selected'} · ${agent}`;
+  dialog.querySelector('[data-location-wizard-review]').textContent = `${label} · ${path || 'Choose a host path'} · ${caps.join(' + ') || 'No access selected'} · ${personal} · ${agent}`;
 }
 
 function chooseKind(kind) {
@@ -110,10 +111,11 @@ function mount() {
     element('legend', { text: 'Access' }),
     element('label', {}, element('input', { type: 'checkbox', name: 'read', checked: 'true' }), ' Browse / download'),
     element('label', {}, element('input', { type: 'checkbox', name: 'write' }), ' Modify'),
-    element('label', {}, element('input', { type: 'checkbox', name: 'agent', checked: 'true' }), ' Agents may use this Location'));
+    element('label', {}, element('input', { type: 'checkbox', name: 'app' }), ' Browse this location in Files and Editor for my account'),
+    element('label', {}, element('input', { type: 'checkbox', name: 'agent' }), ' Agents may use this location'));
   const agentNote = element('p', {
     class: 'file-location-wizard-copy',
-    text: 'Agent access is explicit and can still be narrowed per workspace or chat. Whole disk delegates file safety to the host OS.',
+    text: 'For a folder grant, Agents also need access through Files and Editor. A workspace or chat can narrow Agent access.',
   });
   const review = element('div', { class: 'file-location-wizard-review', 'data-location-wizard-review': '', 'aria-live': 'polite' });
   const status = element('div', { class: 'file-location-wizard-status', 'data-location-wizard-status': '', role: 'status', 'aria-live': 'polite' });
@@ -163,10 +165,11 @@ function mount() {
     if (!active?.submit) return;
     const path = pathInput.value.trim();
     const capabilities = [form.elements.read.checked ? 'read' : '', form.elements.write.checked ? 'write' : ''].filter(Boolean);
-    if (!path || !capabilities.length) {
-      setStatus('Enter a host path and select at least one access capability.', true);
+    if (!path || !capabilities.length || (form.elements.app.checked && !form.elements.read.checked)) {
+      setStatus('Enter a host path and select capabilities. Files and Editor browsing requires Browse / download.', true);
       return;
     }
+    if (active?.unknown) return;
     submit.disabled = true;
     cancel.disabled = true;
     setStatus('Adding Location…');
@@ -175,13 +178,22 @@ function mount() {
         path,
         kind: form.elements.kind.value,
         capabilities,
+        appAccess: form.elements.app.checked,
         agentAccess: form.elements.agent.checked,
       });
       close(result || true);
     } catch (error) {
+      if (active && error.unknown) active.unknown = true;
+      if (active && error.remaining) {
+        pathInput.value = error.path;
+        form.elements.app.checked = error.remaining.includes('app');
+        form.elements.agent.checked = error.remaining.includes('agent');
+        submit.textContent = 'Retry remaining access';
+        updateReview();
+      }
       setStatus(error.message || 'Location could not be added', true);
     } finally {
-      submit.disabled = false;
+      submit.disabled = Boolean(active?.unknown);
       cancel.disabled = false;
     }
   });
@@ -202,7 +214,11 @@ export function openFileLocationWizardDialog({
   const form = dialog.querySelector('form');
   form.reset();
   form.elements.read.checked = true;
-  form.elements.agent.checked = true;
+  form.elements.app.checked = false;
+  form.elements.agent.checked = false;
+  const submitButton = form.querySelector('[data-location-submit]');
+  submitButton.disabled = false;
+  submitButton.textContent = 'Add Location';
   form.elements.path.value = String(suggestedPath || '');
   chooseKind('directory');
   setStatus('');

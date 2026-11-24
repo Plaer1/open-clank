@@ -17,7 +17,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED = {'__pycache__', '.git', '.clanker', '.clankers', '.references', 'node_modules',
-            'target', 'venv', '.venv', 'cache', 'logs', '.env', '.env.local'}
+            'target', 'venv', '.venv', 'cache', 'logs', '.env', '.env.local', '.DS_Store'}
 
 
 def digest(path):
@@ -53,10 +53,22 @@ def dependencies(output):
 def stage_data(destination):
     if destination.exists():
         raise RuntimeError('Release data staging already exists; preserve it')
+    required_resources = (
+        'services/hwfit/data/hf_models.json',
+        'services/hwfit/data/mlx_community_models.json',
+        'companion/__init__.py',
+        'companion/pairing.py',
+        'companion/routes.py',
+    )
+    missing = [name for name in required_resources if not (ROOT / name).is_file()]
+    if missing:
+        raise RuntimeError('Missing release resources: ' + ', '.join(missing))
+
     destination.mkdir(parents=True)
     # Deliberate source/resource closure. Never traverse native compiler output
     # or copy ambient application state. Python sources support child runtimes.
-    for name in ('static', 'scripts', 'mcp_servers', 'services', 'config', 'contracts', 'src', 'core', 'routes', 'licenses'):
+    for name in ('static', 'scripts', 'mcp_servers', 'services', 'config', 'contracts',
+                 'src', 'core', 'routes', 'companion', 'licenses'):
         source = ROOT / name
         if not source.is_dir():
             raise RuntimeError('Missing release resource directory: ' + name)
@@ -80,8 +92,20 @@ def stage_data(destination):
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
-    for name in ('LICENSE', 'requirements.txt', 'app.py'):
-        shutil.copyfile(ROOT / name, destination / name)
+    memery_schema = ROOT / 'native/memery/crates/memery-core/src/store'
+    if not (memery_schema / 'schema-v17-general-hex.sql').is_file():
+        raise RuntimeError('Memery schema resources are missing')
+    sql_resources = sorted(path.relative_to(ROOT) for path in memery_schema.glob('*.sql'))
+    for name in ('LICENSE', 'requirements.txt', 'app.py',
+                 'packages/openclank-agent-supervisor/proto/openclank_agent_supervisor_v1.proto', *sql_resources):
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, target)
+    # Creating a partial packages/mimo-code directory would make startup treat the
+    # package as a source checkout. Only the compaction-proof prompt is required.
+    prompt = destination / 'resources/engine/compaction.txt'
+    prompt.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / 'packages/mimo-code/packages/cli/src/agent/prompt/compaction.txt', prompt)
     # Keep root license prominent as well as within the sealed runtime.
 
 

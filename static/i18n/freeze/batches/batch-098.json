@@ -1,0 +1,35 @@
+{
+  "id": "batch-098",
+  "group": "docs.openclank-docs-usage",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1934,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-usage.title",
+      "source": "Usage and Stats",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-usage.body",
+      "source": "# Usage and Stats\n\nOpen **Usage** from the sidebar or rail. Visit **Sessions** for one run or **Usage** to compare cost and tokens across runs.\n\n## Find the evidence for a run\n\nIn **Sessions**, choose a date range and **Usage timezone**, then filter by provider, model, account or workspace as available. Open a session to see its saved messages, tools, sources and transport attempts. **Open matching conversation** returns to the chat. Use the session export for content and **Usage → Export CSV** for numeric data in scope.\n\n**Reported** values came from the producer. **Estimated** values use available inputs and pricing. **Unknown** or **Partial** means some evidence is missing. Reported zero is a measurement. For context and worker evidence, see [[Chat and Workspaces#See what the chat is using|Model context]] or [[Chat and Workspaces#Inspect a worker or a saved plan|Subagents]].\n\n## Compare usage and activity\n\nChoose **Cost** or **Tokens** for supported groupings and token categories. In **Activity**, select a day to narrow Sessions in the chosen timezone. **More → Account quota** shows supported limit windows. **Trends** analyzes opted-in archive content across dates and identities. **Quality** follows selected dates across identities. Read the coverage label before interpreting either.\n\n## Optional cost and capture controls\n\n**Settings → Tokenomics** starts off. If enabled, eligible tool results can use a compact form on the next turn. Check the effective readback.\n\n**Settings → Logging** keeps baseline activity and usage. **Advanced provider logging** starts off and adds future transport details for supported requests. Sanitized bodies can still contain your work. Opening or exporting bodies requires an explicit choice. Review retention previews before pruning.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

@@ -26,8 +26,8 @@ const API_BASE = window.location.origin;
 // Recent is auto-tracked (last 5 picks, most-recent-first) and lives in its
 // own key. Favorites is the SAME key the sidebar Models section uses, so a
 // favorite toggled here shows up there and vice-versa.
-const RECENT_KEY = 'odysseus-model-recent';
-const FAVORITES_KEY = 'odysseus-model-favorites';
+const RECENT_KEY = 'openclank-model-recent';
+const FAVORITES_KEY = 'openclank-model-favorites';
 const RECENT_MAX = 5;
 // Catalogs at or below this size are small enough that hiding everything
 // behind search would be a regression — keep listing them in browse mode.
@@ -122,6 +122,15 @@ function _groupModelChoices(models) {
   });
 }
 
+function _uniqueChoice(choices) {
+  const unique = new Map();
+  for (const choice of choices) {
+    const key = JSON.stringify([modelChoiceKey(choice), choice.providerModelId || null, choice.optionRouteId || null]);
+    unique.set(key, choice);
+  }
+  return unique.size === 1 ? unique.values().next().value : null;
+}
+
 function _presetKey(choice) {
   return String(choice?.preset || 'standard').toLowerCase();
 }
@@ -174,33 +183,9 @@ let _defaultPendingSeq = 0;
 function _modelExists(modelId, url, endpointId = '') {
   if (!modelId || !window.modelsModule || !window.modelsModule.getCachedItems) return false;
   const items = window.modelsModule.getCachedItems() || [];
-  if (!items.length) return true;
+  // An empty cache cannot establish availability; retain the original choice.
+  if (!items.length) return false;
   return catalogHasModelChoice(items, modelId, endpointId, url);
-}
-
-function _firstAvailableModel() {
-  if (!window.modelsModule || !window.modelsModule.getCachedItems) return null;
-  const items = window.modelsModule.getCachedItems() || [];
-  for (const item of items) {
-    if (item.offline) continue;
-    const entries = catalogEntries(item);
-    if (!entries.length) continue;
-    return {
-      url: item.url,
-      modelId: entries[0].mid,
-      endpointId: item.endpoint_id || '',
-    };
-  }
-  return null;
-}
-
-async function _ensureModelCacheForFallback() {
-  if (!window.modelsModule || !window.modelsModule.getCachedItems) return;
-  const items = window.modelsModule.getCachedItems() || [];
-  if (items.length) return;
-  if (typeof window.modelsModule.refreshModels === 'function') {
-    try { await window.modelsModule.refreshModels(false); } catch (_) {}
-  }
 }
 
 async function _ensureDefaultPendingChat(force = false) {
@@ -211,37 +196,35 @@ async function _ensureDefaultPendingChat(force = false) {
   }
   if (_deps.getCurrentSessionId && _deps.getCurrentSessionId()) return;
   let pending = _deps.getPendingChat && _deps.getPendingChat();
-  if (pending && pending.modelId && pending.source === 'manual') return;
+  if (pending && pending.modelId) return;
+  const capturedPending = pending;
+  const navToken = _deps.getSessionNavigationToken?.();
+  const owner = window.__openClankAuthenticatedUser;
+  const account = document.body?.dataset?.accountId;
   _defaultChatPickInFlight = true;
   const seq = ++_defaultPendingSeq;
   try {
-    let dc = null;
+    let dc = null, fetched = false;
     try {
       const response = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
-      if (response.ok) dc = await response.json();
+      if (response.ok) { dc = await response.json(); fetched = true; }
     } catch (_) {}
-    if (!dc || !dc.endpoint_url || !dc.model) {
-      try {
-        dc = window.__odysseusDefaultChat
-          || JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
-      } catch (_) {}
-    } else {
-      try {
-        window.__odysseusDefaultChat = dc;
-        localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(dc));
-      } catch (_) {}
-    }
     // Cache/default fetches yield. Never let their stale snapshot replace a
     // model the user picked while they were in flight.
-    if (seq !== _defaultPendingSeq) return;
+    if (seq !== _defaultPendingSeq || window.__openClankAuthenticatedUser !== owner || document.body?.dataset?.accountId !== account
+        || (navToken !== undefined && _deps.getSessionNavigationToken?.() !== navToken)) return;
     if (_deps.getCurrentSessionId && _deps.getCurrentSessionId()) return;
     pending = _deps.getPendingChat && _deps.getPendingChat();
-    if (pending && pending.modelId && pending.source === 'manual') return;
-    if (dc && dc.endpoint_url && dc.model && _modelExists(dc.model, dc.endpoint_url, dc.endpoint_id)) {
+    if (pending !== capturedPending || (pending && pending.modelId)) return;
+    if (fetched && dc && dc.endpoint_url && dc.model) {
+      try { window.__odysseusDefaultChat = dc; localStorage.setItem('openclank-default-chat-cache', JSON.stringify(dc)); } catch (_) {}
+    }
+    if (dc && dc.endpoint_url && dc.model) {
       const latest = _deps.getPendingChat && _deps.getPendingChat();
       const pendingUrl = String((pending && pending.url) || '').replace(/\/+$/, '');
       const defaultUrl = String(dc.endpoint_url || '').replace(/\/+$/, '');
       _deps.setPendingChat({
+        ...(pending || {}),
         url: dc.endpoint_url,
         modelId: dc.model,
         endpointId: dc.endpoint_id || '',
@@ -252,18 +235,7 @@ async function _ensureDefaultPendingChat(force = false) {
       }
       return;
     }
-    if (pending && pending.modelId) return;
-    await _ensureModelCacheForFallback();
-    // No configured default, or the configured default is gone/offline:
-    // preserve the convenience fallback and keep the picker usable.
-    const fallback = _firstAvailableModel();
-    if (fallback) {
-      if (seq !== _defaultPendingSeq) return;
-      const latest = _deps.getPendingChat && _deps.getPendingChat();
-      if (latest && latest.modelId && latest.source !== 'default' && latest.source !== 'fallback') return;
-      _deps.setPendingChat({ ...fallback, source: 'fallback' });
-      updateModelPicker();
-    }
+
   } finally {
     _defaultChatPickInFlight = false;
     if (_defaultChatRefreshQueued) {
@@ -365,8 +337,9 @@ function _initModelPickerDropdown() {
         // Deduplicate by model ID — prefer ONLINE endpoint entries over
         // offline duplicates so the user gets a working endpoint first
         // when the same model is exposed by both.
-        if (seen.has(choiceKey)) return;
-        seen.add(choiceKey);
+        const exactKey = JSON.stringify([choiceKey, entry.providerModelId || null, entry.optionRouteId || null]);
+        if (seen.has(exactKey)) return;
+        seen.add(exactKey);
         // Catalog-boundary rows (entry.family set) carry their own public
         // identity: the transport/endpoint behind them is invisible to users.
         const shared = item.shared === true;
@@ -395,6 +368,10 @@ function _initModelPickerDropdown() {
           url: item.url,
           endpointId: item.endpoint_id,
           category: item.category || '',
+          capabilities: entry.capabilities || {},
+          providerModelId: entry.providerModelId || null,
+          optionRouteId: entry.optionRouteId || null,
+          catalogRevision: entry.catalogRevision ?? null,
           epName: sharedLabel || (boundary ? '' : (item.endpoint_name || '')),
           providerText: boundary ? [shared ? sharedProviderLabel(providerName) : providerName, sharedLabel].filter(Boolean).join(' ') : [
             item.endpoint_name || '',
@@ -440,13 +417,13 @@ function _initModelPickerDropdown() {
     listEl.appendChild(row);
   }
 
-  async function _refreshPickerModels({ force = false, showLoading = false } = {}) {
+  async function _refreshPickerModels({ force = false, showLoading = false, discover = false } = {}) {
     if (!window.modelsModule || typeof window.modelsModule.refreshModels !== 'function') return;
     const seq = ++_pickerLoadSeq;
     _pickerLoading = true;
     if (showLoading) _renderLoading(force ? 'Refreshing models…' : 'Loading models…');
     try {
-      await window.modelsModule.refreshModels(force);
+      await window.modelsModule.refreshModels(force, { discover });
     } finally {
       if (seq === _pickerLoadSeq) {
         _pickerLoading = false;
@@ -520,12 +497,12 @@ function _initModelPickerDropdown() {
     if (m.mid.indexOf('/') > 0) return _providerDisplayName(_providerSlug(m.mid));
     return m.epName || 'Other';
   }
-  const _collapsedProviders = new Set(_loadList('odysseus-model-collapsed'));
+  const _collapsedProviders = new Set(_loadList('openclank-model-collapsed'));
   let _justExpandedProvider = null;
 
   document.addEventListener('openclank:auth-user-ready', () => {
     _collapsedProviders.clear();
-    _loadList('odysseus-model-collapsed').forEach(provider => _collapsedProviders.add(provider));
+    _loadList('openclank-model-collapsed').forEach(provider => _collapsedProviders.add(provider));
     if (!menu.classList.contains('hidden')) _populate(search.value);
   });
   document.addEventListener('openclank:model-catalog-updated', () => {
@@ -599,11 +576,11 @@ function _initModelPickerDropdown() {
         modelId = session?.model || pending?.modelId || '';
         endpointId = session?.endpoint_id || pending?.endpointId || '';
       } catch (_) {}
-      return group.choices.find(choice => {
+      return _uniqueChoice(group.choices.filter(choice => {
         if (choice.mid !== modelId) return false;
         if (endpointId === 'mimo:auto') return String(choice.endpointId || '').startsWith('mimo:');
         return !endpointId || String(choice.endpointId || '') === String(endpointId);
-      }) || null;
+      }));
     }
 
     function _addRow(m, preferredChoice = null) {
@@ -630,7 +607,18 @@ function _initModelPickerDropdown() {
       nameSpan.textContent = m.display;
       // Long model names are clipped with ellipsis — expose the full name on
       // hover so the suffix/variant tag is still discoverable (#1982).
-      nameSpan.title = m.display;
+      const modalities = m.capabilities?.modalities;
+      const displayModalities = kind => Array.isArray(modalities?.[kind])
+        ? modalities[kind].filter(value => typeof value === 'string' && /^[a-z_-]{1,24}$/i.test(value)).join(', ')
+        : '';
+      const input = displayModalities('input');
+      const output = displayModalities('output');
+      const effort = m.capabilities?.request_options?.find?.(option => option.id === 'reasoning_effort');
+      const thinking = effort?.source === 'account-discovery' ? 'Thinking from account discovery'
+        : effort ? 'Thinking from the engine catalog'
+        : m.capabilities?.request_options_state === 'undeclared' ? 'Thinking values undeclared' : '';
+      nameSpan.title = [m.display, m.providerName, input && `Input ${input}`,
+        output && `Output ${output}`, thinking].filter(Boolean).join(' · ');
       row.appendChild(nameSpan);
       // Offline state is already conveyed by the row's reduced opacity —
       // a redundant "offline" pill on top of that just added clutter.
@@ -644,9 +632,9 @@ function _initModelPickerDropdown() {
       row.appendChild(epSpan);
 
       const choices = m.choices?.length ? m.choices : [m];
-      const baseChoice = choices.find(choice => (
+      const baseChoice = _uniqueChoice(choices.filter(choice => (
         choice.mid === (m.baseModelId || m.mid) && !choice.preset && !choice.variant
-      )) || choices.find(choice => !choice.preset && !choice.variant) || choices[0];
+      )));
       const initialChoice = (preferredChoice && choices.includes(preferredChoice) ? preferredChoice : null)
         || _activeChoice(m)
         || baseChoice;
@@ -657,7 +645,7 @@ function _initModelPickerDropdown() {
         if (!presetGroups.has(preset)) presetGroups.set(preset, []);
         presetGroups.get(preset).push(choice);
       });
-      const hasOptions = choices.length > 1;
+      const hasOptions = choices.length > 1 || !baseChoice;
       if (hasOptions) {
         const optionsButton = document.createElement('button');
         optionsButton.type = 'button';
@@ -687,9 +675,10 @@ function _initModelPickerDropdown() {
           option.textContent = _presetLabel(preset);
           modeSelect.appendChild(option);
         });
-        modeSelect.value = _presetKey(initialChoice);
+        if (!initialChoice) { const placeholder=document.createElement('option'); placeholder.value=''; placeholder.textContent='Select mode'; placeholder.disabled=true; modeSelect.prepend(placeholder); }
+        modeSelect.value = initialChoice ? _presetKey(initialChoice) : '';
         modeWrap.appendChild(modeSelect);
-        modeWrap.hidden = presetGroups.size < 2;
+        modeWrap.hidden = presetGroups.size < 2 && !!initialChoice;
 
         const thinkingWrap = document.createElement('label');
         thinkingWrap.className = 'mp-model-option-field';
@@ -711,8 +700,9 @@ function _initModelPickerDropdown() {
             return (THINKING_ORDER[left] ?? 99) - (THINKING_ORDER[right] ?? 99)
               || left.localeCompare(right);
           });
-          const prior = wanted || thinkingSelect.value || 'default';
+          const prior = wanted || '';
           thinkingSelect.replaceChildren();
+          const placeholder=document.createElement('option'); placeholder.value=''; placeholder.textContent='Select thinking'; placeholder.disabled=true; thinkingSelect.appendChild(placeholder);
           modeChoices.forEach(choice => {
             const option = document.createElement('option');
             option.value = _variantKey(choice);
@@ -721,21 +711,21 @@ function _initModelPickerDropdown() {
           });
           thinkingSelect.value = modeChoices.some(choice => _variantKey(choice) === prior)
             ? prior
-            : (_variantKey(modeChoices[0]) || 'default');
-          thinkingWrap.hidden = modeChoices.length < 2;
+            : '';
+          thinkingWrap.hidden = false;
         };
-        renderThinking(_variantKey(initialChoice));
+        renderThinking(initialChoice ? _variantKey(initialChoice) : '');
         modeSelect.addEventListener('change', event => {
           event.stopPropagation();
-          renderThinking('default');
+          renderThinking('');
         });
         thinkingSelect.addEventListener('change', event => event.stopPropagation());
         useButton.addEventListener('click', event => {
           event.preventDefault();
           event.stopPropagation();
-          const selected = choicesForMode().find(choice => (
+          const selected = _uniqueChoice(choicesForMode().filter(choice => (
             _variantKey(choice) === thinkingSelect.value
-          )) || choicesForMode()[0];
+          )));
           if (selected) _pick(selected);
         });
         optionsButton.addEventListener('click', event => {
@@ -774,7 +764,7 @@ function _initModelPickerDropdown() {
           const index = favs.indexOf(key);
           if (index >= 0) favs.splice(index, 1);
         });
-        if (nowFav) favs.push(modelChoiceKey(initialChoice));
+        if (nowFav && initialChoice) favs.push(modelChoiceKey(initialChoice));
         _saveList(FAVORITES_KEY, favs);
         isFavorite = nowFav;
         _setFavState(nowFav);
@@ -793,7 +783,10 @@ function _initModelPickerDropdown() {
       });
       row.appendChild(favDot);
 
-      row.addEventListener('click', () => _pick(baseChoice));
+      row.addEventListener('click', () => {
+        if (baseChoice) _pick(baseChoice);
+        else family.querySelector('.mp-model-options-button')?.click();
+      });
       listEl.appendChild(family);
       return family;
     }
@@ -894,7 +887,7 @@ function _initModelPickerDropdown() {
             _collapsedProviders.add(provider);
             _justExpandedProvider = null;
           }
-          _saveList('odysseus-model-collapsed', [..._collapsedProviders]);
+          _saveList('openclank-model-collapsed', [..._collapsedProviders]);
           const st = listEl.scrollTop;
           _populate('');
           listEl.scrollTop = st;
@@ -928,6 +921,8 @@ async function _pick(m) {
       } catch (_) {}
     };
     try {
+      const cached = window.modelsModule?.getCachedItems?.() || [];
+      if (cached.length && !catalogHasModelChoice(cached, m.mid, m.endpointId, m.url)) { uiModule.showToast('Model unavailable or ambiguous'); return; }
       const currentSessionId = _deps.getCurrentSessionId();
       const navToken = _deps.getSessionNavigationToken?.();
       const stillCurrent = () => _deps.getCurrentSessionId() === currentSessionId &&
@@ -955,7 +950,7 @@ async function _pick(m) {
     }
     if (!currentSessionId && _pendingChat) {
       // Already have a deferred session — just update the model
-      _deps.setPendingChat({ url: m.url, modelId: m.mid, endpointId: m.endpointId, source: 'manual' });
+      _deps.setPendingChat({ ..._pendingChat, url: m.url, modelId: m.mid, endpointId: m.endpointId, source: 'manual' });
       // Header stays as session name — model switch only updates picker
       _completePick();
       return;
@@ -1013,25 +1008,30 @@ async function _pick(m) {
   document.addEventListener('odysseus:auto-select-model', async (e) => {
     const detail = (e && e.detail) || {};
     const currentSessionId = _deps.getCurrentSessionId();
+    const navToken = _deps.getSessionNavigationToken?.();
+    const owner = window.__openClankAuthenticatedUser, account = document.body?.dataset?.accountId;
     const sessions = _deps.getSessions();
     const current = sessions.find(x => x.id === currentSessionId);
     const pending = _deps.getPendingChat();
-    if ((current && current.model) || (pending && pending.modelId && pending.source === 'manual')) return;
+    if (!detail.modelId || (current && current.model) || (pending && pending.modelId)) return;
 
     if (window.modelsModule && window.modelsModule.refreshModels) {
       try { await window.modelsModule.refreshModels(false); } catch (_) {}
     }
+    if (_deps.getCurrentSessionId() !== currentSessionId || _deps.getPendingChat() !== pending || window.__openClankAuthenticatedUser !== owner
+        || document.body?.dataset?.accountId !== account || (navToken !== undefined && _deps.getSessionNavigationToken?.() !== navToken)) return;
     const items = window.modelsModule && window.modelsModule.getCachedItems ? window.modelsModule.getCachedItems() : [];
     const targetEndpointId = detail.endpointId ? String(detail.endpointId) : '';
     const targetModel = detail.modelId || '';
-    let match = null;
+    const matches = new Map();
     for (const item of items) {
       if (item.offline) continue;
       if (targetEndpointId && String(item.endpoint_id || '') !== targetEndpointId) continue;
       const entries = catalogEntries(item);
-      const idx = targetModel ? entries.findIndex(entry => entry.mid === targetModel) : (entries.length ? 0 : -1);
+      if (!targetEndpointId && detail.url && String(item.url || '').replace(/\/+$/, '') !== String(detail.url).replace(/\/+$/, '')) continue;
+      const idx = entries.findIndex(entry => entry.mid === targetModel);
       if (idx >= 0) {
-        match = {
+        const match = {
           mid: entries[idx].mid,
           display: (entries[idx].displayName || entries[idx].mid).split('/').pop(),
           url: item.url || detail.url || '',
@@ -1050,20 +1050,12 @@ async function _pick(m) {
             item.url || detail.url || '',
           ].filter(Boolean).join(' '),
         };
-        break;
+        match.providerModelId = entries[idx].providerModelId || null;
+        match.optionRouteId = entries[idx].optionRouteId || null;
+        matches.set(JSON.stringify([modelChoiceKey(match),match.providerModelId,match.optionRouteId]), match);
       }
     }
-    if (!match && detail.modelId && detail.url) {
-      match = {
-        mid: detail.modelId,
-        display: String(detail.modelId).split('/').pop(),
-        url: detail.url,
-        endpointId: detail.endpointId || '',
-        epName: detail.endpointName || '',
-        providerText: [detail.endpointName || '', detail.url || ''].filter(Boolean).join(' '),
-      };
-    }
-    if (match) await _pick(match);
+    if (matches.size === 1) await _pick(matches.values().next().value);
   });
 
   btn.addEventListener('pointerdown', (e) => {
@@ -1081,11 +1073,6 @@ async function _pick(m) {
         _renderLoading('Loading models…');
       }
       if (window.modelsModule && window.modelsModule.refreshModels) {
-        // Force the cheap /api/models cache refresh when the picker opens.
-        // This does not wait on provider probes; the backend returns cached
-        // inventory and starts refresh work separately. Without this, models
-        // enabled in Added Models can be absent from the chatbox picker until
-        // the tab's frontend cache ages out.
         _refreshPickerModels({ force: hasCache, showLoading: !hasCache }).then(() => {
           if (!menu.classList.contains('hidden')) _populate(search.value || '');
           updateModelPicker();
@@ -1111,7 +1098,7 @@ async function _pick(m) {
       refreshBtn.disabled = true;
       refreshBtn.classList.add('spinning');
       try {
-        await _refreshPickerModels({ force: true, showLoading: true });
+        await _refreshPickerModels({ force: true, showLoading: true, discover: true });
         if (!menu.classList.contains('hidden')) _populate(search.value || '');
         updateModelPicker();
       } catch (_) {
@@ -1173,7 +1160,6 @@ export function updateModelPicker() {
   } else if (_pendingChat && _pendingChat.modelId) {
     modelId = _pendingChat.modelId;
     if (!_modelExists(modelId, _pendingChat.url || '', _pendingChat.endpointId || '')) {
-      _deps.setPendingChat(null);
       modelId = null;
     }
   }
@@ -1187,7 +1173,7 @@ export function updateModelPicker() {
     !currentSessionId &&
     window.modelsModule &&
     window.modelsModule.getCachedItems &&
-    (!modelId || (latestPending && latestPending.source === 'fallback'))
+    !latestPending
   ) {
     _ensureDefaultPendingChat();
   }

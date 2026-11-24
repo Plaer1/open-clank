@@ -11,10 +11,11 @@ use super::UnauthenticatedService;
 use super::grpc_retry;
 use super::handle_error;
 use crate::error::ProtocolError;
-use crate::types::CompressionMode;
 use crate::types::Endpoint;
 use crate::types::EnvironmentConfig;
 use crate::types::EnvironmentServerConfig;
+use crate::types::Oidc;
+use crate::types::ServerCompressionMode;
 
 impl From<lore_proto::lore::environment::v1::Environment> for EnvironmentConfig {
     fn from(value: lore_proto::lore::environment::v1::Environment) -> Self {
@@ -50,6 +51,11 @@ impl From<lore_proto::lore::environment::v1::Environment> for EnvironmentConfig 
                 } else {
                     None
                 },
+                user_url: if !endpoint.user_url.is_empty() {
+                    Some(endpoint.user_url.clone())
+                } else {
+                    None
+                },
             }),
             config: value.config.map(|config| EnvironmentServerConfig {
                 max_query_batch: if config.max_query_batch > 0 {
@@ -59,10 +65,29 @@ impl From<lore_proto::lore::environment::v1::Environment> for EnvironmentConfig 
                 },
                 compression_mode: config
                     .compression_mode
-                    .map(|mode| CompressionMode::from_u32(mode as u32)),
+                    .map(|mode| ServerCompressionMode::from_u32(mode as u32)),
             }),
+            oidc: value.oidc.and_then(oidc_from_proto),
         }
     }
+}
+
+/// `None` for a message with no issuer: there is no provider to discover without one.
+fn oidc_from_proto(oidc: lore_proto::lore::environment::v1::Oidc) -> Option<Oidc> {
+    if oidc.issuer.is_empty() {
+        return None;
+    }
+    let non_empty = |value: String| (!value.is_empty()).then_some(value);
+    Some(Oidc {
+        issuer: oidc.issuer,
+        client_id: oidc.client_id,
+        scopes: oidc.scopes,
+        preferred: oidc.preferred,
+        resource_template: non_empty(oidc.resource_template),
+        scope_template: non_empty(oidc.scope_template),
+        token_exchange_issuer: non_empty(oidc.token_exchange_issuer),
+        client_credentials_scopes: oidc.client_credentials_scopes,
+    })
 }
 
 #[derive(Clone)]

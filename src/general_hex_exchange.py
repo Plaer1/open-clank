@@ -11,11 +11,8 @@ from pathlib import Path
 
 
 def ensure_general_hex_exchange_schema(db_path):
-    with sqlite3.connect(db_path, timeout=30) as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS fm_general_hex_exchange_drafts (
-            owner_id TEXT NOT NULL, draft_id TEXT NOT NULL, revision INTEGER NOT NULL,
-            payload_json TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(owner_id,draft_id))''')
+    from src.general_hex_library import ensure_general_hex_schema
+    ensure_general_hex_schema(db_path)
 
 
 def _declarative(rule):

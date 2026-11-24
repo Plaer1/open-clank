@@ -1,0 +1,35 @@
+{
+  "id": "batch-099",
+  "group": "docs.openclank-docs-wiki-recipes",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1964,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-wiki-recipes.title",
+      "source": "Wiki Recipes",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-wiki-recipes.body",
+      "source": "# Wiki Recipes\n\n**Wiki** on Editor’s left rail can display the same page you were editing, complete with links, attachments and the current draft. Switch to **Source** to use the examples below in a personal [[Journal|journal page]].\n\n## Link a page and embed a section\n\nLink to a page by name. Add a heading and a leading exclamation mark to display that section in place:\n\n```markdown\n[[OpenClank/Editor|Editor guide]]\n![[OpenClank/Editor#Source comments]]\n```\n\nHere is the live section from the manual:\n\n![[OpenClank/Editor#Source comments]]\n\n## Media with an accessible resource\n\nUse **Media** to select an adopted picture, recording or PDF. For an image, `![[My photo.png|640]]` sets a display width. If an embed goes missing, check the resource name and your access.\n\n## Source comments and a reusable template\n\nSet a page’s `type` property to `template`, or select a host Markdown folder with **Tools → Choose template folder…**. In a writable page, choose **Insert template** and review any property collisions. The result is a copy you can change independently.\n\n## Typed tables, Bases and Canvas\n\n- **Typed table.** Copy **Typed table (dates, currency, totals)** from **Editor commands → Syntax gallery** into a page for editable quantities and calculated totals.\n- **Base.** A `.base` view filters pages by their properties. To correct a value, open the source page from its row and edit the property in **Details**.\n- **Canvas.** **Note actions → View raw source** exposes a canvas’s node data. Save valid JSON and choose **Back to typed view** to see the result.\n\n## Open Wiki and preserve native data\n\nThe Library’s native `.memes` export carries structured page data. Use Markdown export when the text is what you want to take elsewhere. To trace relationships between saved pages, open [[Graph]].\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

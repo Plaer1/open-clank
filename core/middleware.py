@@ -15,11 +15,11 @@ from starlette.routing import get_route_path
 # routes via HTTP loopback (the agent's tool calls don't carry the
 # admin user's session cookie). Set once at import; tools read the
 # same value from this module. Never persisted or exposed externally.
-INTERNAL_TOOL_TOKEN = os.environ.get("ODYSSEUS_INTERNAL_TOKEN") or secrets.token_hex(32)
+INTERNAL_TOOL_TOKEN = os.environ.get("OPEN_CLANK_INTERNAL_TOKEN") or secrets.token_hex(32)
 INTERNAL_TOOL_HEADER = "X-Odysseus-Internal-Token"
 INTERNAL_TOOL_OWNER_HEADER = "X-Open-Clank-Owner"
 INTERNAL_TOOL_WORKSPACE_HEADER = "X-Open-Clank-Workspace"
-# Pseudo-username on in-process tool-loopback requests; require_admin trusts it and it is reserved.
+# Reserved pseudo-username on authenticated in-process tool-loopback requests.
 INTERNAL_TOOL_USER = "internal-tool"
 
 
@@ -57,16 +57,14 @@ def is_cors_preflight(method: str, headers) -> bool:
 
 
 def require_admin(request: Request):
-    """Raise 403 if the current user isn't an admin.
-    Allows access when auth is explicitly disabled, or when the request carries
-    the in-process internal-tool token used by loopback agent tools.
-    """
-    if getattr(request.state, "internal_tool_authenticated", False) and getattr(request.state, "authenticated", False):
-        return
+    """Require the established administrator role of the verified account."""
     auth_mgr = getattr(request.app.state, "auth_manager", None)
     if auth_mgr is None:
         raise HTTPException(503, "Authentication unavailable")
     user = getattr(request.state, "current_user", None)
+    if user == INTERNAL_TOOL_USER:
+        from src.auth_helpers import effective_user
+        user = effective_user(request) if getattr(request.state, "internal_tool_authenticated", False) else None
     if not getattr(request.state, "authenticated", False) or not user or user not in auth_mgr.users:
         raise HTTPException(403, "Admin only")
     try:
@@ -101,6 +99,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         is_document_pdf_preview = path.startswith("/api/document/") and path.endswith("/render-pdf")
         # Visual report pages are self-contained HTML — need inline scripts + external images
         is_report = path.startswith("/api/research/report/")
+        route_name = str(getattr(request.scope.get("route"), "name", "") or "")
+        content_type = str(response.headers.get("content-type") or "").lower()
+        is_app_shell_html = content_type.startswith("text/html") and (
+            route_name == "serve_index"
+            or route_name == "serve_settings"
+            or route_name.startswith("serve_shell_")
+        )
 
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -139,6 +144,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             # Migrating to nonce-only requires templating the HTML files +
             # auditing every JS-set style attribute. Since inline styles
             # don't execute script, the residual risk is visual-only.
+            frame_source = "frame-src 'self' http://*.artifacts.localhost:*; " if is_app_shell_html else "frame-src 'self'; "
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
                 f"script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net; "
@@ -147,8 +153,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "img-src 'self' data: blob: https:; "
                 "media-src 'self' blob:; "
                 "connect-src 'self'; "
-                "frame-src 'self'; "
-                "frame-ancestors 'none'"
+                + frame_source
+                + "frame-ancestors 'none'"
             )
         if resource_csp and resource_csp != response.headers.get("Content-Security-Policy"):
             response.headers.append("Content-Security-Policy", resource_csp)

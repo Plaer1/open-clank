@@ -5,11 +5,13 @@ import os
 import hashlib
 import json
 import logging
+import math
 import re
 import shutil
 import threading
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Depends
@@ -26,6 +28,65 @@ from services.memory.skill_lifecycle import locked
 UPLOADS_DIR = PERSONAL_UPLOADS_DIR
 
 logger = logging.getLogger(__name__)
+
+_PERSONAL_DOCUMENT_AUTHORITY_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _PersonalDocumentAuthority:
+    """Original Host admission; source evidence is not a write grant."""
+    owner: str
+    account: str
+    snapshot: object
+    _check: object
+    _seal: object
+
+    def __post_init__(self):
+        if self._seal is not _PERSONAL_DOCUMENT_AUTHORITY_SEAL:
+            raise ValueError('personal document authority unavailable')
+
+    def current_account(self):
+        return self._seal is _PERSONAL_DOCUMENT_AUTHORITY_SEAL and self._check(False) is True
+
+    def current_source(self):
+        return self._seal is _PERSONAL_DOCUMENT_AUTHORITY_SEAL and self._check(True) is True
+
+
+_RELOCATION_PROOF_SEAL = object()
+
+
+class _NativeRelocationProof:
+    def __init__(self, capability, provider, step, receipt, relocation, seal):
+        if seal is not _RELOCATION_PROOF_SEAL:
+            raise PersonalRagLifecycleError('native relocation proof unavailable')
+        self.capability, self.provider, self.step = capability, provider, step
+        self.receipt, self.relocation, self._seal = receipt, relocation, seal
+
+    def assert_current(self, source, target, manifest):
+        if self._seal is not _RELOCATION_PROOF_SEAL:
+            raise PersonalRagLifecycleError('native relocation proof unavailable')
+        self.capability.assert_current(provider=self.provider, action='rename', owner=source, new_owner=target)
+        operation = self.capability.lifecycle.get_operation(self.capability.operation_id)
+        step = (operation.get('steps') or {}).get(self.step) or {}
+        manifests = operation.get('manifest') or {}
+        base_step = 'memory_fm_tombstoned' if self.step.startswith('memory_fm_reverse_') else self.step
+        base = manifests.get(base_step) or {}
+        bound = base.get('rag_relocation')
+        if self.step.startswith('memory_fm_reverse_') and bound is not None:
+            bound = {'from': bound['to'], 'to': bound['from']}
+        if (step.get('state') != 'applied' or step.get('receipt') != self.receipt
+                or 'rag_relocation' not in base or bound != self.relocation
+                or manifest.get('rag_relocation') != self.relocation):
+            raise PersonalRagLifecycleError('native relocation proof changed')
+
+
+def _issue_native_relocation_proof(*, capability, provider, step, receipt, relocation, source, target, manifest):
+    from src.openclank.chat_source_bridge import HostAccountSourceTransition
+    if type(capability) is not HostAccountSourceTransition:
+        raise PersonalRagLifecycleError('native relocation authority unavailable')
+    proof = _NativeRelocationProof(capability, provider, step, receipt, relocation, _RELOCATION_PROOF_SEAL)
+    proof.assert_current(source, target, manifest)
+    return proof
 
 
 def _personal_upload_dir_for_owner(owner: str | None, *, create: bool = True) -> str:
@@ -130,6 +191,12 @@ class PersonalRagLifecycle:
         if os.path.lexists(candidate) and os.path.islink(candidate):
             raise PersonalRagLifecycleError("personal RAG owner path is a symlink")
         return candidate
+
+    def assert_relocation_current(self, source_owner: str, target_owner: str, manifest: dict) -> None:
+        if self.canonical_rag_managed_externally:
+            expected = {'from': self._owner_dir(source_owner), 'to': self._owner_dir(target_owner)}
+            if type(manifest) is not dict or manifest.get('rag_relocation') != expected:
+                raise PersonalRagLifecycleError('personal RAG relocation root changed')
 
     @staticmethod
     def _empty_inventory() -> dict:
@@ -269,11 +336,25 @@ class PersonalRagLifecycle:
             if target_inventory["count"] or os.path.exists(self._owner_dir(target)):
                 raise PersonalRagLifecycleError("target personal RAG owner already exists")
             token = uuid.uuid4().hex
-        return {"version": 1, "path_map_token": token, "source": source_inventory, "target": target_inventory}
+            source_dir = os.path.abspath(self._owner_dir(source))
+            target_dir = os.path.abspath(self._owner_dir(target))
+            # The external FM inventory is intentionally not included in the
+            # Personal inventory, so an empty directory cannot prove that no
+            # source URI uses this prefix.
+            has_source = (self.canonical_rag_managed_externally or os.path.exists(source_dir)
+                          or int((source_inventory.get('rag') or {}).get('row_count', 0)) > 0)
+            relocation = {'from': source_dir, 'to': target_dir} if has_source else None
+        return {"version": 1, "path_map_token": token, "source": source_inventory, "target": target_inventory,
+                "rag_relocation": relocation}
 
-    def reconcile_owner_rename(self, source_owner: str, target_owner: str, manifest: dict) -> dict:
+    def reconcile_owner_rename(self, source_owner: str, target_owner: str, manifest: dict, *, native_relocation_proof=None) -> dict:
         source = self._owner(source_owner)
         target = self._owner(target_owner)
+        if native_relocation_proof is not None:
+            self.assert_relocation_current(source, target, manifest)
+            if type(native_relocation_proof) is not _NativeRelocationProof:
+                raise PersonalRagLifecycleError('native relocation proof unavailable')
+            native_relocation_proof.assert_current(source, target, manifest)
         token = str(manifest.get("path_map_token") or "")
         if not re.fullmatch(r"[0-9a-f]{32}", token):
             raise PersonalRagLifecycleError("invalid personal RAG path-map token")
@@ -318,7 +399,7 @@ class PersonalRagLifecycle:
                 if self.canonical_rag_managed_externally
                 else getattr(self.rag_manager, "rename_owner", None)
             )
-            if int(expected_rag.get("row_count", 0)) and not callable(rename_rag):
+            if int(expected_rag.get("row_count", 0)) and not callable(rename_rag) and native_relocation_proof is None:
                 raise PersonalRagLifecycleError("nonempty personal RAG state cannot be renamed")
             if source_exists:
                 if not self._same_inventory(self.owner_inventory(source), frozen):
@@ -341,7 +422,9 @@ class PersonalRagLifecycle:
             if callable(rename_directory):
                 rename_directory(source_dir, target_dir, path_map=path_map)
             path_receipt = None
-            if self.canonical_rag_managed_externally:
+            if self.canonical_rag_managed_externally and native_relocation_proof is not None:
+                native_relocation_proof.assert_current(source, target, manifest)
+            elif self.canonical_rag_managed_externally:
                 rewrite_paths = getattr(self.rag_manager, "rewrite_owner_paths", None)
                 if callable(rewrite_paths):
                     path_receipt = rewrite_paths(
@@ -349,7 +432,7 @@ class PersonalRagLifecycle:
                         path_map=path_map,
                         path_prefixes=[(source_dir, target_dir)],
                     )
-                elif getattr(self.rag_manager, "backend", None) == "frankenmemory":
+                elif getattr(self.rag_manager, "backend", None) == "memery":
                     raise PersonalRagLifecycleError(
                         "canonical RAG source paths cannot be reconciled"
                     )
@@ -366,6 +449,8 @@ class PersonalRagLifecycle:
                     rename_rag(source, target, path_map=path_map, path_prefixes=[(source_dir, target_dir)])
             if not self._same_closure(self.owner_inventory(target), frozen):
                 raise PersonalRagLifecycleError("personal RAG staged inventory does not match preview")
+            if native_relocation_proof is not None:
+                native_relocation_proof.assert_current(source, target, manifest)
             operation["state"] = "complete"
             operation["path_rows_rewritten"] = int(
                 (path_receipt or {}).get("updated_count", 0)
@@ -385,13 +470,15 @@ class PersonalRagLifecycle:
         frozen = manifest or self.preview_owner_rename(source_owner, target_owner)
         return self.reconcile_owner_rename(source_owner, target_owner, frozen)
 
-    def stage_to_tombstone(self, source_owner: str, tombstone_owner: str, manifest: dict) -> dict:
-        return self.reconcile_owner_rename(source_owner, tombstone_owner, manifest)
+    def stage_to_tombstone(self, source_owner: str, tombstone_owner: str, manifest: dict, *, native_relocation_proof=None) -> dict:
+        return self.reconcile_owner_rename(source_owner, tombstone_owner, manifest, native_relocation_proof=native_relocation_proof)
 
-    def compensate(self, source_owner: str, target_owner: str, manifest: dict) -> dict:
+    def compensate(self, source_owner: str, target_owner: str, manifest: dict, *, native_relocation_proof=None) -> dict:
         with self._guard():
             source = self._owner(source_owner)
             target = self._owner(target_owner)
+            if native_relocation_proof is not None:
+                self.assert_relocation_current(source, target, manifest)
             frozen = dict(manifest.get("source") or {})
             source_inventory = self.owner_inventory(source)
             target_inventory = self.owner_inventory(target)
@@ -415,7 +502,11 @@ class PersonalRagLifecycle:
                 # current because account mode deliberately leaves canonical
                 # RAG ownership to the Memory lifecycle.  Re-run the metadata
                 # transition explicitly; both adapters are idempotent.
-                if self.canonical_rag_managed_externally:
+                if self.canonical_rag_managed_externally and native_relocation_proof is not None:
+                    relocation = manifest.get('rag_relocation')
+                    inverse = {'from': relocation['to'], 'to': relocation['from']} if relocation is not None else None
+                    native_relocation_proof.assert_current(target, source, {'rag_relocation': inverse})
+                elif self.canonical_rag_managed_externally:
                     source_dir = self._owner_dir(source)
                     target_dir = self._owner_dir(target)
                     path_map = {}
@@ -438,7 +529,7 @@ class PersonalRagLifecycle:
                             path_map=path_map,
                             path_prefixes=[(target_dir, source_dir)],
                         )
-                    elif getattr(self.rag_manager, "backend", None) == "frankenmemory":
+                    elif getattr(self.rag_manager, "backend", None) == "memery":
                         raise PersonalRagLifecycleError(
                             "canonical RAG source paths cannot be reconciled"
                         )
@@ -450,6 +541,10 @@ class PersonalRagLifecycle:
 
             if not reverse:
                 reverse = self.preview_owner_rename(target, source)
+                if native_relocation_proof is not None:
+                    relocation = manifest.get('rag_relocation')
+                    reverse['rag_relocation'] = ({'from': relocation['to'], 'to': relocation['from']}
+                        if relocation is not None else None)
                 # Persist the reverse token before moving anything.  If the
                 # path rewrite fails after os.replace(), the next compensation
                 # call resumes this exact journaled transition instead of
@@ -463,7 +558,7 @@ class PersonalRagLifecycle:
                 forward_operation["compensation_manifest"] = reverse
                 self._save_journal(journal)
 
-            restored_receipt = self.reconcile_owner_rename(target, source, reverse)
+            restored_receipt = self.reconcile_owner_rename(target, source, reverse, native_relocation_proof=native_relocation_proof)
             if not self._same_inventory(restored_receipt["target"], frozen):
                 raise PersonalRagLifecycleError("personal RAG compensation verification failed")
             return {
@@ -636,9 +731,9 @@ def _index_personal_upload_batch(
                     "type": ext,
                     "owner": user,
                 }
-                if getattr(rag, "backend", "") == "frankenmemory":
+                if getattr(rag, "backend", "") == "memery":
                     if rag.add_document(text, metadata):
-                        from src.frankenmemory_rag import _chunks
+                        from src.memery_rag import _chunks
 
                         total_indexed += len(list(_chunks(text)))
                     else:
@@ -738,6 +833,323 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
     def _owner_lifecycle_lock(owner: str | None) -> asyncio.Lock:
         key = str(owner or "local-installation").strip().lower()
         return _owner_lifecycle_locks.setdefault(key, asyncio.Lock())
+
+    async def _guarded_personal_source_held(request, path, observe, *, deadline, owner, account, credential, state, auth, barrier, capture, loop, extra_current=None):
+        """Run under the existing owner lane, using its already captured authority."""
+        from src.openclank.account_request_barrier import _current_admission
+        from src.openclank.memory_job_admission import _completed_turn_thread
+        from src.openclank.personal_document_source import _retained_personal_document
+        async with barrier.admitted(owner):
+            admission = _current_admission.get()
+            def current(snapshot, source=True):
+                try:
+                    barrier.assert_live_admission(owner, admission)
+                    return (getattr(state, 'account_request_barrier', None) is barrier
+                        and getattr(state, 'auth_manager', None) is auth
+                        and getattr(state, 'capture_original_credential', None) is capture
+                        and loop.time() < deadline and credential() is True
+                        and require_privilege(request, 'can_use_documents') == owner
+                        and auth.account_id(owner) == account
+                        and auth.username_for_account_id(account) == owner
+                        and (extra_current is None or extra_current() is True)
+                        and (not source or snapshot.assert_current() is True))
+                except Exception:
+                    return False
+            async def inspect(snapshot):
+                if not current(snapshot):
+                    raise ValueError('personal document authority unavailable')
+                async with asyncio.timeout_at(deadline):
+                    authority = _PersonalDocumentAuthority(owner, account, snapshot,
+                        lambda source: current(snapshot, source), _PERSONAL_DOCUMENT_AUTHORITY_SEAL)
+                    result = await observe(authority)
+                if not current(snapshot, False):
+                    raise ValueError('personal document authority changed')
+                return result
+            def worker():
+                def current_on_loop():
+                    async def check():
+                        return current(None, False)
+                    future = asyncio.run_coroutine_threadsafe(check(), loop)
+                    try:
+                        return future.result(timeout=max(0.0, deadline - loop.time())) is True
+                    except Exception:
+                        future.cancel()
+                        return False
+                selected = path(current_on_loop) if callable(path) else path
+                with _retained_personal_document(owner, selected, UPLOADS_DIR) as snapshot:
+                    return asyncio.run_coroutine_threadsafe(inspect(snapshot), loop).result()
+            result, cancelled = await _completed_turn_thread(worker)
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+
+
+    async def _guarded_personal_source(request, path, observe, *, deadline, extra_current=None):
+        """Hold the real personal source owners while a private observer runs.
+
+        This source witness does not enable a document writer. The observer must
+        provide its own operation authority and exact original outcome handling.
+        """
+        from src.openclank.account_request_barrier import AccountRequestBarrier
+        if (not callable(observe) or type(deadline) is not float or not math.isfinite(deadline)
+                or getattr(request.state, 'api_token', False)
+                or getattr(request.state, 'internal_tool_authenticated', False)):
+            raise ValueError('personal document authority unavailable')
+        owner = require_privilege(request, 'can_use_documents')
+        state = request.app.state
+        auth = getattr(state, 'auth_manager', None)
+        barrier = getattr(state, 'account_request_barrier', None)
+        capture = getattr(state, 'capture_original_credential', None)
+        if (auth is None or type(barrier) is not AccountRequestBarrier or not callable(capture)):
+            raise ValueError('personal document authority unavailable')
+        account = auth.account_id(owner)
+        if not account or auth.username_for_account_id(account) != owner:
+            raise ValueError('personal document authority unavailable')
+        credential = capture(request, owner, account)
+        loop = asyncio.get_running_loop()
+        if loop.time() >= deadline:
+            raise ValueError('personal document authority unavailable')
+        async with asyncio.timeout_at(deadline):
+            async with _owner_lifecycle_lock(owner):
+                return await _guarded_personal_source_held(request, path, observe, deadline=deadline,
+                    owner=owner, account=account, credential=credential, state=state, auth=auth,
+                    barrier=barrier, capture=capture, loop=loop, extra_current=extra_current)
+
+    async def _guarded_personal_original(request, observe, *, deadline):
+        """Current named-account admission for a factual original read only."""
+        from src.openclank.account_request_barrier import AccountRequestBarrier, _current_admission
+        if (not callable(observe) or type(deadline) is not float or not math.isfinite(deadline)
+                or getattr(request.state, 'api_token', False)
+                or getattr(request.state, 'internal_tool_authenticated', False)):
+            raise ValueError('personal document authority unavailable')
+        owner = require_privilege(request, 'can_use_documents')
+        state=request.app.state; auth=getattr(state,'auth_manager',None)
+        barrier=getattr(state,'account_request_barrier',None); capture=getattr(state,'capture_original_credential',None)
+        if auth is None or type(barrier) is not AccountRequestBarrier or not callable(capture):
+            raise ValueError('personal document authority unavailable')
+        account=auth.account_id(owner)
+        if not account or auth.username_for_account_id(account)!=owner:
+            raise ValueError('personal document authority unavailable')
+        credential=capture(request,owner,account); loop=asyncio.get_running_loop()
+        async with asyncio.timeout_at(deadline):
+            async with barrier.admitted(owner):
+                admission=_current_admission.get()
+                def current(source):
+                    if source: return False
+                    try:
+                        barrier.assert_live_admission(owner,admission)
+                        return (getattr(state,'account_request_barrier',None) is barrier
+                            and getattr(state,'auth_manager',None) is auth
+                            and getattr(state,'capture_original_credential',None) is capture
+                            and loop.time()<deadline and credential() is True
+                            and require_privilege(request,'can_use_documents')==owner
+                            and auth.account_id(owner)==account and auth.username_for_account_id(account)==owner)
+                    except Exception: return False
+                authority=_PersonalDocumentAuthority(owner,account,None,current,_PERSONAL_DOCUMENT_AUTHORITY_SEAL)
+                if authority.current_account() is not True: raise ValueError('personal document authority unavailable')
+                async with asyncio.timeout_at(deadline):
+                    result=await observe(authority)
+                if authority.current_account() is not True: raise ValueError('personal document authority changed')
+                return result
+
+    async def _guarded_personal_bulk(request, observe, *, deadline):
+        """Hold one original named-human owner lane for a retained-snapshot job.
+
+        This is an account admission only. The internal observer must verify
+        the exact current Native document receipts, chunks and watermark at
+        each producer batch and finalization; no model or route is enabled.
+        """
+        from src.openclank.account_request_barrier import AccountRequestBarrier
+        if (not callable(observe) or type(deadline) is not float or not math.isfinite(deadline)
+                or getattr(request.state,'api_token',False) or getattr(request.state,'internal_tool_authenticated',False)):
+            raise ValueError('personal document authority unavailable')
+        owner=require_privilege(request,'can_use_documents');state=request.app.state
+        auth=getattr(state,'auth_manager',None);barrier=getattr(state,'account_request_barrier',None)
+        capture=getattr(state,'capture_original_credential',None);loop=asyncio.get_running_loop()
+        if auth is None or type(barrier) is not AccountRequestBarrier or not callable(capture):
+            raise ValueError('personal document authority unavailable')
+        account=auth.account_id(owner)
+        if not account or auth.username_for_account_id(account)!=owner or loop.time()>=deadline:
+            raise ValueError('personal document authority unavailable')
+        credential=capture(request,owner,account)
+        def outer_current():
+            try:
+                return (getattr(state,'account_request_barrier',None) is barrier
+                    and getattr(state,'auth_manager',None) is auth and getattr(state,'capture_original_credential',None) is capture
+                    and loop.time()<deadline and credential() is True
+                    and require_privilege(request,'can_use_documents')==owner
+                    and auth.account_id(owner)==account and auth.username_for_account_id(account)==owner)
+            except Exception:return False
+        async def inspect(authority):
+            if not outer_current() or authority.current_account() is not True:
+                raise ValueError('personal document authority changed')
+            result=await observe(authority)
+            if not outer_current() or authority.current_account() is not True:
+                raise ValueError('personal document authority changed')
+            return result
+        async with asyncio.timeout_at(deadline):
+            async with _owner_lifecycle_lock(owner):
+                if not outer_current():raise ValueError('personal document authority changed')
+                return await _guarded_personal_original(request,inspect,deadline=deadline)
+
+    async def _guarded_document_vector_intent(request, *, operation_id, action, deadline):
+        """Use only the current human document lane and its original credential."""
+        from src.embeddings import ManagedEmbeddingClient
+        from src.memery_provider import MemeryProvider
+        if action not in ('prepare','execute','status','prepare_v2','execute_v2','resume_v2','status_v2','cancel_v2') or type(operation_id) is not str or re.fullmatch(r'[A-Za-z0-9_-]{16,128}',operation_id) is None:
+            raise ValueError('document vector original unavailable')
+        async def operate(authority):
+            rag=get_rag_manager();factory=getattr(rag,'_embedding_client',None);state=request.app.state
+            provider=getattr(state,'canonical_memory_provider',None) or getattr(state,'memory_provider',None)
+            if type(provider) is not MemeryProvider or not callable(getattr(factory,'for_owner',None)):
+                raise ValueError('document vector producer unavailable')
+            selected=factory.for_owner(authority.owner)
+            if type(selected) is not ManagedEmbeddingClient or selected.owner!=authority.owner:
+                raise ValueError('document vector producer unavailable')
+            client=selected.for_root_operation(operation_id)
+            def current(source):
+                try:
+                    return (not source and authority.current_account() is True and get_rag_manager() is rag
+                        and getattr(rag,'_embedding_client',None) is factory and factory.for_owner(authority.owner) is selected
+                        and (getattr(state,'canonical_memory_provider',None) or getattr(state,'memory_provider',None)) is provider)
+                except Exception:return False
+            scoped=_PersonalDocumentAuthority(authority.owner,authority.account,None,current,_PERSONAL_DOCUMENT_AUTHORITY_SEAL)
+            if scoped.current_account() is not True:raise ValueError('document vector producer changed')
+            if action=='prepare':return await provider._host_document_vector_intent_prepare(scoped,client,operation_id=operation_id,deadline=deadline)
+            if action=='execute':return await provider._host_document_vector_intent_execute(scoped,client,operation_id=operation_id,deadline=deadline)
+            if action=='cancel_v2':return await provider._host_document_vector_v2_cancel(scoped,client,operation_id=operation_id,deadline=deadline)
+            if action=='prepare_v2':return await provider._host_document_vector_intent_prepare(scoped,client,operation_id=operation_id,deadline=deadline,version=2)
+            if action in ('execute_v2','resume_v2'):return await provider._host_document_vector_v2_step(scoped,client,operation_id=operation_id,deadline=deadline,action='execute' if action=='execute_v2' else 'resume')
+            return await provider._host_document_vector_intent_status(scoped,client,operation_id=operation_id,deadline=deadline,version=2 if action=='status_v2' else 1)
+        return await _guarded_personal_bulk(request,operate,deadline=deadline)
+
+    async def _guarded_document_vector_prepare(request, *, deadline):
+        # The operation ID is returned only after the original is durable, and
+        # this preparation never starts a model or sends an embedding frame.
+        operation_id='vecbuild_'+uuid.uuid4().hex
+        return await _guarded_document_vector_intent(request,operation_id=operation_id,action='prepare',deadline=deadline)
+
+    async def _guarded_document_vector_build(request, *, operation_id, deadline):
+        return await _guarded_document_vector_intent(request,operation_id=operation_id,action='execute',deadline=deadline)
+
+    async def _guarded_document_vector_status(request, *, operation_id, deadline):
+        return await _guarded_document_vector_intent(request,operation_id=operation_id,action='status',deadline=deadline)
+
+    async def _guarded_document_vector_v2_prepare(request, *, deadline):
+        operation_id='vecbuild_'+uuid.uuid4().hex
+        return await _guarded_document_vector_intent(request,operation_id=operation_id,action='prepare_v2',deadline=deadline)
+
+    async def _guarded_document_vector_v2_execute(request, *, operation_id, deadline):
+        return await _guarded_document_vector_intent(request,operation_id=operation_id,action='execute_v2',deadline=deadline)
+
+    async def _guarded_document_vector_v2_resume(request, *, operation_id, deadline):
+        return await _guarded_document_vector_intent(request,operation_id=operation_id,action='resume_v2',deadline=deadline)
+
+    async def _guarded_document_vector_v2_status(request, *, operation_id, deadline):
+        return await _guarded_document_vector_intent(request,operation_id=operation_id,action='status_v2',deadline=deadline)
+
+    @router.get('/vector-build/capability')
+    async def document_vector_build_capability(request: Request):
+        from src.memory_provider import MemoryRequestRejectedError
+        from src.openclank.operation_router import ManagedOperationError
+        from src.embeddings import ManagedEmbeddingError
+        from src.embeddings import ManagedEmbeddingClient, ManagedEmbeddingClientFactory
+        from src.memery_provider import MemeryProvider
+        operation_id='vec_cap_'+uuid.uuid4().hex
+        async def inspect(authority):
+            rag=get_rag_manager();state=request.app.state;factory=getattr(rag,'_embedding_client',None)
+            provider=getattr(state,'canonical_memory_provider',None) or getattr(state,'memory_provider',None)
+            if type(factory) is not ManagedEmbeddingClientFactory or type(provider) is not MemeryProvider:
+                raise ValueError('document vector capability unavailable')
+            client=ManagedEmbeddingClient(owner=authority.owner,root_operation_id=operation_id)
+            def current(source):
+                try:return (not source and authority.current_account() is True and get_rag_manager() is rag
+                    and getattr(rag,'_embedding_client',None) is factory
+                    and (getattr(state,'canonical_memory_provider',None) or getattr(state,'memory_provider',None)) is provider)
+                except Exception:return False
+            scoped=_PersonalDocumentAuthority(authority.owner,authority.account,None,current,_PERSONAL_DOCUMENT_AUTHORITY_SEAL)
+            return await provider._host_document_vector_v2_capability(scoped,client,operation_id=operation_id,deadline=float(asyncio.get_running_loop().time()+10.0))
+        try:
+            return await _guarded_personal_bulk(request,inspect,deadline=float(asyncio.get_running_loop().time()+15.0))
+        except (ValueError, TimeoutError, MemoryRequestRejectedError, ManagedOperationError, ManagedEmbeddingError):
+            raise HTTPException(409,'Document embedding build unavailable')
+
+    @router.post('/vector-build/prepare')
+    async def document_vector_build_prepare(request: Request):
+        from src.memory_provider import MemoryRequestRejectedError
+        from src.openclank.operation_router import ManagedOperationError
+        from src.embeddings import ManagedEmbeddingError
+        try:
+            return await _guarded_document_vector_v2_prepare(request,deadline=float(asyncio.get_running_loop().time()+30.0))
+        except (ValueError, TimeoutError, MemoryRequestRejectedError, ManagedOperationError, ManagedEmbeddingError):
+            raise HTTPException(409,'Document embedding preparation unavailable')
+
+    async def _document_vector_build_action(request: Request, body: dict, action: str):
+        from src.memory_provider import MemoryRequestRejectedError
+        from src.openclank.operation_router import ManagedOperationError
+        from src.embeddings import ManagedEmbeddingError
+        if type(body) is not dict or set(body)!={'operation_id'} or type(body.get('operation_id')) is not str:
+            raise HTTPException(400,'Document build ID required')
+        try:
+            return await _guarded_document_vector_intent(request,operation_id=body['operation_id'],action=action,deadline=float(asyncio.get_running_loop().time()+(120.0 if action in ('execute_v2','resume_v2') else 30.0)))
+        except (ValueError, TimeoutError, MemoryRequestRejectedError, ManagedOperationError, ManagedEmbeddingError):
+            raise HTTPException(409,'Document build unavailable or outcome unconfirmed')
+
+    @router.post('/vector-build/execute')
+    async def document_vector_build_execute(request: Request, body: dict):
+        return await _document_vector_build_action(request,body,'execute_v2')
+
+    @router.post('/vector-build/status')
+    async def document_vector_build_status(request: Request, body: dict):
+        return await _document_vector_build_action(request,body,'status_v2')
+
+    @router.post('/vector-build/resume')
+    async def document_vector_build_resume(request: Request, body: dict):
+        return await _document_vector_build_action(request,body,'resume_v2')
+
+    @router.post('/vector-build/cancel')
+    async def document_vector_build_cancel(request: Request, body: dict):
+        return await _document_vector_build_action(request,body,'cancel_v2')
+
+    async def _guarded_document_vector_profile_build(request, *, deadline):
+        """Explicit CPU-only profile creation from the current canonical generation."""
+        from src.memery_provider import MemeryProvider
+        async def build(authority):
+            state=request.app.state;rag=get_rag_manager();factory=getattr(rag,'_embedding_client',None)
+            provider=getattr(state,'canonical_memory_provider',None) or getattr(state,'memory_provider',None)
+            if type(provider) is not MemeryProvider or rag is None:
+                raise ValueError('document vector profile unavailable')
+            def current(source):
+                try:
+                    return (not source and authority.current_account() is True and get_rag_manager() is rag
+                        and getattr(rag,'_embedding_client',None) is factory
+                        and (getattr(state,'canonical_memory_provider',None) or getattr(state,'memory_provider',None)) is provider)
+                except Exception:return False
+            scoped=_PersonalDocumentAuthority(authority.owner,authority.account,None,current,_PERSONAL_DOCUMENT_AUTHORITY_SEAL)
+            if scoped.current_account() is not True:raise ValueError('document vector profile authority changed')
+            return await provider._host_document_vector_profile_build(scoped,deadline=deadline)
+        return await _guarded_personal_bulk(request,build,deadline=deadline)
+
+    @router.post('/vector-profile/build')
+    async def build_document_vector_profile(request: Request):
+        from src.memory_provider import MemoryRequestRejectedError
+        try:
+            return await _guarded_document_vector_profile_build(request,deadline=float(asyncio.get_running_loop().time()+120.0))
+        except (ValueError, TimeoutError, MemoryRequestRejectedError):
+            raise HTTPException(409,'Document vector profile unavailable or its outcome could not be confirmed')
+
+    # Private source and factual original only; no user-facing route is enabled.
+    router._guarded_personal_source = _guarded_personal_source
+    router._guarded_personal_original = _guarded_personal_original
+    router._guarded_personal_bulk = _guarded_personal_bulk
+    router._guarded_document_vector_prepare = _guarded_document_vector_prepare
+    router._guarded_document_vector_build = _guarded_document_vector_build
+    router._guarded_document_vector_status = _guarded_document_vector_status
+    router._guarded_document_vector_v2_prepare = _guarded_document_vector_v2_prepare
+    router._guarded_document_vector_v2_execute = _guarded_document_vector_v2_execute
+    router._guarded_document_vector_v2_resume = _guarded_document_vector_v2_resume
+    router._guarded_document_vector_v2_status = _guarded_document_vector_v2_status
+    router._guarded_document_vector_profile_build = _guarded_document_vector_profile_build
 
     def _rag():
         """Get the current RAG manager, retrying init if needed."""
@@ -880,13 +1292,57 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             logger.error(f"Error removing directory from RAG: {e}")
             raise HTTPException(500, f"Failed to remove directory: {str(e)}")
     
+    @router.post("/document-structure/resume/{name}")
+    async def resume_personal_document_structure(name: str, request: Request):
+        from src.memery_provider import MemeryProvider
+        from src.openclank.document_ingestion import personal
+        if name != os.path.basename(name) or name in {"", ".", ".."} or len(name.encode()) > 255:
+            raise HTTPException(422, "Invalid saved document name")
+        owner = require_privilege(request, 'can_use_documents')
+        state = request.app.state
+        provider = getattr(state,"canonical_memory_provider",None) or getattr(state,"memory_provider",None)
+        if type(provider) is not MemeryProvider:
+            raise HTTPException(503,"Document structure is unavailable")
+        deadline = asyncio.get_running_loop().time() + 10
+        async def continue_source(authority):
+            head = await provider._host_document_head(authority,deadline=deadline)
+            if (head["state"] != "present" or head["forget_state"] != "active"
+                    or head["content_sha256"] != hashlib.sha256(authority.snapshot.text.encode()).hexdigest()):
+                raise ValueError("Indexed source changed")
+            return await personal(provider,authority,source_id=head["source_id"],
+                                  source_revision=head["source_revision"],deadline=deadline)
+        try:
+            path = os.path.join(_personal_upload_dir_for_owner(owner,create=False),name)
+            return await _guarded_personal_source(request,path,continue_source,deadline=deadline)
+        except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+            raise HTTPException(409,'Saved source or document structure is unavailable') from exc
+
     @router.post("/upload")
     async def upload_files_to_rag(request: Request, files: List[UploadFile] = File(...)):
         """Upload files directly into RAG. Supports text and PDF."""
         user = require_privilege(request, "can_use_documents")
-        rag = _rag()
-        if not rag:
+        from src.openclank.chat_source_bridge import canonical_source_provider
+        from src.openclank.account_request_barrier import AccountRequestBarrier
+        state = request.app.state
+        provider = canonical_source_provider(state)
+        guarded = provider is not None and getattr(provider, '_guarded_v17', False) is True
+        if not guarded and os.environ.get('OPENCLANK_MEMORY_STORE_PROFILE', 'legacy-v16') in ('guarded-v17', 'guarded-v18'):
+            raise HTTPException(503, "Guarded document indexing is unavailable")
+        rag = None if guarded else _rag()
+        if not guarded and not rag:
             raise HTTPException(503, "RAG system is not available — is the embedding service running?")
+        if guarded:
+            auth=getattr(state,'auth_manager',None); barrier=getattr(state,'account_request_barrier',None)
+            capture=getattr(state,'capture_original_credential',None)
+            if (getattr(request.state,'api_token',False) or getattr(request.state,'internal_tool_authenticated',False)
+                    or auth is None or type(barrier) is not AccountRequestBarrier or not callable(capture)):
+                raise HTTPException(503, "Guarded document indexing is unavailable")
+            account=auth.account_id(user)
+            if not account or auth.username_for_account_id(account)!=user:
+                raise HTTPException(503, "Guarded document indexing is unavailable")
+            credential=capture(request,user,account)
+            if await provider._host_document_import_ready() is not True or canonical_source_provider(state) is not provider:
+                raise HTTPException(503, "Guarded document indexing is unavailable")
 
         pending: list[tuple[UploadFile, bytes]] = []
         oversized = 0
@@ -897,6 +1353,77 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 oversized += 1
             else:
                 pending.append((upload, content_bytes))
+
+        if guarded:
+            loop=asyncio.get_running_loop(); uploaded=[]; outcomes=[]; indexed=0
+            async with _owner_lifecycle_lock(user):
+                if await provider._host_document_import_ready() is not True or canonical_source_provider(state) is not provider:
+                    raise HTTPException(503, "Guarded document indexing is unavailable")
+                for upload, content_bytes in pending:
+                    saved={}; write_status={}; operation_id=uuid.uuid4().hex
+                    deadline=float(loop.time()+30.0)
+                    def save(check):
+                        lock_target=os.path.join(os.path.abspath(UPLOADS_DIR), '.owner-lifecycle.json')
+                        with locked(lock_target):
+                            if check() is not True or canonical_source_provider(state) is not provider:
+                                raise ValueError('personal document authority changed')
+                            directory=_personal_upload_dir_for_owner(user)
+                            file_path, _stored_name, safe_name=_unique_personal_upload_path(directory,upload.filename)
+                            flags=os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os,'O_CLOEXEC',0)
+                            root_fd=os.open(os.path.abspath(UPLOADS_DIR),flags); dir_fd=None
+                            try:
+                                dir_fd=os.open(os.path.basename(directory),flags,dir_fd=root_fd)
+                                fd=os.open(os.path.basename(file_path),os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,0o600,dir_fd=dir_fd)
+                                with os.fdopen(fd,'wb') as stream:
+                                    stream.write(content_bytes); stream.flush(); os.fsync(stream.fileno())
+                                    st=os.fstat(stream.fileno()); directory_stat=os.fstat(dir_fd); root_stat=os.fstat(root_fd)
+                                    saved.update(path=file_path,name=safe_name,
+                                        fingerprint=(st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns),
+                                        directory=(directory_stat.st_dev,directory_stat.st_ino), root=(root_stat.st_dev,root_stat.st_ino))
+                            finally:
+                                if dir_fd is not None: os.close(dir_fd)
+                                os.close(root_fd)
+                            return file_path
+                    async def apply(authority):
+                        snapshot=authority.snapshot
+                        if (canonical_source_provider(state) is not provider or snapshot._fingerprint != saved.get('fingerprint')
+                                or snapshot._directory_identity != saved.get('directory') or snapshot._root_identity != saved.get('root')):
+                            raise ValueError('personal document source changed')
+                        head=await provider._host_document_head(authority,deadline=deadline)
+                        expected=({'kind':'absent'} if head['state']=='absent' else
+                            {'kind':'revision','source_id':head['source_id'],'revision':head['source_revision'],'content_sha256':head['content_sha256'],'forget_state':head['forget_state']})
+                        result=await provider._host_document_upsert(authority,operation_id=operation_id,
+                            expected_head=expected,deadline=deadline,write_status=write_status)
+                        if result.get('state')!='committed': raise ValueError('personal document outcome unknown')
+                        from src.openclank.document_ingestion import personal
+                        structure = await personal(provider, authority, source_id=result["source_id"],
+                            source_revision=result["source_revision"], deadline=min(deadline - 0.25, loop.time() + 4))
+                        return result['chunk_count'], structure
+                    try:
+                        async with asyncio.timeout_at(deadline):
+                            count,structure=await _guarded_personal_source_held(request,save,apply,deadline=deadline,owner=user,
+                                account=account,credential=credential,state=state,auth=auth,barrier=barrier,capture=capture,loop=loop,
+                                extra_current=lambda: canonical_source_provider(state) is provider)
+                        indexed+=count; uploaded.append(saved['name'])
+                        outcomes.append({'name':saved['name'],'state':'indexed','documentStructure':structure,
+                                         'storedName':os.path.basename(saved['path'])})
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        ticket=write_status.get('ticket'); item={'name':saved.get('name'),'state':'saved_unindexed' if saved else 'not_saved'}
+                        if type(ticket) is dict and not (ticket.get('issued') is False and ticket.get('owned_io_drained') is True):
+                            item['state']='outcome_unknown'
+                        payload=ticket.get('owned_original_payload') if type(ticket) is dict else None
+                        original=payload.get('request') if type(payload) is dict else None
+                        if type(original) is dict:
+                            encoded=json.dumps(original,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode('utf-8')
+                            item['original']={'version':1,'operation_id':original['operation_id'],
+                                'request_sha256':hashlib.sha256(b'openclank.document-upsert.request.v1\n'+encoded).hexdigest(),
+                                'account_id':account,'current_owner':user,'captured_owner':original['captured_owner']}
+                        outcomes.append(item)
+            failures=sum(item['state']!='indexed' for item in outcomes)+oversized
+            return {'success':failures==0,'uploaded':uploaded,'indexed_count':indexed,'failed_count':failures,
+                    'outcomes':outcomes}
 
         async with _owner_lifecycle_lock(user):
             result = await asyncio.to_thread(
@@ -915,8 +1442,54 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         }
 
     @router.delete("/file")
-    async def delete_file_from_rag(filepath: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
+    async def delete_file_from_rag(request: Request, filepath: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
         """Delete a specific file from RAG index and optionally from disk."""
+        from src.openclank.chat_source_bridge import canonical_source_provider
+        provider=canonical_source_provider(request.app.state)
+        guarded=(provider is not None and getattr(provider,'_guarded_v17',False) is True)
+        if guarded or os.environ.get('OPENCLANK_MEMORY_STORE_PROFILE', 'legacy-v16') in ('guarded-v17', 'guarded-v18'):
+            if not guarded:
+                raise HTTPException(503, 'Guarded document removal is unavailable')
+            loop=asyncio.get_running_loop(); deadline=float(loop.time()+30.0); write_status={}; unlinked=[False]
+            operation_id=uuid.uuid4().hex
+            async def remove(authority):
+                if (authority.owner != owner or canonical_source_provider(request.app.state) is not provider
+                        or await provider._host_document_import_ready() is not True or authority.current_source() is not True):
+                    raise ValueError('personal document authority changed')
+                head=await provider._host_document_head(authority,deadline=deadline)
+                removed=0
+                active = head['state']=='present' and head['forget_state']=='active'
+                if active:
+                    result=await provider._host_document_remove(authority,operation_id=operation_id,source_id=head['source_id'],
+                        expected_head={'revision':head['source_revision'],'content_sha256':head['content_sha256']},
+                        deadline=deadline,write_status=write_status)
+                    if result.get('state')!='removed': raise ValueError('personal document outcome unknown')
+                    removed=result['chunks_removed']
+                if authority.current_source() is not True or canonical_source_provider(request.app.state) is not provider:
+                    raise ValueError('personal document authority changed')
+                snapshot=authority.snapshot
+                snapshot.assert_current()
+                os.unlink(snapshot._path.name,dir_fd=snapshot._directory_fd)
+                unlinked[0]=True
+                return {'success':True,'removed_chunks':removed,'deleted_from_disk':True,
+                    'index_state':'removed' if active else 'absent'}
+            try:
+                return await _guarded_personal_source(request,filepath,remove,deadline=deadline,
+                    extra_current=lambda: canonical_source_provider(request.app.state) is provider)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                ticket=write_status.get('ticket'); item={'success':False,'deleted_from_disk':unlinked[0],'state':'unavailable'}
+                if type(ticket) is dict and not (ticket.get('issued') is False and ticket.get('owned_io_drained') is True):
+                    item['state']='outcome_unknown'
+                payload=ticket.get('owned_original_payload') if type(ticket) is dict else None
+                original=payload.get('request') if type(payload) is dict else None
+                if type(original) is dict:
+                    encoded=json.dumps(original,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode('utf-8')
+                    item['original']={'version':1,'operation_id':original['operation_id'],
+                        'request_sha256':hashlib.sha256(b'openclank.document-remove.request.v1\n'+encoded).hexdigest(),
+                        'account_id':original['account_id'],'current_owner':owner,'captured_owner':original['captured_owner']}
+                return item
         try:
             async with _owner_lifecycle_lock(owner):
                 # Remove chunks from RAG vector store (best-effort)
@@ -928,7 +1501,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                     except TypeError:
                         # Keep narrow compatibility with older test/extension
                         # doubles whose method predates owner-scoped RAG.  The
-                        # canonical Frankenmemory implementation accepts owner;
+                        # canonical Memery implementation accepts owner;
                         # never use this fallback for it.
                         removed = rag.delete_by_source(filepath)
                     except Exception as e:

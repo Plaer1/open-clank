@@ -38,3 +38,19 @@ def mutation_failure_status(error: BaseException) -> str:
     # Only an acknowledged provider rejection proves no commit. Lost response,
     # cancellation or untyped exceptions require reconciliation of this action.
     return "NotCommitted" if getattr(error, "mutation_outcome", None) == "NotCommitted" else "Unknown"
+
+def settle_terminal_recovery(client: Any, action_id: str, response: Any) -> bool:
+    action = response.get("Action") if isinstance(response, Mapping) else None
+    if not isinstance(action, Mapping) or action.get("recovery_only") is not True:
+        return False
+    if action.get("state") not in {"Complete", "Failed", "Conflict", "Aborted", "AfterCaptureFailed"}:
+        return False
+    client.settle_recovery(action_id)
+    return True
+
+
+def finish_capture(client: Any, action_id: str, response: Any) -> dict[str, Any]:
+    """Release temporary recovery bytes after the service verifies a terminal mutation."""
+    if settle_terminal_recovery(client, action_id, response):
+        return {"status": "skipped", "durable": False, "phase": "recovery_settled"}
+    return {"status": "complete", "durable": True, "phase": "complete"}

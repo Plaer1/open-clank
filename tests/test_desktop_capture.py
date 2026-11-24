@@ -25,7 +25,7 @@ def _authorized_importer(monkeypatch, tmp_path):
     registry = FilesystemRootRegistry(tmp_path / "roots.json")
     record = registry.add("alice", str(root), "recursive_directory", ["read", "write"])
     registry.assign_visibility("alice", "alice", record["id"], ["read", "write"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(tmp_path / "roots.json"))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(tmp_path / "roots.json"))
     class Client(HostClient):
         async def request(self, operation, path, payload=None):
             if operation == "stat" and not Path(path).exists():
@@ -240,7 +240,7 @@ async def test_host_importer_facade_replay_with_authorized_temp_root(monkeypatch
     registry = FilesystemRootRegistry(tmp_path / "roots.json")
     record = registry.add("alice", str(root), "recursive_directory", ["read", "write"])
     registry.assign_visibility("alice", "alice", record["id"], ["read", "write"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(tmp_path / "roots.json"))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(tmp_path / "roots.json"))
     class Client(HostClient):
         async def request(self, operation, path, payload=None):
             if operation == "stat" and not Path(path).exists():

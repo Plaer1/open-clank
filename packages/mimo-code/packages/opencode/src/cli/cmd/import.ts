@@ -3,6 +3,7 @@ import type { Argv } from "yargs"
 import type { Session as SDKSession, Message, Part } from "@mimo-ai/sdk/v2"
 import { Session } from "../../session"
 import { MessageV2 } from "../../session/message-v2"
+import { stripCaptureMembership } from "../../session/capture-membership"
 import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
 import { Database } from "../../storage"
@@ -97,7 +98,7 @@ export function storeImportedSession(
         const partInfo = MessageV2.Part.parse(part)
         const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
         tx.insert(PartTable)
-          .values({ id: partId, message_id: messageID, session_id: row.id, data: partData })
+          .values({ id: partId, message_id: messageID, session_id: row.id, data: stripCaptureMembership(partData) })
           .onConflictDoNothing()
           .run()
         ids.push(partId)

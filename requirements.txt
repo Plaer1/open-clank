@@ -14,7 +14,7 @@ beautifulsoup4
 charset-normalizer
 numpy
 # Local ONNX embeddings remain available for optional derived-index lanes.
-# Canonical Frankenmemory RAG does not require a vector service.
+# Canonical Memery RAG does not require a vector service.
 fastembed
 youtube-transcript-api
 # Markdown rendering for research reports (src/visual_report.py).
@@ -72,3 +72,6 @@ winrt-Windows.Media.Ocr==3.2.1; sys_platform == "win32" and python_version >= "3
 winrt-Windows.Graphics.Imaging==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
 winrt-Windows.Storage.Streams==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
 winrt-Windows.Globalization==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+
+# Verify exact native-current memory event evidence before exposing content.
+blake3>=1.0.11,<2

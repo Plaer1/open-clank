@@ -290,12 +290,14 @@ pub struct IocpStats {
 /// `FlushFileBuffers`, `CreateFile` or the metadata calls: they block whoever issues them, so a
 /// pool thread is the right place for them and this backend cannot improve on it. They are defined
 /// here rather than left out because a backend owns its whole surface.
+#[lore_macro::test_pub]
 pub(crate) struct IocpDriver {
     inner: Arc<IocpInner>,
     reapers: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl IocpDriver {
+    #[lore_macro::test_pub]
     pub(crate) fn new() -> std::io::Result<IocpDriver> {
         // SAFETY: Calling OS functions. `INVALID_HANDLE_VALUE` with no existing port is the
         // documented way to create one; zero concurrent threads means "as many as there are
@@ -336,7 +338,8 @@ impl IocpDriver {
     /// a packet, and the submitting thread and the reaper would each complete the same operation —
     /// a double free of the entry rather than a wrong byte count. Reporting the error at the open
     /// leaves the caller a backend to fall back to; guessing here would not.
-    fn register(&self, file: &File) -> std::io::Result<()> {
+    #[lore_macro::test_pub]
+    pub(crate) fn register(&self, file: &File) -> std::io::Result<()> {
         let handle: HANDLE = file.as_raw_handle();
         // SAFETY: Calling OS functions. The handle is open and owned by `file`, and a completion
         // key of zero is what every operation here carries.
@@ -358,6 +361,7 @@ impl IocpDriver {
     /// operation entry so the kernel writes into memory the operation owns for its whole lifetime.
     /// That is what lets an abandoned future be sound: the entry outlives the future, and the
     /// completion frees the buffer once the kernel is finished with it.
+    #[lore_macro::test_pub]
     pub(crate) async fn read_at(
         &self,
         file: Arc<File>,
@@ -709,6 +713,7 @@ impl IocpDriver {
         unsafe { complete_op(&self.inner, overlapped, result) };
     }
 
+    #[lore_macro::test_pub]
     pub(crate) async fn open(
         &self,
         options: std::fs::OpenOptions,
@@ -755,6 +760,10 @@ impl IocpDriver {
         PsyncDriver.set_permissions(path, permissions).await
     }
 
+    pub(crate) async fn make_owner_writable(&self, path: PathBuf) -> std::io::Result<()> {
+        PsyncDriver.make_owner_writable(path).await
+    }
+
     pub(crate) async fn write_file_bytes(
         &self,
         path: PathBuf,
@@ -764,32 +773,16 @@ impl IocpDriver {
         PsyncDriver.write_file_bytes(path, data, durable).await
     }
 
-    pub(crate) async fn write_file_segments<B: StableBufList>(
-        &self,
-        options: std::fs::OpenOptions,
-        path: PathBuf,
-        buffers: B,
-        durable: bool,
-    ) -> std::io::Result<()> {
-        PsyncDriver
-            .write_file_segments(options, path, buffers, durable)
-            .await
-    }
-
-    pub(crate) async fn write_file_segments_atomic<B: StableBufList>(
-        &self,
-        options: std::fs::OpenOptions,
-        temporary_path: PathBuf,
-        final_path: PathBuf,
-        buffers: B,
-    ) -> std::io::Result<()> {
-        PsyncDriver
-            .write_file_segments_atomic(options, temporary_path, final_path, buffers)
-            .await
-    }
-
     pub(crate) async fn metadata(&self, path: PathBuf) -> std::io::Result<std::fs::Metadata> {
         PsyncDriver.metadata(path).await
+    }
+
+    pub(crate) async fn stat(&self, path: PathBuf) -> std::io::Result<crate::Stat> {
+        PsyncDriver.stat(path).await
+    }
+
+    pub(crate) async fn symlink_stat(&self, path: PathBuf) -> std::io::Result<crate::Stat> {
+        PsyncDriver.symlink_stat(path).await
     }
 
     pub(crate) async fn holds_name_exactly(&self, path: PathBuf) -> Option<bool> {
@@ -801,10 +794,6 @@ impl IocpDriver {
         file: Arc<File>,
     ) -> std::io::Result<std::fs::Metadata> {
         PsyncDriver.file_metadata(file).await
-    }
-
-    pub(crate) async fn set_len(&self, file: Arc<File>, len: u64) -> std::io::Result<()> {
-        PsyncDriver.set_len(file, len).await
     }
 
     pub(crate) async fn rename(&self, from: PathBuf, to: PathBuf) -> std::io::Result<()> {
@@ -831,6 +820,7 @@ impl IocpDriver {
         PsyncDriver.remove_dir_all(path).await
     }
 
+    #[lore_macro::test_pub]
     pub(crate) fn stats(&self) -> IocpStats {
         IocpStats {
             submits: self.inner.counts.submits.load(Ordering::Relaxed),
@@ -1017,181 +1007,5 @@ impl<P> Drop for OpFuture<P> {
             OpState::Completed(_) => shared.payload = None,
             OpState::Taken | OpState::Abandoned => {}
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Write;
-    use std::os::windows::io::FromRawHandle;
-    use std::sync::atomic::AtomicU64;
-
-    use windows_sys::Win32::Foundation::GENERIC_WRITE;
-    use windows_sys::Win32::Storage::FileSystem::CreateFileW;
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_NONE;
-    use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
-    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
-    use windows_sys::Win32::System::Pipes::CreateNamedPipeW;
-    use windows_sys::Win32::System::Pipes::PIPE_TYPE_BYTE;
-    use windows_sys::Win32::System::Pipes::PIPE_WAIT;
-
-    use super::*;
-
-    /// A pipe pair whose reading end is overlapped, for the one operation a file cannot be made to
-    /// perform on demand.
-    ///
-    /// Whether a *file* read defers is a property of the host — its filesystem, its cache state and
-    /// whatever filters sit in front of them — so a test that reads one asserts nothing it can rely
-    /// on. A pipe with no data waiting defers by definition. The handle underneath is an ordinary
-    /// overlapped handle bound to the same port, so the submission, the packet, the reaper and the
-    /// wake are the file path's exactly.
-    fn overlapped_pipe_pair() -> (File, File) {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let name: Vec<u16> = format!(
-            "\\\\.\\pipe\\lore-io-iocp-{}-{}\0",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        )
-        .encode_utf16()
-        .collect();
-
-        // SAFETY: Calling OS functions. One instance of a byte-mode pipe, readable by this process
-        // and overlapped, named by the null-terminated string above.
-        let server = unsafe {
-            CreateNamedPipeW(
-                name.as_ptr(),
-                PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
-                PIPE_TYPE_BYTE | PIPE_WAIT,
-                1,
-                4096,
-                4096,
-                0,
-                std::ptr::null(),
-            )
-        };
-        assert_ne!(
-            server,
-            INVALID_HANDLE_VALUE,
-            "{}",
-            std::io::Error::last_os_error()
-        );
-
-        // SAFETY: Calling OS functions. Opens the instance created above, which is listening.
-        let client = unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                GENERIC_WRITE,
-                FILE_SHARE_NONE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                0,
-                std::ptr::null_mut(),
-            )
-        };
-        assert_ne!(
-            client,
-            INVALID_HANDLE_VALUE,
-            "{}",
-            std::io::Error::last_os_error()
-        );
-
-        // SAFETY: both handles were just created and are owned by nothing else.
-        unsafe { (File::from_raw_handle(server), File::from_raw_handle(client)) }
-    }
-
-    /// The path this backend exists for: an operation the kernel does not finish during the
-    /// issuing call is completed by the reaper, through the port, and hands its buffer back.
-    ///
-    /// The assertion that the first poll is pending is half the test. Without it a run where the
-    /// kernel happened to complete inline would still pass, and inline completion is the path this
-    /// case is not about.
-    #[test]
-    fn a_pending_operation_completes_through_the_port() {
-        let driver = IocpDriver::new().expect("a completion port");
-        let (server, mut client) = overlapped_pipe_pair();
-        driver.register(&server).expect("binding the pipe");
-
-        futures::executor::block_on(async {
-            let mut read = Box::pin(driver.read_at(Arc::new(server), 8, 0));
-            let mut context = Context::from_waker(Waker::noop());
-            assert!(
-                read.as_mut().poll(&mut context).is_pending(),
-                "a read of an empty pipe completed during the issuing call"
-            );
-
-            client.write_all(b"deferred").expect("writing to the pipe");
-            let bytes = read.await.expect("the deferred read");
-            assert_eq!(&bytes[..], b"deferred");
-        });
-
-        let stats = driver.stats();
-        assert_eq!(stats.reaped, 1, "the completion did not come from the port");
-        assert_eq!(stats.inline, 0, "{stats:?}");
-    }
-
-    /// Abandoning a pending operation must not free what the kernel still owns. The buffer lives
-    /// in the entry, so the completion arriving after the future is gone has somewhere to land —
-    /// and the reaper accounting for it is what says the entry was still there to complete.
-    #[test]
-    fn an_abandoned_pending_operation_is_completed_and_released() {
-        let driver = IocpDriver::new().expect("a completion port");
-        let (server, mut client) = overlapped_pipe_pair();
-        driver.register(&server).expect("binding the pipe");
-
-        let mut read = Box::pin(driver.read_at(Arc::new(server), 8, 0));
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(read.as_mut().poll(&mut context).is_pending());
-        drop(read);
-
-        client.write_all(b"deferred").expect("writing to the pipe");
-        for _ in 0..2000 {
-            if driver.stats().reaped == 1 {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        panic!(
-            "an abandoned operation was never completed: {:?}",
-            driver.stats()
-        );
-    }
-
-    /// Every operation is completed once, by exactly one of the two paths.
-    ///
-    /// Which path is a property of the host, so the test does not pin it. What it pins is that the
-    /// two cannot both claim an operation, which is the failure
-    /// `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` exists to make impossible; the benchmark reports the
-    /// share over a real workload.
-    #[test]
-    fn every_file_operation_is_completed_by_exactly_one_path() {
-        let path = std::env::temp_dir().join(format!("lore-io-iocp-count-{}", std::process::id()));
-        std::fs::write(&path, vec![7u8; 64 * 1024]).expect("seeding the file");
-
-        let driver = IocpDriver::new().expect("a completion port");
-        futures::executor::block_on(async {
-            let file = Arc::new(
-                driver
-                    .open(
-                        crate::file::OpenOptions::new().read(true).to_std(),
-                        path.clone(),
-                    )
-                    .await
-                    .expect("opening the file"),
-            );
-            for offset in [0, 16 * 1024, 48 * 1024] {
-                let bytes = driver
-                    .read_at(Arc::clone(&file), 16 * 1024, offset)
-                    .await
-                    .expect("reading the file");
-                assert_eq!(bytes.len(), 16 * 1024);
-                assert!(bytes.iter().all(|byte| *byte == 7));
-            }
-        });
-
-        let stats = driver.stats();
-        assert_eq!(stats.submits, 3, "{stats:?}");
-        assert_eq!(stats.submits, stats.inline + stats.reaped, "{stats:?}");
-        let _ = std::fs::remove_file(&path);
     }
 }

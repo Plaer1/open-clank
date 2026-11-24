@@ -487,14 +487,14 @@ try {
   await evaluate("document.querySelector('button[title=Refresh]').click()");
   await waitFor("document.querySelector('.code-tree-children .code-tree-name')?.textContent === 'lib.rs'", 'expanded child after refresh');
   const browserMenuRestore = await evaluate(`(() => {
-    localStorage.setItem('odysseus-custom-context-menu', 'off');
+    localStorage.setItem('openclank-custom-context-menu', 'off');
     window.dispatchEvent(new Event('odysseus-context-menu-changed'));
     const row = document.querySelector('.code-tree-row.file[data-code-tree-path$="/main.js"]');
     const event = new MouseEvent('contextmenu', { bubbles:true, cancelable:true, clientX:20, clientY:20 });
     const notCancelled = row.dispatchEvent(event);
     const prompt = document.querySelector('#styled-prompt-overlay');
     const promptVisible = !!prompt && !prompt.classList.contains('hidden') && prompt.style.display !== 'none';
-    localStorage.setItem('odysseus-custom-context-menu', 'on');
+    localStorage.setItem('openclank-custom-context-menu', 'on');
     window.dispatchEvent(new Event('odysseus-context-menu-changed'));
     return { notCancelled, promptVisible };
   })()`);
@@ -652,7 +652,7 @@ try {
   // A status outage is not an account transition. Reopening during an auth
   // 500 must retain the exact dirty buffer and the owner-scoped workspace.
   await evaluate(`(() => {
-    localStorage.setItem('odysseus-code-workspace:owner', '/work');
+    localStorage.setItem('openclank-code-workspace:owner', '/work');
     document.querySelector('.cm-content').focus();
   })()`);
   await command('Input.insertText', { text: '// auth-outage-dirty\n' });
@@ -660,14 +660,14 @@ try {
   assert.equal(await evaluate("document.querySelector('.code-editor-tab.active .code-editor-tab-dot')?.textContent"), '●', 'auth-outage fixture must be dirty');
   await evaluate("(async () => { window.__authStatus = 500; try { await window.__codeModule.open(); } catch (_) {} })()");
   await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js') && document.querySelector('.cm-content')?.textContent.includes('auth-outage-dirty')", 'dirty buffer after auth outage');
-  assert.equal(await evaluate("localStorage.getItem('odysseus-code-workspace:owner')"), '/work');
+  assert.equal(await evaluate("localStorage.getItem('openclank-code-workspace:owner')"), '/work');
   assert.equal(await evaluate("document.querySelector('.code-editor-tab.active .code-editor-tab-dot')?.textContent"), '●');
 
   // Workspace validation has its own tri-state result. A transient 5xx keeps
   // the preference and buffer; only an authoritative invalid response clears.
   await evaluate("(async () => { window.__authStatus = 200; window.__workspaceBrowseStatus = 500; await window.__codeModule.open(); })()");
   await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js') && document.querySelector('.cm-content')?.textContent.includes('auth-outage-dirty')", 'dirty buffer after workspace validation outage');
-  assert.equal(await evaluate("localStorage.getItem('odysseus-code-workspace:owner')"), '/work');
+  assert.equal(await evaluate("localStorage.getItem('openclank-code-workspace:owner')"), '/work');
   await evaluate("window.__workspaceBrowseStatus = 200");
 
   // A live policy event invalidates every owner-bound request. A transient
@@ -694,7 +694,7 @@ try {
   })()`);
   await waitFor("document.querySelectorAll('.code-editor-tab').length === 0 && document.querySelector('[data-code-root]')?.textContent === ''", 'revoked policy purges Code content');
   assert.equal(await evaluate("document.querySelector('.code-editor-window')?.textContent.includes('/work/main.js')"), false);
-  assert.equal(await evaluate("localStorage.getItem('odysseus-code-workspace:owner')"), null);
+  assert.equal(await evaluate("localStorage.getItem('openclank-code-workspace:owner')"), null);
 
   // Restore the fixture through the normal current-policy open path for the
   // independent account-transition race below.
@@ -897,7 +897,7 @@ try {
     resource_ref: 'rr1.host-resource',
     purpose: 'app_folder',
   });
-  assert.equal(await evaluate("localStorage.getItem('odysseus-code-workspace-id:owner')"), 'workspace-resource');
+  assert.equal(await evaluate("localStorage.getItem('openclank-code-workspace-id:owner')"), 'workspace-resource');
 
   // Code sends only the stable Workspace ID and its relative file name. Files
   // resolves fresh opaque Host refs, opens the containing folder, and selects

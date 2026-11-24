@@ -8,10 +8,10 @@ from pathlib import Path
 import sqlite3
 
 
-def install_current_sidecars(conn: sqlite3.Connection) -> None:
+def install_current_sidecars(conn: sqlite3.Connection, *, extra=()) -> None:
     schema = (Path(__file__).resolve().parents[1]
-              / "mcp_servers/frankenmemory/crates/fm-core/src/store/current-schema.sql")
-    names = ("fm_v2_trust_assignments", "fm_v2_job_manifests")
+              / "native/memery/crates/memery-core/src/store/current-schema.sql")
+    names = ("fm_v2_trust_assignments", "fm_v2_job_manifests", *extra)
     with sqlite3.connect(":memory:") as canonical:
         canonical.executescript(schema.read_text(encoding="utf-8"))
         for name in names:

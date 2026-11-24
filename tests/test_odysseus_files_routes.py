@@ -239,7 +239,7 @@ def test_download_hashes_once_and_never_rehashes_each_stream_page(monkeypatch):
 def test_preview_handle_stream_is_opaque_session_bound_and_revocable(monkeypatch, tmp_path):
     registry = FilesystemRootRegistry(tmp_path / "roots.json")
     client, stub = _client(monkeypatch, registry=registry)
-    client.cookies.set("odysseus_session", "session-a")
+    client.cookies.set("open_clank_session", "session-a")
     stub.contents = b"\x89PNG\r\n\x1a\n" + b"preview-bytes"
     stub.fingerprint = "png-fingerprint"
     raw_path = "/workspace/private-image.png"
@@ -284,12 +284,12 @@ def test_preview_handle_stream_is_opaque_session_bound_and_revocable(monkeypatch
 
     # A second login to the same owner cannot consume or revoke the first
     # browser session's capability.
-    client.cookies.set("odysseus_session", "session-b")
+    client.cookies.set("open_clank_session", "session-b")
     stale_for_other_session = client.get(handle["url"])
     assert stale_for_other_session.status_code == 410
     assert stale_for_other_session.json()["detail"]["code"] == "preview_handle_stale"
     assert client.delete(f"/api/odysseus-files/preview-handles/{handle['token']}").status_code == 200
-    client.cookies.set("odysseus_session", "session-a")
+    client.cookies.set("open_clank_session", "session-a")
     assert client.get(handle["url"]).status_code == 200
 
     revoked = client.delete(f"/api/odysseus-files/preview-handles/{handle['token']}")
@@ -303,7 +303,7 @@ def test_preview_handle_stream_is_opaque_session_bound_and_revocable(monkeypatch
 def test_preview_handle_rechecks_policy_and_file_identity(monkeypatch, tmp_path):
     registry = FilesystemRootRegistry(tmp_path / "roots.json")
     client, stub = _client(monkeypatch, registry=registry)
-    client.cookies.set("odysseus_session", "session-a")
+    client.cookies.set("open_clank_session", "session-a")
     stub.contents = b"ID3" + b"\x04\x00\x00" + b"audio"
     stub.fingerprint = "audio-fingerprint"
 
@@ -329,7 +329,7 @@ def test_preview_handle_rechecks_policy_and_file_identity(monkeypatch, tmp_path)
 def test_preview_magic_rejects_script_capable_and_unknown_content(monkeypatch, tmp_path):
     registry = FilesystemRootRegistry(tmp_path / "roots.json")
     client, stub = _client(monkeypatch, registry=registry)
-    client.cookies.set("odysseus_session", "session-a")
+    client.cookies.set("open_clank_session", "session-a")
     raw_path = "/private/payload.svg"
     stub.contents = b'<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>'
     stub.fingerprint = "svg-fingerprint"

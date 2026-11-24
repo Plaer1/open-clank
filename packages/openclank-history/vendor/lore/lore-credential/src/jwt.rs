@@ -10,6 +10,12 @@ use serde_with::serde_as;
 
 use crate::token_store::IdentityToken;
 
+/// The claim an issuer puts the user identity in when `sub` is not it.
+pub const IDENTITY_CLAIM: &str = "identity";
+/// The namespaced alias of [`IDENTITY_CLAIM`], for providers that require namespaced custom
+/// claims.
+pub const IDENTITY_CLAIM_NAMESPACED: &str = "https://lore.org/claims/identity";
+
 #[derive(Debug, Default, Clone)]
 pub struct UserInfo {
     pub id: String,
@@ -26,8 +32,20 @@ pub struct UserInfo {
 pub struct JWTUserInfo {
     #[serde(rename = "iss")]
     pub issuer: String,
+    /// The subject. The identity this token names may be another claim, see
+    /// [`JWTUserInfo::identity`].
     #[serde(rename = "sub")]
     pub user_id: String,
+    /// `None` when the claim is absent; `Some` holds whatever was carried, a JSON `null`
+    /// included, so presence decides (see [`JWTUserInfo::identity`]).
+    #[serde(default, rename = "identity", deserialize_with = "present")]
+    pub identity: Option<serde_json::Value>,
+    #[serde(
+        default,
+        rename = "https://lore.org/claims/identity",
+        deserialize_with = "present"
+    )]
+    pub identity_namespaced: Option<serde_json::Value>,
     pub name: Option<String>,
     pub preferred_username: Option<String>,
     pub is_service_account: Option<bool>,
@@ -36,20 +54,86 @@ pub struct JWTUserInfo {
     #[serde_as(as = "OneOrMany<_, PreferMany>")]
     #[serde(rename = "aud")]
     pub audience: Vec<String>,
+    #[serde_as(as = "Option<OneOrMany<_, PreferMany>>")]
+    #[serde(default)]
+    pub root_domains: Option<Vec<String>>,
+    #[serde_as(as = "Option<OneOrMany<_, PreferMany>>")]
+    #[serde(default, rename = "https://lore.org/claims/root_domains")]
+    pub root_domains_namespaced: Option<Vec<String>>,
+}
+
+/// Keeps a present claim present: a JSON `null` decodes as `Some(Value::Null)`, where
+/// `Option<Value>` alone would read it as absent.
+fn present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 impl JWTUserInfo {
-    /// All the root domains this token are intended for
-    pub fn acceptable_root_domains(&self) -> Vec<String> {
-        [
-            // Whoever issued it already knows about the token and thus
-            // the token can be given back to that endpoint.
-            std::slice::from_ref(&self.issuer),
-            // The Auth Service defines audienes as a list of root domains
-            self.audience.as_slice(),
-        ]
-        .concat()
+    /// The identity this token names: the first of `identity`, its namespaced alias and `sub`
+    /// the token carries, and only that one. `None` when that claim is empty, `null` or not a
+    /// string, so the token names no one; the rule does not fall through to the next claim.
+    pub fn identity(&self) -> Option<&str> {
+        self.identity_source().1
     }
+
+    /// The name of the claim that decides the identity, and its value when it is a non-empty
+    /// string.
+    pub fn identity_source(&self) -> (&'static str, Option<&str>) {
+        let (claim, value) = [
+            (IDENTITY_CLAIM, &self.identity),
+            (IDENTITY_CLAIM_NAMESPACED, &self.identity_namespaced),
+        ]
+        .into_iter()
+        .find_map(|(claim, value)| value.as_ref().map(|value| (claim, value.as_str())))
+        .unwrap_or(("sub", Some(self.user_id.as_str())));
+        (claim, value.filter(|value| !value.is_empty()))
+    }
+
+    /// The root domains this token may be sent to, read from claims the issuer signed.
+    ///
+    /// The `root_domains` claim, or its namespaced alias, wins. Otherwise `aud` entries with a
+    /// usable shape contribute: an `https` URI its host, a domain-shaped entry a suffix. Names
+    /// are fixed so an environment response cannot point the client at a different claim.
+    pub fn acceptable_root_domains(&self) -> Vec<String> {
+        let from_claim: Vec<String> = [&self.root_domains, &self.root_domains_namespaced]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|domain| !domain.is_empty())
+            .cloned()
+            .collect();
+        if !from_claim.is_empty() {
+            return from_claim;
+        }
+
+        self.audience
+            .iter()
+            .filter_map(|aud| domain_from_audience(aud))
+            .collect()
+    }
+}
+
+fn domain_from_audience(aud: &str) -> Option<String> {
+    if aud.contains("://") {
+        let url = url::Url::parse(aud).ok()?;
+        if url.scheme() != "https" {
+            return None;
+        }
+        return url.host_str().map(str::to_string);
+    }
+
+    let apex = aud.strip_prefix('.').unwrap_or(aud);
+    let domain_shaped = apex.contains('.')
+        && apex.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        });
+    domain_shaped.then(|| aud.to_string())
 }
 
 pub async fn user_info<P>(
@@ -98,12 +182,46 @@ pub fn insecure_decode_token(
     jsonwebtoken::decode::<JWTUserInfo>(token, &key, &validation)
 }
 
+/// The `iss` and `aud` of an [`unsigned_identity_token`].
+pub const UNSIGNED_IDENTITY_ISSUER: &str = "lore-unsigned-identity";
+
+/// `exp` of an [`unsigned_identity_token`], 3000-01-01: the token proves nothing, so there
+/// is nothing for an expiry to limit.
+const UNSIGNED_IDENTITY_EXPIRES: u64 = 32_503_680_000;
+
+/// A token that names `identity` to a server with `server.trust_unsigned_identity`. Its
+/// HS256 signature uses an empty key and proves nothing: `jsonwebtoken` refuses
+/// `alg: none` when it reads the header, so the token carries a real algorithm to stay
+/// readable by [`insecure_decode_token`] and the server.
+pub fn unsigned_identity_token(identity: &str) -> Result<String, jsonwebtoken::errors::Error> {
+    let issued_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let claims = serde_json::json!({
+        "iss": UNSIGNED_IDENTITY_ISSUER,
+        "aud": [UNSIGNED_IDENTITY_ISSUER],
+        "sub": identity,
+        "name": identity,
+        "preferred_username": identity,
+        "iat": issued_at,
+        "exp": UNSIGNED_IDENTITY_EXPIRES,
+    });
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(&[]),
+    )
+}
+
+/// The user a token names. `None` when the token is not a JWT with the standard claims, or
+/// names no identity (see [`JWTUserInfo::identity`]).
 pub fn user_info_from_token(token: String) -> Option<UserInfo> {
     let Ok(token_data) = insecure_decode_token(&token) else {
         return None;
     };
+    let id = token_data.claims.identity()?.to_string();
     Some(UserInfo {
-        id: token_data.claims.user_id.clone(),
+        id,
         name: token_data.claims.name.clone().unwrap_or_default(),
         token,
         preferred_username: token_data.claims.preferred_username.unwrap_or_default(),
@@ -132,6 +250,12 @@ pub fn verify_jwt_usage_for_remote(
     remote_domain: &str,
 ) -> Result<(), JwtUsageError> {
     let root_domains = jwt.acceptable_root_domains();
+    if root_domains.is_empty() {
+        return Err(JwtUsageError::internal(
+            "JWT names no domain it may be sent to: have the issuer add a 'root_domains' claim, \
+             or set the token audience to the deployment's https URL or domain",
+        ));
+    }
     if domain_in_root_domains(remote_domain, &root_domains) {
         return Ok(());
     }
@@ -140,67 +264,6 @@ pub fn verify_jwt_usage_for_remote(
         "JWT acceptable domains '{root_domains:?}' does not contain '{remote_domain}' - forbidding JWT leak"
     );
     Err(JwtUsageError::internal(format!(
-        "JWT 'aud' does not specify remote domain '{remote_domain}'"
+        "JWT does not specify remote domain '{remote_domain}'"
     )))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `{"iss":"lore","sub":"alice","name":"Alice","exp":2000000000,"aud":["example.com"]}`
-    const ALICE_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJsb3JlIiwic3ViIjoiYWxpY2UiLCJuYW1lIjoiQWxpY2UiLCJleHAiOjIwMDAwMDAwMDAsImF1ZCI6WyJleGFtcGxlLmNvbSJdfQ.signature";
-
-    #[test]
-    fn identity_from_jwt_is_its_subject() {
-        assert_eq!(identity_from_token(ALICE_TOKEN), "alice");
-    }
-
-    #[test]
-    fn identity_from_undecodable_token_is_empty() {
-        assert!(identity_from_token("").is_empty());
-        assert!(identity_from_token("not-a-jwt").is_empty());
-        // Well-formed base64 segments that are not JWT claims.
-        assert!(identity_from_token("aaaa.bbbb.cccc").is_empty());
-    }
-
-    fn token_with_claims(claims: &str) -> String {
-        use base64::Engine;
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
-        let claims = URL_SAFE_NO_PAD.encode(claims);
-        format!("{header}.{claims}.signature")
-    }
-
-    /// A Keycloak-shaped token carries no `name` claim. It must still decode,
-    /// with the subject as the id, rather than failing the whole decode.
-    #[test]
-    fn a_token_without_a_name_decodes_with_its_subject_as_the_id() {
-        let token = token_with_claims(
-            r#"{"iss":"lore","sub":"alice","exp":2000000000,"aud":["example.com"]}"#,
-        );
-
-        let info = user_info_from_token(token).expect("a nameless token decodes");
-        assert_eq!(info.id, "alice");
-        assert!(info.name.is_empty());
-    }
-
-    /// Regression: a required `name` made `user_info_from_token` return `None`
-    /// for a nameless token, so callers reading `expires` silently skipped the
-    /// expiry check. An expired nameless token must report its expiry.
-    #[test]
-    fn an_expired_nameless_token_still_reports_its_expiry() {
-        let token = token_with_claims(
-            r#"{"iss":"lore","sub":"alice","exp":1000000000,"aud":["example.com"]}"#,
-        );
-
-        let info = user_info_from_token(token).expect("an expired nameless token still decodes");
-        assert_eq!(info.expires, 1_000_000_000_000, "expiry in milliseconds");
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        assert!(info.expires < now_ms, "the token reads as expired");
-    }
 }

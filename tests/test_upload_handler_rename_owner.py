@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from src.upload_handler import UploadHandler
+from src.openclank.attachment_inventory import input_receipt_claim_scope
 
 
 def _make_handler(tmp_path: Path) -> UploadHandler:
@@ -46,6 +47,7 @@ def test_rename_owner_updates_upload_metadata_key_and_resolver(tmp_path):
     handler = _make_handler(tmp_path)
     alice_id = "a" * 32 + ".txt"
     alice_entry = _entry(handler, "Alice", "hash-alice", alice_id)
+    alice_entry["reference_claims"] = [input_receipt_claim_scope("alice", "chat-a", "request-a")]
     bob_entry = _entry(handler, "bob", "hash-bob", "b" * 32 + ".txt")
     handler._atomic_write_json(
         _db_path(handler),
@@ -66,6 +68,7 @@ def test_rename_owner_updates_upload_metadata_key_and_resolver(tmp_path):
     assert updated["alice2:hash-alice"]["hash"] == alice_entry["hash"]
     assert updated["alice2:hash-alice"]["uploaded_at"] == alice_entry["uploaded_at"]
     assert updated["alice2:hash-alice"]["last_accessed"] == alice_entry["last_accessed"]
+    assert updated["alice2:hash-alice"]["reference_claims"] == [input_receipt_claim_scope("alice2", "chat-a", "request-a")]
     assert updated["bob:hash-bob"]["owner"] == "bob"
 
     assert handler.resolve_upload(alice_id, owner="alice2")["id"] == alice_id

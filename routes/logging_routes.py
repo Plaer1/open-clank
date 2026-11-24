@@ -117,6 +117,164 @@ def setup_logging_routes(*, projection: LoggingProjection | None = None,
         expose_session_actions(result["session"])
         return result
 
+    @router.get("/sessions/{handle}/operation")
+    async def session_operation(request: Request, handle: str):
+        owner = identity(request)
+        host_chat_id = await bounded(projection.resolve_session, owner, handle)
+        from routes.orchestration_routes import inspect_owned_observations
+        result = await inspect_owned_observations(request, host_chat_id, expected_owner=owner,
+                                                   session_manager=session_manager)
+        if await bounded(projection.resolve_session, owner, handle) != host_chat_id:
+            raise HTTPException(409, "Session selection changed")
+        return {**result, "sessionHandle":handle}
+
+    async def selected_context_observation(request, owner, handle, deadline):
+        # Only current named-account admission may read the retained positive fact.
+        try:
+            from src.openclank.account_request_barrier import _current_admission
+            from src.openclank.terminal_diagnostic_projection import current_source_wire_observation
+            state = request.app.state
+            auth = getattr(state, 'auth_manager', None)
+            barrier = getattr(state, 'account_request_barrier', None)
+            factory = getattr(state, 'capture_original_credential', None)
+            if (not getattr(request.state, 'authenticated', False) or getattr(request.state, 'api_token', False)
+                    or getattr(request.state, 'internal_tool_authenticated', False) or auth is None or barrier is None or not callable(factory)):
+                return None
+            account = auth.account_id(owner)
+            if not account or auth.username_for_account_id(account) != owner: return None
+            credential = factory(request, owner, account)
+            admission = _current_admission.get()
+            if not callable(credential) or credential() is not True: return None
+            budget = {'deadline': deadline}
+            async def observe():
+                chat = await bounded(projection.resolve_session, owner, handle)
+                fact = await current_source_wire_observation(state=state, owner=owner, account=account,
+                    chat_id=chat, admission=admission, barrier=barrier, credential_current=credential, budget=budget)
+                if (not fact or await bounded(projection.resolve_session, owner, handle) != chat
+                        or credential() is not True or auth.account_id(owner) != account
+                        or auth.username_for_account_id(account) != owner
+                        or not await barrier.is_live(owner, admission)): return None
+                return fact
+            return await asyncio.wait_for(observe(), timeout=max(0.001, deadline - asyncio.get_running_loop().time()))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+
+    @router.post("/sessions/{handle}/similar")
+    async def session_similar(request: Request, handle: str):
+        owner = identity(request)
+        result = await bounded(projection.similar_sessions, owner, handle)
+        deadline = asyncio.get_running_loop().time() + 4.0
+        result['context_observation'] = await selected_context_observation(request, owner, handle, deadline) or {'state':'unavailable'}
+        # Optional live custody observation; never start or recreate a worker.
+        # Its bounded subset is explicitly partial and carries no provider outcome.
+        try:
+            from src.openclank.account_request_barrier import _current_admission
+            from src.openclank.terminal_diagnostic_projection import current_diagnostics
+            auth = getattr(request.app.state, 'auth_manager', None)
+            barrier = getattr(request.app.state, 'account_request_barrier', None)
+            factory = getattr(request.app.state, 'capture_original_credential', None)
+            if (not getattr(request.state, 'authenticated', False) or getattr(request.state, 'api_token', False)
+                    or getattr(request.state, 'internal_tool_authenticated', False) or auth is None or barrier is None or not callable(factory)):
+                return result
+            account = auth.account_id(owner)
+            if not account or auth.username_for_account_id(account) != owner: return result
+            credential = factory(request, owner, account)
+            admission = _current_admission.get()
+            if not callable(credential) or credential() is not True: return result
+            budget = {'deadline': deadline}
+            recent = await asyncio.wait_for(bounded(projection.sessions, owner, {}, limit=8, sort='latest', direction='desc'), timeout=max(0.001, deadline - asyncio.get_running_loop().time()))
+            candidates = [item['handle'] for item in recent['items'] if item.get('handle') != handle]
+            async def one(selector):
+                if asyncio.get_running_loop().time() >= budget['deadline']: return None
+                chat = await bounded(projection.resolve_session, owner, selector)
+                value = await current_diagnostics(state=request.app.state, owner=owner, account=account,
+                    chat_id=chat, admission=admission, barrier=barrier, credential_current=credential, budget=budget)
+                if await bounded(projection.resolve_session, owner, selector) != chat: return None
+                return value
+            async def observe():
+                selected = await one(handle)
+                if not selected: return
+                found = {}
+                for candidate in candidates:
+                    if asyncio.get_running_loop().time() >= budget['deadline']: break
+                    observed = await one(candidate)
+                    if observed and selected.intersection(observed): found[candidate] = selected.intersection(observed)
+                for candidate, matches in tuple(found.items()):
+                    if asyncio.get_running_loop().time() >= budget['deadline']:
+                        del found[candidate]
+                        continue
+                    observed = await one(candidate)
+                    if not observed or selected.intersection(observed) != matches:
+                        del found[candidate]
+                if await one(handle) != selected: return
+                result['native_processor_diagnostics'] = [dict(errorName=n, stage=stage) for n, stage in sorted(selected)]
+                for candidate, matches in found.items():
+                    row = next((i for i in result['items'] if i['handle'] == candidate), None)
+                    if row is None:
+                        row = {'handle':candidate, 'last_activity_ms':None, 'matched_fields':[]}
+                        result['items'].append(row)
+                    row['matched_fields'].append('native_processor_diagnostic')
+                    row['native_processor_diagnostics'] = [dict(errorName=n, stage=stage) for n, stage in sorted(matches)]
+                result['field_coverage']['native_processor_diagnostic'] = {'state':'partial',
+                    'reason':'recorded_host_source_subset', 'max_sessions':8, 'max_sources_per_session':3, 'max_native_reads':0}
+                result['counts']['native_processor_diagnostic'] = len(found)
+            await asyncio.wait_for(observe(), timeout=max(0.001, budget['deadline'] - asyncio.get_running_loop().time()))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        return result
+
+    @router.post("/sessions/{handle}/issue-draft")
+    async def session_issue_draft(request: Request, handle: str):
+        # Local draft only: never stored, never sent.
+        owner = identity(request)
+        result = await bounded(projection.issue_draft, owner, handle)
+        fact = await selected_context_observation(request, owner, handle, asyncio.get_running_loop().time() + 4.0)
+        result['context_observation'] = fact or {'state':'unavailable'}
+        if fact:
+            result['draft_markdown'] += ("\n## Partial source observation\n"
+                "- The eligible root source was observed in a matched provider request, "
+                "and its paired output was recorded. This does not establish complete "
+                "context, provider processing, or usefulness.\n")
+        return result
+
+    @router.get("/current-chat/{host_chat_id}/mcp-health")
+    async def current_chat_mcp_health(request: Request, host_chat_id: str):
+        # The browser's current chat selects a target; ownership and the live
+        # mapped turn are independently checked by the shared inspector.
+        owner = identity(request)
+        from routes.orchestration_routes import inspect_owned_mcp_health
+        return await inspect_owned_mcp_health(request, host_chat_id, expected_owner=owner, session_manager=session_manager)
+
+    @router.get("/current-chat/{host_chat_id}/tools-capabilities")
+    async def current_chat_tools_capabilities(request: Request, host_chat_id: str):
+        owner = identity(request)
+        from routes.orchestration_routes import inspect_owned_mcp_health
+        return await inspect_owned_mcp_health(request, host_chat_id, expected_owner=owner, session_manager=session_manager, capabilities=True)
+
+    @router.get("/sessions/{handle}/tools-capabilities")
+    async def session_tools_capabilities(request: Request, handle: str):
+        owner = identity(request)
+        host_chat_id = await bounded(projection.resolve_session, owner, handle)
+        from routes.orchestration_routes import inspect_owned_mcp_health
+        result = await inspect_owned_mcp_health(request, host_chat_id, expected_owner=owner, session_manager=session_manager, capabilities=True)
+        if await bounded(projection.resolve_session, owner, handle) != host_chat_id:
+            raise HTTPException(409, "Session selection changed")
+        return result
+
+    @router.get("/sessions/{handle}/mcp-health")
+    async def session_mcp_health(request: Request, handle: str):
+        owner = identity(request)
+        host_chat_id = await bounded(projection.resolve_session, owner, handle)
+        from routes.orchestration_routes import inspect_owned_mcp_health
+        result = await inspect_owned_mcp_health(request, host_chat_id, expected_owner=owner, session_manager=session_manager)
+        if await bounded(projection.resolve_session, owner, handle) != host_chat_id:
+            raise HTTPException(409, "Session selection changed")
+        return result
+
     @router.post("/search")
     async def search(request: Request, payload: dict = Body(...)):
         owner = identity(request)

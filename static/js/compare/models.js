@@ -44,10 +44,10 @@ function _modelDisplayNames(models) {
 /** Save selected models and synth models to localStorage, keyed by compare mode. */
 function _persistSelections() {
   if (state._selectedModels.length > 0) {
-    Storage.setJSON('odysseus-compare-selections-' + (state._compareMode || 'agent'), state._selectedModels);
+    Storage.setJSON('openclank-compare-selections-' + (state._compareMode || 'agent'), state._selectedModels);
   }
   if ((state._compareMode === 'search' || state._compareMode === 'research') && state._searchSynthModels) {
-    Storage.setJSON('odysseus-compare-synth-' + state._compareMode, state._searchSynthModels);
+    Storage.setJSON('openclank-compare-synth-' + state._compareMode, state._searchSynthModels);
   }
 }
 
@@ -93,7 +93,7 @@ async function fetchModels() {
 }
 
 // ── Shuffle pool persistence ──
-const POOL_STORAGE_KEY = 'odysseus-shuffle-pool-excluded';
+const POOL_STORAGE_KEY = 'openclank-shuffle-pool-excluded';
 
 function getExcludedModels() {
   return Storage.getJSON(POOL_STORAGE_KEY, []);

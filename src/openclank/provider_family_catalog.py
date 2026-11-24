@@ -28,6 +28,7 @@ from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit
 
 from src.runtime_paths import get_app_root
+from src.openclank.generated.managed_provider_contract import PROVIDER_ENDPOINT_POLICIES
 
 
 class ProviderFamilyCatalogError(RuntimeError):
@@ -37,9 +38,9 @@ class ProviderFamilyCatalogError(RuntimeError):
 _CATALOG_SCHEMA_VERSION = 1
 _FAMILY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MODEL_CATALOG_SHA256 = "33f836f532fd8ada58f255f11030ff5500d45b0cf7e63587772221050ffb1f48"
-_ENGINE_SOURCE_SHA256 = "70fdc3aa1c5bf78ee118ba44d2098eaf007c97a737c03884934fa170f01ccccb"
+_ENGINE_SOURCE_SHA256 = "da1f25fbb5c4cc3f5393c4ec5661b3d097cc18d5282b7717e91651c53e7b67fc"
 _MANAGED_SCHEMA_VERSION = 2
-_MANAGED_SCHEMA_SHA256 = "41620c9c18f1be69b82efd0413840cf2839e16e21193369d7311eb40595c430f"
+_MANAGED_SCHEMA_SHA256 = "6f814b20c4a138996b2885725091ee28656da0f806a8d6753afb79f01f0eea8a"
 _MANAGED_ADAPTERS = {
     "@ai-sdk/openai-compatible": "models-dev-openai-compatible",
     "@ai-sdk/anthropic": "models-dev-anthropic",
@@ -48,12 +49,32 @@ _MANAGED_ADAPTERS = {
 # id, display name, adapters, kinds, billing lanes, API key, keyless, count.
 # These definitions mirror FAMILY_DEFINITIONS in the pinned managed engine.
 _BUILTIN_FAMILIES = (
+    ("voidless", "Voidless 64px image jobs", ("voidless-image-v1",), ("official",), ("metered_api",), True, False, 0),
+    ("sprixen", "Sprixen sprite jobs", ("sprixen-sprite-v1",), ("official",), ("metered_api",), True, False, 0),
+    ("tripo", "Tripo text-to-3D jobs", ("tripo-text3d-v1",), ("official",), ("metered_api",), True, False, 0),
+    ("fal", "Fal media API", ("fal-flux-schnell-v1",), ("official",), ("metered_api",), True, False, 0),
+    ("meshy", "Meshy preview jobs", ("meshy-preview-v1",), ("official",), ("metered_api",), True, False, 0),
+    ("comfyui", "ComfyUI jobs", ("comfyui-workflow-v1",), ("local",), ("local",), False, True, 0),
+    ("blender", "Blender jobs", ("blender-render-v1",), ("local",), ("local",), False, True, 0),
+    ("trellis", "TRELLIS jobs", ("trellis-image3d-v1",), ("local",), ("local",), False, True, 0),
+    ("hunyuan-shape", "Hunyuan local shape jobs", ("hunyuan3d-v2-shape-v1",), ("local",), ("local",), False, True, 0),
     ("openai", "OpenAI", ("openai-responses", "openai-chat"), ("official", "subscription", "custom_gateway"), ("metered_api", "subscription", "custom"), True, False, 47),
     ("anthropic", "Anthropic", ("anthropic-messages",), ("official", "subscription", "custom_gateway"), ("metered_api", "subscription", "custom"), True, False, 23),
     ("github-copilot", "GitHub Copilot", ("copilot-chat",), ("subscription",), ("subscription",), False, False, 25),
     ("xiaomi", "Xiaomi", ("mimo-native",), ("official", "subscription"), ("metered_api", "subscription"), True, False, 3),
-    ("google", "Google", ("google-generative-ai", "google-vertex"), ("official", "custom_gateway"), ("metered_api", "custom"), True, False, 35),
+    ("opencode-console", "OpenCode Console", ("opencode-native",), ("official",), ("metered_api",), True, False, 0),
+    ("opencode-go", "OpenCode Go", ("opencode-native",), ("subscription",), ("subscription",), True, False, 4),
+    # Vertex remains valid for stored connection records, but is not a
+    # selectable host-bundle adapter until engine enrichment publishes it.
+    ("google", "Google", ("google-generative-ai",), ("official", "custom_gateway"), ("metered_api", "custom"), True, False, 35),
     ("xai", "xAI", ("xai-responses",), ("official", "subscription", "custom_gateway"), ("metered_api", "subscription", "custom"), True, False, 25),
+    ("grok", "Grok subscription", ("grok-cli-chat",), ("subscription",), ("subscription",), False, False, 0),
+    ("zai-coding-plan", "Z.AI Coding Plan", ("models-dev-openai-compatible",), ("subscription",), ("subscription",), True, False, 12),
+    ("kimi-code-plan-cn", "Kimi Code Plan (China)", ("models-dev-openai-compatible",), ("subscription",), ("subscription",), True, False, 0),
+    ("kimi-code-plan-global", "Kimi Code Plan (Global)", ("models-dev-openai-compatible",), ("subscription",), ("subscription",), True, False, 0),
+    ("kilo", "Kilo Gateway", ("models-dev-openai-compatible",), ("official",), ("metered_api",), True, False, 335),
+    ("llmgateway", "LLM Gateway", ("models-dev-openai-compatible",), ("official",), ("metered_api",), True, False, 203),
+    ("llmgateway-devpass", "LLM Gateway DevPass", ("models-dev-openai-compatible",), ("subscription",), ("subscription",), True, False, 0),
     ("openrouter", "OpenRouter", ("openai-chat",), ("official", "custom_gateway"), ("metered_api", "custom"), True, False, 166),
     ("deepseek", "DeepSeek", ("openai-chat",), ("official",), ("metered_api",), True, False, 2),
     ("ollama", "Ollama", ("ollama",), ("local",), ("local",), True, True, 0),
@@ -95,11 +116,9 @@ _MODELS_DEV_FAMILIES = (
     ("inference", "Inference", "models-dev-openai-compatible", 9),
     ("io-net", "IO.NET", "models-dev-openai-compatible", 17),
     ("jiekou", "Jiekou.AI", "models-dev-openai-compatible", 61),
-    ("kilo", "Kilo Gateway", "models-dev-openai-compatible", 335),
     ("kimi-for-coding", "Kimi For Coding", "models-dev-anthropic", 2),
     ("kuae-cloud-coding-plan", "KUAE Cloud Coding Plan", "models-dev-openai-compatible", 1),
     ("llama", "Llama", "models-dev-openai-compatible", 7),
-    ("llmgateway", "LLM Gateway", "models-dev-openai-compatible", 203),
     ("lucidquery", "LucidQuery AI", "models-dev-openai-compatible", 2),
     ("meganova", "Meganova", "models-dev-openai-compatible", 19),
     ("minimax", "MiniMax (minimax.io)", "models-dev-anthropic", 6),
@@ -134,16 +153,33 @@ _MODELS_DEV_FAMILIES = (
     ("vultr", "Vultr", "models-dev-openai-compatible", 4),
     ("wandb", "Weights & Biases", "models-dev-openai-compatible", 17),
     ("zai", "Z.AI", "models-dev-openai-compatible", 11),
-    ("zai-coding-plan", "Z.AI Coding Plan", "models-dev-openai-compatible", 12),
     ("zhipuai", "Zhipu AI", "models-dev-openai-compatible", 10),
     ("zhipuai-coding-plan", "Zhipu AI Coding Plan", "models-dev-openai-compatible", 13),
 )
 
 
-def _auth_methods(*, api_key: bool, keyless: bool) -> list[dict[str, str]]:
-    methods: list[dict[str, str]] = []
+def _auth_methods(
+    *,
+    api_key: bool,
+    keyless: bool,
+    billing_lanes: tuple[str, ...],
+    api_key_label: str = "API key",
+    api_key_billing_lanes: Optional[tuple[str, ...]] = None,
+) -> list[dict[str, Any]]:
+    methods: list[dict[str, Any]] = []
     if api_key:
-        methods.append({"id": "api_key", "type": "api", "label": "API key"})
+        methods.append({
+            "id": "api_key",
+            "type": "api",
+            "label": api_key_label,
+            "acquisition_method": "manual-key",
+            "credential_kinds": ["api"],
+            "billing_lanes": list(
+                api_key_billing_lanes
+                if api_key_billing_lanes is not None
+                else tuple(lane for lane in billing_lanes if lane != "subscription")
+            ),
+        })
     if keyless:
         methods.append({"id": "none", "type": "none", "label": "No credential"})
     return methods
@@ -194,11 +230,48 @@ def _payload(
                 "adapters": list(adapters),
                 "kinds": list(kinds),
                 "billing_lanes": list(billing_lanes),
-                "auth_methods": _auth_methods(api_key=api_key, keyless=keyless),
-                "auth_methods_complete": False,
+                "auth_methods": _auth_methods(
+                    api_key=api_key,
+                    keyless=keyless,
+                    billing_lanes=billing_lanes,
+                    api_key_billing_lanes=(
+                        tuple(billing_lanes)
+                        if family_id in {
+                            "xiaomi",
+                            "opencode-go",
+                            "kimi-code-plan-cn",
+                            "kimi-code-plan-global",
+                            "llmgateway-devpass",
+                            "zai-coding-plan",
+                        }
+                        else None
+                    ),
+                    api_key_label=(
+                        "Kimi Code plan key" if str(family_id).startswith("kimi-code-plan-")
+                        else "DevPass API key" if family_id == "llmgateway-devpass"
+                        else "Z.AI Coding Plan API key" if family_id == "zai-coding-plan"
+                        else "API key"
+                    ),
+                ),
+                "auth_methods_complete": family_id in {"zai-coding-plan", "comfyui", "blender", "trellis", "hunyuan-shape", "sprixen", "meshy", "tripo", "fal", "voidless"},
                 "model_count": int(model_count),
+                **({"endpoint_policies": dict(PROVIDER_ENDPOINT_POLICIES[family_id])} if family_id in PROVIDER_ENDPOINT_POLICIES else {}),
             }
         )
+        # Public descriptors from the pinned plugin. Login still checks engine admission.
+        if family_id == "anthropic":
+            families[-1]["auth_methods"].extend(
+                {
+                    "id": f"oauth:{index}",
+                    "type": "oauth",
+                    "label": f"Claude subscription ({variant})",
+                    "acquisition_method": "browser",
+                    "credential_kinds": ["oauth"],
+                    "billing_lanes": ["subscription"],
+                }
+                for index, variant in enumerate(("browser login", "paste callback"))
+            )
+            families[-1]["auth_methods_complete"] = True
     for family_id, display_name, adapter_id, model_count in models_dev_families:
         families.append(
             {
@@ -207,7 +280,7 @@ def _payload(
                 "adapters": [adapter_id],
                 "kinds": ["official"],
                 "billing_lanes": ["metered_api"],
-                "auth_methods": _auth_methods(api_key=True, keyless=False),
+                "auth_methods": _auth_methods(api_key=True, keyless=False, billing_lanes=("metered_api",)),
                 "auth_methods_complete": True,
                 "model_count": int(model_count),
             }
@@ -352,7 +425,7 @@ def generate_provider_family_catalog(
         models = provider.get("models", {}) if isinstance(provider, Mapping) else {}
         if not isinstance(models, Mapping):
             raise ProviderFamilyCatalogError("pinned provider models must be an object")
-        builtin_rows.append((*row[:-1], len(models)))
+        builtin_rows.append((*row[:-1], 0 if row[0] in {"comfyui", "blender", "trellis", "hunyuan-shape", "sprixen", "meshy", "tripo", "fal", "voidless"} else len(models)))
 
     dynamic_rows: list[tuple[str, str, str, int]] = []
     for catalog_id, value in source_catalog.items():

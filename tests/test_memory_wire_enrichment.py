@@ -2,11 +2,11 @@
 the API.
 
 Three layers under test:
-1. FrankenmemoryProvider._record maps every wire field (they used to
+1. MemeryProvider._record maps every wire field (they used to
    fall on the floor).
 2. /api/memory serializes the enriched record; /api/memory/graph and
    /api/memory/digest-preview exist, validate, and owner-scope.
-3. Live fm-mcp: enriched digest pinned entries + graph overview op
+3. Live memery-worker: enriched digest pinned entries + graph overview op
    (real binary, no fakes — house order).
 """
 import asyncio
@@ -18,15 +18,15 @@ import pytest
 from fastapi import HTTPException
 
 import routes.memory_routes as mr
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_digest import render_digest
 from src.memory_provider import MemoryRecord
 
 FM_BIN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "mcp_servers/frankenmemory/target/release/fm-mcp",
+    "native/memery/target/release/memery-worker",
 )
-needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="fm-mcp release binary not built")
+needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="memery-worker release binary not built")
 
 WIRE_RECORD = {
     "id": "mem_1",
@@ -68,7 +68,7 @@ WIRE_RECORD = {
 
 
 def test_record_mapping_carries_full_signal_set():
-    record = FrankenmemoryProvider._record(WIRE_RECORD)
+    record = MemeryProvider._record(WIRE_RECORD)
     assert record.kind == "instruction"
     assert record.source_type == "human"
     assert record.priority == 7
@@ -92,7 +92,7 @@ def test_record_mapping_carries_full_signal_set():
 
 
 def test_record_mapping_defaults_when_fields_absent():
-    record = FrankenmemoryProvider._record({"id": "m", "content": "x"})
+    record = MemeryProvider._record({"id": "m", "content": "x"})
     assert record.kind == "fact"
     assert record.source_type == "auto_extracted"
     assert record.priority is None
@@ -283,7 +283,7 @@ def test_digest_preview_matches_shared_renderer(monkeypatch):
 
 @needs_fm
 async def test_live_digest_pinned_entries_are_enriched(tmp_path):
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         record = await provider.remember(
@@ -305,7 +305,7 @@ async def test_live_digest_pinned_entries_are_enriched(tmp_path):
 
 @needs_fm
 async def test_live_graph_overview_scoped_round_trip(tmp_path):
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         await provider._call_tool(
@@ -347,7 +347,7 @@ async def test_live_graph_overview_scoped_round_trip(tmp_path):
 
 @needs_fm
 async def test_live_canonical_graph_trace_uses_node_ids(tmp_path):
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         record = await provider.remember(

@@ -1,0 +1,78 @@
+import { BusEvent } from "@/bus/bus-event"
+import { SessionID } from "@/session/schema"
+import { ActorStatus, ActorOutcome, SpawnMode, ActorHostContext, ActorModel } from "./schema"
+import z from "zod"
+
+export const ActorRegistered = BusEvent.define(
+  "actor.registered",
+  z.object({
+    sessionID: SessionID.zod,
+    actorID: z.string(),
+    mode: SpawnMode,
+    parentActorID: z.string().optional(),
+    description: z.string(),
+    agent: z.string(),
+    background: z.boolean(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
+  }),
+)
+
+export const ActorStatusChanged = BusEvent.define(
+  "actor.status",
+  z.object({
+    sessionID: SessionID.zod,
+    actorID: z.string(),
+    status: ActorStatus,
+    lastOutcome: ActorOutcome.optional(),
+    turnCount: z.number(),
+    lastTurnTime: z.number(),
+    error: z.string().optional(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
+  }),
+)
+// Legacy wire event; no runtime scanner emits it.
+export const ActorStuck = BusEvent.define(
+  "actor.stuck",
+  z.object({
+    sessionID: SessionID.zod,
+    actorID: z.string(),
+    description: z.string(),
+    lastTurnTime: z.number(),
+    stuckDuration: z.number(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
+  }),
+)
+// Legacy wire event retained for old clients/history. No runtime scanner emits it.
+export const ActorStalled = BusEvent.define(
+  "actor.stalled",
+  z.object({
+    sessionID: SessionID.zod,
+    actorID: z.string(),
+    description: z.string(),
+    lastActivityTime: z.number(),
+    stalledDuration: z.number(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
+  }),
+)
+
+export const WriterCachePerf = BusEvent.define(
+  "writer.cache_perf",
+  z.object({
+    sessionID: SessionID.zod,
+    writerActorID: z.string(),
+    status: z.enum(["completed", "failed"]),
+    total_input_tokens: z.number(),
+    cache_read_tokens: z.number(),
+    cache_write_tokens: z.number(),
+    cache_hit_rate: z.number(),
+    num_llm_calls: z.number(),
+  }),
+)

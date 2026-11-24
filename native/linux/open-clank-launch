@@ -1,0 +1,17 @@
+#!/bin/sh
+# A simple systemd service can be active before its web listener is ready.
+set -eu
+url=http://127.0.0.1:7777/
+fail() {
+    notify-send 'Open Clank' "$1"
+    exit 1
+}
+systemctl --user start openclank.service || fail 'The local server could not start.'
+systemctl --user start openclank-tray.service || :
+for attempt in $(seq 1 90); do
+    if curl --noproxy '*' --silent --fail --output /dev/null --max-time 1 "$url"; then
+        exec xdg-open "$url"
+    fi
+    sleep 1
+done
+fail 'The local server did not become ready.'

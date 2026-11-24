@@ -7,15 +7,12 @@ again at execution time under the authenticated owner.
 """
 
 import asyncio
-import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from routes.research import research_routes
-from src import deep_research as deep_research_module
-from src import research_handler as research_handler_module
 from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 
 
@@ -177,30 +174,6 @@ def test_research_start_preserves_explicit_route_and_share_grant(monkeypatch):
     assert kwargs["llm_model"] == "shared-model"
     assert kwargs["model_route_id"] == "pmr_shared"
     assert kwargs["grant_id"] == "psg_shared"
-
-
-def test_research_route_source_has_no_retired_provider_transport():
-    source = inspect.getsource(research_routes)
-    for retired in (
-        "llm_call_async",
-        "ModelEndpoint",
-        "ProviderAuthSession",
-        "api_key",
-        "base_url",
-        "resolve_endpoint_runtime",
-    ):
-        assert retired not in source
-
-
-def test_research_completion_sources_have_no_direct_llm_transport():
-    for source in (
-        inspect.getsource(deep_research_module),
-        inspect.getsource(research_handler_module),
-    ):
-        assert "llm_call_async" not in source
-        assert "ModelEndpoint" not in source
-        assert "complete_text(" in source
-        assert 'purpose="research"' in source or "purpose=self.purpose" in source
 
 
 @pytest.mark.parametrize("blocked", [True, False])

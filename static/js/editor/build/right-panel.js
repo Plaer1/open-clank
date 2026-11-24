@@ -24,22 +24,28 @@
  *   panelResize: HTMLDivElement,
  * }}
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 
-export function buildRightPanel({ controlsHTML, layerPanelHTML }) {
-  const rightPanel = document.createElement('div');
+export function buildRightPanel({ controlsHTML, layerPanelHTML, state = legacyState, root = null, lifetime = null }) {
+  if (state !== legacyState && (!root || !lifetime)) throw new TypeError('isolated panel requires ownership');
+  const ownerRoot = root || state.container;
+  const doc = ownerRoot?.ownerDocument || document, win = doc.defaultView || window;
+  const removers = [];
+  const listen = (node, type, fn, options) => { node.addEventListener(type, fn, options); removers.push(() => node.removeEventListener(type, fn, options)); };
+  lifetime?.add(() => { for (const remove of removers.splice(0)) remove(); if (controls.parentNode === ownerRoot) controls.remove(); if (panelResizing) doc.body.style.cursor = ''; });
+  const rightPanel = doc.createElement('div');
   rightPanel.className = 'ge-right-panel';
 
   // Controls section.
-  const controls = document.createElement('div');
+  const controls = doc.createElement('div');
   controls.className = 'ge-controls';
   // Swipe-down to dismiss on mobile. Tap the same tool again to bring
   // the sheet back. Only the top ~40 px (grab handle area) initiates
   // the gesture so taps on inputs/sliders inside the panel still work.
   {
     let sy = 0, dragging = false;
-    controls.addEventListener('touchstart', (e) => {
-      if (window.innerWidth > 700) return;
+    listen(controls, 'touchstart', (e) => {
+      if (win.innerWidth > 700) return;
       const rect = controls.getBoundingClientRect();
       const t = e.touches[0];
       // Only engage if touch starts in the top grab zone.
@@ -48,12 +54,12 @@ export function buildRightPanel({ controlsHTML, layerPanelHTML }) {
       dragging = true;
       controls.style.transition = 'none';
     }, { passive: true });
-    controls.addEventListener('touchmove', (e) => {
+    listen(controls, 'touchmove', (e) => {
       if (!dragging) return;
       const dy = e.touches[0].clientY - sy;
       if (dy > 0) controls.style.transform = `translateY(${dy}px)`;
     }, { passive: true });
-    controls.addEventListener('touchend', (e) => {
+    listen(controls, 'touchend', (e) => {
       if (!dragging) return;
       dragging = false;
       const dy = e.changedTouches[0].clientY - sy;
@@ -75,7 +81,7 @@ export function buildRightPanel({ controlsHTML, layerPanelHTML }) {
   // the editor root so it can truly fix to the viewport bottom
   // regardless of the layers-sheet state. On desktop, controls stay
   // docked inside the right panel above the layers list.
-  if (window.innerWidth <= 700 && state.container) {
+  if (win.innerWidth <= 700 && state.container) {
     state.container.appendChild(controls);
   }
 
@@ -92,7 +98,7 @@ export function buildRightPanel({ controlsHTML, layerPanelHTML }) {
   });
 
   // Layer panel.
-  const layerPanel = document.createElement('div');
+  const layerPanel = doc.createElement('div');
   layerPanel.className = 'ge-layers';
   layerPanel.innerHTML = layerPanelHTML();
   rightPanel.appendChild(layerPanel);
@@ -103,15 +109,15 @@ export function buildRightPanel({ controlsHTML, layerPanelHTML }) {
     const header = layerPanel.querySelector('.ge-layers-header');
     if (header) {
       let sy = 0, sx = 0, dragging = false, didSwipe = false;
-      header.addEventListener('touchstart', (e) => {
-        if (window.innerWidth > 700) return;
+      listen(header, 'touchstart', (e) => {
+        if (win.innerWidth > 700) return;
         if (e.target.closest('button')) return;
         sy = e.touches[0].clientY;
         sx = e.touches[0].clientX;
         dragging = true;
         didSwipe = false;
       }, { passive: true });
-      header.addEventListener('touchend', (e) => {
+      listen(header, 'touchend', (e) => {
         if (!dragging) return;
         dragging = false;
         const dy = e.changedTouches[0].clientY - sy;
@@ -139,8 +145,8 @@ export function buildRightPanel({ controlsHTML, layerPanelHTML }) {
           e.preventDefault();
         }
       });
-      header.addEventListener('click', (e) => {
-        if (window.innerWidth > 700) return;
+      listen(header, 'click', (e) => {
+        if (win.innerWidth > 700) return;
         if (e.target.closest('button')) return;
         if (didSwipe) { didSwipe = false; return; }
         // Click cycles between peek and expanded; minimized comes
@@ -160,7 +166,7 @@ export function buildRightPanel({ controlsHTML, layerPanelHTML }) {
   // localStorage so it survives reopens. (Earlier version was a
   // vertical-drag for height; horizontal feels more natural since
   // cramped LAYER ROWS are about width, not height.)
-  const panelResize = document.createElement('div');
+  const panelResize = doc.createElement('div');
   panelResize.className = 'ge-panel-resize';
   panelResize.title = 'Drag to resize panel';
   rightPanel.appendChild(panelResize);
@@ -171,25 +177,25 @@ export function buildRightPanel({ controlsHTML, layerPanelHTML }) {
   let panelResizing = false;
   let panelStartX = 0;
   let panelStartW = 0;
-  panelResize.addEventListener('mousedown', (e) => {
+  listen(panelResize, 'mousedown', (e) => {
     panelResizing = true;
     panelStartX = e.clientX;
     panelStartW = rightPanel.getBoundingClientRect().width;
     e.preventDefault();
-    document.body.style.cursor = 'ew-resize';
+    doc.body.style.cursor = 'ew-resize';
   });
-  document.addEventListener('mousemove', (e) => {
+  listen(doc, 'mousemove', (e) => {
     if (!panelResizing) return;
     // Dragging left → wider panel (the panel sits on the right of
     // the editor, so a leftward drag pulls its left edge left).
     const delta = panelStartX - e.clientX;
-    const next = Math.max(160, Math.min(window.innerWidth - 200, panelStartW + delta));
+    const next = Math.max(160, Math.min(win.innerWidth - 200, panelStartW + delta));
     rightPanel.style.flex = `0 0 ${next}px`;
   });
-  document.addEventListener('mouseup', () => {
+  listen(doc, 'mouseup', () => {
     if (!panelResizing) return;
     panelResizing = false;
-    document.body.style.cursor = '';
+    doc.body.style.cursor = '';
     try {
       const w = Math.round(rightPanel.getBoundingClientRect().width);
       localStorage.setItem('ge-right-panel-width', String(w));

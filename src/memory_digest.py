@@ -118,6 +118,25 @@ def _open_questions(digest: Dict[str, Any]) -> list:
     ]
 
 
+def render_standing_guidance(values: list[str]) -> str:
+    """Render only complete host-validated values without trimming or truncation."""
+    if (type(values) is not list or not 1 <= len(values) <= 4
+        or any(type(value) is not str or not value.strip() or len(value.encode('utf-8')) > 2048 for value in values)
+        or sum(len(value.encode('utf-8')) for value in values) > 8192):
+        raise ValueError('standing guidance unavailable')
+    return ('Current human-approved standing guidance:\n' + '\n'.join(values) +
+        '\nWhen a specific imminent consequential action appears to conflict with this guidance, '
+        'first use an alternative that honors it if that preserves the requested outcome. '
+        'If the guidance, current revision, action or scope is uncertain, defer that inference; '
+        'do not infer permission to override it. If the conflict is necessary and remains unresolved, '
+        'leave that action and its dependent work pending while continuing independent work. '
+        'Use the existing question tool to ask one concrete question only when needed, with an '
+        'alternative or skip and a way for the owner to explicitly change the guidance. Check current '
+        'question and answer context before asking again; dismissal or silence is not permission. '
+        'After an explicit change or resume, recheck the current guidance and action scope. '
+        'Do not treat an answer as a change to protected memory without the existing owner review.')
+
+
 def render_trusted_block(digest: Optional[Dict[str, Any]], prefs: Any) -> str:
     """The endorsed-guidance block (T6): trusted pinned entries, rendered
     with real force, plus the user's open questions (U6). Empty string

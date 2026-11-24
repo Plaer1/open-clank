@@ -609,6 +609,9 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
         {
           label: "xAI Grok OAuth (SuperGrok Subscription)",
           type: "oauth",
+          acquisitionMethod: "browser",
+          credentialKinds: ["oauth"],
+          billingLanes: ["subscription"],
           authorize: async () => {
             await startOAuthServer()
             const pkce = await generatePKCE()
@@ -651,6 +654,9 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
           // backoff and a hard deadline from xAI's `expires_in`.
           label: "xAI Grok OAuth (Headless / Remote / VPS)",
           type: "oauth",
+          acquisitionMethod: "device",
+          credentialKinds: ["oauth"],
+          billingLanes: ["subscription"],
           authorize: async () => {
             const device = await requestDeviceCode(options)
             const browserUrl = device.verification_uri_complete ?? device.verification_uri

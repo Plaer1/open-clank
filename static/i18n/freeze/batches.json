@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "policy": "non-overlapping catalog writes; one batch owns each key exactly once",
-  "batch_count": 83,
-  "entry_count": 9622,
+  "batch_count": 102,
+  "entry_count": 9759,
   "min_entries": 150,
   "max_entries": 300,
   "complex_prose_max": 40,
@@ -44,7 +44,7 @@
       "group": "compatibility",
       "surface": "compatibility",
       "entry_count": 169,
-      "character_count": 17967,
+      "character_count": 17957,
       "complexity": "mixed"
     },
     {
@@ -179,104 +179,104 @@
       "id": "batch-022",
       "group": "docs.openclank-docs-accounts-models",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1669,
+      "entry_count": 3,
+      "character_count": 3582,
       "complexity": "prose"
     },
     {
       "id": "batch-023",
       "group": "docs.openclank-docs-chat-workspaces",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1727,
+      "entry_count": 3,
+      "character_count": 5914,
       "complexity": "prose"
     },
     {
       "id": "batch-024",
       "group": "docs.openclank-docs-editor",
       "surface": "docs",
-      "entry_count": 1,
-      "character_count": 2046,
+      "entry_count": 3,
+      "character_count": 4006,
       "complexity": "prose"
     },
     {
       "id": "batch-025",
       "group": "docs.openclank-docs-files-imps",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1695,
+      "entry_count": 4,
+      "character_count": 3812,
       "complexity": "prose"
     },
     {
       "id": "batch-026",
       "group": "docs.openclank-docs-formatting-demo",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1518,
+      "entry_count": 3,
+      "character_count": 2520,
       "complexity": "prose"
     },
     {
       "id": "batch-027",
       "group": "docs.openclank-docs-getting-work-done",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1748,
+      "entry_count": 3,
+      "character_count": 2570,
       "complexity": "prose"
     },
     {
       "id": "batch-028",
       "group": "docs.openclank-docs-graph",
       "surface": "docs",
-      "entry_count": 1,
-      "character_count": 1637,
+      "entry_count": 3,
+      "character_count": 6151,
       "complexity": "prose"
     },
     {
       "id": "batch-029",
       "group": "docs.openclank-docs-home",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1597,
+      "entry_count": 4,
+      "character_count": 2914,
       "complexity": "prose"
     },
     {
       "id": "batch-030",
       "group": "docs.openclank-docs-limits",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1983,
+      "entry_count": 3,
+      "character_count": 3529,
       "complexity": "prose"
     },
     {
       "id": "batch-031",
       "group": "docs.openclank-docs-memory-lore",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1666,
+      "entry_count": 3,
+      "character_count": 6108,
       "complexity": "prose"
     },
     {
       "id": "batch-032",
       "group": "docs.openclank-docs-recovery",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1599,
+      "entry_count": 3,
+      "character_count": 3158,
       "complexity": "prose"
     },
     {
       "id": "batch-033",
       "group": "docs.openclank-docs-settings-themes",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 2239,
+      "entry_count": 3,
+      "character_count": 5055,
       "complexity": "prose"
     },
     {
       "id": "batch-034",
       "group": "docs.openclank-docs-tasks",
       "surface": "docs",
-      "entry_count": 2,
-      "character_count": 1525,
+      "entry_count": 3,
+      "character_count": 3248,
       "complexity": "prose"
     },
     {
@@ -299,8 +299,8 @@
       "id": "batch-037",
       "group": "editor",
       "surface": "editor",
-      "entry_count": 195,
-      "character_count": 15105,
+      "entry_count": 206,
+      "character_count": 16083,
       "complexity": "mixed"
     },
     {
@@ -323,16 +323,16 @@
       "id": "batch-040",
       "group": "files",
       "surface": "files",
-      "entry_count": 186,
-      "character_count": 15170,
+      "entry_count": 188,
+      "character_count": 15385,
       "complexity": "mixed"
     },
     {
       "id": "batch-041",
       "group": "graph",
       "surface": "graph",
-      "entry_count": 13,
-      "character_count": 851,
+      "entry_count": 14,
+      "character_count": 906,
       "complexity": "mixed"
     },
     {
@@ -380,15 +380,15 @@
       "group": "memory",
       "surface": "memory",
       "entry_count": 213,
-      "character_count": 17981,
+      "character_count": 17939,
       "complexity": "mixed"
     },
     {
       "id": "batch-048",
       "group": "memory",
       "surface": "memory",
-      "entry_count": 16,
-      "character_count": 1509,
+      "entry_count": 19,
+      "character_count": 1934,
       "complexity": "mixed"
     },
     {
@@ -451,8 +451,8 @@
       "id": "batch-056",
       "group": "settings",
       "surface": "settings",
-      "entry_count": 40,
-      "character_count": 5017,
+      "entry_count": 43,
+      "character_count": 5482,
       "complexity": "mixed"
     },
     {
@@ -669,6 +669,158 @@
       "surface": "ui-misc",
       "entry_count": 6,
       "character_count": 758,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-084",
+      "group": "docs.openclank-docs-agent-settings",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1629,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-085",
+      "group": "docs.openclank-docs-app-windows",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1491,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-086",
+      "group": "docs.openclank-docs-buddy",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 622,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-087",
+      "group": "docs.openclank-docs-calendar-email",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1998,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-088",
+      "group": "docs.openclank-docs-clankshop",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1517,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-089",
+      "group": "docs.openclank-docs-compare-cookbook",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1513,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-090",
+      "group": "docs.openclank-docs-credits",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1330,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-091",
+      "group": "docs.openclank-docs-deliverables",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 3072,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-092",
+      "group": "docs.openclank-docs-desktop-host",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1922,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-093",
+      "group": "docs.openclank-docs-journal",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 2012,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-094",
+      "group": "docs.openclank-docs-search-media",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 2598,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-095",
+      "group": "docs.openclank-docs-setup",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1712,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-096",
+      "group": "docs.openclank-docs-source-editing",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 2158,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-097",
+      "group": "docs.openclank-docs-treehouse",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 2949,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-098",
+      "group": "docs.openclank-docs-usage",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1934,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-099",
+      "group": "docs.openclank-docs-wiki-recipes",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1964,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-100",
+      "group": "docs.openclank-docs-workspace-hexes",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1751,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-101",
+      "group": "docs.openclank-docs-index",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1851,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-102",
+      "group": "menus",
+      "surface": "menus",
+      "entry_count": 64,
+      "character_count": 4794,
       "complexity": "mixed"
     }
   ]

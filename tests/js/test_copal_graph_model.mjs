@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, isOfficialDocument, documentFolder, facetCacheKey, mergeFacets } from '../../static/js/copal/graphModel.js';
 
 const docs = [
-  { id:'a', name:'A', kind:'markdown', links:['B'], relations:[{ targetDocumentId:'b', kind:'embed' }, { targetDocumentId:'missing', kind:'link' }] },
-  { id:'b', name:'B', kind:'wiki', links:[] },
+  { id:'a', name:'A', head:'a1', kind:'markdown', links:['B'], relations:[{ targetDocumentId:'b', kind:'embed' }, { targetDocumentId:'missing', kind:'link' }] },
+  { id:'b', name:'B', head:'b1', kind:'wiki', links:[] },
 ];
-const graph = documentGraph(docs, (name) => docs.find((doc) => doc.name === name));
+const verified = new Map([[JSON.stringify(['a','a1','B']), {status:'resolved',targetDocumentId:'b',targetRevisionId:'b1'}]]);
+const graph = documentGraph(docs, null, verified);
 assert.equal(graph.nodes[0].kind, 'note');
 assert.equal(graph.nodes[1].kind, 'wiki');
 assert.deepEqual(graph.edges.map((edge) => edge.type), ['link', 'embed'], 'parallel relationship types survive');
@@ -64,7 +65,7 @@ assert.equal(reparentHeadingSection('# A\n```md\n# fake\n```\n# B\n', 1, 5), '# 
 // mode and there is no separate Mind identity in the mode vocabulary.
 assert.deepEqual(GRAPH_MODES, ['documents', 'structure', 'galaxy', 'code'], 'Graph carries document views, Galaxy and scoped Code; Mind is not a mode');
 const legacyMindState = normalizeGraphState({ mode:'mind', modes:{ mind:{ camera:{ x:12, y:34, w:800, h:520 }, navigation:{ docId:'doc-7', selectedLine:4 }, filters:{ search:'old' } } } });
-assert.equal(legacyMindState.mode, 'structure', 'legacy Mind identity maps to Graph structure mode');
+assert.equal(legacyMindState.mode, 'documents', 'older graph state opens the journal and preserves Structure navigation');
 assert.equal(legacyMindState.modes.structure.camera.x, 12);
 assert.equal(legacyMindState.modes.structure.navigation.docId, 'doc-7');
 assert.equal(legacyMindState.modes.structure.navigation.selectedLine, 4);

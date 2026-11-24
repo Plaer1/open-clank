@@ -8,23 +8,12 @@
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 29 27H3Z' fill='none' stroke='%23F6BE48' stroke-width='2' stroke-linejoin='round'/%3E%3Cpath d='M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z' fill='%23F6BE48' fill-rule='evenodd' clip-rule='evenodd'/%3E%3Ccircle cx='16' cy='17' r='1.2' fill='%23F6BE48'/%3E%3C/svg%3E">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<script nonce="{{CSP_NONCE}}" src="/static/js/migrateBrowserPreferences.js"></script>
 <script nonce="{{CSP_NONCE}}">
 (function(){
-  // Per-theme bg-effect defaults — mirrors THEME_DEFAULT_* maps in
-  // static/js/theme.js so login picks the same default pattern as the
-  // main app for users who never explicitly chose one.
-  var THEME_DEFAULT_PATTERN = {
-    'clanker-dark':'clanker-routefield', 'clanker-light':'clanker-blueprint',
-    dark:'none', light:'dots', midnight:'rain', paper:'dots',
-    cyberpunk:'synapse', retrowave:'embers', forest:'petals',
-    ocean:'constellations', terminal:'perlin-flow', organs:'rain',
-    ume:'petals', cute:'sparkles'
-  };
-  var THEME_DEFAULT_EFFECT_COLOR = {
-    'clanker-dark':'#62C7E8', 'clanker-light':'#2469D8',
-    midnight:'#ffffff', organs:'#451616', cute:'#ff8cb8', ume:'#f5a0c0'
-  };
-  var THEME_DEFAULT_INTENSITY = { 'clanker-dark':0.64, 'clanker-light':0.55, midnight:0.5, terminal:0.8, organs:0.65 };
+  document.documentElement.dataset.publicLoginTheme = 'true';
+  // Synchronous public preset; kept aligned with themeDefaults.js.
+  var loginDefaults = {pattern:'clanker-signal-weave', effectColor:'#62C7E8', intensity:0.2, size:1.8};
   try {
     // Authentication is a stable product surface, so it always uses the
     // canonical Open Clank dark preset instead of the last in-app selection.
@@ -43,10 +32,7 @@
       s.setProperty('--border', c.border);
       if (c.red) s.setProperty('--red', c.red);
       if (c.green) s.setProperty('--green', c.green);
-      // Advanced overrides (sidebar logo color, input bg, send-button bg, etc.)
-      // — mirrors ADV_KEYS in static/js/theme.js so the login page picks up
-      // every customization the user has on their theme instead of falling
-      // back to defaults that didn't match the main app.
+      // Public built-in palette overrides; no saved account theme is read.
       var a = c.advanced || {};
       var ADV = {
         userBubbleBg:    '--user-bubble-bg',
@@ -66,36 +52,13 @@
       };
       for (var k in ADV) { if (a[k]) s.setProperty(ADV[k], a[k]); }
     }
-    // Background effect — pick ONE at random from the main app's 8
-    // patterns each load (matches the old login behavior, but uses the
-    // same effect implementations the main theme system exposes so the
-    // login feels consistent with the rest of the app). Per-theme
-    // bgEffectColor/Intensity defaults still apply so the random
-    // pattern picks up theme-appropriate tinting.
-    // perlin-flow excluded — too visually intense for a login screen.
-    var PATTERNS = ['dots','synapse','rain','constellations','petals','sparkles','embers'];
-    var isClanker = name === 'clanker-dark' || name === 'clanker-light';
-    var savedPattern = t && t.bgPattern;
-    if (name === 'clanker-dark' && savedPattern === 'clanker-sweep') savedPattern = '';
-    var pattern = isClanker
-      ? (savedPattern || THEME_DEFAULT_PATTERN[name])
-      : PATTERNS[Math.floor(Math.random() * PATTERNS.length)];
-    var savedEffectColor = t && t.bgEffectColor;
-    if (name === 'clanker-dark' && (!savedEffectColor || savedEffectColor.toUpperCase() === '#78D4F3')) savedEffectColor = '';
-    var effColor = savedEffectColor || THEME_DEFAULT_EFFECT_COLOR[name] || '';
-    var savedEffectIntensity = t && t.bgEffectIntensity;
-    if (name === 'clanker-dark' && savedEffectIntensity === 0.7) savedEffectIntensity = undefined;
-    var effInt = (savedEffectIntensity !== undefined)
-      ? savedEffectIntensity
-      : (THEME_DEFAULT_INTENSITY[name] !== undefined ? THEME_DEFAULT_INTENSITY[name] : 1);
-    var effSize = (t && t.bgEffectSize !== undefined) ? t.bgEffectSize : 1;
-    if (effColor) s.setProperty('--bg-effect-color', effColor);
-    s.setProperty('--bg-effect-intensity', String(effInt));
-    s.setProperty('--bg-effect-size', String(effSize));
-    // Stash so the deferred module knows which canvas effect to start.
-    window.__loginBgPattern = pattern;
-    // Apply the body class as soon as <body> exists so static-gradient
-    // patterns (dots, synapse) paint immediately on first frame.
+    // Login uses the built-in Signal Loom preset.
+    var isClanker = true;
+    var pattern = loginDefaults.pattern;
+    s.setProperty('--bg-effect-color', loginDefaults.effectColor);
+    s.setProperty('--bg-effect-intensity', String(loginDefaults.intensity));
+    s.setProperty('--bg-effect-size', String(loginDefaults.size));
+    // Apply the preset class as soon as the body exists.
     if (isClanker) s.setProperty('--font-family', "'Liga Comic Mono', 'Fira Code', monospace");
     var apply = function() {
       if (isClanker) document.body.classList.add('theme-' + name);
@@ -107,12 +70,19 @@
 })();
 </script>
 <style>
+  /* The sign-in page can load font files before authentication. */
+  @font-face {
+    font-family: 'Comic Clank Wordmark';
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+    src: url('/static/fonts/ComicClankMono-Bold-Wordmark.woff2') format('woff2');
+  }
   @font-face { font-family: 'Fira Code'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Regular.woff2') format('woff2'); }
   @font-face { font-family: 'Fira Code'; font-weight: 600; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-SemiBold.woff2') format('woff2'); }
   @font-face { font-family: 'Liga Comic Mono'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/LigaComicMono-Regular.woff2') format('woff2'); }
-  @font-face { font-family: 'Fredoka'; font-weight: 300 700; font-style: normal; font-display: swap; src: url('/static/fonts/Fredoka-Variable.woff2') format('woff2'); }
   /* Mirror the main app's :root defaults (static/style.css ~line 18) so an
-     uncustomized theme — or a fresh browser with no `odysseus-theme` in
+     uncustomized theme — or a fresh browser with no `openclank-theme` in
      localStorage — renders the login page in the same palette as the rest
      of the app instead of a different greys+offwhite scheme. */
   :root {
@@ -214,27 +184,25 @@
   .logo {
     text-align: center; margin-bottom: 1.5rem;
   }
-  body.theme-clanker-dark .logo span, body.theme-clanker-light .logo span {
-    font-family: 'Fredoka', 'Liga Comic Mono', sans-serif;
-    font-variation-settings: 'wght' 650, 'wdth' 108;
-  }
-  body.theme-clanker-dark .logo span {
+  body.theme-clanker-dark .login-wordmark {
     letter-spacing: 0;
     background: linear-gradient(90deg, var(--clanker-gold) 0 45%, var(--clanker-coral) 45% 72%, var(--clanker-pink) 72% 88%, var(--clanker-lilac) 88%);
     -webkit-background-clip: text;
     background-clip: text;
   }
-  .logo span {
-    font-family: var(--font-family, 'Fira Code', monospace);
-    font-size: 2rem; font-weight: 600;
+  .login-wordmark {
+    font-family: 'Comic Clank Wordmark', var(--font-family, monospace);
+    font-size: 2rem; font-weight: 700;
     letter-spacing: 0.04em;
-    /* Same gradient as the main app's welcome-screen "Odysseus" title
-       (static/style.css #welcome-screen .welcome-name) so the brand
-       wordmark is consistent across login + first-launch screens. */
     background: linear-gradient(135deg, var(--brand-color, var(--red)), color-mix(in srgb, var(--brand-color, var(--red)) 60%, var(--fg)));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
+  }
+  .login-wordmark-initial {
+    background: linear-gradient(90deg, var(--clanker-sky) 0 48%, var(--clanker-gold) 48%);
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
   }
   .setup-note { color: color-mix(in srgb, var(--fg) 60%, transparent); font-size: 0.8rem; margin-bottom: 1rem; text-align: center; }
   label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; color: color-mix(in srgb, var(--fg) 65%, transparent); }
@@ -320,7 +288,7 @@
   .remember-toggle:hover .remember-dot {
     border-color: color-mix(in srgb, var(--fg) 40%, transparent);
   }
-  .logo-mark { width: 1.6rem; height: 1.6rem; margin-right: 0.4rem; vertical-align: -0.15em; color: var(--red); }
+  .logo-mark { width: 1.6rem; height: 1.6rem; margin-right: 0.4rem; vertical-align: -0.15em; color: var(--clanker-sky); }
   .version-label {
     position: fixed; bottom: 12px; right: 16px;
     font-size: 0.7rem; opacity: 0.25;
@@ -345,7 +313,7 @@
 <body>
 <main class="card">
   <h1 class="logo">
-    <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M16 3 29 27H3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/><circle cx="16" cy="17" r="1.2" fill="currentColor"/></svg><span>Open Clank</span>
+    <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M16 3 29 27H3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/><circle cx="16" cy="17" r="1.2" fill="currentColor"/></svg><span class="login-wordmark"><span class="login-wordmark-initial">O</span>pen Clank</span>
   </h1>
   <p class="setup-note" id="setupNote" style="display:none"></p>
 
@@ -405,7 +373,7 @@
   const usernameInput = document.getElementById('username');
   const passwordInput = document.getElementById('password');
   const confirmPasswordInput = document.getElementById('confirmPassword');
-  const savedUser = localStorage.getItem('odysseus-last-user');
+  const savedUser = localStorage.getItem('openclank-last-user');
   if (savedUser && usernameInput) {
     usernameInput.value = savedUser;
     document.getElementById('password').focus();
@@ -569,9 +537,9 @@
     const remember = document.getElementById('remember').checked;
     function finishLogin(authenticatedUsername) {
       const liveUser = String(authenticatedUsername || username).trim().toLowerCase();
-      const cachedUser = localStorage.getItem('odysseus-auth-user');
+      const cachedUser = localStorage.getItem('openclank-auth-user');
       if (cachedUser !== liveUser) {
-        const _keepKeys = new Set(['odysseus-last-user']);
+        const _keepKeys = new Set(['openclank-last-user']);
         const _toRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
           const key = localStorage.key(i);
@@ -581,10 +549,10 @@
         _toRemove.forEach(key => localStorage.removeItem(key));
         sessionStorage.clear();
       }
-      localStorage.setItem('odysseus-auth-user', liveUser);
+      localStorage.setItem('openclank-auth-user', liveUser);
       const _rem = document.getElementById('remember').checked;
-      if (_rem) localStorage.setItem('odysseus-last-user', liveUser);
-      else localStorage.removeItem('odysseus-last-user');
+      if (_rem) localStorage.setItem('openclank-last-user', liveUser);
+      else localStorage.removeItem('openclank-last-user');
       sessionStorage.removeItem('ody-session-active');
       submitBtn.innerHTML = '<span class="login-spinner" aria-hidden="true"></span>';
       submitBtn.disabled = true;
@@ -688,22 +656,10 @@ if (window.visualViewport) {
 </script>
 <script type="module" src="/static/js/i18n.js"></script>
 <script type="module" nonce="{{CSP_NONCE}}">
-// Drive the login page's bg effect off the user's saved theme. The
-// sync bootstrap above already set the body class + effect CSS vars so
-// the static-gradient patterns (dots, synapse) paint immediately; this
-// block imports theme.js's canvas implementations for the dynamic
-// patterns (route field, rain, constellations, perlin-flow, petals,
-// sparkles, embers, synapse pulses).
-//
-// IMPORTANT: theme.js's auto-init (`_initWithSync` → `initThemeUI`)
-// early-returns at `#themeGrid` which doesn't exist on this page, so
-// `applyBgPattern` would never fire on its own. We call it directly
-// here against the pattern the bootstrap already chose.
+// Apply the public built-in preset without loading account settings.
 try {
   const tm = await import('/static/js/theme.js');
-  const pattern = window.__loginBgPattern;
-  if (tm.applyThemeIdentity) tm.applyThemeIdentity('clanker-dark');
-  if (pattern && tm.applyBgPattern) tm.applyBgPattern(pattern);
+  tm.applyCanonicalLoginTheme();
 } catch (e) {
   console.error('[login-bg] failed:', e);
 }

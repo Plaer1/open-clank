@@ -31,11 +31,15 @@ await withCopalBrowser({ page, overrides: { '/fixture.js': fixture } }, async ({
   // Registration and resolution do not emit opened-workspace events.
   await evaluate(`(async () => { await audit.workspace.bindWorkspacePath('/allowed/a'); await audit.workspace.resolveWorkspaceId('workspace-a'); })()`);
   assert.equal(await evaluate(`audit.calls.filter(call => call.path.includes('/index/')).length`), 0);
+  await evaluate(`audit.workspace.setWorkspace('/allowed/saved','workspace-saved',{persist:false})`);
+  await evaluate(`audit.workspace.initWorkspace()`);
+  assert.equal(await evaluate(`document.getElementById('workspace-indicator-name').textContent`), 'a');
+  assert.equal(await evaluate(`audit.calls.filter(call => call.path.includes('/index/')).length`), 0);
   // A held native acknowledgement cannot hold the workspace selection UI.
-  await evaluate(`audit.workspace.setWorkspace('/allowed/a','workspace-a',{persist:false})`);
+  await evaluate(`audit.workspace.setWorkspace('/allowed/a','workspace-a')`);
   assert.equal(await evaluate(`document.getElementById('workspace-indicator-name').textContent`), 'a');
   await until('audit.pending.size === 1');
-  await evaluate(`audit.workspace.setWorkspace('/allowed/b','workspace-b',{persist:false})`);
+  await evaluate(`audit.workspace.setWorkspace('/allowed/b','workspace-b')`);
   await until(`audit.statuses.some(status => status.workspaceId === 'workspace-b')`);
   await evaluate(`audit.pending.values().next().value()`);
   await until(`audit.calls.filter(call => call.path.endsWith('/index/release')).length >= 2`);
@@ -46,21 +50,21 @@ await withCopalBrowser({ page, overrides: { '/fixture.js': fixture } }, async ({
   assert.equal(await evaluate(`document.getElementById('workspace-indicator-btn').style.display`), 'none');
   // Incognito selection neither opens nor appends any code evidence.
   const opens = await evaluate(`audit.calls.filter(call => call.path.endsWith('/index/open')).length`);
-  await evaluate(`audit.incognito = true; audit.workspace.setWorkspace('/allowed/private','workspace-private',{persist:false})`);
+  await evaluate(`audit.incognito = true; audit.workspace.setWorkspace('/allowed/private','workspace-private')`);
   assert.equal(await evaluate(`audit.calls.filter(call => call.path.endsWith('/index/open')).length`), opens);
   assert.equal(await evaluate(`audit.statuses.length`), 1);
   // Reopening A owns a fresh subscriber; the previous release cannot cancel it.
-  await evaluate(`audit.incognito = false; audit.workspace.setWorkspace('/allowed/a','workspace-a',{persist:false})`);
+  await evaluate(`audit.incognito = false; audit.workspace.setWorkspace('/allowed/a','workspace-a')`);
   await until('audit.pending.size === 2');
   assert.equal(await evaluate(`new Set(audit.calls.filter(call=>call.path.endsWith('/index/open')).map(call=>call.body.subscriber_id)).size`), 3);
   await evaluate('window.dispatchEvent(new Event("pagehide"))');
   await until(`audit.calls.filter(call => call.path.endsWith('/index/release')).length >= 4`);
-  await evaluate(`audit.workspace.setWorkspace('/allowed/rejected','workspace-rejected',{persist:false})`);
+  await evaluate(`audit.workspace.setWorkspace('/allowed/rejected','workspace-rejected')`);
   await until(`audit.statuses.some(status=>status.workspaceId==='workspace-rejected')`);
   assert.deepEqual(await evaluate(`audit.statuses.find(status=>status.workspaceId==='workspace-rejected').index`), {
     lifecycle:'failed',error:{code:'index_request_rejected',message:'Erased index requires explicit admission'},
   });
-  await evaluate(`audit.workspace.setWorkspace('/allowed/unavailable','workspace-unavailable',{persist:false})`);
+  await evaluate(`audit.workspace.setWorkspace('/allowed/unavailable','workspace-unavailable')`);
   await until(`audit.statuses.some(status=>status.workspaceId==='workspace-unavailable')`);
   assert.equal(await evaluate(`audit.statuses.find(status=>status.workspaceId==='workspace-unavailable').index.lifecycle`),'unavailable');
   console.log('Code index workspace acceptance: 8 mounted browser groups passed');
@@ -90,7 +94,8 @@ window.fetch = async (input, options = {}) => {
   }
   return json({});
 };
-await workspace.setWorkspace('/allowed/chat', 'chat-workspace', {persist:false});
+// Explicit pre-chat selection owns a subscriber independent of the Editor.
+await workspace.setWorkspace('/allowed/chat', 'chat-workspace');
 const code = await import('/static/js/codeEditor.js');
 audit.code = code;
 window.auditReady = true;

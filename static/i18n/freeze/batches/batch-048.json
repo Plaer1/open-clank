@@ -2,8 +2,8 @@
   "id": "batch-048",
   "group": "memory",
   "surface": "memory",
-  "entry_count": 16,
-  "character_count": 1509,
+  "entry_count": 19,
+  "character_count": 1934,
   "complexity": "mixed",
   "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
   "entries": [
@@ -38,7 +38,7 @@
       "kind": "server-string",
       "status": "live",
       "locations": [
-        "src/frankenmemory_provider.py:434"
+        "src/memery_provider.py:434"
       ],
       "context": "",
       "complexity": "label"
@@ -50,7 +50,7 @@
       "kind": "server-string",
       "status": "live",
       "locations": [
-        "src/frankenmemory_rag.py:1185"
+        "src/memery_rag.py:1185"
       ],
       "context": "",
       "complexity": "label"
@@ -221,6 +221,42 @@
       "status": "live",
       "locations": [
         "static/js/memory.js:352"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.memory.consolidation.interval.in.days",
+      "source": "Chat memory consolidation interval in days (1–365; blank uses the default)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/index.html:659"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sets.how.often.memery.automatically.consolidates.chat.records",
+      "source": "Sets how often Memery automatically consolidates chat records.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:508"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.memory.consolidation.interval.saved",
+      "source": "Chat memory consolidation interval saved.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:518"
       ],
       "context": "",
       "complexity": "label"

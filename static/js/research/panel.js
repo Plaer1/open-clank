@@ -2,7 +2,7 @@ import { uiIcon } from '../uiIcons.js';
 /**
  * Deep Research side panel — open/close, form, job rendering, library.
  */
-import * as jobs from './jobs.js?v=20260630researchthumb';
+import * as jobs from './jobs.js';
 import themeModule from '../theme.js';
 import modalManager from '../modalManager.js';
 import createResearchSynapse from '../researchSynapse.js';
@@ -65,8 +65,8 @@ let _expandedJobId = null;
 let _markdownModule = null;
 let _sessionModule = null;
 let _settingsCollapsed = false;
-const _SETTINGS_KEY = 'odysseus-research-settings';
-const _COLLAPSE_KEY = 'odysseus-research-settings-collapsed';
+const _SETTINGS_KEY = 'openclank-research-settings';
+const _COLLAPSE_KEY = 'openclank-research-settings-collapsed';
 
 try { _settingsCollapsed = localStorage.getItem(_COLLAPSE_KEY) === '1'; } catch {}
 
@@ -169,15 +169,24 @@ let _orbitAngle = 0;
 let _orbitLastTs = 0;
 let _orbitSpeedDegPerSec = 22;  // idle ambient default
 function _ensureOrbit() {
-  if (_orbitRAF) return;
+  if (_orbitRAF || !_open || modalManager.isMinimized('research-overlay')) return;
   _orbitLastTs = 0;
+  let lastClockSecond = -1;
   const tick = (ts) => {
     const pane = document.getElementById('research-pane');
-    if (!pane) { _orbitRAF = null; return; }  // panel closed → stop loop
+    if (!pane || modalManager.isMinimized('research-overlay')) { _orbitRAF = null; return; }  // panel closed → stop loop
     if (_orbitLastTs) {
       const dt = (ts - _orbitLastTs) / 1000;
       _orbitAngle = (_orbitAngle + _orbitSpeedDegPerSec * dt) % 360;
       pane.style.setProperty('--research-orbit-angle', _orbitAngle.toFixed(2) + 'deg');
+    }
+    const now = Date.now();
+    const second = Math.floor(now / 1000);
+    if (second !== lastClockSecond) {
+      lastClockSecond = second;
+      for (const clock of pane.querySelectorAll('.research-job-time[data-started]')) {
+        clock.textContent = jobs.formatElapsed(now - Number(clock.dataset.started));
+      }
     }
     _orbitLastTs = ts;
     _orbitRAF = requestAnimationFrame(tick);
@@ -342,6 +351,8 @@ export function closePanel() {
   const overlay = document.getElementById('research-overlay');
   if (modalManager.isRegistered('research-overlay')) modalManager.unregister('research-overlay');
   if (overlay) overlay.remove();
+  for (const {synapse} of _jobSynapses.values()) synapse.destroy();
+  _jobSynapses.clear();
 }
 
 function _restorePanelFromDock() {
@@ -349,6 +360,7 @@ function _restorePanelFromDock() {
   if (!overlay) return;
   overlay.style.display = '';
   overlay.classList.remove('hidden', 'modal-minimized');
+  _ensureOrbit();
   document.body.classList.add('research-panel-view');
   const btn = document.getElementById('tool-research-btn');
   if (btn) btn.classList.remove('minimized');
@@ -478,7 +490,7 @@ function _wireEvents(pane) {
     _settingsCollapsed = !_settingsCollapsed;
     body.style.display = _settingsCollapsed ? 'none' : '';
     btn.classList.toggle('collapsed', _settingsCollapsed);
-    try { localStorage.setItem('odysseus-research-settings-collapsed', _settingsCollapsed ? '1' : '0'); } catch {}
+    try { localStorage.setItem('openclank-research-settings-collapsed', _settingsCollapsed ? '1' : '0'); } catch {}
   });
 
   const queryInput = pane.querySelector('#research-query');
@@ -963,7 +975,7 @@ function _buildJobCard(job) {
       <div class="research-job-header">
         <span class="research-job-query">${_esc(job.query)}</span>${job.category ? `<span class="research-cat-badge">${_esc(job.category)}</span>` : ""}
         ${modelTag}
-        <span class="research-job-time">${elapsed}</span>
+        <span class="research-job-time" data-started="${Number(job.startedAt)}">${jobs.formatElapsed(Date.now() - job.startedAt)}</span>
         <button class="research-synapse-toggle${_synapseMinimized ? ' active' : ''}" title="${_synapseMinimized ? 'Show visualization' : 'Minimize visualization'}">${_synapseMinimized ? _vizExpandIcon : _vizCollapseIcon}</button>
         <button class="research-job-cancel" title="Cancel research">${_cancelIcon}</button>
       </div>

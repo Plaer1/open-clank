@@ -2,8 +2,7 @@
 feature: flaky-test-isolation
 status: delivered
 updated: 2026-07-27
-branch: fix/flaky-test-isolation
-commits: 028f3178..f4daa79e
+source: https://github.com/XiaomiMiMo/MiMo-Code/pull/1933
 ---
 
 # Flaky Test Isolation
@@ -56,7 +55,7 @@ already fires 20 times in that file.
 
 ## [S1] Problem
 
-Three suites in `packages/opencode` fail off-CI for reasons unrelated to the behavior they claim to
+Three suites in `packages/cli` fail off-CI for reasons unrelated to the behavior they claim to
 cover. Each failure is an environment or harness artifact, not a product defect, so each one trains
 readers to ignore red output.
 

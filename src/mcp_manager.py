@@ -10,6 +10,8 @@ import logging
 import os
 import re
 import asyncio
+import secrets
+import time
 from contextlib import AsyncExitStack
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from src.database import McpServer, SessionLocal
@@ -17,6 +19,19 @@ from src.database import McpServer, SessionLocal
 from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
+
+# Browser clients are private capabilities. Generic MCP catalog/call/admin
+# paths cannot enumerate, call, reconnect, or disconnect them.
+_BROWSER_CLIENT_PREFIX = "__openclank_browser_"
+_PROTECTED_BROWSER_SERVER_IDS = {"builtin_browser"}
+_BROWSER_ACTION_TOOLS = frozenset({
+    "browser_navigate", "browser_navigate_back", "browser_snapshot",
+    "browser_find", "browser_click", "browser_hover", "browser_drag",
+    "browser_type", "browser_fill_form", "browser_select_option",
+    "browser_press_key", "browser_take_screenshot",
+    "browser_console_messages", "browser_network_requests",
+})
+_BROWSER_INTERNAL_TAB_TOOL = "browser_tabs"
 
 
 def _mcp_child_stderr_log(server_id: str):
@@ -161,6 +176,13 @@ class McpManager:
         # HTTP/OAuth waits can outlive the bounded connect response while the
         # persistent owner task continues toward authorization/readiness.
         self._connect_waiters: Dict[str, asyncio.Task] = {}
+        # Private owner-admitted Browser transport handles and per-client call
+        # serialization. The public MCP manager methods reject these IDs.
+        self._protected_browser_clients: set[str] = set(_PROTECTED_BROWSER_SERVER_IDS)
+        self._browser_client_generations: Dict[str, str] = {}
+        self._browser_call_locks: Dict[str, asyncio.Lock] = {}
+        from src.openclank.mcp_observations import McpObservations
+        self._observations = McpObservations()
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -188,10 +210,15 @@ class McpManager:
         """Own one MCP context stack from entry through exit in one task."""
         stack = AsyncExitStack()
         current = asyncio.current_task()
+        if self._connect_tasks.get(server_id) is not current:
+            return
+        observed = None if server_id in self._protected_browser_clients or str(server_id).startswith(_BROWSER_CLIENT_PREFIX) else self._observations.begin(server_id)
         connected = False
         failed: Optional[BaseException] = None
         try:
             session, tools, metadata = await opener(stack)
+            metadata = dict(metadata)
+            discovery_ms = metadata.pop("_discovery_ms", None)
             if self._connect_tasks.get(server_id) is not current:
                 return
             self._sessions[server_id] = session
@@ -204,6 +231,8 @@ class McpManager:
                 **metadata,
             }
             connected = True
+            if observed:
+                self._observations.update(server_id, observed[0], status='connected', discovery_ms=discovery_ms)
             if not ready.done():
                 ready.set_result(True)
             logger.info(
@@ -266,6 +295,8 @@ class McpManager:
             if not ready.done():
                 ready.set_result(False)
             if self._connect_tasks.get(server_id) is current:
+                if observed:
+                    self._observations.update(server_id, observed[0], status='error' if failed else 'disconnected')
                 self._connect_tasks.pop(server_id, None)
                 self._connect_stops.pop(server_id, None)
                 self._connect_ready.pop(server_id, None)
@@ -327,6 +358,9 @@ class McpManager:
         url: Optional[str] = None,
     ) -> bool:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
+        if server_id in self._protected_browser_clients or str(server_id).startswith(_BROWSER_CLIENT_PREFIX):
+            logger.warning("Refusing generic MCP connect to protected Browser client")
+            return False
         try:
             if (
                 server_id in self._connect_tasks
@@ -353,6 +387,107 @@ class McpManager:
             self._generation += 1
             return False
 
+    async def open_browser_client(
+        self,
+        *,
+        name: str,
+        command: str,
+        args: List[str],
+        env: Optional[Dict[str, str]] = None,
+    ) -> dict:
+        """Open a hidden Browser MCP client for the Browser adapter only."""
+        server_id = _BROWSER_CLIENT_PREFIX + secrets.token_hex(16)
+        self._protected_browser_clients.add(server_id)
+        try:
+            connected = await self._connect_stdio(
+                server_id, str(name or "Browser"), command, list(args or []), dict(env or {})
+            )
+            if not connected:
+                await self._disconnect_server_impl(server_id)
+                self._protected_browser_clients.discard(server_id)
+                return {"connected": False}
+            generation = secrets.token_hex(16)
+            self._browser_client_generations[server_id] = generation
+            self._browser_call_locks[server_id] = asyncio.Lock()
+            self._generation += 1
+            return {
+                "connected": True,
+                "connection_id": server_id,
+                "connection_generation": generation,
+                "tools": self.browser_client_tools(server_id),
+            }
+        except BaseException:
+            await self._disconnect_server_impl(server_id)
+            self._protected_browser_clients.discard(server_id)
+            self._browser_client_generations.pop(server_id, None)
+            self._browser_call_locks.pop(server_id, None)
+            raise
+
+    def browser_client_tools(self, connection_id: str) -> List[Dict[str, Any]]:
+        """Return only admitted action tools to the private Browser adapter."""
+        if connection_id not in self._protected_browser_clients or connection_id == "builtin_browser":
+            raise PermissionError("Unknown protected Browser client")
+        allowed = _BROWSER_ACTION_TOOLS | {_BROWSER_INTERNAL_TAB_TOOL}
+        return [dict(tool) for tool in self._tools.get(connection_id, []) if tool.get("name") in allowed]
+
+    async def call_browser_tool_once(
+        self,
+        connection_id: str,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        *,
+        tab_control: bool = False,
+    ) -> Dict[str, Any]:
+        """Call one admitted Browser tool with no reconnect or replay path."""
+        if connection_id not in self._protected_browser_clients or connection_id == "builtin_browser":
+            return {"error": "Unknown protected Browser client", "exit_code": 1}
+        name = str(tool_name or "")
+        args = dict(arguments or {})
+        if name == _BROWSER_INTERNAL_TAB_TOOL:
+            if not tab_control or args.get("action") not in {"list", "new", "select"}:
+                return {"error": "Browser tab control is adapter-only", "exit_code": 1}
+            if args.get("action") == "new" and set(args) != {"action"}:
+                return {"error": "Browser tab control is adapter-only", "exit_code": 1}
+        elif name not in _BROWSER_ACTION_TOOLS:
+            return {"error": "Browser tool is not admitted by the control adapter", "exit_code": 1}
+        session = self._sessions.get(connection_id)
+        if session is None:
+            return {"error": "Protected Browser client is disconnected", "exit_code": 1}
+        lock = self._browser_call_locks.setdefault(connection_id, asyncio.Lock())
+        async with lock:
+            # Re-check after acquiring the per-client queue. A disconnect while
+            # waiting makes this call stale; no retry or replacement session.
+            if self._sessions.get(connection_id) is not session:
+                return {"error": "Protected Browser client changed before dispatch", "exit_code": 1}
+            try:
+                return await self._do_call(session, name, args)
+            except BaseException as exc:
+                # In particular, never reconnect/replay an action whose remote
+                # outcome might be unknown. Caller can request a fresh snapshot.
+                logger.warning("Protected Browser tool outcome unavailable (%s)", type(exc).__name__)
+                return {"error": "Browser action outcome is unknown; refresh the target before continuing", "exit_code": 1, "outcome_unknown": True}
+
+    async def close_browser_client(self, connection_id: str) -> bool:
+        """Release one adapter-owned MCP client without closing browser tabs."""
+        if connection_id not in self._protected_browser_clients or connection_id == "builtin_browser":
+            return False
+        await self._disconnect_server_impl(connection_id)
+        self._protected_browser_clients.discard(connection_id)
+        self._browser_client_generations.pop(connection_id, None)
+        self._browser_call_locks.pop(connection_id, None)
+        self._generation += 1
+        return True
+
+    def browser_client_generation(self, connection_id: str) -> Optional[str]:
+        if connection_id not in self._protected_browser_clients or connection_id == "builtin_browser":
+            return None
+        return self._browser_client_generations.get(connection_id)
+
+    async def _discover_tools(self, session):
+        started = time.monotonic()
+        tools = self._tool_records(await session.list_tools())
+        return tools, max(0, round((time.monotonic() - started) * 1000))
+
     async def _connect_stdio(self, server_id: str, name: str, command: str, args: List[str], env: Dict[str, str]) -> bool:
         """Connect to an MCP server via stdio transport."""
         async def _open(stack: AsyncExitStack):
@@ -372,7 +507,7 @@ class McpManager:
             )
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
             await session.initialize()
-            tools = self._tool_records(await session.list_tools())
+            tools, discovery_ms = await self._discover_tools(session)
 
             identity_hints = []
             for key, value in (env or {}).items():
@@ -380,7 +515,7 @@ class McpManager:
                 if any(part in key_lower for part in ("email_address", "account", "user", "username")):
                     identity_hints.append(value)
             identity = ", ".join(identity_hints) if identity_hints else ""
-            return session, tools, {"identity": identity}
+            return session, tools, {"identity": identity, "_discovery_ms": discovery_ms}
 
         return await self._start_owned_connection(server_id, name, "stdio", _open)
 
@@ -393,8 +528,8 @@ class McpManager:
             read_stream, write_stream = await stack.enter_async_context(sse_client(url))
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
             await session.initialize()
-            tools = self._tool_records(await session.list_tools())
-            return session, tools, {}
+            tools, discovery_ms = await self._discover_tools(session)
+            return session, tools, {"_discovery_ms": discovery_ms}
 
         return await self._start_owned_connection(server_id, name, "sse", _open)
 
@@ -452,8 +587,8 @@ class McpManager:
                 )
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
                 await session.initialize()
-                tools = self._tool_records(await session.list_tools())
-                return session, tools, {}
+                tools, discovery_ms = await self._discover_tools(session)
+                return session, tools, {"_discovery_ms": discovery_ms}
 
             connected = await self._start_owned_connection(server_id, name, "http", _open)
             if not connected:
@@ -475,7 +610,16 @@ class McpManager:
             return False
 
     async def disconnect_server(self, server_id: str):
-        """Disconnect from an MCP server."""
+        """Disconnect a generic MCP server; Browser clients require their adapter."""
+        if server_id in self._protected_browser_clients or str(server_id).startswith(_BROWSER_CLIENT_PREFIX):
+            raise PermissionError("Protected Browser clients are controlled by the Browser adapter")
+        await self._disconnect_server_impl(server_id)
+
+    async def _disconnect_server_impl(self, server_id: str):
+        """Close a transport from an already-authorized manager lifecycle path."""
+        observation = self._observations.get(server_id)
+        if observation:
+            self._observations.update(server_id, observation['generation'], status='disconnecting')
         # Stop any bounded HTTP/OAuth readiness waiter first. Its cancellation
         # asks the persistent owner task to unwind partial startup in that same
         # owner task.
@@ -525,6 +669,8 @@ class McpManager:
         self._sessions.pop(server_id, None)
         self._tools.pop(server_id, None)
         self._connections.pop(server_id, None)
+        if observation:
+            self._observations.update(server_id, observation['generation'], status='disconnected')
         self._generation += 1
         logger.info(f"MCP server disconnected: {server_id}")
 
@@ -538,7 +684,7 @@ class McpManager:
         })
         if ids:
             await asyncio.gather(
-                *(self.disconnect_server(server_id) for server_id in ids)
+                *(self._disconnect_server_impl(server_id) for server_id in ids)
             )
 
 
@@ -593,34 +739,27 @@ class McpManager:
 
         server_id = parts[1]
         tool_name = parts[2]
+        if server_id in self._protected_browser_clients or str(server_id).startswith(_BROWSER_CLIENT_PREFIX):
+            return {"error": "Protected Browser tools require an owner-bound Browser target", "exit_code": 1}
 
         session = self._sessions.get(server_id)
         if not session:
             return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
 
+        observation = self._observations.get(server_id)
+        started = time.monotonic()
         try:
             result = await self._do_call(session, tool_name, arguments)
-        except Exception as e:
-            # Auto-reconnect for builtin servers whose subprocess may have died
-            if self.is_builtin(server_id):
-                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
-                reconnected = await self._reconnect_builtin(server_id)
-                if reconnected:
-                    session = self._sessions.get(server_id)
-                    if session:
-                        try:
-                            result = await self._do_call(session, tool_name, arguments)
-                        except Exception as e2:
-                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
-                            return {"error": str(e2), "exit_code": 1}
-                    else:
-                        return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
-                else:
-                    logger.error(f"MCP reconnect failed for {server_id}")
-                    return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
-            else:
-                logger.error(f"MCP tool call failed: {qualified_name}: {e}")
-                return {"error": str(e), "exit_code": 1}
+            if observation and self._sessions.get(server_id) is session:
+                self._observations.update(server_id, observation['generation'], status='connected', call_started=started, error='tool_error' if result.get('exit_code') else None)
+        except Exception as exc:
+            if observation and self._sessions.get(server_id) is session:
+                self._observations.update(server_id, observation['generation'], status='degraded', call_started=started, error='transport')
+            # A transport error does not establish whether the remote action
+            # committed. Existing explicit reconnect repairs availability; never replay this call.
+            logger.warning("MCP call outcome unavailable for %s (%s)", qualified_name, type(exc).__name__)
+            return {"error": "MCP tool outcome is unknown; inspect the target and reconnect in Settings if needed",
+                    "exit_code": 1, "outcome_unknown": True}
 
         return result
 
@@ -690,7 +829,9 @@ class McpManager:
         disabled_map: optional {server_id: set_of_disabled_tool_names} to filter out.
         """
         schemas = []
-        for server_id, tools in self._tools.items():
+        for server_id, tools in self._tools.copy().items():
+            if server_id in self._protected_browser_clients or str(server_id).startswith(_BROWSER_CLIENT_PREFIX):
+                continue
             # Skip builtin Python servers — they use the code-block tool format
             # But include NPX-based builtins (like browser) which need function calling
             if self.is_builtin(server_id) and server_id != "builtin_browser":
@@ -722,6 +863,8 @@ class McpManager:
         """Return a flat list of all discovered tools with server info."""
         result = []
         for server_id, tools in self._tools.items():
+            if server_id in self._protected_browser_clients or str(server_id).startswith(_BROWSER_CLIENT_PREFIX):
+                continue
             conn = self._connections.get(server_id, {})
             disabled = (disabled_map or {}).get(server_id, set())
             for tool in tools:
@@ -748,6 +891,8 @@ class McpManager:
         disabled_map: Dict[str, Set[str]] = {}
         qualified: Set[str] = set()
         for server_id, tools in self._tools.items():
+            if server_id in self._protected_browser_clients or str(server_id).startswith(_BROWSER_CLIENT_PREFIX):
+                continue
             for tool in tools:
                 if not mcp_tool_is_readonly(tool):
                     disabled_map.setdefault(server_id, set()).add(tool["name"])
@@ -763,13 +908,28 @@ class McpManager:
             "email",
         }
 
+    def get_observation(self, server_id: str) -> Optional[Dict[str, Any]]:
+        if server_id in self._protected_browser_clients or str(server_id).startswith(_BROWSER_CLIENT_PREFIX):
+            return None
+        observation = self._observations.get(server_id)
+        if observation and observation['status'] in {'connected', 'degraded'} and server_id not in self._sessions:
+            observation['status'] = 'stale'
+        return observation
+
     def get_server_status(self, server_id: str) -> Dict:
-        """Get connection status for a server."""
+        """Get generic server status; protected Browser IDs are opaque."""
+        if server_id in self._protected_browser_clients or str(server_id).startswith(_BROWSER_CLIENT_PREFIX):
+            return {"status": "protected"}
         return self._connections.get(server_id, {"status": "disconnected"})
 
     def get_all_statuses(self) -> Dict[str, Dict]:
-        """Get connection statuses for all servers."""
-        return dict(self._connections)
+        """Get generic MCP statuses without private Browser client records."""
+        return {
+            server_id: status
+            for server_id, status in self._connections.items()
+            if server_id not in self._protected_browser_clients
+            and not str(server_id).startswith(_BROWSER_CLIENT_PREFIX)
+        }
 
     _cached_prompt_desc = None
     _cached_prompt_desc_key = None

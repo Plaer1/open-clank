@@ -1,3 +1,7 @@
+import BUILTIN_COMPACTION_INSTRUCTIONS from "../agent/prompt/compaction.txt"
+import { createHash } from "node:crypto"
+import type { StreamInput } from "./llm"
+import type { MaintenanceWireCandidate } from "./context-inspection"
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 import * as Session from "./session"
@@ -18,7 +22,6 @@ import { InstanceState } from "@/effect"
 import { isOverflow as overflow, usable } from "./overflow"
 import { makeRuntime } from "@/effect/run-service"
 import { fn } from "@/util/fn"
-import { SessionPrefixSnapshot } from "./prefix-snapshot"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -32,6 +35,10 @@ export const Event = {
       // slice. Subscribers that only care about the main context (e.g. the
       // cron-bridge sentinel cache) can filter on this.
       agentID: z.string().optional(),
+      summaryMessageID: MessageID.zod.optional(),
+      summaryPartIDs: z.array(PartID.zod).max(128).optional(),
+      sourceCoverage: z.enum(["complete","incomplete"]).optional(),
+      maintenanceWire: z.object({ attestation:z.string().max(8192), dispatchID:z.string().max(256), bodySHA256:z.string().regex(/^[0-9a-f]{64}$/), promptSHA256:z.string().regex(/^[0-9a-f]{64}$/), wireProfile:z.enum(["openai-chat","codex-responses"]), instructionsSHA256:z.string().regex(/^[0-9a-f]{64}$/).optional(), instructionsClass:z.literal("builtin-compaction-v1").optional(), sourceMessageID:MessageID.zod, sourcePartID:PartID.zod }).optional(),
     }),
   ),
 }
@@ -96,6 +103,7 @@ export interface Interface {
     overflow?: boolean
     agentID?: string
     cfg?: Config.Info
+    requestContext?: StreamInput["requestContext"]
   }) => Effect.Effect<"continue" | "stop" | "text-repeat">
   readonly create: (input: {
     sessionID: SessionID
@@ -250,6 +258,7 @@ export const layer: Layer.Layer<
       overflow?: boolean
       agentID?: string
       cfg?: Config.Info
+      requestContext?: StreamInput["requestContext"]
     }) {
       const parentIdx = input.messages.findLastIndex((m) => m.info.id === input.parentID)
       const parent = parentIdx >= 0 ? input.messages[parentIdx] : undefined
@@ -345,28 +354,37 @@ export const layer: Layer.Layer<
       const prompt = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+      // Only one unchanged host-attested text part and the fixed compiler
+      // summary prompt can form a candidate. All other inputs stay unknown.
+      let maintenance: MaintenanceWireCandidate | undefined
+      const original = selected.head.length === 1 ? selected.head[0] : undefined
+      const transformed = msgs.length === 1 ? msgs[0] : undefined
+      const visible = original?.parts.filter((p) => p.type === "text" && !p.ignored)
+      const after = transformed?.parts.filter((p) => p.type === "text" && !p.ignored)
+      if (compacting.prompt === undefined && compacting.context.length === 0 && original?.info.role === "user" &&
+          transformed?.info.id === original.info.id && transformed.info.role === "user" && visible?.length === 1 && after?.length === 1 &&
+          visible[0].type === "text" && after[0].type === "text" && !visible[0].synthetic && !after[0].synthetic &&
+          original.parts.every((p) => p.type === "text") && transformed.parts.every((p) => p.type === "text") &&
+          original.parts.length === transformed.parts.length && visible[0].id === after[0].id && visible[0].text === after[0].text &&
+          typeof visible[0].metadata?.openclankMaintenanceSource === "string" &&
+          after[0].metadata?.openclankMaintenanceSource === visible[0].metadata.openclankMaintenanceSource) {
+        maintenance = {source:{messageID:original.info.id,partID:visible[0].id,
+          digest:createHash("sha256").update(visible[0].text,"utf8").digest("hex"),sourceRevision:"unavailable"},
+          promptSHA256:createHash("sha256").update(prompt,"utf8").digest("hex"),attestation:visible[0].metadata.openclankMaintenanceSource}
+      }
+      let maintenanceWire: {dispatchID:string;bodySHA256:string;wireProfile:"openai-chat"|"codex-responses";instructionsSHA256?:string;instructionsClass?:"builtin-compaction-v1"} | undefined
       const modelMessages = yield* MessageV2.toModelMessagesEffect(
         msgs,
         model,
         input.overflow ? { stripMedia: true } : { collapseCheckpointTail: true },
       )
       const ctx = yield* InstanceState.context
-      // Match the parent request's stable profile defaults. Compaction has no
-      // separate session-prompt configuration in this owner.
-      const parentSession = yield* session.get(input.sessionID)
-      const parentAgent = yield* agents.get(userMessage.agent)
-      const profileKey = SessionPrefixSnapshot.profileKey({
-        providerID: userMessage.model.providerID,
-        modelID: userMessage.model.modelID,
-        agent: userMessage.agent,
-        agentID: userMessage.agentID ?? "main",
-        harness: "default",
-        systemMode: "append",
-        system: userMessage.system ?? "",
-        format: userMessage.format ?? { type: "text" },
-        permission: Agent.runtimePermission(parentAgent, parentSession.permission),
-      })
-      const frozenPrefix = yield* SessionPrefixSnapshot.get(input.sessionID, profileKey)
+      // Only the checked-in compaction instruction, without user system
+      // content or extra frozen tools, has known source provenance here.
+      if (maintenance && agent.native === true && agent.name === "compaction" &&
+          agent.prompt === BUILTIN_COMPACTION_INSTRUCTIONS && !userMessage.system) {
+        maintenance.trustedInstructionsSHA256 = createHash("sha256").update(BUILTIN_COMPACTION_INSTRUCTIONS,"utf8").digest("hex")
+      }
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
         role: "assistant",
@@ -404,13 +422,28 @@ export const layer: Layer.Layer<
         user: userMessage,
         agent,
         sessionID: input.sessionID,
-        // Preserve the frozen advertised prefix without granting compaction a
-        // second execution authority: restored entries contain schemas only.
-        tools: frozenPrefix?.tools ? SessionPrefixSnapshot.restoreTools(frozenPrefix.tools) : {},
-        activeTools: frozenPrefix?.tools?.map((item) => item.name),
+        requestContext: input.requestContext,
+        maintenanceWire: maintenance,
+        onMaintenanceWire: async (proof) => {
+          const turn = input.requestContext?.actorExecution
+          if (maintenanceWire || !maintenance || !turn || turn.actorID !== "main" || !turn.rootOperationID || !turn.innerTurnID) return
+          try {
+            const managed = await import("@/acp/managed-provider")
+            const result = await managed.managedHostCall("_openclank/session/v1/maintenance/ack", {
+              sessionID:turn.sessionID, rootOperationID:turn.rootOperationID, actorID:"main", executionRevision:turn.executionRevision,
+              innerTurnID:turn.innerTurnID, summaryMessageID:msg.id, attestation:maintenance.attestation,
+              sourceMessageID:maintenance.source.messageID, sourcePartID:maintenance.source.partID, sourceTextSHA256:maintenance.source.digest,
+              dispatchID:proof.dispatchID, bodySHA256:proof.bodySHA256, promptSHA256:maintenance.promptSHA256, wireProfile:proof.wireProfile,
+              ...(proof.instructionsSHA256 ? {instructionsSHA256:proof.instructionsSHA256} : {}),
+              ...(proof.instructionsClass ? {instructionsClass:proof.instructionsClass} : {}),
+            })
+            if (result.accepted && !maintenanceWire) maintenanceWire = proof
+          } catch { /* an unconfirmed ACK cannot authorize capture */ }
+        },
+        // Compaction has its own fresh system assembly and no advertised tools.
+        tools: {},
         toolChoice: "auto",
         system: [],
-        prebuiltSystem: frozenPrefix?.system,
         messages: [
           ...modelMessages,
           {
@@ -526,11 +559,47 @@ export const layer: Layer.Layer<
       }
 
       if (processor.message.error) return "stop"
-      if (result === "continue")
+      if (result === "continue") {
+        // Exact identity is useful even while source/wire coverage remains
+        // incomplete. Failure to enumerate does not fail compaction.
+        let summaryPartIDs: PartID[] | undefined
+        try {
+          const parts = MessageV2.parts(processor.message.id)
+          if (parts.length <= 128) summaryPartIDs = parts.map((part) => part.id)
+        } catch { /* coverage remains incomplete */ }
+        const completeSourceCoverage = !!maintenanceWire && (maintenanceWire.wireProfile === "openai-chat" ||
+          (maintenanceWire.wireProfile === "codex-responses" && maintenanceWire.instructionsClass === "builtin-compaction-v1"))
+        const turn = input.requestContext?.actorExecution
+        if (completeSourceCoverage && maintenanceWire && summaryPartIDs?.length && summaryPartIDs.length <= 16 && turn?.actorID === "main" &&
+            turn.rootOperationID && turn.innerTurnID) {
+          // Optional pending staging is bounded and runs before this turn can
+          // retire. A timeout cannot authorize capture or extend the turn.
+          const rootOperationID = turn.rootOperationID, innerTurnID = turn.innerTurnID
+          yield* Effect.tryPromise({
+            try: async () => {
+              const managed = await import("@/acp/managed-provider")
+              const call = managed.managedHostCall("_openclank/session/v1/maintenance/stage", {
+                sessionID:turn.sessionID,rootOperationID,actorID:"main",executionRevision:turn.executionRevision,
+                innerTurnID,summaryMessageID:processor.message.id,summaryPartIDs,
+              }).catch(() => ({accepted:false}))
+              await Promise.race([call,new Promise((resolve)=>setTimeout(resolve,200))])
+            }, catch: () => new Error("maintenance staging unavailable"),
+          }).pipe(Effect.catch(() => Effect.void))
+        }
         yield* bus.publish(Event.Compacted, {
           sessionID: input.sessionID,
           ...(input.agentID ? { agentID: input.agentID } : {}),
+          summaryMessageID: processor.message.id,
+          ...(summaryPartIDs ? { summaryPartIDs } : {}),
+          sourceCoverage: completeSourceCoverage ? "complete" : "incomplete",
+          ...(maintenance && maintenanceWire ? { maintenanceWire: {
+            attestation:maintenance.attestation, dispatchID:maintenanceWire.dispatchID, bodySHA256:maintenanceWire.bodySHA256,
+            promptSHA256:maintenance.promptSHA256, wireProfile:maintenanceWire.wireProfile,
+            ...(maintenanceWire.instructionsSHA256 ? {instructionsSHA256:maintenanceWire.instructionsSHA256} : {}),
+            ...(maintenanceWire.instructionsClass ? {instructionsClass:maintenanceWire.instructionsClass} : {}), sourceMessageID:MessageID.make(maintenance.source.messageID), sourcePartID:PartID.make(maintenance.source.partID),
+          }} : {}),
         })
+      }
       return result
     })
 

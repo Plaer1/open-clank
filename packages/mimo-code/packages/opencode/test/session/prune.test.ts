@@ -1,3 +1,4 @@
+import { selectContext } from "../../src/session/context-selection"
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Bus } from "../../src/bus"
@@ -68,6 +69,7 @@ const deps = Layer.mergeAll(
 )
 
 const env = Layer.mergeAll(
+  ActorRegistry.defaultLayer,
   SessionNs.defaultLayer,
   CrossSpawnSpawner.defaultLayer,
   SessionPrune.layer.pipe(
@@ -160,6 +162,80 @@ const seedSessionWithOldToolOutput = Effect.fn("PruneTest.seed")(function* (inpu
 })
 
 describe("SessionPrune.prune", () => {
+  it.live("preview rejects a changed source and applies and restores an annotation", provideTmpdirInstance((dir) => Effect.gen(function* () {
+    const ssn = yield* SessionNs.Service
+    const info = yield* ssn.create({})
+    const actors = yield* ActorRegistry.Service
+    const revision = yield* actors.beginExecution(info.id, "main", "pending", 0)
+    if (revision === undefined) throw new Error("actor claim failed")
+    yield* actors.settleExecution(info.id, "main", revision, "success")
+    yield* seedSessionWithOldToolOutput({ sessionID:info.id, dir, tool:"bash" })
+    const messages = yield* ssn.messages({sessionID:info.id})
+    const part = messages.flatMap((message) => message.parts).find((item) => item.type === "tool")
+    if (!part || part.type !== "tool" || part.state.status !== "completed") throw new Error("missing tool")
+    const args = { sessionID:info.id, action:"trim" as const, partIDs:[part.id], runnerBusy:() => false, checkpointBusy:() => false }
+    const stale = selectContext(args)
+    yield* ssn.updatePart({...part, state:{...part.state, output:part.state.output + "changed"}})
+    expect(() => selectContext({...args, expected:stale})).toThrow()
+    const preview = selectContext(args)
+    selectContext({...args, expected:preview})
+    const after = yield* ssn.messages({sessionID:info.id})
+    const selected = after.flatMap((message) => message.parts).find((item) => item.id === part.id)
+    expect(selected?.type === "tool" && selected.contextSelection?.action).toBe("trim")
+    expect(selected?.type === "tool" && selected.state.status === "completed" && selected.state.output.endsWith("changed")).toBe(true)
+    const restore = { ...args, action:"restore" as const }
+    selectContext({...restore, expected:selectContext(restore)})
+    const final = yield* ssn.messages({sessionID:info.id})
+    const restored = final.flatMap((message) => message.parts).find((item) => item.id === part.id)
+    expect(restored?.type === "tool" && restored.contextSelection).toBeUndefined()
+  })))
+  it.live(
+    "keeps source output while projecting a trimmed model view and frozen prefix",
+    provideTmpdirInstance((dir) => Effect.gen(function* () {
+      const svc = yield* SessionPrune.Service
+      const ssn = yield* SessionNs.Service
+      const model = createModel({ context: 100_000, output: 32_000 })
+      const info = yield* ssn.create({})
+      yield* seedSessionWithOldToolOutput({ sessionID: info.id, dir, tool: "bash" })
+      const seeded = yield* ssn.messages({ sessionID: info.id })
+      const firstUser = seeded.find((message) => message.info.role === "user")!
+      const firstAssistant = seeded.find((message) => message.info.role === "assistant")!
+      yield* ssn.updatePart({ id: PartID.ascending(), sessionID: info.id, messageID: firstUser.info.id,
+        type: "file", mime: "image/png", filename: "picture.png", url: "data:image/png;base64,AAAA" })
+      yield* ssn.updatePart({ id: PartID.ascending(), sessionID: info.id, messageID: firstAssistant.info.id,
+        type: "reasoning", text: "original reasoning", time: { start: 1, end: 2 } })
+      for (const text of ["fourth", "fifth"]) {
+        const user = yield* ssn.updateMessage({ id: MessageID.ascending(), role: "user", sessionID: info.id,
+          agent: "build", model: ref, time: { created: Date.now() } })
+        yield* ssn.updatePart({ id: PartID.ascending(), messageID: user.id, sessionID: info.id, type: "text", text })
+      }
+      const before = yield* ssn.messages({ sessionID: info.id })
+      const frozen = yield* MessageV2.toModelMessagesEffect(before, model)
+      const frozenBytes = JSON.stringify(frozen)
+      yield* svc.prune({ sessionID: info.id, model, tokens: { input: 35_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
+      const after = yield* ssn.messages({ sessionID: info.id })
+      const part = after.flatMap((message) => message.parts).find((item) => item.type === "tool")
+      expect(part?.type).toBe("tool")
+      if (part?.type !== "tool" || part.state.status !== "completed") throw new Error("missing tool")
+      expect(part.state.output).toBe("x".repeat(200_000))
+      expect(part.contextSelection?.action).toBe("trim")
+      const rendered = yield* MessageV2.toModelMessagesEffect(after, model)
+      expect(JSON.stringify(rendered)).toContain("trimmed")
+      expect(JSON.stringify(rendered).length).toBeLessThan(10_000)
+      expect(JSON.stringify(rendered)).not.toContain("contextSelection")
+      expect(JSON.stringify(frozen)).toBe(frozenBytes)
+      yield* svc.prune({ sessionID: info.id, model, tokens: { input: 95_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
+      const hard = yield* ssn.messages({ sessionID: info.id })
+      const image = hard.flatMap((message) => message.parts).find((item) => item.type === "file")
+      const reasoning = hard.flatMap((message) => message.parts).find((item) => item.type === "reasoning")
+      expect(image?.type === "file" && image.url).toBe("data:image/png;base64,AAAA")
+      expect(reasoning?.type === "reasoning" && reasoning.text).toBe("original reasoning")
+      const projected = JSON.stringify(yield* MessageV2.toModelMessagesEffect(hard, model))
+      expect(projected).not.toContain("data:image/png;base64,AAAA")
+      expect(projected).not.toContain("original reasoning")
+      expect(JSON.stringify(frozen)).toBe(frozenBytes)
+    }), { config: { compaction: { prune: true } } }),
+  )
   it.live(
     "compacts old completed tool output",
     provideTmpdirInstance(

@@ -3,6 +3,8 @@ import { Effect } from "effect"
 import z from "zod"
 import { Token } from "../util"
 import * as Tool from "./tool"
+import { markStructuredSearch } from "../session/tool-view-structured-search"
+import { toolViewProducerCurrent } from "../session/tool-view-producer-admission"
 
 export const MCP_TOOL_SEARCH_ID = "mcp_tool_search"
 export const MCP_TOOL_SEARCH_DEFAULT_LIMIT = 8
@@ -240,19 +242,21 @@ export const McpToolSearchTool = Tool.define(
       Effect.sync(() => {
         const available = catalog(ctx.extra?.mcpToolSearch)
         if (!available || available.entries.length === 0) {
-          return {
+          const result = {
             title: "No MCP tools available",
             output: JSON.stringify({ status: "no_match", results: [] }, null, 2),
             metadata: { catalogKey: available?.key ?? "", matchedTools: [] },
           }
+          return toolViewProducerCurrent(ctx,'structured-search-v1') ? markStructuredSearch(result,ctx) : result
         }
 
         const results = searchMcpTools(available.entries, params)
-        return {
+        const result = {
           title: results.length > 0 ? `Loaded ${results.length} MCP tool${results.length === 1 ? "" : "s"}` : "No matching MCP tools",
           output: JSON.stringify({ status: results.length > 0 ? "matched" : "no_match", results }, null, 2),
           metadata: { catalogKey: available.key, matchedTools: results.map((result) => result.name) },
         }
+        return toolViewProducerCurrent(ctx,'structured-search-v1') ? markStructuredSearch(result,ctx) : result
       }),
   }),
 )

@@ -354,3 +354,28 @@ def test_expand_daily_rrule_large_window_is_capped_and_marked_truncated():
     assert len(results) == cal._RRULE_EXPANSION_LIMIT
     assert results[-1]["uid"] == "evt-daily-cap::2022-09-26T09:00"
     assert all(r["truncated"] is True for r in results)
+
+
+def test_expand_rrule_with_utc_until_keeps_all_occurrences():
+    """FREQ=DAILY;UNTIL=...Z must expand to every occurrence, not collapse
+    to a single non-recurring event."""
+    cal = import_calendar_routes()
+    ev = _make_event(
+        uid="evt-until-utc", dtstart=datetime(2024, 1, 1, 9),
+        dtend=datetime(2024, 1, 1, 9, 30), is_utc=True,
+        rrule="FREQ=DAILY;UNTIL=20240105T090000Z",
+    )
+
+    results = cal._expand_rrule(ev, datetime(2024, 1, 1), datetime(2024, 1, 10))
+
+    # Jan 1, 2, 3, 4, 5 — five daily occurrences up to and including UNTIL.
+    assert len(results) == 5, (
+        f"Expected 5 daily occurrences bounded by UTC UNTIL, got "
+        f"{len(results)}: {[r['uid'] for r in results]}"
+    )
+    assert all(r["is_recurrence"] is True for r in results), (
+        "Occurrences must be flagged as recurrences, not silently downgraded "
+        f"to non-recurring: {[(r['uid'], r['is_recurrence']) for r in results]}"
+    )
+    assert results[0]["uid"] == "evt-until-utc::2024-01-01T09:00"
+    assert results[-1]["uid"] == "evt-until-utc::2024-01-05T09:00"

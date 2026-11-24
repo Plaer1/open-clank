@@ -280,7 +280,7 @@ def setup_odysseus_files_routes() -> APIRouter:
 
     def authenticated_session(request: Request) -> str:
         """Return a non-reversible binding for the authenticated browser session."""
-        token = str(request.cookies.get("odysseus_session") or "")
+        token = str(request.cookies.get("open_clank_session") or "")
         if not token:
             raise HTTPException(status_code=401, detail="A browser session is required for media preview")
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -318,18 +318,17 @@ def setup_odysseus_files_routes() -> APIRouter:
         return False
 
     def app_context(request: Request) -> tuple[str, dict[str, Any]]:
-        """Resolve the authenticated app scope for every file operation.
+        """Resolve the authenticated account's assigned Files scope."""
+        from src.openclank.files_principal import files_principal
 
-        Administrators retain the legacy host-wide app lane. Standard users
-        receive only the roots an administrator assigned to their identity;
-        an empty assignment set is still passed to Rust and therefore fails
-        closed instead of silently becoming host-wide.
-        """
-        owner = authenticated_owner(request)
+        generation = registry.generation()
+        _subject, owner, host_access = files_principal(request, repository=registry.repository)
         try:
-            scope = registry.app_scope(owner, is_admin=owner_is_admin_or_single_user(owner))
+            scope = registry.app_scope(owner, is_admin=host_access)
         except FilesystemRegistryError as error:
             raise HTTPException(status_code=503, detail={"code": error.code, "message": str(error)}) from error
+        if scope.get("generation") != generation:
+            raise HTTPException(409, detail={"code": "policy_generation_changed", "message": "File access changed. Refresh and try again."})
         return owner, scope
 
     def app_client(request: Request):
@@ -337,11 +336,6 @@ def setup_odysseus_files_routes() -> APIRouter:
         return owner, service_for_scope(owner, scope)
 
     def service_for_scope(owner: str, scope: dict[str, Any]):
-        # Preserve the established admin client call shape for integrations
-        # that monkeypatch or wrap the host-wide lane. Non-admin requests must
-        # always carry the server-minted scope explicitly.
-        if scope.get("host"):
-            return client_for_owner(owner)
         return client_for_owner(owner, app_scope=scope)
 
     def service_error(error: FilesServiceError) -> HTTPException:
@@ -355,6 +349,96 @@ def setup_odysseus_files_routes() -> APIRouter:
             "root_unavailable": 503,
         }.get(error.code, 503)
         return HTTPException(status_code=status, detail={"code": error.code, "message": str(error)})
+
+    async def claimed_mutation(request: Request, service: Any, operation: str, path: str,
+                               payload: dict[str, Any], *, missing_source: bool = False,
+                               destination: str | None = None) -> dict[str, Any]:
+        """Join the Files account's path fence before a direct HTTP mutation."""
+        from src.openclank.files_principal import files_principal
+        from src.openclank.files_facade import FilesFacadeError, ProviderContext
+        from src.openclank.files_host_provider import HostFilesProvider
+        repository = getattr(request.app.state, "files_policy_repository", None)
+        if repository is None:
+            raise HTTPException(status_code=503, detail={"code": "provider_unavailable", "message": "Files mutation authority is unavailable"})
+        account, username, is_admin = files_principal(request, repository=repository)
+        context = ProviderContext(str(account), username, repository.generation(), is_admin=is_admin)
+        provider = HostFilesProvider(registry=registry, operation_store=repository)
+
+        async def canonical_existing(value: str) -> tuple[str, str]:
+            response = await service.request("stat", value, {"include_fingerprint": False})
+            data = response.get("data") or {}
+            canonical = str(data.get("path") or "")
+            if not canonical or not os.path.isabs(value) or os.path.normpath(value) != canonical:
+                raise HTTPException(status_code=409, detail={"code": "resource_changed", "message": "Host path is not canonical"})
+            return canonical, str(data.get("kind") or "")
+
+        async def canonical_new(value: str) -> str:
+            parent, name = os.path.dirname(value), os.path.basename(value)
+            if not name or name in {".", ".."} or not os.path.isabs(value):
+                raise HTTPException(status_code=400, detail="path is invalid")
+            canonical_parent, kind = await canonical_existing(parent)
+            if not provider._is_directory_kind(kind):
+                raise HTTPException(status_code=409, detail="destination parent is unavailable")
+            target = os.path.join(canonical_parent, name)
+            if os.path.normpath(value) != target:
+                raise HTTPException(status_code=409, detail="destination is not canonical")
+            return target
+
+        canonical, kind = (await canonical_new(path), "") if missing_source else await canonical_existing(path)
+        target = await canonical_new(destination) if destination is not None else None
+        claimed_paths = [canonical] + ([target] if target is not None else [])
+        actual_payload = dict(payload)
+        if target is not None:
+            actual_payload["destination"] = target
+
+        async def preflight():
+            if operation in {"move", "rename"} and target is not None and target != canonical:
+                await provider._preflight_managed_media_move(context, canonical, target,
+                    source_is_directory=provider._is_directory_kind(kind))
+        native_id = secrets.token_hex(16)
+        request_digest = hashlib.sha256(json.dumps([operation, canonical, actual_payload], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        recovery = {"kind": operation, "request_digest": request_digest, "native_operation_id": native_id}
+        try:
+            return await provider._run_claimed_host_mutation(context, claimed_paths,
+                lambda: service.request(operation, canonical, actual_payload, root_operation_id=native_id), preflight=preflight, recovery=recovery)
+        except FilesFacadeError as exc:
+            detail = {"code": exc.code, "message": str(exc)}
+            claim = getattr(exc, "host_claim", None)
+            if exc.code == "mutation_outcome_unknown" and isinstance(claim, dict):
+                from src.secret_storage import encrypt
+                detail["recovery_handle"] = encrypt(json.dumps({"v": 1, "owner": str(account), **claim}, separators=(",", ":")))
+            raise HTTPException(status_code=409 if exc.code in {"operation_pending", "resource_changed", "managed_media_move_unsupported"} else 503,
+                                detail=detail) from exc
+
+    @router.post("/mutation-recovery/status")
+    async def mutation_recovery_status(request: Request, body: dict[str, Any]) -> dict[str, str]:
+        """Inspect a pending exact claim; missing proof never implies success."""
+        from src.openclank.files_principal import files_principal
+        from src.openclank.files_facade import ProviderContext
+        from src.openclank.files_host_provider import HostFilesProvider
+        from src.secret_storage import decrypt
+        repository = getattr(request.app.state, "files_policy_repository", None)
+        if repository is None:
+            raise HTTPException(status_code=503, detail="Files mutation authority is unavailable")
+        account, username, is_admin = files_principal(request, repository=repository)
+        handle = body.get("recovery_handle")
+        try:
+            if not isinstance(handle, str) or not handle.startswith("enc:") or len(handle) > 4096:
+                raise ValueError("invalid handle")
+            value = json.loads(decrypt(handle))
+            if not isinstance(value, dict) or value.get("v") != 1 or value.get("owner") != str(account):
+                raise ValueError("invalid owner")
+            claim = repository.inspect_host_mutation(owner_subject_id=str(account), operation_id=str(value.get("operation_id") or ""), token=str(value.get("token") or ""))
+            if not claim:
+                return {"state": "unresolved"}
+            context = ProviderContext(str(account), username, repository.generation(), is_admin=is_admin)
+            provider = HostFilesProvider(registry=registry, operation_store=repository)
+            scope = provider._scope(context)
+            if claim.get("workspace_id") != str(context.workspace_id) or any(not provider._path_writable(context, path, scope) for path in claim.get("paths", [])):
+                raise ValueError("authority changed")
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="Recovery handle unavailable") from exc
+        return {"state": "unresolved"}
 
     @router.get("/browse")
     async def browse(
@@ -853,7 +937,7 @@ def setup_odysseus_files_routes() -> APIRouter:
         if expected is not None:
             payload["expected_fingerprint"] = {"algorithm": "sha256", "value": str(expected)} if isinstance(expected, str) else expected
         try:
-            return await service.request("replace", path, payload)
+            return await claimed_mutation(request, service, "replace", path, payload)
         except FilesServiceError as error:
             raise service_error(error) from error
 
@@ -868,7 +952,7 @@ def setup_odysseus_files_routes() -> APIRouter:
         if body.get("bytes") is not None:
             payload = {"bytes": body["bytes"]}
         try:
-            return await service.request("create", path, payload)
+            return await claimed_mutation(request, service, "create", path, payload, missing_source=True)
         except FilesServiceError as error:
             raise service_error(error) from error
 
@@ -880,7 +964,7 @@ def setup_odysseus_files_routes() -> APIRouter:
         if not path:
             raise HTTPException(status_code=400, detail="path is required")
         try:
-            return await service.request("mkdir", path, {})
+            return await claimed_mutation(request, service, "mkdir", path, {}, missing_source=True)
         except FilesServiceError as error:
             raise service_error(error) from error
 
@@ -892,7 +976,7 @@ def setup_odysseus_files_routes() -> APIRouter:
         if not path:
             raise HTTPException(status_code=400, detail="path is required")
         try:
-            return await service.request("trash", path, {})
+            return await claimed_mutation(request, service, "trash", path, {})
         except FilesServiceError as error:
             raise service_error(error) from error
 
@@ -907,7 +991,7 @@ def setup_odysseus_files_routes() -> APIRouter:
         if not original:
             raise HTTPException(status_code=400, detail="entry.original_path is required")
         try:
-            return await service.request("restore", original, {"entry": entry})
+            return await claimed_mutation(request, service, "restore", original, {"entry": entry}, missing_source=True)
         except FilesServiceError as error:
             raise service_error(error) from error
 
@@ -922,7 +1006,7 @@ def setup_odysseus_files_routes() -> APIRouter:
         if expected is not None:
             payload["expected_fingerprint"] = {"algorithm": "sha256", "value": str(expected)} if isinstance(expected, str) else expected
         try:
-            return await service.request("patch", path, payload)
+            return await claimed_mutation(request, service, "patch", path, payload)
         except FilesServiceError as error:
             raise service_error(error) from error
 
@@ -935,7 +1019,7 @@ def setup_odysseus_files_routes() -> APIRouter:
         if not path or not destination:
             raise HTTPException(status_code=400, detail="path and destination are required")
         try:
-            return await service.request("copy", path, {"destination": destination})
+            return await claimed_mutation(request, service, "copy", path, {"destination": destination}, destination=destination)
         except FilesServiceError as error:
             raise service_error(error) from error
 
@@ -948,7 +1032,7 @@ def setup_odysseus_files_routes() -> APIRouter:
         if not path or not destination:
             raise HTTPException(status_code=400, detail="path and destination are required")
         try:
-            return await service.request("move", path, {"destination": destination})
+            return await claimed_mutation(request, service, "move", path, {"destination": destination}, destination=destination)
         except FilesServiceError as error:
             raise service_error(error) from error
 
@@ -961,7 +1045,7 @@ def setup_odysseus_files_routes() -> APIRouter:
         if not path or not destination:
             raise HTTPException(status_code=400, detail="path and destination are required")
         try:
-            return await service.request("rename", path, {"destination": destination})
+            return await claimed_mutation(request, service, "rename", path, {"destination": destination}, destination=destination)
         except FilesServiceError as error:
             raise service_error(error) from error
 
@@ -1038,11 +1122,8 @@ def setup_odysseus_files_routes() -> APIRouter:
 
     @router.get("/app-scope")
     async def app_scope(request: Request) -> dict[str, Any]:
-        owner = authenticated_owner(request)
-        try:
-            return {"version": 1, "scope": registry.app_scope(owner, is_admin=owner_is_admin_or_single_user(owner))}
-        except FilesystemRegistryError as error:
-            raise HTTPException(status_code=503, detail={"code": error.code, "message": str(error)}) from error
+        _owner, scope = app_context(request)
+        return {"version": 1, "scope": scope}
 
     @router.get("/navigation-roots")
     async def navigation_roots(request: Request) -> dict[str, Any]:

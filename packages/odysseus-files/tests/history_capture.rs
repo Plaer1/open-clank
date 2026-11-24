@@ -100,7 +100,7 @@ fn provider_engine_sends_authenticated_before_live_and_after_frames() {
     let frames = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let captured = Arc::clone(&frames);
     let server = thread::spawn(move || {
-        for _ in 0..4 {
+        for _ in 0..5 {
             let (mut stream, _) = listener.accept().unwrap();
             let mut bytes = String::new();
             BufReader::new(&mut stream).read_line(&mut bytes).unwrap();
@@ -117,6 +117,8 @@ fn provider_engine_sends_authenticated_before_live_and_after_frames() {
                         "created": true
                     }
                 })
+            } else if let Some(settle) = frame.get("SettleRecovery") {
+                serde_json::json!({"Action":{"action_id":settle["action_id"],"recovery_only":true,"recovery_settled":true}})
             } else {
                 serde_json::json!({})
             };
@@ -153,7 +155,9 @@ fn provider_engine_sends_authenticated_before_live_and_after_frames() {
     server.join().unwrap();
 
     let frames = frames.lock().unwrap();
-    assert_eq!(frames.len(), 4);
+    assert_eq!(frames.len(), 5);
+    assert_eq!(frames[1].pointer("/PrepareBatch/envelope/request/coverage/metadata/required_recovery"), Some(&serde_json::json!(true)));
+    assert_eq!(frames[4]["SettleRecovery"]["auth"], frames[1]["PrepareBatch"]["envelope"]["auth"]);
     let action_ids = frames
         .iter()
         .skip(1)
@@ -162,6 +166,7 @@ fn provider_engine_sends_authenticated_before_live_and_after_frames() {
                 .pointer("/PrepareBatch/envelope/request/action_id")
                 .or_else(|| frame.pointer("/RecordLive/envelope/action_id"))
                 .or_else(|| frame.pointer("/CompleteBatch/envelope/action_id"))
+                .or_else(|| frame.pointer("/SettleRecovery/action_id"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap()
                 .to_owned()

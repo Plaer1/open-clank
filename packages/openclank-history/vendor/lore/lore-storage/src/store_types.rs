@@ -16,6 +16,23 @@ use crate::Hash;
 use crate::Partition;
 use crate::immutable_store::StoreError;
 
+/// Where an [`ImmutableStore::get_into`] read put the payload it found.
+///
+/// The store chooses by what it stores, not by what the payload means: bytes that are already the
+/// content go where the reader wants them, and bytes that are not come back on their own. Landing
+/// the latter in the reader's buffer would only force a copy back out of it to expand them.
+///
+/// [`ImmutableStore::get_into`]: crate::immutable_store::ImmutableStore::get_into
+pub enum PayloadRead {
+    /// The caller's buffer holds the content: the stored payload where it is the content, or the
+    /// content the store expanded on receipt.
+    IntoBuffer,
+    /// The stored payload, or the content the store expanded from it, read into a buffer of its
+    /// own, for a reader that has to expand it or walk it as a list of further fragments. The
+    /// caller's buffer is untouched.
+    Returned(Bytes),
+}
+
 /// Progressive match hierarchy for store lookups.
 ///
 /// When querying the store, callers specify a minimum match level.
@@ -120,6 +137,10 @@ pub struct StoreGetData {
     /// The bytes, when they were asked for. `get_metadata` never carries them; a `get` that matched
     /// always does.
     pub payload: Option<Bytes>,
+    /// The content `payload` expands to, and the fragment describing it, where the store expanded
+    /// it to check it against its address on receipt, so a reader takes it rather than expanding
+    /// the payload again. Only a store fetching from an untrusted source fills it.
+    pub content: Option<(Fragment, Bytes)>,
 }
 
 impl StoreGetData {
@@ -139,6 +160,7 @@ impl StoreGetData {
             match_made,
             partition,
             payload: None,
+            content: None,
         }
     }
 
@@ -207,7 +229,7 @@ pub struct KeyValueStream {
 
 impl KeyValueStream {
     pub fn new() -> (Self, UnboundedSender<(Hash, Hash)>) {
-        // Unbounded to ensure not blocking while holding group bucket read lock
+        // Unbounded, so that a send never waits while the producer holds its group's layout.
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (Self { channel: rx }, tx)
     }

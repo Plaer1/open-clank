@@ -1,0 +1,1904 @@
+import { fileURLToPath } from "node:url"
+import { BusEvent } from "@/bus/bus-event"
+import { SessionID, MessageID, PartID } from "./schema"
+import z from "zod"
+import { CaptureMembership } from "./capture-membership"
+import { validGcfReceipt } from "./gcf-source-proof"
+import { graphGcfView } from "./gcf-graph-view"
+import type { GcfArtifact } from "./gcf-native"
+import type { GcfFrameRecorder } from "./gcf-request-frames"
+import { NamedError } from "@mimo-ai/shared/util/error"
+import {
+  APICallError,
+  convertToModelMessages,
+  LoadAPIKeyError,
+  RetryError,
+  type ModelMessage,
+  type UIMessage,
+} from "ai"
+import { LSP } from "../lsp"
+import { Snapshot } from "@/snapshot"
+import { SyncEvent } from "../sync"
+import { Database, NotFoundError, and, desc, eq, inArray, lt, or, sql } from "@/storage"
+import { MessageTable, PartTable, SessionTable } from "./session.sql"
+import { ProviderError } from "@/provider"
+import { errorMessage } from "@/util/error"
+import { HostErrorRegistry } from "@/error/host-registry"
+import { isMedia } from "@/util/media"
+import type { Provider } from "@/provider"
+import { ModelID, ProviderID } from "@/provider/schema"
+import { Effect } from "effect"
+import { EffectLogger } from "@/effect"
+import {
+  inlineToolAttachment,
+  routeToolAttachment,
+  supportsResponsesToolContent,
+  toolAttachmentFilename,
+  toolAttachmentPlaceholder,
+} from "./tool-attachment"
+import { isSkillCatalogReminder } from "./skill-catalog"
+import { collapseCheckpointTail } from "./tail-digest"
+import { createHash } from 'node:crypto'
+import type { NativeMembershipCapture, NativeMembershipSource } from './context-inspection'
+import { selectImageView, type ImageViewContext } from './model-image-view'
+
+/** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
+interface FetchDecompressionError extends Error {
+  code: "ZlibError"
+  errno: number
+  path: string
+}
+
+function causeMetadata(error: unknown): Record<string, string> | undefined {
+  if (error === null || typeof error !== "object") return undefined
+  const source = error as { cause?: unknown; errors?: unknown }
+  if (source.cause === undefined && !Array.isArray(source.errors)) return undefined
+  const causeChain = ProviderError.summarizeCause(error)
+  const history = ProviderError.summarizeCause(error, { includeRetryHistory: true })
+  const retryHistory = JSON.stringify(history) !== JSON.stringify(causeChain) ? JSON.stringify(history) : undefined
+  const metadata = {
+    ...(causeChain.length > 0 ? { causeChain: JSON.stringify(causeChain) } : {}),
+    ...(retryHistory ? { retryHistory } : {}),
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined
+}
+
+export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached file(s) from tool result:"
+export { isMedia }
+
+export const OutputLengthError = NamedError.create(
+  "MessageOutputLengthError",
+  z.object({
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const AbortedError = NamedError.create(
+  "MessageAbortedError",
+  z.object({
+    message: z.string(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const StructuredOutputError = NamedError.create(
+  "StructuredOutputError",
+  z.object({
+    message: z.string(),
+    retries: z.number(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const AuthError = NamedError.create(
+  "ProviderAuthError",
+  z.object({
+    providerID: z.string(),
+    message: z.string(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const APIError = NamedError.create(
+  "APIError",
+  z.object({
+    message: z.string(),
+    statusCode: z.number().optional(),
+    isRetryable: z.boolean(),
+    responseHeaders: z.record(z.string(), z.string()).optional(),
+    responseBody: z.string().optional(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export type APIError = z.infer<typeof APIError.Schema>
+
+function isAuthenticationFailure(error: APIError): boolean {
+  if (error.data.statusCode === 401) return true
+  if (error.data.statusCode !== 403) return false
+  const body = error.data.responseBody?.toLowerCase() ?? ""
+  const message = error.data.message.toLowerCase()
+  const text = `${message} ${body}`
+  return /(?:invalid|expired|missing|malformed)\s*(?:api[ _-]?key|token|credential)|(?:api[ _-]?key|token|credential)\s*(?:invalid|expired|missing|malformed)|\b(?:authentication|authorization)\s+(?:failed|required|invalid|missing)|\binvalid credentials?\b|\baccess denied\b/.test(text) || message.trim() === "unauthorized" || body.trim() === "unauthorized"
+}
+
+export function isAuthError(error: unknown): boolean {
+  return AuthError.isInstance(error) || (APIError.isInstance(error) && isAuthenticationFailure(error))
+}
+export const ContextOverflowError = NamedError.create(
+  "ContextOverflowError",
+  z.object({
+    message: z.string(),
+    responseBody: z.string().optional(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const InvalidOutputError = NamedError.create(
+  "InvalidOutputError",
+  z.object({
+    message: z.string(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+/**
+ * The model stream closed without the provider's terminal frame (unified finish
+ * `other` with no raw finish reason). The step did not finish, so it is retried
+ * rather than accepted as a final answer.
+ */
+export const StreamIncompleteError = NamedError.create(
+  "StreamIncompleteError",
+  z.object({
+    message: z.string(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const TextToolCallError = NamedError.create("TextToolCallError", z.object({ message: z.string(), ...HostErrorRegistry.hostFieldShape }))
+export const ContentFilterError = NamedError.create(
+  "ContentFilterError",
+  z.object({
+    message: z.string(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const ModelError = NamedError.create("ModelError", z.object({ message: z.string(), ...HostErrorRegistry.hostFieldShape }))
+
+export const OutputFormatText = z
+  .object({
+    type: z.literal("text"),
+  })
+  .meta({
+    ref: "OutputFormatText",
+  })
+
+export const OutputFormatJsonSchema = z
+  .object({
+    type: z.literal("json_schema"),
+    schema: z.record(z.string(), z.any()).meta({ ref: "JSONSchema" }),
+    retryCount: z.number().int().min(0).default(2),
+  })
+  .meta({
+    ref: "OutputFormatJsonSchema",
+  })
+
+export const Format = z.discriminatedUnion("type", [OutputFormatText, OutputFormatJsonSchema]).meta({
+  ref: "OutputFormat",
+})
+export type OutputFormat = z.infer<typeof Format>
+
+const PartBase = z.object({
+  id: PartID.zod,
+  sessionID: SessionID.zod,
+  messageID: MessageID.zod,
+})
+
+export const SnapshotPart = PartBase.extend({
+  type: z.literal("snapshot"),
+  snapshot: z.string(),
+}).meta({
+  ref: "SnapshotPart",
+})
+export type SnapshotPart = z.infer<typeof SnapshotPart>
+
+export const PatchPart = PartBase.extend({
+  type: z.literal("patch"),
+  hash: z.string(),
+  files: z.string().array(),
+}).meta({
+  ref: "PatchPart",
+})
+export type PatchPart = z.infer<typeof PatchPart>
+
+export const TextPart = PartBase.extend({
+  type: z.literal("text"),
+  text: z.string(),
+  synthetic: z.boolean().optional(),
+  ignored: z.boolean().optional(),
+  time: z
+    .object({
+      start: z.number(),
+      end: z.number().optional(),
+    })
+    .optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+}).meta({
+  ref: "TextPart",
+})
+export type TextPart = z.infer<typeof TextPart>
+
+export const ReasoningPart = PartBase.extend({
+  contextSelection: z.object({ version: z.literal(1), action: z.literal("omit") }).optional(),
+  type: z.literal("reasoning"),
+  text: z.string(),
+  metadata: z.record(z.string(), z.any()).optional(),
+  time: z.object({
+    start: z.number(),
+    end: z.number().optional(),
+  }),
+}).meta({
+  ref: "ReasoningPart",
+})
+export type ReasoningPart = z.infer<typeof ReasoningPart>
+
+const FilePartSourceBase = z.object({
+  text: z
+    .object({
+      value: z.string(),
+      start: z.number().int(),
+      end: z.number().int(),
+    })
+    .meta({
+      ref: "FilePartSourceText",
+    }),
+})
+
+export const FileSource = FilePartSourceBase.extend({
+  type: z.literal("file"),
+  path: z.string(),
+}).meta({
+  ref: "FileSource",
+})
+
+export const SymbolSource = FilePartSourceBase.extend({
+  type: z.literal("symbol"),
+  path: z.string(),
+  range: LSP.Range,
+  name: z.string(),
+  kind: z.number().int(),
+}).meta({
+  ref: "SymbolSource",
+})
+
+export const ResourceSource = FilePartSourceBase.extend({
+  type: z.literal("resource"),
+  clientName: z.string(),
+  uri: z.string(),
+}).meta({
+  ref: "ResourceSource",
+})
+
+export const FilePartSource = z.discriminatedUnion("type", [FileSource, SymbolSource, ResourceSource]).meta({
+  ref: "FilePartSource",
+})
+
+export const FilePart = PartBase.extend({
+  contextSelection: z.object({ version: z.literal(1), action: z.literal("omit") }).optional(),
+  type: z.literal("file"),
+  mime: z.string(),
+  filename: z.string().optional(),
+  url: z.string(),
+  source: FilePartSource.optional(),
+}).meta({
+  ref: "FilePart",
+})
+export type FilePart = z.infer<typeof FilePart>
+
+export const AgentPart = PartBase.extend({
+  type: z.literal("agent"),
+  name: z.string(),
+  source: z
+    .object({
+      value: z.string(),
+      start: z.number().int(),
+      end: z.number().int(),
+    })
+    .optional(),
+}).meta({
+  ref: "AgentPart",
+})
+export type AgentPart = z.infer<typeof AgentPart>
+
+export const CheckpointPart = PartBase.extend({
+  type: z.literal("checkpoint"),
+  checkpointDir: z.string(),
+  checkpointNumber: z.number(),
+  coveredUpTo: MessageID.zod,
+  /**
+   * Last tail message before the unanswered user messages at its end; the
+   * boundary's Recent activity digest covers (coveredUpTo, digestUpTo].
+   * Optional: absent when the tail has no such message and on older
+   * boundaries.
+   */
+  digestUpTo: MessageID.zod.optional(),
+  /**
+   * Inputs the inbox still held undelivered when this boundary was inserted.
+   * They are not part of the tail; one whose receipt later ends without
+   * delivery is placed after the boundary.
+   */
+  deferredInputs: MessageID.zod.array().optional(),
+}).meta({
+  ref: "CheckpointPart",
+})
+export type CheckpointPart = z.infer<typeof CheckpointPart>
+
+export const SubtaskPart = PartBase.extend({
+  type: z.literal("subtask"),
+  prompt: z.string(),
+  description: z.string(),
+  agent: z.string(),
+  model: z
+    .object({
+      providerID: ProviderID.zod,
+      modelID: ModelID.zod,
+    })
+    .optional(),
+  command: z.string().optional(),
+}).meta({
+  ref: "SubtaskPart",
+})
+export type SubtaskPart = z.infer<typeof SubtaskPart>
+
+export const CompactionPart = PartBase.extend({
+  type: z.literal("compaction"),
+  auto: z.boolean(),
+  overflow: z.boolean().optional(),
+  // Legacy pre-compaction tail marker. New projections keep only messages that
+  // arrive while the summary is being generated; see `projection` below.
+  tail_start_id: MessageID.zod.optional(),
+  projection: z
+    .object({
+      version: z.literal(1),
+      summary_message_id: MessageID.zod,
+      summary: z.string(),
+      manifest: z.string().optional(),
+      trigger: z.enum(["manual", "automatic", "provider-overflow"]),
+      // The observed compression-time range. `tail_start_id` is the first
+      // whole API round retained inside that range; when omitted, the range was
+      // over budget and is dropped. Messages newer than `tail_end_id` are normal
+      // post-compaction traffic and always stay live.
+      tail_start_id: MessageID.zod.optional(),
+      // Earliest original pre-boundary message retained after the summary.
+      retained_start_id: MessageID.zod.optional(),
+      // Arrivals omitted from model context remain in original history.
+      dropped_arrived_start_id: MessageID.zod.optional(),
+      dropped_arrived_end_id: MessageID.zod.optional(),
+      tail_end_id: MessageID.zod.optional(),
+      compacted_tool_calls: z
+        .array(
+          z.object({
+            call_id: z.string(),
+            tokens: z.number().int().nonnegative(),
+          }),
+        )
+        .optional(),
+    })
+    .optional(),
+}).meta({
+  ref: "CompactionPart",
+})
+export type CompactionPart = z.infer<typeof CompactionPart>
+
+// Durable retry record of one assistant message: upserted on every retry of the
+// step, kept through retry cleanup, removed once the turn succeeds. Never sent
+// to the model.
+export const RetryPart = PartBase.extend({
+  type: z.literal("retry"),
+  attempt: z.number(),
+  phase: z.enum(["request", "stream"]),
+  scope: z.enum(["request", "live-step"]),
+  kind: z.enum(["network", "rate_limit", "server", "stream", "unknown"]),
+  message: z.string(),
+  hostCode: z.string().optional(),
+  next: z.number(),
+  time: z.object({
+    created: z.number(),
+    updated: z.number(),
+  }),
+}).meta({
+  ref: "RetryPart",
+})
+export type RetryPart = z.infer<typeof RetryPart>
+
+export const StepStartPart = PartBase.extend({
+  type: z.literal("step-start"),
+  snapshot: z.string().optional(),
+  captureMembership: CaptureMembership.optional(),
+}).meta({
+  ref: "StepStartPart",
+})
+export type StepStartPart = z.infer<typeof StepStartPart>
+
+export const StepFinishPart = PartBase.extend({
+  type: z.literal("step-finish"),
+  reason: z.string(),
+  snapshot: z.string().optional(),
+  cost: z.number(),
+  tokens: z.object({
+    total: z.number().optional(),
+    input: z.number(),
+    output: z.number(),
+    reasoning: z.number(),
+    cache: z.object({
+      read: z.number(),
+      write: z.number(),
+    }),
+  }),
+}).meta({
+  ref: "StepFinishPart",
+})
+export type StepFinishPart = z.infer<typeof StepFinishPart>
+
+export const ToolStatePending = z
+  .object({
+    status: z.literal("pending"),
+    input: z.record(z.string(), z.any()),
+    raw: z.string(),
+  })
+  .meta({
+    ref: "ToolStatePending",
+  })
+
+export type ToolStatePending = z.infer<typeof ToolStatePending>
+
+export const ToolStateRunning = z
+  .object({
+    status: z.literal("running"),
+    input: z.record(z.string(), z.any()),
+    title: z.string().optional(),
+    metadata: z.record(z.string(), z.any()).optional(),
+    time: z.object({
+      start: z.number(),
+    }),
+  })
+  .meta({
+    ref: "ToolStateRunning",
+  })
+export type ToolStateRunning = z.infer<typeof ToolStateRunning>
+
+export const ToolStateCompleted = z
+  .object({
+    status: z.literal("completed"),
+    input: z.record(z.string(), z.any()),
+    output: z.string(),
+    providerOutput: z.unknown().optional(),
+    providerMetadata: z.record(z.string(), z.any()).optional(),
+    title: z.string(),
+    metadata: z.record(z.string(), z.any()),
+    time: z.object({
+      start: z.number(),
+      end: z.number(),
+      compacted: z.number().optional(),
+    }),
+    attachments: FilePart.array().optional(),
+  })
+  .meta({
+    ref: "ToolStateCompleted",
+  })
+export type ToolStateCompleted = z.infer<typeof ToolStateCompleted>
+
+export const ToolStateError = z
+  .object({
+    status: z.literal("error"),
+    input: z.record(z.string(), z.any()),
+    inputComplete: z.boolean().optional(),
+    error: z.string(),
+    metadata: z.record(z.string(), z.any()).optional(),
+    time: z.object({
+      start: z.number(),
+      end: z.number(),
+    }),
+    attachments: FilePart.array().optional(),
+  })
+  .meta({
+    ref: "ToolStateError",
+  })
+export type ToolStateError = z.infer<typeof ToolStateError>
+
+/**
+ * The terminal state for a tool part that was left unfinished by an
+ * interruption. A `pending`/`running` part is persisted the moment the tool
+ * starts (so the TUI can stream progress) and is only rewritten by whoever
+ * finalizes the turn — so every finalizer must produce the SAME shape, or the
+ * transcript renders interrupted calls inconsistently. Callers: the abort
+ * finalizer in `SessionProcessor.cleanup` and `SessionPrompt.sweepOrphanToolParts`.
+ */
+export function abortedToolState(state: ToolPart["state"], error = "Tool execution aborted"): ToolStateError {
+  const end = Date.now()
+  return {
+    status: "error",
+    input: state.input,
+    inputComplete: state.status === "error" ? state.inputComplete : state.status !== "pending",
+    error,
+    metadata: { ...("metadata" in state && state.metadata ? state.metadata : {}), interrupted: true },
+    time: { start: "time" in state ? state.time.start : end, end },
+  }
+}
+
+export const ToolState = z
+  .discriminatedUnion("status", [ToolStatePending, ToolStateRunning, ToolStateCompleted, ToolStateError])
+  .meta({
+    ref: "ToolState",
+  })
+
+export const ToolPart = PartBase.extend({
+  contextSelection: z.object({ version: z.literal(1), action: z.literal("trim"), head: z.literal(1536), tail: z.literal(1536) }).optional(),
+  type: z.literal("tool"),
+  execution: z.enum(["not-started", "started"]).optional(),
+  callID: z.string(),
+  tool: z.string(),
+  state: ToolState,
+  metadata: z.record(z.string(), z.any()).optional(),
+}).meta({
+  ref: "ToolPart",
+})
+export type ToolPart = z.infer<typeof ToolPart>
+
+const Base = z.object({
+  id: MessageID.zod,
+  sessionID: SessionID.zod,
+  agentID: z.string().optional(),
+})
+
+/** Plugin hook envelope: actor/spawn pre/post hook sends. */
+export const HookProvenance = z
+  .object({
+    hookPhase: z.enum(["pre", "post"]),
+    hookIteration: z.number().int().nonnegative(),
+    pluginNames: z.array(z.string()),
+    hookIDs: z.array(z.string()),
+  })
+  .meta({ ref: "HookProvenance" })
+export type HookProvenance = z.infer<typeof HookProvenance>
+
+/**
+ * Root-session machine/host envelope (host automation, system, scheduled host).
+ * Present provenance on source=hook allows non-text parts and does not force
+ * text parts synthetic; absence still fail-closes those checks.
+ */
+export const MachineProvenance = z
+  .object({
+    machine: z.string().min(1),
+  })
+  .meta({ ref: "MachineProvenance" })
+export type MachineProvenance = z.infer<typeof MachineProvenance>
+
+export const AgentProvenance = z.object({
+  source: z.literal("agent"),
+  senderSessionID: SessionID.zod.optional(),
+  senderActorID: z.string().optional(),
+}).meta({ ref: "AgentProvenance" })
+export type AgentProvenance = z.infer<typeof AgentProvenance>
+
+export const Provenance = z.union([HookProvenance, MachineProvenance, AgentProvenance]).meta({ ref: "Provenance" })
+export type Provenance = z.infer<typeof Provenance>
+
+export const User = Base.extend({
+  role: z.literal("user"),
+  time: z.object({
+    created: z.number(),
+  }),
+  format: Format.optional(),
+  summary: z
+    .object({
+      title: z.string().optional(),
+      body: z.string().optional(),
+      diffs: Snapshot.FileDiff.array(),
+    })
+    .optional(),
+  agent: z.string(),
+  model: z.object({
+    providerID: ProviderID.zod,
+    modelID: ModelID.zod,
+    variant: z.string().optional(),
+  }),
+  system: z.string().optional(),
+  systemMode: z.enum(["append", "replace-agent"]).optional(),
+  harness: z.enum(["auto", "codex", "default"]).optional(),
+  task_id: z.string().optional(),
+  tools: z.record(z.string(), z.boolean()).optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+  provenance: Provenance.optional(),
+}).meta({
+  ref: "UserMessage",
+})
+export type User = z.infer<typeof User>
+
+export const Part = z
+  .discriminatedUnion("type", [
+    TextPart,
+    SubtaskPart,
+    ReasoningPart,
+    FilePart,
+    ToolPart,
+    StepStartPart,
+    StepFinishPart,
+    SnapshotPart,
+    PatchPart,
+    AgentPart,
+    RetryPart,
+    CheckpointPart,
+    CompactionPart,
+  ])
+  .meta({
+    ref: "Part",
+  })
+export type Part = z.infer<typeof Part>
+
+export const Assistant = Base.extend({
+  role: z.literal("assistant"),
+  time: z.object({
+    created: z.number(),
+    completed: z.number().optional(),
+  }),
+  error: z
+    .discriminatedUnion("name", [
+      AuthError.Schema,
+      NamedError.Unknown.Schema,
+      OutputLengthError.Schema,
+      AbortedError.Schema,
+      StructuredOutputError.Schema,
+      ContextOverflowError.Schema,
+      InvalidOutputError.Schema,
+      StreamIncompleteError.Schema,
+      TextToolCallError.Schema,
+      ContentFilterError.Schema,
+      ModelError.Schema,
+      APIError.Schema,
+    ])
+    .optional(),
+  parentID: MessageID.zod,
+  modelID: ModelID.zod,
+  providerID: ProviderID.zod,
+  /**
+   * @deprecated
+   */
+  mode: z.string(),
+  agent: z.string(),
+  path: z.object({
+    cwd: z.string(),
+    root: z.string(),
+  }),
+  summary: z.boolean().optional(),
+  cost: z.number(),
+  tokens: z.object({
+    total: z.number().optional(),
+    input: z.number(),
+    output: z.number(),
+    reasoning: z.number(),
+    cache: z.object({
+      read: z.number(),
+      write: z.number(),
+    }),
+  }),
+  structured: z.any().optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+  actorResult: z.object({
+    finalText: z.string().optional(),
+    structured: z.unknown().optional(),
+    reportedStatus: z.enum(["success", "partial", "failed", "blocked"]).optional(),
+    reportedSummary: z.string().optional(),
+    warnings: z.array(z.string()).optional(),
+  }).optional(),
+  variant: z.string().optional(),
+  finish: z.string().optional(),
+  /** Provider's raw finish reason (AI SDK `rawFinishReason`), e.g. `stop`, `end_turn`. */
+  rawFinish: z.string().optional(),
+}).meta({
+  ref: "AssistantMessage",
+})
+export type Assistant = z.infer<typeof Assistant>
+
+export const Info = z.discriminatedUnion("role", [User, Assistant]).meta({
+  ref: "Message",
+})
+export type Info = z.infer<typeof Info>
+
+export const Event = {
+  Updated: SyncEvent.define({
+    type: "message.updated",
+    version: 1,
+    aggregate: "sessionID",
+    schema: z.object({
+      sessionID: SessionID.zod,
+      info: Info,
+    }),
+  }),
+  Removed: SyncEvent.define({
+    type: "message.removed",
+    version: 1,
+    aggregate: "sessionID",
+    schema: z.object({
+      sessionID: SessionID.zod,
+      messageID: MessageID.zod,
+    }),
+  }),
+  PartUpdated: SyncEvent.define({
+    type: "message.part.updated",
+    version: 1,
+    aggregate: "sessionID",
+    schema: z.object({
+      sessionID: SessionID.zod,
+      part: Part,
+      time: z.number(),
+    }),
+  }),
+  PartDelta: BusEvent.define(
+    "message.part.delta",
+    z.object({
+      sessionID: SessionID.zod,
+      messageID: MessageID.zod,
+      partID: PartID.zod,
+      field: z.string(),
+      delta: z.string(),
+    }),
+  ),
+  PartRemoved: SyncEvent.define({
+    type: "message.part.removed",
+    version: 1,
+    aggregate: "sessionID",
+    schema: z.object({
+      sessionID: SessionID.zod,
+      messageID: MessageID.zod,
+      partID: PartID.zod,
+    }),
+  }),
+}
+
+export const WithParts = z.object({
+  info: Info,
+  parts: z.array(Part),
+})
+export type WithParts = z.infer<typeof WithParts>
+
+// Apply the newest v1 compaction boundary as a context projection while keeping
+// its persisted assistant summary in the internal message stream. API
+// conversion below re-roles that summary as user context; runLoop still sees
+// the real assistant row for terminal-step control flow.
+function compactionProjection(messages: WithParts[]) {
+  const boundaryIdx = messages.findLastIndex(
+    (message) =>
+      message.info.role === "user" &&
+      message.parts.some((part) => part.type === "compaction" && part.projection?.version === 1),
+  )
+  if (boundaryIdx < 0) return messages
+
+  const boundary = messages[boundaryIdx]
+  const projection = boundary.parts.find(
+    (part): part is CompactionPart => part.type === "compaction" && part.projection?.version === 1,
+  )?.projection
+  if (!projection) return messages
+
+  const after = messages.slice(boundaryIdx + 1)
+  // filterCompacted may have already moved the original retained rows after
+  // the summary. IDs are unique, so their presence here marks that projection.
+  if (projection.retained_start_id && after.some((message) => message.info.id === projection.retained_start_id))
+    return messages
+  const retainedStart = projection.retained_start_id
+    ? messages.findIndex((message, index) => index < boundaryIdx && message.info.id === projection.retained_start_id)
+    : -1
+  if (projection.retained_start_id && retainedStart < 0)
+    throw new Error("Compaction retained history is unavailable")
+  const retained = retainedStart < 0 ? [] : messages.slice(retainedStart, boundaryIdx)
+  const tailEndIdx = projection.tail_end_id
+    ? after.findIndex((message) => message.info.id === projection.tail_end_id)
+    : -1
+  if (!projection.retained_start_id && tailEndIdx < 0) return messages.slice(boundaryIdx)
+  const observed = tailEndIdx < 0 ? [] : after.slice(0, tailEndIdx + 1)
+  const summary = after.find((message) => message.info.id === projection.summary_message_id)
+  const tailStartIdx = projection.tail_start_id
+    ? observed.findIndex((message) => message.info.id === projection.tail_start_id)
+    : -1
+  const compacted = new Map((projection.compacted_tool_calls ?? []).map((item) => [item.call_id, item.tokens]))
+  const shrink = (message: WithParts): WithParts => ({
+    info: message.info,
+    parts: message.parts.map((part) => {
+      if (part.type !== "tool" || part.state.status !== "completed") return part
+      const tokens = compacted.get(part.callID)
+      if (tokens === undefined) return part
+      return {
+        ...part,
+        state: {
+          ...part.state,
+          output: `[Tool result omitted during compaction: ${tokens} tokens. Re-run "${part.tool}" if this result is needed.]`,
+          providerOutput: undefined,
+          attachments: undefined,
+        },
+      }
+    }),
+  })
+
+  return [
+    boundary,
+    ...(summary ? [summary] : []),
+    ...retained.map(shrink),
+    ...(tailStartIdx < 0
+      ? []
+      : observed
+          .slice(tailStartIdx)
+          .filter((message) => message.info.id !== projection.summary_message_id)
+          .map(shrink)),
+    ...after.slice(tailEndIdx < 0 ? 0 : tailEndIdx + 1).filter((message) => message.info.id !== projection.summary_message_id),
+  ]
+}
+
+const Cursor = z.object({
+  id: MessageID.zod,
+  time: z.number(),
+})
+type Cursor = z.infer<typeof Cursor>
+
+export const cursor = {
+  encode(input: Cursor) {
+    return Buffer.from(JSON.stringify(input)).toString("base64url")
+  },
+  decode(input: string) {
+    return Cursor.parse(JSON.parse(Buffer.from(input, "base64url").toString("utf8")))
+  },
+}
+
+const info = (row: typeof MessageTable.$inferSelect) =>
+  ({
+    ...row.data,
+    id: row.id,
+    sessionID: row.session_id,
+    agentID: row.agent_id,
+  }) as Info
+
+const part = (row: typeof PartTable.$inferSelect) =>
+  ({
+    ...row.data,
+    id: row.id,
+    sessionID: row.session_id,
+    messageID: row.message_id,
+  }) as Part
+
+/** Stable substring for the compose-agent synthetic protocol (request-order head). */
+export const COMPOSE_REMINDER_MARKER = "Open Clank Compose Agent"
+
+/**
+ * DB orders parts by `PartTable.id` (ascending). Compose protocol must sit at the
+ * head of the user message for every consumer (runLoop request, checkpoint fork
+ * capture, trajectory) or parent/fork prompt prefixes diverge. Promote on hydrate
+ * so position is a load-time invariant, not a request-layer compensating projection.
+ *
+ * Mutates `parts` in place (splice/unshift) and returns the same array. Callers
+ * must not share the array with a consumer that requires PartID-asc order.
+ */
+export function promoteComposeProtocolFirst(parts: Part[]): Part[] {
+  const idx = parts.findIndex(
+    (p) => p.type === "text" && p.synthetic === true && !p.ignored && p.text.includes(COMPOSE_REMINDER_MARKER),
+  )
+  if (idx <= 0) return parts
+  const found = parts[idx]
+  if (!found) return parts
+  parts.splice(idx, 1)
+  parts.unshift(found)
+  return parts
+}
+
+const older = (row: Cursor) =>
+  or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
+
+function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
+  const ids = rows.map((row) => row.id)
+  const partByMessage = new Map<string, Part[]>()
+  if (ids.length > 0) {
+    const partRows = Database.use((db) =>
+      db
+        .select()
+        .from(PartTable)
+        .where(inArray(PartTable.message_id, ids))
+        .orderBy(PartTable.message_id, PartTable.id)
+        .all(),
+    )
+    for (const row of partRows) {
+      const next = part(row)
+      const list = partByMessage.get(row.message_id)
+      if (list) list.push(next)
+      else partByMessage.set(row.message_id, [next])
+    }
+  }
+
+  return rows.map((row) => ({
+    info: info(row),
+    parts: promoteComposeProtocolFirst(partByMessage.get(row.id) ?? []),
+  }))
+}
+
+function providerMeta(metadata: Record<string, any> | undefined) {
+  if (!metadata) return undefined
+  const { providerExecuted: _, ...rest } = metadata
+  return Object.keys(rest).length > 0 ? rest : undefined
+}
+
+export function planResumeTrim(input: WithParts[], parentID: MessageID) {
+  const parent = input.findIndex((message) => message.info.id === parentID && message.info.role === "user")
+  if (parent < 0) throw new Error("Resume parent is missing")
+  const sourceTail = input.slice(parent + 1)
+  if (sourceTail.some((message) => message.info.role !== "assistant" || message.info.parentID !== parentID)) {
+    throw new Error("Resume trim crosses a parent boundary")
+  }
+  const removeMessages: MessageID[] = []
+  const removeParts: Part[] = []
+  const tail = sourceTail.map((message) => ({
+    ...message,
+    parts: message.parts.filter((part) => {
+      if (part.type !== "tool" || part.execution !== "not-started" || part.metadata?.providerExecuted ||
+        part.state.status === "completed" || ("attachments" in part.state && part.state.attachments?.length) ||
+        ("output" in part.state && part.state.output !== undefined) ||
+        ("metadata" in part.state && (part.state.metadata?.output !== undefined || part.state.metadata?.diff !== undefined))) return true
+      if (message.info.role === "assistant" && (message.info.summary || message.info.structured !== undefined ||
+        (!message.info.error && message.info.finish && message.info.finish !== "length" && message.info.finish !== "tool-calls" &&
+          (message.info.finish === "stop" || message.info.time.completed !== undefined)))) {
+        throw new Error("Resume trim would discard protected output")
+      }
+      removeParts.push(part)
+      return false
+    }),
+  }))
+  const lastToolMessage = tail.findLastIndex((message) => message.parts.some((part) => part.type === "tool"))
+  const updateParts: ToolPart[] = []
+  const updateMessages: Assistant[] = []
+  const retained = tail.flatMap((message, index): WithParts[] => {
+    const info = message.info as Assistant
+    const lastTool = message.parts.findLastIndex((part) => part.type === "tool")
+    // SDK flushes a whole assistant block before emitting its tool results.
+    const nextBlock = index === lastToolMessage
+      ? message.parts.findIndex((part, partIndex) => partIndex > lastTool && part.type === "step-start")
+      : -1
+    // No tool in the tail: keep delivered/protected work, discard incomplete
+    // text-only tails so the request ends at the parent user (no prefill).
+    const delivered = !!info.summary || info.structured !== undefined ||
+      (!info.error && info.finish && info.finish !== "length" && info.finish !== "tool-calls" &&
+        (info.finish === "stop" || info.time.completed !== undefined))
+    const cut = lastToolMessage < 0 ? (delivered ? message.parts.length : 0)
+      : index < lastToolMessage ? message.parts.length
+      : index === lastToolMessage ? (nextBlock < 0 ? message.parts.length : nextBlock)
+      : 0
+    const discarded = message.parts.slice(cut)
+    const hasContent = discarded.some((part) =>
+      part.type === "text" ? !part.ignored && part.text.trim().length > 0
+        : part.type === "reasoning" ? part.text.trim().length > 0 : part.type === "tool",
+    )
+    // File-only / non-model-site shells are residue: drop before the protected
+    // gate so attachments do not masquerade as delivered output.
+    const useful = message.parts.some((part) =>
+      part.type === "text" ? !part.synthetic && !part.ignored && part.text.trim().length > 0
+        : part.type === "tool" ? true
+        : part.type === "reasoning" && part.text.trim().length > 0)
+    const onlyStructural = message.parts.every((part) =>
+      part.type === "step-start" || part.type === "step-finish" || part.type === "retry" ||
+      part.type === "text" && (part.ignored || !part.text.trim().length) ||
+      part.type === "reasoning" && !part.text.trim().length)
+    if (!useful && !onlyStructural && message.parts.length > 0 && info.structured === undefined && !info.summary) {
+      removeMessages.push(info.id)
+      return []
+    }
+    if (cut < message.parts.length && (
+      info.summary || info.structured !== undefined ||
+      (!info.error && info.finish && info.finish !== "length" && info.finish !== "tool-calls" &&
+        (info.finish === "stop" || info.time.completed !== undefined) && discarded.some((part) =>
+          part.type === "text" ? !part.synthetic && !part.ignored && part.text.trim().length > 0
+            : part.type === "reasoning" && part.text.trim().length > 0)) ||
+      discarded.some((part) => !["text", "reasoning", "step-start", "step-finish", "retry"].includes(part.type))
+    )) throw new Error("Resume trim would discard protected output")
+    if (cut === 0 && !hasContent && !removeParts.some((part) => part.messageID === info.id)) return [message]
+    if (cut === 0) {
+      removeMessages.push(info.id)
+      for (let i = removeParts.length - 1; i >= 0; i--) {
+        if (removeParts[i].messageID === info.id) removeParts.splice(i, 1)
+      }
+      return []
+    }
+    removeParts.push(...discarded)
+    const parts = message.parts.slice(0, cut).map((part) => {
+      if (part.type !== "tool") return part
+      if (part.state.status === "pending" || (part.state.status === "error" && (
+        part.state.inputComplete === false ||
+        (part.state.metadata?.interrupted === true && part.state.inputComplete !== true)
+      ))) throw new Error("Resume tool input has no execution boundary")
+      if (part.state.status !== "running") return part
+      const settled = { ...part, state: abortedToolState(part.state) }
+      updateParts.push(settled)
+      return settled
+    })
+    if (info.error && !AbortedError.isInstance(info.error) && parts.some((part) => part.type === "tool")) {
+      const restored = { ...info, error: new AbortedError({ message: "Interrupted before resume" }).toObject() }
+      updateMessages.push(restored)
+      return [{ info: restored, parts }]
+    }
+    return [{ info, parts }]
+  })
+  return { messages: [...input.slice(0, parent + 1), ...retained], removeMessages, removeParts, updateParts, updateMessages }
+}
+
+export function assertResumeModelBoundary(messages: ModelMessage[]) {
+  const pending = new Map<string, string>()
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue
+    for (const part of message.content) {
+      if (part.type === "tool-call") {
+        if (pending.has(part.toolCallId)) throw new Error("Duplicate resume tool call")
+        pending.set(part.toolCallId, part.toolName)
+      }
+      if (part.type === "tool-result") {
+        if (pending.get(part.toolCallId) !== part.toolName) throw new Error("Unpaired resume tool result")
+        pending.delete(part.toolCallId)
+      }
+    }
+  }
+  if (pending.size > 0) throw new Error("Missing resume tool result")
+  if (messages.at(-1)?.role === "assistant") {
+    throw new Error("Resume requires a user or complete client tool-result boundary")
+  }
+  // Empty is legal for user-resume: the parent user may carry no parts and
+  // runLoop re-seeds the turn from that user. Only tool-pairing and tail shape
+  // must hold when there is model input.
+}
+
+export const toModelMessagesEffect = Effect.fnUntraced(function* (
+  input: WithParts[],
+  model: Provider.Model,
+  /**
+   * When true, messages after the latest rebuild checkpoint are collapsed into
+   * a single activity-log user message (see tail-digest.ts). Off by default so
+   * checkpoint writers / compaction / title generation keep full fidelity.
+   */
+  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean; languageProvider?: string; gcfViewIdentity?: string; gcfArtifact?:GcfArtifact; gcfMemoScope?:string; toolViews?:ReadonlyMap<string,string>; nativeMembership?:NativeMembershipCapture; gcfFrameRecord?:GcfFrameRecorder; browserFrameRecord?:(part:ToolPart,frame:string)=>void; imageView?:ImageViewContext },
+) {
+  // Preference identity alone never qualifies an output; preserve original bytes.
+  const result: UIMessage[] = []
+  const toolNames = new Set<string>()
+  // Only the main rebuild request opts in. Writers and compaction require the
+  // persisted transcript verbatim.
+  const source = compactionProjection(options?.collapseCheckpointTail ? collapseCheckpointTail(input) : input)
+  const capture=options?.nativeMembership
+  if (capture) capture.sources=undefined
+  const emitted:NativeMembershipSource[]=[]
+  let membershipValid=!!capture && source.length===input.length && source.every((message,index)=>message===input[index] && message===capture.shapes[index]?.message && message.info.role===capture.shapes[index].role && message.parts.length===capture.shapes[index].parts.length && message.parts.every((item,n)=>item===capture.shapes[index].parts[n].ref && item.id===capture.shapes[index].parts[n].id && item.type===capture.shapes[index].parts[n].type && item.sessionID===capture.sessionID)) && capture.shapes.length===source.length
+  let emittingIndex=0
+  const recordMembership=(message:WithParts,part:WithParts['parts'][number])=>{
+    const index=emittingIndex++, original=capture?.entries.get(index)
+    if (!membershipValid) return
+    if (!original) return
+    if (original.part!==part || message.info.sessionID!==capture?.sessionID || part.sessionID!==capture?.sessionID ||
+        message.info.id!==original.messageID || message.info.role!==original.role || part.messageID!==original.messageID || part.id!==original.partID || part.type!=='text' || part.ignored || part.synthetic || createHash('sha256').update(part.text,'utf8').digest('hex')!==original.digest) {membershipValid=false;return}
+    emitted.push({messageID:original.messageID,partID:original.partID,role:original.role,digest:original.digest,sourceRevision:'unavailable',messageIndex:index,contentIndex:0})
+  }
+  const projection = source
+    .flatMap((message) =>
+      message.info.role === "user"
+        ? message.parts.flatMap((part) =>
+            part.type === "compaction" && part.projection?.version === 1 ? [part.projection] : [],
+          )
+        : [],
+    )
+    .at(-1)
+
+  const toModelOutput = (options: { toolCallId: string; input: unknown; output: unknown }) => {
+    const output = options.output
+    if (typeof output === "string") {
+      return { type: "text", value: output }
+    }
+
+    if (
+      output &&
+      typeof output === "object" &&
+      "text" in output &&
+      typeof output.text === "string" &&
+      "attachments" in output &&
+      Array.isArray(output.attachments)
+    ) {
+      const outputObject = output as {
+        text: string
+        attachments?: Array<{ mime: string; url: string; filename?: string }>
+      }
+      const attachments = (outputObject.attachments ?? []).flatMap((attachment) => {
+        const inline = inlineToolAttachment(attachment)
+        return inline ? [{ ...attachment, ...inline }] : []
+      })
+
+      return {
+        type: "content",
+        value: [
+          { type: "text", text: outputObject.text },
+          ...attachments.map((attachment) =>
+            attachment.mime.startsWith("image/")
+              ? {
+                  type: "image-data" as const,
+                  mediaType: attachment.mediaType,
+                  data: attachment.data,
+                }
+              : {
+                  type: "file-data" as const,
+                  mediaType: attachment.mediaType,
+                  data: attachment.data,
+                  filename: toolAttachmentFilename(attachment),
+                },
+          ),
+        ],
+      }
+    }
+
+    return { type: "json", value: output as never }
+  }
+
+  for (const msg of source) {
+    if (msg.parts.length === 0) continue
+    if (msg.info.role === "assistant" && msg.parts.every((part) =>
+      part.type === "step-start" || part.type === "step-finish" || part.type === "retry" ||
+      (part.type === "text" && (part.ignored || part.text.trim().length === 0)) ||
+      (part.type === "reasoning" && part.text.trim().length === 0),
+    )) continue
+
+    if (projection && msg.info.id === projection.summary_message_id) {
+      result.push({
+        id: msg.info.id,
+        role: "user",
+        parts: [
+          { type: "text", text: projection.summary },
+          ...(projection.manifest ? [{ type: "text" as const, text: projection.manifest }] : []),
+        ],
+      })
+      continue
+    }
+
+    if (msg.info.role === "user") {
+      const userMessage: UIMessage = {
+        id: msg.info.id,
+        role: "user",
+        parts: [],
+      }
+      result.push(userMessage)
+      for (const part of msg.parts) {
+        if (part.type === "text") {
+          // Skill catalogs moved to the system tail. Suppress snapshots persisted
+          // by older versions so resumed sessions do not receive a duplicate user-side catalog.
+          if (part.synthetic && isSkillCatalogReminder(part.text)) continue
+          if (!part.ignored) {
+            recordMembership(msg,part)
+            userMessage.parts.push({
+              type: "text",
+              text: part.text,
+            })
+          }
+        }
+        // text/plain and directory files are converted into text parts, ignore them
+        if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory") {
+          if (part.contextSelection?.action === "omit") {
+            userMessage.parts.push({ type: "text", text: `[stripped: ${part.filename ?? part.mime}]` })
+          } else if (part.url.startsWith("file:") && part.mime !== "application/pdf" && !/^(?:image|audio|video)\//.test(part.mime)) {
+            userMessage.parts.push({ type: "text", text: `[Attached local file: ${fileURLToPath(part.url)}]` })
+          } else if (options?.stripMedia && isMedia(part.mime)) {
+            userMessage.parts.push({
+              type: "text",
+              text: `[Attached ${part.mime}: ${part.filename ?? "file"}]`,
+            })
+          } else {
+            const imageView = part.mime.startsWith("image/") ? selectImageView(options?.imageView,
+              {sessionID:msg.info.sessionID,messageID:msg.info.id,partID:part.id,mime:part.mime,url:part.url}) : undefined
+            userMessage.parts.push({
+              type: "file",
+              url: imageView?.url ?? part.url,
+              mediaType: imageView?.mediaType ?? part.mime,
+              filename: part.filename,
+            })
+          }
+        }
+
+        if (part.type === "checkpoint") {
+          userMessage.parts.push({
+            type: "text" as const,
+            text: "Summary of previous conversation from checkpoint files:",
+          })
+        }
+        if (part.type === "compaction" && !part.projection) {
+          userMessage.parts.push({
+            type: "text" as const,
+            text: "Summary of previous conversation:",
+          })
+        }
+        if (part.type === "subtask") {
+          userMessage.parts.push({
+            type: "text",
+            text: "The following tool was executed by the user",
+          })
+        }
+      }
+    }
+
+    if (msg.info.role === "assistant") {
+      const differentModel = `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`
+      const syntheticGroups: Array<{
+        tool: string
+        callID: string
+        status: "completed" | "error"
+        parts: Array<
+          { type: "file"; url: string; mediaType: string; filename?: string } | { type: "text"; text: string }
+        >
+      }> = []
+      const routeAttachments = (input: {
+        tool: string
+        callID: string
+        status: "completed" | "error"
+        attachments: FilePart[]
+        allowNative: boolean
+      }) => {
+        const native: FilePart[] = []
+        const parts: (typeof syntheticGroups)[number]["parts"] = []
+        for (const attachment of input.attachments) {
+          const route = routeToolAttachment({
+            model,
+            attachment,
+            allowNative: input.allowNative,
+            languageProvider: options?.languageProvider,
+          })
+          if (route === "native") native.push(attachment)
+          if (route === "synthetic") {
+            parts.push({
+              type: "file",
+              url: attachment.url,
+              mediaType: attachment.mime,
+              filename: toolAttachmentFilename(attachment),
+            })
+          }
+          if (route === "placeholder") {
+            parts.push({
+              type: "text",
+              text: toolAttachmentPlaceholder(attachment),
+            })
+          }
+        }
+        if (parts.length > 0) {
+          syntheticGroups.push({
+            tool: input.tool,
+            callID: input.callID,
+            status: input.status,
+            parts,
+          })
+        }
+        return native
+      }
+
+      if (
+        msg.info.error &&
+        !(
+          AbortedError.isInstance(msg.info.error) &&
+          msg.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
+        )
+      ) {
+        continue
+      }
+      const assistantMessage: UIMessage = {
+        id: msg.info.id,
+        role: "assistant",
+        parts: [],
+      }
+      for (const part of msg.parts) {
+        if (part.type === "text" && (part.metadata?.origin as { kind?: string } | undefined)?.kind !== "model_switch") {
+          recordMembership(msg,part)
+          assistantMessage.parts.push({
+            type: "text",
+            text: part.text,
+            ...(differentModel ? {} : { providerMetadata: part.metadata }),
+          })
+        }
+        if (part.type === "step-start")
+          assistantMessage.parts.push({
+            type: "step-start",
+          })
+        if (part.type === "tool") {
+          toolNames.add(part.tool)
+          if (part.state.status === "completed") {
+            const trimmed = part.contextSelection?.action === "trim" && part.state.output.length > 4096
+            let outputText = part.state.time.compacted ? "[Old tool result content cleared]" : trimmed
+              ? part.state.output.slice(0, part.contextSelection!.head) +
+                "\n\n[... trimmed — kept first and last 1.5K of " + part.state.output.length + " chars ...]\n\n" +
+                part.state.output.slice(-part.contextSelection!.tail)
+              : options?.toolViews?.get(part.id) ?? part.state.output
+            let fullGcfFrame = false
+            let gcfEligible = false
+            // T04 owns a selected view first. GCF only derives a model-facing
+            // view from an authenticated complete original and never persists it.
+            if (!part.state.time.compacted && !trimmed && !options?.toolViews?.has(part.id) && options?.gcfViewIdentity &&
+                options.gcfArtifact?.availability() === "available" && validGcfReceipt(part)) {
+              gcfEligible = true
+              const primer = `[Experimental lossless GCF generic JSON. Decode the following value: the first line is the profile; '=' introduces a scalar, '-' is null, and booleans, integers and quoted strings use JSON spelling. Object keys are bare identifiers or JSON strings: key=value is a field; '## key' opens a nested object; key[N] or '## key [N]' opens an array. A root array starts '## [N]'. Array [N]: lists comma-separated scalars; [N]{keys} lists pipe-separated object rows in key order, with '~' meaning a missing field. Other arrays have @i =value, @i {} or @i [N] entries. Indentation is two spaces per nesting level. The canonical source remains unchanged.]`
+              const graph = graphGcfView(part.state.output, options.gcfArtifact, options.gcfMemoScope, primer)
+              if (graph.detected) {
+                if (graph.frame) { outputText = graph.frame; fullGcfFrame = true }
+              } else {
+                const input = Buffer.from(part.state.output, "utf8")
+                const result = options.gcfArtifact.encode(input, "gcf-generic-v3-safe-integers-v1", options.gcfMemoScope)
+                if (result.state === "encoded" && options.gcfArtifact.availability() === "available") {
+                  try {
+                    const body = new TextDecoder("utf-8", {fatal:true}).decode(result.output)
+                    if (!body.startsWith("GCF profile=generic\n") || !body.endsWith("\n")) throw new Error("Invalid GCF frame")
+                    const framed = `${primer}\n${body}`
+                    if (Buffer.byteLength(framed,"utf8") < input.byteLength) { outputText = framed; fullGcfFrame = true }
+                  } catch { /* Keep the canonical original. */ }
+                }
+              }
+            }
+            const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+            const finalAttachments = routeAttachments({
+              tool: part.tool,
+              callID: part.callID,
+              status: "completed",
+              attachments,
+              allowNative: true,
+            })
+
+            const output =
+              !part.state.time.compacted && !trimmed && part.state.providerOutput !== undefined
+                ? part.state.providerOutput
+                : finalAttachments.length > 0
+                  ? {
+                      text: outputText,
+                      attachments: finalAttachments,
+                    }
+                  : outputText
+
+            if (gcfEligible && (fullGcfFrame || outputText === part.state.output) && typeof output === "string" && output === outputText && part.state.providerOutput === undefined && !part.metadata?.providerExecuted) {
+              try { options?.gcfFrameRecord?.(part, output) } catch { /* Optional witness cannot alter the model view. */ }
+            }
+            if (!part.state.time.compacted && !trimmed && typeof output === "string" && output === part.state.output && part.state.providerOutput === undefined && !part.metadata?.providerExecuted && finalAttachments.length === 0) {
+              try { options?.browserFrameRecord?.(part, output) } catch { /* Optional witness cannot alter the model view. */ }
+            }
+            assistantMessage.parts.push({
+              type: ("tool-" + part.tool) as `tool-${string}`,
+              state: "output-available",
+              toolCallId: part.callID,
+              input: part.state.input,
+              output,
+              ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+              ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+              ...(differentModel ? {} : { resultProviderMetadata: providerMeta(part.state.providerMetadata) }),
+            })
+          }
+          if (part.state.status === "error") {
+            const attachments = options?.stripMedia ? [] : (part.state.attachments ?? [])
+            const finalAttachments = routeAttachments({
+              tool: part.tool,
+              callID: part.callID,
+              status: "error",
+              attachments,
+              allowNative: supportsResponsesToolContent(model, options?.languageProvider),
+            })
+            const output = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
+            if (finalAttachments.length > 0 || typeof output === "string") {
+              assistantMessage.parts.push({
+                type: ("tool-" + part.tool) as `tool-${string}`,
+                state: "output-available",
+                toolCallId: part.callID,
+                input: part.state.input,
+                // Responses has no separate error-image output variant. Keep the
+                // failure explicit in text and its images under the same call ID.
+                output:
+                  finalAttachments.length > 0
+                    ? {
+                        text: `Tool failed: ${part.state.error}${typeof output === "string" ? `\n${output}` : ""}`,
+                        attachments: finalAttachments,
+                      }
+                    : output,
+                ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+              })
+            } else {
+              assistantMessage.parts.push({
+                type: ("tool-" + part.tool) as `tool-${string}`,
+                state: "output-error",
+                toolCallId: part.callID,
+                input: part.state.input,
+                errorText: part.state.error,
+                ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+              })
+            }
+          }
+          // Handle pending/running tool calls to prevent dangling tool_use blocks
+          // Anthropic/Claude APIs require every tool_use to have a corresponding tool_result
+          if (part.state.status === "pending" || part.state.status === "running")
+            assistantMessage.parts.push({
+              type: ("tool-" + part.tool) as `tool-${string}`,
+              state: "output-error",
+              toolCallId: part.callID,
+              input: part.state.input,
+              errorText: "[Tool execution was interrupted]",
+              ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+              ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+            })
+        }
+        if (part.type === "reasoning") {
+          assistantMessage.parts.push({
+            type: "reasoning",
+            text: part.contextSelection?.action === "omit" ? "" : part.text,
+            ...(differentModel ? {} : { providerMetadata: part.metadata }),
+          })
+        }
+      }
+      if (assistantMessage.parts.length > 0) {
+        result.push(assistantMessage)
+        if (syntheticGroups.length > 0) {
+          result.push({
+            id: MessageID.ascending(),
+            role: "user",
+            parts: [
+              {
+                type: "text" as const,
+                text: SYNTHETIC_ATTACHMENT_PROMPT,
+              },
+              ...syntheticGroups.flatMap((group) => [
+                {
+                  type: "text" as const,
+                  text: `Tool "${group.tool}" call ${group.callID} ${group.status === "error" ? "failed" : "completed"}:`,
+                },
+                ...group.parts,
+              ]),
+            ],
+          })
+        }
+      }
+    }
+  }
+
+  const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
+
+  const converted = yield* Effect.promise(() =>
+    convertToModelMessages(
+      result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
+      {
+        //@ts-expect-error (convertToModelMessages expects a ToolSet but only actually needs tools[name]?.toModelOutput)
+        tools,
+      },
+    ),
+  )
+  if (capture && membershipValid && emittingIndex===capture.shapes.length && emitted.length===capture.entries.size && converted.length===capture.shapes.length && converted.every((item,index)=>item.role===capture.shapes[index].role) && emitted.every(source=>{
+      const item=converted[source.messageIndex],content=item.content, text=typeof content==='string' ? content : Array.isArray(content) && content.length===1 && content[0]?.type==='text' ? content[0].text : undefined
+      return item.role===source.role && typeof text==='string' && createHash('sha256').update(text,'utf8').digest('hex')===source.digest
+    })) capture.sources=emitted
+  return converted
+})
+
+export function toModelMessages(
+  input: WithParts[],
+  model: Provider.Model,
+  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean; languageProvider?: string; gcfViewIdentity?: string; gcfArtifact?:GcfArtifact; gcfMemoScope?:string; toolViews?:ReadonlyMap<string,string> },
+): Promise<ModelMessage[]> {
+  return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
+}
+
+export function page(input: { sessionID: SessionID; limit: number; before?: string; agentID?: string }) {
+  const before = input.before ? cursor.decode(input.before) : undefined
+  // Slice contract: agentID `undefined` (default) ⇒ main slice only;
+  // `"*"` ⇒ every slice (full-stream opt-out for export/stats/etc.);
+  // any other string ⇒ that subagent's actorID slice.
+  const agentClause = input.agentID === "*" ? undefined : eq(MessageTable.agent_id, input.agentID ?? "main")
+  const where = and(
+    eq(MessageTable.session_id, input.sessionID),
+    ...(before ? [older(before)] : []),
+    ...(agentClause ? [agentClause] : []),
+  )
+  const rows = Database.use((db) =>
+    db
+      .select()
+      .from(MessageTable)
+      .where(where)
+      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+      .limit(input.limit + 1)
+      .all(),
+  )
+  if (rows.length === 0) {
+    const row = Database.use((db) =>
+      db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get(),
+    )
+    if (!row) throw new NotFoundError({ message: `Session not found: ${input.sessionID}` })
+    return {
+      items: [] as WithParts[],
+      more: false,
+    }
+  }
+
+  const more = rows.length > input.limit
+  const slice = more ? rows.slice(0, input.limit) : rows
+  const items = hydrate(slice)
+  items.reverse()
+  const tail = slice.at(-1)
+  return {
+    items,
+    more,
+    cursor: more && tail ? cursor.encode({ id: tail.id, time: tail.time_created }) : undefined,
+  }
+}
+
+/**
+ * Iterate session messages oldest-last (caller usually reverses).
+ *
+ * Slice contract (forwarded to `page`):
+ *   options.agentID === undefined  → main slice only (default)
+ *   options.agentID === "*"        → every slice (full-stream opt-out)
+ *   any other string               → that actor's slice
+ */
+export function* stream(sessionID: SessionID, options?: { agentID?: string }) {
+  const size = 50
+  let before: string | undefined
+  while (true) {
+    const next = page({ sessionID, limit: size, before, agentID: options?.agentID })
+    if (next.items.length === 0) break
+    for (let i = next.items.length - 1; i >= 0; i--) {
+      yield next.items[i]
+    }
+    if (!next.more || !next.cursor) break
+    before = next.cursor
+  }
+}
+
+/** Retry records of one actor slice on assistants answering `fromUserID` or later, read without loading other parts. */
+export function retryParts(sessionID: SessionID, agentID: string, fromUserID: MessageID): RetryPart[] {
+  const rows = Database.use((db) =>
+    db
+      .select({ id: PartTable.id, message_id: PartTable.message_id, session_id: PartTable.session_id, data: PartTable.data })
+      .from(PartTable)
+      .innerJoin(MessageTable, eq(MessageTable.id, PartTable.message_id))
+      .where(and(
+        eq(PartTable.session_id, sessionID),
+        eq(MessageTable.agent_id, agentID),
+        sql`json_extract(${PartTable.data}, '$.type') = 'retry'`,
+        sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
+        sql`json_extract(${MessageTable.data}, '$.parentID') >= ${fromUserID}`,
+      ))
+      .orderBy(PartTable.id)
+      .all(),
+  )
+  return rows.map((row) => ({ ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id }) as RetryPart)
+}
+
+export function parts(message_id: MessageID) {
+  const rows = Database.use((db) =>
+    db.select().from(PartTable).where(eq(PartTable.message_id, message_id)).orderBy(PartTable.id).all(),
+  )
+  return promoteComposeProtocolFirst(
+    rows.map(
+      (row) =>
+        ({
+          ...row.data,
+          id: row.id,
+          sessionID: row.session_id,
+          messageID: row.message_id,
+        }) as Part,
+    ),
+  )
+}
+
+export function get(input: { sessionID: SessionID; messageID: MessageID }): WithParts {
+  const row = Database.use((db) =>
+    db
+      .select()
+      .from(MessageTable)
+      .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
+      .get(),
+  )
+  if (!row) throw new NotFoundError({ message: `Message not found: ${input.messageID}` })
+  return {
+    info: info(row),
+    parts: parts(input.messageID),
+  }
+}
+
+export function filterCompacted(msgs: Iterable<WithParts>) {
+  const result = [] as WithParts[]
+  let retainedStart: MessageID | undefined
+  for (const msg of msgs) {
+    result.push(msg)
+    if (retainedStart && msg.info.id === retainedStart) break
+    if (msg.info.role !== "user") continue
+    const boundary = msg.parts.find((part) => part.type === "checkpoint" || part.type === "compaction")
+    if (!boundary) continue
+    // Never cross an older boundary while searching for a damaged marker.
+    if (retainedStart || boundary.type === "checkpoint") break
+    retainedStart = boundary.projection?.retained_start_id
+    if (!retainedStart) break
+  }
+  result.reverse()
+  return compactionProjection(result)
+}
+
+/**
+ * Message order as the model sees it: hide still-queued inputs, then move each
+ * consumed input in front of the assistant message that first read it.
+ * Also used by fork, which copies this order so the clone's raw id order is
+ * already the rendered one (no inbox records are copied).
+ */
+export function renderedOrder(
+  msgs: WithParts[],
+  receipts: Array<{
+    id: string
+    input_message_id: MessageID | null
+    delivery_message_id: MessageID | null
+    state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+    consumed: boolean
+  }>,
+  sessionID: SessionID,
+  owned: Set<string>,
+  // Reads a consumed input that lies outside `msgs` (e.g. before the compacted
+  // window) so it can still be placed in front of its delivery message.
+  load: (messageID: MessageID) => WithParts,
+): WithParts[] {
+  const hidden = new Set<MessageID>()
+  for (const receipt of receipts) {
+    if (!receipt.input_message_id) continue
+    if (receipt.state === "accepted") {
+      hidden.add(receipt.input_message_id)
+      continue
+    }
+    if (receipt.state === "claimed" && !owned.has(receipt.id)) {
+      hidden.add(receipt.input_message_id)
+    }
+  }
+  let ordered = msgs.filter(
+    (msg) =>
+      msg.info.sessionID !== sessionID ||
+      msg.info.role !== "user" ||
+      !hidden.has(msg.info.id),
+  )
+  const deliveries = new Map<MessageID, MessageID[]>()
+  for (const receipt of [...receipts].sort((a, b) => a.id.localeCompare(b.id))) {
+    if (!receipt.input_message_id || !receipt.delivery_message_id || (!receipt.consumed && !owned.has(receipt.id))) continue
+    const ids = deliveries.get(receipt.delivery_message_id) ?? []
+    ids.push(receipt.input_message_id)
+    deliveries.set(receipt.delivery_message_id, ids)
+  }
+  // First delivery, not final settlement, fixes each batch before its own
+  // tool/assistant steps.
+  for (const [responseID, ids] of deliveries) {
+    const at = ordered.findIndex((msg) => msg.info.id === responseID)
+    if (at < 0) continue
+    const inputs = ids.map((messageID) => ordered.find((msg) => msg.info.id === messageID) ?? load(messageID))
+    ordered = ordered.filter((msg) => !ids.includes(msg.info.id))
+    ordered.splice(ordered.findIndex((msg) => msg.info.id === responseID), 0, ...inputs)
+  }
+  return ordered
+}
+
+export const filterCompactedEffect = Effect.fnUntraced(function* (
+  sessionID: SessionID,
+  options?: { contextFrom?: SessionID; contextWatermark?: MessageID; agentID?: string },
+) {
+  const ownMessages = filterCompacted(stream(sessionID, { agentID: options?.agentID }))
+
+  if (!options?.contextFrom) return ownMessages
+
+  // Load parent messages up to the watermark. Inherited parent context is
+  // always scoped to the parent's main thread (agent_id = 'main') — subagent
+  // siblings on the parent must not leak into a child session/subagent.
+  const parentStream = stream(options.contextFrom, { agentID: "main" })
+  const parentFiltered = filterCompacted(parentStream)
+
+  // If watermark is set, truncate parent messages at the watermark point
+  if (options.contextWatermark) {
+    const watermarkIdx = parentFiltered.findIndex((msg) => msg.info.id === options.contextWatermark)
+    if (watermarkIdx >= 0) {
+      return [...parentFiltered.slice(0, watermarkIdx + 1), ...ownMessages]
+    }
+  }
+
+  // Fallback: use all parent messages
+  return [...parentFiltered, ...ownMessages]
+})
+
+function fromParsedStreamError(
+  parsed: ProviderError.ParsedStreamError,
+  cause: unknown,
+): NonNullable<Assistant["error"]> {
+  const metadata = causeMetadata(cause)
+  if (parsed.type === "context_overflow") {
+    return new ContextOverflowError(
+      { message: parsed.message, responseBody: parsed.responseBody },
+      { cause },
+    ).toObject()
+  }
+  return new APIError(
+    {
+      message: parsed.message,
+      isRetryable: parsed.isRetryable,
+      responseBody: parsed.responseBody,
+      ...(metadata ? { metadata } : {}),
+    },
+    { cause },
+  ).toObject()
+}
+
+type ErrorContext = { providerID: ProviderID; aborted?: boolean; allow404Retry?: boolean }
+
+export function fromError(e: unknown, ctx: ErrorContext): NonNullable<Assistant["error"]> {
+  return normalizeError(e, ctx, false)
+}
+
+export function fromLiveError(e: unknown, ctx: ErrorContext): NonNullable<Assistant["error"]> {
+  return normalizeError(e, ctx, true)
+}
+
+function normalizeError(e: unknown, ctx: ErrorContext, requireBinding: boolean): NonNullable<Assistant["error"]> {
+  HostErrorRegistry.inheritHostError(e, ctx)
+  const error = fromErrorCore(e, ctx)
+  const metadata = causeMetadata(e)
+  if (metadata) error.data.metadata = { ...error.data.metadata, ...metadata }
+  if (HostErrorRegistry.isSafetyTerminal(e) && !HostErrorRegistry.isSafetyTerminal(error)) {
+    error.data.metadata = { ...error.data.metadata, causeChain: JSON.stringify(ProviderError.summarizeCause(e)) }
+  }
+  return HostErrorRegistry.copyHostError(error, e, ctx, { requireBinding })
+}
+
+function fromErrorCore(
+  e: unknown,
+  ctx: { providerID: ProviderID; aborted?: boolean; allow404Retry?: boolean },
+  original: unknown = e,
+): NonNullable<Assistant["error"]> {
+  if (!ctx.aborted && !ProviderError.isAbortError(e)) {
+    const candidate = e instanceof NamedError ? e.toObject() : e
+    const hostClass = HostErrorRegistry.hostRetryClass(candidate)
+    const parsed = Assistant.shape.error.safeParse(hostClass && APIError.isInstance(candidate)
+      ? { ...candidate, data: { ...candidate.data, hostRetryClass: hostClass } }
+      : candidate)
+    if (parsed.success && parsed.data) return parsed.data
+  }
+  switch (true) {
+    case e instanceof DOMException && e.name === "AbortError":
+      return new AbortedError({ message: e.message }, { cause: original }).toObject()
+    case ProviderError.isAbortError(e):
+      return new AbortedError({ message: errorMessage(e) }, { cause: original }).toObject()
+    // Session-level abort (user stop / cancel): any residual stream error — including
+    // undici UND_ERR_ABORTED which is otherwise transport-retryable — is user abort.
+    // Without this, stop is reclassified as network and auto-resume reopens the turn.
+    case ctx.aborted === true:
+      return new AbortedError({ message: errorMessage(e) || "Aborted" }, { cause: original }).toObject()
+    // The AI SDK wraps the real failure in AI_RetryError after exhausting its
+    // own maxRetries. Unwrap to the underlying error (.lastError) so the
+    // APICallError branch below can extract statusCode/isRetryable/responseBody.
+    // Without this, a wrapped 5xx falls through to the `e instanceof Error`
+    // catch-all and collapses to an opaque UnknownError — which SessionRetry
+    // can't classify, so the visible retry status never fires and the turn
+    // hangs with a dead spinner.
+    case RetryError.isInstance(e): {
+      const errors = Array.isArray(e.errors) ? e.errors : []
+      const inner = e.lastError ?? errors[errors.length - 1]
+      if (inner !== undefined && inner !== e) return fromErrorCore(inner, ctx, original)
+      return new NamedError.Unknown({ message: e.message }, { cause: original }).toObject()
+    }
+    case LoadAPIKeyError.isInstance(e):
+      return new AuthError(
+        {
+          providerID: ctx.providerID,
+          message: e.message,
+        },
+        { cause: original },
+      ).toObject()
+    case e instanceof Error && !APICallError.isInstance(e) && !HostErrorRegistry.isTerminalError(e) && ProviderError.isRetryableNetworkError(e): {
+      const code = ProviderError.networkErrorCode(e)
+      const message =
+        code === "ECONNRESET"
+          ? "Connection reset by server"
+          : code === "ETIMEDOUT"
+            ? "Request timed out"
+            : errorMessage(e) || "Transient network error"
+      return new APIError(
+        {
+          message,
+          statusCode: ProviderError.summarizeCause(e)[0]?.statusCode,
+          isRetryable: true,
+          metadata: {
+            ...(code ? { code } : {}),
+            message: e.message,
+            ...causeMetadata(original),
+          },
+        },
+        { cause: original },
+      ).toObject()
+    }
+    case e instanceof Error && (e as FetchDecompressionError).code === "ZlibError":
+      if (ctx.aborted) {
+        return new AbortedError({ message: e.message }, { cause: original }).toObject()
+      }
+      return new APIError(
+        {
+          message: "Response decompression failed",
+          isRetryable: true,
+          metadata: {
+            code: (e as FetchDecompressionError).code,
+            message: e.message,
+            ...causeMetadata(original),
+          },
+        },
+        { cause: original },
+      ).toObject()
+    case APICallError.isInstance(e):
+      const parsed = ProviderError.parseAPICallError({
+        providerID: ctx.providerID,
+        error: e,
+        allow404Retry: ctx.allow404Retry,
+      })
+      if (parsed.type === "context_overflow") {
+        return new ContextOverflowError(
+          {
+            message: parsed.message,
+            responseBody: parsed.responseBody,
+          },
+          { cause: original },
+        ).toObject()
+      }
+
+      return new APIError(
+        {
+          message: parsed.message,
+          statusCode: parsed.statusCode,
+          isRetryable: parsed.isRetryable,
+          responseHeaders: parsed.responseHeaders,
+          responseBody: parsed.responseBody,
+          metadata: (() => {
+            const metadata = { ...parsed.metadata, ...causeMetadata(original) }
+            return Object.keys(metadata).length > 0 ? metadata : undefined
+          })(),
+        },
+        { cause: original },
+      ).toObject()
+    // A TypeError (e.g. "j.map is not a function" from non-array content)
+    // is a programming defect, not a transient API failure. Surface it as a
+    // named error so it is diagnosable instead of collapsing to UnknownError.
+    case e instanceof TypeError:
+    case e instanceof Error: {
+      const parsed = ProviderError.parseStreamError(e)
+      if (parsed) return fromParsedStreamError(parsed, original)
+      const message = e instanceof TypeError ? `TypeError: ${errorMessage(e)}` : errorMessage(e)
+      // Preserve HTTP status on plain Errors (mock SDK / undici shapes carry
+      // `.status`). Dropping it collapses a 400 into UnknownError, which
+      // SessionRetry then treats as uncatalogued and retries forever.
+      const rawStatus =
+        (e as { statusCode?: unknown }).statusCode ?? (e as { status?: unknown }).status ??
+        (e as { response?: { status?: unknown } }).response?.status
+      const statusCode =
+        typeof rawStatus === "number" && Number.isFinite(rawStatus)
+          ? rawStatus
+          : typeof rawStatus === "string" && /^\d+$/.test(rawStatus)
+            ? Number.parseInt(rawStatus, 10)
+            : undefined
+      if (statusCode != null) {
+        return new APIError(
+          {
+            message,
+            statusCode,
+            isRetryable: statusCode >= 500 && statusCode !== 501 && statusCode !== 505,
+            metadata: causeMetadata(original),
+          },
+          { cause: original },
+        ).toObject()
+      }
+      return new NamedError.Unknown({ message }, { cause: original }).toObject()
+    }
+    default: {
+      const parsed = ProviderError.parseStreamError(e)
+      if (parsed) return fromParsedStreamError(parsed, original)
+      const response = HostErrorRegistry.boundAPIResponse(original, ctx)
+      const stream = response && ProviderError.parseStreamError(response.responseBody)
+      if (stream) return fromParsedStreamError(stream, original)
+      if (response) return new APIError({
+        message: errorMessage(e) || response.responseBody || "Provider API error",
+        isRetryable: false,
+        ...response,
+      }, { cause: original }).toObject()
+      // 字符串直接用原文:JSON.stringify("Internal Server Error") 会多包一层引号,
+      // 让 SessionRetry and client isOpaqueError 精确匹配失效,错误卡把带引号原文吐给用户。
+      // 对象仍 stringify 保诊断;undefined/null 走 String()。
+      const message =
+        typeof e === "string"
+          ? e
+          : (JSON.stringify(e) ?? String(e))
+      return new NamedError.Unknown({ message }, { cause: original }).toObject()
+    }
+  }
+}
+
+export * as MessageV2 from "./message-v2"

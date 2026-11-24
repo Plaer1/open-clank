@@ -27,6 +27,21 @@ pub fn sync_dir<P: AsRef<Path>>(_path: P) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Whether something is at `path`. Only its absence says no: a stat that fails for another
+/// reason, as on a transient I/O error, is reported, so that a directory that cannot be read is
+/// never taken for one never written.
+pub(crate) async fn exists(path: &Path) -> std::io::Result<bool> {
+    #[cfg(feature = "test-util")]
+    if crate::test_util::take_directory_stat_failure() {
+        return Err(std::io::Error::other("directory stat failed as asked"));
+    }
+    match lore_io::IoDriver::global().stat(path).await {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 pub async fn unlink_recursive<P: AsRef<Path>>(absolute_path: P) -> tokio::io::Result<()> {
     let absolute_path = absolute_path.as_ref();
     lore_base::lore_trace!("Deleting {}", absolute_path.display());

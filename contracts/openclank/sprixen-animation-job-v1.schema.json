@@ -1,0 +1,18 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://openclank.local/contracts/sprixen-animation-job-v1.schema.json",
+  "$comment":"Presentation only; current account, source assertion, provider revision and Files authority are host-resolved.",
+  "$defs":{
+    "token":{"type":"string","minLength":1,"maxLength":512},
+    "sourceID":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+    "hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "ref":{"type":"string","minLength":1,"maxLength":16384},
+    "parameters":{"type":"object","additionalProperties":false,"required":["type","frameCount","fps"],"properties":{"type":{"enum":["idle","walk","run","attack","jump","death","hurt"]},"frameCount":{"type":"integer","minimum":2,"maximum":12},"fps":{"type":"integer","minimum":4,"maximum":60}}},
+    "projects":{"type":"object","additionalProperties":false,"required":["sessionID","connectionID","providerAccountID"],"properties":{"sessionID":{"$ref":"#/$defs/token"},"connectionID":{"$ref":"#/$defs/token"},"providerAccountID":{"$ref":"#/$defs/token"},"projectID":{"anyOf":[{"type":"null"},{"$ref":"#/$defs/sourceID"}]}}},
+    "projectList":{"type":"object","additionalProperties":false,"required":["projects","omitted"],"properties":{"projects":{"type":"array","maxItems":128,"items":{"type":"object","additionalProperties":false,"required":["id","name"],"properties":{"id":{"$ref":"#/$defs/sourceID"},"name":{"type":"string","maxLength":256}}}},"omitted":{"type":"boolean"}}},
+    "spriteList":{"type":"object","additionalProperties":false,"required":["projectID","sprites","omitted"],"properties":{"projectID":{"$ref":"#/$defs/sourceID"},"sprites":{"type":"array","maxItems":128,"items":{"type":"object","additionalProperties":false,"required":["id","sourceSHA256"],"properties":{"id":{"$ref":"#/$defs/sourceID"},"sourceSHA256":{"$ref":"#/$defs/hash"}}}},"omitted":{"type":"boolean"}}},
+    "source":{"type":"object","additionalProperties":false,"required":["projectID","spriteID","sourceSHA256"],"properties":{"projectID":{"$ref":"#/$defs/sourceID"},"spriteID":{"$ref":"#/$defs/sourceID"},"sourceSHA256":{"$ref":"#/$defs/hash"}}},
+    "prepare":{"type":"object","additionalProperties":false,"required":["sessionID","connectionID","providerAccountID","destinationRef","destinationName","projectID","spriteID","sourceSHA256","parameters"],"properties":{"sessionID":{"$ref":"#/$defs/token"},"connectionID":{"$ref":"#/$defs/token"},"providerAccountID":{"$ref":"#/$defs/token"},"destinationRef":{"$ref":"#/$defs/ref"},"destinationName":{"type":"string","minLength":1,"maxLength":255},"projectID":{"$ref":"#/$defs/sourceID"},"spriteID":{"$ref":"#/$defs/sourceID"},"sourceSHA256":{"$ref":"#/$defs/hash"},"parameters":{"$ref":"#/$defs/parameters"}}},
+    "prepared":{"type":"object","additionalProperties":false,"required":["jobID","revision","state","profile","destination","source","parameters","notice"],"properties":{"jobID":{"$ref":"#/$defs/token"},"revision":{"type":"integer","minimum":1},"state":{"const":"prepared"},"profile":{"$ref":"sprixen-job-v1.schema.json#/$defs/profile"},"destination":{"type":"object","additionalProperties":false,"required":["name","folder"],"properties":{"name":{"type":"string","minLength":1,"maxLength":255},"folder":{"type":"string","maxLength":240}}},"source":{"$ref":"#/$defs/source"},"parameters":{"$ref":"#/$defs/parameters"},"notice":{"type":"string","maxLength":512}}}
+  }
+}

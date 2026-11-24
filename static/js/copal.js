@@ -1,48 +1,61 @@
+import { journalEvidence } from './copal/journalEvidence.js';
+import { createSharedTextClient } from './copal/sharedTextClient.js';
+import { sharedTextHandle, createSharedTextSaveAdapter } from './copal/sharedTextBuffer.js';
+import { openSharedTextStream } from './sharedTextStream.js';
+import { parseWorkbook } from './editor/workbookModel.js';
+import { parseSlideDeck } from './editor/slideModel.js';
+import { hasBrowserPreview } from './editor/previewModel.js';
 import { normalizeGraphSettings, resolveGraphSettings, mountGraphSettings } from './copal/graphSettings.js';
 import { recordPresentation, acknowledgeVisible, achievementOwner } from './achievementProducer.js';
 import { mountWorkbenchMenu } from './workbenchMenu.js';
 import { uiIcon } from './uiIcons.js';
 import { openCalendar } from './calendar.js';
 import { formatBaseCell, makeDefaultBase, serializeBase, updateViewSort, canonicalSourceProperty, setFrontmatterProperty, flattenFilterToLines, hasNestedFilterGroups, parseFilterLines, removeBaseView, reorderBaseView, makeViewFromTemplate, VIEW_TYPES, parseDataviewQuery, reorderBaseColumn } from './copal/bases.js';
-import { createMarkdownEditor, createSourceEditor } from './copal/codemirror.js';
 import { createNotesFeature } from './copal/notesFeature.js';
+import { installEditorFilesStyles } from './copal/editorFilesBrowser.js';
+import { openScopedImageRef } from './copal/resourceDestinations.js';
 import { createBufferRegistry } from './copal/documentBuffers.js';
 import { createWikiWorkspace } from './copal/wikiWorkspace.js';
 import { databaseRelations, moveHeadingSection, moveHeadingSectionTo, outlineEntries, reparentHeading } from './copal/notesModel.js';
-import { createPlanningFeature } from './copal/planning.js';
-import { createTreeHouseFeature } from './copal/treehouse.js';
+import { createPlanningFeature, galaxyPlanningPopulation } from './copal/planning.js';
 import { createCopalWindow } from './copal/windows.js';
 import { wireDialog } from './copal/overlays.js';
 import { configureCopalStorage, copalStorageKey } from './copal/storage.js';
 import { filesFacadeClient } from './filesFacadeClient.js';
-import { saveResourceSnapshot } from './codeEditor.js';
 import { prepareDocumentSave, commitDocumentSave, sameSaveScope } from './copal/documentSave.js';
 import { cloneEnvelope, normalizeResourceHandle, sameResourceKey, snapshotEnvelope } from './copal/resourceModel.js';
-import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, moveHeadingSection as moveGraphHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, isOfficialDocument, mergeFacets, documentGraphLabelMetrics } from './copal/graphModel.js';
+import { documentLinkBatches, documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, moveHeadingSection as moveGraphHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, isOfficialDocument, mergeFacets, documentGraphLabelMetrics } from './copal/graphModel.js';
 import { createFacetCatalog } from './copal/graphFacetCatalog.js';
+import { documentNeighborhood, relationPanel } from './copal/documentNeighbors.js';
 import { mountGraphFilters } from './copal/graphFilterControls.js';
 import { canHandleInput } from './copal/inputContext.js';
 import { codeReceiptKey } from './copal/codeGraphModel.js';
 import { mountCodeGraphWorkbench } from './copal/codeGraphWorkbench.js';
+import { mountStaticFunctionOverlay } from './copal/staticFunctionOverlay.js';
+import { mountTraceOverlay, traceOverlayOffered } from './copal/traceOverlay.js';
+import { openCodeSummary } from './copal/codeSummaryPanel.js';
+import { openWikiGenerate } from './copal/wikiGenerate.js';
+import { openResourceHistory } from './historyView.js';
 import { openWorkspaceBrowser, bindWorkspacePath, subscribeWorkspaceIndex } from './workspace.js';
-import { extractReferenceSection } from './copal/markdownResources.js';
+import { extractReferenceSection, extractDocumentReferences } from './copal/markdownResources.js';
 import { createMarkdownRenderer, registerAppDestination } from './copal/markdownRenderer.js';
 import { navigationIntentFromEvent } from './copal/notesWorkspace.js';
 import { createSpellingService } from './copal/spelling.js';
 import { appletPath, updateAppletRoute, resolveAppletLocation } from './appletRoutes.js';
-import { registerAdapter, createCodeMirrorContextAdapter } from './custom-context-menu.js';
+import { registerAdapter } from './custom-context-menu.js';
+import { isReadOnlyColumn } from './copal/sheetModel.js';
 import { styledConfirm, styledPrompt } from './ui.js';
 
-const VIEWS = ['notes', 'wiki', 'timeline', 'graph', 'treehouse', 'achievements', 'todo'];
+const VIEWS = ['notes', 'wiki', 'timeline', 'treehouse', 'clankshop', 'achievements', 'todo'];
 // Mind is not a separate destination.  Its label is kept only as the legacy
 // deep-link alias text; Graph owns both views and Mind opens structure mode.
-const LABELS = { notes: 'Editor', wiki: 'Wiki', timeline: 'Timeline', galaxy: 'Galaxy', graph: 'Graph', mind: 'Graph', bases: 'Bases', treehouse: 'TreeHouse', achievements: 'Achievements', todo: 'Meatbag Tasks' };
+const LABELS = { notes: 'Editor', wiki: 'Wiki', timeline: 'Timeline', galaxy: 'Galaxy', graph: 'Graph', mind: 'Graph', bases: 'Bases', treehouse: 'TreeHouse', clankshop: 'Clankshop', achievements: 'Achievements', todo: 'Meatbag Tasks' };
 // Code and Notes remain accepted route/DOM aliases, but only the canonical
 // Editor destination participates in visible Copal launcher preferences.
-const COPAL_LAUNCHER_IDS = [...VIEWS.filter((view) => view !== 'notes'), 'notes', 'files', 'imps', 'calendar'];
-const LAUNCHER_LABELS = { ...LABELS, code: 'Editor', files: 'Files', imps: 'Image Editor', calendar: 'Calendar' };
+const COPAL_LAUNCHER_IDS = ['journal', 'notes', 'files', 'timeline', 'treehouse', 'clankshop', 'achievements', 'todo', 'calendar'];
+const LAUNCHER_LABELS = { ...LABELS, journal:'Journal', code: 'Editor', files: 'Files', calendar: 'Calendar' };
 const MEMES_MIME = 'application/vnd.openclank.memes+json';
-const HIDDEN_KINDS = new Set(['asset', 'planning', 'calendar-projection', 'treehouse-state', 'copal-tracks', 'copal-migration']);
+const HIDDEN_KINDS = new Set(['asset', 'planning', 'calendar-projection', 'treehouse-state', 'copal-tracks', 'copal-migration', 'image-session']);
 const state = {
   api: '', workspace: 'default', storageNamespace: null, view: 'notes', docs: [], taskProjection: [], taskProjectionLoaded: false, taskCursor: null, taskSnapshotRevision: null, taskProjectionTotal: null, taskLoading: false, taskQueryToken: 0, taskQuery: { query:'', completed:null, source:'all', sourceFilter:'all', statusFilter:'all', hideDone:false }, taskSelectedId: null, planning: { tracks: [], floatingTodos: [] }, selected: null,
   filter: '', reading: false, saveTimers: new Map(),
@@ -50,6 +63,7 @@ const state = {
   root: null, content: null, body: null,
   treehouseSection: 'courses', treehouseLesson: null,
   title: null, status: null, search: null, events: null, reloadTimer: null, ignoreEventsUntil: 0, documentLoadToken: 0,
+  documentWriteVersion:0, documentWriteVersions:new Map(), journalCatalog:null,
   projectedPlanningHead: null, projectingPlanning: null,
   baseId: null, baseView: null, basePage: 1, basePageSize: 100, baseQueryToken: 0, baseDefinition: null,
   baseSourceDocs: new Map(), baseFocusRow: -1, baseFocusCol: -1, baseFocusTable: null,
@@ -58,6 +72,7 @@ const state = {
   entryVisibility: null,
   entryVisibilityError: null,
   accountId: null, contextEpoch: 0,
+  documentsLoaded: false, planningLoaded: false, documentLoadError: null, planningLoadError: null, sourceRefreshPending: false,
   navigationEvents: null,
 };
 let planningFeature = null;
@@ -67,9 +82,13 @@ let wikiWorkspace = null;
 let graphRenderTicket = 0;
 let codeGraphController = null;
 let codeGraphMenuGeneration=0;
-let copalInitialization=null;
+let copalInitialization = null;
+let pendingDocumentLoad = null;
+let entryVisibilityLoad = null;
+let expectedCopalAccount = null;
 let codeGraphSelection = null; // Canonical code workspace, never Copal's document workspace.
 let codeGraphContextEpoch = 0;
+let graphFolderTicket = 0;
 let editorNavigationTicket = 0;
 function invalidateCodeGraphContext(event) {
   // Chat workspace display is independent from the explicitly bound Code folder.
@@ -77,8 +96,8 @@ function invalidateCodeGraphContext(event) {
   const account=event?.detail?.accountId;
   if(typeof account==='string'&&account&&account===state.accountId)return;
   codeGraphContextEpoch += 1; codeGraphController?.dispose();
-  const visible = state.windows.get('graph')?.window.body?.querySelector('[data-code-graph]');
-  if (visible) { visible.replaceChildren(h('p',{role:'status',text:'Account authorization changed. Choose an authorized code folder after signing in.'})); state.windows.get('graph')?.window.setStatus('Code context unavailable'); }
+  const visible = getViewContext('graph')?.window.body?.querySelector('[data-code-graph]');
+  if (visible) { visible.replaceChildren(h('p',{role:'status',text:'Account authorization changed. Choose an authorized code folder after signing in.'})); getViewContext('graph')?.window.setStatus('Code context unavailable'); }
 }
 for (const eventName of ['openclank:auth-context-changed','workspace-change']) window.addEventListener(eventName, invalidateCodeGraphContext);
 document.addEventListener('openclank:auth-context-changed', invalidateCodeGraphContext);
@@ -120,8 +139,27 @@ function svg(tag, attrs = {}) {
   return node;
 }
 
+function getViewContext(view) {
+  const editor = state.windows.get('notes');
+  if (view === 'graph') return editor?.graphMode;
+  if (view === 'wiki') return editor?.wikiMode;
+  return state.windows.get(view);
+}
+
+function editorDocumentContexts() {
+  const editor = state.windows.get('notes');
+  return [editor, editor?.wikiMode].filter(Boolean);
+}
+
+function visibleViewEntries() {
+  return [...state.windows].map(([view, context]) => {
+    const active = view === 'notes' ? context.editorMode : view;
+    return [active, getViewContext(active)];
+  }).filter(([, context]) => context?.window.visible);
+}
+
 function persistActiveContext() {
-  const context = state.windows.get(state.view);
+  const context = getViewContext(state.view);
   if (!context) return;
   context.selected = state.selected;
   context.filter = state.filter;
@@ -132,8 +170,9 @@ function activateView(view, { navigation = true } = {}) {
   if (navigation) editorNavigationTicket += 1;
   // Foreground changes do not close another still-visible applet window.
   if (state.view !== view) persistActiveContext();
-  const context = state.windows.get(view);
+  const context = getViewContext(view);
   if (!context) return null;
+  if (navigation && ['notes','wiki','graph'].includes(view)) showEditorMode(view);
   state.view = view;
   state.root = context.window.root;
   state.content = context.window.content;
@@ -150,25 +189,24 @@ function activateView(view, { navigation = true } = {}) {
 async function api(path, options = {}, workspace = state.workspace) {
   const epoch = state.contextEpoch;
   const separator = path.includes('?') ? '&' : '?';
-  const mutating = options.method && options.method !== 'GET';
+  const mutating = options.method && options.method !== 'GET' && !options.readOnly;
   if (mutating) state.ignoreEventsUntil = Date.now() + 5000;
   const contentHeaders = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
   const response = await fetch(`${state.api}/api/copal${path}${separator}workspace=${encodeURIComponent(workspace)}`, {
     ...options,
     headers: { ...contentHeaders, ...(state.accountId ? { 'X-Copal-Account':state.accountId } : {}), ...(options.headers || {}) },
   });
-  if (epoch !== state.contextEpoch) throw Object.assign(new Error('The active Copal account changed.'), { code:'stale_scope' });
+  if (epoch !== state.contextEpoch) throw Object.assign(new Error('The active account changed.'), { code:'stale_scope' });
   if (response.ok) {
     const value = await response.json();
-    if (epoch !== state.contextEpoch) throw Object.assign(new Error('The active Copal account changed.'), { code:'stale_scope' });
+    if (epoch !== state.contextEpoch) throw Object.assign(new Error('The active account changed.'), { code:'stale_scope' });
     if (mutating) {
       state.ignoreEventsUntil = Date.now() + 1000;
-      clearTimeout(state.reloadTimer);
     }
     return value;
   }
   const error = await response.json().catch(() => ({}));
-  if (epoch !== state.contextEpoch) throw Object.assign(new Error('The active Copal account changed.'), { code:'stale_scope' });
+  if (epoch !== state.contextEpoch) throw Object.assign(new Error('The active account changed.'), { code:'stale_scope' });
   const detail = error.detail;
   const message = typeof detail === 'string'
     ? detail
@@ -226,7 +264,7 @@ async function abortAttachment(actionId) {
 }
 
 function setStatus(message, bad = false) {
-  const context = state.windows.get(state.view);
+  const context = getViewContext(state.view);
   if (context) context.window.setStatus(message, bad);
 }
 
@@ -243,8 +281,8 @@ function planningData() {
   return state.planning || { tracks: [], floatingTodos: [] };
 }
 
-function visibleDocs(corpus) {
-  const query = state.filter.trim().toLowerCase();
+function visibleDocs(corpus, filter = state.filter) {
+  const query = filter.trim().toLowerCase();
   return state.docs.filter((doc) => {
     if (HIDDEN_KINDS.has(doc.kind)) return false;
     if (corpus === 'wiki' && doc.kind !== 'wiki') return false;
@@ -299,23 +337,83 @@ async function reconcileCalendarProjection(force = false) {
   return job.promise;
 }
 
-async function loadDocuments(render = true) {
+function loadDocuments(render = true, watchedDocuments = null) {
   const scope = saveScope();
+  if (!scope.storageNamespace) return Promise.resolve(false);
   const loadToken = ++state.documentLoadToken;
-  // SSE refreshes, explicit restores, and view activation can overlap. Only
-  // the newest request may project its snapshot into the workspace; otherwise
-  // an older index response can put a restored document back on a stale head.
+  state.sourceRefreshPending = false;
   const current = () => loadToken === state.documentLoadToken && sameSaveScope(scope, saveScope());
-  setStatus('Loading…');
-  try {
-    let [result, planning] = await Promise.all([api('/documents?hidden=include', {}, scope.workspace), api('/planning', {}, scope.workspace)]);
-    if (!current()) return;
-    if (planning.migrationRequired) {
-      setStatus('Saved Timeline notes need explicit workspace migration. Their source is preserved.', true);
+  const pending = refreshDocumentSources({ scope, render, watchedDocuments, current }).catch((error) => {
+    if (current()) setStatus(error.message, true);
+    return false;
+  }).finally(() => {
+    if (pendingDocumentLoad === pending) pendingDocumentLoad = null;
+  });
+  pendingDocumentLoad = pending;
+  return pending;
+}
+
+function updateDocumentViewStatus(view) {
+  const mode = view === 'graph' ? getGraphView().mode : null;
+  if (mode === 'code') return;
+  const planning = view === 'timeline' || mode === 'galaxy';
+  const failure = planning ? state.planningLoadError : state.documentLoadError;
+  if (failure) {
+    setViewStatus(view, `${planning ? 'Planning' : 'Documents'} unavailable · ${failure.message}`, true);
+  } else if (planning && state.planning.migrationRequired) {
+    setViewStatus(view, 'Saved Timeline notes need explicit workspace migration; source preserved.', true);
+  } else if (!['achievements', 'treehouse'].includes(view)) {
+    setViewStatus(view, `${state.docs.length} documents`);
+  }
+}
+
+function isCopalAuthorityFailure(error) {
+  return [401, 403].includes(error?.status) || error?.detail?.outcome === 'stale_session';
+}
+
+async function refreshDocumentSources({ scope, render, watchedDocuments, current }) {
+  // A failed planning projection must leave the document index usable, and
+  // a failed document read must leave a successful Galaxy projection usable.
+  const writeVersion = state.documentWriteVersion;
+  const [documents, planning, journal] = await Promise.allSettled([
+    api('/documents?hidden=include', {}, scope.workspace),
+    api('/planning', {}, scope.workspace),
+    state.journalCatalog || filesFacadeClient.binders(),
+  ]);
+  if (!current()) return false;
+  for (const source of [documents, planning]) {
+    const error = source.reason;
+    if (isCopalAuthorityFailure(error)) {
+      retireCopalScope();
+      window.uiModule?.showError?.('Workspace access changed. Open the applet again to reconnect.');
+      return false;
     }
-    state.docs = (result.docs || []).map((doc) => notesFeature?.projectDocument?.(doc, scope) || doc);
+  }
+  state.documentLoadError = documents.reason || null;
+  state.planningLoadError = planning.reason || null;
+  if (journal.status === 'fulfilled') acceptJournalCatalog(journal.value);
+  if (documents.status === 'fulfilled') {
+    const editorImages = notesFeature?.retainedImageDocuments() || [];
+    const imageIds = new Set(editorImages.map(doc => doc.id));
+    const newer = new Map(state.docs.filter(doc => state.documentWriteVersions.get(doc.id) > writeVersion).map(doc => [doc.id, doc]));
+    const indexed = (documents.value.docs || []).filter(doc => !imageIds.has(doc.id)).map(doc => {
+      const committed = newer.get(doc.id);
+      newer.delete(doc.id);
+      return committed || notesFeature?.projectDocument?.(doc, scope) || doc;
+    });
+    indexed.push(...newer.values());
+    state.docs = [...indexed, ...editorImages];
+    state.documentsLoaded = true;
+    if (state.selected && !state.docs.some((doc) => doc.id === state.selected)) state.selected = null;
+  }
+  if (planning.status === 'fulfilled') {
+    state.planning = planning.value;
+    state.planningLoaded = true;
+  }
+  if (documents.status === 'fulfilled' || planning.status === 'fulfilled') {
     state.taskProjection = [];
     state.taskProjectionLoaded = false;
+    state.taskLoading = false;
     state.taskCursor = null;
     state.taskSnapshotRevision = null;
     state.taskProjectionTotal = null;
@@ -323,34 +421,34 @@ async function loadDocuments(render = true) {
     state.taskMatchedTotal = null;
     state.taskTotalExact = false;
     state.taskQueryToken += 1;
-    state.planning = planning || { tracks: [], floatingTodos: [] };
-    if (state.selected && !state.docs.some((doc) => doc.id === state.selected)) state.selected = null;
-    if (render) {
-      const active = state.view;
-      // Document refreshes do not change Code's source scope. Preserve its
-      // current owner (including an awaited folder choice), not a disposed or
-      // stale mount. Internal window activation below is not user navigation.
-      const retainedCode = getGraphView().mode === 'code'
-        && codeGraphController?.isCurrent?.() ? codeGraphController : null;
-      for (const [view, context] of state.windows) if (context.window.visible) {
-        if (view === 'graph' && retainedCode && retainedCode === codeGraphController
-          && retainedCode.isMounted() && getGraphView().mode === 'code'
-          && sameSaveScope(scope, saveScope())) continue;
-        renderView(view);
-      }
-      activateView(active, {navigation:false});
-    }
-    for (const [view, context] of state.windows) if(view!=='graph'||getGraphView().mode!=='code')context.window.setStatus(planning.migrationRequired ? 'Saved Timeline notes need explicit workspace migration; source preserved.' : ['achievements', 'treehouse'].includes(view) ? '' : `${state.docs.length} documents`);
-    reconcileCalendarProjection().catch(() => {});
-  } catch (error) {
-    if (!current()) return;
-    setStatus(error.message, true);
-    if (render && state.body) state.body.replaceChildren(h('div', { class: 'copal-empty', text: error.message }));
   }
+  if (render) {
+    const active = state.view;
+    // Code Graph owns a different source. Keep its live mount and folder picker.
+    const retainedCode = getGraphView().mode === 'code' && codeGraphController?.isCurrent?.()
+      ? codeGraphController : null;
+    for (const [view] of visibleViewEntries()) {
+      if (view === 'graph' && retainedCode === codeGraphController && retainedCode?.isMounted()) continue;
+      const usesPlanning = view === 'timeline' || (view === 'graph' && getGraphView().mode === 'galaxy');
+      const source = usesPlanning ? planning : documents;
+      const hadSnapshot = usesPlanning ? state.planningLoaded : state.documentsLoaded;
+      if (source.status === 'fulfilled' || (!hadSnapshot && view === 'graph')) renderView(view);
+      updateDocumentViewStatus(view);
+    }
+    activateView(active, { navigation:false });
+  }
+  if (watchedDocuments && documents.status === 'fulfilled') {
+    for (const id of watchedDocuments) {
+      if (!current()) break;
+      void notesFeature?.invalidateBaseLeaves?.(id);
+    }
+  }
+  if (documents.status === 'fulfilled' && planning.status === 'fulfilled') reconcileCalendarProjection().catch(() => {});
+  return documents.status === 'fulfilled';
 }
 
 function updateRoute(view, replace = false) {
-  const selected = state.windows.get(view)?.selected || (state.view === view ? state.selected : null);
+  const selected = getViewContext(view)?.selected || (state.view === view ? state.selected : null);
   // Canonical direct applet address — never the legacy /copal prefix. The
   // live rewrite keeps unconsumed one-shot query tokens (TreeHouse share) so
   // this normalization cannot eat a deep link before its consumer accepts it.
@@ -361,22 +459,36 @@ function updateRoute(view, replace = false) {
 
 function markActive() {
   document.querySelectorAll('[data-copal-view]').forEach((link) => {
-    const visible = state.windows.get(link.dataset.copalView)?.window.visible;
+    const visible = getViewContext(link.dataset.copalView)?.window.visible;
     link.classList.toggle('active', !!visible);
     if (link.dataset.copalView === state.view) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   });
 }
 
-async function open(view = 'notes', push = true) {
+export function openResolvedRoute(resolved) {
+  if (resolved?.target !== 'editor') return;
+  if (['wiki','graph'].includes(resolved.view) && resolved.canonicalPath !== location.pathname + location.search) {
+    history.replaceState(history.state, '', resolved.canonicalPath + location.hash);
+  }
+  const legacyGraph = resolved.view === 'graph' && ['mind', 'galaxy'].includes(resolved.mode);
+  const view = resolved.openBases ? 'bases' : legacyGraph ? resolved.mode : resolved.view || 'notes';
+  return open(view, false, { mode:resolved.mode, doc:resolved.doc });
+}
+
+async function open(view = 'notes', push = true, { mode = null, doc = null, focusRail = false } = {}) {
   const navigationTicket=++editorNavigationTicket;
-  // Routes and applet actions may arrive before authenticated /status returns.
-  // Wait for the existing initializer; never invent an unscoped storage key.
-  if(!state.storageNamespace){
-    const pending=copalInitialization;
-    if(!pending)return;
+  // A launcher can recover an earlier failed /status without using an
+  // unscoped preference key. Concurrent opens share the same scope lookup.
+  if (!state.storageNamespace) {
+    const pending = init(state.api || window.location.origin);
+    const epoch = state.contextEpoch;
     await pending;
-    if(pending!==copalInitialization||navigationTicket!==editorNavigationTicket||!state.storageNamespace)return;
+    if (epoch !== state.contextEpoch || navigationTicket !== editorNavigationTicket) return;
+    if (!state.storageNamespace) {
+      if (push) window.uiModule?.showError?.('Could not open this applet. Open it again to retry.');
+      return;
+    }
   }
   if (view === 'calendar') {
     if (push || location.pathname.startsWith('/calendar')) {
@@ -386,60 +498,94 @@ async function open(view = 'notes', push = true) {
     return;
   }
   const requestedView = String(view || 'notes').toLowerCase();
-  const legacyWikiHome = requestedView === 'wiki';
   const openingBases = requestedView === 'bases' || requestedView === 'base';
-  view = resolveView(view);
+  view = resolveView(view, mode);
   const scope = saveScope();
   const context = ensureViewWindow(view);
+  if (doc) context.selected = doc;
   activateView(view);
-  localStorage.setItem(copalStorageKey('odysseus-copal-view'), view);
+  localStorage.setItem(copalStorageKey('openclank-copal-view'), view);
   context.window.show(document.activeElement);
+  const modeButton = focusRail ? state.windows.get('notes')?.activityRail?.buttons[view] : null;
+  modeButton?.focus({ preventScroll:true });
   markActive();
   if (push) updateRoute(view);
-  if (!state.docs.length) await loadDocuments();
-  else { renderView(view); reconcileCalendarProjection().catch(() => {}); }
+  const graphMode = view === 'graph' ? getGraphView().mode : null;
+  const usesPlanning = view === 'timeline' || graphMode === 'galaxy';
+  const needsSource = usesPlanning ? !state.planningLoaded || state.planningLoadError
+    : !state.documentsLoaded || state.documentLoadError;
+  if (graphMode !== 'code' && (needsSource || state.sourceRefreshPending)) {
+    context.window.setStatus('Loading…');
+    let pending = pendingDocumentLoad || loadDocuments(false);
+    await pending;
+    while (sameSaveScope(scope, saveScope()) && pendingDocumentLoad && pendingDocumentLoad !== pending) {
+      pending = pendingDocumentLoad;
+      await pending;
+    }
+  }
+  if (!sameSaveScope(scope, saveScope()) || !context.window.visible
+      || (view === 'notes' && context.window.body.hidden)) return;
+  const active = state.view;
+  const retainedCode = view === 'graph' && getGraphView().mode === 'code'
+    && codeGraphController?.isMounted?.() && codeGraphController.isCurrent();
+  if (!retainedCode) renderView(view);
+  if (state.documentsLoaded && state.planningLoaded && !state.documentLoadError && !state.planningLoadError) {
+    reconcileCalendarProjection().catch(() => {});
+  }
+  updateDocumentViewStatus(view);
+  activateView(active, { navigation:false });
   // `/copal/bases` remains a bookmark-compatible alias. Select the requested
   // Base before the shared Editor workspace normalizes its first leaf.
-  if (openingBases && view === 'notes') {
+  if (openingBases && view === 'notes' && editorNavigationTicket === navigationTicket + 1) {
     const preferredId = state.baseId || (context.selected && state.docs.find((doc) => doc.id === context.selected && doc.kind === 'base')?.id);
     const base = state.docs.find((doc) => doc.kind === 'base' && doc.id === preferredId) || state.docs.find((doc) => doc.kind === 'base');
     if (base) { state.baseId = base.id; notesFeature?.open(base.id, { reuse:true }); context.selected = base.id; state.selected = base.id; renderView(view); }
   }
   if (!sameSaveScope(scope, saveScope())) return;
-  context.window.focus();
-  const surface = { notes:'editor', graph:'graph', treehouse:'treehouse' }[view];
-  if (surface) acknowledgeVisible(context.window.body, 'surface.visited', { surface, visited:true }, { accountId:state.accountId, workspaceId:state.workspace });
+  if (editorNavigationTicket === navigationTicket + 1 && !modeButton) context.window.focus();
+  const surfaces = { notes:['editor'], wiki:['editor'], graph:['editor','graph'], treehouse:['treehouse'] }[view] || [];
+  for (const surface of surfaces) {
+    acknowledgeVisible(context.window.body, 'surface.visited', { surface, visited:true }, { accountId:state.accountId, workspaceId:state.workspace });
+  }
 }
 
 function close(view = state.view, push = true, fromManager = false) {
-  if (view === 'graph') { graphRenderTicket += 1; codeGraphController?.dispose(); }
+  const context = getViewContext(resolveView(view));
+  if (!context?.window.visible) return;
   clearTimeout(state.saveTimer);
-  const context = state.windows.get(view);
-  if (context) context.window.requestClose(fromManager);
+  context.window.requestClose(fromManager);
   markActive();
   if (push) history.pushState({}, '', '/');
 }
 
+const WIKI_LESSON_ID = 'openclank-docs-wiki-recipes';
+
+function officialArticleId(doc) {
+  return doc?.readOnly === true && isOfficialDocument(doc) && typeof doc.officialRef === 'string'
+    ? doc.officialRef : '';
+}
+
 /** Help opens one canonical handbook in the chosen applet presentation. */
-async function openClankHandbook({ presentation = 'copal' } = {}) {
+export async function openClankHandbook({ presentation = 'copal', articleId = 'openclank-docs-home', isCurrent = () => true } = {}) {
   const view = presentation === 'wiki' ? 'wiki' : 'notes';
   const scope = saveScope();
-  const home = () => state.docs.find((doc) => doc.readOnly === true && isOfficialDocument(doc)
-    && String(doc.officialRef || doc.properties?.docId || '') === 'openclank-docs-home');
+  const findArticle = () => state.docs.find(doc => officialArticleId(doc) === articleId)
+    || state.docs.find(doc => doc.readOnly === true && doc.builtin === true
+      && doc.properties?.docId === articleId);
   // Installed article bodies can advance while an applet stays open. Help
   // refreshes through the normal index path, which preserves personal drafts.
   await loadDocuments(false);
-  if (!sameSaveScope(scope, saveScope())) return null;
-  const match = home();
+  if (!sameSaveScope(scope, saveScope()) || !isCurrent()) return null;
+  const match = findArticle();
   if (!match || !notesFeature) return null;
-  // Both entry points address the installed article, with independent
-  // window presentations over the shared canonical document core.
-  openDocument(match.id, view, true, { mode:'reading', revealHandbook:true });
+  // Both Editor modes address the same installed article and canonical buffer.
+  openDocument(match.id, view, true, { mode:'reading', manualEntry:true });
   return match.id;
 }
 window.openClankHandbook = openClankHandbook;
 
 function openDocument(id, view = state.view, push = true, options = {}) {
+  if (view === 'graph') view = 'notes';
   const doc = state.docs.find((item) => item.id === id);
   const context = ensureViewWindow(view);
   if (['notes', 'wiki'].includes(view) && featureFor(view)) {
@@ -462,15 +608,6 @@ function openDocument(id, view = state.view, push = true, options = {}) {
 async function handleContextObjectCommand(command, target) {
   const node = target?.closest?.('[data-copal-context-object]') || target;
   if (!node) return false;
-  const sheet = node.closest?.('.copal-sheet-surface');
-  if (sheet?.__openClankSheetContextCommand && ['edit-sheet-cell', 'clear-sheet-cell', 'copy-sheet-cell', 'edit-sheet-column'].includes(command)) return Boolean(await sheet.__openClankSheetContextCommand(command, node));
-  if (String(command).startsWith('table-') && typeof window.__openClankTableContextCommand === 'function') return Boolean(await window.__openClankTableContextCommand(command, node));
-  if (command === 'edit-track' || command === 'edit-event' || command === 'toggle-task' || command === 'open-task') {
-    return Boolean(await planningFeature?.handleContextCommand?.(command, node));
-  }
-  if (command === 'open-treehouse-item') {
-    return Boolean(await treeHouse?.handleContextCommand?.(command, node));
-  }
   if (command === 'open-file') {
     // Notes Explorer rows are Copal documents, even though they share the
     // Files object vocabulary.  Keep the captured document identity when the
@@ -485,15 +622,6 @@ async function handleContextObjectCommand(command, target) {
     const code = window.codeEditorModule || await import('./codeEditor.js');
     await code.openPath(path);
     return true;
-  }
-  if (command === 'open-base-document') {
-    const id = String(node.dataset?.documentId || '').trim();
-    if (!id) return false;
-    openDocument(id, 'notes');
-    return true;
-  }
-  if (['edit-sheet-cell', 'clear-sheet-cell', 'copy-sheet-cell', 'edit-sheet-column'].includes(command) && typeof window.__openClankSheetContextCommand === 'function') {
-    return Boolean(await window.__openClankSheetContextCommand(command, node));
   }
   if (command === 'copy-file-path') {
     if (typeof window.__openClankFilesContextCommand === 'function' && await window.__openClankFilesContextCommand(command, node)) return true;
@@ -520,17 +648,6 @@ async function handleContextObjectCommand(command, target) {
     await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'application/octet-stream']: blob })]);
     return true;
   }
-  if (command === 'open-graph-node') {
-    const id = String(node.dataset?.graphId || '');
-    const view = getGraphView();
-    const projection = view.mode === 'galaxy' ? galaxyGraph(planningData().tracks || [], allPlanningTasks(planningData())) : documentGraph(visibleDocs(), findByName);
-    const graphNode = projection.nodes.find((item) => item.id === id);
-    if (!graphNode) return false;
-    if (graphNode.task) editPlanningTask(graphNode.task.primaryTrackId, graphNode.task.id);
-    else if (graphNode.track) planningFeature.openTrackEditor(graphNode.track.id, node);
-    else if (graphNode.doc) openDocument(graphNode.doc.id, graphNode.kind === 'wiki' ? 'wiki' : 'notes');
-    return true;
-  }
   return false;
 }
 
@@ -539,17 +656,23 @@ function saveScope() {
 }
 
 async function refreshIndexedDocument(id, scope = saveScope()) {
+  const writeVersion = state.documentWriteVersion;
   const fresh = await api(`/documents/${encodeURIComponent(id)}`, {}, scope.workspace);
   if (!sameSaveScope(scope, saveScope())) return fresh;
-  const projected = notesFeature?.projectDocument?.(fresh, scope) || fresh;
-  const index = state.docs.findIndex((doc) => doc.id === id);
-  if (index >= 0) state.docs[index] = projected;
-  else state.docs.push(projected);
+  if (state.documentWriteVersions.get(id) > writeVersion) return refreshIndexedDocument(id, scope);
+  acceptIndexedDocument(fresh, scope);
   return fresh;
 }
 
+function acceptIndexedDocument(fresh, scope) {
+  const projected = notesFeature?.projectDocument?.(fresh, scope) || fresh;
+  const index = state.docs.findIndex((doc) => doc.id === fresh.id);
+  if (index >= 0) state.docs[index] = projected;
+  else state.docs.push(projected);
+}
+
 function setViewStatus(view, message, bad = false) {
-  state.windows.get(view)?.window.setStatus(message, bad);
+  getViewContext(view)?.window.setStatus(message, bad);
 }
 
 function showDocumentConflict(doc, localContent, remote, view, submittedSnapshot = null) {
@@ -637,7 +760,7 @@ async function saveDocument(doc, content, rerender = false, view = state.view, o
   setViewStatus(view, 'Saving…');
   let receipt = null, writeStarted = false;
   try {
-    const prepared = prepareDocumentSave(doc, content, { snapshot:options.snapshot, scope, relationsFor:(text) => databaseRelations(text, state.docs) });
+    const prepared = prepareDocumentSave(doc, content, { snapshot:options.snapshot, scope, relationsFor:(text) => databaseRelations(text, state.docs, doc) });
     content = prepared.payload.content;
     receipt = await commitDocumentSave(prepared, (id, payload) => { writeStarted = true; return api(`/documents/${encodeURIComponent(id)}`, {
       method:'PUT', body:JSON.stringify(payload),
@@ -647,6 +770,8 @@ async function saveDocument(doc, content, rerender = false, view = state.view, o
     if (receipt.outcome !== 'applied') throw Object.assign(new Error('A newer version exists.'), { status:409, detail:{ doc:receipt.remote } });
     const result = receipt.result;
     doc.head = receipt.revision.value;
+    state.documentWriteVersions.set(doc.id, ++state.documentWriteVersion);
+    acceptIndexedDocument(receipt.doc, scope);
     // A failed projection read must never turn a committed write into a failed
     // save or make the buffer retry against its previous head.
     try { await refreshIndexedDocument(doc.id, scope); } catch (_) { /* next invalidation retries the read */ }
@@ -658,9 +783,12 @@ async function saveDocument(doc, content, rerender = false, view = state.view, o
     }
     projectionChanged(result);
     const taskProjection = receipt.projections?.tasks;
-    setViewStatus(view, taskProjection && taskProjection.status !== 'ready' ? 'Saved · indexing pending' : 'Saved');
+    const latestDraft = options.viaBuffer && notesFeature?.getDraftSnapshot?.(doc.id);
+    const newerEdits = latestDraft && latestDraft.localRevision > receipt.acknowledgedLocalRevision;
+    setViewStatus(view, newerEdits ? 'Saved captured version · newer edits unsaved'
+      : taskProjection && taskProjection.status !== 'ready' ? 'Saved · indexing pending' : 'Saved');
     const active = state.view;
-    for (const [openView, context] of state.windows) if (openView !== view && context.window.visible) renderView(openView);
+    for (const [openView] of visibleViewEntries()) if (openView !== view) renderView(openView);
     if (rerender) renderView(view);
     activateView(active, {navigation:false});
     return options.returnReceipt ? receipt : true;
@@ -689,7 +817,7 @@ function convertPluginBlock(source, lang) {
       ['name', 'Base name', `${lang}-converted.base`],
     ], async ({ name }) => {
       const properties = { source_block: lang, original_source: source };
-      const relations = databaseRelations(source, state.docs);
+      const relations = databaseRelations(source, state.docs, { name });
       await api('/documents', { method:'POST', body:JSON.stringify({ name, kind:'note', content:source, properties, relations }) });
       await loadDocuments(false);
       setStatus(`Created ${name} from ${lang} block`);
@@ -737,11 +865,27 @@ function convertPluginBlock(source, lang) {
 }
 
 // Resolve Host media through owner-bound Files refs, never a guessed host URL.
-async function resolveHostCommentAsset(reference, origin) {
+async function resolveHostCommentAsset(reference, origin, vaultAsset = null) {
+  if (vaultAsset) {
+    const key = vaultAsset.resource?.key;
+    const scope = saveScope(), capturedHead = String(vaultAsset.head || '');
+    const current = () => sameSaveScope(scope, saveScope()) && state.docs.some(doc => doc.id === vaultAsset.id
+      && doc.resource?.key?.resourceId === key?.resourceId && doc.resource?.key?.accountId === key?.accountId
+      && doc.resource?.key?.workspaceId === key?.workspaceId && String(doc.head || '') === capturedHead);
+    if (vaultAsset.kind !== 'asset' || key?.provider !== 'copal' || !vaultAsset.id || !key.accountId || !key.workspaceId || !key.resourceId || !current()) return null;
+    const resolved = await filesFacadeClient.resolveResource({provider:'copal', resource_id:vaultAsset.id,
+      account_id:key.accountId, workspace_id:key.workspaceId});
+    if (!current() || resolved.id !== key.resourceId || !resolved.ref) return null;
+    const checked = await filesFacadeClient.stat(resolved.ref);
+    if (!current() || checked.id !== key.resourceId || !hasBrowserPreview(checked)) return null;
+    return {target:{kind:'asset', name:checked.name, mimeType:checked.mime_type,
+      resourceRef:checked.ref, resourceID:checked.id, revision:checked.revision, accountScope:scope.accountId,
+      workspaceScope:scope.workspace, browserPreview:true, isCurrent:current}};
+  }
   if (origin?.resource?.key?.provider !== 'host') return null;
   let path;
   try {path=decodeURIComponent(String(reference.target || '').split('#')[0]);} catch {return null;}
-  if (!path || path.startsWith('/') || path.includes('\\') || /^[a-z][a-z\d+.-]*:/i.test(path) || !/\.(?:png|jpe?g|gif|webp|svg|avif|bmp|ico|mp3|wav|ogg|m4a|flac|aac|mp4|webm|mov|m4v|pdf)$/i.test(path)) return null;
+  if (!path || path.startsWith('/') || path.includes('\\') || /^[a-z][a-z\d+.-]*:/i.test(path) || !/\.(?:png|jpe?g|gif|webp|svg|avif|bmp|ico|mp3|wav|ogg|m4a|flac|aac|mp4|webm|mov|m4v|pdf|html?|xhtml|clankbook)$/i.test(path)) return null;
   const parts=path.split('/').filter(part=>part && part!=='.');
   if (!parts.length || parts.length>32) return null;
   const scope=saveScope(), originalParent=origin.hostParentResourceRef;
@@ -769,9 +913,145 @@ async function resolveHostCommentAsset(reference, origin) {
     const has=cap=>Array.isArray(match.capabilities)?match.capabilities.includes(cap):match.capabilities?.[cap]===true;
     if(index<parts.length-1){if(!has('children'))return null;parentRef=match.ref;continue;}
     if(!has('preview'))return null;
+    if (/\.clankbook$/i.test(name)) {
+      if (!has('stat') || !has('open')) return null;
+      const checked = await filesFacadeClient.stat(match.ref);
+      const format=checked?.format, revision=checked?.revision, capturedResource=origin.resource, capturedHead=origin.head;
+      if (!current() || checked?.provider!=='host' || checked.id!==match.id || !checked.ref || !revision
+          || format?.variant!=='openclank-workbook-v1' || format?.resourceRef!==checked.ref
+          || format?.providerRevision?.kind!==revision.kind || format?.providerRevision?.value!==revision.value
+          || format?.policyGeneration!==checked.policy_generation || format?.operations?.workbookView?.available!==true
+          || format?.operations?.workbookView?.requires!=='workbook-v1') return null;
+      let fragment=''; try {fragment=decodeURIComponent(String(reference.target||'').split('#').slice(1).join('#'));} catch (_) {return null;}
+      const sourceCurrent=()=>current() && origin.resource===capturedResource && origin.head===capturedHead;
+      return {target:{kind:'asset',name:checked.name,workbookEmbed:true,resourceRef:checked.ref,resourceID:checked.id,
+        revision,policyGeneration:checked.policy_generation,accountScope:scope.accountId,workspaceScope:scope.workspace,fragment,isCurrent:sourceCurrent,
+        load:async (isCurrent,signal)=>{const {loadWorkbookSnapshot}=await import('./editor/workbookResourceLoader.js');
+          return loadWorkbookSnapshot({client:filesFacadeClient,resourceRef:checked.ref,resourceId:checked.id,revision,
+            policyGeneration:checked.policy_generation,accountId:scope.accountId,fragment,isCurrent,signal});},
+        openEditor:(identity,isCurrent)=>openResource(identity.resourceRef,{expectedRevision:identity.revision,isCurrent:()=>sourceCurrent() && isCurrent()})}};
+    }
+    if (/\.(?:html?|xhtml)$/i.test(name)) {
+      if (!has('stat')) return null;
+      const checked = await filesFacadeClient.stat(match.ref);
+      if (!current() || !hasBrowserPreview(checked) || !checked.id || checked.id !== match.id) return null;
+      return {target:{kind:'asset',name:checked.name,mimeType:checked.mime_type,
+        resourceRef:checked.ref || checked.resource_ref,resourceID:checked.id,revision:checked.revision,
+        accountScope:scope.accountId,workspaceScope:scope.workspace,browserPreview:true,isCurrent:current}};
+    }
     return {target:{kind:'asset',name:match.name,mimeType:match.mime_type,resourceRef:match.ref},url:filesFacadeClient.contentUrl(match.ref,{purpose:'preview'})};
   }
   return null;
+}
+
+function chooseRelocatedPassage(result, isCurrent) {
+  if (result?.state === 'relocated' && result.candidates?.length === 1) return Promise.resolve(result.candidates[0]);
+  if (result?.state !== 'ambiguous' || !Array.isArray(result.candidates)
+      || result.candidates.length < 2 || result.candidates.length > 16 || !isCurrent()) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const dialog = h('dialog', {class:'copal-dialog','aria-label':'Choose a moved citation'});
+    const options = result.candidates.map(candidate => h('li',{},h('button',{type:'button',class:'copal-btn',
+      text:`Open line ${candidate.line}`,onclick:() => {
+        if (isCurrent()) selected = candidate;
+        dialog.close();
+      }})));
+    let selected = null;
+    dialog.append(h('h2',{text:'Choose a moved citation'}),
+      h('p',{text:'More than one passage has the original citation text. Choose a line to inspect.'}),
+      h('ul',{},...options),
+      ...(result.omittedCandidates ? [h('p',{text:`${result.omittedCandidates} more matches omitted.`})] : []),
+      h('button',{type:'button',class:'copal-btn',text:'Cancel',onclick:()=>dialog.close()}));
+    dialog.addEventListener('close',()=>resolve(isCurrent() ? selected : null),{once:true});
+    wireDialog(dialog); document.body.append(dialog); dialog.showModal();
+  });
+}
+
+async function openCommittedCitation(citation, {isCurrent = () => true, intent = 'current'} = {}) {
+  const scope = saveScope();
+  const current = () => sameSaveScope(scope,saveScope());
+  if (!isCurrent() || !scope.accountId || typeof citation?.documentId !== 'string' || typeof citation.revisionId !== 'string'
+      || typeof citation.spelling !== 'string' || !Number.isSafeInteger(citation.line) || citation.line < 1
+      || !Number.isSafeInteger(citation.startByte) || !Number.isSafeInteger(citation.endByte)
+      || citation.startByte < 0 || citation.endByte <= citation.startByte) return null;
+  const documentPath = `/documents/${encodeURIComponent(citation.documentId)}`;
+  const doc = await api(documentPath, {}, scope.workspace).catch(() => null);
+  const stillCurrent = () => isCurrent() && current();
+  if (!stillCurrent() || doc?.id !== citation.documentId) return null;
+  if (String(doc.head) !== citation.revisionId) {
+    if (!/^[0-9a-f]{64}$/.test(citation.anchorProof || '')) return null;
+    const result = await api(documentPath + '/citation-locate', {method:'POST',readOnly:true,
+      body:JSON.stringify({spelling:citation.spelling,anchorProof:citation.anchorProof})},scope.workspace).catch(() => null);
+    if (!stillCurrent()) return null;
+    const selected = await chooseRelocatedPassage(result, stillCurrent);
+    if (!selected || selected.documentId !== citation.documentId || selected.spelling !== citation.spelling
+        || selected.anchorProof !== citation.anchorProof || selected.revisionId !== String(doc.head) || !stillCurrent()) {
+      if (result?.state === 'unresolved' && stillCurrent()) setStatus('The citation could not be located in the current revision.',true);
+      return null;
+    }
+    citation = selected;
+  }
+  const raw = new TextEncoder().encode(String(doc.text || ''));
+  const decoded = new TextDecoder().decode(raw.slice(citation.startByte,citation.endByte));
+  if (citation.endByte > raw.length || decoded !== citation.spelling) return null;
+  let witnessedLine = 1;
+  for (let offset = 0; offset < citation.startByte; offset++) if (raw[offset] === 10) witnessedLine++;
+  if (witnessedLine !== citation.line) return null;
+  if (!state.docs.some(item => item.id === doc.id && String(item.head) === citation.revisionId)) {
+    await loadDocuments(false);
+    if (!isCurrent() || !current() || !state.docs.some(item => item.id === doc.id && String(item.head) === citation.revisionId)) return null;
+  }
+  const view = doc.kind === 'wiki' ? 'wiki' : 'notes';
+  const feature = featureFor(view);
+  const exactText = () => {
+    const snapshot = feature?.getDraftSnapshot?.(doc.id) || feature?.getAuthoritativeSnapshot?.(doc.id);
+    return !snapshot || (snapshot.expectedRevision?.value === citation.revisionId && snapshot.envelope?.text === doc.text);
+  };
+  if (!exactText()) {
+    setStatus('This passage is in a different revision than the open draft.',true);
+    return null;
+  }
+  openDocument(doc.id, view, true, {intent});
+  feature?.focusSourceLine(doc.id, citation.line, () => current() && exactText()
+    && state.docs.some(item => item.id === doc.id && String(item.head) === citation.revisionId));
+  const cache = [...(getViewContext(view)?.noteLeafViews?.values() || [])].find(item => item.docId === doc.id && item.root?.isConnected && item.root.getClientRects().length);
+  return resolvedElement(cache?.root, doc.id);
+}
+
+async function openCommittedCodeMention({document:doc, revisionId, spelling, startLine, endLine, isCurrent}) {
+  const scope = saveScope(), selection = codeGraphSelection;
+  const current = () => sameSaveScope(scope,saveScope()) && codeGraphSelection === selection;
+  try {
+    if (!isCurrent() || !scope.accountId || selection?.owner !== scope.accountId || !selection.workspaceId) {
+      if (isCurrent()) setStatus('Choose an authorized workspace in Code Graph first.',true);
+      return;
+    }
+    const workspace = selection.workspaceId;
+    let receipt = codeGraphController?.publishedContext?.()?.receipt;
+    if (!receipt || receipt.workspace_id !== workspace) {
+      const response = await fetch(`${state.api}/api/memory/code/graph`,{method:'POST',credentials:'same-origin',cache:'no-store',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_id:workspace, query:{operation:'capabilities', fields:[], channels:[]}})});
+      if (!response.ok) throw new Error('The Code Graph index is unavailable.');
+      receipt = (await response.json())?.receipt;
+    }
+    if (!isCurrent() || !current() || !receipt || receipt.workspace_id !== workspace) return;
+    const result = await api(`/documents/${encodeURIComponent(doc.id)}/code-mention`, {
+      method:'POST',readOnly:true,
+      body:JSON.stringify({codeWorkspaceId:workspace,codeReceipt:receipt,revisionId,spelling,startLine,endLine}),
+    },scope.workspace);
+    if (!isCurrent() || !current()) return;
+    const destination = result?.destination;
+    if (result?.state !== 'current' || result?.reference?.kind !== 'code' || codeReceiptKey(result.reference.receipt) !== codeReceiptKey(receipt)
+        || destination?.provider !== 'host' || typeof destination.resource?.ref !== 'string') {
+      setStatus(result?.state === 'ambiguous' ? 'This reference names more than one current code target.' : 'No single current code target was found.',true);
+      return;
+    }
+    const expectedRevision = destination.expected_revision;
+    const sourceLine = result.source?.span?.start_line;
+    if (expectedRevision?.kind !== 'hostFingerprint' || !Number.isSafeInteger(sourceLine) || sourceLine < 1) return;
+    await openResource(destination.resource.ref,{expectedRevision,sourceLine,isCurrent:()=>isCurrent()&&current(),handoffCurrent:current});
+  } catch (error) {
+    if (isCurrent() && current()) setStatus(error.message || 'This code reference is unavailable.',true);
+  }
 }
 
 const markdownRenderer = createMarkdownRenderer({
@@ -780,25 +1060,28 @@ const markdownRenderer = createMarkdownRenderer({
   findByName,
   resolveAsset:resolveHostCommentAsset,
   assetUrl:target => target.resourceRef ? null : `${state.api}/api/copal/assets/${encodeURIComponent(target.id)}?workspace=${encodeURIComponent(state.workspace)}`,
-  openTarget:(target, fragment, event) => {
+  openTarget:(target, fragment, event, { navigation } = {}) => {
+    if (navigation && !navigation.isCurrent()) return null;
     if (target?.kind === 'app-destination-error') {
       setStatus(target.name || 'Unknown app destination.', true);
       return;
     }
-    const view = target.kind === 'wiki' ? 'wiki' : 'notes';
+    const article = officialArticleId(target);
+    const view = navigation?.presentation === 'notes' && article
+      ? (article === WIKI_LESSON_ID ? 'wiki' : 'notes')
+      : (target.kind === 'wiki' ? 'wiki' : 'notes');
     const intent = navigationIntentFromEvent(event);
-    // S17: Wiki opens are Editor documents and honor the shared navigation
-    // intent (L-S15-WIKI-INTENT).
     openDocument(target.id, view, true, { intent });
     if (fragment && ['notes', 'wiki'].includes(view)) {
       const section = extractReferenceSection(target.text, fragment);
       if (section.status === 'resolved') featureFor(view)?.focusSourceLine(target.id, section.line);
       else setStatus(`${section.status === 'ambiguous' ? 'Ambiguous' : 'Missing'} section: ${fragment}`, true);
     }
-    const cache = [...(state.windows.get(view)?.noteLeafViews?.values() || [])].find(item => item.docId === target.id && item.root?.isConnected && item.root.getClientRects().length);
+    const cache = [...(getViewContext(view)?.noteLeafViews?.values() || [])].find(item => item.docId === target.id && item.root?.isConnected && item.root.getClientRects().length);
     return { documentId:cache?.docId, element:cache?.root };
   },
   onConvertPluginBlock:convertPluginBlock,
+  openCodeMention:openCommittedCodeMention,
 });
 const { renderMarkdown, renderPreview, renderReference } = markdownRenderer;
 
@@ -827,12 +1110,26 @@ const resolveLinkedAppDocument = async ({ panel, event, screen }) => {
   if (!doc || doc.kind === 'asset') return null;
   const view = screen === 'wiki' ? 'wiki' : 'notes';
   openDocument(doc.id, view, true, { intent:navigationIntentFromEvent(event) });
-  const cache = [...(state.windows.get(view)?.noteLeafViews?.values() || [])].find(item => item.docId === doc.id && item.root?.isConnected && item.root.getClientRects().length);
+  const cache = [...(getViewContext(view)?.noteLeafViews?.values() || [])].find(item => item.docId === doc.id && item.root?.isConnected && item.root.getClientRects().length);
   return resolvedElement(cache?.root, cache?.docId);
 };
 registerAppDestination('editor', resolveLinkedAppDocument);
 registerAppDestination('wiki', resolveLinkedAppDocument);
-for (const [screen, view] of [['graph','graph'], ['galaxy','graph'], ['achievements','achievements'], ['treehouse','treehouse'], ['timeline','timeline'], ['tasks','todo']]) {
+registerAppDestination('citation', async ({panel,event}) => {
+  const fields = String(panel || '').split('/');
+  if (fields.length !== 6 && fields.length !== 7) return null;
+  const [documentId,revisionId,line,startByte,endByte,spelling,anchorProof] = fields.map(decodeURIComponent);
+  return openCommittedCitation({documentId,revisionId,line:Number(line),startByte:Number(startByte),
+    endByte:Number(endByte),spelling,anchorProof},{intent:navigationIntentFromEvent(event)});
+});
+for (const view of ['graph','mind','galaxy']) {
+  registerAppDestination(view, async () => {
+    await open(view);
+    const context = getViewContext('graph');
+    return context?.window.visible ? resolvedElement(context.window.body) : null;
+  });
+}
+for (const [screen, view] of [['achievements','achievements'], ['treehouse','treehouse'], ['timeline','timeline'], ['tasks','todo']]) {
   registerAppDestination(screen, async () => {
     const context = ensureViewWindow(view); activateView(view); context.window.show(document.activeElement);
     await renderView(view); return resolvedElement(context.window.body);
@@ -872,7 +1169,7 @@ async function showHistory(doc) {
 }
 
 async function showTrash(kind = null) {
-  const dialog = h('dialog', { class: 'copal-dialog' }, h('h2', { text: kind === 'base' ? 'Deleted Bases' : 'Deleted Copal documents' }));
+  const dialog = h('dialog', { class: 'copal-dialog' }, h('h2', { text: kind === 'base' ? 'Deleted Bases' : 'Deleted documents' }));
   const list = h('div', { text: 'Loading…' });
   dialog.append(list, h('div', { class: 'copal-dialog-actions' }, h('button', { class: 'copal-btn', text: 'Close', onclick: () => dialog.close() })));
   wireDialog(dialog); document.body.append(dialog);
@@ -918,7 +1215,7 @@ async function deleteDocument(doc) {
 
 async function deleteDocuments(docs) {
   const unique = [...new Map((docs || []).filter((doc) => doc && !doc.readOnly).map((doc) => [doc.id, doc])).values()];
-  if (!unique.length || !await styledConfirm(`Move ${unique.length} selected Copal document${unique.length === 1 ? '' : 's'} to trash?`, { title: 'Move documents to Trash', confirmText: 'Move to Trash', danger: true })) return false;
+  if (!unique.length || !await styledConfirm(`Move ${unique.length} selected document${unique.length === 1 ? '' : 's'} to trash?`, { title: 'Move documents to Trash', confirmText: 'Move to Trash', danger: true })) return false;
   for (const doc of unique) {
     if (notesFeature?.prepareDelete && !await notesFeature.prepareDelete(doc.id)) return false;
     clearTimeout(state.saveTimers.get(doc.id));
@@ -996,7 +1293,7 @@ function renderNotes() {
   notesFeature?.render();
 }
 function renderWiki() {
-  const current = state.windows.get('wiki');
+  const current = getViewContext('wiki');
   if (current && !current.noteWorkspace && !current.selected) current.selected = state.docs.find(doc => doc.kind === 'wiki' && !doc.builtin)?.id || state.docs.find(doc => doc.kind === 'wiki')?.id || null;
   wikiFeature?.render();
 }
@@ -1079,7 +1376,7 @@ async function previewWikiMemes(file) {
       method:'POST', headers:state.accountId ? { 'X-Copal-Account':state.accountId } : {}, body:form,
     });
     if (!imported.ok) throw new Error((await imported.json().catch(() => ({}))).detail || 'The .memes import failed');
-    dialog.close(); await loadDocuments(false); renderNotes(); setStatus(restore ? 'Wiki .memes restore complete' : 'Wiki .memes import complete');
+    dialog.close(); await loadDocuments(false); renderView(state.view); setStatus(restore ? 'Wiki .memes restore complete' : 'Wiki .memes import complete');
   };
   const form = new FormData(); form.append('file', file, file.name);
   const response = await fetch(`${state.api}/api/copal/preview/memes?workspace=${encodeURIComponent(state.workspace)}`, {
@@ -1137,6 +1434,16 @@ function renderCalendar() {
   state.body.replaceChildren(toolbar, calendar);
 }
 
+const graphNeighborhoods = new WeakMap();
+const galaxyCaches = new WeakMap();
+function scopedGalaxyGraph(view) {
+  const population = galaxyPlanningPopulation(planningData(), planningFeature.timelineState);
+  if (!galaxyCaches.has(view)) galaxyCaches.set(view, {});
+  return galaxyGraph(population.tracks, population.events, {
+    registryHead:population.registryHead, cache:galaxyCaches.get(view),
+    showUnassigned:view.modes.galaxy.filters.showUnassigned,
+  });
+}
 let graphView = null;
 let graphScopeKey = null;
 
@@ -1153,22 +1460,51 @@ function getGraphView() {
 
 function readCodeSettings(workspaceId){
   const key=graphStorageKey(state.accountId,'code:'+workspaceId);
-  try{return normalizeGraphState(JSON.parse(localStorage.getItem(key)||'{}')).settings;}catch{return normalizeGraphSettings();}
+  try {
+    const saved=JSON.parse(localStorage.getItem(key)||'{}');
+    if(workspaceId && !saved.settings)return readCodeSettings('');
+    return normalizeGraphState(saved).settings;
+  } catch {return normalizeGraphSettings();}
 }
 function writeCodeSettings(workspaceId,value){
-  const key=graphStorageKey(state.accountId,'code:'+workspaceId);if(!key||!workspaceId)return;
+  const key=graphStorageKey(state.accountId,'code:'+workspaceId);if(!key||!state.accountId)return;
   let saved={};try{saved=JSON.parse(localStorage.getItem(key)||'{}');}catch{}
   localStorage.setItem(key,JSON.stringify({...normalizeGraphState(saved),settings:normalizeGraphSettings(value)}));
 }
-function showFamilyGraphSettings(){
-  const context=state.windows.get('graph');if(!context)return;
-  const view=getGraphView(),owner=state.accountId,key=graphScopeKey,mode=view.mode;
-  const panel=h('section',{class:'code-map-diagnostics','aria-label':'Graph settings'});context.window.body.append(panel);
-  let cleanup=()=>{};const close=()=>{cleanup();panel.remove();};
-  cleanup=mountGraphSettings(panel,{family:mode,mode:'common',read:()=>view.settings,write:value=>{if(owner!==state.accountId||key!==graphScopeKey)return;view.settings=value;persistGraphView(view);},isCurrent:()=>panel.isConnected&&owner===state.accountId&&key===graphScopeKey,onChange:()=>{close();if(mode==='structure')renderMind();else renderGraph();showFamilyGraphSettings();}});
-  panel.prepend(h('button',{class:'copal-btn',text:'Close settings',onclick:close}));
+function effectiveCodeSettings(workspaceId) {
+  const saved = readCodeSettings(workspaceId);
+  return resolveGraphSettings(saved, saved.presentation);
 }
-window.addEventListener('openclank:graph-settings',async()=>{const pending=copalInitialization;if(pending){await pending;if(pending!==copalInitialization)return;}const owner=state.accountId,epoch=state.contextEpoch;await open('graph');if(owner!==state.accountId||epoch!==state.contextEpoch)return;if(getGraphView().mode==='code')codeGraphController?.openSettings?.();else showFamilyGraphSettings();});
+
+function graphSettingsPanel(context) {
+  if (!context.settingsPanel) {
+    context.settingsPanel = h('section',{class:'graph-sidebar-settings','aria-label':'Graph settings'});
+    context.sidebarContent.before(context.settingsPanel);
+  }
+  return context.settingsPanel;
+}
+
+function mountFamilySettings(context, view) {
+  const panel = graphSettingsPanel(context);
+  const mode = view.mode;
+  if (context.settingsView === view && context.settingsMode === mode) return;
+  context.disposeFamilySettings?.();
+  panel.replaceChildren();
+  context.settingsView = view;
+  context.settingsMode = mode;
+  if (mode === 'code') return;
+  const current = () => context.window.visible && view === getGraphView() && mode === view.mode;
+  context.disposeFamilySettings = mountGraphSettings(panel,{
+    family:mode, mode:'common', read:()=>view.settings, isCurrent:current,
+    write:value=>{if(current()){view.settings=value;persistGraphView(view);}},
+    onChange:()=>{if(current())renderView('graph');},
+  });
+}
+
+function showFamilyGraphSettings() {
+  graphSettingsPanel(getViewContext('graph')).querySelector('h3')?.focus();
+}
+window.addEventListener('openclank:graph-settings',async()=>{if(!state.storageNamespace)await init(state.api || window.location.origin);if(!state.storageNamespace)return;const owner=state.accountId,epoch=state.contextEpoch;await open('graph');if(owner!==state.accountId||epoch!==state.contextEpoch)return;if(getGraphView().mode==='code')codeGraphController?.openSettings?.();else showFamilyGraphSettings();});
 function persistGraphView(view = getGraphView()) {
   if (view !== getGraphView() || !graphScopeKey) return;
   try {
@@ -1190,9 +1526,6 @@ function mindModeState() {
 
 function resolveView(view, mode = null) {
   if (view === 'editor') view = 'notes';
-  // Wiki is a document type owned by the shared Editor. Keep the legacy view
-  // name as a route alias, but never create or restore a second window.
-  // Wiki retains its own applet; both controllers share canonical buffers.
   // Bases is an Editor leaf now. Keep the old URL as a compatibility alias so
   // bookmarks open the selected Base in the shared Editor workspace.
   if (view === 'bases') view = 'notes';
@@ -1208,7 +1541,8 @@ function resolveView(view, mode = null) {
     getGraphView().mode = view === 'galaxy' ? 'galaxy' : mode;
     persistGraphView();
   }
-  return view === 'galaxy' ? 'graph' : VIEWS.includes(view) ? view : 'notes';
+  if (view === 'galaxy') return 'graph';
+  return view === 'graph' || VIEWS.includes(view) ? view : 'notes';
 }
 
 function docKindToGraphKind(doc) {
@@ -1224,6 +1558,59 @@ function kindColor(kind) {
   return { note: 'var(--copal-graph-note, var(--accent, var(--red)))', event: 'var(--copal-graph-event, #22c55e)', wiki: 'var(--copal-graph-wiki, var(--accent, var(--red)))', base: 'var(--copal-graph-base, #f59e0b)', track:'var(--copal-graph-track, #a78bfa)' }[kind] || 'var(--accent, var(--red))';
 }
 
+function journalConnections(selected,direction,kind,current) {
+  const scope=saveScope();
+  const live=()=>sameSaveScope(scope,saveScope()) && current();
+  const read=params=>api('/documents/'+encodeURIComponent(selected.id)+'/neighbors?'+new URLSearchParams({kind,...params}),{},scope.workspace);
+  return relationPanel({h,direction,current:live,read,open:async(row,direction,structure,valid)=>{
+    const receipt=await read({direction,witness:row.id});
+    if (!valid()) return;
+    const link=receipt.link, incoming=direction==='incoming';
+    const endpoint=incoming?link.source:link.target;
+    const doc=await refreshIndexedDocument(endpoint.id,scope);
+    const matches=()=>sameSaveScope(scope,saveScope()) && doc.head===endpoint.head &&
+      state.docs.some(item=>item.id===doc.id && item.head===endpoint.head) &&
+      [notesFeature,wikiFeature].every(feature=>{
+        const draft=feature?.getDraftSnapshot?.(doc.id);
+        return !draft || draft.envelope?.text===doc.text;
+      });
+    if (!valid()) return;
+    if (!matches()) throw new Error('The page changed. Reload connections.');
+    let line=1;
+    const range=incoming?link.range:null;
+    const blockId=incoming?link.sourceBlockId:link.targetBlockId;
+    if (range) {
+      const hash=await attachmentTextHash(doc.text.slice(range.from,range.to));
+      if (hash!==range.spellingHash) throw new Error('The source range changed. Reload connections.');
+      line=range.line;
+    } else if (blockId) {
+      const blocks=doc.blocks || [], index=blocks.findIndex(item=>item.id===blockId);
+      if (index<0) throw new Error('The linked block location is unavailable.');
+      line=1+blocks.slice(0,index).reduce((lines,item)=>lines+String(item.source ?? item.text ?? '').split('\n').length,0);
+    } else if (!incoming && link.fragment) {
+      const section=extractReferenceSection(doc.text,link.fragment);
+      if(section.status!=='resolved') throw new Error(section.status==='ambiguous'?'The section is ambiguous.':'The linked section is missing.');
+      line=section.line;
+    }
+    if (!valid() || !matches()) return;
+    if (structure) {
+      const graph=getGraphView(), nav=mindModeState();
+      graph.source={...graphSourceEnvelope(doc),connection:{workspace:scope.workspace,head:doc.head,fragment:link.fragment,range,line}};
+      nav.docId=doc.id;
+      nav.collapsed.clear();
+      nav.selectedLine=structureEntries(doc.text).filter(entry=>entry.line<=line).at(-1)?.line || null;
+      nav.editingLine=null;
+      persistGraphView();
+      await open('graph',true,{mode:'structure',doc:doc.id});
+    } else {
+      const view=doc.kind==='wiki'?'wiki':'notes';
+      openDocument(doc.id,view,true,{mode:'source'});
+      if(range) featureFor(view).focusSourceRange(doc.id,range,matches);
+      else featureFor(view).focusSourceLine(doc.id,line,matches);
+    }
+  }});
+}
+
 function graphSourceEnvelope(doc) {
   const snapshot = notesFeature?.getDraftSnapshot?.(doc?.id);
   const resource = doc?.resource?.key || doc?.resourceKey || null;
@@ -1235,7 +1622,7 @@ function graphSourceEnvelope(doc) {
   };
 }
 
-function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = null, catalog = null, isCurrent = () => true) {
+function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = null, catalog = null, isCurrent = () => true, documentProjection = null, onNeighborhood = null, onFullGraph = null, neighborhoodCoverage = null, journalInspector = {}) {
   const root = h('div', { class: 'copal-graph-wrap' });
   const view = getGraphView();
   const modeState = view.modes[mode];
@@ -1243,6 +1630,7 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
   // saved filter set is reconciled against the loaded snapshot so renamed or
   // deleted values recover instead of silently hiding the graph.
   const reconciled = reconcileFilters(modeState.filters, facets);
+  if (mode === 'galaxy') reconciled.showUnassigned = modeState.filters.showUnassigned === true;
   modeState.filters = reconciled;
   const graphState = {
     searchQuery:reconciled.search,
@@ -1253,18 +1641,29 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     includeOfficial:reconciled.includeOfficial === true,
     selectedNodeId:modeState.selection?.nodeId || null,
   };
+  const graphSettings=resolveGraphSettings(view.settings,'common');
+  const MIN_VIEW=100000/graphSettings.documentZoomMax, MAX_VIEW=100000/graphSettings.documentZoomMin;
+  const clampWidth = width => Math.max(MIN_VIEW, Math.min(MAX_VIEW, width));
+  const clampHeight = height => Math.max(MIN_VIEW*0.65, Math.min(MAX_VIEW*0.65, height));
   const vb = { ...modeState.camera };
+  const width = clampWidth(vb.w), height = clampHeight(vb.h * width / vb.w);
+  vb.x += (vb.w-width)/2;
+  vb.y += (vb.h-height)/2;
+  vb.w=width;
+  vb.h=height;
   const initialCamera = { ...vb }, cameraViewId = crypto.randomUUID();
+  const cameraScope = saveScope();
   const cameraOwner = achievementOwner();
+  const cameraOptions = { accountId:cameraOwner, workspaceId:cameraScope.workspace };
+  const cameraScopeCurrent = () => sameSaveScope(cameraScope, saveScope());
   let cameraStart = null;
   const cameraFacts = camera => ({ accepted:true, populatedView:nodes.length > 0, viewId:cameraViewId,
     scale:1000 / camera.w, panX:-camera.x * 1000 / camera.w, panY:-camera.y * 650 / camera.h });
-  const graphSettings=resolveGraphSettings(view.settings),MAX_MOUNTED=view.mode==='galaxy'?graphSettings.galaxyItems:graphSettings.documentItems;
-  const MAX_EDGES=view.mode==='galaxy'?graphSettings.galaxyEdges:graphSettings.documentEdges;
-  const MIN_VIEW = 20, MAX_VIEW = 80000;
+  const MAX_MOUNTED=mode==='galaxy'?graphSettings.galaxyItems:graphSettings.documentItems;
+  const MAX_EDGES=mode==='galaxy'?graphSettings.galaxyEdges:graphSettings.documentEdges;
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  modeState.camera = { ...vb };
   const persist = () => {
-    modeState.camera = { ...vb };
     modeState.filters = {
       search:graphState.searchQuery,
       kinds:[...graphState.activeKinds],
@@ -1272,22 +1671,70 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
       tags:[...graphState.activeTags],
       properties:Object.fromEntries(Object.entries(graphState.activeProperties).map(([key, values]) => [key, [...values]])),
       includeOfficial:graphState.includeOfficial,
+      ...(mode === 'galaxy' ? {showUnassigned:modeState.filters.showUnassigned === true} : {}),
     };
     const selected = nodesById.get(graphState.selectedNodeId);
-    modeState.selection = selected ? { ...selected.selection, nodeId:selected.id } : null;
+    if (selected) modeState.selection = { ...selected.selection, nodeId:selected.id };
+    else if (!graphState.selectedNodeId) modeState.selection = null;
     persistGraphView(view);
   };
-  const svgEl = svg('svg', { class: 'copal-graph', viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`, role: 'img', 'aria-label': `Graph showing ${nodes.length} nodes and ${edges.length} edges` });
+  const svgEl = svg('svg', { class: 'copal-graph', viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`, role: 'group', 'aria-label': `Graph showing ${nodes.length} nodes and ${edges.length} edges` });
   let cameraFrame = 0, cameraFrameCancel = null, destroyed = false;
+  let cameraDirty = false, cameraWasVisible = false, cameraCheckpointTimer = null;
+  let renderedWidth = vb.w, renderedHeight = vb.h;
+  const checkpointCamera = () => {
+    clearTimeout(cameraCheckpointTimer);
+    cameraCheckpointTimer = null;
+    if (!cameraDirty || !cameraScopeCurrent()) return;
+    cameraDirty = false;
+    persistGraphView(view);
+    const report = cameraWasVisible && cameraOwner === achievementOwner();
+    cameraWasVisible = false;
+    if (!report) return;
+    // Capture the final facts now, so the asynchronous start receipt can't
+    // observe a later gesture or substitute the next workspace.
+    const final = cameraFacts(vb);
+    cameraStart ||= recordPresentation('graph.camera.gesture', { ...cameraFacts(initialCamera), start:true }, cameraOptions);
+    void cameraStart.then(() => {
+      if (cameraScopeCurrent() && cameraOwner === achievementOwner()) {
+        return recordPresentation('graph.camera.gesture', final, cameraOptions);
+      }
+    }).catch(() => {});
+  };
+  const scheduleCameraCheckpoint = () => {
+    if (!cameraDirty) return;
+    clearTimeout(cameraCheckpointTimer);
+    cameraCheckpointTimer = setTimeout(() => {
+      cameraCheckpointTimer = null;
+      if (!dragging && !pinch) checkpointCamera();
+    }, 180);
+  };
   const applyCamera = () => {
+    if (destroyed || !isCurrent() || !cameraScopeCurrent()) return;
+    const last = modeState.camera;
+    if (last.x === vb.x && last.y === vb.y && last.w === vb.w && last.h === vb.h) return;
+    Object.assign(last, vb);
+    if (!cameraDirty) {
+      cameraWasVisible = Boolean(cameraOwner && cameraOwner === cameraScope.accountId && nodes.length
+        && document.visibilityState === 'visible' && root.getClientRects().length);
+    }
+    cameraDirty = true;
+    if (!dragging && !pinch) scheduleCameraCheckpoint();
     if (cameraFrame) return;
     const useRaf = typeof globalThis.requestAnimationFrame === 'function';
     const frame = useRaf ? globalThis.requestAnimationFrame.bind(globalThis) : (callback) => setTimeout(callback, 0);
     cameraFrameCancel = useRaf ? globalThis.cancelAnimationFrame?.bind(globalThis) : clearTimeout;
-    cameraFrame = frame(() => { cameraFrame = 0; cameraFrameCancel = null; if (destroyed || !root.isConnected) return; svgEl.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); syncGraphLabels(); persist(); updateZoomBounds?.();
-      if (nodes.length && root.getClientRects().length && document.visibilityState === 'visible') {
-        cameraStart ||= recordPresentation('graph.camera.gesture', { ...cameraFacts(initialCamera), start:true }, { accountId:cameraOwner, workspaceId:state.workspace });
-        void cameraStart.then(() => recordPresentation('graph.camera.gesture', cameraFacts(vb), { accountId:cameraOwner, workspaceId:state.workspace }));
+    cameraFrame = frame(() => {
+      cameraFrame = 0;
+      cameraFrameCancel = null;
+      if (destroyed || !isCurrent()) return;
+      svgEl.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+      const sizeChanged = vb.w !== renderedWidth || vb.h !== renderedHeight;
+      if (sizeChanged) {
+        renderedWidth = vb.w;
+        renderedHeight = vb.h;
+        syncGraphLabels();
+        updateZoomBounds();
       }
     });
   };
@@ -1304,10 +1751,10 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
 
   // Layout positions
   const positions = new Map();
-  nodes.forEach((node, index) => { const angle = index / Math.max(1, nodes.length) * Math.PI * 2; const ring = 190 + (index % 3) * 45; positions.set(node.id, { x: 500 + Math.cos(angle) * ring, y: 325 + Math.sin(angle) * ring }); });
 
   let edgeEls = [];
   let nodeEls = [];
+  let arrivalFrame = 0;
   function syncGraphLabels() {
     if (destroyed || !root.isConnected) return;
     const metrics = documentGraphLabelMetrics(svgEl.getScreenCTM());
@@ -1325,6 +1772,9 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
   const inspector = h('div', { class: 'copal-graph-inspector' });
 
   function updateInspector(node) {
+    const focusedConnection = journalInspector.controls?.contains(document.activeElement) ? document.activeElement : null;
+    if (!node || node.doc?.id !== journalInspector.docId) journalInspector.controls = null;
+    inspector.querySelector('.copal-graph-evidence')?.disposeEvidence();
     inspector.textContent = '';
     if (!node) return;
     const name = h('div', { class: 'copal-graph-inspector-name', text: node.label || '' });
@@ -1334,7 +1784,7 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     // Find connected nodes
     const connected = adjacentEdges.get(node.id) || [];
     const links = h('div', { class: 'copal-graph-inspector-links' });
-    for (const edge of connected) {
+    for (const edge of connected.slice(0,graphSettings.connections)) {
       const otherId = edge.from === node.id ? edge.to : edge.from;
       const otherNode = nodesById.get(otherId);
       if (!otherNode) continue;
@@ -1347,18 +1797,104 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     meta.textContent = `${connected.length} connection${connected.length !== 1 ? 's' : ''}`;
     inspector.append(name, kindLabel, meta);
     if (connected.length) inspector.append(links);
+    if (connected.length > graphSettings.connections) inspector.append(h('p',{text:`Showing ${graphSettings.connections} of ${connected.length} connections.`}));
+    if (mode === 'galaxy' && node.task?.documentId) {
+      const source = state.docs.find(doc => doc.id === node.task.documentId);
+      if (source) {
+        const targets = new Set([source.id]);
+        for (const relation of source.relations || []) {
+          if (relation.targetDocumentId) targets.add(relation.targetDocumentId);
+        }
+        for (const id of targets) {
+          const target = state.docs.find(doc => doc.id === id);
+          if (target) inspector.append(h('button', {type:'button', text:id === source.id ? 'Open event note' : `Open linked note · ${target.name}`,
+            onclick:() => { if (isCurrent() && state.docs.some(doc => doc.id === id)) openDocument(id, 'notes'); }}));
+        }
+      }
+    }
+    if (mode === 'documents' && node.doc && documentProjection) {
+      const doc = node.doc, scope = saveScope();
+      const current = () => isCurrent() && sameSaveScope(scope,saveScope());
+      inspector.append(journalEvidence({h, current, load:async()=>{
+        const selection = codeGraphSelection;
+        let receipt = codeGraphController?.publishedContext?.()?.receipt;
+        if (selection?.owner === scope.accountId && selection.workspaceId && receipt?.workspace_id !== selection.workspaceId) {
+          const response = await fetch(`${state.api}/api/memory/code/graph`, {method:'POST',cache:'no-store',
+            credentials:'same-origin',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({workspace_id:selection.workspaceId,query:{operation:'capabilities',fields:[],channels:[]}})});
+          receipt = response.ok ? (await response.json()).receipt : null;
+        }
+        if (!current() || codeGraphSelection !== selection) throw new Error('Graph selection changed');
+        const code = selection?.owner === scope.accountId && receipt && receipt.workspace_id === selection.workspaceId
+          ? {codeWorkspaceId:selection.workspaceId,codeReceipt:receipt} : null;
+        const data = await api(`/documents/${encodeURIComponent(doc.id)}/graph-evidence`,{method:'POST',readOnly:true,
+          body:JSON.stringify({head:doc.head,...(code ? {code} : {})})},scope.workspace);
+        if (!current() || codeGraphSelection !== selection || data.page.id !== doc.id || data.page.revision !== doc.head)
+          throw new Error('Graph selection changed');
+        return data;
+      }, open:async(row,valid)=>{
+        if (row.kind === 'mentions') return openCommittedCodeMention({document:doc,revisionId:doc.head,
+          spelling:row.label,startLine:row.line,endLine:row.line,isCurrent:valid});
+        if (row.to.kind === 'fact') return window.memoryModule?.openReference?.(row.to.id);
+        const view = doc.kind === 'wiki' ? 'wiki' : 'notes';
+        openDocument(doc.id,view,true);
+        featureFor(view)?.focusSourceLine(doc.id,row.line,()=>current() && state.docs.some(d=>d.id===doc.id && d.head===doc.head));
+      }}));
+
+      journalInspector.focusNeighborhood = onNeighborhood;
+      if (journalInspector.docId !== doc.id || journalInspector.head !== doc.head || !journalInspector.controls) {
+        journalInspector.docId = doc.id;
+        journalInspector.head = doc.head;
+        const direction = h('select', {'aria-label':'Connection direction'},
+          ...[['both','Both'],['incoming','Incoming'],['outgoing','Outgoing']].map(([value,text])=>h('option',{value,text})));
+        const kinds = h('select', {'aria-label':'Connection type'},
+          ...[['both','Links and embeds'],['link','Links'],['embed','Embeds']].map(([value,text])=>h('option',{value,text})));
+        const depth = h('select', {'aria-label':'Connection depth'},
+          h('option',{value:'1',text:'One level'}), h('option',{value:'2',text:'Two levels'}));
+        const focus = h('button',{type:'button',text:'Focus connections',onclick:()=>{
+          if (isCurrent()) journalInspector.focusNeighborhood?.(node.id,{direction:direction.value,depth:Number(depth.value),kinds:kinds.value==='both'?['link','embed']:[kinds.value]});
+        }});
+        const panels=h('div');
+        const updatePanels=()=>panels.replaceChildren(...(direction.value==='both'?['incoming','outgoing']:[direction.value])
+          .map(value=>journalConnections(doc,value,kinds.value,current)));
+        direction.addEventListener('change',updatePanels);
+        kinds.addEventListener('change',updatePanels);
+        updatePanels();
+        journalInspector.controls = h('div',{},direction,kinds,depth,focus,panels);
+      }
+      inspector.append(h('p',{text:'The canvas shows loaded pages. Browse connections across this journal below.'}),journalInspector.controls);
+      if (focusedConnection?.isConnected) focusedConnection.focus({preventScroll:true});
+      if (neighborhoodCoverage) inspector.append(h('p',{text:`Neighborhood limit omitted ${neighborhoodCoverage.omittedNodes} nodes and ${neighborhoodCoverage.omittedEdges} edges; ${neighborhoodCoverage.filteredEdges} loaded graph edges excluded by type.`}));
+      if (onFullGraph) inspector.append(h('button',{type:'button',text:'Return to full graph',onclick:()=>{if(isCurrent())onFullGraph();}}));
+      const parsed = extractDocumentReferences(node.doc.text || '');
+      if (parsed.truncated || parsed.unresolvedDefinitions) inspector.append(h('p',{text:`Link extraction is partial${parsed.truncated ? ' (source or link limit)' : ''}${parsed.unresolvedDefinitions ? `; ${parsed.unresolvedDefinitions} reference definitions unavailable` : ''}.`}));
+      for (const edge of connected.slice(0,50)) {
+        if (edge.from !== node.id || !edge.sourceLine) continue;
+        const sourceLine = String(node.doc.text || '').split('\n')[edge.sourceLine - 1];
+        if (sourceLine != null) inspector.append(h('p',{text:`Line ${edge.sourceLine}${edge.fragment ? ` #${edge.fragment}` : ''}: ${sourceLine.trim().slice(0,160)}`}));
+      }
+      const notices = (documentProjection.notices || []).filter(item=>item.sourceNodeId===node.id);
+      for (const item of notices.slice(0,50)) {
+        const sourceLine = item.sourceLine ? String(node.doc.text || '').split('\n')[item.sourceLine-1] : null;
+        inspector.append(h('p',{text:`${item.kind}: ${item.reason}${item.locator ? ' · '+item.locator : ''}${item.fragment ? ' #'+item.fragment : ''}${sourceLine != null ? ` · line ${item.sourceLine}: ${sourceLine.trim().slice(0,160)}` : ''}`}));
+      }
+      if (notices.length>50) inspector.append(h('p',{text:`${notices.length-50} more notices not shown.`}));
+      if (documentProjection.coverage?.omittedNotices || documentProjection.coverage?.omittedEdges) inspector.append(h('p',{text:`Loaded graph limits omitted ${documentProjection.coverage.omittedNotices || 0} notices and ${documentProjection.coverage.omittedEdges || 0} connection occurrences.`}));
+    }
     inspector.append(openBtn);
   }
 
-  function clearInspector() { inspector.textContent = ''; }
+  function clearInspector() { journalInspector.controls = null; inspector.querySelector('.copal-graph-evidence')?.disposeEvidence(); inspector.textContent = ''; }
 
   // B4: select/deselect node
   let selectedEl = null;
   function selectNode(nodeEl, node) {
-    if (selectedEl) selectedEl.classList.remove('selected');
+    if (selectedEl) { selectedEl.classList.remove('selected'); selectedEl.setAttribute('aria-pressed','false'); }
     selectedEl = nodeEl;
     nodeEl.classList.add('selected');
+    nodeEl.setAttribute('aria-pressed','true');
     graphState.selectedNodeId = node.id;
+    if (itemBrowser.open) renderItemPage(true);
     if (node.doc) view.source = graphSourceEnvelope(node.doc);
     persist();
     updateInspector(node);
@@ -1366,9 +1902,10 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     for (const ee of edgeEls) ee.el.classList.toggle('edge-highlight', ee.edge.from === node.id || ee.edge.to === node.id);
   }
   function deselectNode() {
-    if (selectedEl) selectedEl.classList.remove('selected');
+    if (selectedEl) { selectedEl.classList.remove('selected'); selectedEl.setAttribute('aria-pressed','false'); }
     selectedEl = null;
     graphState.selectedNodeId = null;
+    if (itemBrowser.open) renderItemPage(false);
     persist();
     clearInspector();
     for (const ee of edgeEls) ee.el.classList.remove('edge-highlight');
@@ -1377,15 +1914,20 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
   // Mount only a bounded window, rebuilding it when search/filter/selection
   // changes. This keeps a large corpus discoverable without creating 5,001
   // SVG subtrees, and always makes the selected match reachable.
-  function mountGraph(visibleIds) {
+  function mountGraph(visibleIds, onProgress) {
+    if (arrivalFrame) cancelAnimationFrame(arrivalFrame);
+    arrivalFrame=0;
     const selected = graphState.selectedNodeId;
     const mountedIds = [];
-    if (selected && visibleIds.has(selected)) mountedIds.push(selected);
-    for (const node of nodes) {
+    for (const id of visibleIds) {
       if (mountedIds.length >= MAX_MOUNTED) break;
-      if (visibleIds.has(node.id) && !mountedIds.includes(node.id)) mountedIds.push(node.id);
+      mountedIds.push(id);
+    }
+    if (selected && visibleIds.has(selected) && !mountedIds.includes(selected)) {
+      mountedIds[mountedIds.length-1] = selected;
     }
     const mounted = new Set(mountedIds);
+    positions.clear();
     const columns = Math.max(1, Math.ceil(Math.sqrt(mountedIds.length)));
     const rows = Math.max(1, Math.ceil(mountedIds.length / columns));
     mountedIds.forEach((id, index) => positions.set(id, {
@@ -1396,33 +1938,49 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     svgEl.replaceChildren();
     edgeEls = [];
     nodeEls = [];
-    const drawnConnections=new Map();
+    const edgeLayer = svg('g',{'aria-hidden':'true'});
+    svgEl.append(edgeLayer);
+    const drawnConnections=new Map(), edgesByEndpoint=new Map(), admitted=new Set();
+    let admittedEdges=0;
     for (const edge of edges) {
-      if(edgeEls.length>=MAX_EDGES)break;
-      if((drawnConnections.get(edge.from)||0)>=graphSettings.documentConnections||(drawnConnections.get(edge.to)||0)>=graphSettings.documentConnections)continue;
+      if (admittedEdges>=MAX_EDGES) break;
       if (!mounted.has(edge.from) || !mounted.has(edge.to)) continue;
-      const from = positions.get(edge.from); const to = positions.get(edge.to);
-      if (!from || !to) continue;
-      const line = svg('line', { x1: from.x, y1: from.y, x2: to.x, y2: to.y, class: `copal-graph-edge edge-${edge.type || 'link'}`, 'data-from': edge.from, 'data-to': edge.to });
-      line.classList.toggle('edge-highlight', Boolean(selected) && (edge.from === selected || edge.to === selected));
-      drawnConnections.set(edge.from,(drawnConnections.get(edge.from)||0)+1);drawnConnections.set(edge.to,(drawnConnections.get(edge.to)||0)+1);edgeEls.push({ el: line, edge });
-      svgEl.append(line);
+      if ((drawnConnections.get(edge.from)||0)>=graphSettings.documentConnections ||
+          (drawnConnections.get(edge.to)||0)>=graphSettings.documentConnections) continue;
+      admittedEdges++;
+      for (const id of new Set([edge.from,edge.to])) {
+        drawnConnections.set(id,(drawnConnections.get(id)||0)+1);
+        if (!edgesByEndpoint.has(id)) edgesByEndpoint.set(id,[]);
+        edgesByEndpoint.get(id).push(edge);
+      }
     }
-    for (const node of nodes) {
-      if (!mounted.has(node.id)) continue;
-      const pos = positions.get(node.id); if (!pos) continue;
-      const group = svg('g', { class: `copal-graph-node${visibleIds.has(node.id) ? '' : ' dimmed'}`, 'data-copal-context-object':'graph', 'data-graph-id':node.id, tabindex:'0', role:'button', 'aria-label':`${node.label} (${node.kind || 'note'})` });
+    function appendNode(id) {
+      const node = nodesById.get(id);
+      const pos = positions.get(node.id);
+      const group = svg('g', { class: `copal-graph-node${visibleIds.has(node.id) ? '' : ' dimmed'}`, 'data-graph-id':node.id, tabindex:'0', role:'button', 'aria-pressed':String(graphState.selectedNodeId===id), 'aria-label':`${node.label} (${node.kind || 'note'})` });
       const color = kindColor(node.kind || 'note');
       group.append(svg('circle', { cx: pos.x, cy: pos.y, r: node.hub ? 22 : 15, class: `kind-${node.kind || 'note'}${node.hub ? ' hub' : ''}`, fill: color, stroke: color }));
       const label = svg('text', { x: pos.x + (node.hub ? 26 : 20), y: pos.y + 4, class: 'copal-graph-label' });
       label.textContent = String(node.label || '').slice(0, 40);
       group.append(label);
-      if (node.id === selected) { group.classList.add('selected'); selectedEl = group; }
+      if (node.id === graphState.selectedNodeId) { group.classList.add('selected'); selectedEl = group; }
       nodeEls.push({ el: group, node });
+      if (node.doc || node.task || node.track) {
+        const command = { id:'open-graph-node', label:node.track ? 'Edit track' : node.task ? 'Open event' : 'Open in Editor', dialog:!!(node.track || node.task) };
+        const nodeCurrent = request => group.isConnected && isCurrent() && request.adapterContext?.node === node;
+        registerAdapter(group, {
+          editingCommands:false,
+          capture:() => ({ node }),
+          isCurrent:nodeCurrent,
+          commands:() => [command],
+          execute:(id, request) => id === command.id && nodeCurrent(request) ? onOpen(node, group) : false,
+        });
+      }
       group.addEventListener('click', () => selectNode(group, node));
       group.addEventListener('dblclick', (event) => { event.preventDefault(); selectNode(group, node); onOpen(node); });
       group.addEventListener('keydown', (event) => {
         if (!canHandleInput(event)) return;
+        if (event.key === ' ') { event.preventDefault(); selectNode(group,node); }
         if (event.key === 'Enter') { event.preventDefault(); selectNode(group, node); onOpen(node); }
         if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
           event.preventDefault(); event.stopPropagation();
@@ -1434,7 +1992,37 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
         }
       });
       svgEl.append(group);
+      admitted.add(id);
+      for (const edge of edgesByEndpoint.get(id)||[]) {
+        if (!admitted.has(edge.from) || !admitted.has(edge.to)) continue;
+        const from=positions.get(edge.from), to=positions.get(edge.to);
+        const line=svg('line',{x1:from.x,y1:from.y,x2:to.x,y2:to.y,class:`copal-graph-edge edge-${edge.type||'link'}`,'data-from':edge.from,'data-to':edge.to});
+        line.classList.toggle('edge-highlight',edge.from===graphState.selectedNodeId || edge.to===graphState.selectedNodeId);
+        edgeEls.push({el:line,edge});
+        edgeLayer.append(line);
+      }
     }
+    // Construct large pages in bounded frames. The selected node is available
+    // immediately, including when its natural slot is on the last batch.
+    const inView=[], outside=[];
+    for (const id of mountedIds) {
+      if (id===selected) continue;
+      const point=positions.get(id);
+      const inside=point.x>=vb.x && point.x<=vb.x+vb.w && point.y>=vb.y && point.y<=vb.y+vb.h;
+      (inside?inView:outside).push(id);
+    }
+    const order=mounted.has(selected)?[selected,...inView,...outside]:[...inView,...outside];
+    let offset=0;
+    function appendBatch() {
+      arrivalFrame=0;
+      const end=Math.min(order.length,offset+64);
+      while (offset<end) appendNode(order[offset++]);
+      if (offset<order.length) arrivalFrame=requestAnimationFrame(() => {
+        if (!destroyed && isCurrent()) { appendBatch(); syncGraphLabels(); }
+      });
+      onProgress();
+    }
+    appendBatch();
     syncGraphLabels();
   }
   svgEl.addEventListener('click', (e) => { if (e.target === svgEl || e.target.tagName === 'line') deselectNode(); });
@@ -1442,8 +2030,8 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
   // Zoom controls. Zoom keeps the pointer anchor fixed so wheel/pinch feels
   // natural, while the buttons remain secondary helpers.
   const zoomAroundCenter = (factor) => {
-    const width = Math.max(MIN_VIEW, Math.min(MAX_VIEW, vb.w * factor));
-    const height = Math.max(MIN_VIEW * 650 / 1000, Math.min(MAX_VIEW * 650 / 1000, vb.h * (width / vb.w)));
+    const width = clampWidth(vb.w * factor);
+    const height = clampHeight(vb.h * width / vb.w);
     vb.x += (vb.w - width) / 2; vb.y += (vb.h - height) / 2; vb.w = width; vb.h = height; applyCamera();
   };
   // Zoom around a screen point so the world coordinate under the pointer stays
@@ -1453,8 +2041,8 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     if (!transform) { zoomAroundCenter(factor); return; }
     const inverse = transform.inverse();
     const anchor = new DOMPoint(clientX, clientY).matrixTransform(inverse);
-    const width = Math.max(MIN_VIEW, Math.min(MAX_VIEW, vb.w * factor));
-    const height = Math.max(MIN_VIEW * 650 / 1000, Math.min(MAX_VIEW * 650 / 1000, vb.h * (width / vb.w)));
+    const width = clampWidth(vb.w * factor);
+    const height = clampHeight(vb.h * width / vb.w);
     // Keep the anchor's relative position inside the viewBox stable.
     const ratioX = (anchor.x - vb.x) / vb.w;
     const ratioY = (anchor.y - vb.y) / vb.h;
@@ -1475,8 +2063,8 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     const maxX = Math.max(...points.map((point) => point.x)) + 80;
     const minY = Math.min(...points.map((point) => point.y)) - 60;
     const maxY = Math.max(...points.map((point) => point.y)) + 60;
-    const width = Math.max(MIN_VIEW, Math.min(MAX_VIEW, maxX - minX));
-    const height = Math.max(MIN_VIEW * 650 / 1000, Math.min(MAX_VIEW * 650 / 1000, maxY - minY));
+    const width = clampWidth(maxX-minX);
+    const height = clampHeight(maxY-minY);
     Object.assign(vb, { x:minX, y:minY, w:width, h:height });
     applyCamera();
   } });
@@ -1513,6 +2101,44 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     onChange:detail => { pendingAchievementFacet = detail || null; rebuildGraph(); } });
   const info = h('div', { class: 'copal-graph-info', role: 'status', 'aria-live': 'polite' }, h('span', { text: `Graph showing ${nodes.length} nodes and ${edges.length} edges` }));
 
+  // The canvas budget limits painting. The item picker can reach every
+  // matching record using native keyboard navigation and bounded DOM pages.
+  const pageSize = 50;
+  let matchingIds = [], itemPage = 0;
+  const itemPicker = h('select', {'aria-label':'Graph item', onchange:() => {
+    if (!isCurrent() || !itemPicker.value) return;
+    graphState.selectedNodeId = itemPicker.value;
+    rebuildGraph();
+    const selected = nodeEls.find(item => item.node.id === graphState.selectedNodeId);
+    if (selected) {
+      selectNode(selected.el,selected.node);
+      const point=positions.get(selected.node.id);
+      if (point.x<vb.x || point.x>vb.x+vb.w || point.y<vb.y || point.y>vb.y+vb.h) {
+        vb.x=point.x-vb.w/2; vb.y=point.y-vb.h/2; applyCamera();
+      }
+    }
+  }});
+  const previousItems = h('button',{type:'button',class:'copal-btn',text:'Previous items',onclick:()=>{ itemPage--; renderItemPage(false); }});
+  const nextItems = h('button',{type:'button',class:'copal-btn',text:'Next items',onclick:()=>{ itemPage++; renderItemPage(false); }});
+  const itemRange = h('span',{'aria-live':'polite'});
+  const itemBrowser = h('details', {class:'copal-graph-legend-disclosure'},
+    h('summary',{text:'Browse items'}),itemPicker,previousItems,nextItems,itemRange);
+  controls.append(itemBrowser);
+  itemBrowser.addEventListener('toggle',()=>{ if (itemBrowser.open) renderItemPage(true); });
+  function renderItemPage(followSelection) {
+    const selectedIndex = followSelection ? matchingIds.indexOf(graphState.selectedNodeId) : -1;
+    if (selectedIndex >= 0) itemPage = Math.floor(selectedIndex/pageSize);
+    itemPage = Math.max(0,Math.min(itemPage,Math.ceil(matchingIds.length/pageSize)-1));
+    const start = itemPage*pageSize, page = matchingIds.slice(start,start+pageSize);
+    itemPicker.replaceChildren(h('option',{value:'',text:'Choose an item'}),
+      ...page.map(id=>h('option',{value:id,text:nodesById.get(id).label || id})));
+    if (page.includes(graphState.selectedNodeId)) itemPicker.value=graphState.selectedNodeId;
+    previousItems.disabled = !itemPage;
+    nextItems.disabled = start+page.length >= matchingIds.length;
+    itemPicker.disabled = !page.length;
+    itemRange.textContent = page.length ? `${start+1}–${start+page.length} of ${matchingIds.length}` : 'No matching items';
+  }
+
   // Rebuild on filter/search change. Facet filters are AND-ed across
   // dimensions and OR-ed within one dimension, matching the model predicate.
   function rebuildGraph() {
@@ -1537,9 +2163,15 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
       if (!doc && activeFilters.search.trim() && !String(node.label || '').toLowerCase().includes(activeFilters.search.trim().toLowerCase())) continue;
       visibleIds.add(node.id);
     }
-    if (graphState.selectedNodeId && !visibleIds.has(graphState.selectedNodeId)) graphState.selectedNodeId = null;
+    if (nodesById.has(graphState.selectedNodeId) && !visibleIds.has(graphState.selectedNodeId)) graphState.selectedNodeId = null;
+    matchingIds = [...visibleIds];
+    if (itemBrowser.open) renderItemPage(true);
     const activeGraphId = svgEl.contains(document.activeElement) ? document.activeElement?.getAttribute('data-graph-id') : null;
-    mountGraph(visibleIds);
+    const visibleEdges = edges.filter(edge => visibleIds.has(edge.from) && visibleIds.has(edge.to)).length;
+    mountGraph(visibleIds,() => {
+      info.textContent = visibleIds.size ? `Graph showing ${nodeEls.length} of ${visibleIds.size} matching items and ${edgeEls.length} of ${visibleEdges} matching edges. Browse or search all matches.` : 'No graph results. Reset filters or search again.';
+      if (facets?.incomplete) info.textContent += ` · Facets partial${facets.status ? ` (${facets.status})` : ''}`;
+    });
     if (activeGraphId !== null) {
       const target = nodeEls.find(item => item.node.id === activeGraphId) || nodeEls[0];
       (target?.el || toolbar.querySelector('input'))?.focus({ preventScroll:true });
@@ -1551,9 +2183,6 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     }
     pendingAchievementFacet = null;
     previousResultCount = visibleIds.size;
-    const visibleEdges = edges.filter((edge) => visibleIds.has(edge.from) && visibleIds.has(edge.to)).length;
-    info.textContent = visibleIds.size ? `Graph showing ${nodeEls.length} of ${visibleIds.size} matching items and ${edgeEls.length} of ${visibleEdges} matching edges · limits ${MAX_MOUNTED} items / ${MAX_EDGES} edges; search to navigate omitted items` : 'No graph results. Reset filters or search again.';
-    if (facets?.incomplete) info.textContent += ` · Facets partial${facets.status ? ` (${facets.status})` : ''}`;
     updateInspector(graphState.selectedNodeId ? nodesById.get(graphState.selectedNodeId) : null);
     persist();
   }
@@ -1591,7 +2220,7 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
   svgEl.addEventListener('pointerdown', (e) => { if (e.button === 0 && canHandleInput(e) && (e.target === svgEl || e.target.tagName === 'line')) { dragging = true; lastX = e.clientX; lastY = e.clientY; svgEl.setPointerCapture(e.pointerId); } });
   svgEl.addEventListener('pointermove', (e) => {
     if (!dragging) return;
-    if (!canHandleInput(e)) { dragging = false; return; }
+    if (!canHandleInput(e)) { dragging = false; scheduleCameraCheckpoint(); return; }
     // The screen transform includes CSS zoom and SVG aspect-ratio padding.
     const transform = svgEl.getScreenCTM();
     if (!transform) return;
@@ -1631,25 +2260,28 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     }
   });
   const endPointer = (e) => {
+    const cameraGestureEnded = dragging || (pinch && activeTouches.has(e.pointerId));
     dragging = false;
     activeTouches.delete(e.pointerId);
     if (activeTouches.size < 2) pinch = null;
+    if (cameraGestureEnded) scheduleCameraCheckpoint();
   };
   for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) svgEl.addEventListener(type, endPointer);
+  window.addEventListener('pagehide', checkpointCamera);
   root._copalDestroy = () => {
+    if (destroyed) return;
+    inspector.querySelector('.copal-graph-evidence')?.disposeEvidence();
+    checkpointCamera();
     destroyed = true;
     root._copalDisposed = true;
+    window.removeEventListener('pagehide', checkpointCamera);
+    if (arrivalFrame) cancelAnimationFrame(arrivalFrame);
     labelResizeObserver?.disconnect();
     globalThis.removeEventListener?.('resize', syncGraphLabels);
     filterControls.dispose(); catalog?.dispose();
     if (cameraFrame) { cameraFrameCancel?.(cameraFrame); clearTimeout(cameraFrame); cameraFrame = 0; cameraFrameCancel = null; }
   };
   return root;
-}
-
-function renderGalaxy() {
-  resolveView('galaxy');
-  renderGraph();
 }
 
 // Each mounted graph owns its discovery requests and cache. Account/workspace
@@ -1663,24 +2295,44 @@ function makeGraphFacetCatalog() {
 }
 
 function renderGraph() {
-  codeGraphController?.dispose(); codeGraphController = null;
+  const context = getViewContext('graph');
+  if (!context?.window.visible) return;
   const ticket = ++graphRenderTicket;
-  const body = state.body;
-  const context = state.windows.get('graph');
+  codeGraphController?.dispose(); codeGraphController = null;
+  const body = context.window.body;
   const scope = saveScope();
   const view = getGraphView();
   const modeId = view.mode;
+  mountFamilySettings(context,view);
+  context.modePicker.value = modeId;
+  context.sidebarContent.replaceChildren();
+  context.search.hidden = modeId === 'code' || (context.search.hidden && !context.filter);
   let mountedGraph = null;
   const isCurrent = () => ticket === graphRenderTicket && context?.window.body === body
-    && body?.isConnected && context === state.windows.get('graph')
-    && (context?.window.visible !== false || context?.window.root?.classList?.contains('modal-minimized')) && (modeId==='code'?scope.accountId===state.accountId&&scope.epoch===state.contextEpoch:sameSaveScope(scope, saveScope()))
+    && body?.isConnected && context === getViewContext('graph')
+    && !context.host.hidden && (context.window.visible || context.window.root.classList.contains('modal-minimized')) && (modeId==='code'?scope.accountId===state.accountId&&scope.epoch===state.contextEpoch:sameSaveScope(scope, saveScope()))
     && getGraphView().mode === modeId && (!mountedGraph || (mountedGraph.isConnected && !mountedGraph._copalDisposed));
   if (modeId === 'code') { renderCodeGraph({ body, isCurrent }); return; }
-  context?.window.setStatus(`${state.docs.length} documents`);
+  if (state.sourceRefreshPending && !pendingDocumentLoad) void loadDocuments();
+  const needsPlanning = modeId === 'galaxy';
+  const loaded = needsPlanning ? state.planningLoaded : state.documentsLoaded;
+  const loadError = needsPlanning ? state.planningLoadError : state.documentLoadError;
+  if (!loaded) {
+    body.querySelector('.copal-graph-wrap')?._copalDestroy?.();
+    body.replaceChildren(h('div', { class:'copal-empty', role:'status' },
+      h('p', { text:loadError ? (needsPlanning ? 'Planning is unavailable.' : 'Documents are unavailable.') : 'Loading Graph…' }),
+      loadError ? h('button', { class:'copal-btn', text:'Retry', onclick:() => { if (isCurrent()) void loadDocuments(); } }) : null,
+    ));
+    if (!loadError && !pendingDocumentLoad) void loadDocuments();
+    if (loadError) updateDocumentViewStatus('graph');
+    else setViewStatus('graph', 'Loading…');
+    return;
+  }
+  updateDocumentViewStatus('graph');
   // B2: respect dot-folder toggle from workspace settings
-  let docs = visibleDocs();
+  let docs = visibleDocs(undefined, context.filter);
   try {
-    const saved = JSON.parse(localStorage.getItem(copalStorageKey('odysseus-copal-notes-layout', state.workspace)) || '{}');
+    const saved = JSON.parse(localStorage.getItem(copalStorageKey('openclank-copal-notes-layout', state.workspace)) || '{}');
     const showDot = saved?.left?.showDotFolders === true;
     if (!showDot) docs = docs.filter((doc) => {
       // Canonical .memes Wiki pages are first-party graph sources. The
@@ -1691,30 +2343,44 @@ function renderGraph() {
   } catch (_) {}
 
   if (view.mode === 'structure') { renderMind(); return; }
-  const projection = view.mode === 'galaxy' ? galaxyGraph(planningData().tracks || [], allPlanningTasks(planningData())) : documentGraph(docs, findByName);
+  let projection = view.mode === 'galaxy' ? scopedGalaxyGraph(view) : documentGraph(docs, findByName);
   const facetCatalog = view.mode === 'documents' ? makeGraphFacetCatalog() : null;
-  // Mind is not offered as a Graph view. Both linked-document and
-  // document-structure modes live here; Galaxy keeps its own projection.
-  const modeOptions = [h('option', { value:'documents', text:'Documents · links' }), h('option', { value:'structure', text:'Structure · headings and bullets' }), h('option', { value:'galaxy', text:'Galaxy · tracks and events' }), h('option', { value:'code', text:'Code · scoped evidence (Alpha)' })];
-  const mode = h('select', { 'aria-label':'Graph view', 'data-graph-mode':true }, modeOptions);
-  mode.value = view.mode;
-  mode.addEventListener('change', () => { view.mode = mode.value; persistGraphView(view); renderGraph(); updateRoute('graph', true); state.body.querySelector('[data-graph-mode]')?.focus(); });
-  const focusedId = state.body.contains(document.activeElement) ? document.activeElement?.getAttribute('data-graph-id') : null;
-  const openNode = (node) => {
-    if (!sameSaveScope(scope, saveScope())) return;
-    if (node.task) editPlanningTask(node.task.primaryTrackId, node.task.id);
-    else if (node.track) planningFeature.openTrackEditor(node.track.id);
-    else if (node.doc) openDocument(node.doc.id, node.kind === 'wiki' ? 'wiki' : 'notes');
+  const focusedId = body.contains(document.activeElement) ? document.activeElement?.getAttribute('data-graph-id') : null;
+  const openNode = (node, trigger) => {
+    const scopeCurrent = () => sameSaveScope(scope, saveScope());
+    if (!scopeCurrent()) return;
+    if (node.task) return planningFeature.openEventEditor(node.task.id, trigger, scopeCurrent);
+    if (node.track) return planningFeature.openTrackEditor(node.track.id, trigger, scopeCurrent);
+    else if (node.doc) openDocument(node.doc.id, 'notes');
   };
+  const scopeState = view.modes[modeId];
+  let neighborhood = graphNeighborhoods.get(scopeState) || null, currentFacets = null;
+  const changeNeighborhood = value => {
+    neighborhood=value;
+    if (value) graphNeighborhoods.set(scopeState,value);
+    else graphNeighborhoods.delete(scopeState);
+  };
+  const journalInspector = {}; // One selection inside this render's account, workspace and projection generation.
   const mount = (facets) => {
     if (!isCurrent()) return;
+    currentFacets = facets;
+    const focusedConnection = journalInspector.controls?.contains(document.activeElement) ? document.activeElement : null;
     const activeId = body.contains(document.activeElement) ? document.activeElement?.getAttribute('data-graph-id') : null;
-    const graph = graphSvg(projection.nodes, projection.edges, openNode, view.mode, facets, facetCatalog, isCurrent);
+    const shown = view.mode === 'documents' && neighborhood
+      ? documentNeighborhood(projection, neighborhood.id, neighborhood.options) : projection;
+    const focus = (id, options) => { if (!isCurrent()) return; changeNeighborhood({id,options}); mount(facets); };
+    const clear = neighborhood ? () => { if (!isCurrent()) return; changeNeighborhood(null); mount(facets); } : null;
     body.querySelector('.copal-graph-wrap')?._copalDestroy?.();
-    body.replaceChildren(h('div', { class:'copal-timeline-toolbar' }, h('label', {}, 'Graph view ', mode)), graph);
+    mountedGraph = null;
+    const graph = graphSvg(shown.nodes, shown.edges, openNode, view.mode, facets, facetCatalog, isCurrent,
+      view.mode === 'documents' ? projection : null, focus, clear, neighborhood ? shown.coverage : null, journalInspector);
+    context.sidebarContent.replaceChildren();
+    if (neighborhood) context.sidebarContent.append(h('button',{class:'copal-btn',type:'button',text:'Return to full graph',onclick:()=>{if(isCurrent()){changeNeighborhood(null);mount(facets);}}}));
+    body.replaceChildren(graph);
     mountedGraph = graph;
     if (view.mode === 'documents') acknowledgeVisible(graph, 'graph.mode.presented', { mode:'linked', nodeCount:projection.nodes.length }, { accountId:state.accountId, workspaceId:state.workspace });
-    if (activeId || focusedId) graph.querySelector(`[data-graph-id="${CSS.escape(activeId || focusedId)}"]`)?.focus({ preventScroll:true });
+    if (focusedConnection?.isConnected) focusedConnection.focus({preventScroll:true});
+    else if (activeId || focusedId) graph.querySelector(`[data-graph-id="${CSS.escape(activeId || focusedId)}"]`)?.focus({ preventScroll:true });
   };
   // Mount immediately with locally derived facets, then refine with the lazy
   // server snapshot so the graph stays responsive while values stream in.
@@ -1733,10 +2399,51 @@ function renderGraph() {
       properties:{},
     };
     mount(galaxyFacets);
+    const toggle = h('input', {type:'checkbox'});
+    toggle.checked = view.modes.galaxy.filters.showUnassigned;
+    toggle.addEventListener('change', () => {
+      if (!isCurrent()) return;
+      view.modes.galaxy.filters.showUnassigned = toggle.checked;
+      persistGraphView(view);
+      renderGraph();
+    });
+    const {eligible, unassigned, unavailable, omitted} = projection.coverage;
+    if (!state.planningLoadError && !state.planning.migrationRequired) setViewStatus('graph', `${eligible} events in Timeline scope`);
+    const {rangeStart, rangeEnd} = planningFeature.timelineState;
+    const range = rangeStart && rangeEnd ? `${rangeStart.toLocaleDateString()} – ${rangeEnd.toLocaleDateString()}` : 'All dates';
+    context.sidebarContent.append(h('label', {}, toggle, ' Include events without a loaded track'),
+      h('p', {text:`${range} · ${unassigned} unassigned · ${unavailable} with unavailable tracks · ${omitted} omitted`}));
+
     return;
   }
   const localFacets = { ...deriveFacets(docs, { generation:'local', officialRoot:officialDocsRoot(docs) }), incomplete:true, status:'loading' };
   mount(localFacets);
+  if (view.mode === 'documents') {
+    void (async () => {
+      const verified = new Map();
+      let generation;
+      for (const sources of documentLinkBatches(docs)) {
+        if (!isCurrent()) return;
+        const result = await api('/documents/link-resolutions', {
+          method:'POST', readOnly:true, body:JSON.stringify({sources}),
+        }, scope.workspace);
+        if (!isCurrent() || !result?.coverage?.complete || result?.sources?.length !== sources.length) return;
+        if (generation !== undefined && generation !== result.coverage.generation) return;
+        generation = result.coverage.generation;
+        for (const [i, source] of sources.entries()) {
+          const received = result.sources[i];
+          if (received?.id !== source.id || received.head !== source.head ||
+              !Array.isArray(received.targets) || received.targets.length !== source.targets.length) return;
+          source.targets.forEach((target, index) => verified.set(JSON.stringify([source.id, source.head, target]), received.targets[index]));
+        }
+      }
+      if (!isCurrent() || !verified.size) return;
+      const current = new Map(visibleDocs().map(doc => [String(doc.id), String(doc.head)]));
+      if (docs.some(doc => current.get(String(doc.id)) !== String(doc.head))) return;
+      projection = documentGraph(docs, findByName, verified);
+      mount(currentFacets || localFacets);
+    })().catch(() => {}); // Local unresolved notices remain visible during an outage.
+  }
   void (async () => {
     // An early picker can establish a newer generation while the canonical
     // walk is in flight. Retry only this still-live mount; never leave its
@@ -1745,7 +2452,8 @@ function renderGraph() {
       const snapshot = await facetCatalog.canonical({ isCurrent });
       if (!isCurrent()) return;
       if (snapshot) {
-        mountedGraph._updateGraphFacets(mergeFacets(localFacets, snapshot, { sameCorpus:true }));
+        currentFacets = mergeFacets(localFacets, snapshot, { sameCorpus:true });
+        mountedGraph._updateGraphFacets(currentFacets);
         return;
       }
     }
@@ -1755,9 +2463,22 @@ function renderGraph() {
   });
 }
 
+export function captureCodeActivityPreference({accountID, workspaceID} = {}) {
+  if (!accountID || accountID !== state.accountId || !workspaceID || codeGraphSelection?.owner !== accountID ||
+      codeGraphSelection.workspaceId !== workspaceID || !codeGraphController?.isCurrent?.()) return false;
+  const saved=readCodeSettings(workspaceID);
+  return resolveGraphSettings(saved,saved.presentation).agentActivity === true;
+}
+
+export function observeCodeActivity(event, {accountID, chatID} = {}) {
+  if (!accountID || accountID !== state.accountId || !chatID || event?.hostChatID !== chatID ||
+      event?.accountID !== accountID || !codeGraphController?.isCurrent?.()) return false;
+  return codeGraphController.observeActivity?.(event, chatID) === true;
+}
+
 export async function openCodeGraphBinding(binding,{isCurrent=()=>false,dirty=false}={}) {
-  await whenReady();
-  if(!isCurrent()||!binding?.workspace?.id||binding.workspace.archived||typeof binding.open_relative!=='string')return false;
+  if (!state.storageNamespace) await init(state.api || window.location.origin);
+  if(!state.accountId||!isCurrent()||!binding?.workspace?.id||binding.workspace.archived||typeof binding.open_relative!=='string')return false;
   const owner=state.accountId,epoch=state.contextEpoch;
   codeGraphContextEpoch++;
   codeGraphSelection={owner,workspaceId:binding.workspace.id,label:binding.workspace.name,
@@ -1767,60 +2488,421 @@ export async function openCodeGraphBinding(binding,{isCurrent=()=>false,dirty=fa
   return owner===state.accountId&&epoch===state.contextEpoch&&isCurrent();
 }
 
+export async function openStaticFunctionOverlay({workspaceID,dossierID,expectedDossierRevision,sourceRef,accountID,client,watchRoot},{isCurrent=()=>false}={}) {
+  if (!state.storageNamespace) await init(state.api || window.location.origin);
+  if(!state.storageNamespace||!isCurrent()||!watchRoot?.isConnected||!accountID||accountID!==state.accountId||typeof workspaceID!=='string'||!workspaceID||typeof dossierID!=='string'||!dossierID||!expectedDossierRevision||typeof sourceRef!=='string'||typeof client?.staticAnalysisOverlay!=='function')return false;
+  const owner=state.accountId,epoch=state.contextEpoch;
+  codeGraphContextEpoch++;
+  codeGraphSelection={owner,workspaceId:workspaceID,label:'Static functions',overlay:{workspaceID,dossierID,expectedDossierRevision,sourceRef,client,watchRoot,isCurrent}};
+  getGraphView().mode='code';persistGraphView();await open('graph');
+  return owner===state.accountId&&epoch===state.contextEpoch&&isCurrent();
+}
+
+function chooseGraphWorkspace(isCurrent) {
+  return new Promise(resolve=>{
+    let cancelled=false, pending=null;
+    const current=()=>!cancelled&&isCurrent();
+    void openWorkspaceBrowser({
+      selectionKind:'app_folder',
+      title:'Open folder',
+      useLabel:'Open folder',
+      successLabel:'Graph folder opened',
+      note:'Choose a folder to index and explore in Code Graph.',
+      onCancel:()=>{cancelled=true;resolve(null);},
+      onSelect:path=>{
+        if(!current())throw new Error('The graph changed. Close this picker and open it from the active graph.');
+        if(pending)return pending;
+        pending=(async()=>{
+          try {
+            const binding=await bindWorkspacePath(path,'app_folder');
+            if (!current() || binding.archived) throw new Error('The graph or folder changed. Reopen the picker.');
+            resolve(binding);
+          } finally {
+            pending=null;
+          }
+        })();
+        return pending;
+      },
+    }).catch(()=>resolve(null));
+  });
+}
+
+const validCodeWorkspaceId = id => typeof id === 'string' && /^[^\x00-\x20\x7f]{1,256}$/.test(id);
+function codeFolderPreference(owner) {
+  return owner ? 'copal-code-folder:v1:' + encodeURIComponent(owner) : null;
+}
+
+function lastCodeFolder(owner) {
+  const key = codeFolderPreference(owner);
+  try {
+    const id = key && localStorage.getItem(key);
+    return validCodeWorkspaceId(id) ? id : '';
+  } catch { return ''; }
+}
+
+function rememberCodeFolder(owner, id) {
+  const key = codeFolderPreference(owner);
+  if (!key || !validCodeWorkspaceId(id)) return;
+  try { localStorage.setItem(key, id); } catch { /* Local preference is optional. */ }
+}
+
+function forgetCodeFolder(owner, id) {
+  const key = codeFolderPreference(owner);
+  if (!key) return;
+  try { if (localStorage.getItem(key) === id) localStorage.removeItem(key); } catch { /* Local preference is optional. */ }
+}
+
+async function openGraphFolder(context) {
+  if(!context || context!==getViewContext('graph'))return;
+  const mode=getGraphView().mode;
+  const ticket=++graphFolderTicket, owner=state.accountId, epoch=state.contextEpoch, codeEpoch=codeGraphContextEpoch;
+  const current=()=>ticket===graphFolderTicket&&owner===state.accountId&&epoch===state.contextEpoch
+    && codeEpoch===codeGraphContextEpoch&&context===getViewContext('graph')&&context.window.root.isConnected
+    && context.window.visible!==false&&getGraphView().mode===mode;
+  if(!current())return;
+  const binding=await chooseGraphWorkspace(current);
+  if(!binding?.id||!current())return;
+  codeGraphContextEpoch++;
+  codeGraphSelection={owner,workspaceId:binding.id,label:binding.name||binding.path||binding.id,chosenFolder:binding.id};
+  rememberCodeFolder(owner, binding.id);
+  getGraphView().mode='code';
+  persistGraphView();
+  renderView('graph');
+  updateRoute('graph', true);
+}
+
 function renderCodeGraph({ body, isCurrent }) {
-  codeGraphMenuGeneration++;const graphContext=state.windows.get('graph');if(graphContext)graphContext.search.hidden=true;
+  codeGraphMenuGeneration++;const graphContext=getViewContext('graph');if(graphContext)graphContext.search.hidden=true;
   const owner = state.accountId, epoch = state.contextEpoch, codeEpoch = codeGraphContextEpoch;
-  if (codeGraphSelection?.owner !== owner) codeGraphSelection = { owner, workspaceId:'' };
+  if (codeGraphSelection?.owner !== owner || codeGraphSelection.revoked) codeGraphSelection = { owner, workspaceId:'' };
   const selectedWorkspace = codeGraphSelection;
   const wrap = h('div', { class:'copal-graph-wrap', 'data-code-graph':true });
   const current = () => isCurrent() && epoch === state.contextEpoch && codeEpoch === codeGraphContextEpoch && owner === state.accountId
     && codeGraphSelection === selectedWorkspace && wrap.isConnected;
-  const mode = h('select', { 'aria-label':'Graph view', 'data-graph-mode':true },
-    ...[['documents','Documents · links'],['structure','Structure · headings and bullets'],['galaxy','Galaxy · tracks and events'],['code','Code · scoped evidence (Alpha)']].map(([value,text]) => h('option',{value,text})));
-  mode.value = 'code';
-  mode.onchange = () => { if (!current()) return; getGraphView().mode = mode.value; persistGraphView(); renderGraph(); updateRoute('graph', true); };
-  const surface = h('div');
-  wrap.append(h('label', {class:'code-graph-mode'}, 'Graph view ',mode),surface);
+  const surface = h('div', {class:'copal-editor-graph-code-surface'});
+  wrap.append(surface);
   body.querySelector('.copal-graph-wrap')?._copalDestroy?.(); body.replaceChildren(wrap);
-  const preference = async (value) => {
-    const response = await fetch('/api/prefs/code_context_enabled', value === undefined ? {credentials:'same-origin'} :
+  if(selectedWorkspace.overlay){
+    const selected=selectedWorkspace.overlay;
+    const overlay=mountStaticFunctionOverlay({container:surface,watchRoot:selected.watchRoot,
+      isCurrent:()=>current()&&selected.isCurrent()&&selectedWorkspace.overlay===selected,
+      load:({signal})=>selected.client.staticAnalysisOverlay({workspaceID:selected.workspaceID,dossierID:selected.dossierID,expectedDossierRevision:selected.expectedDossierRevision,sourceRef:selected.sourceRef},{signal}),
+      onDispose:()=>{if(selectedWorkspace.overlay===selected)selectedWorkspace.overlay=null;}});
+    const traceBox=h('div');wrap.append(traceBox);
+    let trace=null;const traceCurrent=()=>current()&&selected.isCurrent()&&selectedWorkspace.overlay===selected;
+    if(typeof selected.client.saveAnalysisIngest==='function'&&typeof selected.client.analysisSnapshotCapabilities==='function')
+      selected.client.analysisSnapshotCapabilities().then(capability=>{if(!trace&&traceOverlayOffered(capability)&&traceCurrent())trace=mountTraceOverlay({container:traceBox,client:selected.client,workspaceID:selected.workspaceID,sourceRef:selected.sourceRef,isCurrent:traceCurrent});}).catch(()=>{});
+    codeGraphController=overlay;wrap._copalDestroy=()=>{overlay.dispose();trace?.dispose();};return;
+  }
+  const preference = async (value, key = 'code_context_enabled') => {
+    const response = await fetch('/api/prefs/' + key, value === undefined ? {credentials:'same-origin'} :
       {method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({value})});
     if (!response.ok) throw new Error('Preference unavailable');
     const result = await response.json();
-    if (typeof result.value !== 'boolean') throw new Error('Invalid preference');
+    if (key === 'code_context_prompt_budget' ? !Number.isInteger(result.value) : typeof result.value !== 'boolean') throw new Error('Invalid preference');
     return result.value;
   };
-  const workbench = mountCodeGraphWorkbench({element:surface,isCurrent:current,onStatus:text=>{if(current())graphContext?.window.setStatus(text);},workspaceId:selectedWorkspace.workspaceId,
+  const investigationActions = new Map();
+  let folderRestore = null;
+  let choosingFolder = false;
+  async function restoreCodeFolder() {
+    if (!current() || selectedWorkspace.workspaceId || choosingFolder || folderRestore) return;
+    const id = lastCodeFolder(owner);
+    if (!id) return;
+    const controller = folderRestore = new AbortController();
+    const owns = () => current() && folderRestore === controller && !controller.signal.aborted &&
+      !choosingFolder && !selectedWorkspace.workspaceId && lastCodeFolder(owner) === id;
+    graphContext?.window.setStatus('Checking the last Code Graph folder…');
+    try {
+      const signal = AbortSignal.any([controller.signal,AbortSignal.timeout(12000)]);
+      const issued = await filesFacadeClient.workspaceResource(id, '', {signal});
+      if (!owns()) return;
+      const registered = issued?.workspace;
+      if (issued?.version !== 1 || registered?.id !== id || registered.archived !== false ||
+          issued.resource?.provider !== 'host' || issued.resource.kind !== 'folder' ||
+          !Number.isSafeInteger(issued.generation)) {
+        if (registered?.id === id && registered.archived === true) forgetCodeFolder(owner,id);
+        graphContext?.window.setStatus('Last Code Graph folder is unavailable. Choose a folder to continue.');
+        return;
+      }
+      workbench.selectWorkspace(id,{label:registered.name || id});
+    } catch (error) {
+      if (!owns()) return;
+      if ([403,404].includes(error?.status)) forgetCodeFolder(owner,id);
+      graphContext?.window.setStatus('Last Code Graph folder is unavailable. Choose a folder to continue.');
+    } finally {
+      if (folderRestore === controller) folderRestore = null;
+    }
+  }
+  const workbench = mountCodeGraphWorkbench({element:surface,isCurrent:current,onStatus:text=>{if(current())graphContext?.window.setStatus(text);},workspaceId:selectedWorkspace.workspaceId,accountID:owner,
+    settingsHost:graphSettingsPanel(graphContext),
     workspaceLabel:selectedWorkspace.label || '',
+    topologyOwner:selectedWorkspace.topologyOwner ||= {},
     readGraphSettings:()=>readCodeSettings(selectedWorkspace.workspaceId),
+    readDocumentEvidence:async({workspaceId,receipt,resourceId,signal,isCurrent})=>{
+      const scope=saveScope();
+      if(!current() || !isCurrent() || workspaceId!==selectedWorkspace.workspaceId) return null;
+      const result=await api('/graph/code-citations',{method:'POST',readOnly:true,signal,
+        body:JSON.stringify({codeWorkspaceId:workspaceId,codeReceipt:receipt,resourceId})},scope.workspace);
+      return current() && isCurrent() && sameSaveScope(scope,saveScope()) ? result : null;
+    },
+    openDocumentCitation:(citation,{isCurrent})=>openCommittedCitation(citation,{isCurrent:()=>current()&&isCurrent()}),
+    captureTopology:async({workspaceId,paths,receipt,operation,isCurrent,persistOriginal})=>{
+      if(!current()||!isCurrent()||workspaceId!==selectedWorkspace.workspaceId)return null;
+      const {createResourcePicker}=await import('./copal/resourcePicker.js');if(!current()||!isCurrent())return null;
+      const folder=await new Promise(resolve=>{const picker=createResourcePicker({client:filesFacadeClient,purpose:'folder',accountScope:owner,
+        originWindow:graphContext?.window,isOriginCurrent:()=>current()&&isCurrent(),getAccountScope:()=>state.accountId,
+        rootLabel:'Choose a folder for the topology capture',
+        isCompatible:row=>row.provider==='host' && (row.capabilities.create||row.capabilities.write) && row.revision?.kind==='hostDirectoryRevision' ? '' : 'Choose a writable Host folder with a current revision.',
+        onSelect:row=>{resolve(row);return true;},onCancel:()=>resolve(null)});void picker.open();});
+      if(!folder||!current()||!isCurrent())return null;
+      const name=await styledPrompt('Choose a name for this recorded topology.',{title:'Capture indexed topology',defaultValue:'indexed-topology.json',confirmText:'Capture',maxLength:240});
+      if(!name||!current()||!isCurrent())return null;
+      const settings=effectiveCodeSettings(workspaceId);
+      if(paths.length>settings.maxFiles)throw Error('The selected scope exceeds the configured file budget.');
+      if(!current()||!isCurrent()||typeof persistOriginal!=='function'||persistOriginal()!==true)return null;
+      const response=await fetch(`${state.api}/api/memory/code/topology/capture`,{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({version:1,operation_id:operation,workspace_id:workspaceId,paths,expected_receipt:receipt,parent_ref:folder.ref,name,parent_revision:folder.revision,
+          limits:{nodes:settings.retainedNodes,edges:settings.retainedEdges,work:settings.queryWork}})});
+      const result=await response.json();if(!current()||!response.ok||result?.version!==1||!['pending','prepared','saved','unknown','unavailable'].includes(result.state)||result.operation_id!==operation)throw Error('Capture unavailable');return result;
+    },
+    topologyStatus:async({operation,isCurrent})=>{
+      const response=await fetch(`${state.api}/api/memory/code/topology/status`,{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:1,operation_id:operation})});
+      const result=await response.json();if(!current()||!isCurrent()||!response.ok||result?.operation_id!==operation)throw Error('Status unavailable');return result;
+    },
+    compareTopology:({workspaceId,receipt,isCurrent,onResult,onError})=>{void (async()=>{
+      try{const {createResourcePicker}=await import('./copal/resourcePicker.js');if(!current()||!isCurrent())return;
+        const picker=createResourcePicker({client:filesFacadeClient,purpose:'snapshot-file',accountScope:owner,originWindow:graphContext?.window,
+          isOriginCurrent:()=>current()&&isCurrent(),getAccountScope:()=>state.accountId,rootLabel:'Choose a recorded topology file',
+          onSelect:row=>{if(!current()||!isCurrent()||!row.resourceId)return false;
+            return openResourceHistory({resourceId:row.resourceId,name:row.name,provider:'host',isContextCurrent:()=>current()&&isCurrent(),
+              onSelectVersion:async selection=>{if(!current()||!isCurrent())return;const settings=effectiveCodeSettings(workspaceId);
+                const response=await fetch(`${state.api}/api/memory/code/topology/compare`,{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+                  body:JSON.stringify({version:1,workspace_id:workspaceId,resource_id:selection.resource_id,version_ref:selection.version_ref,expected_receipt:receipt,
+                    limits:{nodes:settings.retainedNodes,edges:settings.retainedEdges,work:settings.queryWork,bytes:settings.cacheMiB*1048576}})});
+                const result=await response.json();if(!current()||!isCurrent())return;if(!response.ok||result?.state!=='compared')throw Error('Comparison unavailable');onResult(result.comparison);}});}});
+        void picker.open();
+      }catch{if(current()&&isCurrent())onError();}})();},
     writeGraphSettings:value=>writeCodeSettings(selectedWorkspace.workspaceId,value),
     focusPath:selectedWorkspace.openRelative||'',savedSourceNotice:selectedWorkspace.savedSourceNotice===true,
-    setWorkspace:(id,label)=>{if(current()){selectedWorkspace.workspaceId=id;selectedWorkspace.label=label;selectedWorkspace.openRelative='';selectedWorkspace.savedSourceNotice=false;}},
-    subscribeIndex:(id,options)=>subscribeWorkspaceIndex(id,{...options,purpose:'app_folder',observe:true}),
-    chooseWorkspace:()=>new Promise((resolve,reject)=>{
-      openWorkspaceBrowser({selectionKind:'app_folder',title:'Choose Code Graph workspace',
-        note:'Index this code folder and observe its progress. This does not change chat workspace or enable automatic code context.',
-        onCancel:()=>resolve(null),
-        onSelect:async path=>{try{resolve(await bindWorkspacePath(path,'app_folder'));}catch(error){reject(error);}}});
-    }),
+    createWikiDocument:(content, isOriginCurrent)=>{
+      const target=saveScope();
+      if (!target.accountId || !current() || !isOriginCurrent() || typeof globalThis.crypto?.randomUUID !== 'function') throw new Error('A current authenticated wiki destination is required.');
+      const actionId='graph-wiki-'+globalThis.crypto.randomUUID();
+      let submitted=null;
+      showForm(`Create new local wiki document in ${target.workspace}`, [['name','New document name','Graph snapshot'],['content','Review content before creating',content,'textarea']], async ({name,content:reviewed})=>{
+        if (!current() || !isOriginCurrent() || !sameSaveScope(target,saveScope())) throw new Error('The graph or destination changed. Open a fresh preview.');
+        if (!name) throw new Error('Choose a new document name.');
+        const body=JSON.stringify({name,kind:'wiki',corpus:'wiki',content:reviewed,actionId});
+        if (submitted !== null && submitted !== body) throw new Error('This creation was already attempted. Reopen the graph preview to change its content.');
+        submitted=body;
+        const result=await api('/documents',{method:'POST',body:submitted},target.workspace);
+        if (!sameSaveScope(target,saveScope()) || !current() || !isOriginCurrent()) return;
+        await loadDocuments();
+        if (sameSaveScope(target,saveScope()) && current() && isOriginCurrent() && result?.doc?.id) openDocument(result.doc.id,'wiki');
+      });
+    },
+    setWorkspace:(id,label)=>{if(current()){selectedWorkspace.workspaceId=id;selectedWorkspace.label=label;selectedWorkspace.revoked=false;selectedWorkspace.openRelative='';selectedWorkspace.savedSourceNotice=false;}},
+    subscribeIndex:(id,options)=>{
+      const replaceStaleRoot=selectedWorkspace.chosenFolder===id;
+      if (replaceStaleRoot) selectedWorkspace.chosenFolder=null;
+      return subscribeWorkspaceIndex(id,{...options,purpose:'app_folder',observe:true,replaceStaleRoot,onStatus:value=>{
+      if (!current() || !options.isCurrent() || selectedWorkspace.workspaceId !== id) return;
+      if (value?.lifecycle === 'denied') {
+        selectedWorkspace.revoked = true;
+        forgetCodeFolder(owner,id);
+      }
+      options.onStatus(value);
+    }});},
+    chooseWorkspace:async ownsChoice=>{
+      choosingFolder = true;
+      folderRestore?.abort();
+      folderRestore = null;
+      const owns = () => current() && (ownsChoice?.() ?? true);
+      let binding = null;
+      try {
+        binding = await chooseGraphWorkspace(owns);
+        if (binding?.id && owns()) {
+          selectedWorkspace.chosenFolder=binding.id;
+          rememberCodeFolder(owner,binding.id);
+        }
+        return binding;
+      } finally {
+        choosingFolder = false;
+        if (!binding && owns()) void restoreCodeFolder();
+      }
+    },
     request:async(workspaceId,query,signal)=>{
       const response=await fetch(`${state.api}/api/memory/code/graph`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_id:workspaceId,query}),signal});
       if(!response.ok)throw new Error('Code query unavailable');return response.json();
     },
-    requestMap:async(workspaceId,visual_request,signal)=>{
+    requestMap:async(workspaceId,visual_request,signal,reportTimings)=>{
       const response=await fetch(`${state.api}/api/memory/code/map`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_id:workspaceId,visual_request}),signal});
+      if(response.status===504)throw Object.assign(new Error('Code map read timed out'),{status:504});
       // Structured app errors carry bounded public codes, never an HTML body.
       if(!(response.headers.get('content-type')||'').includes('application/json'))throw new Error('Code map unavailable');
       const result=await response.json();
       if(!response.ok&&!result?.error)throw new Error('Code map unavailable');
+      if(reportTimings&&response.ok&&!result?.error){
+        const timing=response.headers.get('Server-Timing')||'';
+        const durations=new Map(timing.split(',').map(entry=>entry.trim().match(/^(host-envelope|provider-wait);dur=([0-9]{1,9}(?:\.[0-9]{1,3})?)$/)).filter(Boolean).map(([,stage,duration])=>[stage,Number(duration)]));
+        reportTimings({providerWaitMs:durations.get('provider-wait'),hostEnvelopeMs:durations.get('host-envelope')});
+      }
       return result;
     },
     onRawOpen:async(destination,{isCurrent})=>{if(!isCurrent()||destination?.provider!=='host'||typeof destination.resource?.ref!=='string')return;await openResource(destination.resource.ref,{isCurrent});},
+    onLibraryLookup:async({workspaceId,packageName,isCurrent,signal})=>{
+      const response=await fetch(`${state.api}/api/memory/code/on-disk-library`,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},signal,
+        body:JSON.stringify({workspace_id:workspaceId,package:packageName})});
+      if(!isCurrent()||!response.ok)return {ok:false};
+      const value=await response.json();
+      if(!isCurrent()||value?.schema!=='open-clank.library-observation/v1'||value.state!=='current'||value.partial!==true
+          ||value.workspace_id!==workspaceId||value.package!==packageName||!Array.isArray(value.declaration?.items)||value.declaration.items.length>128
+          ||typeof value.declaration?.rel_path!=='string'||!value.declaration.rel_path.startsWith('node_modules/'+packageName+'/'))return {ok:false};
+      const lines=value.declaration.items.map(item=>`${item.kind}: ${item.signature || item.name}`);
+      return {ok:true,text:[`${value.manifest.name}${value.manifest.version?' · '+value.manifest.version:''}`,
+        `Manifest-declared TypeScript: ${value.declaration.rel_path}`,
+        'Partial on-disk declaration shape; exports and runtime resolution are unproved.',...lines,
+        ...(value.declaration.omitted?[`${value.declaration.omitted} declarations omitted.`]:[])].join('\n')};
+    },
     onEvidenceAction:async(kind,selection)=>{
+      if (kind === 'select_scip' || kind === 'clear_scip') {
+        let resourceRef = null;
+        if (kind === 'select_scip') {
+          const {createResourcePicker} = await import('./copal/resourcePicker.js');
+          if (!selection.isCurrent()) return {ok:false};
+          const file = await new Promise(resolve => {
+            const picker = createResourcePicker({client:filesFacadeClient,purpose:'snapshot-file',accountScope:owner,
+              originWindow:graphContext?.window,isOriginCurrent:selection.isCurrent,getAccountScope:()=>state.accountId,
+              rootLabel:'Choose a local SCIP index in this workspace',
+              isCompatible:row=>row.provider==='host'&&row.kind==='file'&&row.capabilities.read&&row.name.endsWith('.scip')
+                ? '' : 'Choose a readable .scip file with embedded source text.',
+              onSelect:row=>{resolve(row);return true;},onCancel:()=>resolve(null)});
+            void picker.open();
+          });
+          if (!file || !selection.isCurrent()) return {ok:false,message:'SCIP selection cancelled.'};
+          resourceRef = file.ref;
+        }
+        const response = await fetch(`${state.api}/api/memory/code/scip`,{method:'POST',cache:'no-store',
+          headers:{'Content-Type':'application/json'},signal:selection.signal,
+          body:JSON.stringify({workspace_id:selection.workspaceId,expected_receipt:selection.receipt,resource_ref:resourceRef})});
+        const value = response.ok ? await response.json() : null;
+        if (!selection.isCurrent() || value?.schema !== 'open-clank.code-scip-selection/v1'
+            || value.state !== (kind === 'select_scip' ? 'selected' : 'cleared')) {
+          return {ok:false,message:'Choose a bounded binary SCIP index in this workspace with embedded text and position encoding.'};
+        }
+        return {ok:true,message:kind==='select_scip'?'SCIP index selected for this code receipt.':'SCIP index cleared.'};
+      }
+      if (kind === 'open_scip_definition') {
+        const candidate = selection.scipCandidate;
+        if (!selection.isCurrent() || !/^file:[a-f0-9]{64}$/.test(candidate?.id || '')) return {ok:false};
+        const matches = (left,right)=>left?.id===right?.id
+          && left?.source?.source_hash===right?.source?.source_hash
+          && left?.source?.rel_path===right?.source?.rel_path
+          && left?.source?.span?.start_byte===right?.source?.span?.start_byte
+          && left?.source?.span?.end_byte===right?.source?.span?.end_byte;
+        const headers = {'Content-Type':'application/json'};
+        const fresh = await fetch(`${state.api}/api/memory/code/graph`,{method:'POST',cache:'no-store',headers,signal:selection.signal,
+          body:JSON.stringify({workspace_id:selection.workspaceId,query:{operation:'inspect',seed_ids:[selection.node.id],
+            expected_receipt:selection.receipt,channels:[],fields:['source','properties']}})});
+        const evidence = fresh.ok ? await fresh.json() : null;
+        const live = evidence?.hits?.[0]?.properties?.scipObservation;
+        if (!selection.isCurrent() || codeReceiptKey(evidence?.receipt)!==codeReceiptKey(selection.receipt)
+            || evidence?.hits?.[0]?.id!==selection.node.id || live?.profile!=='selected_scip_binary_v1'
+            || live.index_sha256!==selection.node.properties?.scipObservation?.index_sha256
+            || !live.candidates?.some(row=>matches(row,candidate))) return {ok:false,message:'The SCIP witness is no longer current.'};
+        const response = await fetch(`${state.api}/api/memory/code/resource?exact_revision=true`,{method:'POST',cache:'no-store',
+          headers,signal:selection.signal,body:JSON.stringify({workspace_id:selection.workspaceId,operation:'resolve',
+            reference:{kind:'code',id:candidate.id,receipt:selection.receipt},excerpt_bytes:1})});
+        const target = response.ok ? await response.json() : null;
+        const revision = target?.destination?.expected_revision;
+        if (!selection.isCurrent() || target?.current_source_verified!==true
+            || target?.reference?.id!==candidate.id || target?.source?.source_hash!==candidate.source.source_hash
+            || codeReceiptKey(target.receipt)!==codeReceiptKey(selection.receipt)
+            || target.destination?.provider!=='host' || typeof target.destination.resource?.ref!=='string'
+            || revision?.kind!=='hostFingerprint') return {ok:false,message:'The definition revision is unavailable.'};
+        const opened = await openResource(target.destination.resource.ref,{isCurrent:selection.isCurrent,expectedRevision:revision,
+          sourceRange:{startByte:candidate.source.span.start_byte,endByte:candidate.source.span.end_byte,
+            sourceHash:candidate.source.source_hash},
+          handoffCurrent:()=>owner===state.accountId&&epoch===state.contextEpoch&&codeEpoch===codeGraphContextEpoch
+            && codeGraphSelection===selectedWorkspace&&selectedWorkspace.workspaceId===selection.workspaceId});
+        return opened ? {ok:true,message:'Opened the SCIP definition witness.'} : {ok:false};
+      }
+      const compilerComparison = kind === 'compare_compiler_import';
+      if(kind==='compare' || compilerComparison){
+        const target=await new Promise((resolve,reject)=>openWorkspaceBrowser({selectionKind:'app_folder',title:'Choose target Code Graph workspace',
+          note:compilerComparison
+            ? 'Look for the explicitly imported Python function in a separately authorized workspace.'
+            : 'Compare one literal dependency against this separately authorized workspace. This does not change the chat workspace.',
+          onCancel:()=>resolve(null),onSelect:async path=>{try{resolve(await bindWorkspacePath(path,'app_folder'));}catch(error){reject(error);}}}));
+        if(!selection.isCurrent() || !target?.id || target.id===selection.workspaceId)return {ok:false,message:'Comparison unavailable.'};
+        const headers={'Content-Type':'application/json'};
+        const probe=await fetch(`${state.api}/api/memory/code/graph`,{method:'POST',cache:'no-store',headers,
+          body:JSON.stringify({workspace_id:target.id,query:{operation:'capabilities',fields:[],channels:[]}}),signal:selection.signal});
+        if(!selection.isCurrent()||!probe.ok)return {ok:false,message:'Target index unavailable.'};
+        const projected=await probe.json(); const targetReceipt=projected?.receipt;
+        if(!selection.isCurrent()||!targetReceipt||targetReceipt.workspace_id!==target.id)return {ok:false,message:'Target index unavailable.'};
+        const targetSelection = {workspace_id:target.id,receipt:targetReceipt};
+        const sourceSelection = {workspace_id:selection.workspaceId,receipt:selection.receipt};
+        const comparison = compilerComparison
+          ? {version:2,kind:'python_compiler_import',source:{...sourceSelection,occurrence_id:selection.node.id},target:targetSelection}
+          : {version:1,source:{...sourceSelection,file_id:selection.node.id},target:targetSelection};
+        const response=await fetch(`${state.api}/api/memory/code/cross-project`,{method:'POST',cache:'no-store',headers,signal:selection.signal,
+          body:JSON.stringify(comparison)});
+        if(!selection.isCurrent()||!response.ok)return {ok:false,message:'Comparison unavailable or source changed.'};
+        const result=await response.json();
+        if (compilerComparison) {
+          if (!selection.isCurrent() || result?.schema !== 'open-clank.code-cross-project/v2' || result.partial !== true) {
+            return {ok:false,message:'Comparison unavailable or source changed.'};
+          }
+          if (result.state === 'no_match' && result.source === null && result.target === null && result.relation === null) {
+            return {ok:true,message:'No unique imported function was witnessed in the selected workspace.'};
+          }
+          const source = result.source, endpoint = result.target;
+          if (result.state !== 'match' || result.relation?.kind !== 'compiler_qualified_import'
+              || source?.workspace_id !== selection.workspaceId || source?.id !== selection.node.id
+              || endpoint?.workspace_id !== target.id || !/^decl:[0-9a-f]{64}$/.test(endpoint?.id || '')
+              || codeReceiptKey(source.receipt) !== codeReceiptKey(selection.receipt)
+              || codeReceiptKey(endpoint.receipt) !== codeReceiptKey(targetReceipt)
+              || !/^[0-9a-f]{64}$/.test(source.source?.source_hash || '')
+              || !/^[0-9a-f]{64}$/.test(endpoint.source?.source_hash || '')) {
+            return {ok:false,message:'Comparison unavailable or source changed.'};
+          }
+          return {ok:true,message:'The selected workspace contains the compiler-qualified import candidate. Runtime loading remains unverified.',
+            navigation:{workspace_id:endpoint.workspace_id,id:endpoint.id,receipt:structuredClone(endpoint.receipt),
+              source_hash:endpoint.source.source_hash,original_source_hash:source.source.source_hash}};
+        }
+        if(!selection.isCurrent()||result?.schema!=='open-clank.code-cross-project/v1'||result.partial!==true||result.source?.workspace_id!==selection.workspaceId||result.target?.workspace_id!==target.id||codeReceiptKey(result.source.receipt)!==codeReceiptKey(selection.receipt)||codeReceiptKey(result.target.receipt)!==codeReceiptKey(targetReceipt))return {ok:false,message:'Comparison unavailable or source changed.'};
+        if(result.state==='match'&&result.relation?.kind==='declared_local_file_dependency'&&result.relation?.semantics==='lexical_only'&&/^file:[0-9a-f]{64}$/.test(result.target?.file_id||''))return {ok:true,message:'Selected manifest declares a lexical local dependency on the target. Symlinks, installation and runtime resolution are unproved.',navigation:{...structuredClone(result.target),original_source_hash:result.source.source_hash}};
+        if(result.state==='no_match'&&result.relation===null)return {ok:true,message:'No supported literal matches in this selected manifest. Other dependencies and runtime resolution remain unexamined.'};
+        return {ok:false,message:'Comparison unavailable.'};
+      }
+      if(kind==='summary'){const composer=window.chatModule, target=composer?.captureCodeEvidenceDraft?.();openCodeSummary({selection,base:state.api,target,onCaptureDocument:()=>notesFeature?.captureSummaryDocumentTarget?.() || null,onInsertDocument:(documentTarget,section)=>notesFeature?.insertSummaryDocumentSection?.(documentTarget,section) || {outcome:'failed',message:'Document unavailable.'},onAttach:(receipt,expected)=>composer?.attachGeneratedSummary?.(receipt,{expected,isCurrent:selection.isCurrent})===true,onOpenSource:async(id,receipt)=>{
+        const response=await fetch(`${state.api}/api/memory/code/resource`,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_id:selection.workspaceId,operation:'resolve',reference:{kind:'code',id,receipt},excerpt_bytes:1024}),signal:selection.signal});
+        const result=response.ok?await response.json():null;
+        if(selection.isCurrent()&&result?.state==='current'&&result.current_source_verified===true&&codeReceiptKey(result.receipt)===codeReceiptKey(receipt)&&result.destination?.provider==='host'&&typeof result.destination.resource?.ref==='string')await openResource(result.destination.resource.ref,{isCurrent:selection.isCurrent});
+      }});return {ok:true,message:'Summary preview opened.'};}
+      if(kind==='navigate_comparison'){
+        const target=selection.navigation;
+        const targetID = target?.id || target?.file_id;
+        if(!selection.isCurrent()||!target||!/^(file|decl):[0-9a-f]{64}$/.test(targetID||'')||target.receipt?.workspace_id!==target.workspace_id)return {ok:false};
+        const verify=async(workspace,id,receipt,hash)=>{
+          const response=await fetch(`${state.api}/api/memory/code/resource`,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},signal:selection.signal,
+            body:JSON.stringify({workspace_id:workspace,operation:'resolve',reference:{kind:'code',id,receipt},excerpt_bytes:1})});
+          if(!selection.isCurrent()||!response.ok)return false;
+          const value=await response.json();
+          return selection.isCurrent()&&value?.state==='current'&&value.current_source_verified===true&&value.validation_kind==='current_source'
+            && value.workspace_id===workspace&&value.reference?.id===id&&codeReceiptKey(value.receipt)===codeReceiptKey(receipt)&&value.source?.source_hash===hash;
+        };
+        if(!await verify(target.workspace_id,targetID,target.receipt,target.source_hash))return {ok:false,message:'Target receipt or source is unavailable.'};
+        if(!await verify(selection.workspaceId,selection.node.id,selection.receipt,target.original_source_hash))return {ok:false,message:'Source receipt or source is unavailable.'};
+        return selection.isCurrent()?{ok:true}:{ok:false};
+      }
       const composer=window.chatModule;
-      const draft=kind==='open'?null:composer?.captureCodeEvidenceDraft?.();
-      if(kind!=='open'&&!draft)return {ok:false,message:'Open a chat composer before adding evidence.'};
-      const response=await fetch(`${state.api}/api/memory/code/resource`,{method:'POST',headers:{'Content-Type':'application/json'},
+      const draft=['open','history'].includes(kind)?null:composer?.captureCodeEvidenceDraft?.();
+      if(!['open','history'].includes(kind)&&!draft)return {ok:false,message:'Open a chat composer before adding evidence.'};
+      const range=kind==='open'?selection.sourceRange:undefined;
+      const response=await fetch(`${state.api}/api/memory/code/resource${range?'?exact_revision=true':''}`,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({workspace_id:selection.workspaceId,operation:'resolve',reference:{kind:'code',id:selection.node.id,receipt:selection.receipt},excerpt_bytes:1024}),signal:selection.signal});
       const result=response.ok?await response.json():null;
       if(!selection.isCurrent())return {ok:false};
@@ -1828,33 +2910,131 @@ function renderCodeGraph({ body, isCurrent }) {
         || result.state!=='current' || result.current_source_verified!==true || result.validation_kind!=='current_source'
         || codeReceiptKey(result.receipt)!==codeReceiptKey(selection.receipt) || result.reference?.id!==selection.node.id)
         return {ok:false,message:`Source ${['stale','missing','erased','ambiguous','unavailable','denied','cancelled','invalid'].includes(result?.state)?result.state:'unavailable'}. No evidence was added or opened.`};
+      if(kind==='history'){
+        const resource=result.destination?.resource;
+        if(result.destination?.provider!=='host'||typeof resource?.id!=='string')return {ok:false,message:'History destination unavailable.'};
+        const live=()=>selection.isCurrent() && owner===state.accountId && epoch===state.contextEpoch && codeEpoch===codeGraphContextEpoch
+          && codeGraphSelection===selectedWorkspace && selectedWorkspace.workspaceId===selection.workspaceId;
+        if(!live())return {ok:false};
+        if (!state.documentsLoaded || state.documentLoadError || state.sourceRefreshPending) {
+          await (pendingDocumentLoad || loadDocuments(false));
+          if (!live()) return {ok:false};
+        }
+        const copalWorkspace=state.workspace;
+        const changeSetContext={account:owner,workspace:copalWorkspace,epoch,isCurrent:()=>owner===state.accountId&&epoch===state.contextEpoch&&state.workspace===copalWorkspace,
+          choices:state.docs.filter(doc=>doc?.kind==='note'&&typeof doc.id==='string'&&typeof doc.name==='string').slice(0,100).map(doc=>({id:doc.id,name:doc.name})),api};
+        const expectedReceipt=structuredClone(selection.receipt);
+        const onRecordedImpact=async({locator,resourceID,actionID,versionID,isCurrent})=>{
+          const valid=()=>live() && codeGraphController===workbench && typeof isCurrent==='function' && isCurrent()===true;
+          if(!valid())return false;
+          const response=await fetch(`${state.api}/api/memory/code/recorded-impact`,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_id:selection.workspaceId,locator,resource_id:resourceID,expected_receipt:expectedReceipt}),signal:selection.signal});
+          if(!valid()||!response.ok)return false;
+          const value=await response.json();
+          const comparison=value?.comparison;
+          const keys=['action_id','current_sha256','current_size','file_id','index','recorded_sha256','recorded_size','resource_id','state','version','version_id','workspace_id'];
+          if(valid()&&value?.schema==='openclank.recorded-code-impact/v1'&&value.state==='unavailable'&&value.graph===null
+              && comparison && typeof comparison==='object' && JSON.stringify(Object.keys(comparison).sort())===JSON.stringify(keys)
+              && comparison.version===1 && ['recorded_matches_current','current_differs_from_recorded'].includes(comparison.state)
+              && ['current','unknown'].includes(comparison.index) && comparison.workspace_id===selection.workspaceId
+              && comparison.resource_id===resourceID && comparison.action_id===actionID && comparison.version_id===versionID
+              && /^file:[0-9a-f]{64}$/.test(comparison.file_id||'') && /^[0-9a-f]{64}$/.test(comparison.recorded_sha256||'')
+              && /^[0-9a-f]{64}$/.test(comparison.current_sha256||'') && Number.isSafeInteger(comparison.recorded_size)
+              && comparison.recorded_size>=1 && comparison.recorded_size<=1048576 && Number.isSafeInteger(comparison.current_size)
+              && comparison.current_size>=0 && comparison.current_size<=1048576
+              && ((comparison.recorded_sha256===comparison.current_sha256 && comparison.recorded_size===comparison.current_size)===(comparison.state==='recorded_matches_current')))
+            { const retro=value.retrospective_declarations;
+              const ids=x=>Array.isArray(x)&&x.length<=200&&x.every(id=>/^decl:[0-9a-f]{64}$/.test(id))&&new Set(x).size===x.length;
+              const validRetro=retro?.state==='complete' && Object.keys(retro).sort().join(',')==='basis,current_only,matched,recorded_only,state'
+                && retro.basis==='retrospective_current_parser' && Number.isSafeInteger(retro.matched) && retro.matched>=0 && retro.matched<=200
+                && ids(retro.recorded_only) && ids(retro.current_only);
+              return {kind:'recorded-comparison',state:comparison.state,index:comparison.index,
+                retrospective:validRetro?{matched:retro.matched,recordedOnly:retro.recorded_only.length,currentOnly:retro.current_only.length}:null}; }
+          if(!valid()||value?.schema!=='openclank.recorded-code-impact/v1'||value.state!=='current'||value.coverage!=='indexed_declarations_in_one_recorded_file'
+              ||value.workspace_id!==selection.workspaceId||value.resource_id!==resourceID||value.recorded_after?.action_id!==actionID||value.recorded_after?.version_id!==versionID
+              ||value.recorded_after?.sha256!==value.source?.sha256||value.recorded_after?.size_bytes!==value.source?.size_bytes
+              ||codeReceiptKey(value.query?.expected_receipt)!==codeReceiptKey(expectedReceipt)||codeReceiptKey(value.graph?.receipt)!==codeReceiptKey(expectedReceipt))return false;
+          // Applying may retire the originating selection; successful apply is final.
+          return await workbench.applyQualifiedImpact(value,{expectedReceipt,isCurrent:valid});
+        };
+        if(!openResourceHistory({resourceId:resource.id,name:selection.node.name||'Selected source',provider:'host',isContextCurrent:live,onRecordedImpact,exactOnly:true,managedGroups:true,changeSetContext}))return {ok:false,message:'History is busy or unavailable.'};
+        return {ok:true,message:'Opened recorded change fragments for this resource.'};
+      }
       if(kind==='open'){
         if(result.destination?.provider!=='host'||typeof result.destination.resource?.ref!=='string')return {ok:false,message:'Editor destination unavailable.'};
-        await openResource(result.destination.resource.ref,{isCurrent:selection.isCurrent,
+        const expectedRevision = result.destination.expected_revision;
+        if(range&&(expectedRevision?.kind!=='hostFingerprint'||range.sourceHash!==result.source?.source_hash))
+          return {ok:false,message:'The exact indexed source range is no longer available.'};
+        const opened=await openResource(result.destination.resource.ref,{isCurrent:selection.isCurrent,
+          ...(range?{expectedRevision,sourceRange:range}:{}),
           handoffCurrent:()=>owner===state.accountId && epoch===state.contextEpoch && codeEpoch===codeGraphContextEpoch
             && codeGraphSelection===selectedWorkspace && selectedWorkspace.workspaceId===selection.workspaceId});
-        return {ok:true,message:'Opened current resource in Editor, not a retained indexed version.'};
+        return opened?{ok:true,message:range?'Opened witnessed source range in Editor.':'Opened current resource in Editor.'}:{ok:false};
       }
       return composer.appendCodeEvidence(result,{expected:draft,isCurrent:selection.isCurrent,ask:kind==='ask'});
     },
     readResourceCapabilities:async(workspaceId,signal)=>{
-      const response=await fetch(`${state.api}/api/memory/code/resource`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_id:workspaceId,operation:'capabilities'}),signal});
+      const response=await fetch(`${state.api}/api/memory/code/resource`,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_id:workspaceId,operation:'capabilities'}),signal});
       if(!response.ok)return {available:false,reason:'Source bridge unavailable.'};
       const result=await response.json();
       if(result.schema!=='open-clank.code-resource/v1'||result.workspace_id!==workspaceId)return {available:false,reason:'Invalid source capability.'};
       return result.capabilities?.find(cap=>cap.kind==='code')||{available:false,reason:'Code source producer unavailable.'};
-    },readPreference:()=>preference(),writePreference:value=>preference(value)});
+    },readPreference:()=>preference(),writePreference:value=>preference(value),
+    async saveRecordedInvestigation({workspaceId, receipt, pages, title, isCurrent}) {
+      const target = saveScope();
+      const valid = () => current() && isCurrent() && sameSaveScope(target, saveScope()) &&
+        selectedWorkspace.workspaceId === workspaceId && receipt?.workspace_id === workspaceId;
+      const {buildRecordedInvestigation} = await import('./copal/codeInvestigation.js');
+      if (!valid()) throw new Error('The workspace changed.');
+      const manifest = buildRecordedInvestigation(pages, receipt);
+      const key = JSON.stringify([title, manifest]);
+      if (!investigationActions.has(key)) investigationActions.set(key, crypto.randomUUID().replaceAll('-', ''));
+      const body = {version:1, workspace:target.workspace, name:title, title, ...manifest, action_id:investigationActions.get(key)};
+      const result = await api('/logical-change-sets', {method:'POST',body:JSON.stringify(body)}, target.workspace);
+      if (!valid() || !(result?.state === 'complete' || result?.state === 'status_only' && result.receipt?.state === 'complete') ||
+          !result.receipt?.document_id || !result.receipt.head) throw new Error('Save outcome is pending.');
+      const documentId = result.receipt.document_id;
+      return {documentId, open:async () => {
+        if (!valid()) return;
+        await refreshIndexedDocument(documentId, target);
+        if (valid()) openDocument(documentId, 'notes');
+      }};
+    },
+    async readRecordedActivity({workspaceId, receipt, signal, relativePath = '', cursor = null}) {
+      const valid = () => current() && !signal?.aborted && workspaceId === selectedWorkspace.workspaceId
+        && receipt?.workspace_id === workspaceId && typeof receipt.checkout_id === 'string';
+      if (!valid()) throw new Error('Graph workspace changed');
+      const issued = await filesFacadeClient.workspaceResource(workspaceId, relativePath, {signal});
+      if (!valid() || issued.workspace?.id !== workspaceId || issued.resource?.provider !== 'host'
+          || !/^resource-[0-9a-f]{64}$/.test(issued.resource.id))
+        throw new Error('Recorded workspace activity unavailable');
+      const params = new URLSearchParams({graph_activity:'true', graph_workspace_id:workspaceId,
+        graph_checkout_id:receipt.checkout_id});
+      if (cursor) params.set('cursor', cursor);
+      const response = await fetch(`${state.api}/api/history/resources/${encodeURIComponent(issued.resource.id)}/workspace-recorded-activity?${params}`,
+        {signal, credentials:'same-origin', cache:'no-store'});
+      if (!response.ok) throw new Error('Recorded workspace activity unavailable');
+      const data = await response.json(), scope = data.projection?.graph_scope;
+      if (!valid() || scope?.workspace_id !== workspaceId || scope.checkout_id !== receipt.checkout_id
+          || scope.workspace_revision !== issued.workspace.revision || scope.policy_generation !== issued.generation)
+        throw new Error('Recorded activity scope changed');
+      return data;
+    },
+    readPromptBudget:()=>preference(undefined,'code_context_prompt_budget'),
+    writePromptBudget:value=>preference(value,'code_context_prompt_budget')});
+  // From Editor focuses the supplied file once. Subsequent mounts restore the selected symbol.
+  selectedWorkspace.openRelative = '';
   // A minimized native window retains its scope/subscription, not GPU work.
   // Actual close, mode replacement and scope invalidation still dispose it.
-  const graphWindow=state.windows.get('graph')?.window;
+  const graphWindow=getViewContext('graph')?.window;
   const syncVisibility=()=>workbench.setVisible?.(graphWindow?.visible !== false);
   const visibilityObserver=new MutationObserver(syncVisibility);
   visibilityObserver.observe(graphWindow.root,{attributes:true,attributeFilter:['class','style']});
   const disposeWorkbench=workbench.dispose;
-  workbench.dispose=()=>{visibilityObserver.disconnect();disposeWorkbench.call(workbench);};
+  workbench.dispose=()=>{folderRestore?.abort();folderRestore=null;visibilityObserver.disconnect();disposeWorkbench.call(workbench);};
   syncVisibility();
   codeGraphController=workbench;
   wrap._copalDestroy=()=>workbench.dispose();
+  void restoreCodeFolder();
 }
 
 function mindOutlineEntries(text) {
@@ -2055,14 +3235,14 @@ function findMindParent(node, nodes) {
 
 
 function mindSelectNext(node, entries) {
-  const visible = [...state.body.querySelectorAll('.copal-mind-tree-node')].map((item) => Number(item.dataset.line));
+  const visible = [...getViewContext('graph').window.body.querySelectorAll('.copal-mind-tree-node')].map((item) => Number(item.dataset.line));
   const sequence = visible.length ? visible : entries.map((entry) => entry.line);
   const idx = sequence.indexOf(node.line);
   if (idx >= 0 && idx < sequence.length - 1) { mindModeState().selectedLine = sequence[idx + 1]; persistGraphView(); renderMind(); }
 }
 
 function mindSelectPrev(node, entries) {
-  const visible = [...state.body.querySelectorAll('.copal-mind-tree-node')].map((item) => Number(item.dataset.line));
+  const visible = [...getViewContext('graph').window.body.querySelectorAll('.copal-mind-tree-node')].map((item) => Number(item.dataset.line));
   const sequence = visible.length ? visible : entries.map((entry) => entry.line);
   const idx = sequence.indexOf(node.line);
   if (idx > 0) { mindModeState().selectedLine = sequence[idx - 1]; persistGraphView(); renderMind(); }
@@ -2123,68 +3303,62 @@ function mindMindReparent(doc, payload, toLine) {
 }
 
 function renderMind() {
-  state.body.querySelector('.copal-graph-wrap')?._copalDestroy?.();
+  const context = getViewContext('graph');
+  if (!context?.window.visible || getGraphView().mode !== 'structure') return;
+  const body = context.window.body;
+  body.querySelector('.copal-graph-wrap')?._copalDestroy?.();
+  context.sidebarContent.replaceChildren();
   const graphView = getGraphView();
-  const allDocs = visibleDocs();
+  const allDocs = visibleDocs(undefined, context.filter);
+  const exact=graphView.source?.connection && state.docs.find(item=>item.id===graphView.source.docId);
+  if (exact && !allDocs.includes(exact)) allDocs.push(exact);
   const docs = allDocs.filter((doc) => ['wiki', 'note', 'markdown', 'text'].includes(String(doc.kind || '').toLowerCase()));
-  const context = state.windows.get('graph');
   const navigation = mindModeState();
-  const requested = graphView.source?.docId || navigation.docId || context?.selected || state.selected;
+  const requested = graphView.source?.docId || navigation.docId || context.selected;
   const doc = requested ? docs.find((d) => d.id === requested) : docs[0];
   const requestedAny = requested ? allDocs.find((item) => item.id === requested) : null;
   if (graphView.source?.docId && requestedAny && !doc) {
-    state.body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' }, h('h2', { text:'Structure source unsupported' }), h('p', { text:`${requestedAny.name || requestedAny.id} is a ${requestedAny.kind || 'non-text'} resource and has no heading tree.` }), h('button', { class:'copal-btn', text:'Open source', onclick:() => openDocument(requestedAny.id, requestedAny.kind === 'wiki' ? 'wiki' : 'notes') }), h('button', { class:'copal-btn', text:'Choose another source', onclick:() => { graphView.source = null; navigation.docId = null; persistGraphView(); renderMind(); } })));
+    body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' }, h('h2', { text:'Structure source unsupported' }), h('p', { text:`${requestedAny.name || requestedAny.id} is a ${requestedAny.kind || 'non-text'} resource and has no heading tree.` }), h('button', { class:'copal-btn', text:'Open source', onclick:() => openDocument(requestedAny.id, 'notes') }), h('button', { class:'copal-btn', text:'Choose another source', onclick:() => { graphView.source = null; navigation.docId = null; persistGraphView(); renderMind(); } })));
     return;
   }
   // Keep an explicit source identity visible through deletion, revocation, or
   // an unavailable projection. Never silently substitute another document.
   if (graphView.source?.docId && !doc) {
-    state.body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' },
+    body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' },
       h('h2', { text:'Structure source unavailable' }),
       h('p', { text:`The selected source ${graphView.source.docId} is unavailable in this account or workspace.` }),
       h('p', { text:'Its ResourceKey and revision are retained so it can be retried or reauthorized safely.' }),
-      h('button', { class:'copal-btn', text:'Retry source', 'aria-label':'Retry unavailable structure source', onclick:() => loadDocuments().then(() => renderMind()).catch((error) => setViewStatus('graph', error.message, true)) }),
+      h('button', { class:'copal-btn', text:'Retry source', 'aria-label':'Retry unavailable structure source', onclick:() => loadDocuments() }),
       h('button', { class:'copal-btn', text:'Choose another source', onclick:() => { graphView.source = null; navigation.docId = null; persistGraphView(); renderMind(); } }),
     ));
     return;
   }
   if (!doc) {
-    state.body.replaceChildren(h('div', { class: 'copal-mind-empty' }, h('h2', { text: 'Structure' }), h('p', { text: 'No document source is available for headings.' }), h('button', { class:'copal-btn', text:'Open Editor', onclick:() => open('notes') })));
+    body.replaceChildren(h('div', { class: 'copal-mind-empty' }, h('h2', { text: 'Structure' }), h('p', { text: 'No document source is available for headings.' }), h('button', { class:'copal-btn', text:'Open Editor', onclick:() => open('notes') })));
     return;
   }
   navigation.docId = doc.id;
   graphView.source ||= graphSourceEnvelope(doc);
   persistGraphView();
-  if (context) context.selected = doc.id;
-  state.selected = doc.id;
+  context.selected = doc.id;
+  if (state.view === 'graph') state.selected = doc.id;
   const source = wikiText(doc);
+  if (graphView.source.connection && (graphView.source.connection.head!==doc.head || source!==doc.text)) {
+    delete graphView.source.connection;
+    navigation.selectedLine=null;
+    persistGraphView();
+    setViewStatus('graph','The source changed. Reopen its link to locate the current section.',true);
+  }
   if (doc.rawPreserved && doc.recoveryState !== 'legacy-import') {
     const parseFailed = doc.recoveryState === 'malformed-preserved';
     const sourceLabel = doc.recoveryState === 'unsupported-future' ? 'This source was written by a newer Wiki format.' : parseFailed ? 'This source could not be parsed as a native Wiki record.' : 'This source is preserved but unavailable to the headings parser.';
-    state.body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' }, h('h2', { text:parseFailed ? 'Structure source parse failed' : 'Structure source unavailable' }), h('p', { text:sourceLabel }), h('p', { text:String(doc.note_error || 'Choose an explicit recovery action in the Editor.') }), h('button', { class:'copal-btn', text:'Open in Editor', onclick:() => openDocument(doc.id, 'wiki') })));
+    body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' }, h('h2', { text:parseFailed ? 'Structure source parse failed' : 'Structure source unavailable' }), h('p', { text:sourceLabel }), h('p', { text:String(doc.note_error || 'Choose an explicit recovery action in the Editor.') }), h('button', { class:'copal-btn', text:'Open in Editor', onclick:() => openDocument(doc.id, 'notes') })));
     return;
   }
   const entries = mindOutlineEntries(source);
   const structureSettings=resolveGraphSettings(graphView.settings),allTreeNodes=buildMindTree(entries);let remaining=structureSettings.structureItems;
   const boundedTree=(rows,depth=1)=>{const result=[];if(depth>structureSettings.structureDepth)return result;for(const node of rows){if(remaining<=0)break;remaining--;result.push({...node,children:boundedTree(node.children,depth+1)});}return result;};
   const treeNodes=boundedTree(allTreeNodes);
-  const mindEl = h('div', { class: 'copal-mind' });
-
-  const familyMode = h('select', { class:'copal-mind-mode', 'aria-label':'Graph family mode', 'data-graph-mode':true },
-    h('option', { value:'documents', text:'Documents · links' }),
-    h('option', { value:'structure', text:'Structure · headings and bullets' }),
-    h('option', { value:'galaxy', text:'Galaxy · tracks and events' }),
-    h('option', { value:'code', text:'Code · scoped evidence (Alpha)' }));
-  familyMode.value = 'structure';
-  familyMode.addEventListener('change', () => {
-    const next = familyMode.value;
-    getGraphView().mode = next;
-    persistGraphView();
-    if (next === 'structure') renderMind(); else renderGraph();
-    updateRoute('graph', true);
-  });
-  mindEl.append(h('div', { class: 'copal-timeline-toolbar' }, h('label', {}, 'Graph view ', familyMode)));
-
   // Document picker
   const picker = h('div', { class: 'copal-mind-picker' }, h('h3', { text: 'Documents' }));
   const pickerSearch = h('input', { class:'copal-mind-doc-search', type:'search', placeholder:'Search documents…', 'aria-label':'Search structure sources' });
@@ -2199,7 +3373,7 @@ function renderMind() {
       if (selected) rows.unshift(selected);
     }
     docList.replaceChildren(...rows.map((d) => h('li', { class: `copal-mind-doc-item${d.id === navigation.docId ? ' active' : ''}` },
-      h('button', { class: 'copal-mind-doc-btn', text: d.name, 'aria-label':`Select ${d.name} as structure source`, onclick: () => { navigation.docId = d.id; graphView.source = graphSourceEnvelope(d); if (context) context.selected = d.id; state.selected = d.id; navigation.collapsed.clear(); navigation.selectedLine = null; navigation.editingLine = null; persistGraphView(); renderMind(); } }))));
+      h('button', { class: 'copal-mind-doc-btn', text: d.name, 'aria-label':`Select ${d.name} as structure source`, onclick: () => { navigation.docId = d.id; graphView.source = graphSourceEnvelope(d); context.selected = d.id; if (state.view === 'graph') state.selected = d.id; navigation.collapsed.clear(); navigation.selectedLine = null; navigation.editingLine = null; persistGraphView(); renderMind(); } }))));
     pickerStatus.textContent = matches.length > rows.length ? `${matches.length} sources · showing ${rows.length}; search to reach more` : `${matches.length} source${matches.length === 1 ? '' : 's'}`;
   };
   pickerSearch.addEventListener('input', renderPicker);
@@ -2226,13 +3400,13 @@ function renderMind() {
     treePane.append(treeList);
   }
 
-  mindEl.append(picker, treePane);
-  state.body.replaceChildren(mindEl);
-  acknowledgeVisible(mindEl, 'graph.mode.presented', { mode:'structure', nodeCount:entries.length }, { accountId:state.accountId, workspaceId:state.workspace });
+  context.sidebarContent.replaceChildren(picker);
+  body.replaceChildren(treePane);
+  acknowledgeVisible(treePane, 'graph.mode.presented', { mode:'structure', nodeCount:entries.length }, { accountId:state.accountId, workspaceId:state.workspace });
 
   // Focus selected
   if (navigation.selectedLine) {
-    const selected = mindEl.querySelector(`[data-line="${navigation.selectedLine}"]`);
+    const selected = treePane.querySelector(`[data-line="${navigation.selectedLine}"]`);
     if (selected) selected.focus();
   }
 }
@@ -2281,7 +3455,7 @@ function parseBaseLiteral(value) {
 async function createBaseDocument({ onComplete = null } = {}) {
   const dialog = h('dialog', { class: 'copal-dialog' }, h('h2', { text: 'Create a live Base' }));
   const name = h('input', { value: 'Projects.base', 'aria-label': 'Base name' });
-  dialog.append(baseField('Name', name), h('p', { text: 'Starts as a live table over this Copal workspace. Configure columns, filters, sorts, groups, formulas, and summaries after creation.' }));
+  dialog.append(baseField('Name', name), h('p', { text: 'Starts as a live table over this workspace. Configure columns, filters, sorts, groups, formulas, and summaries after creation.' }));
   dialog.append(h('div', { class: 'copal-dialog-actions' },
     h('button', { class: 'copal-btn', text: 'Cancel', onclick: () => dialog.close() }),
     h('button', { class: 'copal-btn primary', text: 'Create', onclick: async () => {
@@ -2498,6 +3672,7 @@ async function renderBases(targetBody = state.body, embeddedDoc = null) {
   const mount = targetBody || state.body;
   const rerender = () => renderBases(mount, embeddedDoc);
   const token = ++state.baseQueryToken;
+  const scope = saveScope();
   const bases = state.docs.filter((doc) => doc.kind === 'base');
   if (!bases.length) {
     mount.replaceChildren(h('div', { class: 'copal-empty' }, h('h2', { text: 'No Bases yet' }), h('p', { text: 'Create a Base to query live Redb documents. No sample rows are fabricated.' }), h('button', { class: 'copal-btn primary', text: 'Create Base', onclick: () => createBaseDocument({ onComplete: rerender }) })));
@@ -2556,22 +3731,49 @@ async function renderBases(targetBody = state.body, embeddedDoc = null) {
       main.replaceChildren(toolbar, messages, h('div', { class: 'copal-empty', text: 'This live query returned no rows. Adjust its filters or add matching document properties.' }));
       return;
     }
+    const readOnlySourceIds = new Set(state.docs.filter(doc => doc.readOnly).map(doc => String(doc.id)));
+    const canEditCell = (row, column) => Boolean(row.documentId) && !row.readOnly
+      && !readOnlySourceIds.has(String(row.documentId)) && !isReadOnlyColumn(column)
+      && !column.property.startsWith('file.') && !['tags', 'links', 'kind', 'name'].includes(column.property);
+    const registerBaseCell = (cell, row, column, value, edit) => {
+      const documentId = row.documentId;
+      if (!documentId) return;
+      const commands = () => [
+        ...(edit && !state.docs.find(doc => String(doc.id) === String(documentId))?.readOnly ? [{ id:'edit-sheet-cell', label:'Edit cell', run:edit }] : []),
+        ...(navigator.clipboard?.writeText ? [{ id:'copy-sheet-cell', label:'Copy cell', run:() => navigator.clipboard.writeText(value) }] : []),
+        { id:'open-base-document', label:'Open source note', run:() => openDocument(documentId, 'notes') },
+      ];
+      const current = () => cell.isConnected && mount.contains(cell) && sameSaveScope(scope, saveScope());
+      registerAdapter(cell, {
+        editingCommands:false,
+        hitTest:target => target.closest('input, textarea, select, [contenteditable="true"]') ? 'native' : true,
+        capture:() => current() ? { documentId, column } : null,
+        isCurrent:request => current() && request.adapterContext?.documentId === documentId && request.adapterContext?.column === column,
+        commands:() => commands().map(({ run, ...item }) => item),
+        execute:id => {
+          const command = current() && commands().find(item => item.id === id);
+          return command ? command.run() : false;
+        },
+      });
+    };
     const renderTableRow = (row) => {
-        const tr = h('tr', { 'data-document-id': row.documentId });
-        for (const column of view.columns) {
-          const value = formatBaseCell(row.values?.[column.property]);
-          const editable = !column.formula && !column.property.startsWith('file.') && !['tags', 'links', 'kind', 'name'].includes(column.property);
-          const td = h('td', { 'data-copal-context-object':'base-cell', 'data-document-id':row.documentId, 'data-base-id':base.id, 'data-column-property':column.property });
-          td.append(h('button', {
-            class: 'copal-base-cell', type: 'button', text: value,
-            title: editable ? `Edit ${column.property}` : `Open ${row.name}`,
-            'aria-label': editable ? `Edit ${column.label} for ${row.name}: ${value}` : `Open ${row.name}: ${value}`,
-            onclick: () => { if (editable) makeInlineCellEditor(base, row, column, td, rerender); else openDocument(row.documentId, 'notes'); },
-          }));
-          tr.append(td);
-        }
-        return tr;
-      };
+      const tr = h('tr', { 'data-document-id':row.documentId });
+      for (const column of view.columns) {
+        const value = formatBaseCell(row.values?.[column.property]);
+        const editable = canEditCell(row, column);
+        const td = h('td');
+        const edit = () => makeInlineCellEditor(base, row, column, td, rerender);
+        td.append(h('button', {
+          class:'copal-base-cell', type:'button', text:value,
+          title:editable ? `Edit ${column.property}` : `Open ${row.name}`,
+          'aria-label':editable ? `Edit ${column.label} for ${row.name}: ${value}` : `Open ${row.name}: ${value}`,
+          onclick:editable ? edit : () => openDocument(row.documentId, 'notes'),
+        }));
+        registerBaseCell(td, row, column, value, editable ? edit : null);
+        tr.append(td);
+      }
+      return tr;
+    };
     let contentWrap;
     if (view.type === 'card') {
       contentWrap = h('div', { class: 'copal-base-card-view' });
@@ -2580,19 +3782,16 @@ async function renderBases(targetBody = state.body, embeddedDoc = null) {
         const card = h('div', { class: 'copal-base-card', 'data-document-id': row.documentId });
         for (const column of view.columns) {
           const value = formatBaseCell(row.values?.[column.property]);
-          const editable = !column.formula && !column.property.startsWith('file.') && !['tags', 'links', 'kind', 'name'].includes(column.property);
+          const editable = canEditCell(row, column);
           const field = h('div', { class: 'copal-base-card-field' }, h('span', { class: 'copal-base-card-label', text: column.label }));
           const valueEl = h('span', { class: 'copal-base-card-value', text: value });
-          if (editable) {
-            valueEl.style.cursor = 'pointer';
-            valueEl.addEventListener('click', () => {
-              const td = h('td', {});
-              makeInlineCellEditor(base, row, column, td, rerender);
-              valueEl.replaceChildren(...td.childNodes);
-            });
-          } else {
-            valueEl.addEventListener('click', () => openDocument(row.documentId, 'notes'));
-          }
+          const edit = () => makeInlineCellEditor(base, row, column, valueEl, rerender);
+          if (editable) valueEl.style.cursor = 'pointer';
+          valueEl.addEventListener('click', event => {
+            if (event.target !== valueEl) return;
+            if (editable) edit(); else openDocument(row.documentId, 'notes');
+          });
+          registerBaseCell(valueEl, row, column, value, editable ? edit : null);
           field.append(valueEl);
           card.append(field);
         }
@@ -2606,19 +3805,18 @@ async function renderBases(targetBody = state.body, embeddedDoc = null) {
         const mainCol = view.columns[0];
         const title = h('span', { class: 'copal-base-list-title', text: mainCol ? formatBaseCell(row.values?.[mainCol.property]) : row.name });
         title.addEventListener('click', () => openDocument(row.documentId, 'notes'));
+        registerBaseCell(title, row, mainCol, title.textContent, null);
         item.append(title);
         for (const column of view.columns.slice(1)) {
           const value = formatBaseCell(row.values?.[column.property]);
-          const editable = !column.formula && !column.property.startsWith('file.') && !['tags', 'links', 'kind', 'name'].includes(column.property);
-          const meta = h('span', { class: 'copal-base-list-meta', text: `${column.label}: ${value}` });
+          const editable = canEditCell(row, column);
+          const meta = h('span', { class:'copal-base-list-meta', text:`${column.label}: ${value}` });
+          const edit = () => makeInlineCellEditor(base, row, column, meta, rerender);
           if (editable) {
             meta.style.cursor = 'pointer';
-            meta.addEventListener('click', () => {
-              const td = h('td', {});
-              makeInlineCellEditor(base, row, column, td, rerender);
-              meta.replaceChildren(...td.childNodes);
-            });
+            meta.addEventListener('click', event => { if (event.target === meta) edit(); });
           }
+          registerBaseCell(meta, row, column, value, editable ? edit : null);
           item.append(meta);
         }
         contentWrap.append(item);
@@ -2763,7 +3961,17 @@ function taskItems() {
   return items;
 }
 
-const treeHouse = createTreeHouseFeature({ h, api, setStatus, renderMarkdown, openDocument, openResource });
+let treeHouse, clankshop;
+async function loadTreeHouse() {
+  const {createTreeHouseFeature} = await import('./copal/treehouse.js');
+  if (!treeHouse) {
+    treeHouse = createTreeHouseFeature({h, api, setStatus, renderMarkdown, openDocument, openResource});
+    if (state.storageNamespace) treeHouse.loadState();
+    const owner = state.windows.get('treehouse');
+    if (owner) treeHouse.setNavigationWindow(owner.window);
+  }
+  return treeHouse;
+}
 
 function resourceIdentityToken(resourceKey) {
   if (!resourceKey || typeof resourceKey !== 'object') return null;
@@ -2803,6 +4011,8 @@ function baseSourceForRow(row = {}) {
 }
 
 async function transformBaseCommand(base, request, command) {
+  const isCurrent = request?.payload?.isCurrent;
+  if (isCurrent && !isCurrent()) return { outcome:'conflict', message:'The saved view changed. Reopen its menu and retry.' };
   // A successful buffered Base write updates the authoritative document in
   // state.docs and discards its clean draft. The leaf cache can still hold
   // the pre-write object, so never reuse its old CAS head for the next
@@ -2825,12 +4035,14 @@ async function transformBaseCommand(base, request, command) {
     transformed = await api(`/bases/${encodeURIComponent(currentBase.id)}/transform`, {
       method:'POST', body:JSON.stringify({ command, source, base:revision }),
     }, request?.scope?.workspace || state.workspace);
+    if (isCurrent && !isCurrent()) return { outcome:'conflict', message:'The saved view changed. Reopen its menu and retry.' };
     const newest = notesFeature?.getDraftSnapshot?.(base.id) || null;
     const advanced = newest && (
       (localRevision != null && newest.localRevision !== localRevision)
       || (localRevision == null && String(newest.envelope?.text ?? '') !== source)
     );
     if (!advanced) break;
+    if (isCurrent) return { outcome:'conflict', message:'The saved view changed. Reopen its menu and retry.' };
     draftSnapshot = newest;
     authoritativeSnapshot = notesFeature?.getAuthoritativeSnapshot?.(base.id) || null;
     snapshot = draftSnapshot || authoritativeSnapshot || null;
@@ -2839,6 +4051,9 @@ async function transformBaseCommand(base, request, command) {
     transformed = null;
   }
   if (!transformed) return { outcome:'conflict', message:'The Base changed while this command was being prepared. Retry it on the newest draft.' };
+  if (request?.payload?.expectedViewOrder && JSON.stringify(transformed.definition?.views?.map(view => view.id)) !== JSON.stringify(request.payload.expectedViewOrder)) {
+    return { outcome:'conflict', message:'The saved view changed. Reopen its menu and retry.' };
+  }
   const latest = notesFeature?.getDraftSnapshot?.(base.id) || null;
   if (latest && localRevision != null && latest.localRevision !== localRevision) {
     return { outcome:'conflict', message:'The Base changed while this command was being prepared. Retry it on the newest draft.' };
@@ -2966,6 +4181,10 @@ function createBaseSheetAdapter() {
       }
       return api(`/bases/${encodeURIComponent(doc.id)}/query?page=1&page_size=100${viewParam}${queryParam}`, { signal:request.signal }, request.scope?.workspace || state.workspace);
     },
+    canWriteCell:(row) => {
+      const { source } = baseSourceForRow(row);
+      return !!source && !source.readOnly && !row.readOnly;
+    },
     cellEdit:(doc, request) => applyBaseCells(doc, [{ rowKey:commandRowKey(request.row), documentId:request.row?.documentId ?? request.row?.id, resourceKey:request.row?.resourceKey || request.row?.resource?.key || null, columnKey:request.column.property, value:request.value, editorKind:request.column.type }]),
     clear:(doc, cells) => applyBaseCells(doc, cells),
     paste:(doc, preview) => applyBaseCells(doc, preview.cells),
@@ -3030,15 +4249,23 @@ function createBaseSheetAdapter() {
       if (!view?.columns?.some((item) => item.property === fromProperty) || !view.columns.some((item) => item.property === toProperty) || fromProperty === toProperty) return { outcome:'failed', message:'The column changed before reorder was committed.' };
       return controller.command('reorder-column', { fromProperty, toProperty });
     },
-    contextCommand:(doc, command, node, controller) => {
-      if (command === 'edit-sheet-column') return controller.command('sort', { property:node.dataset.sheetColumnKey });
-      return false;
-    },
     viewCommand:async (doc, action, view, controller) => {
-      if (action === 'rename-view') {
-        const name = await styledPrompt('Rename view', { title:'Rename saved view', defaultValue:view?.name || 'Table', confirmText:'Save', maxLength:128 });
-        if (!name?.trim()) return;
-        return controller.command(action, { viewId:view?.id, name:name.trim() });
+      const scope = saveScope();
+      const definition = controller.getState().definition;
+      const views = definition?.views || [];
+      const viewIndex = views.findIndex((item) => item.id === view?.id);
+      const capturedView = views[viewIndex];
+      const isCurrent = () => sameSaveScope(scope, saveScope()) && controller.getState().definition === definition
+        && !doc.readOnly && !state.docs.find(item => String(item.id) === String(doc.id))?.readOnly;
+      const run = async (command, payload) => {
+        const result = await controller.command(command, { ...payload, isCurrent });
+        if (result?.message && ['conflict', 'failed'].includes(result.outcome) && sameSaveScope(scope, saveScope())) setStatus(result.message, true);
+        return result;
+      };
+      if (action === 'rename-view' && capturedView && isCurrent()) {
+        const name = await styledPrompt('Rename view', { title:'Rename saved view', defaultValue:capturedView.name, confirmText:'Save', maxLength:128 });
+        if (!name?.trim() || !isCurrent()) return;
+        return run(action, { viewId:capturedView.id, name:name.trim() });
       }
       if (action === 'add-view') {
         const menu = h('dialog', { class:'copal-dialog copal-sheet-view-create-menu' }, h('h2', { text:'Add saved view' }));
@@ -3049,16 +4276,21 @@ function createBaseSheetAdapter() {
         menu.append(h('label', { text:'View name' }), name, h('label', { text:'View type' }), type, h('div', { class:'copal-dialog-actions' }, h('button', { class:'copal-btn', text:'Cancel', onclick:() => menu.close() }), h('button', { class:'copal-btn primary', text:'Create', onclick:create })));
         wireDialog(menu); document.body.append(menu); menu.showModal(); name.focus(); return;
       }
-      const menu = h('dialog', { class:'copal-dialog copal-sheet-view-menu' }, h('h2', { text:`${view?.name || 'View'} actions` }));
-      const run = (command, payload = {}) => { menu.close(); void controller.command(command, { viewId:view?.id, ...payload }); };
-      const viewIndex = controller.getState().definition.views.findIndex((item) => item.id === view?.id);
-      menu.append(h('div', { class:'copal-dialog-actions' },
-        h('button', { class:'copal-btn', text:'Duplicate view', onclick:() => run('duplicate-view', { name:`${view.name} copy` }) }),
-        h('button', { class:'copal-btn', text:'Move left', disabled:viewIndex <= 0, onclick:() => run('reorder-view', { fromIndex:viewIndex, toIndex:Math.max(0, viewIndex - 1) }) }),
-        h('button', { class:'copal-btn', text:'Move right', disabled:viewIndex < 0 || viewIndex >= controller.getState().definition.views.length - 1, onclick:() => run('reorder-view', { fromIndex:viewIndex, toIndex:Math.min(controller.getState().definition.views.length - 1, viewIndex + 1) }) }),
-        h('button', { class:'copal-btn danger', text:'Delete view', disabled:controller.getState().definition.views.length <= 1, onclick:() => run('remove-view') }),
-      ));
-      wireDialog(menu); document.body.append(menu); menu.showModal(); menu.querySelector('button:not([disabled])')?.focus({ preventScroll:true });
+      if (!capturedView || !isCurrent()) return false;
+      const viewId = capturedView.id;
+      if (action === 'duplicate-view') return run(action, { viewId, name:`${capturedView.name} copy` });
+      if (action === 'move-view-left' || action === 'move-view-right') {
+        const toIndex = viewIndex + (action === 'move-view-left' ? -1 : 1);
+        if (toIndex < 0 || toIndex >= views.length) return false;
+        const expectedViewOrder = views.map(item => item.id);
+        expectedViewOrder.splice(toIndex, 0, expectedViewOrder.splice(viewIndex, 1)[0]);
+        return run('reorder-view', { viewId, fromIndex:viewIndex, toIndex, expectedViewOrder });
+      }
+      if (action === 'remove-view' && views.length > 1) {
+        if (!await styledConfirm(`Delete view "${capturedView.name}"?`, { title:'Delete Base view', confirmText:'Delete view', danger:true }) || !isCurrent()) return false;
+        return run(action, { viewId });
+      }
+      return false;
     },
     toolbar:async (doc, action, controller) => {
       const selectedState = controller.getState();
@@ -3111,17 +4343,21 @@ planningFeature = createPlanningFeature({
   queryMarkdownTasks:(options) => loadTaskProjection(true, options),
   patchMarkdownTask:(item, checked) => toggleTask(item, checked),
 });
+function documentNavigation(view) {
+  const scope = saveScope();
+  return { presentation:view, workspaceId:scope.workspace, isCurrent:() => sameSaveScope(scope, saveScope()) };
+}
+
 function buildDocumentFeature(view) { return createNotesFeature({
   h,
   api,
   state,
-  createMarkdownEditor,
-  createSourceEditor,
-  renderMarkdown,
-  renderPreview,
-  renderComment:(body, doc) => markdownRenderer.renderComment(body, doc),
+  renderMarkdown:(body, seen, doc) => renderMarkdown(body, seen, doc, { navigation:documentNavigation(view) }),
+  renderPreview:(body, doc) => renderPreview(body, doc, { navigation:documentNavigation(view) }),
+  renderComment:(body, doc) => markdownRenderer.renderComment(body, doc, { navigation:documentNavigation(view) }),
   formatBaseCell,
   saveDocument,
+  showDocumentConflict,
   renameNote,
   deleteDocument,
   deleteDocuments,
@@ -3131,13 +4367,17 @@ function buildDocumentFeature(view) { return createNotesFeature({
   importVault,
   loadDocuments,
   openDocument,
+  mountEditorActivity:view === 'notes' ? controls => {
+    state.windows.get('notes')?.activityRail?.documentControls.replaceChildren(controls);
+  } : null,
   persistActiveContext,
-  saveResource:async(snapshot,options)=>{const receipt=await saveResourceSnapshot(snapshot,options);if(receipt?.snapshot?.envelope)window.dispatchEvent(new CustomEvent('openclank-files-resource-mutated',{detail:{action:'save',resource:options.resource,resourceRef:options.resource?.ref}}));return receipt;},
+  saveResource:async(snapshot,options)=>{const {saveResourceSnapshot}=await import('./codeEditor.js');const receipt=await saveResourceSnapshot(snapshot,options);if(receipt?.snapshot?.envelope)window.dispatchEvent(new CustomEvent('openclank-files-resource-mutated',{detail:{action:'save',resource:options.resource,resourceRef:options.resource?.ref}}));return receipt;},
   uploadAttachment,
   commitAttachment,
   abortAttachment,
   activateNotes:() => activateView(view, {navigation:state.view !== view}),
-  getContext:() => state.windows.get(view),
+  getContext:() => getViewContext(view),
+  getDocumentContexts:editorDocumentContexts,
   presentationId:view, registerGlobalOpener:view === 'notes',
   resourceBufferRegistry:sharedDocumentRegistry, getSharedDocumentState:documentState,
   onSourceChanged:(id, value, changes) => featureFor(view === 'wiki' ? 'notes' : 'wiki')?.receiveDocumentSource(id, value, changes),
@@ -3155,6 +4395,7 @@ function buildDocumentFeature(view) { return createNotesFeature({
 notesFeature = buildDocumentFeature('notes');
 wikiFeature = buildDocumentFeature('wiki');
 wikiWorkspace = createWikiWorkspace({ h, core:{
+  connections:target=>journalConnections(target.doc,'incoming','both',()=>wikiFeature.captureEditorTarget()?.docId===target.docId),
   capture:() => wikiFeature.captureEditorTarget(),
   isCurrent:target => wikiFeature.editorTargetCurrent(target),
   documents:() => state.docs,
@@ -3172,19 +4413,30 @@ wikiWorkspace = createWikiWorkspace({ h, core:{
   insertMedia:target => wikiFeature.insertAttachment(target),
 } });
 
-function renderAchievements() {
-  treeHouse.renderAchievementsPanel(state.body);
+async function renderTreeHouseSurface(view) {
+  const owner = state.windows.get(view), scope = saveScope();
+  if (!owner?.window.visible) return;
+  const feature = await loadTreeHouse();
+  if (!sameSaveScope(scope, saveScope()) || !owner.window.visible || state.windows.get(view) !== owner) return;
+  if (view === 'achievements') return feature.renderAchievementsPanel(owner.window.body);
+  return feature.render(owner.window.body);
 }
 
-function renderTreeHouse() {
-  treeHouse.render(state.body);
+async function renderClankshop() {
+  const owner = state.windows.get('clankshop'), scope = saveScope();
+  if (!owner?.window.visible) return;
+  const {createClankshopFeature} = await import('./copal/clankshop.js');
+  if (!sameSaveScope(scope, saveScope()) || !owner.window.visible || state.windows.get('clankshop') !== owner) return;
+  clankshop ||= createClankshopFeature();
+  return clankshop.render(owner.window.body, owner.window);
 }
 
 async function toggleTask(item, checked) {
+  const scope = saveScope();
   const openDoc = item?.doc && state.docs.find((value) => value.id === item.doc.id);
   const draft = openDoc ? notesFeature?.getDraftSnapshot?.(openDoc.id) : null;
   if (openDoc && draft && !['notes', 'wiki'].includes(state.view)) {
-    if (!await notesFeature?.resolveDirtyDocuments?.([openDoc.id], { force:true, title:'Update task in document' })) return;
+    if (!await notesFeature?.resolveDirtyDocuments?.([openDoc.id], { force:true, title:'Update task in document' }) || !sameSaveScope(scope, saveScope())) return;
     item = { ...item, sourceRevision:{ kind:'copalHead', value:openDoc.head } };
   }
   if (openDoc && ['notes', 'wiki'].includes(state.view)) {
@@ -3304,8 +4556,16 @@ async function loadTaskProjection(reset = false, queryOptions = null) {
 async function openMarkdownTask(item) {
   const id = item?.doc?.id || item?.document?.id;
   if (!id) return;
+  const scope = saveScope();
   if (!state.docs.some((doc) => String(doc.id) === String(id))) {
-    try { state.docs.push(await api(`/documents/${encodeURIComponent(id)}`)); } catch (error) { setStatus(error.message, true); return; }
+    try {
+      const doc = await api(`/documents/${encodeURIComponent(id)}`, {}, scope.workspace);
+      if (!sameSaveScope(scope, saveScope())) return;
+      if (!state.docs.some(item => String(item.id) === String(id))) state.docs.push(doc);
+    } catch (error) {
+      if (sameSaveScope(scope, saveScope())) setStatus(error.message, true);
+      return;
+    }
   }
   openDocument(id, 'notes');
 }
@@ -3320,7 +4580,7 @@ function showForm(title, fields, submit) {
 
 function createDocument() {
   const defaultKind = state.view === 'wiki' ? 'wiki' : state.view === 'treehouse' ? 'lesson' : 'note';
-  showForm('New Copal document', [['name', 'Name', state.view === 'treehouse' ? 'TreeHouse/New Lesson.md' : 'Untitled'], ['content', 'Starting text', '', 'textarea']], async ({ name, content }) => {
+  showForm('New document', [['name', 'Name', state.view === 'treehouse' ? 'TreeHouse/New Lesson.md' : 'Untitled'], ['content', 'Starting text', '', 'textarea']], async ({ name, content }) => {
     const result = await api('/documents', { method: 'POST', body: JSON.stringify({ name, kind: defaultKind, content }) });
     state.selected = result.doc.id; await loadDocuments();
   });
@@ -3331,7 +4591,7 @@ function importVault() {
   input.style.display = 'none'; document.body.append(input);
   input.addEventListener('change', async () => {
     const file = input.files?.[0]; input.remove();
-    if (!file || !await styledConfirm(`Import ${file.name} into Copal workspace “${state.workspace}”? Existing same-named documents are versioned, not silently replaced.`, { title: 'Import vault', confirmText: 'Import', danger: false })) return;
+    if (!file || !await styledConfirm(`Import ${file.name} into workspace “${state.workspace}”? Existing same-named documents are versioned, not silently replaced.`, { title: 'Import vault', confirmText: 'Import', danger: false })) return;
     const form = new FormData(); form.append('file', file);
     const controller = new AbortController();
     const progress = h('dialog', { class:'copal-dialog copal-import-progress' }, h('h2', { text:'Importing Obsidian vault' }), h('p', { text:file.name }), h('progress', { 'aria-label':'Import in progress' }), h('p', { class:'copal-dialog-hint', text:'Copal validates the archive before committing imported records.' }));
@@ -3351,6 +4611,9 @@ function importVault() {
 }
 
 function renderView(view = state.view) {
+  const target = getViewContext(view);
+  if (!target || (view === 'notes' && target.window.body.hidden)
+      || (view === 'graph' && !target.window.visible)) return;
   // A cold load can render/focus several visible windows. That is not a
   // newer navigation intent and must not cancel its own source handoff.
   const context = activateView(view, {navigation:false});
@@ -3358,7 +4621,7 @@ function renderView(view = state.view) {
   // renderCalendar intentionally remains in this module as dormant,
   // recoverable boutique plumbing. Odysseus's native Calendar owns the active
   // route/menu and receives Copal events through the backend projector.
-  const renderers = { notes: renderNotes, wiki: renderWiki, timeline: renderTimeline, galaxy: renderGalaxy, graph: renderGraph, mind: renderMind, bases: renderBases, treehouse: renderTreeHouse, achievements: renderAchievements, todo: renderTodo };
+  const renderers = { notes: renderNotes, wiki: renderWiki, timeline: renderTimeline, graph: renderGraph, bases: renderBases, treehouse: () => renderTreeHouseSurface('treehouse'), clankshop: renderClankshop, achievements: () => renderTreeHouseSurface('achievements'), todo: renderTodo };
   const rendered = (renderers[view] || renderNotes)();
   persistActiveContext();
   return rendered;
@@ -3366,29 +4629,48 @@ function renderView(view = state.view) {
 
 function ensureViewWindow(view) {
   view = resolveView(view);
+  if (view === 'graph' || view === 'wiki') {
+    const editor = ensureViewWindow('notes');
+    if (view === 'graph') return editor.graphMode ||= createEditorGraphMode(editor.window);
+    return editor.wikiMode ||= createEditorWikiMode(editor.window);
+  }
   if (state.windows.has(view)) return state.windows.get(view);
   const modalId = `copal-${view}-modal`;
   const windowApi = createCopalWindow({
     id:modalId,
     label:LABELS[view],
-    icon: { notes:'code', wiki:'book', timeline:'timeline', graph:'graph', treehouse:'treehouse', achievements:'check', todo:'tasks' }[view] || 'document',
+    icon: { notes:'code', wiki:'book', timeline:'timeline', treehouse:'treehouse', clankshop:'clankshop', achievements:'check', todo:'tasks' }[view] || 'document',
     subtitle:'Open Clank',
-    navigationChrome:view !== 'achievements',
-    chatVisibleMaximize:view === 'graph',
+    navigationChrome:view !== 'achievements' && view !== 'clankshop',
+    chatVisibleMaximize:view === 'notes',
+    focusTarget:() => view === 'notes' ? getViewContext(state.windows.get('notes')?.editorMode)?.window.body : null,
     minWidth:view === 'timeline' ? 720 : 560,
     minHeight:420,
-    sizeKey:copalStorageKey(`odysseus-copal-${view}-window-size`),
+    sizeKey:copalStorageKey(`openclank-copal-${view}-window-size`),
     className:`copal-view-window copal-${view}-window`,
     onActivate:() => {
       if (!state.windows.has(view)) return;
-      activateView(view, {navigation:state.view !== view}); if (view === 'treehouse') treeHouse.refreshEngagement(); markActive(); localStorage.setItem(copalStorageKey('odysseus-copal-view'), view);
-      if (resolveAppletLocation(location.pathname, location.search)?.target === 'editor') updateRoute(view, true);
+      const active = view === 'notes' ? state.windows.get(view).editorMode || 'notes' : view;
+      const changed = state.view !== active;
+      activateView(active, {navigation:changed});
+      if (view === 'treehouse') treeHouse?.refreshEngagement();
+      markActive();
+      localStorage.setItem(copalStorageKey('openclank-copal-view'), active);
+      if (changed && resolveAppletLocation(location.pathname, location.search)?.target === 'editor') updateRoute(active, true);
     },
-  onBeforeClose:() => ['notes', 'wiki'].includes(view) ? featureFor(view)?.beforeWindowClose?.() : true,
+  onBeforeClose:async () => {
+    if (view !== 'notes') return true;
+    if (!await notesFeature.beforeWindowClose()) return false;
+    return wikiFeature.beforeWindowClose();
+  },
   onClosed:() => {
-    if (view === 'treehouse') treeHouse.stopEngagement();
-    if (['notes', 'wiki'].includes(view)) featureFor(view)?.destroy();
-    if (view === 'graph') state.windows.get('graph')?.window.body?.querySelector('.copal-graph-wrap')?._copalDestroy?.();
+    if (view === 'treehouse') treeHouse?.stopEngagement();
+    if (view === 'clankshop') clankshop?.destroy();
+    if (view === 'notes') {
+      showEditorMode('notes');
+      notesFeature.destroy();
+      wikiFeature.destroy();
+    }
     markActive();
   },
   });
@@ -3403,24 +4685,23 @@ function ensureViewWindow(view) {
   }
   if (['notes', 'wiki'].includes(view)) {
     try {
-      const saved = JSON.parse(localStorage.getItem(copalStorageKey(`odysseus-copal-${view}-layout`, state.workspace)) || '{}');
+      const saved = JSON.parse(localStorage.getItem(copalStorageKey(`openclank-copal-${view}-layout`, state.workspace)) || '{}');
       featureFor(view)?.loadSaved(context, saved);
       context.selected = saved.selected || null;
     } catch (_) {}
   }
   state.windows.set(view, context);
-  if(view==='treehouse'&&typeof treeHouse.setNavigationWindow==='function')treeHouse.setNavigationWindow(windowApi);
-  if (view === 'wiki' && !context.selected) context.selected = state.docs.find(doc => doc.kind === 'wiki')?.id || null;
+  if (view === 'notes') createEditorActivityRail(context);
+  if(view==='treehouse'&&treeHouse)treeHouse.setNavigationWindow(windowApi);
   search.addEventListener('input', () => { activateView(view); context.filter = search.value; state.filter = search.value; renderView(view); });
   const activate = (callback) => (...args) => { activateView(view); return callback(...args); };
   if (['notes', 'wiki'].includes(view)) {
-    windowApi.actions.append(
-      h('button', { class:'copal-btn', icon:'search', title:'Quick switcher', 'aria-label':'Quick switcher', onclick:activate(() => featureFor(view)?.showChooser()) }),
-      h('button', { class:'copal-btn', icon:'menu', title:'Editor commands', 'aria-label':'Editor commands', onclick:activate(() => featureFor(view)?.showCommands()) }),
+    context.documentActions = h('div', { class:'copal-editor-document-actions' },
+      h('button', { class:'copal-btn', icon:'search', title:'Quick switcher', 'aria-label':'Quick switcher', onclick:() => featureFor(context.editorMode)?.showChooser() }),
+      h('button', { class:'copal-btn', icon:'menu', title:'Editor commands', 'aria-label':'Editor commands', onclick:() => featureFor(context.editorMode)?.showCommands() }),
     );
-  } else if (view==='graph') {
-    search.hidden=true;windowApi.actions.append(search);
-  } else if (['achievements', 'treehouse'].includes(view)) {
+    windowApi.actions.append(context.documentActions);
+  } else if (['achievements', 'treehouse', 'clankshop'].includes(view)) {
     // Learning actions live inside TreeHouse; achievements update from events.
     // Keep shared navigation adapters available to other window consumers.
   } else {
@@ -3432,28 +4713,165 @@ function ensureViewWindow(view) {
       h('button', { class:'copal-btn', icon:'refresh', title:`Refresh ${LABELS[view]}`, 'aria-label':`Refresh ${LABELS[view]}`, onclick:activate(() => loadDocuments()) }),
     );
   }
-  if(view==='graph'){
+  return context;
+}
+
+function createEditorActivityRail(editor) {
+  const buttons = Object.fromEntries([['notes', 'Text', 'text'], ['wiki', 'Wiki', 'puzzle'], ['graph', 'Graph', 'graph']].map(([view, label, icon]) => [
+    view, h('button', { type:'button', icon, class:view === 'notes' ? 'active' : '',
+      title:label, 'aria-label':label, 'aria-current':view === 'notes' ? 'page' : null, 'data-editor-mode-button':view,
+      onclick:async () => {
+        const switching = (editor.editorMode || 'notes') !== view;
+        if (switching) await open(view, true, { focusRail:true });
+        if (view === 'notes' && state.view === 'notes') notesFeature?.showExplorer(switching);
+      },
+    }),
+  ]));
+  const documentControls = h('div', { class:'copal-editor-document-activity' });
+  const rail = h('nav', { class:'copal-notes-ribbon copal-editor-activity-rail', 'aria-label':'Editor activity' },
+    h('div', { class:'copal-editor-mode-buttons', role:'group', 'aria-label':'Editor modes' }, ...Object.values(buttons)),
+    documentControls);
+  editor.activityRail = { rail, buttons, documentControls };
+  editor.window.root.dataset.editorMode = editor.editorMode = 'notes';
+  editor.window.body.prepend(rail);
+}
+
+function showEditorMode(view) {
+  const editor = state.windows.get('notes');
+  if (!editor || (editor.editorMode || 'notes') === view) return;
+  const previous = editor.editorMode;
+  const graph = editor.graphMode;
+  const wiki = editor.wikiMode;
+  const graphVisible = view === 'graph';
+  const wikiVisible = view === 'wiki';
+  editor.editorMode = view;
+  editor.window.root.dataset.editorMode = view;
+  editor.window.body.hidden = view !== 'notes';
+  editor.window.body.inert = view !== 'notes';
+  editor.window.status.hidden = graphVisible;
+  editor.documentActions.hidden = graphVisible;
+  editor.noteWorkbenchMenu?.close({ restore:false });
+  if (editor.noteWorkbenchMenu) editor.noteWorkbenchMenu.element.hidden = view !== 'notes';
+  if (graph) graph.host.hidden = !graphVisible;
+  if (wiki) {
+    wiki.host.hidden = !wikiVisible;
+    wiki.window.body.hidden = !wikiVisible;
+    wiki.host.inert = !wikiVisible;
+    if (!wikiVisible) wiki.noteWorkbenchMenu?.close({restore:false});
+    if (wiki.noteWorkbenchMenu) wiki.noteWorkbenchMenu.element.hidden = !wikiVisible;
+  }
+  const { rail, buttons, documentControls } = editor.activityRail;
+  const dock = graphVisible ? graph.layout : wikiVisible ? wiki.host : editor.window.body;
+  dock.prepend(rail);
+  documentControls.hidden = view !== 'notes';
+  for (const [mode, button] of Object.entries(buttons)) {
+    button.classList.toggle('active', mode === view);
+    if (mode === view) button.setAttribute('aria-current','page');
+    else button.removeAttribute('aria-current');
+  }
+  if (graphVisible) {
+    for (const owner of editorDocumentContexts()) for (const image of owner.noteImages?.values() || []) {
+      for (const imageView of image.views.values()) imageView.runtime?.setVisible(false);
+    }
+  }
+  if (previous === 'graph' && graph) {
+    graph.graphMenu.close({ restore:false });
+    ++graphRenderTicket;
+    graph.window.body.querySelector('.copal-graph-wrap')?._copalDestroy?.();
+    codeGraphController?.dispose(); codeGraphController = null;
+    graph.window.body.replaceChildren();
+    graph.sidebarContent.replaceChildren();
+  }
+}
+
+function createEditorWikiMode(windowApi) {
+  const body = h('main', {class:'copal-view copal-editor-wiki-body', tabindex:'-1', hidden:true, 'aria-label':'Wiki articles', 'data-editor-help-mode':'wiki'});
+  const host = h('section', {class:'copal-editor-wiki', hidden:true, inert:true, 'aria-label':'Editor Wiki mode'}, body);
+  windowApi.body.after(host);
+  const search = h('input', {type:'search','aria-label':'Search Wiki'});
+  const context = {view:'wiki', host, search, selected:null, filter:'', reading:false, window:{
+    id:windowApi.id, root:windowApi.root, workbenchHost:host, content:host, body, heading:windowApi.heading, status:windowApi.status,
+    get visible() { return windowApi.visible && !host.hidden; },
+    get physicalVisible() { return windowApi.visible; },
+    show:trigger=>windowApi.show(trigger), focus:()=>windowApi.focus(), requestClose:fromManager=>windowApi.requestClose(fromManager),
+    setStatus:(message,bad)=>windowApi.setStatus(message,bad),
+  }};
+  try {
+    const saved=JSON.parse(localStorage.getItem(copalStorageKey('openclank-copal-wiki-layout',state.workspace)) || '{}');
+    wikiFeature.loadSaved(context,saved);
+    context.selected=saved.selected || null;
+  } catch { /* Preserve the existing layout recovery policy. */ }
+  return context;
+}
+
+function createEditorGraphMode(windowApi) {
+  installEditorFilesStyles();
+  const graphSearch = h('input', { class:'copal-search', type:'search', hidden:true, placeholder:'Search documents…', 'aria-label':'Search Graph documents' });
+  const status = h('p', { class:'copal-editor-graph-status', role:'status' });
+  const body = h('div', { class:'copal-editor-graph-body', tabindex:'-1', role:'region', 'aria-label':'Graph canvas', 'data-editor-help-mode':'graph' });
+  const host = h('section', { class:'copal-editor-graph', hidden:true, 'aria-label':'Editor Graph mode' });
+  const modePicker = h('select', { 'data-graph-mode':true },
+    h('option', { value:'documents', text:'Journal & Wiki' }),
+    h('option', { value:'structure', text:'Structure' }),
+    h('option', { value:'galaxy', text:'Galaxy' }),
+    h('option', { value:'code', text:'Code' }));
+  const sidebarContent = h('div');
+  const sidebar = h('aside', { class:'copal-editor-graph-sidebar', 'aria-label':'Graph sidebar' },
+    h('label', {}, 'Graph view', modePicker), graphSearch, sidebarContent, status);
+  const content = h('div', { class:'copal-editor-graph-content' }, sidebar, body);
+  host.append(content);
+  windowApi.body.after(host);
+  const context = { view:'graph', host, layout:content, modePicker, sidebarContent, search:graphSearch, selected:null, filter:'', reading:false,
+    window: {
+      id:windowApi.id, root:windowApi.root, content:host, heading:windowApi.heading, body, status,
+      get visible() { return !host.hidden && windowApi.visible; },
+      show:trigger => windowApi.show(trigger), focus:() => windowApi.focus(),
+      requestClose:fromManager => windowApi.requestClose(fromManager),
+      setStatus(message, bad = false) { status.textContent = message || ''; status.classList.toggle('error', bad); },
+    },
+  };
+  function selectGraphFamily(mode) {
+    getGraphView().mode = mode;
+    persistGraphView();
+    context.window.setStatus('');
+    renderGraph();
+    updateRoute('graph', true);
+    if (mode === 'code') return;
+    const needsSource = mode === 'galaxy' ? !state.planningLoaded || state.planningLoadError
+      : !state.documentsLoaded || state.documentLoadError;
+    if (needsSource || state.sourceRefreshPending) void loadDocuments();
+    else updateDocumentViewStatus('graph');
+  }
+  modePicker.addEventListener('change', () => selectGraphFamily(modePicker.value));
+  graphSearch.addEventListener('input', () => {
+    activateView('graph');
+    state.filter = context.filter = graphSearch.value;
+    renderGraph();
+    graphSearch.hidden = false;
+  });
+  const activate = callback => (...args) => { activateView('graph'); return callback(...args); };
     const capture=()=>({account:state.accountId,epoch:state.contextEpoch,workspace:state.workspace,mode:getGraphView().mode,
       generation:codeGraphMenuGeneration,code:getGraphView().mode==='code'?JSON.stringify(codeGraphController?.menuCapture?.()||null):null});
-    const isCurrent=c=>windowApi.root.isConnected&&c.account===state.accountId&&c.epoch===state.contextEpoch&&c.workspace===state.workspace&&c.mode===getGraphView().mode
-      &&(c.mode!=='code'||c.generation===codeGraphMenuGeneration&&codeGraphController?.menuScopeCurrent?.(JSON.parse(c.code)));
-    context.graphMenu=mountWorkbenchMenu({host:windowApi.root,container:windowApi.content,before:windowApi.body,id:modalId,kind:'graph',label:'Graph',surface:{capture,isCurrent,commands:c=>{
-      const family=['documents','structure','galaxy','code'].map(mode=>({id:'graph.family-'+mode,menu:'View',label:mode==='code'?'Code Graph (Alpha)':mode[0].toUpperCase()+mode.slice(1),checked:c.mode===mode,
-        run:()=>{getGraphView().mode=mode;persistGraphView();context.search.hidden=true;renderGraph();updateRoute('graph',true);}}));
-      if(c.mode==='code')return [...family,...(codeGraphController?.menuCommands?.(JSON.parse(c.code))||[])];
-      return [...family,
+    const isCurrent=c=>host.isConnected&&!host.hidden&&c.account===state.accountId&&c.epoch===state.contextEpoch&&c.workspace===state.workspace&&c.mode===getGraphView().mode
+      && (c.mode !== 'code' || (c.generation === codeGraphMenuGeneration
+        && (c.code === 'null' || codeGraphController?.menuScopeCurrent?.(JSON.parse(c.code)))));
+    context.graphMenu=mountWorkbenchMenu({host,container:host,before:content,id:'editor-graph',kind:'graph',label:'Graph',surface:{capture,isCurrent,commands:c=>{
+      const family=['documents','structure','galaxy','code'].map(mode=>({id:'graph.family-'+mode,menu:'View',label:mode==='code'?'Code Graph':mode[0].toUpperCase()+mode.slice(1),checked:c.mode===mode,
+        run:()=>selectGraphFamily(mode)}));
+      const openFolder={id:'graph.choose',menu:'File',label:'Open folder…',run:()=>openGraphFolder(context)};
+      if(c.mode==='code'){const wikiWorkspace=codeGraphSelection&&!codeGraphSelection.overlay?codeGraphSelection.workspaceId:'';
+        const commands=codeGraphController?.menuCommands?.(JSON.parse(c.code))||[];
+        return [...family,openFolder,...commands.filter(command=>command.id!==openFolder.id),
+          {id:'graph.wiki-generate',menu:'Graph',label:'Generate code wiki…',disabledReason:wikiWorkspace?'':'Choose a Code Graph workspace first.',
+            run:()=>{if(wikiWorkspace&&isCurrent(c))openWikiGenerate({workspaceId:wikiWorkspace,copalWorkspace:state.workspace,base:state.api,isCurrent:()=>isCurrent(c)&&codeGraphSelection?.workspaceId===wikiWorkspace,onCaptureDocument:()=>notesFeature?.captureSummaryDocumentTarget?.()||null,onInsertWiki:(handle,payload)=>notesFeature?.insertWikiPages?.(handle,payload)||{outcome:'failed',message:'Document unavailable.'}});}}];}
+      return [...family,openFolder,
         {id:'graph.document-import',menu:'File',label:'Import Obsidian vault…',run:activate(importVault)},
         {id:'graph.document-export',menu:'File',label:'Export Obsidian vault…',run:()=>{window.location.href=`/api/copal/export/obsidian?workspace=${encodeURIComponent(state.workspace)}`;}},
         {id:'graph.document-search',menu:'View',label:'Search documents…',run:()=>{context.search.hidden=false;context.search.focus();}},
         {id:'graph.settings',menu:'View',label:'Graph settings…',run:activate(showFamilyGraphSettings)},
         {id:'graph.document-refresh',menu:'Graph',label:'Refresh documents',run:activate(()=>loadDocuments())}];
     }}});
-  }
   return context;
-}
-
-function buildWorkspace() {
-  for (const view of VIEWS) ensureViewWindow(view);
 }
 
 // --- Per-entry Copal visibility (Appearance) ---
@@ -3464,10 +4882,22 @@ function buildWorkspace() {
 const ENTRY_VIS_KEY = 'copal_entry_visibility';
 function defaultEntryVisibility() {
   const map = {};
-  for (const view of COPAL_LAUNCHER_IDS) map[view] = view !== 'wiki';
+  for (const view of COPAL_LAUNCHER_IDS) map[view] = true;
   return map;
 }
-async function loadEntryVisibility() {
+function loadEntryVisibility() {
+  if (entryVisibilityLoad) return entryVisibilityLoad;
+  const scope = saveScope();
+  const pending = readEntryVisibility().then(() => {
+    if (sameSaveScope(scope, saveScope())) applyEntryVisibility();
+  }).finally(() => {
+    if (entryVisibilityLoad === pending) entryVisibilityLoad = null;
+  });
+  entryVisibilityLoad = pending;
+  return pending;
+}
+
+async function readEntryVisibility() {
   const epoch = state.contextEpoch;
   const stored = await fetch(`/api/prefs/${ENTRY_VIS_KEY}`).then((r) => {
     if (!r.ok) throw new Error(`Appearance preference failed (${r.status})`);
@@ -3482,33 +4912,32 @@ async function loadEntryVisibility() {
   window.dispatchEvent(new CustomEvent('copal-appearance-ready'));
 }
 async function saveEntryVisibility() {
-  const response = await fetch(`/api/prefs/${ENTRY_VIS_KEY}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: state.entryVisibility }) });
+  const value = { ...state.entryVisibility };
+  const response = await fetch(`/api/prefs/${ENTRY_VIS_KEY}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }) });
   if (!response.ok) throw new Error(`Appearance preference failed (${response.status})`);
 }
 function applyEntryVisibility() {
   const map = state.entryVisibility || defaultEntryVisibility();
+  const journalRow = document.querySelector('[data-copal-journal-row]');
+  if (journalRow) journalRow.hidden = map.journal === false;
   document.querySelectorAll('[data-copal-view], [data-copal-launcher]').forEach((link) => {
     const view = link.dataset.copalView || link.dataset.copalLauncher;
+    if (view === 'imps') { link.style.display = 'none'; return; }
     if (!COPAL_LAUNCHER_IDS.includes(view)) return;
     link.style.display = link.dataset.copalCompat === 'true' ? 'none' : map[view] === false ? 'none' : '';
   });
 }
-function openCopalAppearance() {
-  if (!window.settingsModule?.open) throw new Error('Appearance settings are still loading');
-  window.settingsModule.open('appearance');
-}
-
 export function getAppearanceEntries() { return COPAL_LAUNCHER_IDS.map((id) => ({ id, label: LAUNCHER_LABELS[id] || id })); }
 export function getEntryVisibility() { return state.entryVisibility ? { ...state.entryVisibility } : null; }
 export async function updateEntryVisibility(id, visible) {
-  if (!COPAL_LAUNCHER_IDS.includes(id) || !state.entryVisibility) throw new Error('Copal Appearance is not ready');
+  if (!COPAL_LAUNCHER_IDS.includes(id) || !state.entryVisibility) throw new Error('Copal navigation is unavailable. Reopen Appearance to retry.');
   const previous = { ...state.entryVisibility };
   state.entryVisibility = { ...previous, [id]: visible === true };
   try { await saveEntryVisibility(); applyEntryVisibility(); return { ...state.entryVisibility }; }
   catch (error) { state.entryVisibility = previous; applyEntryVisibility(); throw error; }
 }
 async function replaceEntryVisibility(map) {
-  if (!state.entryVisibility) throw new Error('Copal Appearance is not ready');
+  if (!state.entryVisibility) throw new Error('Copal navigation is unavailable. Reopen Appearance to retry.');
   const previous = { ...state.entryVisibility };
   state.entryVisibility = map;
   try { await saveEntryVisibility(); applyEntryVisibility(); return { ...state.entryVisibility }; }
@@ -3518,15 +4947,59 @@ export function setAllEntryVisibility(visible) {
   return replaceEntryVisibility(Object.fromEntries(COPAL_LAUNCHER_IDS.map((id) => [id, visible === true])));
 }
 export function resetEntryVisibility() { return replaceEntryVisibility(defaultEntryVisibility()); }
-export function whenReady() {
-  if (state.entryVisibilityError) return Promise.reject(state.entryVisibilityError);
-  if (state.storageNamespace && state.entryVisibility !== null) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const onReady = () => {
-      if (state.entryVisibilityError) reject(state.entryVisibilityError);
-      else resolve();
-    };
-    window.addEventListener('copal-appearance-ready', onReady, { once: true });
+export async function whenReady() {
+  if (!state.storageNamespace) await init(state.api || window.location.origin);
+  if (!state.storageNamespace) throw new Error('Copal navigation is unavailable. Reopen Appearance to retry.');
+  const scope = saveScope();
+  if (state.entryVisibility === null) await loadEntryVisibility();
+  if (!sameSaveScope(scope, saveScope())) throw new Error('The active account changed.');
+  if (state.entryVisibilityError) throw state.entryVisibilityError;
+  if (!state.entryVisibility) throw new Error('Copal navigation is unavailable. Reopen Appearance to retry.');
+}
+
+function acceptJournalCatalog(catalog) {
+  if (catalog?.accountId !== state.accountId || !Array.isArray(catalog.configuredIds) || !catalog.descriptors ||
+      catalog.revision < state.journalCatalog?.revision) return false;
+  state.journalCatalog = catalog;
+  return true;
+}
+
+async function openConfiguredJournal(binderId) {
+  const scope = saveScope();
+  const opening = open('notes');
+  const ticket = editorNavigationTicket;
+  await opening;
+  const context = state.windows.get('notes');
+  const current = () => context?.window.visible && state.view === 'notes'
+    && sameSaveScope(scope, saveScope()) && ticket === editorNavigationTicket;
+  if (!current()) return false;
+  try {
+    const catalog = await filesFacadeClient.binders();
+    if (!current() || catalog.accountId !== scope.accountId || !acceptJournalCatalog(catalog)) return false;
+    const descriptor = catalog.descriptors[binderId ?? catalog.defaultId];
+    if (!descriptor?.enabled) throw new Error(binderId
+      ? 'This Journal is no longer available. Refresh Manage journals and try again.'
+      : 'Choose a default Journal in Manage journals.');
+    if (descriptor.source.workspaceId !== scope.workspace) throw new Error('This Journal belongs to a different workspace.');
+    const { homeDocumentId } = await filesFacadeClient.resolveBinder(descriptor.id, catalog.revision, descriptor, {openHome:true});
+    if (!current()) return false;
+    if (homeDocumentId && !state.docs.some(doc => doc.id === homeDocumentId)) await loadDocuments(false);
+    return current() && notesFeature.showJournal({ accountId:catalog.accountId, workspace:scope.workspace,
+      catalogRevision:catalog.revision, descriptor }, homeDocumentId);
+  } catch (error) {
+    if (current()) throw error;
+    return false;
+  }
+}
+
+export async function manageJournals() {
+  const origin = saveScope();
+  const { openJournalManager } = await import('./copal/journalManager.js');
+  if (!sameSaveScope(origin, saveScope())) return null;
+  return openJournalManager({
+    getScope:() => ({ accountId:state.accountId, workspace:state.workspace, generation:state.contextEpoch }),
+    openJournal:openConfiguredJournal,
+    onCatalogChanged:catalog => { if (acceptJournalCatalog(catalog)) notesFeature?.syncJournalCatalog(catalog); },
   });
 }
 
@@ -3534,73 +5007,102 @@ function bindSidebar() {
   state.navigationEvents?.abort();
   state.navigationEvents = new AbortController();
   const options = { signal:state.navigationEvents.signal };
+  window.addEventListener('popstate', () => {
+    void openResolvedRoute(resolveAppletLocation(location.pathname, location.search));
+  }, options);
   document.querySelectorAll('[data-copal-view]').forEach((link) => link.addEventListener('click', (event) => { event.preventDefault(); open(link.dataset.copalView); }, options));
   document.querySelectorAll('[data-copal-launcher="code"], [data-copal-launcher="files"]').forEach((link) => link.addEventListener('click', (event) => {
     if (link.tagName === 'A') return;
     event.preventDefault(); window.location.href = link.dataset.copalLauncher === 'code' ? '/code' : '/files';
   }, options));
-  document.getElementById('copal-appearance-btn')?.addEventListener('click', (event) => { event.preventDefault(); openCopalAppearance(); }, options);
-  document.getElementById('rail-copal')?.addEventListener('click', () => {
-    const view = resolveView(localStorage.getItem(copalStorageKey('odysseus-copal-view')) || 'notes'); const context = ensureViewWindow(view);
-    context.window.visible ? close(view) : open(view);
+  document.querySelector('[data-copal-launcher="journal"]')?.addEventListener('click', async () => {
+    if (!state.storageNamespace) await init(state.api || window.location.origin);
+    if (!state.storageNamespace) { window.uiModule?.showError?.('Could not open the Journal. Select Journal to retry.'); return; }
+    void openConfiguredJournal().catch(error => window.uiModule?.showError?.(error.message || 'Could not open the Journal.'));
+  }, options);
+  document.querySelector('[data-copal-journal-manager]')?.addEventListener('click', async () => {
+    if (!state.storageNamespace) await init(state.api || window.location.origin);
+    if (!state.storageNamespace) { window.uiModule?.showError?.('Journal settings are unavailable. Select Manage journals to retry.'); return; }
+    void manageJournals().catch(error => window.uiModule?.showError?.(error.message || 'Could not open Manage journals.'));
+  }, options);
+  document.getElementById('tool-instruction-manual-btn')?.addEventListener('click', async () => {
+    if (!state.storageNamespace) await init(state.api || window.location.origin);
+    const scope = saveScope();
+    try {
+      const opened = await openClankHandbook({ presentation:'copal' });
+      if (!opened && sameSaveScope(scope, saveScope())) throw new Error('The Instruction Manual is unavailable.');
+    } catch (error) {
+      if (sameSaveScope(scope, saveScope())) window.uiModule?.showError?.(error.message || 'Could not open the Instruction Manual.');
+    }
   }, options);
 }
 
-function connectEvents() {
+function connectEvents(reconnecting = false) {
   const scope = saveScope();
   state.events?.close();
-  state.events = new EventSource(`${state.api}/api/copal/events?workspace=${encodeURIComponent(state.workspace)}`);
-  // The mutating client refreshes its own document directly. Ignore the
-  // matching SSE echo so it cannot overwrite save/conflict feedback. If a
-  // different writer publishes during that short suppression window, queue
-  // the refresh instead of dropping the notification; this keeps direct
-  // Clanker/API writes visible in an already-open Timeline.
-  const refresh = (event) => {
-    if (!sameSaveScope(scope, saveScope())) return;
-    const deferred = state.ignoreEventsUntil - Date.now();
-    if (deferred > 0) {
-      clearTimeout(state.reloadTimer);
-      state.reloadTimer = setTimeout(() => refresh(event), deferred + 20);
-      return;
-    }
+  const source = new EventSource(`${state.api}/api/copal/events?workspace=${encodeURIComponent(scope.workspace)}`);
+  state.events = source;
+  const current = () => state.events === source && sameSaveScope(scope, saveScope());
+  const changed = new Set();
+  let refreshAll = false;
+  let reconnectTimer;
+  // The mutating client refreshes directly. Cache event IDs through its
+  // suppression window, then read the index once for the whole batch.
+  const scheduleRefresh = () => {
+    if (!current()) return;
     clearTimeout(state.reloadTimer);
+    const deferred = Math.max(0, state.ignoreEventsUntil - Date.now());
     state.reloadTimer = setTimeout(() => {
-      if (!sameSaveScope(scope, saveScope())) return;
-      if (![...state.windows.values()].some((context) => context.window.visible)) return;
-      // D1: Scoped invalidation — check if changed doc is a Base source
-      let docId = null;
-      try { const data = JSON.parse(event?.data || '{}'); docId = data.id || data.documentId; } catch { /* full reload */ }
-      // Editor leaves keep their own retained DOM and query controller. Load
-      // the newest document envelope, then invalidate only mounted sheets
-      // whose Base or visible source row is affected. This preserves each
-      // leaf's view, selection, and scroll state while ensuring a watch echo
-      // cannot leave a stale query cache behind.
-      if (docId && typeof notesFeature?.invalidateBaseLeaves === 'function') {
-        loadDocuments(false).then(async () => {
-          if (!sameSaveScope(scope, saveScope())) return;
-          const refreshed = await notesFeature.invalidateBaseLeaves(docId);
-          if (!refreshed) loadDocuments();
-        });
-        return;
-      }
-      if (state.view === 'bases' && docId && state.baseSourceDocs.size > 0) {
-        const affected = [];
-        for (const [baseId, sources] of state.baseSourceDocs) {
-          if (sources.has(docId) || baseId === docId) affected.push(baseId);
-        }
-        if (affected.length === 0) return; // not a source for any visible Base
-        // Full document reload (needed for other views + selection context) then scoped requery
-        loadDocuments().then(() => {
-          for (const baseId of affected) {
-            if (state.baseId === baseId) { renderBases(); break; }
-          }
-        });
-        return;
-      }
-      loadDocuments();
-    }, 120);
+      if (!current()) return;
+      if (Date.now() < state.ignoreEventsUntil) { scheduleRefresh(); return; }
+      const watched = refreshAll ? [null] : [...changed];
+      changed.clear(); refreshAll = false;
+      const visible = visibleViewEntries().some(([view]) => view !== 'graph' || getGraphView().mode !== 'code');
+      if (!visible) { state.sourceRefreshPending = true; return; }
+      void loadDocuments(true, watched);
+    }, Math.max(120, deferred + 20));
   };
-  state.events.addEventListener('document', refresh); state.events.addEventListener('deleted', refresh);
+  const refresh = (event) => {
+    let docId;
+    try {
+      const payload = JSON.parse(event.data);
+      docId = payload.id || payload.documentId;
+    } catch { /* A notification without a usable ID invalidates all Base leaves. */ }
+    if (docId) changed.add(docId); else refreshAll = true;
+    scheduleRefresh();
+  };
+  source.addEventListener('document', refresh);
+  source.addEventListener('deleted', refresh);
+  source.addEventListener('ready', () => {
+    if (!current() || (!reconnecting && !state.documentLoadError && !state.planningLoadError)) return;
+    reconnecting = false;
+    refreshAll = true;
+    scheduleRefresh();
+  });
+  // A reset can refuse EventSource's own reconnect with an HTTP error.
+  source.onerror = () => {
+    if (!current()) return;
+    reconnecting = true;
+    if (source.readyState !== EventSource.CLOSED) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(async () => {
+      if (!current()) return;
+      // EventSource does not expose the HTTP rejection. Recheck the owner
+      // before a retry, including a logout that left the stream closed.
+      try {
+        const status = await api('/status', { signal:AbortSignal.timeout(3000) }, scope.workspace);
+        if (!current()) return;
+        if (status?.storage_namespace !== scope.storageNamespace || (status?.account_id || null) !== scope.accountId) {
+          retireCopalScope();
+          return;
+        }
+      } catch (error) {
+        if (!current()) return;
+        if (isCopalAuthorityFailure(error)) { retireCopalScope(); return; }
+      }
+      if (current()) connectEvents(true);
+    }, 5000);
+  };
 }
 
 function suspendCopalScope() {
@@ -3610,7 +5112,7 @@ function suspendCopalScope() {
   notesFeature?.suspendScope();
   wikiFeature?.suspendScope();
   planningFeature?.suspendScope?.();
-  treeHouse.suspendScope();
+  treeHouse?.suspendScope();
   state.events?.close(); state.events = null;
   state.navigationEvents?.abort(); state.navigationEvents = null;
   state.filesMutationEvents?.abort(); state.filesMutationEvents = null;
@@ -3618,15 +5120,23 @@ function suspendCopalScope() {
   for (const timer of state.saveTimers.values()) clearTimeout(timer);
   state.saveTimers.clear();
   for (const context of state.windows.values()) {
-    context.window.body?.querySelector('.copal-graph-wrap')?._copalDestroy?.();
+    context.graphMode?.graphMenu.dispose();
+    context.graphMode?.window.body.querySelector('.copal-graph-wrap')?._copalDestroy?.();
     context.window.destroy();
   }
   state.windows.clear();
+  pendingDocumentLoad = null;
+  entryVisibilityLoad = null;
+  codeGraphController?.dispose();
+  codeGraphController = null;
+  codeGraphSelection = null;
   for (const dialog of document.querySelectorAll('dialog.copal-dialog')) { dialog.close(); dialog.remove(); }
   for (const editor of state.noteEditors) editor.destroy();
   state.noteEditors.clear();
   Object.assign(state, {
     storageNamespace:null, accountId:null, workspace:'default', view:'notes', docs:[],
+    documentWriteVersion:0, documentWriteVersions:new Map(), journalCatalog:null,
+    documentsLoaded:false, planningLoaded:false, documentLoadError:null, planningLoadError:null, sourceRefreshPending:false,
     planning:{ tracks:[], floatingTodos:[] }, taskProjection:[], taskProjectionLoaded:false, taskCursor:null, taskSnapshotRevision:null, taskProjectionTotal:null, taskIndexedTotal:null, taskMatchedTotal:null, taskTotalExact:false, taskLoading:false, taskQuery:{ query:'', completed:null, source:'all', sourceFilter:'all', statusFilter:'all', hideDone:false }, taskQueryToken:state.taskQueryToken + 1, taskSelectedId:null, selected:null, filter:'', reading:false,
     root:null, content:null, body:null, title:null, status:null, search:null,
     calendarMonth:null, projectedPlanningHead:null, projectingPlanning:null, ignoreEventsUntil:0,
@@ -3635,17 +5145,47 @@ function suspendCopalScope() {
     entryVisibility:null, entryVisibilityError:null,
     filesMutationBridgeInstallations:0,
   });
+  graphRenderTicket += 1;
   graphView = null; graphScopeKey = null;
 }
 
+function retireCopalScope() {
+  state.contextEpoch += 1;
+  copalInitialization = null;
+  suspendCopalScope();
+  bindSidebar();
+}
+
+function handleCopalAccountChange(event) {
+  const account = event.detail?.accountId || null;
+  if (account && account === state.accountId) return;
+  const previous = expectedCopalAccount;
+  expectedCopalAccount = account;
+  if (!state.storageNamespace && previous === null) return;
+  retireCopalScope();
+  if (account) void init(state.api || window.location.origin);
+}
+
+document.addEventListener('openclank:auth-context-changed', handleCopalAccountChange);
+window.addEventListener('openclank:auth-context-changed', handleCopalAccountChange);
+window.addEventListener('online', () => {
+  if (!state.storageNamespace && state.api) void init(state.api);
+});
+
 export function init(apiBase = window.location.origin) {
-  copalInitialization=initializeCopal(apiBase);
-  return copalInitialization;
+  if (copalInitialization) return copalInitialization;
+  if (state.storageNamespace && state.api === apiBase) return Promise.resolve();
+  const pending = initializeCopal(apiBase).finally(() => {
+    if (copalInitialization === pending) copalInitialization = null;
+  });
+  copalInitialization = pending;
+  return pending;
 }
 
 async function initializeCopal(apiBase) {
   suspendCopalScope();
   const epoch = ++state.contextEpoch;
+  bindSidebar();
   const initialNavigationTicket=editorNavigationTicket;
   // Context-menu object actions resolve against the same production command
   // owners as visible buttons and keyboard actions. The menu captures a
@@ -3660,17 +5200,22 @@ async function initializeCopal(apiBase) {
       if (epoch !== state.contextEpoch) return;
       const retryable = !error.status || error.status >= 500;
       if (!retryable || attempt === 2) {
-        console.error('[copal] refused to initialize without an authenticated storage scope', error);
+        console.error('[copal] could not load the authenticated storage scope', error);
+        if (initialNavigationTicket === editorNavigationTicket && resolveAppletLocation(location.pathname, location.search)?.target === 'editor') {
+          window.uiModule?.showError?.('Could not open this applet. Open it again to retry.');
+        }
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+      if (epoch !== state.contextEpoch) return;
     }
   }
-  if (epoch !== state.contextEpoch) return;
+  if (epoch !== state.contextEpoch || (expectedCopalAccount && status?.account_id !== expectedCopalAccount)) return;
+  if (typeof status?.storage_namespace !== 'string' || !status.storage_namespace.trim()) return;
   configureCopalStorage(status.storage_namespace);
   state.storageNamespace = status.storage_namespace;
   state.accountId = status.account_id || null;
-  state.workspace = localStorage.getItem(copalStorageKey('odysseus-copal-workspace')) || 'default';
+  state.workspace = localStorage.getItem(copalStorageKey('openclank-copal-workspace')) || 'default';
   // Standalone Copal surfaces (Files, deep links, future providers) can
   // follow the active logical workspace without reading Copal's private
   // storage namespace or treating it as host filesystem authority.
@@ -3688,30 +5233,11 @@ async function initializeCopal(apiBase) {
     if (!window.openClankSpelling) createSpellingService(undefined, { scope:spellingScope, locale });
   }
   planningFeature.loadState(state.workspace);
-  treeHouse.loadState();
-  buildWorkspace(); bindSidebar(); connectEvents();
-  await loadEntryVisibility();
-  if (epoch !== state.contextEpoch) return;
-  applyEntryVisibility();
-  const _resolveEditorRoute = () => {
-    const resolved = resolveAppletLocation(location.pathname, location.search);
-    if (!resolved || resolved.target !== 'editor') return null;
-    const view = resolved.openBases ? 'bases'
-      : resolved.mode === 'mind' ? 'mind'
-      : resolved.mode === 'galaxy' ? 'galaxy'
-      : (resolved.view || 'notes');
-    return resolveView(view, resolved.mode);
-  };
-  window.addEventListener('popstate', () => {
-    const view = _resolveEditorRoute();
-    if (!view) return;
-    const context = ensureViewWindow(view);
-    context.selected = new URLSearchParams(location.search).get('doc'); open(view, false);
-  }, { signal:state.navigationEvents.signal });
-  {
-    const view = _resolveEditorRoute();
-    // A route/action queued during scoped initialization owns the next open.
-    if (view && initialNavigationTicket===editorNavigationTicket) { ensureViewWindow(view).selected = new URLSearchParams(location.search).get('doc'); open(view, false); }
+  treeHouse?.loadState();
+  connectEvents();
+  // A launcher queued during scoped initialization owns the next open.
+  if (initialNavigationTicket === editorNavigationTicket) {
+    void openResolvedRoute(resolveAppletLocation(location.pathname, location.search));
   }
 }
 
@@ -3727,16 +5253,133 @@ export function updateNotesSettings(patch = {}) {
   return notesFeature?.updateSettings(patch) || {};
 }
 
-/** Open one Copal note through an owner-bound opaque Files ref. */
+/** Create an unbound image in the current authenticated Editor scope. */
+export async function openBlankImage(options = {}) {
+  const scope=Object.freeze({...saveScope()});
+  if (!scope.accountId || !scope.storageNamespace) throw new Error('Image Editor account authority is unavailable.');
+  const opening=open('notes',false), ticket=editorNavigationTicket; await opening;
+  if (!sameSaveScope(scope,saveScope()) || ticket!==editorNavigationTicket || state.view!=='notes' || (options.isCurrent && !options.isCurrent())) throw new Error('The originating account or Editor view changed.');
+  if (!notesFeature?.openBlankImage) throw new Error('Blank image Editor is unavailable.');
+  return notesFeature.openBlankImage({name:options.name,presetSize:options.presetSize});
+}
+
+export async function openRetainedHostImage(resourceRef,{expectedRevision,isCurrent=()=>true}={}) {
+  const scope=Object.freeze({...saveScope()});
+  if (!scope.accountId || !scope.storageNamespace || !isCurrent() ||
+      expectedRevision?.kind !== 'hostFingerprint' || typeof resourceRef !== 'string' || !resourceRef) throw new Error('Saved image authority is unavailable.');
+  const opening=open('notes',false), ticket=editorNavigationTicket;
+  await opening;
+  const current=()=>sameSaveScope(scope,saveScope()) && ticket === editorNavigationTicket && state.view === 'notes' && isCurrent();
+  if (!current() || !notesFeature?.openRetainedHostImage) throw new Error('The original account or Editor view changed.');
+  return notesFeature.openRetainedHostImage(resourceRef,expectedRevision,current);
+}
+
+export async function openPendingAttachment(file,isCurrent,provenance) {
+  const scope=Object.freeze({...saveScope()});
+  if (!scope.accountId || !scope.storageNamespace || typeof isCurrent!=='function' || !isCurrent()) throw new Error('Attachment Editor authority is unavailable.');
+  const opening=open('notes',false), ticket=editorNavigationTicket; await opening;
+  if (!sameSaveScope(scope,saveScope()) || ticket!==editorNavigationTicket || state.view!=='notes' || !isCurrent()) throw new Error('The originating attachment changed.');
+  return notesFeature.openPendingAttachment(file,isCurrent,provenance);
+}
+
+/** Create one blank image and deliver a captured Files gesture to its exact view. */
+export async function openFilesImageInBlank(handoff) {
+  const scope=Object.freeze({...saveScope()});
+  if (!scope.accountId || !scope.storageNamespace || typeof handoff?.getContext !== 'function' || handoff?.context?.owner!==scope.accountId || handoff?.context?.workspace!==String(scope.workspace || 'default')) throw new Error('Files image handoff authority is unavailable.');
+  const opening=open('notes',false), ticket=editorNavigationTicket; await opening;
+  if (!sameSaveScope(scope,saveScope()) || ticket!==editorNavigationTicket || state.view!=='notes') throw new Error('The originating account or Editor view changed.');
+  if (!notesFeature?.openFilesCanvasHandoff) throw new Error('Canvas image import is unavailable.');
+  return notesFeature.openFilesCanvasHandoff(handoff);
+}
+
+/** Admit an exact Files image into the existing owner-scoped Editor workspace. */
+export async function openImageResource(resourceRef, options = {}) {
+  const externalCurrent=typeof options.isCurrent === 'function' ? options.isCurrent : () => true;
+  return openScopedImageRef(resourceRef, {
+    captureScope:saveScope, sameScope:sameSaveScope, expectedRevision:options.expectedRevision || null,
+    activateEditor:async () => { const opening=open('notes',false), ticket=editorNavigationTicket; await opening; return ticket; },
+    navigationCurrent:ticket => externalCurrent() && ticket===editorNavigationTicket && state.view==='notes',
+    openImage:(ref,guard) => { if (!notesFeature?.openResourceRef) throw new Error('Image Editor exact-open is unavailable.'); return notesFeature.openResourceRef({resourceRef:ref,...guard}); },
+  });
+}
+
+/** Open one journal page through an owner-bound opaque Files ref. */
+export async function openSharedText({publicationID, name = 'Shared text', isCurrent = () => true} = {}) {
+  const scope=saveScope(), ticket=++editorNavigationTicket;
+  const current=()=>sameSaveScope(scope,saveScope()) && isCurrent();
+  if (!scope.accountId || !current()) throw new Error('Shared text authority unavailable.');
+  const makeClient=(format)=>createSharedTextClient({accountID:scope.accountId,publicationID,format,
+    getScope:()=>current()?{accountID:scope.accountId,publicationID,epoch:scope.epoch}:null,
+    exchange:async(phase,body)=>{
+      const response=await fetch(`/api/files-v1/shared-${format==='workbook'?'workbook':format==='slides'?'slides':'text'}/${phase}`,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      if (!response.ok) throw new Error('Shared resource unavailable.');
+      return response.json();
+    }});
+  let client=makeClient('text'), data=await client.read(), format='text';
+  if (!current() || ticket!==editorNavigationTicket) return null;
+  let workbook=false;try{parseWorkbook(data.text);workbook=true}catch{}
+  if(workbook){
+    const prior=data;client=makeClient('workbook');data=await client.read();
+    if (!current() || ticket!==editorNavigationTicket) return null;
+    if(data.resource_id!==prior.resource_id || data.role!==prior.role)throw Error('Shared workbook changed.');
+    parseWorkbook(data.text);format='workbook';
+  } else {
+    let slides=false;try{parseSlideDeck(data.text);slides=true}catch{}
+    if(slides){const prior=data;client=makeClient('slides');data=await client.read();
+      if(!current()||ticket!==editorNavigationTicket)return null;
+      if(data.resource_id!==prior.resource_id||data.role!==prior.role)throw Error('Shared slides changed.');
+      parseSlideDeck(data.text);format='slides';}
+  }
+  const handle=sharedTextHandle({accountID:scope.accountId,publicationID,resourceID:data.resource_id,revision:data.revision,name,role:data.role});
+  const adapter=data.role==='editor'?createSharedTextSaveAdapter({client,publicationID,initialText:data.text,initialRevision:data.revision,role:data.role,format}):null;
+  const opening=open('notes',false), navigationTicket=editorNavigationTicket;
+  await opening;
+  if (!current() || navigationTicket!==editorNavigationTicket || state.view!=='notes' || !notesFeature?.openSharedText) return null;
+  history.pushState({copal:'notes'},'',appletPath('editor'));
+  const shared={adapter,isCurrent:current,format,publicationID,role:data.role};
+  const opened=notesFeature.openSharedText(handle,{name,text:data.text},shared), id=opened.id;
+  if (opened.shared!==shared) return id;
+  const openedContext=state.windows.get('notes');
+  openSharedTextStream({publicationID,isCurrent:()=>current() && Boolean(openedContext?.window?.body?.isConnected),readCurrent:()=>client.read(),onSnapshot:fresh=>{
+    if (fresh.resource_id!==data.resource_id || fresh.role!==data.role || !current()) return;
+    notesFeature.acceptSharedSnapshot(id,shared,fresh);
+  }});
+  return id;
+}
+
+/** Read a named shared image through its existing publication authority. */
+export async function openSharedImage({publicationID, name='Shared image', isCurrent=()=>true}={}) {
+  const scope=saveScope(), ticket=++editorNavigationTicket;
+  const current=()=>sameSaveScope(scope,saveScope()) && isCurrent();
+  if(!scope.accountId || !current()) throw Error('Shared image unavailable.');
+  const response=await fetch('/api/files-v1/shared-image/read',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:1,publication_id:publicationID})});
+  if(!response.ok || !current() || ticket!==editorNavigationTicket) throw Error('Shared image unavailable.');
+  const data=await response.json();
+  if(!current() || ticket!==editorNavigationTicket) return null;
+  const opening=open('notes',false), navigationTicket=editorNavigationTicket; await opening;
+  if(!current() || navigationTicket!==editorNavigationTicket || state.view!=='notes') return null;
+  const owner=state.windows.get('notes');
+  const {openSharedImageFeedback}=await import('./editor/sharedImageFeedback.js');
+  return openSharedImageFeedback({data,name,publicationID,isCurrent:()=>current() && Boolean(owner?.window?.body?.isConnected)});
+}
+
 export async function openResource(resourceRef, options = {}) {
   const guarded = typeof options.isCurrent === 'function' || typeof options.handoffCurrent === 'function';
   const isCurrent = options.isCurrent || (() => true), handoffCurrent = options.handoffCurrent || (() => true);
   if (!isCurrent()) return null;
+  const {sourceLine,sourceRange} = options;
+  const anchored = sourceLine !== undefined || sourceRange !== undefined;
+  if (anchored && (options.expectedRevision?.kind !== 'hostFingerprint' || !guarded ||
+      sourceLine !== undefined && (!Number.isSafeInteger(sourceLine) || sourceLine < 1) ||
+      sourceRange !== undefined && (!sourceRange || !Number.isSafeInteger(sourceRange.startByte) ||
+        !Number.isSafeInteger(sourceRange.endByte) || sourceRange.startByte < 0 || sourceRange.endByte <= sourceRange.startByte))) {
+    throw new Error('A captured Host revision and valid source location are required.');
+  }
   const requestTicket = ++editorNavigationTicket;
   const scope = saveScope();
-  const response = await filesFacadeClient.openResource(resourceRef);
+  const response = await filesFacadeClient.openResource(resourceRef, { expectedRevision:options.expectedRevision || null, purpose:options.purpose || null });
   if (guarded && (!isCurrent() || requestTicket !== editorNavigationTicket)) return null;
-  if (!sameSaveScope(scope, saveScope())) throw new Error('The active Copal account changed. Open the file again.');
+  if (!sameSaveScope(scope, saveScope())) throw new Error('The active account changed. Open the file again.');
   if (!response?.resource?.ref || !response?.payload) {
     throw new Error('This Files resource cannot be opened in Editor');
   }
@@ -3744,8 +5387,37 @@ export async function openResource(resourceRef, options = {}) {
   // before entering the shared workspace so a rotating ref can never become a
   // buffer identity and a filename suffix cannot choose presentation mode.
   const payload = response.payload;
+  if (response.target?.app === 'editor' && response.resource.provider === 'host' && payload.kind === 'host-image' && !anchored) {
+    return openRetainedHostImage(response.resource.ref, {
+      expectedRevision:response.resource.revision,
+      isCurrent:() => sameSaveScope(scope, saveScope()) && isCurrent() && handoffCurrent(),
+    });
+  }
   const resource = normalizeResourceHandle(payload.resource);
+  if (options.expectedRevision?.kind === 'copalHead' && (resource.key.provider !== 'copal' ||
+      resource.key.resourceId !== response.resource.id || resource.revision.kind !== 'copalHead' ||
+      resource.revision.value !== options.expectedRevision.value)) {
+    throw new Error('The captured Journal revision has changed.');
+  }
+  if (anchored && (resource.key.provider !== 'host' ||
+      resource.revision.kind !== options.expectedRevision.kind || resource.revision.value !== options.expectedRevision.value)) {
+    throw new Error('The captured match revision has changed.');
+  }
   const snapshotText = String(payload.text ?? payload.content ?? '');
+  let sourceSelection;
+  if (sourceRange !== undefined) {
+    // The editor consumes UTF-16 offsets after line ending normalization. Only
+    // convert when the actual decoded file payload matches the captured bytes.
+    const bytes = new TextEncoder().encode(snapshotText);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    if (!isCurrent() || !sameSaveScope(scope, saveScope()) || requestTicket !== editorNavigationTicket) return null;
+    const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2,'0')).join('');
+    if (options.expectedRevision.value !== `sha256:${hash}:${bytes.length}` || sourceRange.endByte > bytes.length)
+      throw new Error('The captured source bytes have changed.');
+    const lengthAt = offset => new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes.subarray(0,offset)).replace(/\r\n?|\n/g,'\n').length;
+    sourceSelection = {from:lengthAt(sourceRange.startByte),to:lengthAt(sourceRange.endByte)};
+    if (sourceSelection.from >= sourceSelection.to) throw new Error('The captured source selection cannot be shown.');
+  }
   const snapshot = snapshotEnvelope({
     key:resource.key,
     expectedRevision:resource.revision,
@@ -3758,6 +5430,11 @@ export async function openResource(resourceRef, options = {}) {
   const navigationTicket = editorNavigationTicket;
   await opening;
   if (!sameSaveScope(scope, saveScope()) || (guarded && (navigationTicket !== editorNavigationTicket || !handoffCurrent() || state.view !== 'notes'))) return null;
+  if (resource.key.provider === 'copal' && !state.docs.some(doc =>
+      sameResourceKey(doc.resource?.key, resource.key) && doc.resource.revision?.value === resource.revision.value)) {
+    await loadDocuments(false);
+    if (!sameSaveScope(scope, saveScope()) || (guarded && (navigationTicket !== editorNavigationTicket || !handoffCurrent() || state.view !== 'notes'))) return null;
+  }
   history.pushState({ copal:'notes' }, '', appletPath('editor'));
   // Install the Files mutation bridge before opening the shared buffer. The
   // notes feature returns its active resource immediately, so a listener
@@ -3765,13 +5442,22 @@ export async function openResource(resourceRef, options = {}) {
   installFilesMutationBridge();
   if (notesFeature?.openResource) {
     return notesFeature.openResource(resource, {
-      ...payload,
+      ...payload, openedFilesResource:response.resource,
+      recordingJobHint: guarded && response.resource?.format?.formatId === 'video' && /^[a-f0-9]{32}$/.test(String(options.recordingJobHint || '')) ? options.recordingJobHint : null,
+      recordingEvidence:guarded && response.resource?.format?.formatId === 'video' && options.recordingEvidence?.resourceRef === resourceRef &&
+        options.recordingEvidence.revision?.kind === resource.revision.kind && options.recordingEvidence.revision?.value === resource.revision.value ? options.recordingEvidence : null,
       name:String(payload.name || response.resource.name || resource.locator.displayName || 'Untitled'),
       text:snapshot.envelope.text,
+      ...(anchored ? {
+        matchedSourceLine: sourceLine,
+        matchedSourceRange: sourceSelection,
+        matchedSourceCurrent: () => handoffCurrent() && navigationTicket === editorNavigationTicket && sameSaveScope(scope, saveScope()),
+      } : {}),
       snapshot,
       resourceRef,
   });
 }
+  if (anchored) throw new Error('The captured match requires the Editor source view.');
   const existing = state.docs.find((doc) => sameResourceKey(doc.resource?.key, resource.key));
   if (existing) { notesFeature.open(existing.id); return existing.id; }
   const id = `resource:${resource.key.provider}:${resource.key.resourceId}`;
@@ -3794,7 +5480,7 @@ export function updateNotesPanel(id, patch = {}) { ensureViewWindow('notes'); re
 // contract. It never exposes drafts, owner identity, URLs, or user-authored
 // content. The most recently activated visible Copal window is state.view.
 export function getActiveAgentContext() {
-  const current = state.windows.get(state.view);
+  const current = getViewContext(state.view);
   if (!current?.window?.visible) {
     return { accountId: state.accountId || null, workspace: state.workspace || 'default', view: null, resourceKind: null, resourceId: null };
   }
@@ -3816,7 +5502,7 @@ export function getActiveAgentContext() {
 // Files' New file creates a canonical empty note, rather than pretending the
 // read-only Copal navigation projection implements arbitrary staged imports.
 export async function createFilesNote({ name, workspace, corpus = 'notes', actionId }) {
-  if (!actionId || !['notes', 'wiki'].includes(corpus)) throw new Error('Invalid Copal creation request.');
+  if (!actionId || !['notes', 'wiki'].includes(corpus)) throw new Error('Invalid document creation request.');
   const options = { method: 'POST', body: JSON.stringify({ name, kind: corpus === 'wiki' ? 'wiki' : 'note', corpus, content: '', actionId }) };
   let result;
   try { result = await api('/documents', options, workspace); }
@@ -3834,7 +5520,7 @@ export async function flushActiveAgentResource() {
   // through their existing explicit controls or are projections; the method is
   // intentionally awaited so Chat can add future editor flushers centrally.
   if (['notes', 'wiki'].includes(state.view)) {
-    const current = state.windows.get(state.view);
+    const current = getViewContext(state.view);
     if (current?.noteDrafts?.size || [...(current?.noteBuffers?.values() || [])].some(buffer => buffer.state().dirty)) {
       featureFor(state.view)?.persistRecovery?.();
       throw new Error('The Editor has unsaved changes. Save explicitly before sharing its saved document with the agent.');
@@ -3846,4 +5532,4 @@ export async function flushActiveAgentResource() {
 window.__odysseusGetActiveCopalContext = getActiveAgentContext;
 window.__odysseusFlushActiveCopalResource = flushActiveAgentResource;
 
-export default { init, open, close, openResource, openCodeGraphBinding, getNotesSettings, updateNotesSettings, customizeExplorer, getNotesPanels, updateNotesPanel, getFilesMutationBridgeInstallations, getActiveAgentContext, flushActiveAgentResource, whenReady, getAppearanceEntries, getEntryVisibility, updateEntryVisibility, setAllEntryVisibility, resetEntryVisibility };
+export default { init, open, openResolvedRoute, close, manageJournals, openResource, openImageResource, openBlankImage, openRetainedHostImage, openPendingAttachment, openFilesImageInBlank, openCodeGraphBinding, getNotesSettings, updateNotesSettings, customizeExplorer, getNotesPanels, updateNotesPanel, getFilesMutationBridgeInstallations, getActiveAgentContext, flushActiveAgentResource, whenReady, getAppearanceEntries, getEntryVisibility, updateEntryVisibility, setAllEntryVisibility, resetEntryVisibility };

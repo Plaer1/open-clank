@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.request
 import uuid
 import zipfile
@@ -81,9 +82,10 @@ _SOURCE_EXCLUDED_DIRS = {
     ".cache",
     ".git",
     ".idea",
-    ".mimo-worktrees",
-    ".mimocde",
+    ".openclank-worktrees",
+    ".openclank",
     ".mimocode",
+    ".mimo-worktrees",
     ".playwright-cli",
     ".scripts",
     ".serena",
@@ -107,6 +109,7 @@ _SOURCE_EXCLUDED_DIRS = {
     "ts-dist",
 }
 _SOURCE_EXCLUDED_DIR_PREFIXES = (
+    ".openclank-test-fixtures-",
     ".mimocode-test-fixtures-",
     "dist-",
 )
@@ -114,18 +117,30 @@ _SOURCE_EXCLUDED_RELATIVE_DIRS = {
     # These paths are explicitly generated/local in the vendored project's
     # ignore contract. Restrict them by relative path so similarly named real
     # source directories elsewhere remain admitted inputs.
+    # Retired pre-upgrade source; private/excluded runtime data stays untouched.
+    "packages/app",
+    "packages/console",
+    "packages/desktop",
+    "packages/enterprise",
+    "packages/function",
+    "packages/opencode",
+    "packages/script",
+    "packages/slack",
+    "packages/storybook",
+    "packages/ui",
+    "packages/web",
     "experiment",
     "mimoapi",
-    "packages/opencode/research",
-    "packages/opencode/src/ext",
+    "packages/cli/research",
+    "packages/cli/src/ext",
 }
 _SOURCE_EXCLUDED_FILES = {
     # The manifest pins this tree digest, so it must not hash itself. Its own
     # bytes are hashed separately into artifact provenance.
     VENDOR_MANIFEST_NAME,
-    "packages/opencode/src/ext/_manifest.ts",
-    "packages/opencode/src/provider/models-snapshot.d.ts",
-    "packages/opencode/src/provider/models-snapshot.js",
+    "packages/cli/src/ext/_manifest.ts",
+    "packages/cli/src/provider/models-snapshot.d.ts",
+    "packages/cli/src/provider/models-snapshot.js",
     "packages/sdk/js/openapi.json",
 }
 
@@ -144,11 +159,12 @@ def _source_file_excluded(relative: Path) -> bool:
     relative_text = relative.as_posix()
     if relative_text in _SOURCE_EXCLUDED_FILES:
         return True
-    # bundle.macro.ts embeds Markdown below each builtin skill directory;
-    # those are runtime instructions, while other Markdown stays documentation.
+    # Both runtime skill bundle macros embed Markdown.
+    # Other Markdown stays documentation.
     if relative.suffix.lower() == ".md":
         return not (
-            relative_text.startswith("packages/opencode/src/skill/builtin/.bundle/")
+            relative_text.startswith(("packages/cli/src/skill/builtin/.bundle/",
+                                      "packages/cli/src/skill/compose/.bundle/"))
             and len(relative.parts) >= 8
         )
     # Compiler, package, log, or process outputs are not build inputs.
@@ -161,7 +177,7 @@ def _source_file_excluded(relative: Path) -> bool:
     # opencode's build-* scripts are generated per target; build.ts is the
     # admitted source entrypoint and must remain fingerprinted.
     return (
-        relative.parent.as_posix() == "packages/opencode/script"
+        relative.parent.as_posix() == "packages/cli/script"
         and name.startswith("build-")
         and relative.suffix == ".ts"
     )
@@ -180,6 +196,8 @@ class EngineVerification:
     target: str | None
     source_sha256: str | None
     errors: tuple[str, ...] = ()
+    addon: Mapping[str, Any] | None = None
+    declared_addon: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -532,6 +550,7 @@ def resolve_installed_binary(install_root: Path | str | None = None) -> Path:
 
 def _validate_provenance_shape(provenance: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
+    v2 = type(provenance.get('schema_version')) is int and provenance.get('schema_version') == 2
     expected_top = {
         "schema_version",
         "product",
@@ -548,10 +567,12 @@ def _validate_provenance_shape(provenance: Mapping[str, Any]) -> list[str]:
         "managed_schema",
         "source",
     }
+    if v2:
+        expected_top.add('native_artifacts')
     if set(provenance) != expected_top:
         errors.append("provenance top-level fields are incompatible")
     expected_constants = {
-        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "schema_version": 2 if v2 else PROVENANCE_SCHEMA_VERSION,
         "product": "Open Clank",
         "artifact_kind": "managed-model-engine",
         "build_contract_version": 1,
@@ -598,6 +619,8 @@ def _validate_provenance_shape(provenance: Mapping[str, Any]) -> list[str]:
             "bun_lock_sha256",
             "model_catalog_sha256",
         }
+        if v2:
+            expected_inputs |= {'rust_toolchain_sha256','cargo_lock_sha256','gcf_source_sha256'}
         if set(inputs) != expected_inputs:
             errors.append("provenance input fields are incompatible")
         for field in expected_inputs:
@@ -632,6 +655,20 @@ def _validate_provenance_shape(provenance: Mapping[str, Any]) -> list[str]:
                 errors.append(f"provenance source {field} is invalid")
         if source.get("hash_algorithm") != "openclank-tree-sha256-v1":
             errors.append("provenance source hash algorithm is incompatible")
+    if v2:
+        native=provenance.get('native_artifacts')
+        if type(native) is not list or len(native)>1:
+            errors.append('native artifact list is incompatible')
+        elif native:
+            leaf=native[0]
+            if (type(leaf) is not dict or set(leaf)!={'path','target','napi','abi','codecVersion','sha256','size'}
+                or leaf.get('path')!='native/openclank-gcf.node' or leaf.get('target')!=target
+                or type(leaf.get('napi')) is not int or leaf.get('napi')!=6
+                or type(leaf.get('abi')) is not int or leaf.get('abi')!=1
+                or type(leaf.get('size')) is not int or not 0<leaf.get('size',0)<=268435456
+                or not _SHA256_RE.fullmatch(str(leaf.get('sha256','')))
+                or type(leaf.get('codecVersion')) is not str or not _VERSION_RE.fullmatch(leaf.get('codecVersion',''))):
+                errors.append('native artifact metadata is incompatible')
     return errors
 
 
@@ -795,6 +832,21 @@ def verify_install(
         if os.name != "nt" and not os.access(binary, os.X_OK):
             errors.append("managed engine binary is not executable")
 
+    addon = None
+    if not errors and provenance.get('schema_version') == 2 and provenance.get('native_artifacts'):
+        leaf=provenance['native_artifacts'][0]
+        try:
+            native_dir=artifact / 'native'
+            path=native_dir / 'openclank-gcf.node'
+            if native_dir.is_symlink() or path.is_symlink() or not path.is_file() or path.resolve().parent != native_dir.resolve():
+                raise EngineBuildError('native artifact path is invalid')
+            if path.stat().st_size != leaf['size'] or _sha256_file(path) != leaf['sha256']:
+                raise EngineBuildError('native artifact integrity mismatch')
+            addon={'version':1,'absolutePath':str(path.resolve()),'sha256':leaf['sha256'],'size':leaf['size'],
+                   'target':leaf['target'],'napi':6,'abi':1,'codecVersion':leaf['codecVersion']}
+        except (EngineBuildError,OSError) as exc:
+            errors.append(str(exc))
+
     if not errors and run_smoke and binary is not None:
         try:
             result = subprocess.run(
@@ -825,6 +877,8 @@ def verify_install(
         target=str(target) if target is not None else None,
         source_sha256=str(source_sha256) if source_sha256 is not None else None,
         errors=tuple(dict.fromkeys(errors)),
+        addon=addon if not errors else None,
+        declared_addon=provenance.get('schema_version') == 2,
     )
 
 
@@ -1006,10 +1060,12 @@ def _provenance_payload(
     target: str,
     source_sha256: str,
     binary: Path,
+    addon: Path | None = None,
+    gcf_root: Path | None = None,
 ) -> dict[str, Any]:
     vendor = manifest["vendor"]
     support_tier = "tier-1" if target in manifest["build"]["tier_1_targets"] else "experimental"
-    return {
+    payload = {
         "schema_version": PROVENANCE_SCHEMA_VERSION,
         "product": "Open Clank",
         "artifact_kind": "managed-model-engine",
@@ -1046,6 +1102,58 @@ def _provenance_payload(
     }
 
 
+    if addon is not None:
+        if gcf_root is None:
+            raise EngineBuildError("GCF source root is required")
+        try:
+            package = tomllib.loads((gcf_root / "Cargo.toml").read_text("utf-8"))
+            codec_version = package["package"]["version"]
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise EngineBuildError("invalid GCF package version") from exc
+        if not isinstance(codec_version, str) or not _VERSION_RE.fullmatch(codec_version):
+            raise EngineBuildError("invalid GCF codec version")
+        payload["schema_version"] = 2
+        payload["inputs"].update({
+            "rust_toolchain_sha256": _sha256_file(gcf_root / "rust-toolchain.toml"),
+            "cargo_lock_sha256": _sha256_file(gcf_root / "Cargo.lock"),
+            "gcf_source_sha256": source_fingerprint(gcf_root),
+        })
+        payload["native_artifacts"] = [{
+            "path": "native/openclank-gcf.node", "target": target,
+            "napi": 6, "abi": 1, "codecVersion": codec_version,
+            "sha256": _sha256_file(addon), "size": addon.stat().st_size,
+        }]
+    return payload
+
+
+def _build_gcf_addon(gcf_root: Path, target_dir: Path, cargo: Path, rustc: Path, cargo_home: Path) -> Path:
+    """Build only from an explicitly supplied pinned toolchain and offline cache."""
+    for executable, expected in ((cargo, "cargo 1.99.1"), (rustc, "rustc 1.99.1")):
+        if not executable.is_file():
+            raise EngineBuildError("explicit GCF toolchain executable is unavailable")
+        result = subprocess.run([str(executable), "--version"], capture_output=True, text=True, check=True)
+        if not result.stdout.strip().startswith(expected + " "):
+            raise EngineBuildError("GCF requires the pinned Rust 1.99.1 toolchain")
+    if not cargo_home.is_dir():
+        raise EngineBuildError("explicit GCF Cargo cache is unavailable")
+    try:
+        pin = tomllib.loads((gcf_root / "rust-toolchain.toml").read_text("utf-8"))
+    except (OSError, ValueError) as exc:
+        raise EngineBuildError("invalid GCF toolchain pin") from exc
+    if pin.get("toolchain", {}).get("channel") != "1.99.1":
+        raise EngineBuildError("GCF source toolchain pin is incompatible")
+    env = os.environ.copy()
+    for key in list(env):
+        if key in {"RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTUP_TOOLCHAIN", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET", "CARGO_BUILD_RUSTC", "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", "CARGO_TARGET_DIR"} or key.startswith("CARGO_TARGET_"):
+            env.pop(key, None)
+    env.update({"CARGO_HOME": str(cargo_home), "RUSTC": str(rustc)})
+    subprocess.run([str(cargo), "build", "--locked", "--offline", "--release", "--features", "node-addon", "--manifest-path", str(gcf_root / "Cargo.toml"), "--target-dir", str(target_dir)], cwd=gcf_root, env=env, check=True)
+    addon = target_dir / "release" / "libopenclank_gcf.so"
+    if addon.is_symlink() or not addon.is_file() or addon.stat().st_size == 0:
+        raise EngineBuildError("GCF build did not produce a regular nonempty addon")
+    return addon
+
+
 def _atomic_write(path: Path, payload: bytes, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -1078,10 +1186,18 @@ def _install_artifact(
     install_root: Path,
     built_binary: Path,
     provenance: Mapping[str, Any],
+    built_addon: Path | None = None,
 ) -> None:
     version = str(provenance["open_clank_version"])
     target = str(provenance["target"])
     source_prefix = str(provenance["inputs"]["source_sha256"])[:16]
+    if _validate_provenance_shape(provenance):
+        raise EngineBuildError('invalid artifact provenance')
+    leaves=provenance.get('native_artifacts', [])
+    if bool(leaves) != (built_addon is not None):
+        raise EngineBuildError('native artifact staging mismatch')
+    if provenance.get('schema_version') == 2:
+        source_prefix += '-' + hashlib.sha256(_canonical_json_bytes(provenance)).hexdigest()[:16]
     final = install_root / version / target / source_prefix
     staging_root = Path(tempfile.mkdtemp(prefix=".staging-", dir=install_root))
     staging = staging_root / "artifact"
@@ -1095,11 +1211,31 @@ def _install_artifact(
         # write access. Reopen the private copy without truncating its bytes.
         with staged_binary.open("r+b") as handle:
             os.fsync(handle.fileno())
+        if built_addon is not None:
+            if built_addon.is_symlink() or not built_addon.is_file():
+                raise EngineBuildError('native artifact source is invalid')
+            native=staging / 'native'; native.mkdir()
+            staged_addon=native / 'openclank-gcf.node'
+            shutil.copyfile(built_addon,staged_addon)
+            if staged_addon.stat().st_size != leaves[0]['size'] or _sha256_file(staged_addon) != leaves[0]['sha256']:
+                raise EngineBuildError('native artifact staging integrity mismatch')
+            with staged_addon.open('r+b') as handle: os.fsync(handle.fileno())
+            _fsync_directory(native)
         _atomic_write(staging / "provenance.json", _canonical_json_bytes(provenance))
         if final.exists():
             existing = final / "provenance.json"
             if not existing.is_file() or existing.read_bytes() != (staging / "provenance.json").read_bytes():
                 raise EngineBuildError("non-reproducible engine artifact for the same source fingerprint")
+            existing_binary=final / binary_name
+            if (existing_binary.is_symlink() or not existing_binary.is_file()
+                    or existing_binary.stat().st_size != provenance['binary']['size']
+                    or _sha256_file(existing_binary) != provenance['binary']['sha256']):
+                raise EngineBuildError('existing engine artifact integrity mismatch')
+            if leaves:
+                native=final / 'native'; leaf=native / 'openclank-gcf.node'
+                if (native.is_symlink() or leaf.is_symlink() or not leaf.is_file()
+                        or leaf.stat().st_size != leaves[0]['size'] or _sha256_file(leaf) != leaves[0]['sha256']):
+                    raise EngineBuildError('existing native artifact integrity mismatch')
         else:
             final.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staging, final)
@@ -1126,7 +1262,15 @@ def build_current(
     force: bool = False,
     acp_smoke: bool = True,
     target: str | None = None,
+    include_gcf: bool = False,
+    gcf_cargo: Path | str | None = None,
+    gcf_rustc: Path | str | None = None,
+    gcf_cargo_home: Path | str | None = None,
 ) -> EngineVerification:
+    if include_gcf and (install_root is None or not all((gcf_cargo, gcf_rustc, gcf_cargo_home))):
+        raise EngineBuildError("GCF build requires an explicit install root, Cargo, rustc and private Cargo cache")
+    if not include_gcf and any((gcf_cargo, gcf_rustc, gcf_cargo_home)):
+        raise EngineBuildError("GCF toolchain options require include_gcf")
     root = Path(repo_root or REPO_ROOT).resolve()
     destination = Path(install_root or default_install_root(root)).resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -1136,6 +1280,8 @@ def build_current(
     vendor_root = _vendor_root(root)
     source_sha256 = source_fingerprint(vendor_root)
     target = target or current_target()
+    if include_gcf and (target != "linux-x64" or current_target() != "linux-x64"):
+        raise EngineBuildError("optional GCF build is supported only on native linux-x64")
     if target not in TIER_1_TARGETS | EXPERIMENTAL_TARGETS:
         raise EngineBuildError(f"unsupported explicit engine target: {target}")
     if target.split("-", 1)[0] != current_target().split("-", 1)[0]:
@@ -1154,7 +1300,7 @@ def build_current(
             run_smoke=True,
             acp_smoke=acp_smoke,
         )
-        if existing.ok:
+        if existing.ok and (not include_gcf or existing.addon is not None):
             return existing
 
     # Keep the destination lock beside, rather than inside, the install root so
@@ -1173,7 +1319,7 @@ def build_current(
                 run_smoke=True,
                 acp_smoke=acp_smoke,
             )
-            if existing.ok:
+            if existing.ok and (not include_gcf or existing.addon is not None):
                 return existing
 
         bun = _ensure_bun(root, manifest, bun_executable, allow_download=allow_bun_download)
@@ -1193,24 +1339,24 @@ def build_current(
         environment.update({
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
-            "MIMOCODE_CHANNEL": "openclank",
-            "MIMOCODE_COMMIT_SHA": source_sha256[:12],
-            "MIMOCODE_VERSION": release_version,
+            "OPENCLANK_CHANNEL": "openclank",
+            "OPENCLANK_COMMIT_SHA": source_sha256[:12],
+            "OPENCLANK_VERSION": release_version,
             "SOURCE_DATE_EPOCH": str(manifest["build"]["source_date_epoch"]),
             "TZ": "UTC",
         })
-        environment.pop("MIMOCODE_RELEASE", None)
+        environment.pop("OPENCLANK_RELEASE", None)
         if os.name == "nt":
             # Start compilation with generated catalog files already present.
             # Resolving models-schema during in-process generation can leave
             # Windows Bun's compiler unaware of the newly created sibling.
             subprocess.run(
-                [str(bun), "run", "--cwd", "packages/opencode", "script/generate.ts"],
+                [str(bun), "run", "--cwd", "packages/cli", "script/generate.ts"],
                 cwd=vendor_root,
                 env=environment,
                 check=True,
             )
-            provider_root = vendor_root / "packages" / "opencode" / "src" / "provider"
+            provider_root = vendor_root / "packages" / "cli" / "src" / "provider"
             for name in ("models-snapshot.js", "models-snapshot.d.ts"):
                 generated = provider_root / name
                 if generated.is_symlink() or not generated.is_file() or generated.stat().st_size == 0:
@@ -1220,7 +1366,7 @@ def build_current(
                 str(bun),
                 "run",
                 "--cwd",
-                "packages/opencode",
+                "packages/cli",
                 "script/build.ts",
                 "--single",
                 "--target",
@@ -1231,7 +1377,7 @@ def build_current(
             env=environment,
             check=True,
         )
-        output = vendor_root / "packages" / "opencode" / "dist" / f"openclank-engine-{target}" / "bin"
+        output = vendor_root / "packages" / "cli" / "dist" / f"openclank-engine-{target}" / "bin"
         built_binary = output / ("openclank-engine.exe" if target.startswith("windows-") else "openclank-engine")
         if not built_binary.is_file():
             raise EngineBuildError(f"engine build did not produce {built_binary}")
@@ -1240,18 +1386,23 @@ def build_current(
         if source_fingerprint(vendor_root) != source_sha256:
             raise EngineBuildError("vendored engine source changed during the build")
 
-        provenance = _provenance_payload(
-            manifest=manifest,
-            manifest_sha256=manifest_sha256,
-            version=release_version,
-            target=target,
-            source_sha256=source_sha256,
-            binary=built_binary,
-        )
-        shape_errors = _validate_provenance_shape(provenance)
-        if shape_errors:
-            raise EngineBuildError("invalid generated provenance: " + "; ".join(shape_errors))
-        _install_artifact(install_root=destination, built_binary=built_binary, provenance=provenance)
+        temporary_build = tempfile.TemporaryDirectory(prefix="openclank-gcf-build-") if include_gcf else contextlib.nullcontext(None)
+        with temporary_build as temporary:
+            addon = None
+            gcf_root = vendor_root / "packages" / "cli" / "native" / "gcf"
+            if include_gcf:
+                addon = _build_gcf_addon(gcf_root, Path(temporary), Path(gcf_cargo).resolve(), Path(gcf_rustc).resolve(), Path(gcf_cargo_home).resolve())
+                if source_fingerprint(vendor_root) != source_sha256:
+                    raise EngineBuildError("vendored engine source changed during the GCF build")
+            provenance = _provenance_payload(
+                manifest=manifest, manifest_sha256=manifest_sha256, version=release_version,
+                target=target, source_sha256=source_sha256, binary=built_binary,
+                addon=addon, gcf_root=gcf_root if addon is not None else None,
+            )
+            shape_errors = _validate_provenance_shape(provenance)
+            if shape_errors:
+                raise EngineBuildError("invalid generated provenance: " + "; ".join(shape_errors))
+            _install_artifact(install_root=destination, built_binary=built_binary, provenance=provenance, built_addon=addon)
 
     return verify_install(
         destination,
@@ -1290,6 +1441,31 @@ def ensure_engine_ready(
     )
     if verified.ok:
         return verified
+    # A missing or damaged pointer is not evidence of a fresh install.  Only
+    # an intact, shape-valid v1 provenance permits legacy engine-only repair.
+    pointer = destination / 'current.json'
+    if pointer.exists() or pointer.is_symlink():
+        try:
+            _, provenance_path, _ = _read_pointer(destination)
+            recorded = _load_json(provenance_path, 'engine provenance')
+            trusted_v1 = recorded.get('schema_version') == 1 and not _validate_provenance_shape(recorded)
+        except (OSError, EngineBuildError, ValueError):
+            trusted_v1 = False
+        if not trusted_v1:
+            raise EngineBuildError('installed engine authority is unavailable; use explicit engine repair')
+    elif destination.exists():
+        # A version/target/artifact directory with an engine leaf or provenance
+        # is recognizable prior installation evidence; unrelated files are not.
+        for version_dir in destination.iterdir():
+            if not version_dir.is_dir() or not _VERSION_RE.fullmatch(version_dir.name):
+                continue
+            for target_dir in version_dir.iterdir():
+                if not target_dir.is_dir() or target_dir.name not in TIER_1_TARGETS | EXPERIMENTAL_TARGETS:
+                    continue
+                for artifact_dir in target_dir.iterdir():
+                    if artifact_dir.is_dir() and any((artifact_dir / n).exists() or (artifact_dir / n).is_symlink()
+                                                     for n in ('provenance.json','openclank-engine','openclank-engine.exe')):
+                        raise EngineBuildError('installed engine pointer is missing; use explicit engine repair')
     if not vendor_root.is_dir():
         return verified.require()
     return build_current(root, destination, version=release_version)

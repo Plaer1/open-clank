@@ -5,10 +5,7 @@ import importlib
 import importlib.util
 import json
 import os
-import shutil
-import socket
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,10 +13,8 @@ import pytest
 
 from routes.shell_routes import (
     _find_line_break,
-    _host_docker_access_enabled,
     _import_optional_dependency_for_status,
     _running_in_container,
-    _docker_row_status,
     _package_installed_from_probe,
     _package_pip_update_status,
     _package_probe_script,
@@ -28,33 +23,7 @@ from routes.shell_routes import (
     _reject_cross_site,
     _ssh_base_argv,
     _venv_activate_prefix,
-    DOCKER_IN_CONTAINER_HINT,
 )
-
-
-@pytest.fixture
-def short_unix_socket_path():
-    """Provide an AF_UNIX endpoint below macOS's 104-byte path limit."""
-    if not hasattr(socket, "AF_UNIX"):
-        pytest.skip("AF_UNIX sockets are unavailable on this platform")
-
-    short_root = Path(
-        tempfile.mkdtemp(
-            prefix="oc-sock-",
-            dir="/tmp" if os.name == "posix" else None,
-        )
-    )
-    socket_path = short_root / "docker.sock"
-    try:
-        try:
-            with socket.socket(socket.AF_UNIX) as unix_socket:
-                unix_socket.bind(str(socket_path))
-        except OSError as exc:
-            pytest.skip(f"AF_UNIX sockets are unavailable: {exc}")
-        socket_path.unlink(missing_ok=True)
-        yield socket_path
-    finally:
-        shutil.rmtree(short_root, ignore_errors=True)
 
 
 def test_shell_routes_import_without_posix_pty_modules(monkeypatch):
@@ -155,30 +124,6 @@ class TestFindLineBreak:
 class TestRunningInContainer:
     """Detect whether the Odysseus process itself runs inside a container."""
 
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_dockerenv_marker_present(self, tmp_path):
-        marker = tmp_path / ".dockerenv"
-        marker.write_text("")
-        assert (
-            _running_in_container(
-                dockerenv_path=str(marker),
-                cgroup_path=str(tmp_path / "missing"),
-            )
-            is True
-        )
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_cgroup_names_a_container_runtime(self, tmp_path):
-        cgroup = tmp_path / "cgroup"
-        cgroup.write_text("12:devices:/docker/abcdef0123456789\n")
-        assert (
-            _running_in_container(
-                dockerenv_path=str(tmp_path / "no-marker"),
-                cgroup_path=str(cgroup),
-            )
-            is True
-        )
-
     def test_bare_host_has_neither_signal(self, tmp_path):
         cgroup = tmp_path / "cgroup"
         cgroup.write_text("0::/user.slice/session-1.scope\n")
@@ -230,134 +175,6 @@ class TestAppleSiliconDetection:
         importlib.reload(platform_compat)
 
         assert platform_compat.IS_APPLE_SILICON is False
-
-
-class TestDockerRowStatus:
-    """Applicability plus install hint for the docker dependency row."""
-
-    DEFAULT = "Install Docker on the selected server."
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_in_container_and_absent_is_not_applicable_with_safe_default_hint(self):
-        status = _docker_row_status(
-            on_remote=False,
-            in_container=True,
-            installed=False,
-            default_hint=self.DEFAULT,
-        )
-        assert status.applicable is False
-        assert status.install_hint == DOCKER_IN_CONTAINER_HINT
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_in_container_cli_without_opt_in_is_not_applicable(self):
-        status = _docker_row_status(
-            on_remote=False,
-            in_container=True,
-            installed=True,
-            default_hint=self.DEFAULT,
-        )
-        assert status.applicable is False
-        assert status.install_hint == DOCKER_IN_CONTAINER_HINT
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_in_container_opt_in_with_socket_is_applicable(self):
-        status = _docker_row_status(
-            on_remote=False,
-            in_container=True,
-            installed=True,
-            default_hint=self.DEFAULT,
-            host_docker_access=True,
-        )
-        assert status.applicable is True
-        assert status.install_hint == self.DEFAULT
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_on_host_and_absent_stays_applicable_with_default_hint(self):
-        status = _docker_row_status(
-            on_remote=False,
-            in_container=False,
-            installed=False,
-            default_hint=self.DEFAULT,
-        )
-        assert status.applicable is True
-        assert status.install_hint == self.DEFAULT
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_remote_server_is_always_applicable_even_when_absent(self):
-        status = _docker_row_status(
-            on_remote=True,
-            in_container=False,
-            installed=False,
-            default_hint=self.DEFAULT,
-        )
-        assert status.applicable is True
-        assert status.install_hint == self.DEFAULT
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_remote_server_ignores_local_container_status(self):
-        status = _docker_row_status(
-            on_remote=True,
-            in_container=True,
-            installed=False,
-            default_hint=self.DEFAULT,
-        )
-        assert status.applicable is True
-        assert status.install_hint == self.DEFAULT
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_container_hint_steers_to_remote_and_warns_on_socket(self):
-        lowered = DOCKER_IN_CONTAINER_HINT.lower()
-        assert "remote" in lowered
-        assert "socket" in lowered
-        assert "high-trust" in lowered
-        assert "docker/host-docker.yml" in lowered
-
-
-class TestHostDockerAccess:
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_opt_in_without_socket_is_disabled(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
-
-        assert _host_docker_access_enabled(str(tmp_path / "missing.sock")) is False
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_regular_file_is_not_accepted(self, monkeypatch, tmp_path):
-        socket_path = tmp_path / "docker.sock"
-        socket_path.touch()
-        monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
-
-        assert _host_docker_access_enabled(str(socket_path)) is False
-
-    @pytest.mark.parametrize("flag", [None, "false"])
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_socket_without_explicit_opt_in_is_disabled(
-        self,
-        monkeypatch,
-        short_unix_socket_path,
-        flag,
-    ):
-        socket_path = short_unix_socket_path
-        with socket.socket(socket.AF_UNIX) as unix_socket:
-            unix_socket.bind(str(socket_path))
-            if flag is None:
-                monkeypatch.delenv("ODYSSEUS_ENABLE_HOST_DOCKER", raising=False)
-            else:
-                monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", flag)
-
-            assert _host_docker_access_enabled(str(socket_path)) is False
-
-    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
-    def test_explicit_opt_in_with_unix_socket_is_enabled(
-        self,
-        monkeypatch,
-        short_unix_socket_path,
-    ):
-        socket_path = short_unix_socket_path
-        with socket.socket(socket.AF_UNIX) as unix_socket:
-            unix_socket.bind(str(socket_path))
-            monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
-
-            assert _host_docker_access_enabled(str(socket_path)) is True
 
 
 class TestPackageProbeStatus:

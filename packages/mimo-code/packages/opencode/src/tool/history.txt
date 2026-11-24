@@ -1,17 +1,11 @@
-Search RAW conversation trajectory: prior user/assistant messages, tool inputs, tool errors.
+Search or inspect the authorized conversation history. For ordinary recall, use memory first when it is useful, then search history for the original trajectory.
 
-USE ONLY WHEN MEMORY SEARCH RETURNS NOTHING USEFUL.
+Operations:
+  - search: find matching messages or tool parts.
+  - around: inspect messages around a result.
+  - get: inspect an ordinary retained part.
+  - media: inspect retained attachment locators.
+  - exact_output_query: search one eligible exact tool output for a case-sensitive literal, with UTF-8 byte ranges. Supply message_id, part_id, revision, content_hash and query; byte_offset defaults to 0 and limit defaults to 20 (maximum 50). Use next_offset for the next match page. The original selector in the JSON result recovers the complete output via exact_output.
+  - exact_output: directly recover an eligible exact tool-output page from its message ID, part ID, revision and content hash. The result is JSON: decode its `text` string for the exact page. Use the returned `nextOffset` as `byte_offset` for the next page; do not guess an offset. A null `nextOffset` means the output is complete. An unavailable result must not be replaced with a different source.
 
-memory is your curated notebook — small, fast, semantically organized. ALWAYS try `memory` first.
-history is the unindexed firehose of your past sessions: bigger, noisier, slower, and tool result
-cap will likely truncate `around` output forcing a follow-up Grep/Read. Reach for it as a last
-resort, e.g.:
-  - memory had no entry, but you suspect this came up in a prior session
-  - you need verbatim recall of something the memory summary glossed over
-  - debugging "did I already try X" across the project
-
-Two operations:
-  - search: FTS BM25 over text/tool kinds (returns snippets + message_ids)
-  - around: given a search hit's message_id, pull ±N surrounding messages from the raw store
-
-Default scope is current project; pass scope="global" to search every project on this machine.
+Managed history is constrained by the current authenticated account and permissions.

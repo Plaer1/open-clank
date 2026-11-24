@@ -23,6 +23,10 @@ pub struct Endpoint {
     /// Notification service endpoint.
     #[prost(string, tag = "6")]
     pub notification_url: ::prost::alloc::string::String,
+    /// User directory endpoint: resolves user IDs to display names and back.
+    /// Falls back to `auth_url` if empty.
+    #[prost(string, tag = "7")]
+    pub user_url: ::prost::alloc::string::String,
 }
 impl ::prost::Name for Endpoint {
     const NAME: &'static str = "Endpoint";
@@ -57,6 +61,57 @@ impl ::prost::Name for Config {
         "/lore.environment.v1.Config".into()
     }
 }
+/// The OpenID Connect provider clients log in at. An empty string means
+/// "not set" for every string field.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Oidc {
+    /// Issuer URL. Clients fetch `<issuer>/.well-known/openid-configuration`.
+    #[prost(string, tag = "1")]
+    pub issuer: ::prost::alloc::string::String,
+    /// The public client ID clients present to the provider.
+    #[prost(string, tag = "2")]
+    pub client_id: ::prost::alloc::string::String,
+    /// Default scopes to request at login.
+    #[prost(string, repeated, tag = "3")]
+    pub scopes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Whether the client should take the OIDC path rather than
+    /// `Endpoint.auth_url`, if both are supported.
+    #[prost(bool, tag = "4")]
+    pub preferred: bool,
+    /// Template for converting a partition into an RFC 8707 resource, with
+    /// `{id}` standing for the partition ID. Exclusive with `scope_template`.
+    #[prost(string, tag = "5")]
+    pub resource_template: ::prost::alloc::string::String,
+    /// Template for converting a partition into a scope value, with `{id}`
+    /// standing for the partition ID. Exclusive with `resource_template`.
+    #[prost(string, tag = "6")]
+    pub scope_template: ::prost::alloc::string::String,
+    /// The issuer of the RFC 8693 token-exchange endpoint that mints
+    /// partition-scoped tokens.
+    #[prost(string, tag = "7")]
+    pub token_exchange_issuer: ::prost::alloc::string::String,
+    /// Deprecated and left empty: the user identity is read from the token
+    /// itself, its `identity` claim or else `sub`. Kept so older peers decode.
+    #[deprecated]
+    #[prost(string, tag = "8")]
+    pub identity_claim: ::prost::alloc::string::String,
+    /// Scopes to request with the client credentials grant. Empty requests none,
+    /// leaving the client's default scopes to the provider.
+    #[prost(string, repeated, tag = "9")]
+    pub client_credentials_scopes: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
+}
+impl ::prost::Name for Oidc {
+    const NAME: &'static str = "Oidc";
+    const PACKAGE: &'static str = "lore.environment.v1";
+    fn full_name() -> ::prost::alloc::string::String {
+        "lore.environment.v1.Oidc".into()
+    }
+    fn type_url() -> ::prost::alloc::string::String {
+        "/lore.environment.v1.Oidc".into()
+    }
+}
 /// Composite environment record returned by EnvironmentGet.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Environment {
@@ -66,6 +121,11 @@ pub struct Environment {
     /// Server-tunable configuration knobs.
     #[prost(message, optional, tag = "2")]
     pub config: ::core::option::Option<Config>,
+    /// The OpenID Connect provider. Unset when the server does not
+    /// advertise OIDC login. In this case clients authenticate through
+    /// `Endpoint.auth_url`.
+    #[prost(message, optional, tag = "3")]
+    pub oidc: ::core::option::Option<Oidc>,
 }
 impl ::prost::Name for Environment {
     const NAME: &'static str = "Environment";

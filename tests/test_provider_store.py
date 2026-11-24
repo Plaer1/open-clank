@@ -218,6 +218,54 @@ def test_account_crud_encrypts_with_scope_and_never_returns_plaintext_at_rest(
     assert [row.id for row in deleted_rows] == [account.id]
 
 
+def test_kimi_device_oauth_metadata_survives_encrypted_save_and_refresh_cas(provider_store):
+    store, factory = provider_store
+    connection = store.create_connection(
+        owner="alice",
+        connection_id="kimi-cn",
+        family_id="kimi-code-plan-cn",
+        adapter_id="models-dev-openai-compatible",
+        kind="subscription",
+        billing_lane="subscription",
+        label="Kimi Code China",
+        normalized_url="https://api.kimi.com/coding/v1",
+    )
+    metadata = {
+        "device_id": "f3e1245d-8260-4ee8-b2f6-a18e7be1c44a",
+        "kimi_region": "cn",
+        "credential_profile": "kimi-code-device-v1",
+    }
+    account = store.create_account(
+        owner="alice",
+        connection_id=connection.id,
+        account_id="kimi-device-account",
+        label="Kimi Code device login",
+        auth_method="oauth",
+        auth_class="subscription",
+        credentials={
+            "type": "oauth",
+            "access": "synthetic-access-token",
+            "refresh": "synthetic-refresh-token",
+            "expires": 1_900_000_000_000,
+            "metadata": metadata,
+        },
+        sort_order=0,
+    )
+    with factory() as db:
+        raw = db.query(ProviderAccount).filter(ProviderAccount.id == account.id).one()
+        assert "f3e1245d-8260-4ee8-b2f6-a18e7be1c44a" not in raw.credential_envelope
+    saved = store.credential_access(owner="alice", account_id=account.id).credentials
+    assert saved["metadata"] == metadata
+    rotated = store.replace_account_credential(
+        owner="alice",
+        account_id=account.id,
+        expected_credential_version=1,
+        credentials={**saved, "access": "synthetic-refreshed-access"},
+    )
+    assert rotated.credential_version == 2
+    assert store.credential_access(owner="alice", account_id=account.id).credentials["metadata"] == metadata
+
+
 def test_owner_rename_reseals_credentials_and_migrates_every_identity_reference(
     provider_store,
 ):
@@ -581,6 +629,45 @@ def test_equal_round_robin_is_durable_and_root_operations_are_sticky(provider_st
     assert committed.committed_at == NOW
 
 
+def test_actor_execution_bindings_are_distinct_under_one_root(provider_store):
+    store, _ = provider_store
+    connection = _connection(store)
+    route = _route(store, connection_id=connection.id, route_id="actor-route")
+    account = _account(
+        store,
+        connection_id=connection.id,
+        account_id="actor-account",
+        sort_order=1,
+        key="actor-key",
+    )
+    _entitle(store, account_id=account.id, route_id=route.id)
+
+    main = store.bind_account(
+        owner="alice", root_operation_id="shared-root", scope_kind="actor_execution",
+        session_id="engine-session", actor_id="main", execution_revision=4,
+        model_route_id=route.id, connection_id=connection.id, model_id=route.provider_model_id,
+        inherited_account_id=account.id,
+    )
+    child = store.bind_account(
+        owner="alice", root_operation_id="shared-root", scope_kind="actor_execution",
+        session_id="engine-session", actor_id="worker", execution_revision=2,
+        model_route_id=route.id, connection_id=connection.id, model_id=route.provider_model_id,
+        inherited_account_id=account.id,
+    )
+
+    assert main.binding_id != child.binding_id
+    assert main.to_wire()["actorID"] == "main"
+    assert child.to_wire()["actorID"] == "worker"
+    assert main.to_wire()["executionRevision"] == 4
+    assert child.to_wire()["executionRevision"] == 2
+    assert store.bind_account(
+        owner="alice", root_operation_id="shared-root", scope_kind="actor_execution",
+        session_id="engine-session", actor_id="main", execution_revision=4,
+        model_route_id=route.id, connection_id=connection.id, model_id=route.provider_model_id,
+        inherited_account_id=account.id,
+    ).binding_id == main.binding_id
+
+
 def test_sticky_binding_rejects_provider_or_model_drift(provider_store):
     store, _ = provider_store
     connection = _connection(store)
@@ -767,6 +854,234 @@ def test_preferred_pin_falls_back_only_to_eligible_same_pool_account(provider_st
         now=NOW + timedelta(minutes=6),
     )
     assert [row.id for row in eligible_after_cooldown] == [first.id]
+
+
+def test_null_account_policy_snapshots_legacy_round_robin_and_failover(provider_store):
+    store, factory = provider_store
+    connection = _connection(store)
+    route = _route(store, connection_id=connection.id)
+    accounts = [
+        _account(
+            store,
+            connection_id=connection.id,
+            account_id=f"legacy-account-{suffix}",
+            sort_order=index * 10,
+            key=f"legacy-key-{suffix}",
+        )
+        for index, suffix in enumerate(("a", "b"))
+    ]
+    for account in accounts:
+        _entitle(store, account_id=account.id, route_id=route.id)
+
+    selection = store.bind_account(
+        owner="alice",
+        root_operation_id="legacy-policy-root",
+        connection_id=connection.id,
+        model_route_id=route.id,
+    )
+    assert selection.account_id == accounts[0].id
+    with factory() as db:
+        binding = db.query(ProviderOperationBinding).filter_by(id=selection.binding_id).one()
+        assert binding.policy_snapshot["source"] == "legacy"
+        assert binding.policy_snapshot["mode"] == "round_robin"
+        assert binding.policy_snapshot["same_model_fallback"] is True
+        assert binding.policy_snapshot["ordered_account_ids"] == [item.id for item in accounts]
+
+    fallback = store.record_account_attempt(
+        owner="alice",
+        binding_id=selection.binding_id,
+        expected_revision=selection.binding_revision,
+        account_id=selection.account_id,
+        outcome="auth",
+    )
+    assert fallback.account_id == accounts[1].id
+    assert fallback.source == "failover"
+
+
+def test_explicit_pool_policy_fails_closed_or_uses_frozen_same_model_order(provider_store):
+    store, factory = provider_store
+    connection = _connection(store)
+    route = _route(store, connection_id=connection.id)
+    accounts = [
+        _account(
+            store,
+            connection_id=connection.id,
+            account_id=f"policy-account-{suffix}",
+            sort_order=index * 10,
+            key=f"policy-key-{suffix}",
+        )
+        for index, suffix in enumerate(("a", "b", "c"))
+    ]
+    for account in accounts:
+        _entitle(store, account_id=account.id, route_id=route.id)
+
+    connection = store.get_connection(owner="alice", connection_id=connection.id)
+    configured = store.update_connection(
+        owner="alice",
+        connection_id=connection.id,
+        expected_revision=connection.revision,
+        account_pool_policy={
+            "version": 1,
+            "mode": "preferred",
+            "account_id": accounts[0].id,
+            "same_model_fallback": False,
+        },
+    )
+    store.set_account_health(
+        owner="alice",
+        account_id=accounts[0].id,
+        state="cooldown",
+        cooldown_until=NOW + timedelta(minutes=5),
+    )
+    with pytest.raises(NoEligibleAccount, match="fallback is disabled"):
+        store.bind_account(
+            owner="alice",
+            root_operation_id="preferred-no-fallback",
+            connection_id=connection.id,
+            model_route_id=route.id,
+        )
+
+    pinned = store.update_connection(
+        owner="alice",
+        connection_id=connection.id,
+        expected_revision=configured.revision,
+        account_pool_policy={
+            "version": 1,
+            "mode": "pinned",
+            "account_id": accounts[0].id,
+            "same_model_fallback": False,
+        },
+    )
+    with pytest.raises(NoEligibleAccount, match="pinned provider account is unavailable"):
+        store.bind_account(
+            owner="alice",
+            root_operation_id="pinned-no-fallback",
+            connection_id=connection.id,
+            model_route_id=route.id,
+            preferred_account_id=accounts[1].id,
+        )
+
+    store.set_account_health(owner="alice", account_id=accounts[0].id, state="healthy")
+    preferred = store.update_connection(
+        owner="alice",
+        connection_id=connection.id,
+        expected_revision=pinned.revision,
+        account_pool_policy={
+            "version": 1,
+            "mode": "preferred",
+            "account_id": accounts[0].id,
+            "same_model_fallback": True,
+        },
+    )
+    selected = store.bind_account(
+        owner="alice",
+        root_operation_id="frozen-order-root",
+        connection_id=connection.id,
+        model_route_id=route.id,
+    )
+    assert selected.account_id == accounts[0].id
+    with factory() as db:
+        binding = db.query(ProviderOperationBinding).filter_by(id=selected.binding_id).one()
+        original_snapshot = dict(binding.policy_snapshot)
+        assert original_snapshot["source"] == "explicit"
+        assert original_snapshot["mode"] == "preferred"
+        assert original_snapshot["policy_revision"] == preferred.revision
+        assert original_snapshot["ordered_account_ids"] == [item.id for item in accounts]
+
+    reordered, _ = store.reorder_accounts(
+        owner="alice",
+        connection_id=connection.id,
+        account_ids=[accounts[2].id, accounts[1].id, accounts[0].id],
+        expected_revision=preferred.revision,
+    )
+    store.update_account(
+        owner="alice",
+        account_id=accounts[1].id,
+        expected_revision=accounts[1].revision,
+        label="Renamed during operation",
+    )
+    store.update_connection(
+        owner="alice",
+        connection_id=connection.id,
+        expected_revision=reordered.revision,
+        account_pool_policy={
+            "version": 1,
+            "mode": "pinned",
+            "account_id": accounts[2].id,
+            "same_model_fallback": False,
+        },
+    )
+    fallback = store.record_account_attempt(
+        owner="alice",
+        binding_id=selected.binding_id,
+        expected_revision=selected.binding_revision,
+        account_id=selected.account_id,
+        outcome="auth",
+    )
+    assert fallback.account_id == accounts[1].id
+    assert fallback.source == "failover"
+    with factory() as db:
+        binding = db.query(ProviderOperationBinding).filter_by(id=selected.binding_id).one()
+        assert binding.policy_snapshot == original_snapshot
+
+
+def test_opt_in_same_model_fallback_rechecks_revoked_grant(provider_store):
+    store, _ = provider_store
+    connection = _connection(store)
+    route = _route(store, connection_id=connection.id)
+    accounts = [
+        _account(
+            store,
+            connection_id=connection.id,
+            account_id=f"shared-policy-{suffix}",
+            sort_order=index * 10,
+            key=f"shared-policy-key-{suffix}",
+        )
+        for index, suffix in enumerate(("a", "b"))
+    ]
+    for account in accounts:
+        _entitle(store, account_id=account.id, route_id=route.id)
+    connection = store.get_connection(owner="alice", connection_id=connection.id)
+    connection = store.update_connection(
+        owner="alice",
+        connection_id=connection.id,
+        expected_revision=connection.revision,
+        account_pool_policy={
+            "version": 1,
+            "mode": "preferred",
+            "account_id": accounts[0].id,
+            "same_model_fallback": True,
+        },
+    )
+    grant = store.create_share_grant(
+        owner="alice",
+        recipient="bob",
+        connection_id=connection.id,
+        account_selector=AccountSelector.explicit([item.id for item in accounts]),
+        model_selector=ModelSelector.explicit([route.id]),
+        grant_id="policy-revocation-grant",
+    )
+    selected = store.bind_account(
+        owner="bob",
+        root_operation_id="revoked-policy-root",
+        connection_id=connection.id,
+        model_route_id=route.id,
+        grant_id=grant.id,
+    )
+    assert selected.account_id == accounts[0].id
+    store.revoke_share_grant(
+        owner="alice",
+        grant_id=grant.id,
+        expected_revision=grant.revision,
+    )
+    with pytest.raises(ShareDenied, match="revoked before retry"):
+        store.record_account_attempt(
+            owner="bob",
+            binding_id=selected.binding_id,
+            expected_revision=selected.binding_revision,
+            account_id=selected.account_id,
+            outcome="auth",
+        )
 
 
 def test_precommit_failover_is_conservative_and_each_account_is_tried_once(
@@ -974,6 +1289,59 @@ def test_billing_lanes_are_connection_confined_even_for_same_root(provider_store
             connection_id=subscription_connection.id,
             allowed_account_ids=[api_account.id],
         )
+
+
+def test_generation_close_fences_queued_dispatch_before_lock():
+    from src.openclank.provider_callbacks import ManagedProviderCallbacks, ManagedProviderCallbackError
+
+    class Store:
+        def revoke_worker_generation(self, **_kwargs): pass
+        def handle_managed_method(self, **_kwargs): pytest.fail("closed generation dispatched")
+    callback = ManagedProviderCallbacks.__new__(ManagedProviderCallbacks)
+    callback._owner, callback._holder_id, callback._store = "alice", "pwg_" + "a" * 32, Store()
+    callback._generation_lock = threading.RLock()
+    callback._generation_closed = threading.Event()
+    with callback._generation_lock:
+        closer = threading.Thread(target=callback.close_provider_generation)
+        closer.start()
+        assert callback._generation_closed.wait(timeout=2)
+    closer.join(timeout=2)
+    assert not closer.is_alive()
+    with pytest.raises(ManagedProviderCallbackError, match="generation is closed"):
+        callback._dispatch_provider_generation("unused", {})
+
+
+def test_close_callback_generation_revokes_only_exact_holder(provider_store):
+    from src.openclank.provider_callbacks import ManagedProviderCallbacks, ManagedProviderCallbackError
+
+    store, factory = provider_store
+    connection = _connection(store)
+    first = _account(store, connection_id=connection.id, account_id="shared-a", sort_order=0, key="a")
+    second = _account(store, connection_id=connection.id, account_id="shared-b", sort_order=1, key="b")
+    route = _route(store, connection_id=connection.id)
+    _entitle(store, account_id=first.id, route_id=route.id)
+    binding = store.bind_account(owner="alice", root_operation_id="root", connection_id=connection.id, model_route_id=route.id)
+    holder = "pwg_" + "a" * 32
+    other = "pwg_" + "b" * 32
+    store.acquire_refresh_lease(owner="alice", account_id=first.id, holder_id=holder, now=NOW)
+    store.acquire_refresh_lease(owner="alice", account_id=second.id, holder_id=other, now=NOW)
+    db = factory()
+    for digest, owner, generation in (("1" * 64, "bob", holder), ("2" * 64, "alice", other)):
+        db.add(ProviderCredentialLease(lease_id_digest=digest, owner=owner, credential_owner="alice", holder_id=generation,
+            root_operation_id="root", binding_id=binding.binding_id, connection_id=connection.id, account_id=first.id,
+            model_id="model", credential_revision=1, issued_at=NOW, expires_at=NOW + timedelta(seconds=30)))
+    db.commit()
+    db.close()
+    callback = ManagedProviderCallbacks(owner="bob", holder_id=holder, store=store, session_factory=factory)
+    callback.close_provider_generation()
+    db = factory()
+    try:
+        assert [row.holder_id for row in db.query(ProviderRefreshLease).all()] == [other]
+        assert [row.holder_id for row in db.query(ProviderCredentialLease).all()] == [other]
+    finally:
+        db.close()
+    with pytest.raises(ManagedProviderCallbackError, match="generation is closed"):
+        callback._dispatch_provider_generation("unused", {})
 
 
 def test_refresh_lease_is_single_flight_and_commit_uses_credential_cas(provider_store):
@@ -1528,6 +1896,11 @@ def test_managed_provider_v1_wire_binding_and_exact_credential_lease(
         method="_openclank/provider-store/v1/account/bind",
         params={
             "rootOperationID": "wire-root",
+            "scopeKind": "actor_execution",
+            "sessionID": "engine-session",
+            "actorID": "actor-main",
+            "executionRevision": 1,
+            "modelRouteID": route.id,
             "connectionID": connection.id,
             "providerID": "openai",
             "billingLane": "metered_api",
@@ -1539,6 +1912,11 @@ def test_managed_provider_v1_wire_binding_and_exact_credential_lease(
         "bindingID": binding["bindingID"],
         "bindingRevision": 1,
         "rootOperationID": "wire-root",
+        "scopeKind": "actor_execution",
+        "sessionID": "engine-session",
+        "actorID": "actor-main",
+        "executionRevision": 1,
+        "modelRouteID": route.id,
         "connectionID": connection.id,
         "providerID": "openai",
         "billingLane": "metered_api",
@@ -1556,13 +1934,18 @@ def test_managed_provider_v1_wire_binding_and_exact_credential_lease(
         holder_id="worker-generation-1",
         method="_openclank/provider-store/v1/credential/lease",
         params={
-            "rootOperationID": "wire-root",
-            "connectionID": connection.id,
-            "accountID": account.id,
-            "modelID": "wire-model",
+            "bindingID": binding["bindingID"],
+            "expectedBindingRevision": binding["bindingRevision"],
             "expectedCredentialRevision": 1,
         },
     )
+    assert credential_lease["bindingID"] == binding["bindingID"]
+    assert credential_lease["scopeKind"] == "actor_execution"
+    assert credential_lease["sessionID"] == "engine-session"
+    assert credential_lease["actorID"] == "actor-main"
+    assert credential_lease["executionRevision"] == 1
+    assert credential_lease["rootOperationID"] == "wire-root"
+    assert credential_lease["modelRouteID"] == route.id
     assert credential_lease["credential"] == {
         "type": "api",
         "key": "wire-secret",
@@ -1582,7 +1965,7 @@ def test_managed_provider_v1_wire_binding_and_exact_credential_lease(
     import json
 
     schema = json.loads(
-        Path("contracts/openclank/managed-provider-v1.schema.json").read_text(
+        Path("contracts/openclank/managed-provider-v2.schema.json").read_text(
             encoding="utf-8"
         )
     )
@@ -1632,6 +2015,16 @@ def test_driver_callback_consumes_exact_credential_lease_once(provider_store):
             holder_id="other-driver",
             now=NOW,
         )
+    with factory() as db:
+        row = db.query(ProviderOperationBinding).filter_by(id=binding.binding_id).one()
+        row.policy_snapshot = {**(row.policy_snapshot or {}), "private_authority": {"kind": "private", "generation": "a" * 64, "holderID": "pwg_" + "b" * 32}}
+        db.commit()
+    with pytest.raises(ProviderValidationError, match="private driver credential consumption is unavailable"):
+        store.consume_credential_lease(owner="alice", lease_id=lease.lease_id, holder_id="callback-driver", now=NOW)
+    with factory() as db:
+        row = db.query(ProviderOperationBinding).filter_by(id=binding.binding_id).one()
+        row.policy_snapshot = {key: value for key, value in row.policy_snapshot.items() if key != "private_authority"}
+        db.commit()
     consumed = store.consume_credential_lease(
         owner="alice",
         lease_id=lease.lease_id,
@@ -2032,3 +2425,20 @@ def test_received_share_projection_query_budget_is_share_cardinality_independent
     assert all(item.health_by_account[account.id][0]["eligible"] for item in projections)
     assert len(statements) == 7
     assert elapsed < 5.0
+
+
+def test_typed_attempt_evidence_roundtrip_keeps_cooldown_distinct(provider_store):
+    store, factory = provider_store
+    connection = _connection(store)
+    route = _route(store, connection_id=connection.id)
+    account = _account(store, connection_id=connection.id, account_id="evidence-account", sort_order=1, key="synthetic")
+    _entitle(store, account_id=account.id, route_id=route.id)
+    binding = store.bind_account(owner="alice", root_operation_id="evidence-root", connection_id=connection.id, model_route_id=route.id)
+    evidence = {"version":1, "kind":"exhausted", "httpStatus":429, "localNotBefore":"2026-08-09T12:01:00Z"}
+    with pytest.raises(NoEligibleAccount):
+        store.handle_managed_method(owner="alice", holder_id="holder", method="_openclank/provider-store/v1/account/attempt", params={"bindingID":binding.binding_id, "expectedRevision":binding.binding_revision, "accountID":account.id, "outcome":"quota", "retryAfterMs":60000, "evidence":evidence})
+    with factory() as db:
+        row = db.query(ProviderOperationBinding).filter_by(id=binding.binding_id).one()
+        health = db.query(ProviderAccountHealth).filter_by(account_id=account.id).one()
+        assert row.attempts[-1]["evidence"] == evidence
+        assert health.cooldown_until is not None and health.quota_reset_at is None

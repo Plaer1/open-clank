@@ -1,0 +1,81 @@
+import { Effect } from "effect"
+import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { Bus } from "@/bus"
+import { TuiEvent } from "@/cli/cmd/tui/event"
+import type { Interface as Inbox } from "@/inbox/inbox"
+import type { AdmissionGuard } from "@/inbox/controller"
+import type { SessionID } from "@/session/schema"
+import type { Service as SessionService } from "@/session/session"
+import type { Interface as Registry } from "./registry"
+import type { ReturnStatus } from "./return-header"
+
+export interface TerminalNotification extends AdmissionGuard {
+  sessionID: SessionID
+  actorID: string
+  source: "spawn" | "continuation" | "pending"
+  parentSessionID?: SessionID
+  parentActorID?: string
+  status: "completed" | "failed" | "cancelled"
+  /** Execution this terminal state belongs to; defaults to the row's current revision. */
+  executionRevision?: number
+  result?: string
+  error?: string
+  reportedStatus?: ReturnStatus
+  reportedSummary?: string
+  warnings?: string[]
+}
+
+export function makeTerminalNotifier(deps: {
+  inbox: Inbox
+  registry: Registry
+  sessions: Pick<SessionService["Service"], "get">
+}) {
+  return (input: TerminalNotification) =>
+    Effect.gen(function* () {
+      const actor = yield* deps.registry.get(input.sessionID, input.actorID)
+      if (!actor?.background) return
+      if (input.source === "spawn" ? actor.agent === "checkpoint-writer" : SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent))
+        return
+      const parentSessionID =
+        input.parentSessionID ??
+        (actor.mode === "peer" ? (yield* deps.sessions.get(input.sessionID)).parentID : input.sessionID)
+      if (!parentSessionID) return yield* Effect.fail(new Error("actor parent session missing"))
+      // Exactly one terminal notification per settled execution revision, whichever path reports it.
+      const outcome = input.status === "completed" ? "success" : input.status === "failed" ? "failure" : "cancelled"
+      const revision = input.executionRevision ?? actor.executionRevision
+      const accepted = yield* deps.inbox.accept({
+        receiverSessionID: parentSessionID,
+        receiverActorID: input.parentActorID ?? actor.parentActorID ?? "main",
+        senderSessionID: input.sessionID,
+        senderActorID: input.actorID,
+        type: "actor_notification",
+        terminalClaim: { sessionID: input.sessionID, actorID: input.actorID, revision, outcome },
+        // Structured and validated by Inbox.accept; rendered there, never passed as text.
+        notification: {
+          actorID: input.actorID,
+          description: actor.description,
+          status: input.status,
+          ...(actor.requestedModel ? { requestedModel: actor.requestedModel } : {}),
+          ...(actor.effectiveModel ? { effectiveModel: actor.effectiveModel } : {}),
+          ...(actor.hostContext ? { hostContext: actor.hostContext } : {}),
+          ...(input.result !== undefined ? { result: input.result } : {}),
+          ...(input.error !== undefined ? { error: input.error } : {}),
+          ...(input.reportedStatus ? { reportedStatus: input.reportedStatus } : {}),
+          ...(input.reportedSummary ? { reportedSummary: input.reportedSummary } : {}),
+          ...(input.warnings?.length ? { warnings: input.warnings } : {}),
+        },
+      }, { isCancelled: input.isCancelled, expectedEpoch: input.expectedEpoch })
+      if (input.source === "continuation" || accepted.disposition !== "inserted") return
+      yield* Effect.promise(() =>
+        Bus.publish(TuiEvent.ToastShow, {
+          message: `Child "${actor.description}" ${input.status}`,
+          variant: input.status === "completed" ? "success" : input.status === "cancelled" ? "info" : "error",
+        }),
+      ).pipe(Effect.ignore)
+    }).pipe(
+      Effect.ignoreCause({
+        log: "Error",
+        message: `actor terminal notification failed: ${input.sessionID}/${input.actorID}`,
+      }),
+    )
+}

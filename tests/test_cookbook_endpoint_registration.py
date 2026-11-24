@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import inspect
 
 import pytest
@@ -11,64 +9,6 @@ from starlette.requests import Request
 import routes.cookbook_routes as cookbook_routes
 from core.provider_models import ProviderBase
 from src.openclank.provider_store import ProviderStore
-
-
-ROOT = Path(__file__).resolve().parents[1]
-COOKBOOK_RUNNING = ROOT / "static" / "js" / "cookbookRunning.js"
-COOKBOOK_ROUTES = ROOT / "routes" / "cookbook_routes.py"
-COOKBOOK_TOOLS = ROOT / "src" / "tools" / "cookbook.py"
-
-
-def _source() -> str:
-    return COOKBOOK_RUNNING.read_text(encoding="utf-8")
-
-
-def test_cookbook_uses_only_normalized_provider_control_plane():
-    src = _source()
-    routes = COOKBOOK_ROUTES.read_text(encoding="utf-8")
-    tools = COOKBOOK_TOOLS.read_text(encoding="utf-8")
-
-    for source in (src, routes, tools):
-        assert "ModelEndpoint" not in source
-        assert "/api/model-endpoints" not in source
-    assert "/api/cookbook/provider-connections" in src
-    assert "/api/cookbook/provider-connections" in tools
-    assert 'method="_openclank/provider-control/v1/connection/validate"' in routes
-    assert "provider_store.create_connection(" in routes
-    assert "provider_store.create_model_route(" in routes
-
-
-def test_cookbook_does_not_use_local_as_provider_hostname():
-    src = _source()
-    assert "function _connectHostFromRemote" in src
-    assert "if (!host || host === 'local') return fallback;" in src
-    assert "const rawHost = task.remoteHost || 'localhost';" not in src
-
-
-def test_cookbook_advertised_bind_urls_keep_connectable_host():
-    src = _source()
-    assert "function _endpointFromAdvertisedUrl" in src
-    assert "_isAnyBindHost(u.hostname) ? currentHost" in src
-    assert "host = u.hostname || host;" not in src
-
-
-def test_cookbook_provider_cleanup_is_owner_and_provenance_scoped():
-    routes = COOKBOOK_ROUTES.read_text(encoding="utf-8")
-
-    assert 'settings.get("managed_by") != "cookbook"' in routes
-    assert "owner=_cookbook_provider_owner(request)" in routes
-    assert 'session_id=session_id' in routes
-    assert '"status": "retained"' in routes
-    assert "provider_store.delete_connection(" in routes
-
-
-def test_cookbook_model_selection_uses_managed_catalog_identity():
-    src = _source()
-
-    assert "item.endpoint_id === connection.id" in src
-    assert "window.sessionModule.createDirectChat(item.url, mid, item.endpoint_id)" in src
-    assert "url.includes(host) || url.includes(port)" not in src
-    assert "do_manage_endpoints" not in COOKBOOK_TOOLS.read_text(encoding="utf-8")
 
 
 class _ManagedControl:

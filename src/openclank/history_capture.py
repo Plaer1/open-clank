@@ -216,7 +216,62 @@ def _same_stability(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _read_strict_fd(name: str, dir_fd: int, expected: os.stat_result) -> bytes:
+@dataclass(frozen=True)
+class StrictTreeLimits:
+    """Finite per-traversal limits for an explicitly selected strict tree."""
+    max_entries: int
+    max_depth: int
+    max_file_bytes: int
+    max_input_bytes: int
+    max_manifest_bytes: int
+    timeout_seconds: float
+
+    def __post_init__(self):
+        import math
+        for value in (self.max_entries, self.max_depth, self.max_file_bytes, self.max_input_bytes, self.max_manifest_bytes):
+            if type(value) is not int or value < 1: raise ValueError('invalid strict tree limits')
+        if self.max_depth > 128: raise ValueError('invalid strict tree depth limit')
+        if type(self.timeout_seconds) not in (int, float) or not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError('invalid strict tree limits')
+
+
+class _StrictTreeBudget:
+    def __init__(self, limits):
+        self.limits = limits
+        self.deadline = time.monotonic() + limits.timeout_seconds
+        self.input_bytes = 0
+        self.encoded_bytes = len(b'{"entries":[],"root_type":"directory","version":1}')
+        self.records = 0
+        self.check()
+
+    def check(self):
+        if time.monotonic() >= self.deadline: raise ValueError('strict tree time limit exceeded')
+
+    def names(self, count):
+        self.check()
+        if count > self.limits.max_entries: raise ValueError('strict tree entry limit exceeded')
+
+    def reserve_file(self, size):
+        self.check()
+        if size < 0 or size > self.limits.max_file_bytes or self.input_bytes + size > self.limits.max_input_bytes:
+            raise ValueError('strict tree byte limit exceeded')
+        self.input_bytes += size
+
+    def record(self, record, *, content_size=None):
+        self.check()
+        self.records += 1
+        if self.records > self.limits.max_entries or len(pathlib.PurePosixPath(record['path']).parts) > self.limits.max_depth:
+            raise ValueError('strict tree entry or depth limit exceeded')
+        projected = dict(record)
+        if content_size is not None:
+            projected.update(size=content_size, sha256='0'*64, content='', content_encoding='base64')
+        encoded = len(json.dumps(projected, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8'))
+        if content_size is not None: encoded += 4 * ((content_size + 2) // 3)
+        self.encoded_bytes += encoded + (1 if self.records > 1 else 0)
+        if self.encoded_bytes > self.limits.max_manifest_bytes: raise ValueError('strict tree manifest limit exceeded')
+
+
+def _read_strict_fd(name: str, dir_fd: int, expected: os.stat_result, *, budget=None) -> bytes:
     """Read one regular file without following a raced final symlink."""
     nofollow = os.O_NOFOLLOW
     if not nofollow or not os.O_CLOEXEC:
@@ -232,11 +287,18 @@ def _read_strict_fd(name: str, dir_fd: int, expected: os.stat_result) -> bytes:
             raise ValueError(f"unsupported file replaced during shell capture: {name}")
         if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
             raise ValueError(f"file replaced during shell capture: {name}")
+        if budget is not None and not _same_stability(opened, expected):
+            raise ValueError(f"file changed before bounded shell capture: {name}")
+        if budget is not None: budget.reserve_file(opened.st_size)
         chunks: list[bytes] = []
+        read_size = 0
         while True:
-            chunk = os.read(fd, 1024 * 1024)
+            if budget is not None: budget.check()
+            chunk = os.read(fd, min(1024 * 1024, opened.st_size - read_size + 1) if budget is not None else 1024 * 1024)
             if not chunk:
                 break
+            read_size += len(chunk)
+            if budget is not None and read_size > opened.st_size: raise ValueError('strict tree file grew during read')
             chunks.append(chunk)
         finished = os.fstat(fd)
         if not _same_stability(finished, opened):
@@ -301,9 +363,12 @@ def _capture_payload(
     *,
     strict: bool = False,
     expected_identity: tuple[int, int] | None = None,
+    strict_tree_limits: StrictTreeLimits | None = None,
 ) -> bytes | None:
     """Read the exact provider payload for a file, directory, or symlink."""
     stat_result = os.lstat(path)
+    if strict_tree_limits is not None and not stat.S_ISDIR(stat_result.st_mode):
+        raise ValueError('bounded strict tree target must be a directory')
     if expected_identity is not None and _identity(stat_result) != expected_identity:
         raise ValueError(f"path replaced during shell capture: {path}")
     if stat.S_ISLNK(stat_result.st_mode):
@@ -311,7 +376,7 @@ def _capture_payload(
             raise ValueError(f"symlink boundary appeared during shell capture: {path}")
         return os.readlink(path).encode("utf-8", "surrogateescape")
     if stat.S_ISDIR(stat_result.st_mode):
-        return _directory_manifest(path, strict=strict, expected=stat_result)
+        return _directory_manifest(path, strict=strict, expected=stat_result, limits=strict_tree_limits)
     if strict:
         return _read_strict_file(path, stat_result)
     return pathlib.Path(path).read_bytes()
@@ -321,6 +386,7 @@ def _validate_strict_capture_tree(
     paths: Iterable[str],
     *,
     expected_identities: Mapping[str, tuple[int, int]] | None = None,
+    strict_tree_limits: StrictTreeLimits | None = None,
 ) -> None:
     """Validate a shell after-state without opening file bytes."""
     for raw_path in paths:
@@ -337,8 +403,9 @@ def _validate_strict_capture_tree(
         if stat.S_ISLNK(info.st_mode):
             raise ValueError(f"symlink boundary appeared during shell capture: {path}")
         if not stat.S_ISDIR(info.st_mode):
+            if strict_tree_limits is not None: raise ValueError('bounded strict tree target must be a directory')
             continue
-        _strict_directory_walk(path, expected=info, include_content=False)
+        _strict_directory_walk(path, expected=info, include_content=False, budget=_StrictTreeBudget(strict_tree_limits) if strict_tree_limits else None)
 
 
 def _opaque_root_label(root: str) -> str:
@@ -520,6 +587,7 @@ def _directory_manifest(
     *,
     strict: bool = False,
     expected: os.stat_result | None = None,
+    limits: StrictTreeLimits | None = None,
 ) -> bytes:
     """Return a deterministic recursive directory preimage.
 
@@ -531,7 +599,7 @@ def _directory_manifest(
     if strict:
         if _excluded_secret(root):
             raise ValueError(f"protected path appeared during shell capture: {root}")
-        return _strict_directory_manifest(root, expected=expected)
+        return _strict_directory_manifest(root, expected=expected, limits=limits)
     entries: list[dict[str, Any]] = []
     for current, dirs, files in os.walk(root, followlinks=False):
         dirs.sort()
@@ -572,13 +640,23 @@ def _strict_directory_walk(
     *,
     expected: os.stat_result | None = None,
     include_content: bool,
+    budget: _StrictTreeBudget | None = None,
+    pinned_root_fd: int | None = None,
+    pinned_parent_fd: int | None = None,
+    pinned_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Walk a tree through explicitly pinned, no-follow directory descriptors."""
     if os.name == "nt":
+        if budget is not None: raise ValueError('bounded strict tree capture unavailable on Windows')
         from .windows_history_io import directory_walk
         return directory_walk(root, expected=expected, include_content=include_content, same=_same_stability, excluded=_excluded_secret)
     root = os.path.abspath(root)
-    root_fd = _open_strict_directory(root)
+    if pinned_root_fd is not None:
+        if pinned_parent_fd is None or not pinned_name or '/' in pinned_name or pinned_name in ('.', '..'):
+            raise ValueError('pinned strict tree identity unavailable')
+        root_fd = os.dup(pinned_root_fd)
+    else:
+        root_fd = _open_strict_directory(root)
     entries: list[dict[str, Any]] = []
     child_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -586,9 +664,18 @@ def _strict_directory_walk(
         opened_dir = os.fstat(current_fd)
         if not _same_stability(opened_dir, expected_dir) or not stat.S_ISDIR(opened_dir.st_mode):
             raise ValueError(f"directory replaced during shell capture: {current_path}")
-        with os.scandir(current_fd) as iterator:
-            names = sorted(entry.name for entry in iterator)
+        scan_fd = os.open(".", child_flags, dir_fd=current_fd)
+        try:
+            with os.scandir(scan_fd) as iterator:
+                names = []
+                for entry in iterator:
+                    names.append(entry.name)
+                    if budget is not None: budget.names(len(entries) + len(names))
+                names.sort()
+        finally:
+            os.close(scan_fd)
         for name in names:
+            if budget is not None: budget.check()
             relative = os.path.normpath(os.path.join(relative_current, name))
             item = current_path / name
             if _excluded_secret(str(item)):
@@ -606,6 +693,7 @@ def _strict_directory_walk(
             }
             if stat.S_ISDIR(entry_stat.st_mode):
                 record["type"] = "directory"
+                if budget is not None: budget.record(record)
                 child_fd = os.open(name, child_flags, dir_fd=current_fd)
                 try:
                     opened_child = os.fstat(child_fd)
@@ -623,8 +711,9 @@ def _strict_directory_walk(
                     raise ValueError(f"directory replaced during shell capture: {item}")
             elif stat.S_ISREG(entry_stat.st_mode):
                 record["type"] = "file"
+                if budget is not None: budget.record(record, content_size=entry_stat.st_size if include_content else None)
                 if include_content:
-                    content = _read_strict_fd(name, current_fd, entry_stat)
+                    content = _read_strict_fd(name, current_fd, entry_stat, budget=budget)
                     record.update({
                         "size": len(content),
                         "sha256": hashlib.sha256(content).hexdigest(),
@@ -640,8 +729,17 @@ def _strict_directory_walk(
                     raise ValueError(f"file replaced during shell capture: {item}")
             else:
                 raise ValueError(f"unsupported entry during shell capture: {item}")
-        with os.scandir(current_fd) as iterator:
-            final_names = sorted(entry.name for entry in iterator)
+        # Open a fresh file description: scandir advances the directory offset.
+        scan_fd = os.open(".", child_flags, dir_fd=current_fd)
+        try:
+            with os.scandir(scan_fd) as iterator:
+                final_names = []
+                for entry in iterator:
+                    final_names.append(entry.name)
+                    if budget is not None: budget.names(len(final_names))
+                final_names.sort()
+        finally:
+            os.close(scan_fd)
         final_dir = os.fstat(current_fd)
         if not _same_stability(final_dir, opened_dir):
             raise ValueError(f"directory changed during shell capture: {current_path}")
@@ -666,7 +764,8 @@ def _strict_directory_walk(
             raise ValueError(f"directory replaced during shell capture: {root}")
         visit(pathlib.Path(root), root_fd, "", opened_root)
         try:
-            final_root = os.lstat(root)
+            final_root = (os.stat(pinned_name, dir_fd=pinned_parent_fd, follow_symlinks=False)
+                if pinned_root_fd is not None else os.lstat(root))
         except FileNotFoundError as exc:
             raise ValueError(f"root changed during shell capture: {root}") from exc
         if not _same_stability(final_root, opened_root) or not stat.S_ISDIR(final_root.st_mode):
@@ -680,15 +779,25 @@ def _strict_directory_manifest(
     root: str,
     *,
     expected: os.stat_result | None = None,
+    limits: StrictTreeLimits | None = None,
+    pinned_root_fd: int | None = None,
+    pinned_parent_fd: int | None = None,
+    pinned_name: str | None = None,
 ) -> bytes:
     """Manifest a tree with dir-fd and no-follow checks before each read."""
-    entries = _strict_directory_walk(root, expected=expected, include_content=True)
-    return json.dumps(
+    budget = _StrictTreeBudget(limits) if limits else None
+    entries = _strict_directory_walk(root, expected=expected, include_content=True, budget=budget,
+        pinned_root_fd=pinned_root_fd, pinned_parent_fd=pinned_parent_fd, pinned_name=pinned_name)
+    result = json.dumps(
         {"version": 1, "root_type": "directory", "entries": entries},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
+    if budget is not None:
+        budget.check()
+        if len(result) > limits.max_manifest_bytes: raise ValueError('strict tree manifest limit exceeded')
+    return result
 
 
 def _batch_entries(
@@ -699,6 +808,7 @@ def _batch_entries(
     context: HistoryContext,
     strict_tree: bool = False,
     expected_identities: Mapping[str, tuple[int, int]] | None = None,
+    strict_tree_limits: StrictTreeLimits | None = None,
 ) -> tuple[list[dict[str, Any]], bytes | None]:
     """Read every declared before-state for a recoverable parent mutation."""
     targets = [path, *paths]
@@ -720,6 +830,8 @@ def _batch_entries(
             raise ValueError(f"cannot inspect batch preimage {target}: {exc}") from exc
         else:
             existence = "Present"
+            if strict_tree_limits is not None and not stat.S_ISDIR(info.st_mode):
+                raise ValueError('bounded strict tree target must be a directory')
             expected = (expected_identities or {}).get(os.path.abspath(target))
             if expected is not None and _identity(info) != expected:
                 raise ValueError(f"path replaced during shell capture: {target}")
@@ -738,6 +850,7 @@ def _batch_entries(
                     target,
                     strict=strict_tree,
                     expected=info if strict_tree else None,
+                    limits=strict_tree_limits,
                 )
                 exact = True
             elif stat.S_ISREG(info.st_mode):
@@ -805,6 +918,7 @@ def _validate_strict_batch_preimage(
     targets: Iterable[str],
     entries: list[Mapping[str, Any]],
     expected_identities: Mapping[str, tuple[int, int]],
+    strict_tree_limits: StrictTreeLimits | None = None,
 ) -> None:
     """Re-read every strict preimage immediately before PrepareBatch.
 
@@ -821,6 +935,7 @@ def _validate_strict_batch_preimage(
             target,
             strict=True,
             expected_identity=expected_identities.get(os.path.abspath(target)),
+            strict_tree_limits=strict_tree_limits,
         )
         if current != entry.get("content") or _fingerprint(current) != entry.get("fingerprint"):
             raise ValueError(f"tree changed before PrepareBatch: {target}")
@@ -831,6 +946,7 @@ def _validate_strict_batch_after(
     targets: Iterable[str],
     entries: list[Mapping[str, Any]],
     expected_identities: Mapping[str, tuple[int, int]],
+    strict_tree_limits: StrictTreeLimits | None = None,
 ) -> None:
     """Validate exact after payloads immediately before CompleteBatch."""
     target_list = list(targets)
@@ -841,6 +957,7 @@ def _validate_strict_batch_after(
             target,
             strict=True,
             expected_identity=expected_identities.get(os.path.abspath(target)),
+            strict_tree_limits=strict_tree_limits,
         )
         if current != entry.get("content") or _fingerprint(current) != entry.get("fingerprint"):
             raise ValueError(f"after-state changed before CompleteBatch: {target}")
@@ -863,6 +980,21 @@ class CaptureHandle:
     finish_result: dict[str, Any] | None = None
     strict_tree: bool = False
     expected_identities: dict[str, tuple[int, int]] = field(default_factory=dict)
+    strict_tree_limits: StrictTreeLimits | None = None
+
+    def _settle_private(self, response: Any) -> bool:
+        action = response.get("Action") if isinstance(response, Mapping) else None
+        if not isinstance(action, Mapping) or action.get("recovery_only") is not True:
+            return False
+        if action.get("action_id") != self.action_id:
+            raise HistoryClientError("history recovery action changed")
+        settled = self.client.settle_recovery(self.action_id).get("Action", {})
+        if settled.get("action_id") != self.action_id or settled.get("recovery_settled") is not True:
+            raise HistoryClientError("history recovery settlement was not acknowledged")
+        self.before = None
+        self.batch_entries = None
+        self.receipt = None
+        return True
 
     @property
     def available(self) -> bool:
@@ -874,6 +1006,7 @@ class CaptureHandle:
         committed: bool = True,
         after: bytes | None = None,
         after_read_error: str | None = None,
+        writers_settled: bool = True,
     ) -> dict[str, Any]:
         if self.finish_result is not None:
             return dict(self.finish_result)
@@ -887,12 +1020,14 @@ class CaptureHandle:
             _set_status(self.context, **result)
             self.finish_result = result
             return result
+        before_fingerprint = _fingerprint(self.before)
         try:
             if committed and after_read_error is None and self.strict_tree:
                 try:
                     _validate_strict_capture_tree(
                         self.paths,
                         expected_identities=self.expected_identities,
+                        strict_tree_limits=self.strict_tree_limits,
                     )
                 except (OSError, ValueError) as exc:
                     after_read_error = str(exc)
@@ -908,22 +1043,28 @@ class CaptureHandle:
                 },
             )
             if not committed:
+                self._settle_private(live)
                 result = {
                     "action_id": self.action_id,
                     "history_status": "failed",
                     "capture_phase": "live_not_committed",
-                    "before_fingerprint": _fingerprint(self.before),
+                    "before_fingerprint": before_fingerprint,
                     "live": live,
                 }
                 _set_status(self.context, **result)
                 self.finish_result = result
                 return result
             if after_read_error is not None:
+                action = live.get("Action") if isinstance(live, Mapping) else None
+                if writers_settled and isinstance(action, Mapping) and action.get("recovery_only") is True:
+                    # The provider already recorded a commit. Persist the terminal gap
+                    # before expiring its temporary capture.
+                    self._settle_private(self.client.after_unavailable(self.action_id))
                 result = {
                     "action_id": self.action_id,
                     "history_status": "failed",
                     "capture_phase": "after_failed",
-                    "before_fingerprint": _fingerprint(self.before),
+                    "before_fingerprint": before_fingerprint,
                     "error": after_read_error,
                     "live": live,
                 }
@@ -943,11 +1084,13 @@ class CaptureHandle:
                                 _validate_strict_capture_tree(
                                     (target,),
                                     expected_identities=self.expected_identities,
+                                    strict_tree_limits=self.strict_tree_limits,
                                 )
                             target_after = _capture_payload(
                                 target,
                                 strict=self.strict_tree,
                                 expected_identity=self.expected_identities.get(os.path.abspath(target)),
+                                strict_tree_limits=self.strict_tree_limits,
                             )
                         except FileNotFoundError:
                             target_after = None
@@ -998,28 +1141,32 @@ class CaptureHandle:
                         targets=all_targets,
                         entries=after_entries,
                         expected_identities=self.expected_identities,
+                        strict_tree_limits=self.strict_tree_limits,
                     )
                 self.receipt = self.client.complete_batch(self.action_id, after_entries)
             else:
                 self.receipt = self.client.complete(
                     self.action_id, content=after, fingerprint=_fingerprint(after)
                 )
-            result = {
-                "action_id": self.action_id,
-                "history_status": "complete",
-                "capture_phase": "complete",
-                "before_fingerprint": _fingerprint(self.before),
-                "after_fingerprint": _fingerprint(after),
-                "receipt": self.receipt,
-                "live": live,
-            }
+            if self._settle_private(self.receipt):
+                result = {"action_id": self.action_id, "history_status": "skipped", "capture_phase": "recovery_settled"}
+            else:
+                result = {
+                    "action_id": self.action_id,
+                    "history_status": "complete",
+                    "capture_phase": "complete",
+                    "before_fingerprint": before_fingerprint,
+                    "after_fingerprint": _fingerprint(after),
+                    "receipt": self.receipt,
+                    "live": live,
+                }
         except Exception as exc:  # live writes must remain usable
             paused = "history_paused_budget" in str(exc)
             result = {
                 "action_id": self.action_id,
                 "history_status": "paused" if paused else "failed",
                 "capture_phase": "budget" if paused else "after_failed",
-                "before_fingerprint": _fingerprint(self.before),
+                "before_fingerprint": before_fingerprint,
                 "after_fingerprint": _fingerprint(after),
                 "error": str(exc),
             }
@@ -1030,17 +1177,16 @@ class CaptureHandle:
     def abort(self) -> dict[str, Any]:
         if self.finish_result is not None:
             return dict(self.finish_result)
-        if self.client is not None and self.status == "prepared":
-            try:
-                self.client.abort(self.action_id)
-            except Exception:
-                pass
-        result = {
-            "action_id": self.action_id,
-            "history_status": "aborted",
-            "capture_phase": "aborted",
-        }
+        result = {"action_id": self.action_id, "history_status": "aborted", "capture_phase": "aborted"}
+        try:
+            if self.available:
+                self._settle_private(self.client.abort(self.action_id))
+        except Exception as exc:
+            result.update(history_status="failed", capture_phase="abort_unconfirmed", error=str(exc))
+        finally:
+            self.close()
         _set_status(self.context, **result)
+        self.finish_result = result
         return result
 
     def close(self) -> None:
@@ -1056,13 +1202,17 @@ def begin_file_capture(
     context: HistoryContext | None = None,
     action_id: str | None = None,
     paths: Iterable[str] = (),
+    required_recovery: bool = False,
     strict_tree: bool = False,
     expected_identities: Mapping[str, tuple[int, int]] | None = None,
+    strict_tree_limits: StrictTreeLimits | None = None,
 ) -> CaptureHandle:
     """Prepare one file mutation, or return an honest unavailable handle."""
     action_id = action_id or _ACTIVE_ACTION.get() or f"file-{uuid.uuid4().hex}"
     paths = list(paths)
     all_paths = [path, *paths]
+    if strict_tree_limits is not None and (type(strict_tree_limits) is not StrictTreeLimits or not strict_tree or paths or os.name == 'nt'):
+        raise ValueError('bounded strict tree capture unavailable')
     expected_identities = {
         os.path.abspath(str(target)): (int(identity[0]), int(identity[1]))
         for target, identity in (expected_identities or {}).items()
@@ -1078,12 +1228,28 @@ def begin_file_capture(
         handle = CaptureHandle(action_id, None, {}, None, context, "paused", "excluded", reason, strict_tree=strict_tree)
         _set_status(context, action_id=action_id, history_status="paused", capture_phase="excluded", error=reason)
         return handle
+    client = _configured_client(context)
+    if isinstance(client, HistoryClient) and not required_recovery:
+        try:
+            capture = client.get_capture_policy()
+            category = "agent_files" if context.actor_kind == "agent" else "files"
+            if not capture["enabled"] or not capture[category]:
+                reason = "Automatic history is disabled for this content"
+                handle = CaptureHandle(action_id, None, {}, None, context, "paused", "excluded", reason, strict_tree=strict_tree)
+                _set_status(context, action_id=action_id, history_status="paused", capture_phase="excluded", error=reason)
+                return handle
+        except (HistoryClientError, KeyError, TypeError, OSError) as exc:
+            handle = CaptureHandle(action_id, None, {}, None, context, "paused", "unavailable", str(exc), strict_tree=strict_tree)
+            _set_status(context, action_id=action_id, history_status="paused", capture_phase="unavailable", error=handle.error)
+            return handle
     if strict_tree and not _strict_capture_supported():
         reason = "strict shell capture unavailable: race-safe no-follow reader is unsupported"
         handle = CaptureHandle(action_id, None, {}, None, context, "unavailable", "unavailable", reason, strict_tree=strict_tree)
         _set_status(context, action_id=action_id, history_status="unavailable", capture_phase="unavailable", error=reason)
         return handle
     try:
+        if strict_tree_limits is not None and not stat.S_ISDIR(os.lstat(path).st_mode):
+            raise ValueError('bounded strict tree target must be a directory')
         if strict_tree:
             for target in all_paths:
                 expected = expected_identities.get(os.path.abspath(target))
@@ -1096,6 +1262,7 @@ def begin_file_capture(
             path,
             strict=strict_tree,
             expected_identity=expected_identities.get(os.path.abspath(path)),
+            strict_tree_limits=strict_tree_limits,
         )
     except FileNotFoundError:
         if strict_tree:
@@ -1125,7 +1292,6 @@ def begin_file_capture(
         handle = CaptureHandle(action_id, None, {}, before, context, "failed", "before_failed", str(exc), strict_tree=strict_tree)
         _set_status(context, action_id=action_id, history_status="failed", capture_phase="before_failed", error=str(exc))
         return handle
-    client = _configured_client(context)
     if client is None:
         handle = CaptureHandle(action_id, None, {}, before, context, "paused", "unavailable", "history worker is not configured", strict_tree=strict_tree)
         _set_status(context, action_id=action_id, history_status="paused", capture_phase="unavailable", error=handle.error)
@@ -1141,6 +1307,8 @@ def begin_file_capture(
             context=context,
             client=client,
         )
+        if required_recovery:
+            envelope["coverage"].setdefault("metadata", {})["required_recovery"] = True
         batch_prepare = getattr(client, "prepare_batch", None)
         if callable(batch_prepare):
             envelope["coverage"]["kind"] = "KnownMutationHooks"
@@ -1152,12 +1320,14 @@ def begin_file_capture(
                 context=context,
                 strict_tree=strict_tree,
                 expected_identities=expected_identities,
+                strict_tree_limits=strict_tree_limits,
             )
             if strict_tree:
                 _validate_strict_batch_preimage(
                     targets=all_paths,
                     entries=entries,
                     expected_identities=expected_identities,
+                    strict_tree_limits=strict_tree_limits,
                 )
             batch_prepare(envelope, entries)
             batch_entries = entries
@@ -1199,6 +1369,7 @@ def begin_file_capture(
         paths=tuple(all_paths),
         strict_tree=strict_tree,
         expected_identities=expected_identities,
+        strict_tree_limits=strict_tree_limits,
     )
     _set_status(context, action_id=action_id, history_status="prepared", capture_phase="before_durable")
     return handle
@@ -1224,17 +1395,24 @@ def file_capture(
 
 
 def complete_file_capture(handle: CaptureHandle, path: str, *, committed: bool = True) -> dict[str, Any]:
+    if not handle.available and not handle.strict_tree:
+        try:
+            return handle.finish(committed=committed)
+        finally:
+            handle.close()
     read_error = None
     try:
         if committed and handle.strict_tree:
             _validate_strict_capture_tree(
                 handle.paths or (path,),
                 expected_identities=handle.expected_identities,
+                strict_tree_limits=handle.strict_tree_limits,
             )
         after = _capture_payload(
             path,
             strict=handle.strict_tree,
             expected_identity=handle.expected_identities.get(os.path.abspath(path)),
+            strict_tree_limits=handle.strict_tree_limits,
         )
     except FileNotFoundError:
         if handle.strict_tree:

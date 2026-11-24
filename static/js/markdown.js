@@ -830,16 +830,20 @@ export function renderContent(content) {
 /**
  * Initialize any unprocessed Mermaid diagrams in a container (or whole document)
  */
-export function renderMermaid(container) {
-  if (!window.mermaid) return;
-  initMermaid();
+export async function renderMermaid(container) {
   const target = container || document;
-  const pending = target.querySelectorAll('pre.mermaid:not([data-processed])');
-  if (pending.length === 0) return;
+  const selector = 'pre.mermaid:not([data-processed])';
+  if (!target.querySelector(selector)) return;
   try {
-    window.mermaid.run({ nodes: pending });
-  } catch (e) {
-    console.warn('Mermaid render error:', e);
+    if (!window.mermaid) {
+      const {loadClassicScript} = await import('./loadClassicScript.js');
+      await loadClassicScript('/static/lib/mermaid.min.js?v=20260815mermaid1');
+    }
+    initMermaid();
+    const nodes = target.querySelectorAll(selector);
+    if (nodes.length) await window.mermaid.run({ nodes });
+  } catch (error) {
+    console.warn('Mermaid render error:', error);
   }
 }
 
@@ -874,7 +878,7 @@ initMermaid();
 // the inner text content instead — same content reproduces the same hash on
 // reload. LocalStorage holds a Set of expanded hashes; we observe the chat
 // history and re-expand matching sections as they're inserted.
-const THINK_EXPANDED_KEY = 'odysseus-thinking-expanded';
+const THINK_EXPANDED_KEY = 'openclank-thinking-expanded';
 function _loadExpandedSet() {
   try { return new Set(JSON.parse(localStorage.getItem(THINK_EXPANDED_KEY) || '[]')); }
   catch { return new Set(); }

@@ -95,6 +95,13 @@ async function _deleteFile(filepath, displayName) {
       credentials: 'same-origin'
     });
     if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    if (data.success === false) {
+      const box = document.getElementById('docs-view');
+      if (box && data.original) box._documentOriginals = [...(box._documentOriginals || []), data.original].slice(-20);
+      alert(displayName + ': ' + (data.state === 'outcome_unknown' ? 'removal outcome is unknown.' : 'removal could not be confirmed.'));
+      return;
+    }
     await loadPersonalDocs();
   } catch (e) {
     console.error('Delete failed:', e);
@@ -126,13 +133,22 @@ export async function uploadRagFiles(fileList) {
     if (!res.ok) throw new Error(await res.text());
 
     const data = await res.json();
-    if (zone) zone.textContent = 'Drop files here or click to upload';
+    if (zone) {
+      const outcomes = Array.isArray(data.outcomes) ? data.outcomes : [];
+      const incomplete = outcomes.filter(item => item && item.state !== 'indexed');
+      zone._documentOriginals = [...(zone._documentOriginals || []), ...incomplete.filter(item => item.original).map(item => item.original)].slice(-20);
+      if (data.success === false) {
+        const details = incomplete.map(item => (item.name || 'File') + ': ' +
+          (item.state === 'outcome_unknown' ? 'indexing outcome unknown' : item.state === 'saved_unindexed' ? 'saved but not indexed' : 'not saved'));
+        zone.textContent = details.length ? details.join(' | ') : 'Some files were not indexed.';
+      } else zone.textContent = 'Drop files here or click to upload';
+    }
     await loadPersonalDocs();
     return data;
   } catch (e) {
     console.error('Upload failed:', e);
     if (zone) zone.textContent = 'Drop files here or click to upload';
-    alert('Upload failed: ' + e.message);
+    alert('Upload response unavailable; the outcome may be unknown. ' + e.message);
   }
 }
 

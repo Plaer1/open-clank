@@ -147,8 +147,14 @@ try {
     }
   })();` });
 
-  await command('Page.navigate', { url: `${base}/static/login.html?__lang=es-ES&__fresh=1` });
-  await waitFor("window.openClankI18n && document.querySelector('.i18n-offer')", 'Spanish language offer');
+  const navigate = async query => {
+    const url = `${base}/static/login.html?${query}`;
+    await command('Page.navigate', { url });
+    await waitFor(`location.href === ${JSON.stringify(url)} && Boolean(window.openClankI18n?.ready)`, 'language initialization');
+    await evaluate("window.openClankI18n.ready");
+  };
+
+  await navigate('__lang=ja-JP&__fresh=1');
   const offer = await evaluate(`({
     locale:window.openClankI18n.locale,
     lang:document.documentElement.lang,
@@ -157,108 +163,92 @@ try {
   })`);
   assert.equal(offer.locale, 'en');
   assert.equal(offer.lang, 'en');
-  assert.match(offer.message, /idioma.*español/i);
+  assert.match(offer.message, /日本語/);
   assert.equal(offer.direction, 'ltr');
   await evaluate("document.querySelector('.i18n-offer [data-accept]').click()");
-  await waitFor("window.openClankI18n.locale === 'es' && !document.querySelector('.i18n-offer')", 'accepted Spanish locale');
-  assert.equal(await evaluate("localStorage.getItem('openclank.locale')"), 'es');
+  await waitFor("window.openClankI18n.locale === 'ja' && !document.querySelector('.i18n-offer')", 'accepted Japanese locale');
+  assert.equal(await evaluate("localStorage.getItem('openclank.locale')"), 'ja');
 
-  const locales = ['en', 'zh-Hans', 'ja', 'ko', 'es', 'hi', 'ar', 'ru', 'pt', 'id', 'pa-Guru', 'bn', 'sw', 'ur', 'fa'];
-  await evaluate(`(() => {
-    const select=document.createElement('select');
-    select.dataset.languageSelect='';
-    for (const locale of ${JSON.stringify(locales)}) select.add(new Option(locale, locale));
-    document.body.appendChild(select);
-  })()`);
-  const matrix = await evaluate(`(async () => {
-    const locales=${JSON.stringify(locales)};
-    const rtl=new Set(['ar','ur','fa']);
-    const failures=[];
-    let checked=0;
-    for (const from of locales) {
-      await window.openClankI18n.setLocale(from);
-      for (const to of locales) {
-        await window.openClankI18n.setLocale(to);
-        checked += 1;
-        if (document.documentElement.lang !== to) failures.push(from+'>'+to+':lang');
-        if (document.documentElement.dir !== (rtl.has(to) ? 'rtl' : 'ltr')) failures.push(from+'>'+to+':dir');
-        if (document.querySelector('[data-language-select]').value !== to) failures.push(from+'>'+to+':select');
-      }
-    }
-    return {checked,failures};
-  })()`);
-  assert.equal(matrix.checked, 225);
-  assert.deepEqual(matrix.failures, []);
-
-  const contentSafety = await evaluate(`(async () => {
-    const message=document.createElement('div'); message.className='msg';
-    message.innerHTML='<div class="body">Save</div><div class="msg-actions"><button>Save</button></div>';
-    document.body.appendChild(message);
+  // Mount the actual Settings control on this isolated login surface.
+  await evaluate(`(async () => {
+    const source = await fetch('/static/index.html').then(response => response.text());
+    const settings = new DOMParser().parseFromString(source, 'text/html');
+    const control = settings.querySelector('[data-language-select]').parentElement;
+    document.body.appendChild(control);
     await window.openClankI18n.setLocale('ja');
-    return {body:message.querySelector('.body').textContent,button:message.querySelector('button').textContent};
   })()`);
-  assert.equal(contentSafety.body, 'Save');
-  assert.notEqual(contentSafety.button, 'Save');
-
-  const capture = await command('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
-  fs.writeFileSync(path.join(outputDir, 'japanese-interface.png'), Buffer.from(capture.data, 'base64'));
-
-  await command('Page.navigate', { url: `${base}/static/login.html?__lang=zh-TW&__fresh=1` });
-  await waitFor("location.pathname === '/static/login.html' && location.search.includes('__lang=zh-TW') && document.readyState === 'complete'", 'Traditional Chinese locale page navigation');
-  await new Promise(resolve => setTimeout(resolve, 400));
-  assert.equal(await evaluate("window.openClankI18n.locale"), 'en');
-  assert.equal(await evaluate("Boolean(document.querySelector('.i18n-offer'))"), true);
-  assert.equal(await evaluate("document.querySelector('.i18n-offer').lang"), 'zh-Hant');
-  await evaluate("document.querySelector('.i18n-offer [data-decline]').click()");
-
-  // The login page exposes the i18n facade before its asynchronous catalog
-  // registry has finished loading. Wait for the registry itself before
-  // checking aliases; this keeps the assertion about catalog semantics while
-  // avoiding a page-load/module-load race.
-  await waitFor("window.openClankI18n && window.openClankI18n.locales && window.openClankI18n.locales['en-CA'] && window.openClankI18n.locales.fr && window.openClankI18n.locales.ms", 'complete i18n catalog');
-
-  // French-backed “Canadian English” display alias: selection label is the
-  // joke, catalog bytes are French, html lang is French, and real fr remains.
-  const canadian = await evaluate(`(async () => {
-    await window.openClankI18n.setLocale('en-CA');
-    const descriptor = window.openClankI18n.locales['en-CA'];
-    await window.openClankI18n.setLocale('fr');
-    const french = window.openClankI18n.locales.fr;
+  const readSettings = () => evaluate(`(() => {
+    const select = document.querySelector('[data-language-select]');
     return {
-      aliasName: descriptor.name,
-      aliasCatalog: descriptor.catalog,
-      aliasHtmlLang: descriptor.html_lang || descriptor.catalog,
-      frenchName: french.name,
-      frenchCatalog: french.catalog,
-      locale: window.openClankI18n.locale,
-      dir: document.documentElement.dir,
-    };
-  })()`);
-  assert.equal(canadian.aliasName, 'Canadian English');
-  assert.equal(canadian.aliasCatalog, 'fr');
-  assert.equal(canadian.aliasHtmlLang, 'fr');
-  assert.equal(canadian.frenchName, 'Français');
-  assert.equal(canadian.frenchCatalog, 'fr');
-  assert.equal(canadian.locale, 'fr');
-
-  // Malay stays a dedicated catalog selection, not a duplicate or English stub.
-  const malay = await evaluate(`(async () => {
-    await window.openClankI18n.setLocale('ms');
-    return {
-      locale: window.openClankI18n.locale,
-      name: window.openClankI18n.locales.ms.name,
-      catalog: window.openClankI18n.locales.ms.catalog,
+      options: [...select.options].map(option => option.value),
+      selected: select.value,
+      label: select.labels[0].textContent.trim(),
       lang: document.documentElement.lang,
       dir: document.documentElement.dir,
     };
   })()`);
-  assert.equal(malay.locale, 'ms');
-  assert.equal(malay.name, 'Bahasa Melayu');
-  assert.equal(malay.catalog, 'ms');
-  assert.equal(malay.lang, 'ms');
-  assert.equal(malay.dir, 'ltr');
+  const japanese = await readSettings();
+  const released = ["en", "ja", "zh-Hans", "zh-Hant", "ru", "hi", "es", "es-419"];
+  assert.deepEqual([...japanese.options].sort(), [...released].sort());
+  assert.equal(japanese.selected, 'ja');
+  assert.match(japanese.label, /言語/);
+  assert.equal(japanese.lang, 'ja');
+  assert.equal(japanese.dir, 'ltr');
+  for (const next of [...released.filter(id => id !== 'ja'), 'ja']) {
+    await evaluate(`(() => {
+      const select = document.querySelector('[data-language-select]');
+      select.value = ${JSON.stringify(next)};
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(`document.documentElement.lang === ${JSON.stringify(next)}`, 'Settings language switch');
+    const settings = await readSettings();
+    assert.equal(settings.selected, next);
+    if (next !== 'en') assert.notEqual(settings.label, 'Interface language');
+  }
 
-  console.log(JSON.stringify({ offer, matrix, contentSafety, traditionalChineseAlias: 'zh-TW→zh-Hant', canadian, malay }, null, 2));
+  const contentSafety = await evaluate(`(async () => {
+    const english = await fetch('/static/i18n/en.json').then(response => response.json());
+    const home = window.openClankI18n.officialArticleTranslation(
+      'openclank-docs-home', 'body', english['docs.openclank-docs-home.body']);
+    const message = document.createElement('div'); message.className = 'msg';
+    message.innerHTML = '<div class="body">Save</div><div class="msg-actions"><button>Save</button></div>';
+    const composer = document.createElement('textarea');
+    composer.placeholder = 'New Chat';
+    composer.value = 'New Chat';
+    document.body.append(message, composer);
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    return {body:message.querySelector('.body').textContent, button:message.querySelector('button').textContent,
+      placeholder:composer.placeholder, draft:composer.value, handbookLang:home?.lang, handbookHasJapanese:/[ぁ-んァ-ン]/u.test(home?.text || '')};
+  })()`);
+  assert.equal(contentSafety.body, 'Save');
+  assert.equal(contentSafety.button, '保存');
+  assert.match(contentSafety.placeholder, /チャット/);
+  assert.equal(contentSafety.draft, 'New Chat');
+  assert.equal(contentSafety.handbookLang, 'ja');
+  assert.equal(contentSafety.handbookHasJapanese, true);
+
+  const capture = await command('Page.captureScreenshot', { format:'png', captureBeyondViewport:false });
+  fs.writeFileSync(path.join(outputDir, 'japanese-interface.png'), Buffer.from(capture.data, 'base64'));
+
+  for (const [requested, expected, endonym] of [
+    ['zh-Hant-TW', 'zh-Hant', '繁體中文'], ['es-MX', 'es-419', 'español latinoamericano'],
+  ]) {
+    await navigate('__lang=' + requested + '&__fresh=1');
+    assert.ok(await evaluate(`document.querySelector('.i18n-offer p')?.textContent.includes(${JSON.stringify(endonym)})`));
+    await evaluate("document.querySelector('.i18n-offer [data-accept]').click()");
+    await waitFor(`document.documentElement.lang === ${JSON.stringify(expected)}`, 'accepted regional language');
+    assert.ok(await evaluate(`document.querySelector('#i18n-language-status')?.textContent.includes(${JSON.stringify(endonym)})`));
+  }
+  await navigate('__lang=ko-KR&__fresh=1');
+  assert.equal(await evaluate("window.openClankI18n.locale"), 'en');
+  assert.equal(await evaluate("Boolean(document.querySelector('.i18n-offer'))"), false);
+  await evaluate("localStorage.setItem('openclank.locale', 'ko')");
+  await navigate('__lang=ko-KR');
+  assert.equal(await evaluate("window.openClankI18n.locale"), 'en');
+  assert.equal(await evaluate("document.documentElement.lang"), 'en');
+  assert.equal(await evaluate("Boolean(document.querySelector('.i18n-offer'))"), false);
+
+  console.log(JSON.stringify({ offer, japanese, contentSafety }, null, 2));
 } finally {
   try { socket?.close(); } catch {}
   chromium.kill('SIGTERM');

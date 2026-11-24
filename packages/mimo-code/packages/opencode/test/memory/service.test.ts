@@ -215,7 +215,7 @@ describe("Memory.search", () => {
           expect(results[0].path).toContain("tenant.md")
           expect(results[0].backend).toBe("mimo")
         }),
-      { config: { memory: { provider: "frankenmemory" } } },
+      { config: { memory: { provider: "memery" } } },
     ),
   )
 })

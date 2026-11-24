@@ -1,0 +1,1973 @@
+import { describe, expect, test } from "bun:test"
+import { APICallError, RetryError, generateText } from "ai"
+import { createAzure } from "@ai-sdk/azure"
+import { createOpenAI } from "@ai-sdk/openai"
+import { convertToLanguageModelPrompt } from "ai/internal"
+import { MessageV2 } from "../../src/session/message-v2"
+import { ProviderTransform } from "../../src/provider"
+import type { Provider } from "../../src/provider"
+import { ModelID, ProviderID } from "../../src/provider/schema"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
+import { Question } from "../../src/question"
+
+const sessionID = SessionID.make("session")
+const providerID = ProviderID.make("test")
+const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+const wavBase64 = "UklGRiUAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQEAAACA"
+const binaryBase64 = "YmluYXJ5"
+const model: Provider.Model = {
+  id: ModelID.make("test-model"),
+  providerID,
+  api: {
+    id: "test-model",
+    url: "https://example.com",
+    npm: "@ai-sdk/openai",
+  },
+  name: "Test Model",
+  capabilities: {
+    temperature: true,
+    reasoning: false,
+    attachment: false,
+    toolcall: true,
+    input: {
+      text: true,
+      audio: false,
+      image: false,
+      video: false,
+      pdf: false,
+    },
+    output: {
+      text: true,
+      audio: false,
+      image: false,
+      video: false,
+      pdf: false,
+    },
+    interleaved: false,
+  },
+  cost: {
+    input: 0,
+    output: 0,
+    cache: {
+      read: 0,
+      write: 0,
+    },
+  },
+  limit: {
+    context: 0,
+    input: 0,
+    output: 0,
+  },
+  status: "active",
+  options: {},
+  headers: {},
+  release_date: "2026-01-01",
+}
+const openAICompatibleModel: Provider.Model = {
+  ...model,
+  api: { ...model.api, npm: "@ai-sdk/openai-compatible" },
+}
+
+function withInputCapabilities(
+  input: Partial<Provider.Model["capabilities"]["input"]>,
+  base: Provider.Model = model,
+): Provider.Model {
+  return {
+    ...base,
+    capabilities: {
+      ...base.capabilities,
+      attachment: true,
+      input: { ...base.capabilities.input, ...input },
+    },
+  }
+}
+
+// [TP-SR-R21-27] [TP-SR-R21-28] [TP-SR-R21-30]
+describe("resume trim model boundary", () => {
+  const userID = MessageID.make("resume-user")
+  const assistantID = MessageID.make("resume-assistant")
+  const base = { sessionID, messageID: assistantID }
+  function history(parts: MessageV2.Part[]): MessageV2.WithParts[] {
+    return [
+      { info: userInfo(userID), parts: [{ ...base, id: PartID.make("user-text"), messageID: userID, type: "text", text: "Original input" }] },
+      { info: { ...assistantInfo(assistantID, userID), finish: "length" }, parts },
+    ]
+  }
+  function tool(id: string, providerExecuted = false): MessageV2.ToolPart {
+    return { ...base, id: PartID.make(id), type: "tool", tool: "bash", callID: id,
+      metadata: providerExecuted ? { providerExecuted: true } : undefined,
+      state: { status: "completed", input: { command: "already executed" }, output: "original output", title: "done", metadata: {}, time: { start: 1, end: 2 } },
+    }
+  }
+  test("legacy tool block keeps text after the call because SDK emits results after the entire block", async () => {
+    const parts: MessageV2.Part[] = [tool("call-a"),
+      { ...base, id: PartID.make("after-tool"), type: "text", text: "still before SDK results" }, tool("call-b"),
+      { ...base, id: PartID.make("trailing-reasoning"), type: "reasoning", text: "same block", time: { start: 1, end: 2 } },
+    ]
+    const input = history(parts)
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.messages).toEqual(input)
+    expect(trim.removeMessages).toEqual([])
+    expect(trim.removeParts).toEqual([])
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    expect(converted.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+    expect(converted[1].content).toEqual(expect.arrayContaining([{ type: "text", text: "still before SDK results" }]))
+    expect(() => MessageV2.assertResumeModelBoundary(converted)).not.toThrow()
+  })
+  test("step-start defines discarded text even when end timestamps say completed", async () => {
+    const parts: MessageV2.Part[] = [tool("call-a"), tool("call-b"),
+      { ...base, id: PartID.make("next-block"), type: "step-start" },
+      { ...base, id: PartID.make("discard"), type: "text", text: "half answer", time: { start: 1, end: 2 } },
+    ]
+    const input = history(parts)
+    const original = structuredClone(input)
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.removeParts).toEqual(parts.slice(2))
+    expect(trim.messages[1].parts).toEqual(parts.slice(0, 2))
+    expect(input).toEqual(original)
+    MessageV2.assertResumeModelBoundary(await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true }))
+  })
+  test("provider-executed results stay assistant; a synthetic attachment cannot manufacture a safe boundary", async () => {
+    const part = tool("provider-call", true)
+    if (part.state.status === "completed") part.state.attachments = [{ ...base, id: PartID.make("attachment"), type: "file", mime: "image/png", url: `data:image/png;base64,${pngBase64}` }]
+    const trim = MessageV2.planResumeTrim(history([part]), userID)
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    expect(converted.at(-1)?.role).toBe("assistant")
+    expect(converted.at(-1)?.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "tool-result", toolCallId: "provider-call" })]))
+    expect(() => MessageV2.assertResumeModelBoundary(converted)).toThrow("boundary")
+    expect(trim.removeMessages).toEqual([])
+    expect(trim.removeParts).toEqual([])
+  })
+  test("mixed provider/client group is paired and ends at the client result", async () => {
+    const trim = MessageV2.planResumeTrim(history([tool("provider-call", true), tool("client-call")]), userID)
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    expect(converted.at(-1)?.role).toBe("tool")
+    MessageV2.assertResumeModelBoundary(converted)
+  })
+  test("pending raw input rejects; running tools get an explicit interruption without changing completed tools", async () => {
+    const pending: MessageV2.ToolPart = { ...tool("pending"), state: { status: "pending", input: {}, raw: '{"command":' } }
+    const pendingInput = history([tool("completed"), pending])
+    const original = structuredClone(pendingInput)
+    expect(() => MessageV2.planResumeTrim(pendingInput, userID)).toThrow("execution boundary")
+    expect(pendingInput).toEqual(original)
+    const running: MessageV2.ToolPart = { ...tool("running"), state: { status: "running", input: { command: "already started" }, time: { start: 1 }, metadata: { output: "partial output" } } }
+    const completed = tool("completed")
+    const trim = MessageV2.planResumeTrim(history([completed, running]), userID)
+    expect(trim.messages[1].parts[0]).toEqual(completed)
+    expect(trim.updateParts).toEqual([expect.objectContaining({ id: running.id, state: expect.objectContaining({ status: "error", error: "Tool execution aborted", input: running.state.input, metadata: { output: "partial output", interrupted: true } }) })])
+    expect(running.state.status).toBe("running")
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    MessageV2.assertResumeModelBoundary(converted)
+    expect(JSON.stringify(converted)).toContain("partial output")
+  })
+  test("interrupted errors require a persisted complete-call boundary, including after repeated cleanup", async () => {
+    for (const inputComplete of [undefined, false, true]) {
+      const state: MessageV2.ToolStateError = {
+        status: "error", input: {}, inputComplete, error: "interrupted",
+        metadata: { interrupted: true }, time: { start: 1, end: 2 },
+      }
+      const settled = MessageV2.abortedToolState(state)
+      expect(settled.inputComplete).toBe(inputComplete)
+      const input = history([{ ...tool("interrupted"), state: settled }])
+      const original = structuredClone(input)
+      if (inputComplete !== true) {
+        expect(() => MessageV2.planResumeTrim(input, userID)).toThrow("execution boundary")
+      } else {
+        const trim = MessageV2.planResumeTrim(input, userID)
+        expect(trim.updateParts).toEqual([])
+        MessageV2.assertResumeModelBoundary(await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true }))
+      }
+      expect(input).toEqual(original)
+    }
+  })
+  // [TP-SR-R21-32]
+  test("only proven unexecuted calls can be discarded before calculating the tool boundary", async () => {
+    const pending = { ...tool("pending"), execution: "not-started" as const,
+      state: { status: "error" as const, input: {}, inputComplete: false, error: "interrupted",
+        metadata: { interrupted: true }, time: { start: 1, end: 2 } } }
+    const input = history([pending])
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.removeMessages).toEqual([assistantID])
+    expect(trim.messages).toEqual(input.slice(0, 1))
+    const completed = tool("completed")
+    const mixed = MessageV2.planResumeTrim(history([completed, pending]), userID)
+    expect(mixed.removeParts).toEqual([pending])
+    expect(mixed.messages[1].parts).toEqual([completed])
+    MessageV2.assertResumeModelBoundary(await MessageV2.toModelMessages(mixed.messages, model))
+    for (const execution of [undefined, "started"] as const) {
+      expect(() => MessageV2.planResumeTrim(history([{ ...pending, execution }]), userID)).toThrow("execution boundary")
+    }
+    expect(() => MessageV2.planResumeTrim(history([{ ...pending, metadata: { providerExecuted: true } }]), userID)).toThrow("execution boundary")
+    const delivered = { ...completed, execution: "not-started" as const }
+    expect(MessageV2.planResumeTrim(history([delivered]), userID).removeParts).toEqual([])
+    const attached = { ...pending, state: { ...pending.state, attachments: [{ ...base, id: PartID.make("result-file"),
+      type: "file" as const, mime: "image/png", url: `data:image/png;base64,${pngBase64}` }] } }
+    expect(() => MessageV2.planResumeTrim(history([attached]), userID)).toThrow("execution boundary")
+    for (const fields of [{ summary: true }, { structured: null }, { finish: "stop" }]) {
+      const protectedHistory = history([pending])
+      protectedHistory[1].info = { ...assistantInfo(assistantID, userID), ...fields }
+      expect(() => MessageV2.planResumeTrim(protectedHistory, userID)).toThrow("protected output")
+    }
+    const block: MessageV2.Part[] = [completed, { ...base, id: PartID.make("later-step"), type: "step-start" },
+      { ...base, id: PartID.make("later-text"), type: "text", text: "unfinished" }, pending,
+      { ...base, id: PartID.make("later-reason"), type: "reasoning", text: "unfinished reasoning", time: { start: 1 } }]
+    const blocks = MessageV2.planResumeTrim(history(block), userID)
+    expect(blocks.messages[1].parts).toEqual([completed])
+    expect(new Set(blocks.removeParts.map((part) => part.id))).toEqual(new Set(block.slice(1).map((part) => part.id)))
+    expect(MessageV2.planResumeTrim(blocks.messages, userID).removeParts).toEqual([])
+  })
+  test("APIError on tool carrier cannot silently hide completed observations", async () => {
+    const input = history([tool("completed")])
+    input[1].info = { ...assistantInfo(assistantID, userID), error: { name: "APIError", data: { message: "unavailable", isRetryable: false } } }
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.updateMessages).toHaveLength(1)
+    expect(trim.messages[1].parts).toEqual(input[1].parts)
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    MessageV2.assertResumeModelBoundary(converted)
+    expect(JSON.stringify(converted)).toContain("original output")
+  })
+  test("empty containers stay durable but never become model input", async () => {
+    const input = history([{ ...base, id: PartID.make("step"), type: "step-start" },
+      { ...base, id: PartID.make("placeholder"), type: "text", text: "ignored placeholder", ignored: true }])
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.messages).toEqual(input)
+    expect(trim.removeMessages).toEqual([])
+    expect((await MessageV2.toModelMessages(trim.messages, model)).map((message) => message.role)).toEqual(["user"])
+  })
+  for (const protectedInfo of [{ summary: true }, { structured: null }, { finish: "stop" }]) {
+    test(`protect delivered output ${JSON.stringify(protectedInfo)}`, () => {
+      const input = history([{ ...base, id: PartID.make("text"), type: "text", text: "delivered" }])
+      input[1].info = { ...assistantInfo(assistantID, userID), ...protectedInfo }
+      // Delivered output is kept, never silently dropped from durable history.
+      const trim = MessageV2.planResumeTrim(input, userID)
+      expect(trim.removeMessages).toEqual([])
+      expect(trim.messages[1].parts).toEqual(input[1].parts)
+    })
+  }
+})
+
+function userInfo(id: string): MessageV2.User {
+  return {
+    id,
+    sessionID,
+    role: "user",
+    time: { created: 0 },
+    agent: "user",
+    model: { providerID, modelID: ModelID.make("test") },
+    tools: {},
+    mode: "",
+  } as unknown as MessageV2.User
+}
+
+function assistantInfo(
+  id: string,
+  parentID: string,
+  error?: MessageV2.Assistant["error"],
+  meta?: { providerID: string; modelID: string },
+): MessageV2.Assistant {
+  const infoModel = meta ?? { providerID: model.providerID, modelID: model.api.id }
+  return {
+    id,
+    sessionID,
+    role: "assistant",
+    time: { created: 0 },
+    error,
+    parentID,
+    modelID: infoModel.modelID,
+    providerID: infoModel.providerID,
+    mode: "",
+    agent: "agent",
+    path: { cwd: "/", root: "/" },
+    cost: 0,
+    tokens: {
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    },
+  } as unknown as MessageV2.Assistant
+}
+
+function basePart(messageID: string, id: string) {
+  return {
+    id: PartID.make(id),
+    sessionID,
+    messageID: MessageID.make(messageID),
+  }
+}
+
+describe("session.message-v2.toModelMessage", () => {
+  test("local binary and structured text references become paths instead of uploads", async () => {
+    for (const mime of ["application/x-apple-diskimage", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream", "text/csv", "application/json"]) {
+      const messages = await MessageV2.toModelMessages([{ info: userInfo("local-file"), parts: [{ ...basePart("local-file", "binary"), type: "file", filename: "fixture file", mime, url: "file:///fixture/local%20file" }] }], model)
+      expect(messages).toEqual([{ role: "user", content: [{ type: "text", text: "[Attached local file: /fixture/local file]" }] }])
+    }
+  })
+  test("native media file parts retain their payload representation", async () => {
+    for (const mime of ["audio/wav", "video/mp4", "application/pdf"]) {
+      const messages = await MessageV2.toModelMessages([{ info: userInfo("media-file"), parts: [{ ...basePart("media-file", "media"), type: "file", filename: "media", mime, url: "file:///fixture/media" }] }], model)
+      expect(messages).toEqual([{ role: "user", content: [{ type: "file", data: "file:///fixture/media", filename: "media", mediaType: mime }] }])
+    }
+  })
+  test("suppresses legacy user-side skill catalogs",  async () => {
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo("m-skills-first"),
+        parts: [
+          {
+            ...basePart("m-skills-first", "p-catalog-first"),
+            type: "text",
+            text: "<system-reminder>\nSkills available in this session:\nFIRST\n</system-reminder>",
+            synthetic: true,
+          },
+          { ...basePart("m-skills-first", "p-user"), type: "text", text: "hello" },
+          {
+            ...basePart("m-skills-first", "p-other-reminder"),
+            type: "text",
+            text: "<system-reminder>other</system-reminder>",
+            synthetic: true,
+          },
+        ],
+      },
+      {
+        info: userInfo("m-skills-duplicate"),
+        parts: [
+          {
+            ...basePart("m-skills-duplicate", "p-catalog-duplicate"),
+            type: "text",
+            text: "<system-reminder>\nSkills available in this session:\nSECOND\n</system-reminder>",
+            synthetic: true,
+          },
+          { ...basePart("m-skills-duplicate", "p-next-user"), type: "text", text: "continue" },
+        ],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "hello" },
+          { type: "text", text: "<system-reminder>other</system-reminder>" },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ])
+  })
+
+  test("suppresses persisted skill snapshots after catalogs move to system", async () => {
+    const firstSnapshot = [
+      "<system-reminder>",
+      "Authoritative skills catalog snapshot v2:",
+      "When multiple snapshots exist, the last one is authoritative.",
+      "Skills available in this session:",
+      "FIRST",
+      "</system-reminder>",
+    ].join("\n")
+    const secondSnapshot = firstSnapshot.replace("FIRST", "SECOND")
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo("m-skills-first"),
+        parts: [
+          { ...basePart("m-skills-first", "p-user"), type: "text", text: "hello" },
+          { ...basePart("m-skills-first", "p-snapshot-first"), type: "text", text: firstSnapshot, synthetic: true },
+        ],
+      },
+      {
+        info: userInfo("m-skills-second"),
+        parts: [
+          { ...basePart("m-skills-second", "p-next-user"), type: "text", text: "continue" },
+          { ...basePart("m-skills-second", "p-snapshot-second"), type: "text", text: secondSnapshot, synthetic: true },
+        ],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ])
+  })
+
+  test("preserves structured provider-executed outputs", async () => {
+    const userID = "m-provider-user"
+    const assistantID = "m-provider-assistant"
+    const providerOutput = { results: [{ title: "Result", url: "https://example.com" }] }
+    const messages = await MessageV2.toModelMessages(
+      [
+        {
+          info: userInfo(userID),
+          parts: [{ ...basePart(userID, "u-provider"), type: "text", text: "search" }],
+        },
+        {
+          info: assistantInfo(assistantID, userID),
+          parts: [
+            {
+              ...basePart(assistantID, "a-provider"),
+              type: "tool",
+              tool: "web_search",
+              callID: "provider-call",
+              metadata: { providerExecuted: true, test: { itemId: "call-item" } },
+              state: {
+                status: "completed",
+                input: { query: "example" },
+                output: JSON.stringify(providerOutput),
+                providerOutput,
+                providerMetadata: { test: { itemId: "result-item" } },
+                title: "",
+                metadata: {},
+                time: { start: 0, end: 1 },
+              },
+            },
+          ],
+        },
+      ] as MessageV2.WithParts[],
+      model,
+    )
+
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          toolName: "web_search",
+          providerExecuted: true,
+          providerOptions: { test: { itemId: "call-item" } },
+        },
+        {
+          type: "tool-result",
+          toolName: "web_search",
+          output: { type: "json", value: providerOutput },
+          providerOptions: { test: { itemId: "result-item" } },
+        },
+      ],
+    })
+  })
+
+  test("filters out messages with no parts", async () => {
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo("m-empty"),
+        parts: [],
+      },
+      {
+        info: userInfo("m-user"),
+        parts: [
+          {
+            ...basePart("m-user", "p1"),
+            type: "text",
+            text: "hello",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+      },
+    ])
+  })
+
+  // Mechanism pin for the empty-user-content provider 400. Companion to the
+  // zero-part test above: a zero-part user message is DROPPED by our layer (so
+  // the transient state between Inbox.drain's `updateMessage` and its first
+  // `updatePart` can never reach a provider), but a message whose only part is
+  // `text: ""` survives at parts.length === 1 — invisible to every
+  // `parts.length === 0` / `content.length === 0` check — and is only reduced to
+  // `content: []` later, inside the SDK's own per-role filter on the way to the
+  // provider (ai@6.0.168 dist/index.mjs:1424, convertToLanguageModelMessage:
+  // `.filter((part) => part.type !== "text" || part.text !== "")`, no backfill).
+  // `content: []` is what a provider rejects with
+  // "messages.<N>: user messages must have non-empty content".
+  test("an empty-text-only user message survives our layer at length 1 and only collapses at the SDK boundary", async () => {
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo("m-empty-text"),
+        parts: [
+          {
+            ...basePart("m-empty-text", "p1"),
+            type: "text",
+            text: "",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    // Our layer: still length 1, so nothing on our side can see it as "empty".
+    const ours = await MessageV2.toModelMessages(input, model)
+    expect(ours).toStrictEqual([{ role: "user", content: [{ type: "text", text: "" }] }])
+
+    // The SDK step that actually runs between us and the provider.
+    const wire = await convertToLanguageModelPrompt({
+      prompt: { messages: ours },
+      supportedUrls: {},
+      download: async () => [],
+    })
+    expect(wire.length).toBe(1)
+    expect(wire[0].role).toBe("user")
+    expect(wire[0].content).toStrictEqual([])
+  })
+
+  test("retry records never reach the model and do not keep an otherwise empty assistant", async () => {
+    const retry = (messageID: string, id: string): MessageV2.RetryPart => ({
+      ...basePart(messageID, id),
+      type: "retry",
+      attempt: 3,
+      phase: "stream",
+      scope: "live-step",
+      kind: "server",
+      message: "retry-record-marker",
+      next: 1,
+      time: { created: 0, updated: 1 },
+    })
+    const input: MessageV2.WithParts[] = [
+      { info: userInfo("m-user-1"), parts: [{ ...basePart("m-user-1", "u1"), type: "text", text: "first" }] as MessageV2.Part[] },
+      {
+        info: assistantInfo("m-retry-only", "m-user-1"),
+        parts: [retry("m-retry-only", "r1")],
+      },
+      { info: userInfo("m-user-2"), parts: [{ ...basePart("m-user-2", "u2"), type: "text", text: "second" }] as MessageV2.Part[] },
+      {
+        info: assistantInfo("m-retry-answer", "m-user-2"),
+        parts: [
+          retry("m-retry-answer", "r2"),
+          { ...basePart("m-retry-answer", "t2"), type: "text", text: "answer" },
+        ] as MessageV2.Part[],
+      },
+    ]
+    const converted = await MessageV2.toModelMessages(input, model)
+    expect(JSON.stringify(converted)).not.toContain("retry-record-marker")
+    expect(converted.map((message) => message.role)).toEqual(["user", "user", "assistant"])
+    expect(converted.at(-1)).toMatchObject({ role: "assistant", content: [{ type: "text", text: "answer" }] })
+  })
+
+  test("filters out messages with only ignored parts", async () => {
+    const messageID = "m-user"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(messageID),
+        parts: [
+          {
+            ...basePart(messageID, "p1"),
+            type: "text",
+            text: "ignored",
+            ignored: true,
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([])
+  })
+
+  test("includes synthetic text parts", async () => {
+    const messageID = "m-user"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(messageID),
+        parts: [
+          {
+            ...basePart(messageID, "p1"),
+            type: "text",
+            text: "hello",
+            synthetic: true,
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo("m-assistant", messageID),
+        parts: [
+          {
+            ...basePart("m-assistant", "a1"),
+            type: "text",
+            text: "assistant",
+            synthetic: true,
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "assistant" }],
+      },
+    ])
+  })
+
+  test("converts user text/file parts and injects subtask prompt", async () => {
+    const messageID = "m-user"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(messageID),
+        parts: [
+          {
+            ...basePart(messageID, "p1"),
+            type: "text",
+            text: "hello",
+          },
+          {
+            ...basePart(messageID, "p2"),
+            type: "text",
+            text: "ignored",
+            ignored: true,
+          },
+          {
+            ...basePart(messageID, "p3"),
+            type: "file",
+            mime: "image/png",
+            filename: "img.png",
+            url: "https://example.com/img.png",
+          },
+          {
+            ...basePart(messageID, "p4"),
+            type: "file",
+            mime: "text/plain",
+            filename: "note.txt",
+            url: "https://example.com/note.txt",
+          },
+          {
+            ...basePart(messageID, "p5"),
+            type: "file",
+            mime: "application/x-directory",
+            filename: "dir",
+            url: "https://example.com/dir",
+          },
+          {
+            ...basePart(messageID, "p7"),
+            type: "subtask",
+            prompt: "prompt",
+            description: "desc",
+            agent: "agent",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "hello" },
+          {
+            type: "file",
+            mediaType: "image/png",
+            filename: "img.png",
+            data: "https://example.com/img.png",
+          },
+          { type: "text", text: "The following tool was executed by the user" },
+        ],
+      },
+    ])
+  })
+
+  test.each([
+    ["openai", false],
+    ["openai", true],
+    ["azure", false],
+    ["azure", true],
+  ] as const)("sends 51 historical screenshots inside %s Responses tool outputs (store=%s)", async (adapter, store) => {
+    const mediaModel = withInputCapabilities({ image: true })
+    mediaModel.api = { ...mediaModel.api, npm: adapter === "azure" ? "@ai-sdk/azure" : "@ai-sdk/openai" }
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo("m-user"),
+        parts: [
+          { ...basePart("m-user", "u1"), type: "text", text: "Inspect screenshots" },
+          { ...basePart("m-user", "u2"), type: "file", mime: "image/png", url: `data:image/png;base64,${pngBase64}` },
+        ],
+      },
+      ...Array.from(
+        { length: 51 },
+        (_, i): MessageV2.WithParts => ({
+          info: assistantInfo(`m-assistant-${i}`, "m-user"),
+          parts: [
+            {
+              ...basePart(`m-assistant-${i}`, `tool-${i}`),
+              type: "tool",
+              callID: `call-${i}`,
+              tool: "screenshot",
+              metadata: { openai: { itemId: `fc-${i}` } },
+              state: {
+                status: "completed",
+                input: {},
+                output: `Screenshot ${i}`,
+                title: "Screenshot",
+                metadata: {},
+                time: { start: 0, end: 1 },
+                attachments: [
+                  {
+                    ...basePart(`m-assistant-${i}`, `image-${i}`),
+                    type: "file",
+                    mime: "image/png",
+                    url: `data:image/png;base64,${pngBase64}`,
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      ),
+    ]
+    const requests: Array<{
+      store?: boolean
+      input: Array<{ type?: string; role?: string; call_id?: string; output?: unknown; content?: unknown }>
+    }> = []
+    const sdk = (adapter === "azure" ? createAzure : createOpenAI)({
+      resourceName: "test",
+      apiKey: "test-key",
+      fetch: Object.assign(
+        async (_url: RequestInfo | URL, init?: RequestInit) => {
+          requests.push(JSON.parse(String(init?.body)))
+          return Response.json({
+            id: "resp-test",
+            created_at: 1,
+            model: "test-model",
+            output: [],
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          })
+        },
+        { preconnect: fetch.preconnect },
+      ),
+    })
+    const language = sdk.responses("test-model")
+    const messages = await MessageV2.toModelMessages(input, mediaModel, { languageProvider: language.provider })
+    expect(messages.filter((message) => message.role === "user")).toHaveLength(1)
+    await generateText({
+      model: language,
+      messages: ProviderTransform.message(messages, mediaModel, {}),
+      providerOptions: { openai: { store } },
+      maxRetries: 0,
+    })
+    const sent = requests[0]!.input
+    expect(requests[0]!.store).toBe(store)
+    const outputs = sent.filter((item) => item.type === "function_call_output")
+    expect(outputs).toHaveLength(51)
+    for (const [i, output] of outputs.entries()) {
+      expect(output.call_id).toBe(`call-${i}`)
+      expect(output.output).toEqual([
+        { type: "input_text", text: `Screenshot ${i}` },
+        { type: "input_image", image_url: `data:image/png;base64,${pngBase64}` },
+      ])
+      expect(sent.some((item) => item.type === "function_call" && item.call_id === output.call_id)).toBe(true)
+    }
+    expect(sent.filter((item) => item.role === "user")).toHaveLength(1)
+    expect(JSON.stringify(sent.find((item) => item.role === "user"))).toContain("input_image")
+    expect(JSON.stringify(sent)).not.toContain(MessageV2.SYNTHETIC_ATTACHMENT_PROMPT)
+
+    const replay = await MessageV2.toModelMessages(input, mediaModel, {
+      languageProvider: sdk.chat("test-model").provider,
+    })
+    expect(replay.filter((message) => message.role === "user")).toHaveLength(52)
+    const stripped = await MessageV2.toModelMessages(input, mediaModel, {
+      languageProvider: language.provider,
+      stripMedia: true,
+    })
+    expect(JSON.stringify(stripped)).not.toContain(pngBase64)
+
+    const failed = structuredClone(input.slice(0, 2))
+    const part = failed[1]!.parts[0]!
+    if (part.type !== "tool" || part.state.status !== "completed") throw new Error("Expected completed fixture")
+    part.state = {
+      status: "error",
+      input: {},
+      error: "Screenshot interrupted",
+      time: { start: 0, end: 1 },
+      attachments: part.state.attachments,
+    }
+    const errorMessages = await MessageV2.toModelMessages(failed, mediaModel, { languageProvider: language.provider })
+    expect(errorMessages.filter((message) => message.role === "user")).toHaveLength(1)
+    expect(JSON.stringify(errorMessages)).toContain("Tool failed: Screenshot interrupted")
+    expect(JSON.stringify(errorMessages.find((message) => message.role === "tool"))).toContain(pngBase64)
+  })
+
+  test("routes supported and unsupported tool-result files for OpenAI-compatible Chat models", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const mediaModel = withInputCapabilities({ image: true, audio: true }, openAICompatibleModel)
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "text",
+            text: "done",
+            metadata: { openai: { assistant: "meta" } },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "ok",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1 },
+              attachments: [
+                {
+                  ...basePart(assistantID, "file-1"),
+                  type: "file",
+                  mime: "image/png",
+                  filename: "attachment.png",
+                  url: `data:image/png;base64,${pngBase64}`,
+                },
+                {
+                  ...basePart(assistantID, "file-2"),
+                  type: "file",
+                  mime: "audio/wav",
+                  filename: "attachment.wav",
+                  url: `data:audio/wav;base64,${wavBase64}`,
+                },
+                {
+                  ...basePart(assistantID, "file-3"),
+                  type: "file",
+                  mime: "application/octet-stream",
+                  filename: "attachment.bin",
+                  url: `data:application/octet-stream;base64,${binaryBase64}`,
+                },
+              ],
+            },
+            metadata: { openai: { tool: "meta" } },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const messages = await MessageV2.toModelMessages(input, mediaModel)
+    expect(messages).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "done", providerOptions: { openai: { assistant: "meta" } } },
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+            providerOptions: { openai: { tool: "meta" } },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: {
+              type: "text",
+              value: "ok",
+            },
+            providerOptions: { openai: { tool: "meta" } },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: MessageV2.SYNTHETIC_ATTACHMENT_PROMPT },
+          { type: "text", text: 'Tool "bash" call call-1 completed:' },
+          {
+            type: "file",
+            mediaType: "image/png",
+            filename: "attachment.png",
+            data: `data:image/png;base64,${pngBase64}`,
+          },
+          {
+            type: "file",
+            mediaType: "audio/wav",
+            filename: "attachment.wav",
+            data: `data:audio/wav;base64,${wavBase64}`,
+          },
+          {
+            type: "text",
+            text: '[Tool attachment "attachment.bin" (application/octet-stream) was retained but cannot be safely sent to this model/provider.]',
+          },
+        ],
+      },
+    ])
+    expect(JSON.stringify(messages)).not.toContain(binaryBase64)
+  })
+
+  test("omits provider metadata when assistant model differs", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID, undefined, { providerID: "other", modelID: "other" }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "text",
+            text: "done",
+            metadata: { openai: { assistant: "meta" } },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "ok",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+            metadata: { openai: { tool: "meta" } },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "done" },
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: "ok" },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("replaces compacted tool output with placeholder", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "this should be cleared",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1, compacted: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: "[Old tool result content cleared]" },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("preserves tool error media for OpenAI-compatible Chat models", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const mediaModel = withInputCapabilities({ image: true, audio: true }, openAICompatibleModel)
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "error",
+              input: { cmd: "ls" },
+              error: "nope",
+              time: { start: 0, end: 1 },
+              metadata: {},
+              attachments: [
+                {
+                  ...basePart(assistantID, "file-1"),
+                  type: "file",
+                  mime: "image/png",
+                  filename: "error-state.png",
+                  url: `data:image/png;base64,${pngBase64}`,
+                },
+                {
+                  ...basePart(assistantID, "file-2"),
+                  type: "file",
+                  mime: "audio/wav",
+                  filename: "error.wav",
+                  url: `data:audio/wav;base64,${wavBase64}`,
+                },
+                {
+                  ...basePart(assistantID, "file-3"),
+                  type: "file",
+                  mime: "audio/aac",
+                  filename: "unsupported.aac",
+                  url: "data:audio/aac;base64,//FQgA==",
+                },
+                {
+                  ...basePart(assistantID, "file-4"),
+                  type: "file",
+                  mime: "application/octet-stream",
+                  filename: "diagnostic.bin",
+                  url: `data:application/octet-stream;base64,${binaryBase64}`,
+                },
+              ],
+            },
+            metadata: { openai: { tool: "meta" } },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const messages = await MessageV2.toModelMessages(input, mediaModel)
+    expect(messages).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+            providerOptions: { openai: { tool: "meta" } },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "error-text", value: "nope" },
+            providerOptions: { openai: { tool: "meta" } },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: MessageV2.SYNTHETIC_ATTACHMENT_PROMPT },
+          { type: "text", text: 'Tool "bash" call call-1 failed:' },
+          {
+            type: "file",
+            mediaType: "image/png",
+            filename: "error-state.png",
+            data: `data:image/png;base64,${pngBase64}`,
+          },
+          {
+            type: "file",
+            mediaType: "audio/wav",
+            filename: "error.wav",
+            data: `data:audio/wav;base64,${wavBase64}`,
+          },
+          {
+            type: "text",
+            text: '[Tool attachment "unsupported.aac" (audio/aac) was retained but cannot be safely sent to this model/provider.]',
+          },
+          {
+            type: "text",
+            text: '[Tool attachment "diagnostic.bin" (application/octet-stream) was retained but cannot be safely sent to this model/provider.]',
+          },
+        ],
+      },
+    ])
+
+    expect(JSON.stringify(messages)).not.toContain(binaryBase64)
+    expect(await MessageV2.toModelMessages(input, mediaModel, { stripMedia: true })).toStrictEqual(
+      messages.slice(0, -1),
+    )
+  })
+
+  test("caps oversized synthetic error images before sending them to Anthropic", async () => {
+    const anthropicModel = withInputCapabilities(
+      { image: true },
+      {
+        ...model,
+        id: ModelID.make("anthropic/claude-opus-4-7"),
+        providerID: ProviderID.make("anthropic"),
+        api: {
+          id: "claude-opus-4-7-20250805",
+          url: "https://api.anthropic.com",
+          npm: "@ai-sdk/anthropic",
+        },
+      },
+    )
+    const oversizedBytes = Buffer.alloc(6_000_000, 0x42)
+    oversizedBytes.write("RIFF", 0, "ascii")
+    oversizedBytes.writeUInt32LE(5_999_992, 4)
+    oversizedBytes.write("WEBP", 8, "ascii")
+    oversizedBytes.write("VP8X", 12, "ascii")
+    oversizedBytes.writeUIntLE(99, 24, 3)
+    oversizedBytes.writeUIntLE(99, 27, 3)
+    const oversized = oversizedBytes.toString("base64")
+    const userID = "m-user-oversized-error"
+    const assistantID = "m-assistant-oversized-error"
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1-oversized-error"), type: "text", text: "run tool" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1-oversized-error"),
+            type: "tool",
+            callID: "call-oversized-error",
+            tool: "computer",
+            state: {
+              status: "error",
+              input: {},
+              error: "capture failed",
+              time: { start: 0, end: 1 },
+              metadata: {},
+              attachments: [
+                {
+                  ...basePart(assistantID, "file-oversized-error"),
+                  type: "file",
+                  mime: "image/webp",
+                  filename: "error-state.webp",
+                  url: `data:image/webp;base64,${oversized}`,
+                },
+              ],
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const messages = await MessageV2.toModelMessages(input, anthropicModel)
+    const synthetic = messages.at(-1)
+    expect(synthetic?.role).toBe("user")
+    expect(
+      Array.isArray(synthetic?.content) &&
+        synthetic.content.some((part) => part.type === "file" && part.mediaType === "image/webp"),
+    ).toBe(true)
+
+    // streamText converts data URLs to raw base64 before invoking the model
+    // middleware where ProviderTransform.message runs.
+    const providerPrompt = messages.map((message) => {
+      if (message !== synthetic || message.role !== "user" || !Array.isArray(message.content)) return message
+      return {
+        ...message,
+        content: message.content.map((part) =>
+          part.type === "file" && part.mediaType === "image/webp" ? { ...part, data: oversized } : part,
+        ),
+      }
+    })
+    const transformed = ProviderTransform.message(providerPrompt, anthropicModel, {})
+    const content = transformed.at(-1)?.content
+    expect(
+      Array.isArray(content) && content.some((part) => part.type === "text" && part.text.includes("Image omitted")),
+    ).toBe(true)
+    expect(
+      Array.isArray(content) && content.some((part) => part.type === "file" && part.mediaType === "image/webp"),
+    ).toBe(false)
+  })
+
+  test("keeps synthetic attachments correlated with multiple tool calls", async () => {
+    const userID = "m-user-groups"
+    const assistantID = "m-assistant-groups"
+    const mediaModel = withInputCapabilities({ image: true })
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u-groups"),
+            type: "text",
+            text: "run both tools",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "tool-image"),
+            type: "tool",
+            callID: "call-image",
+            tool: "screenshot",
+            state: {
+              status: "completed",
+              input: {},
+              output: "captured",
+              title: "Screenshot",
+              metadata: {},
+              time: { start: 0, end: 1 },
+              attachments: [
+                {
+                  ...basePart(assistantID, "group-image"),
+                  type: "file",
+                  mime: "image/png",
+                  filename: "screen.png",
+                  url: `data:image/png;base64,${pngBase64}`,
+                },
+              ],
+            },
+          },
+          {
+            ...basePart(assistantID, "tool-error"),
+            type: "tool",
+            callID: "call-error",
+            tool: "upload",
+            state: {
+              status: "error",
+              input: {},
+              error: "upload failed",
+              metadata: {},
+              time: { start: 2, end: 3 },
+              attachments: [
+                {
+                  ...basePart(assistantID, "group-binary"),
+                  type: "file",
+                  mime: "application/octet-stream",
+                  filename: "upload.bin",
+                  url: `data:application/octet-stream;base64,${binaryBase64}`,
+                },
+              ],
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const messages = await MessageV2.toModelMessages(input, mediaModel)
+    const synthetic = messages.filter(
+      (message) =>
+        message.role === "user" &&
+        Array.isArray(message.content) &&
+        message.content.some((part) => part.type === "text" && part.text === "Attached file(s) from tool result:"),
+    )
+
+    expect(synthetic).toHaveLength(1)
+    expect(synthetic[0]?.content).toStrictEqual([
+      { type: "text", text: "Attached file(s) from tool result:" },
+      { type: "text", text: 'Tool "screenshot" call call-image completed:' },
+      {
+        type: "file",
+        mediaType: "image/png",
+        filename: "screen.png",
+        data: `data:image/png;base64,${pngBase64}`,
+      },
+      { type: "text", text: 'Tool "upload" call call-error failed:' },
+      {
+        type: "text",
+        text: '[Tool attachment "upload.bin" (application/octet-stream) was retained but cannot be safely sent to this model/provider.]',
+      },
+    ])
+    expect(JSON.stringify(messages)).not.toContain(binaryBase64)
+  })
+
+  test("forwards partial bash output for aborted tool calls", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const output = [
+      "31403",
+      "12179",
+      "4575",
+      "",
+      "<bash_metadata>",
+      "User aborted the command",
+      "</bash_metadata>",
+    ].join("\n")
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "error",
+              input: { command: "for i in {1..20}; do print -- $RANDOM; sleep 1; done" },
+              error: "Tool execution aborted",
+              metadata: { interrupted: true, output },
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { command: "for i in {1..20}; do print -- $RANDOM; sleep 1; done" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: output },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("filters assistant messages with non-abort errors", async () => {
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(
+          assistantID,
+          "m-parent",
+          new MessageV2.APIError({ message: "boom", isRetryable: true }).toObject() as MessageV2.APIError,
+        ),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "text",
+            text: "should not render",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([])
+  })
+
+  test("includes aborted assistant messages only when they have non-step-start/reasoning content", async () => {
+    const assistantID1 = "m-assistant-1"
+    const assistantID2 = "m-assistant-2"
+
+    const aborted = new MessageV2.AbortedError({ message: "aborted" }).toObject() as MessageV2.Assistant["error"]
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID1, "m-parent", aborted),
+        parts: [
+          {
+            ...basePart(assistantID1, "a1"),
+            type: "reasoning",
+            text: "thinking",
+            time: { start: 0 },
+          },
+          {
+            ...basePart(assistantID1, "a2"),
+            type: "text",
+            text: "partial answer",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID2, "m-parent", aborted),
+        parts: [
+          {
+            ...basePart(assistantID2, "b1"),
+            type: "step-start",
+          },
+          {
+            ...basePart(assistantID2, "b2"),
+            type: "reasoning",
+            text: "thinking",
+            time: { start: 0 },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "thinking", providerOptions: undefined },
+          { type: "text", text: "partial answer" },
+        ],
+      },
+    ])
+  })
+
+  test("splits assistant messages on step-start boundaries", async () => {
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-parent"),
+        parts: [
+          {
+            ...basePart(assistantID, "p1"),
+            type: "text",
+            text: "first",
+          },
+          {
+            ...basePart(assistantID, "p2"),
+            type: "step-start",
+          },
+          {
+            ...basePart(assistantID, "p3"),
+            type: "text",
+            text: "second",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "first" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "second" }],
+      },
+    ])
+  })
+
+  test("drops messages that only contain step-start parts", async () => {
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-parent"),
+        parts: [
+          {
+            ...basePart(assistantID, "p1"),
+            type: "step-start",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([])
+  })
+
+  test("converts pending/running tool calls to error results to prevent dangling tool_use", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-pending",
+            tool: "bash",
+            state: {
+              status: "pending",
+              input: { cmd: "ls" },
+              raw: "",
+            },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "tool",
+            callID: "call-running",
+            tool: "read",
+            state: {
+              status: "running",
+              input: { path: "/tmp" },
+              time: { start: 0 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+
+    expect(result).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-pending",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+          },
+          {
+            type: "tool-call",
+            toolCallId: "call-running",
+            toolName: "read",
+            input: { path: "/tmp" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-pending",
+            toolName: "bash",
+            output: { type: "error-text", value: "[Tool execution was interrupted]" },
+          },
+          {
+            type: "tool-result",
+            toolCallId: "call-running",
+            toolName: "read",
+            output: { type: "error-text", value: "[Tool execution was interrupted]" },
+          },
+        ],
+      },
+    ])
+  })
+})
+
+describe("session.message-v2.fromError", () => {
+  test("normalizes stream_read_error as a retryable APIError", () => {
+    const input = {
+      type: "error",
+      error: { type: "upstream_error", code: "stream_read_error", message: "stream_read_error" },
+    }
+    const result = MessageV2.fromError(input, { providerID })
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
+    expect((result as MessageV2.APIError).data.responseBody).toBe(JSON.stringify(input))
+  })
+
+  test("normalizes fetch failed with a retryable network cause", () => {
+    const cause = Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" })
+    const result = MessageV2.fromError(Object.assign(new TypeError("fetch failed"), { cause }), { providerID })
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
+    expect((result as MessageV2.APIError).data.metadata?.code).toBe("UND_ERR_SOCKET")
+  })
+
+  test("serializes context_length_exceeded as ContextOverflowError", () => {
+    const input = {
+      type: "error",
+      error: {
+        code: "context_length_exceeded",
+      },
+    }
+    const result = MessageV2.fromError(input, { providerID })
+
+    expect(result).toStrictEqual({
+      name: "ContextOverflowError",
+      data: {
+        message: "Input exceeds context window of this model",
+        responseBody: JSON.stringify(input),
+      },
+    })
+  })
+
+  test("serializes response error codes", () => {
+    const cases = [
+      {
+        code: "insufficient_quota",
+        message: "Quota exceeded. Check your plan and billing details.",
+      },
+      {
+        code: "usage_not_included",
+        message: "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
+      },
+      {
+        code: "invalid_prompt",
+        message: "Invalid prompt from test",
+      },
+    ]
+
+    cases.forEach((item) => {
+      const input = {
+        type: "error",
+        error: {
+          code: item.code,
+          message: item.code === "invalid_prompt" ? item.message : undefined,
+        },
+      }
+      const result = MessageV2.fromError(input, { providerID })
+
+      expect(result).toStrictEqual({
+        name: "APIError",
+        data: {
+          message: item.message,
+          isRetryable: false,
+          responseBody: JSON.stringify(input),
+        },
+      })
+    })
+  })
+
+  test("detects context overflow from APICallError provider messages", () => {
+    const cases = [
+      "prompt is too long: 213462 tokens > 200000 maximum",
+      "Your input exceeds the context window of this model",
+      "The input token count (1196265) exceeds the maximum number of tokens allowed (1048575)",
+      "Please reduce the length of the messages or completion",
+      "400 status code (no body)",
+      "413 status code (no body)",
+    ]
+
+    cases.forEach((message) => {
+      const error = new APICallError({
+        message,
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode: 400,
+        responseHeaders: { "content-type": "application/json" },
+        isRetryable: false,
+      })
+      const result = MessageV2.fromError(error, { providerID })
+      expect(MessageV2.ContextOverflowError.isInstance(result)).toBe(true)
+    })
+  })
+
+  // [TP-R8-06] Desktop turn-execution: provider prose must reach the native
+  // overflow branch even when the HTTP 400 body has no context error code.
+  test("detects model's context window overflow without a structured overflow code", () => {
+    const message = "The prompt exceeds the model's context window of 393,216 tokens. Shorten or compact the conversation and retry."
+    const responseBody = JSON.stringify({ error: { message, type: "invalid_request_error", code: null } })
+    for (const providerID of [ProviderID.make("test"), ProviderID.make("xiaomi")]) {
+      for (const sdkMessage of [message, "Request failed"]) {
+        const result = MessageV2.fromError(new APICallError({
+          message: sdkMessage,
+          url: "https://example.com/v1/chat/completions",
+          requestBodyValues: {},
+          statusCode: 400,
+          responseBody,
+          isRetryable: false,
+        }), { providerID })
+        expect(MessageV2.ContextOverflowError.isInstance(result)).toBe(true)
+        expect(result).toMatchObject({ data: { responseBody } })
+      }
+    }
+  })
+
+  test("ordinary HTTP 400 mentioning a model context window remains an API error", () => {
+    for (const message of [
+      "Unable to determine the model's context window",
+      "The output exceeds the model's output token limit",
+      "Invalid model context window configuration",
+    ]) {
+      const result = MessageV2.fromError(new APICallError({
+        message, url: "https://example.com", requestBodyValues: {}, statusCode: 400, isRetryable: false,
+      }), { providerID })
+      expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    }
+  })
+
+  test("detects context overflow from context_length_exceeded code in response body", () => {
+    const error = new APICallError({
+      message: "Request failed",
+      url: "https://example.com",
+      requestBodyValues: {},
+      statusCode: 422,
+      responseHeaders: { "content-type": "application/json" },
+      responseBody: JSON.stringify({
+        error: {
+          message: "Some message",
+          type: "invalid_request_error",
+          code: "context_length_exceeded",
+        },
+      }),
+      isRetryable: false,
+    })
+    const result = MessageV2.fromError(error, { providerID })
+    expect(MessageV2.ContextOverflowError.isInstance(result)).toBe(true)
+  })
+
+  test("does not classify 429 no body as context overflow", () => {
+    const result = MessageV2.fromError(
+      new APICallError({
+        message: "429 status code (no body)",
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode: 429,
+        responseHeaders: { "content-type": "application/json" },
+        isRetryable: false,
+      }),
+      { providerID },
+    )
+    expect(MessageV2.ContextOverflowError.isInstance(result)).toBe(false)
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+  })
+
+  test("serializes unknown inputs", () => {
+    const result = MessageV2.fromError(123, { providerID })
+
+    expect(result).toStrictEqual({
+      name: "UnknownError",
+      data: {
+        message: "123",
+      },
+    })
+  })
+
+  test("plain string errors keep raw text without JSON quote wrapping", () => {
+    // 回归:JSON.stringify("Internal Server Error") 曾多包一层引号,
+    // 让 SessionRetry and client isOpaqueError 精确匹配失效。
+    const result = MessageV2.fromError("Internal Server Error", { providerID })
+    expect(result).toStrictEqual({
+      name: "UnknownError",
+      data: { message: "Internal Server Error" },
+    })
+    expect((result as { data: { message: string } }).data.message).not.toMatch(/^".*"$/)
+  })
+
+  test("serializes tagged errors with their message", () => {
+    const result = MessageV2.fromError(new Question.RejectedError(), { providerID })
+
+    expect(result).toStrictEqual({
+      name: "UnknownError",
+      data: {
+        message: "The user dismissed this question",
+      },
+    })
+  })
+
+  test("classifies ZlibError from fetch as retryable APIError", () => {
+    const zlibError = new Error(
+      'ZlibError fetching "https://opencode.cloudflare.dev/anthropic/messages". For more information, pass `verbose: true` in the second argument to fetch()',
+    )
+    ;(zlibError as any).code = "ZlibError"
+    ;(zlibError as any).errno = 0
+    ;(zlibError as any).path = ""
+
+    const result = MessageV2.fromError(zlibError, { providerID })
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
+    expect((result as MessageV2.APIError).data.message).toInclude("decompression")
+  })
+
+  test("classifies ZlibError as AbortedError when abort context is provided", () => {
+    const zlibError = new Error(
+      'ZlibError fetching "https://opencode.cloudflare.dev/anthropic/messages". For more information, pass `verbose: true` in the second argument to fetch()',
+    )
+    ;(zlibError as any).code = "ZlibError"
+    ;(zlibError as any).errno = 0
+
+    const result = MessageV2.fromError(zlibError, { providerID, aborted: true })
+
+    expect(result.name).toBe("MessageAbortedError")
+  })
+
+  test("normalizes SSE timeout before the processor retry boundary", () => {
+    const result = MessageV2.fromError(new Error("SSE read timed out"), { providerID })
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
+  })
+
+ test("abort cause wins over a retryable network cause", () => {
+   const cause = Object.assign(new Error("socket reset"), { code: "ECONNRESET" })
+   const error = Object.assign(new DOMException("user aborted", "AbortError"), { cause })
+   const result = MessageV2.fromError(error, { providerID })
+   expect(result.name).toBe("MessageAbortedError")
+ })
+
+ test("recognizes normalized credential rejection as an auth error", () => {
+    const error = new MessageV2.APIError({ message: "Unauthorized", statusCode: 401, isRetryable: false }).toObject()
+   expect(MessageV2.isAuthError(error)).toBe(true)
+  })
+
+  test("does not treat a generic 403 permission failure as authentication", () => {
+    const error = new MessageV2.APIError({ message: "Forbidden", statusCode: 403, isRetryable: false }).toObject()
+    expect(MessageV2.isAuthError(error)).toBe(false)
+  })
+
+  test("treats an explicitly invalid 403 credential as authentication", () => {
+    const error = new MessageV2.APIError({ message: "Invalid API key", statusCode: 403, isRetryable: false }).toObject()
+    expect(MessageV2.isAuthError(error)).toBe(true)
+  })
+
+  test("treats a bare 403 Unauthorized reason as authentication", () => {
+    const error = new MessageV2.APIError({ message: "Unauthorized", statusCode: 403, isRetryable: false }).toObject()
+    expect(MessageV2.isAuthError(error)).toBe(true)
+  })
+
+  test("does not treat an unrelated unauthorized word as authentication", () => {
+    const error = new MessageV2.APIError({ message: "CORS unauthorized origin", statusCode: 403, isRetryable: false }).toObject()
+    expect(MessageV2.isAuthError(error)).toBe(false)
+  })
+
+  test("recognizes explicit authorization-required and access-denied responses", () => {
+    for (const message of ["Authorization required", "Access denied"]) {
+      const error = new MessageV2.APIError({ message, statusCode: 403, isRetryable: false }).toObject()
+      expect(MessageV2.isAuthError(error)).toBe(true)
+    }
+  })
+
+  test("malformed output-length tags cannot bypass schema validation", () => {
+    for (const raw of [{ name: "MessageOutputLengthError" }, { name: "MessageOutputLengthError", data: null }]) {
+      for (const normalize of [MessageV2.fromLiveError, MessageV2.fromError]) {
+        expect(() => normalize(raw, { providerID })).not.toThrow()
+        const result = normalize(raw, { providerID })
+        expect(result.name).toBe("UnknownError")
+        expect(MessageV2.Assistant.shape.error.safeParse(result).success).toBe(true)
+      }
+    }
+  })
+
+  test("valid output-length instances and serialized objects retain their classification", () => {
+    const error = new MessageV2.OutputLengthError({})
+    for (const raw of [error, error.toObject()]) {
+      expect(MessageV2.fromLiveError(raw, { providerID })).toEqual(error.toObject())
+      expect(MessageV2.fromError(raw, { providerID })).toEqual(error.toObject())
+    }
+  })
+
+  test("does not crash on a RetryError without an errors array", () => {
+    const error = new RetryError({ message: "retry failed", reason: "maxRetriesExceeded", errors: [] })
+    ;(error as any).errors = undefined
+    const result = MessageV2.fromError(error, { providerID })
+    expect(result.name).toBe("UnknownError")
+  })
+})

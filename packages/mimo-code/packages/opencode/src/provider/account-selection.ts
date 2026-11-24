@@ -15,8 +15,40 @@ export class Scope extends Schema.Class<Scope>("ProviderAccountScope")({
   credential: Schema.optional(Auth.Info),
 }) {}
 
+export const MethodPolicy = Schema.Struct({
+  version: Schema.Literal(1),
+  methodID: Schema.Literal("anthropic.claude_subscription"),
+  credentialOwner: Schema.String,
+  policyRevision: Schema.Number,
+})
+
+export const ActorOptions = Schema.Struct({
+  version: Schema.Literal(1), routeID: Schema.String, optionRouteID: Schema.String, catalogRevision: Schema.Number,
+  model: Schema.Struct({ providerID: Schema.String, modelID: Schema.String }),
+  options: Schema.Struct({ reasoning_effort: Schema.optional(Schema.String) }),
+  source: Schema.Struct({ kind: Schema.Literals(["parent_execution", "default", "receipt"]), requestID: Schema.optional(Schema.String), sessionID: Schema.optional(Schema.String), actorID: Schema.optional(Schema.String), executionRevision: Schema.optional(Schema.Number), rootOperationID: Schema.optional(Schema.String), messageID: Schema.optional(Schema.String) }),
+})
+
+const BootstrapCommon = {
+  stableChatID: Schema.String, owner: Schema.String, rootSessionID: Schema.String,
+  sessionID: Schema.String, actorID: Schema.String, rootOperationID: Schema.String,
+  expectedExecutionRevision: Schema.Number, modelRouteID: Schema.String,
+  handoffID: Schema.optional(Schema.String), modelRequestOptions: Schema.optional(ActorOptions),
+}
 export class SelectionRequest extends Schema.Class<SelectionRequest>("ProviderAccountSelectionRequest")({
   rootOperationID: Schema.String,
+  modelRequestOptions: Schema.optional(ActorOptions),
+  methodPolicy: Schema.optional(MethodPolicy),
+  bootstrap: Schema.optional(Schema.Union([
+    Schema.Struct({ ...BootstrapCommon, mapRevision: Schema.Number, mappingRevision: Schema.Number, workspaceRevision: Schema.Number }),
+    Schema.Struct({ ...BootstrapCommon, authority: Schema.Struct({ kind: Schema.Literal("private"), generation: Schema.String }), workspaceRevision: Schema.optional(Schema.Number) }),
+  ])),
+  scopeKind: Schema.Literals(["actor_execution", "auxiliary_operation"]),
+  operationID: Schema.optional(Schema.String),
+  sessionID: Schema.optional(Schema.String),
+  actorID: Schema.optional(Schema.String),
+  executionRevision: Schema.optional(Schema.Number),
+  modelRouteID: Schema.optional(Schema.String),
   connectionID: Schema.String,
   providerID: Schema.String,
   billingLane: Auth.BillingLane,
@@ -30,9 +62,18 @@ export const SelectionSource = Schema.Literals(["round_robin", "preferred", "inh
 export type SelectionSource = Schema.Schema.Type<typeof SelectionSource>
 
 export class Binding extends Schema.Class<Binding>("ProviderAccountBinding")({
+  pendingCrossModel: Schema.optional(Schema.Struct({version:Schema.Literal(1),coordinatorRevision:Schema.Literal(1)})),
+  crossModelAttempt: Schema.optional(Schema.Struct({version:Schema.Literal(1),attemptID:Schema.String,attemptGeneration:Schema.Literal(1),coordinatorRevision:Schema.Number,accounting:Schema.optional(Schema.Literal('unavailable'))})),
+  methodPolicy: Schema.optional(MethodPolicy),
   bindingID: Schema.String,
   bindingRevision: Schema.Number,
   rootOperationID: Schema.String,
+  scopeKind: Schema.Literals(["actor_execution", "auxiliary_operation"]),
+  operationID: Schema.optional(Schema.String),
+  sessionID: Schema.optional(Schema.String),
+  actorID: Schema.optional(Schema.String),
+  executionRevision: Schema.optional(Schema.Number),
+  modelRouteID: Schema.optional(Schema.String),
   connectionID: Schema.String,
   providerID: Schema.String,
   billingLane: Auth.BillingLane,
@@ -47,6 +88,17 @@ export class Binding extends Schema.Class<Binding>("ProviderAccountBinding")({
 
 export const AttemptOutcome = Schema.Literals(["success", "auth", "quota", "entitlement", "transient", "unknown"])
 export type AttemptOutcome = Schema.Schema.Type<typeof AttemptOutcome>
+
+export type DispatchObservation = { version: 1; profile: "anthropic.messages.v1" | "openai.codex.responses.v1"; captureDispatchID: string; upstreamDispatchID: string; httpStatus: number }
+
+export type AttemptEvidence = {
+  version: 1
+  kind: "throttle" | "exhausted" | "auth" | "entitlement" | "transient" | "malformed_success" | "unknown"
+  httpStatus?: number
+  providerReset?: { at: string; source: string; observedAt: string; dispatchID: string }
+  codexWindows?: { source: "openai.codex.subscription.headers.v1"; observedAt: string; dispatchID: string; windows: { window: "primary" | "secondary"; usedPercent: number; windowMinutes?: number; resetAt?: string }[] }
+  localNotBefore?: string
+}
 
 export class SelectionError extends Schema.TaggedErrorClass<SelectionError>()("ProviderAccountSelectionError", {
   code: Schema.Literals(["no_eligible_account", "binding_conflict", "committed", "grant_revoked"]),
@@ -69,6 +121,7 @@ export interface Interface {
     outcome: AttemptOutcome
     retryAfterMs?: number
     modelEligible?: boolean
+    evidence?: AttemptEvidence
   }) => Effect.Effect<Binding, SelectionError>
 }
 

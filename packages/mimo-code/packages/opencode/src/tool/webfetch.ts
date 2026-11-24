@@ -2,7 +2,8 @@ import z from "zod"
 import { Effect } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import * as Tool from "./tool"
-import TurndownService from "turndown"
+import { convertHTMLToMarkdown, markWebfetchHtml, markWebfetchMarkdown } from "./webfetch-view"
+import { toolViewProducerCurrent } from "../session/tool-view-producer-admission"
 import DESCRIPTION from "./webfetch.txt"
 import { isImageAttachment } from "@/util/media"
 import { assertSafeUrl } from "@/util/ssrf"
@@ -94,7 +95,11 @@ export const WebFetchTool = Tool.define(
           )
 
           // Block SSRF via redirect: if the response was redirected, validate final URL
-          const source = (response as any).source as Response | undefined
+          // Effect's interruptible response wraps the actual Fetch response once.
+          // Only a real Response supplies a final URL; never infer it from the request.
+          const carrier = response as unknown as {source?:unknown;original?:{source?:unknown}}
+          const candidate = carrier.source ?? carrier.original?.source
+          const source = candidate instanceof Response ? candidate : undefined
           if (source?.url && source.url !== params.url) {
             yield* Effect.promise(() => assertSafeUrl(source.url))
           }
@@ -135,15 +140,13 @@ export const WebFetchTool = Tool.define(
           // Handle content based on requested format and actual content type
           switch (params.format) {
             case "markdown":
-              if (contentType.includes("text/html")) {
-                const markdown = convertHTMLToMarkdown(content)
-                return {
-                  output: markdown,
-                  title,
-                  metadata: {},
-                }
+              {
+                const html = contentType.includes("text/html")
+                const result = { output: html ? convertHTMLToMarkdown(content) : content, title, metadata: {} }
+                if ((mime==='text/markdown' || mime==='text/x-markdown' || (mime==='text/html' && html)) && source?.url && ctx.callID && toolViewProducerCurrent(ctx,'markdown-slim-v1'))
+                  return markWebfetchMarkdown(result,{sessionID:ctx.sessionID,messageID:ctx.messageID,callID:ctx.callID,requestedURL:params.url,finalURL:source.url},mime,ctx)
+                return result
               }
-              return { output: content, title, metadata: {} }
 
             case "text":
               if (contentType.includes("text/html")) {
@@ -152,8 +155,16 @@ export const WebFetchTool = Tool.define(
               }
               return { output: content, title, metadata: {} }
 
-            case "html":
-              return { output: content, title, metadata: {} }
+            case "html": {
+              const result = { output: content, title, metadata: {} }
+              // A real, validated response URL and exact HTML MIME are required;
+              // this sidecar never enters serializable tool metadata.
+              if (mime === 'text/html' && source?.url && ctx.callID && toolViewProducerCurrent(ctx,'html-markdown-v1')) {
+                return markWebfetchHtml(result, {sessionID:ctx.sessionID,messageID:ctx.messageID,
+                  callID:ctx.callID,requestedURL:params.url,finalURL:source.url},ctx)
+              }
+              return result
+            }
 
             default:
               return { output: content, title, metadata: {} }
@@ -193,16 +204,4 @@ async function extractTextFromHTML(html: string) {
 
   await rewriter.text()
   return text.trim()
-}
-
-function convertHTMLToMarkdown(html: string): string {
-  const turndownService = new TurndownService({
-    headingStyle: "atx",
-    hr: "---",
-    bulletListMarker: "-",
-    codeBlockStyle: "fenced",
-    emDelimiter: "*",
-  })
-  turndownService.remove(["script", "style", "meta", "link"])
-  return turndownService.turndown(html)
 }

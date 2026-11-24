@@ -7,6 +7,7 @@ import hashlib
 import os
 import secrets
 import shutil
+import stat
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,18 @@ def _owner(value: str) -> str:
     if not clean or "\x00" in clean:
         raise ArtifactError("artifact owner is required")
     return clean
+
+
+def account_artifact_owner(subject_id: str) -> str:
+    """Existing reserved immutable-account partition for retained artifacts."""
+    if not isinstance(subject_id, str) or not subject_id or '\x00' in subject_id:
+        raise ArtifactError('artifact account identity is required')
+    return 'user:media:' + hashlib.sha256(subject_id.encode('utf-8')).hexdigest()
+
+
+def media_artifact_owner(subject_id: str) -> str:
+    """Compatibility name for the existing immutable-account partition."""
+    return account_artifact_owner(subject_id)
 
 
 def _utc(value: datetime | None = None) -> datetime:
@@ -141,16 +154,29 @@ class ArtifactStore:
                 )
                 if existing is not None:
                     if destination.is_file() and destination.stat().st_size == size:
-                        existing.state = "staged"
-                        existing.expires_at = expires_at
-                        existing.media_type = media_type
+                        if existing.relative_path != relative or existing.size_bytes != size:
+                            raise ArtifactIntegrityError('artifact metadata changed')
+                        flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+                        fd = os.open(destination, flags)
+                        with os.fdopen(fd, 'rb') as handle:
+                            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                                raise ArtifactIntegrityError('artifact payload is not a regular file')
+                            verified = hashlib.sha256()
+                            for block in iter(lambda: handle.read(1024 * 1024), b''):
+                                verified.update(block)
+                        if verified.hexdigest() != sha256:
+                            raise ArtifactIntegrityError('artifact payload failed its content hash')
+                        if existing.state != 'acknowledged':
+                            existing.state = "staged"
+                            existing.expires_at = expires_at
                         db.flush()
                         db.refresh(existing)
                         db.expunge(existing)
                         return existing
+                    if destination.exists() or existing.state == 'acknowledged':
+                        raise ArtifactIntegrityError('existing artifact payload is missing or changed')
                     existing.relative_path = relative
                     existing.size_bytes = size
-                    existing.media_type = media_type
                     existing.state = "staged"
                     existing.expires_at = expires_at
                     existing.acknowledged_at = None

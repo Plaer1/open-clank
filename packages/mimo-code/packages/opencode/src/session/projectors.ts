@@ -1,7 +1,12 @@
-import { NotFoundError, eq, and } from "../storage"
+import { NotFoundError, eq, and, sql } from "../storage"
 import { SyncEvent } from "@/sync"
 import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
+import { projectGcfReceipt } from "./gcf-source-proof"
+import { currentToolView } from "./tool-view-source"
+import { peekToolTiming } from "./tool-timing"
+import { createHash } from "node:crypto"
+import { projectMembership } from "./capture-membership"
 import { SessionTable, MessageTable, PartTable } from "./session.sql"
 import { Log } from "../util"
 
@@ -111,6 +116,14 @@ export default [
     const time_created = data.info.time.created
     const { id, sessionID, agentID, ...rest } = data.info
 
+    const previousMessage = db.select().from(MessageTable).where(and(eq(MessageTable.id,id),eq(MessageTable.session_id,sessionID))).get()
+    const priorExecution = (previousMessage?.data as any)?.metadata?.managedExecution
+    const nextExecution = (rest as any)?.metadata?.managedExecution
+    if (previousMessage && (previousMessage.agent_id !== (agentID ?? "main") || JSON.stringify(priorExecution) !== JSON.stringify(nextExecution)) &&
+        db.all<{name:string}>(sql`PRAGMA table_info('part')`).some(column => column.name === 'openclank_step_recovery')) {
+      db.run(sql`UPDATE part SET openclank_step_recovery=NULL WHERE message_id=${id} AND session_id=${sessionID} AND openclank_step_recovery IS NOT NULL`)
+    }
+
     try {
       db.insert(MessageTable)
         .values({
@@ -141,7 +154,29 @@ export default [
   }),
 
   SyncEvent.project(MessageV2.Event.PartUpdated, (db, data) => {
-    const { id, messageID, sessionID, ...rest } = data.part
+    const identity = db.select().from(PartTable).where(eq(PartTable.id,data.part.id)).get()
+    if (identity && (identity.message_id !== data.part.messageID || identity.session_id !== data.part.sessionID))
+      throw new Error("part identity changed")
+    const current = identity
+    const previous = current ? {...current.data,id:current.id,messageID:current.message_id,sessionID:current.session_id} : undefined
+    const issuedPart = data.part
+    const safePart = projectMembership(projectGcfReceipt(issuedPart,previous as typeof data.part | undefined), previous as typeof data.part | undefined)
+    const issuedUnchanged = JSON.stringify(safePart) === JSON.stringify(issuedPart)
+    data.part = issuedUnchanged ? issuedPart : safePart
+    const { id, messageID, sessionID, ...rest } = safePart
+
+    // Optional decision state is never accepted from an event. A changed
+    // canonical part invalidates it in the same projector transaction.
+    if (current && db.all<{name:string}>(sql`PRAGMA table_info('part')`).some((column) => column.name === 'openclank_view_decision')) {
+      const prior = db.get<{decision:string | null}>(sql`SELECT openclank_view_decision AS decision FROM part WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID}`)
+      if (prior?.decision != null && JSON.stringify(current.data) !== JSON.stringify(rest))
+        db.run(sql`UPDATE part SET openclank_view_decision=NULL WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID}`)
+    }
+
+    if (current && (current.data as any)?.type === "step-start" && JSON.stringify(current.data) !== JSON.stringify(rest) &&
+        db.all<{name:string}>(sql`PRAGMA table_info('part')`).some(column => column.name === 'openclank_step_recovery')) {
+      db.run(sql`UPDATE part SET openclank_step_recovery=NULL WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID}`)
+    }
 
     try {
       db.insert(PartTable)
@@ -154,6 +189,24 @@ export default [
         })
         .onConflictDoUpdate({ target: PartTable.id, set: { data: rest } })
         .run()
+      const capture = issuedUnchanged ? currentToolView(issuedPart) : undefined
+      if (capture && current && (current.data as any)?.state?.status === 'running') {
+        try {
+          const timing=peekToolTiming(issuedPart)
+          if (!timing || timing.proof.clockID!==capture.admission.clockID || timing.proof.actorID!==capture.admission.actorID ||
+              timing.proof.rootOperationID!==capture.admission.rootOperationID || timing.proof.innerTurnID!==capture.admission.innerTurnID ||
+              timing.proof.messageID!==messageID || timing.proof.partID!==id) return
+          if (db.all<{name:string}>(sql`PRAGMA table_info('part')`).some(column=>column.name==='openclank_view_decision')) {
+            const row=db.get<{data:string; decision:string | null}>(sql`SELECT data,openclank_view_decision AS decision FROM part WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID} AND length(CAST(data AS BLOB))<=262144`)
+            if (row && typeof row.data==='string' && row.decision===null) {
+              const {on:_on,...scope}=capture.admission
+              const candidate=JSON.stringify({version:scope.profile==='line-cap-v1' ? 2 : 1,state:'candidate',...scope,dataSHA256:createHash('sha256').update(row.data,'utf8').digest('hex'),contentSHA256:timing.proof.contentSHA256})
+              if (Buffer.byteLength(candidate,'utf8')<=4096)
+                db.run(sql`UPDATE part SET openclank_view_decision=${candidate} WHERE id=${id} AND message_id=${messageID} AND session_id=${sessionID} AND data=${row.data} AND openclank_view_decision IS NULL`)
+            }
+          }
+        } catch { /* Optional candidate persistence must not fail the tool. */ }
+      }
     } catch (err) {
       if (!foreign(err)) throw err
       log.warn("ignored late part update", { partID: id, messageID, sessionID })

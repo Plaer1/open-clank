@@ -2,8 +2,8 @@
   "id": "batch-040",
   "group": "files",
   "surface": "files",
-  "entry_count": 186,
-  "character_count": 15170,
+  "entry_count": 188,
+  "character_count": 15385,
   "complexity": "mixed",
   "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
   "entries": [
@@ -2344,6 +2344,31 @@
       "status": "live",
       "locations": [
         "static/js/files.js:2986"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.collections",
+      "source": "Workspace collections",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:183",
+        "static/js/files.js:7339"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.an.active.folder.under.workspace.collections",
+      "source": "Choose an active folder under Workspace collections.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js"
       ],
       "context": "",
       "complexity": "label"

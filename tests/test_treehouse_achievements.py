@@ -67,21 +67,21 @@ def _shell_ready(source: str = "shell-1", **kwargs) -> ActivityEvent:
 
 
 # ---------------------------------------------------------------------------
-# Catalog shape (30 visible + 4 mystery + 3 ultra, as approved)
+# Catalog shape (32 visible + 4 mystery + 3 ultra)
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_is_30_visible_plus_4_mystery_plus_3_ultra():
+def test_catalog_is_32_visible_plus_4_mystery_plus_3_ultra():
     visible = [item for item in CATALOG if item.rarity == "normal"]
     mystery = [item for item in CATALOG if item.rarity == "mystery"]
     ultra = [item for item in CATALOG if item.rarity == "ultra"]
-    assert len(visible) == 30
+    assert len(visible) == 32
     assert len(mystery) == 4
     assert len(ultra) == 3
-    assert NORMAL_COUNT == 34
+    assert NORMAL_COUNT == 36
     assert ULTRA_COUNT == 3
     assert {item.id for item in CATALOG} == {
-        *(f"N{i:02d}" for i in range(1, 31)),
+        *(f"N{i:02d}" for i in range(1, 33)),
         *(f"S{i:02d}" for i in range(1, 5)),
         *(f"U{i:02d}" for i in range(1, 4)),
     }
@@ -89,6 +89,16 @@ def test_catalog_is_30_visible_plus_4_mystery_plus_3_ultra():
     assert BY_ID["N01"].key == "oc.first-light"
     assert BY_ID["S04"].key == "oc.not-first-rodeo"
     assert BY_ID["U03"].key == "oc.full-house"
+
+
+def test_clankshop_visible_acknowledgments_award_once(tmp_path):
+    engine = TreeHouseAchievementEngine(_repo(tmp_path))
+    visit = _event("visit", EventFamily.SURFACE_VISITED, facts={"surface":"clankshop", "visited":True})
+    play = _event("play", EventFamily.SURFACE_VISITED, facts={"surface":"clankshop-game", "mode":"blocks", "visited":True, "deliberate":True})
+    assert [award["achievementId"] for award in engine.ingest("acct", [visit, play])["newAwards"]] == ["N31", "N32"]
+    assert engine.ingest("acct", [visit, play])["newAwards"] == []
+    not_deliberate = _event("other", EventFamily.SURFACE_VISITED, facts={"surface":"clankshop-game", "mode":"blocks", "visited":True})
+    assert engine.ingest("different", [not_deliberate])["newAwards"] == []
 
 
 def test_aggregate_dependencies_are_acyclic():

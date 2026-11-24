@@ -102,7 +102,7 @@ async def test_model_process_is_admitted_under_the_os_boundary(tmp_path, monkeyp
         '{"version": 1, "generation": 0, "roots": {}, "visibility_assignments": {}}',
         encoding="utf-8",
     )
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry_path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry_path))
     monkeypatch.setattr(te, "_owner_is_admin", lambda owner: True)
     _desc, result = await te.execute_tool_block(
         ToolBlock("bash", "printf admission-ok"),

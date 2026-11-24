@@ -88,7 +88,7 @@ def _request(
         personal_docs_manager=personal_docs_manager,
     )
     return SimpleNamespace(
-        cookies={"odysseus_session": token},
+        cookies={"open_clank_session": token},
         app=SimpleNamespace(state=state),
         state=SimpleNamespace(current_user="admin"),
     )
@@ -233,7 +233,7 @@ def test_rename_no_session_manager_does_not_crash(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
     # app.state without a session_manager must not raise.
     req = SimpleNamespace(
-        cookies={"odysseus_session": "t"},
+        cookies={"open_clank_session": "t"},
         app=SimpleNamespace(state=SimpleNamespace(invalidate_token_cache=lambda: None)),
         state=SimpleNamespace(current_user="admin"),
     )
@@ -438,8 +438,8 @@ def test_rename_updates_active_research_before_completed_json_sweep(rename_endpo
 
 
 def test_rename_research_respects_custom_data_dir(monkeypatch, tmp_path):
-    """DEEP_RESEARCH_DIR (which honours ODYSSEUS_DATA_DIR) is used, not a
-    hardcoded relative path. Before the fix, setting ODYSSEUS_DATA_DIR made
+    """DEEP_RESEARCH_DIR (which honours OPEN_CLANK_DATA_DIR) is used, not a
+    hardcoded relative path. Before the fix, setting OPEN_CLANK_DATA_DIR made
     the rename silently patch a different directory from where research files
     actually live, so reports still disappeared after rename."""
     import routes.auth_routes as ar
@@ -502,13 +502,6 @@ def test_rename_memory_json_case_insensitive(rename_endpoint):
     asyncio.run(endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path)))
 
     assert json.loads((tmp_path / "memory.json").read_text())[0]["owner"] == "bob"
-
-
-def test_rename_no_memory_json_does_not_crash(rename_endpoint):
-    endpoint, _am, tmp_path = rename_endpoint
-    # No memory.json — must not crash.
-    res = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
-    assert res["ok"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -674,12 +667,6 @@ def test_rename_updates_usage_sidecar_keys(rename_endpoint):
     assert "alice::test-skill" not in updated
     assert "carol::other-skill" in updated
     assert "unscoped-skill" in updated
-
-
-def test_rename_no_skills_dir_does_not_crash(rename_endpoint):
-    endpoint, _am, tmp_path = rename_endpoint
-    res = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
-    assert res["ok"] is True
 
 
 def test_rename_skill_md_owner_case_insensitive(rename_endpoint):

@@ -43,7 +43,7 @@ def _install_import_fakes(monkeypatch, tmp_path, *, persona, model_output=None):
         },
     )
     monkeypatch.setattr(
-        "src.frankenmemory_v2.mirror_import_job",
+        "src.memery_v2.mirror_import_job",
         lambda **_kwargs: None,
     )
     monkeypatch.setattr("src.default_persona.get_default_persona", persona)

@@ -13,15 +13,19 @@
        browser-default styling that didn't match the Odysseus theme. -->
   <meta name="format-detection" content="telephone=no, date=no, address=no, email=no">
   <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-  <script nonce="{{CSP_NONCE}}">
+  <script nonce="{{CSP_NONCE}}" src="/static/js/migrateBrowserPreferences.js"></script>
+<script nonce="{{CSP_NONCE}}">
+    if (new URLSearchParams(location.search).get('traceResources') === '1') {
+      performance.setResourceTimingBufferSize?.(2048);
+    }
   window._odysseusLoadTime = Date.now();
   (function(){
     try {
-      var _bootOwner = localStorage.getItem('odysseus-auth-owner') || localStorage.getItem('odysseus-auth-user');
-      var _bootThemeKey = _bootOwner ? 'odysseus-theme:scope:' + encodeURIComponent(_bootOwner) : 'odysseus-theme';
+      var _bootOwner = localStorage.getItem('openclank-auth-owner') || localStorage.getItem('openclank-auth-user');
+      var _bootThemeKey = _bootOwner ? 'openclank-theme:scope:' + encodeURIComponent(_bootOwner) : 'openclank-theme';
       // Once an owner is known, never flash the anonymous/previous owner's
       // theme while that account namespace is being hydrated.
-      var t = JSON.parse(localStorage.getItem(_bootThemeKey) || (!_bootOwner ? localStorage.getItem('odysseus-theme') : 'null'));
+      var t = JSON.parse(localStorage.getItem(_bootThemeKey) || (!_bootOwner ? localStorage.getItem('openclank-theme') : 'null'));
       var s = document.documentElement.style;
       var themeName = (t && t.identity && t.identity.name) || (t && t.name) || 'clanker-dark';
       // Keep source precedence aligned with theme.js: compatibility colors,
@@ -120,7 +124,7 @@
       // Apply the saved font early, using the same precedence as theme.js.
       var themeFont = (t && t.typography && t.typography.font) || (t && t.font) || 'liga-comic-mono';
       if (themeFont) {
-        var fm = {'liga-comic-mono':"'Liga Comic Mono', 'Fira Code', monospace",mono:"'Fira Code', monospace",sans:"system-ui, -apple-system, 'Segoe UI', sans-serif",serif:"Georgia, 'Times New Roman', serif",opendyslexic:"'OpenDyslexic', sans-serif"};
+        var fm = {'comic-clank':"'Comic Clank', sans-serif",'comic-clank-mono':"'Comic Clank Mono', monospace",'liga-comic-mono':"'Liga Comic Mono', 'Fira Code', monospace",mono:"'Fira Code', monospace",sans:"system-ui, -apple-system, 'Segoe UI', sans-serif",serif:"Georgia, 'Times New Roman', serif",opendyslexic:"'OpenDyslexic', sans-serif"};
         if (fm[themeFont]) { s.setProperty('--font-family', fm[themeFont]); }
         else { s.setProperty('--font-family', "'" + themeFont.replace(/'/g,'') + "', sans-serif"); }
       }
@@ -131,26 +135,44 @@
       // Apply UI text-size scale early (global accessibility pref, independent
       // of the active theme) so there's no flash on load.
       try {
-        var _us = localStorage.getItem('odysseus-ui-scale');
+        var _us = localStorage.getItem('openclank-ui-scale');
         if (_us && _us !== '100') document.documentElement.classList.add('ui-scale-' + _us);
       } catch(e){}
+      // Early scalar bridge mirrors themeDefaults.js until the module boots.
+      // Nested snapshot fields have the same precedence as theme normalization.
+      var _earlyClanker = {'clanker-dark':{effectColor:'#62C7E8',intensity:0.2,size:1.8},
+        'clanker-light':{effectColor:'#2469D8',intensity:0.70,size:1.8}}[themeName];
+      if (_earlyClanker || t) {
+        _earlyClanker = _earlyClanker || {effectColor:'', intensity:1, size:1};
+        var _effectOptions = Object.assign({}, (t && t.background) || {}, t || {}, (t && t.background) || {});
+        var _effectColor = _effectOptions.effectColor || _effectOptions.bgEffectColor || _earlyClanker.effectColor;
+        var _effectIntensity = _effectOptions.effectIntensity ?? _effectOptions.bgEffectIntensity ?? _earlyClanker.intensity;
+        var _effectSize = _effectOptions.effectSize ?? _effectOptions.bgEffectSize ?? _earlyClanker.size;
+        var _intensityNumber = isNaN(_effectIntensity) ? 1 : Math.max(0, Math.min(1, Number(_effectIntensity)));
+        var _sizeNumber = isNaN(_effectSize) ? 1 : Math.max(0.2, Math.min(3, Number(_effectSize)));
+        s.setProperty('--bg-effect-color', _effectColor);
+        s.setProperty('--bg-effect-intensity', String(_intensityNumber));
+        s.setProperty('--bg-effect-size', String(_sizeNumber));
+        s.setProperty('--clanker-grid-size', Math.round(32 * _sizeNumber) + 'px');
+        s.setProperty('--clanker-route-size', Math.round(160 * _sizeNumber) + 'px');
+      }
       // Apply theme identity and its default effect before the module boots.
-      var defaultPatterns = {'clanker-dark':'clanker-emoji-drift','clanker-light':'clanker-lcars'};
+      var defaultPatterns = {'clanker-dark':'clanker-signal-weave','clanker-light':'clanker-kene-weave'};
       var storedPattern = t && ((t.background && t.background.pattern) || t.bgPattern);
-      var hasStoredPattern = typeof storedPattern === 'string' && !!storedPattern;
       var bgPattern = storedPattern || defaultPatterns[themeName] || 'none';
+      // Wait for a known account’s uncached preferences before painting its effect.
+      if (!t && _bootOwner) bgPattern = 'none';
       var bgControls = (t && t.background && t.background.controls) || (t && t.bgEffectControls) || {};
       var lcarsControls = bgControls['clanker-lcars'] || {};
       var hasLcarsVisualMode = Object.prototype.hasOwnProperty.call(lcarsControls, 'visualMode');
       var statusSweep = bgPattern === 'clanker-lcars' && (
         lcarsControls.visualMode === 'status-sweep'
-        || (!hasStoredPattern && themeName === 'clanker-light' && !hasLcarsVisualMode)
       );
-      document.addEventListener('DOMContentLoaded', function() {
+      window._applyCachedThemeBody = function() {
         if (themeName === 'clanker-dark' || themeName === 'clanker-light') document.body.classList.add('theme-' + themeName);
         if (bgPattern !== 'none') document.body.classList.add('bg-pattern-' + bgPattern);
         if (statusSweep) document.body.classList.add('bg-mode-lcars-status-sweep');
-      }, {once:true});
+      };
     } catch(e){}
   })();
   </script>
@@ -161,7 +183,7 @@
   (function(){
     try {
       var path = (window.location.pathname || '').toLowerCase();
-      var theme = (function(){ try { var o=localStorage.getItem('odysseus-auth-owner') || localStorage.getItem('odysseus-auth-user'); var k=o ? 'odysseus-theme:scope:' + encodeURIComponent(o) : 'odysseus-theme'; return JSON.parse(localStorage.getItem(k) || (!o ? localStorage.getItem('odysseus-theme') : 'null')); } catch(_) { return null; } })();
+      var theme = (function(){ try { var o=localStorage.getItem('openclank-auth-owner') || localStorage.getItem('openclank-auth-user'); var k=o ? 'openclank-theme:scope:' + encodeURIComponent(o) : 'openclank-theme'; return JSON.parse(localStorage.getItem(k) || (!o ? localStorage.getItem('openclank-theme') : 'null')); } catch(_) { return null; } })();
       var ac = theme && theme.name === 'clanker-dark'
         ? ((theme.colors && theme.colors.red) || '#F6BE48')
         : (theme && (theme.red || theme.colors && theme.colors.red)) || '#F6BE48';
@@ -277,7 +299,6 @@
     } catch(e){}
   })();
   </script>
-  <script defer src="/static/lib/shiki.bundle.js?v=20260815shiki1"></script>
   <script defer src="/static/js/highlighter.js?v=20260815shiki1"></script>
   <!-- Self-hosted fonts — inlined so mobile clients fetch immediately -->
   <style>
@@ -285,7 +306,6 @@
     @font-face { font-family: 'Fira Code'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Regular.woff2') format('woff2'); }
     @font-face { font-family: 'Fira Code'; font-weight: 600; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-SemiBold.woff2') format('woff2'); }
     @font-face { font-family: 'Liga Comic Mono'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/LigaComicMono-Regular.woff2') format('woff2'); }
-    @font-face { font-family: 'Fredoka'; font-weight: 300 700; font-style: normal; font-display: swap; src: url('/static/fonts/Fredoka-Variable.woff2') format('woff2'); }
     @font-face { font-family: 'OpenDyslexic'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/OpenDyslexic-Regular.woff2') format('woff2'); }
     @font-face { font-family: 'OpenDyslexic'; font-weight: 700; font-style: normal; font-display: swap; src: url('/static/fonts/OpenDyslexic-Bold.woff2') format('woff2'); }
     @font-face { font-family: 'Inter'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/Inter-Regular.woff2') format('woff2'); }
@@ -309,23 +329,24 @@
     }
   </style>
   <!-- KaTeX CSS is loaded with media="print" so it doesn't block render,
-       then flipped to "all" via JS after load. Mermaid init runs once the
-       library finishes loading. Both hooks are wired via addEventListener
+       then flipped to "all" via JS after load. The hook uses addEventListener
        below (inline onload= attrs are blocked by CSP script-src-attr). -->
   <link id="katex-css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" media="print">
   <script async src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
-  <script id="mermaid-script" async src="/static/lib/mermaid.min.js?v=20260815mermaid1"></script>
   <script nonce="{{CSP_NONCE}}">
     (function(){
       var k = document.getElementById('katex-css');
       if (k) k.addEventListener('load', function(){ k.media = 'all'; }, { once: true });
-      var m = document.getElementById('mermaid-script');
-      if (m) m.addEventListener('load', function(){
-        if (window.odysseusInitMermaid) window.odysseusInitMermaid();
-      }, { once: true });
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=20261004sidebarhamburger1">
+  <link rel="stylesheet" href="/static/css/taskWorkload.css">
+  <link rel="stylesheet" href="/static/css/clankshop.css">
+  <link rel="stylesheet" href="/static/css/agentRunInspector.css">
+  <link rel="stylesheet" href="/static/css/comic-clank.css">
+  <link rel="stylesheet" href="/static/css/brand-wordmark.css">
+  <link rel="stylesheet" href="/static/style.css?v=20261119manual2">
+  <link rel="stylesheet" href="/static/css/chatWorkspacePanel.css">
+  <link rel="stylesheet" href="/static/css/chatTurnRail.css">
   <link rel="stylesheet" href="/static/js/workbenchMenu.css">
   <link rel="stylesheet" href="/static/css/editorRichComments.css?v=20261005richcomments1">
   <link rel="stylesheet" href="/static/css/appletFrame.css?v=20261005appletframe1">
@@ -337,6 +358,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content, viewport-fit=cover" />
 </head>
 <body>
+  <script nonce="{{CSP_NONCE}}">window._applyCachedThemeBody?.(); delete window._applyCachedThemeBody;</script>
   <!-- Loading overlay — hides all flashing until app is ready -->
   <div id="app-loader" style="position:fixed;inset:0;z-index:99999;background:var(--bg,#191A1E);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;transition:opacity .3s">
     <div id="loader-wave" style="color:var(--brand-color,var(--red,#F6BE48));font-family:monospace;font-size:11px;opacity:.5">▁▂▃</div>
@@ -383,6 +405,7 @@
           <button class="memory-tab" data-memory-tab="inspect"><svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="details"></svg>Inspect</button>
           <button class="memory-tab" data-memory-tab="graph"><svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="graph"></svg>Graph</button>
           <button class="memory-tab" data-memory-tab="digest"><svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="text"></svg>Digest</button>
+          <button class="memory-tab" data-memory-tab="explorer">Explorer</button>
           <button class="memory-tab" data-memory-tab="skills"><svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="skills"></svg>Skills <span id="skills-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
           <button class="memory-tab" data-memory-tab="add"><svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="add"></svg>Add</button>
           <button class="memory-tab" data-memory-tab="settings"><svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="settings"></svg>Settings</button>
@@ -458,8 +481,8 @@
               </select>
               <button id="memory-inspect-refresh" type="button" class="memory-toolbar-btn">Refresh</button>
             </div>
+            <div id="memory-inspect-list" class="memory-list" style="min-height:180px"></div>
           </div>
-          <div id="memory-inspect-list" class="memory-list" style="min-height:180px"></div>
         </div>
         <!-- ── Graph tab (memory-trust metaplan T4: canvas-first) ── -->
         <div class="memory-tab-panel hidden" data-memory-panel="graph">
@@ -475,6 +498,8 @@
             </div>
           </div>
         </div>
+        <!-- ── Explorer tab: read-only counts, growth, newest changes, links ── -->
+        <div class="memory-tab-panel hidden" data-memory-panel="explorer"><div id="memory-explorer-root"></div></div>
         <!-- ── Digest tab: what the AI sees each turn ── -->
         <div class="memory-tab-panel hidden" data-memory-panel="digest">
           <p class="memory-desc doclib-desc" style="margin:0 0 8px 0;">Live from the memory engine — this is exactly what the AI receives about your memories at the start of every chat turn, split the same way it's injected. Nothing here is hardcoded. <span id="memory-digest-stamp" style="opacity:0.6"></span></p>
@@ -527,6 +552,8 @@
                 <span class="skill-rich-ph"><span class="k">Import URL</span> — e.g. GitHub tree link to a skill folder</span>
               </div>
               <button type="button" id="skill-import-url-btn" class="theme-io-btn" title="Import skill from URL" style="flex:none;height:28px;font-size:12px;"><svg width="13" height="13" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:4px;" aria-hidden="true" focusable="false" data-ui-icon="download"></svg>Import</button>
+              <button type="button" id="skill-snapshot-import-btn" class="theme-io-btn" title="Review a portable skill snapshot" style="flex:none;height:28px;">Import snapshot…</button>
+              <button type="button" id="skill-marketplace-btn" class="theme-io-btn" title="Review a marketplace skill" style="flex:none;height:28px;">Marketplace…</button>
             </div>
             <p class="memory-desc doclib-desc" style="margin-top:0;">Or create a skill by hand — title, what it solves, and an approach.</p>
             <div class="skill-ph-wrap" style="margin-top:4px;margin-bottom:6px;">
@@ -586,6 +613,13 @@
               </div>
               <input type="text" id="skills-search" placeholder="Search skills…" class="memory-search-input" aria-label="Search skills" />
             </div>
+            <details class="memory-toolbar" id="skills-distill">
+              <summary>Find repeated workflows</summary>
+              <p class="memory-desc">Select 2–8 chats. The last 30 days are checked for repeated qualified tool patterns; results may be incomplete. Asking the teacher sends bounded, best-effort redacted excerpts from the selected chats and tool outputs.</p>
+              <select id="skills-distill-chats" multiple size="5" aria-label="Chats to compare"></select>
+              <div><button id="skills-distill-preview" class="memory-toolbar-btn">Preview</button> <button id="skills-distill-run" class="memory-toolbar-btn" disabled>Ask teacher for draft</button></div>
+              <p id="skills-distill-status" role="status"></p>
+            </details>
             <div id="skills-audit-panel" class="skills-audit-panel hidden"></div>
             <div id="skills-bulk-bar" class="memory-bulk-bar hidden">
               <label class="memory-bulk-check-all" style="position:relative;top:0px;"><input type="checkbox" id="skills-select-all" /> All</label>
@@ -611,6 +645,57 @@
               </select>
             </div>
             <span id="memory-mode-help" class="admin-toggle-sub" style="display:block;margin-top:6px">Capture useful memories automatically. Agent saves are admitted immediately.</span>
+            <div data-memory-learning-home><div id="memory-learning-controls">
+            <label class="admin-toggle" style="display:flex;align-items:center;gap:8px;margin-top:12px"><input type="checkbox" id="memory-assistant-interpretation-toggle" /> Review assistant interpretations for memory</label>
+            <span class="admin-toggle-sub">Off by default. Assistant text is treated as an untrusted interpretation.</span>
+            <label class="admin-toggle" style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="memory-policy-importance-toggle" aria-describedby="memory-policy-importance-status" /> Use importance policies</label>
+            <span id="memory-policy-importance-status" class="admin-toggle-sub" role="status">Profile availability unavailable.</span>
+            <label class="admin-toggle" style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="memory-policy-connections-toggle" aria-describedby="memory-policy-connections-status" /> Use connections policies</label>
+            <span id="memory-policy-connections-status" class="admin-toggle-sub" role="status">Profile availability unavailable.</span>
+            <label class="admin-toggle-sub" for="memory-connection-predicate">Connection predicate</label>
+            <select id="memory-connection-predicate" disabled aria-describedby="memory-connection-predicate-status"></select>
+            <span id="memory-connection-predicate-status" class="admin-toggle-sub">Predicate options unavailable.</span>
+            <label class="admin-toggle" style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="memory-policy-consolidation-toggle" aria-describedby="memory-policy-consolidation-status" /> Use consolidation policies</label>
+            <span id="memory-policy-consolidation-status" class="admin-toggle-sub" role="status">Profile availability unavailable.</span>
+            <label class="admin-toggle-sub" for="memory-journal-interval">Chat memory consolidation interval in days (1–365; blank uses the default)</label>
+            <input type="number" id="memory-journal-interval" min="1" max="365" step="1" disabled />
+            <button type="button" id="memory-journal-interval-save" class="memory-toolbar-btn" disabled>Save interval</button>
+            <span id="memory-journal-interval-status" class="admin-toggle-sub" role="status">Interval unavailable.</span>
+            <div class="admin-toggle-sub" id="memory-connection-retained-run" role="status">Last retained verified connection model run: unavailable.</div>
+            <div class="admin-toggle-sub" id="memory-retained-run">Last retained verified summary run: unavailable.</div>
+            </div></div>
+            <button type="button" id="memory-consolidate-now" class="memory-toolbar-btn">Consolidate current chat</button>
+            <span id="memory-consolidate-status" class="admin-toggle-sub" role="status"></span>
+            <fieldset id="memory-document-vector" style="margin-top:12px" disabled>
+              <legend>Document search profile</legend>
+              <label for="memory-document-vector-family">Preferred CPU search profile</label>
+              <select id="memory-document-vector-family"><option value="exact">Exact</option><option value="ivf_minibatch">Experimental minibatch IVF</option><option value="ivf_flat">IVF Flat</option><option value="hnsw">HNSW</option><option value="scalar8">Scalar 8-bit</option><option value="pq">Product quantization</option></select>
+              <button type="button" id="memory-document-vector-save" class="memory-toolbar-btn">Save preference</button>
+              <button type="button" id="memory-document-vector-build" class="memory-toolbar-btn">Build selected profile</button>
+              <span id="memory-document-vector-status" class="admin-toggle-sub" role="status">Profile unavailable.</span>
+              <p class="admin-toggle-sub">Profiles use existing document embeddings. Approximate profiles may return different results. Missing profiles use exact search; building is explicit.</p>
+            </fieldset>
+            <fieldset id="memory-document-build" style="margin-top:12px" disabled>
+              <legend>Document embeddings</legend>
+              <button type="button" id="memory-document-build-start" class="memory-toolbar-btn">Build embeddings</button>
+              <button type="button" id="memory-document-build-check" class="memory-toolbar-btn">Check status</button>
+              <button type="button" id="memory-document-build-resume" class="memory-toolbar-btn">Continue build</button>
+              <button type="button" id="memory-document-build-cancel" class="memory-toolbar-btn">Cancel build</button>
+              <span id="memory-document-build-status" class="admin-toggle-sub" role="status">Document embedding build unavailable.</span>
+              <p class="admin-toggle-sub">Building uses the configured embedding route and may incur provider usage. A saved build can be checked or continued after a reload.</p>
+            </fieldset>
+            <fieldset id="memory-rank-learning" style="margin-top:12px" disabled>
+              <legend>Recall ranking</legend>
+              <label class="admin-toggle"><input type="checkbox" data-rank="enabled" /> Use ranking preferences</label>
+              <label class="admin-toggle"><input type="checkbox" data-rank="salience" /> Prefer important memories</label>
+              <label class="admin-toggle"><input type="checkbox" data-rank="age_decay" /> Prefer recent memories</label>
+              <label class="admin-toggle"><input type="checkbox" data-rank="retrieval_boost" /> Use recorded recall signals</label>
+              <span class="admin-toggle-sub">Turning the master off keeps these choices. Recall signals use existing found, admitted and helped weights when their evidence is available; zero weights have no effect.</span>
+              <button type="button" id="memory-rank-save" class="memory-toolbar-btn">Save ranking preferences</button>
+              <span id="memory-rank-status" class="admin-toggle-sub" role="status">Ranking availability is being checked.</span>
+            </fieldset>
+            <label class="admin-toggle" style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="memory-shadow-ranking-toggle" /> Shadow ranking (observe only)</label>
+            <span class="admin-toggle-sub">Records a few numeric signals about recalled memories so an ordering can be compared later. Never changes recall.</span>
           </div>
           <div class="admin-card" id="memory-trust-card">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px">
@@ -667,7 +752,8 @@
               </select>
             </div>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">
-              <button type="button" id="memory-add-profile-questions" class="memory-toolbar-btn">Add profile questions</button>
+              <label class="admin-toggle-sub"><input type="checkbox" id="memory-question-seeds" disabled> Prepare unsurfaced profile questions</label>
+              <button type="button" id="memory-add-profile-questions" class="memory-toolbar-btn">About profile questions</button>
               <span id="memory-profile-question-status" class="admin-toggle-sub" role="status" aria-live="polite" aria-atomic="true" style="margin:0;flex:1;min-width:180px"></span>
             </div>
             <span class="admin-toggle-sub" style="display:block;margin-top:6px;opacity:0.6">Adds reviewable open questions for your Handler's preferred name and mobile-control preference. Nothing is added until you choose this button.</span>
@@ -844,6 +930,8 @@
           <div class="theme-fd-group">
             <label class="theme-fd-label">Font</label>
             <select id="theme-font-select" class="theme-fd-select" aria-label="Font">
+              <option data-i18n-skip value="comic-clank">Comic Clank</option>
+              <option data-i18n-skip value="comic-clank-mono">Comic Clank Mono</option>
               <option value="liga-comic-mono">Liga Comic Mono</option>
               <option value="mono">Monospace</option>
               <option value="sans">Sans-serif</option>
@@ -867,8 +955,9 @@
             </select>
           </div>
           <div class="theme-fd-group">
-            <label class="theme-fd-label theme-effect-control-label" for="theme-edge-hardness"><span>Edge hardness</span><output id="theme-edge-hardness-value" for="theme-edge-hardness" aria-hidden="true">50% · Current</output></label>
-            <input type="range" id="theme-edge-hardness" class="theme-fd-range" min="0" max="100" step="1" value="50" aria-valuetext="50% · Current" title="Softer corners at 0%, current appearance at 50%, square corners at 100%">
+            <label class="theme-fd-label theme-effect-control-label" for="theme-edge-hardness"><span>Edge hardness</span><output id="theme-edge-hardness-value" for="theme-edge-hardness" aria-hidden="true">50% · Default</output></label>
+            <label><input type="checkbox" id="theme-edge-hardness-default" checked> Default</label>
+            <input type="range" id="theme-edge-hardness" class="theme-fd-range" min="0" max="100" step="1" value="50" disabled aria-valuetext="50% · Default" title="Softer corners at 0%, current appearance at 50%, square corners at 100%">
           </div>
           <div class="theme-fd-group" id="theme-frosted-group">
             <label class="theme-fd-label" for="theme-frosted-toggle">Frosted</label>
@@ -885,8 +974,9 @@
               <option value="none">Solid</option>
               <option value="clanker-routefield">Clanker Signal Routes</option>
               <option value="clanker-kene-weave">Shipibo Kene-Inspired Signal Weave</option>
-              <option value="clanker-lcars">Clanker LCARS</option>
-              <option value="clanker-gem-drift">Clanker Gem Drift</option>
+              <option value="clanker-signal-weave">Signal Loom</option>
+              <option value="clanker-lcars" hidden disabled>Clanker LCARS</option>
+              <option value="clanker-gem-drift" hidden disabled>Clanker Gem Drift</option>
               <option value="clanker-emoji-drift">Clanker Emoji Drift</option>
               <option value="clanker-matrix-rain">Clanker Matrix Rain</option>
               <option value="clanker-emoji-rain">Clanker Emoji Rain</option>
@@ -929,7 +1019,7 @@
         <div class="theme-save-error" id="theme-save-error"></div>
         <div class="theme-io-row" style="margin-top:6px;">
           <button id="theme-import-btn" class="theme-io-btn" title="Import a theme from JSON"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="download"></svg> Import</button>
-          <button id="theme-export-btn" class="theme-io-btn" title="Export current colors as JSON"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="upload"></svg> Export</button>
+          <button id="theme-export-btn" class="theme-io-btn" title="Export current theme settings as JSON"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="upload"></svg> Export</button>
         </div>
         <textarea id="theme-import-area" class="theme-import-area hidden" placeholder="Paste theme JSON here..." rows="3"></textarea>
         <div class="theme-import-actions hidden" id="theme-import-actions">
@@ -956,17 +1046,15 @@
     <!-- Dynamic contextual indicators (shown only while active) -->
     <button class="icon-rail-btn rail-dynamic" id="rail-chats" title="Chat ready" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="chat"></svg></button>
     <button class="icon-rail-btn rail-dynamic" id="rail-documents" title="Files" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="document"></svg></button>
+    <button type="button" class="icon-rail-btn" id="rail-buddy" title="Buddy" aria-label="Buddy" aria-pressed="false" disabled><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" data-ui-icon="eye"></svg></button>
     <!-- Tool launchers — always visible, alphabetical -->
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="compare"></svg></button>
-    <button class="icon-rail-btn" id="rail-copal" title="Copal"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="workspace"></svg></button>
     <div id="rail-copal-launchers" class="rail-copal-launchers" aria-label="Copal destinations">
       <button class="icon-rail-btn rail-copal-entry" data-copal-view="notes" title="Editor" aria-label="Editor"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="code"></svg></button>
-      <button class="icon-rail-btn rail-copal-entry" data-copal-view="wiki" title="Wiki" aria-label="Wiki"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="book"></svg></button>
-      <button type="button" class="icon-rail-btn rail-copal-entry" data-copal-launcher="imps" data-image-editor-launcher title="Image Editor" aria-label="Image Editor"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="image"></svg></button>
       <button style="display:none" class="icon-rail-btn rail-copal-entry" data-copal-launcher="code" data-copal-compat="true" title="Editor" aria-label="Editor" data-copal-target="/code"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="code"></svg></button>
       <button class="icon-rail-btn rail-copal-entry" data-copal-launcher="files" title="Files" aria-label="Files" data-copal-target="/files"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="folder"></svg></button>
-      <button class="icon-rail-btn rail-copal-entry" data-copal-view="graph" title="Graph" aria-label="Graph"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="graph"></svg></button>
       <button class="icon-rail-btn rail-copal-entry" data-copal-view="treehouse" title="TreeHouse" aria-label="TreeHouse"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="treehouse"></svg></button>
+      <button class="icon-rail-btn rail-copal-entry" data-copal-view="clankshop" title="Clankshop" aria-label="Clankshop"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="clankshop"></svg></button>
       <button class="icon-rail-btn rail-copal-entry" data-copal-view="todo" title="Meatbag Tasks" aria-label="Meatbag Tasks"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="tasks"></svg></button>
       <button class="icon-rail-btn rail-copal-entry" data-copal-view="timeline" title="Timeline" aria-label="Timeline"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="timeline"></svg></button>
       <button class="icon-rail-btn rail-copal-entry" data-copal-launcher="calendar" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="calendar"></svg></button>
@@ -1066,39 +1154,41 @@
         </div>
       </div>
 
-      <div class="section" id="email-section">
-        <div class="section-header-flex">
-          <span class="section-title" id="email-section-title" style="cursor:pointer;" title="Open email inbox"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="email"></svg><span>Email</span></span>
-          <button type="button" class="section-header-btn list-item-plus-btn" id="email-compose-btn" title="Compose email">
-            <svg class="list-item-plus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="add"></svg>
-            <span class="list-item-plus-label">new</span>
-          </button>
-          <!-- Unread dot is a direct header child placed AFTER the compose
-               button (it used to live inside the title, before the button).
-               With the title's flex:1 eating the free space, this lands the
-               dot at the far-right corner with the + just to its left —
-               i.e. the dot and + swap places when the dot appears. -->
-          <span id="email-unread-dot" class="sidebar-notif-dot" style="display:none"></span>
-        </div>
+      <div class="section" id="buddy-section">
+        <button type="button" class="section-header-flex" id="buddy-launcher" aria-pressed="false" disabled>
+          <span class="section-title"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" aria-hidden="true" data-ui-icon="eye"></svg><span>Buddy</span></span>
+        </button>
       </div>
 
       <div class="section copal-sidebar-section" id="copal-section">
         <div class="section-header-flex" id="copal-section-toggle">
           <span class="section-title"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="workspace"></svg><span>Copal</span></span>
-          <button type="button" class="section-header-btn" id="copal-appearance-btn" title="Show or hide Copal launchers" aria-label="Copal appearance"><svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="eye"></svg></button>
         </div>
         <div id="copal-submenu" class="copal-sidebar-submenu">
+          <div class="copal-journal-row" data-copal-journal-row>
+            <button type="button" class="list-item copal-sidebar-link" data-copal-launcher="journal"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" data-ui-icon="cookbook"></svg></span><span class="grow">Journal</span></button>
+            <button type="button" class="section-header-btn" data-copal-journal-manager title="Manage journals" aria-label="Manage journals" aria-haspopup="dialog">
+              <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="menu"></svg>
+            </button>
+          </div>
           <a class="list-item copal-sidebar-link" href="/editor" data-copal-view="notes"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="code"></svg></span><span class="grow">Editor</span></a>
-          <a class="list-item copal-sidebar-link" href="/wiki" data-copal-view="wiki"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="book"></svg></span><span class="grow">Wiki</span></a>
-          <button type="button" class="list-item copal-sidebar-link" data-copal-launcher="imps" data-image-editor-launcher><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="image"></svg></span><span class="grow">Image Editor</span></button>
           <a style="display:none" class="list-item copal-sidebar-link" id="tool-code-btn" href="/code" data-code-editor-launcher data-copal-launcher="code" data-copal-compat="true"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="code"></svg></span><span class="grow">Editor</span></a>
           <a class="list-item copal-sidebar-link" id="tool-files-btn" href="/files" data-files-launcher data-copal-launcher="files"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="folder"></svg></span><span class="grow">Files</span></a>
-          <a class="list-item copal-sidebar-link" href="/graph" data-copal-view="graph"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="graph"></svg></span><span class="grow">Graph</span></a>
           <a class="list-item copal-sidebar-link" href="/treehouse" data-copal-view="treehouse"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="treehouse"></svg></span><span class="grow">TreeHouse</span></a>
+          <a class="list-item copal-sidebar-link" href="/clankshop" data-copal-view="clankshop"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="clankshop"></svg></span><span class="grow">Clankshop</span></a>
           <a class="list-item copal-sidebar-link" href="/treehouse?section=achievements" data-copal-view="achievements"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="check"></svg></span><span class="grow">Achievements</span></a>
           <a class="list-item copal-sidebar-link" href="/todo" data-copal-view="todo"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="tasks"></svg></span><span class="grow">Meatbag Tasks</span></a>
           <a class="list-item copal-sidebar-link" href="/timeline" data-copal-view="timeline"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="timeline"></svg></span><span class="grow">Timeline</span></a>
           <button type="button" class="list-item copal-sidebar-link" id="tool-calendar-btn" data-copal-launcher="calendar"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="calendar"></svg></span><span class="grow">Calendar</span></button>
+          <div id="email-section" class="copal-email-row">
+            <button type="button" class="list-item copal-sidebar-link" id="email-section-title">
+              <span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" data-ui-icon="email"></svg></span><span class="grow">Email</span>
+              <span id="email-unread-dot" class="sidebar-notif-dot" style="display:none"></span>
+            </button>
+            <button type="button" class="section-header-btn" id="email-compose-btn" title="Compose email" aria-label="Compose email">
+              <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true" data-ui-icon="add"></svg>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1175,6 +1265,13 @@
           <svg width="14" height="14" viewBox="0 0 24 24" style="flex-shrink:0;opacity:0.5;" aria-hidden="true" focusable="false" data-ui-icon="hue"></svg>
           <span class="grow">Theme</span>
         </button>
+        <button type="button" class="list-item copal-sidebar-link" id="tool-instruction-manual-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" style="flex-shrink:0;opacity:0.5" fill="currentColor" aria-hidden="true" focusable="false"><path d="M2 5c3-1 6-1 9 1v14c-3-2-6-2-9-1zM22 5c-3-1-6-1-9 1v14c3-2 6-2 9-1z"/></svg>
+          <span class="grow">Instruction Manual</span>
+        </button>
+        <button type="button" class="list-item copal-sidebar-link" id="tool-help-btn" data-contextual-help-open data-help-surface="treehouse">
+          <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9.5 9a2.5 2.5 0 1 1 3.7 2.2l-1.2.7v1.6M12 16.5h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="grow">Help</span>
+        </button>
       </div>
     </div>
     <div class="sidebar-user-bar" id="sidebar-user-bar">
@@ -1196,11 +1293,13 @@
          (the sidebar that shows the visible brand is hidden off-canvas on
          mobile) so the page always exposes a single level-1 heading. -->
     <h1 class="a11y-visually-hidden">Open Clank</h1>
+    <button type="button" id="chat-workspace-button" title="Chat status" aria-label="Chat status" aria-haspopup="dialog" aria-expanded="false" aria-controls="chat-workspace-panel" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="5.5" cy="7" r="2.5"/><circle cx="5.5" cy="17" r="2.5"/><path d="M12 7h9m-9 10h6" stroke-linecap="round"/></svg></button>
+    <dialog id="chat-workspace-panel" aria-label="Chat status" tabindex="-1"></dialog>
     <div class="chat-top-bar">
       <button type="button" class="incognito-indicator" id="incognito-indicator" title="Nobody mode active — click to deactivate" style="display:none;"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="eye-off"></svg></button>
       <div class="chat-meta-overlay"><span id="current-meta">Open Clank Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><button type="button" id="goal-panel-btn" class="goal-panel-open-btn" aria-haspopup="dialog" aria-controls="goal-dialog" hidden>Goals</button><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="more"></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="edit"></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="copy"></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="pdf"></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="document"></svg></span><span>Save to Documents</span></div></div></span></div>    </div>
     <div id="welcome-screen">
-      <div class="welcome-name"><svg class="welcome-boat" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 29 27H3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/><circle cx="16" cy="17" r="1.2" fill="currentColor"/></svg>Open Clank</div>
+      <div class="welcome-name"><svg class="welcome-boat" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 29 27H3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/><circle cx="16" cy="17" r="1.2" fill="currentColor"/></svg><span class="welcome-name-initial">O</span>pen Clank</div>
       <div class="welcome-sub" id="welcome-sub">Welcome, <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">type /setup</span> to get started.</div>
       <div class="welcome-tip" id="welcome-tip"></div>
       <button type="button" class="incognito-btn" id="incognito-btn" title="Enable Nobody mode — no memory, no history saved">
@@ -1218,10 +1317,10 @@
         'Tip: Press Ctrl+B to quickly toggle the sidebar.',
         'Tip: Shift-click the sidebar toggle to swap it to the other side.',
         'Tip: Drag and drop files onto the chat to attach them.',
-        'Tip: Right-click a session for rename, delete, and memory options.',
+        'Tip: Right-click a session to see its actions.',
       ];
       var phone = [
-        'Tip: Long-press a session for rename, delete, and memory options.',
+        'Tip: Long-press a session to see its actions.',
         'Tip: Tap the eye icon for Nobody mode — no history saved.',
         'Tip: Switch to Agent mode for web search and code execution.',
         'Tip: Use Compare mode to test different models side by side.',
@@ -1255,6 +1354,7 @@
 
     <!-- Unified chat input bar -->
     <div class="chat-input-bar">
+      <div class="composer-height-handle" role="separator" tabindex="0" aria-orientation="horizontal" aria-controls="message" aria-label="Message input height" aria-valuemin="24" aria-valuenow="24" title="Drag to resize · Double-click to reset"></div>
       <div class="chat-input-top">
         <div id="message-ghost" class="ghost-text-overlay" aria-hidden="true"></div>
         <textarea id="message" placeholder="Message Open Clank..." required autocomplete="off" aria-label="Message input" rows="1" autofocus></textarea>
@@ -1636,38 +1736,38 @@
           <input type="search" id="settings-finder" class="settings-finder"
                  placeholder="Find a setting…" aria-label="Find a setting"
                  autocomplete="off" spellcheck="false">
-          <!-- Section 1: AI plumbing (Add Models → AI Defaults → Search) -->
+          <!-- Section 1: AI plumbing (Add Provider → AI Defaults → Search) -->
           <button class="settings-nav-item active" data-settings-tab="services">
             <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="add"></svg>
-            <span>Add Models</span>
-          </button>
-          <button class="settings-nav-item" data-settings-tab="added-models">
-            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="model"></svg>
-            <span>Added Models</span>
+            <span>Provider/Model Management</span>
           </button>
           <button class="settings-nav-item" data-settings-tab="ai">
             <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="sliders"></svg>
             <span>AI Defaults</span>
           </button>
-          <button class="settings-nav-item" data-settings-tab="search">
-            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="search"></svg>
-            <span>Search</span>
+          <button class="settings-nav-item" data-settings-tab="tokenomics">
+            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="sliders"></svg>
+            <span>Tokenomics</span>
+          </button>
+          <button class="settings-nav-item" data-settings-tab="logging">
+            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" data-ui-icon="activity"></svg>
+            <span>Logging</span>
           </button>
           <button class="settings-nav-item" data-settings-tab="file-access">
             <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="shield"></svg>
             <span>Permissions</span>
           </button>
-          <button class="settings-nav-item" data-settings-tab="logging">
-            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="terminal"></svg>
-            <span>Logging</span>
+          <button class="settings-nav-item" data-settings-tab="history">
+            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="restore"></svg>
+            <span>Lore History</span>
           </button>
           <button class="settings-nav-item" data-settings-tab="hexes">
             <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="hex"></svg>
             <span>Hexes</span>
           </button>
-          <button class="settings-nav-item" data-settings-tab="history">
-            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="restore"></svg>
-            <span>History</span>
+          <button class="settings-nav-item" data-settings-tab="memery">
+            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" data-ui-icon="book"></svg>
+            <span>Memery</span>
           </button>
           <div class="settings-sidebar-divider"></div>
           <!-- Section 2: Comms (Integrations → Email → Reminders).
@@ -1677,16 +1777,15 @@
             <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="link"></svg>
             <span>Integrations</span>
           </button>
-          <button class="settings-nav-item" data-settings-tab="email">
-            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="email"></svg>
-            <span>Email</span>
-          </button>
           <button class="settings-nav-item" data-settings-tab="reminders">
             <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="bell"></svg>
             <span>Reminders</span>
           </button>
           <div class="settings-sidebar-divider"></div>
           <!-- Section 3: UX (Appearance → Shortcuts) -->
+          <button class="settings-nav-item" data-settings-tab="buddy">
+            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" data-ui-icon="eye"></svg><span>Buddy</span>
+          </button>
           <button class="settings-nav-item" data-settings-tab="appearance">
             <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="hue"></svg>
             <span>Appearance</span>
@@ -1726,9 +1825,33 @@
         <div class="settings-panels">
 
 
+        <!-- ═══ TOKENOMICS TAB ═══ -->
+        <div data-settings-panel="tokenomics" class="hidden">
+          <div class="admin-card">
+            <h2>Tokenomics</h2>
+            <p class="admin-toggle-sub">When available, eligible structured tool results can use a more compact representation. If filtering cannot be applied, the original result is used.</p>
+            <p class="admin-toggle-sub">This account preference applies to the next admitted turn. Saving also saves any other pending native settings changes.</p>
+            <div id="tokenomics-native-fields" class="settings-col"></div>
+            <p id="tokenomics-readback" class="admin-toggle-sub" aria-live="polite">Loading account preference…</p>
+            <div class="settings-row"><button type="button" id="tokenomics-save" class="btn-primary" disabled>Save account settings</button><button type="button" id="tokenomics-reset" class="btn-secondary" disabled>Reset to default Off</button></div>
+            <p id="tokenomics-status" class="admin-toggle-sub" aria-live="polite"></p>
+          </div>
+        </div>
+        <div data-settings-panel="logging" class="hidden">
+          <div class="admin-card" id="settings-logging-section" data-logging-settings></div>
+        </div>
+
         <!-- ═══ AI TAB ═══ -->
 
         <div data-settings-panel="ai" class="hidden">
+          <div class="admin-card">
+            <h2>Chat input</h2>
+            <label class="settings-row" for="settings-input-queue">
+              <input type="checkbox" id="settings-input-queue" disabled>
+              <span>Queue follow-ups by default</span>
+            </label>
+            <p class="admin-toggle-sub">While a reply runs, send follow-ups after the current turn. Press Ctrl+Enter to queue just one message.</p>
+          </div>
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="contact"></svg>Persona</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">The default persona is who the assistant is everywhere — chat, the personal assistant, reminders, and background work; edits to it sync to all of them. Saved and built-in characters can be managed here too; enable one for a chat from the chat bar's persona modal.</div>
@@ -1803,6 +1926,22 @@
                 <select id="set-memoryModelSelect" class="settings-select"><option value="">Same as Utility</option></select>
               </div>
               <div id="set-memoryChatMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+              <div id="set-memoryRatings" aria-label="Chat ratings" style="margin-top:12px">
+                <strong>Chat ratings</strong>
+                <div class="admin-toggle-sub">Manual ratings only. Saved chat ratings do not train memory automatically.</div>
+                <label><input type="checkbox" id="set-memoryRatingsVisible"> Show rating controls and history</label>
+                <label><input type="checkbox" id="set-memoryRatingsCollect"> Allow new manual ratings</label>
+                <button type="button" id="set-memoryRatingsSave">Save rating settings</button>
+                <button type="button" id="set-memoryRatingsRefresh">Refresh rating settings</button>
+                <div id="set-memoryRatingsStatus" role="status" class="admin-toggle-sub"></div>
+              </div>
+              <div id="set-memoryWorkKinds" aria-label="Background work model assignments" style="margin-top:12px">
+                <strong>Background work models</strong>
+                <div class="admin-toggle-sub">Automatic processing is not active yet. Saved choices apply when supported. Unset inherits the initiating execution; unanchored work waits.</div>
+                <button type="button" id="set-memoryWorkKindsRefresh">Refresh model choices</button>
+                <div id="set-memoryWorkKindsRows"></div>
+                <div id="set-memoryWorkKindsStatus" role="status" class="admin-toggle-sub"></div>
+              </div>
             </div>
           </div>
           <div class="admin-card">
@@ -1818,8 +1957,22 @@
             </div>
           </div>
           <div class="admin-card">
+            <h2>Desktop</h2>
+            <div style="display:flex;align-items:center;gap:0.75rem;">
+              <div style="flex:1"><label class="settings-label" for="set-desktopCaptureToggle">Allow screen capture and recording</label>
+                <div class="admin-toggle-sub">Off by default. Lets you record the screen from Files, and lets the assistant take a screenshot when you ask. The system asks which screen to share each time.</div></div>
+              <label class="admin-switch"><input type="checkbox" id="set-desktopCaptureToggle"><span class="admin-slider"></span></label>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.75rem;margin-top:10px;">
+              <div style="flex:1"><label class="settings-label" for="set-desktopControlToggle">Allow the assistant to control this desktop (experimental)</label>
+                <div class="admin-toggle-sub">Off by default. Choose the intended target and review each requested action. Available controls depend on your operating system, desktop permissions and installed helper.</div></div>
+              <label class="admin-switch"><input type="checkbox" id="set-desktopControlToggle"><span class="admin-slider"></span></label>
+            </div>
+            <div id="set-desktopSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+          </div>
+          <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="research"></svg>Research Model</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Model used for Deep Research. Leave blank to inherit the Default Chat Model above; more settings are under <a href="#" data-go-settings-tab="search" style="color:var(--accent, var(--red));text-decoration:underline;font-weight:600;">Search →</a></div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Leave blank to use the default chat model for Deep Research.</div>
             <div class="settings-col">
               <div class="settings-row">
                 <label class="settings-label">Endpoint</label>
@@ -1951,84 +2104,9 @@
               </div>
             </div>
           </div>
-        </div>
-
-        <!-- ═══ SEARCH TAB ═══ -->
-        <div data-settings-panel="search" class="hidden">
-          <div class="admin-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="search"></svg>Web Search</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Search API used for web search and deep research.</div>
-            <div class="settings-col">
-              <div class="settings-row">
-                <label class="settings-label">Provider</label>
-                <!-- Custom picker (with logos). Hidden native <select> mirrors
-                     its value so the existing JS that reads
-                     set-searchProvider keeps working unchanged. -->
-                <div class="adm-provider-picker search-provider-picker" id="search-provider-picker" style="flex:1;position:relative;top:5px;">
-                  <button type="button" class="adm-provider-btn" id="search-provider-btn">
-                    <span class="adm-provider-current"><span class="adm-provider-logo"></span><span class="adm-provider-name">SearXNG</span></span>
-                    <svg class="adm-provider-caret" width="10" height="10" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="chevron-down"></svg>
-                  </button>
-                  <div class="adm-provider-menu hidden" id="search-provider-menu"></div>
-                </div>
-                <select id="set-searchProvider" class="settings-select" style="display:none;">
-                  <option value="searxng" data-search-logo="searxng">SearXNG (self-hosted)</option>
-                  <option value="duckduckgo" data-search-logo="duckduckgo">DuckDuckGo (free, no key)</option>
-                  <option value="brave" data-search-logo="brave">Brave Search</option>
-                  <option value="kagi" data-search-logo="kagi">Kagi Search</option>
-                  <option value="google_pse" data-search-logo="google_pse">Google PSE</option>
-                  <option value="tavily" data-search-logo="tavily">Tavily</option>
-                  <option value="serper" data-search-logo="serper">Serper.dev</option>
-                  <option value="mimo" data-search-logo="mimo">MiMo hosted search</option>
-                  <option value="disabled" data-search-logo="disabled">Disabled</option>
-                </select>
-                <button type="button" class="admin-btn-sm" id="set-searchTestBtn" title="Run a test query against the configured provider" style="margin-left:2px;flex-shrink:0;position:relative;top:2px;display:inline-flex;align-items:center;gap:4px;">
-                  <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="check"></svg>Test
-                </button>
-              </div>
-              <div class="settings-row">
-                <label class="settings-label" title="How many web search results to fetch per query">Results per query</label>
-                <div style="display:flex;gap:8px;flex:1;">
-                  <select id="set-searchResultCount" class="settings-select" style="flex:1;">
-                    <option value="3">3</option>
-                    <option value="5" selected>5</option>
-                    <option value="10">10</option>
-                    <option value="20">20</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                  <input id="set-searchResultCountCustom" type="number" class="settings-select" placeholder="Enter custom value" style="flex:1;display:none;min-width:120px;" min="1" max="100">
-                </div>
-              </div>
-              <div id="set-searchUrlRow" class="settings-row">
-                <label class="settings-label">URL</label>
-                <input id="set-searchUrl" type="text" placeholder="http://localhost:8080 (optional)" class="settings-select">
-              </div>
-              <div id="set-searchKeyRow" class="settings-row" style="display:none;">
-                <label class="settings-label">API Key</label>
-                <div style="position:relative;flex:1;display:flex;align-items:center;">
-                  <svg width="13" height="13" viewBox="0 0 24 24" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.55;pointer-events:none;" aria-hidden="true" focusable="false" data-ui-icon="key"></svg>
-                  <input id="set-searchApiKey" type="password" placeholder="API key" class="settings-select" style="flex:1;padding-left:28px;">
-                </div>
-              </div>
-              <div id="set-searchCxRow" class="settings-row" style="display:none;">
-                <label class="settings-label">CX ID</label>
-                <input id="set-searchCx" type="text" placeholder="Google PSE engine ID" class="settings-select">
-              </div>
-              <div class="settings-row" style="align-items:flex-start;">
-                <label class="settings-label" style="margin-top:6px;" title="Providers tried in order when the primary fails or hits a rate limit">Fallbacks</label>
-                <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
-                  <div class="settings-fallbacks" id="set-searchFallbackChain"></div>
-                  <button type="button" class="settings-fallback-add" id="set-searchAddFallback" title="Add a search provider to try if the primary fails">+ Add fallback</button>
-                </div>
-              </div>
-              <div id="set-searchHint" class="admin-toggle-sub"></div>
-              <div id="set-searchMsg" style="font-size:11px;"></div>
-            </div>
-          </div>
-
-          <div class="admin-card">
+<div class="admin-card admin-only" id="settings-deep-research">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="research"></svg>Deep Research</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Deep Research runtime settings. Default Model is picked in <a href="#" data-go-settings-tab="ai" style="color:var(--accent, var(--red));text-decoration:underline;font-weight:600;">AI Defaults →</a></div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Choose the search, iteration and timeout limits for Deep Research.</div>
             <div class="settings-col">
               <div class="settings-row">
                 <label class="settings-label">Search</label>
@@ -2070,7 +2148,10 @@
           </div>
         </div>
 
+        <!-- ═══ SEARCH TAB ═══ -->
+
         <!-- ═══ APPEARANCE TAB ═══ -->
+        <div data-settings-panel="buddy" class="hidden"></div>
         <div data-settings-panel="appearance" class="settings-appearance-panel hidden">
           <section class="admin-card" data-graphical-rendering-settings aria-labelledby="graphical-rendering-heading">
             <h2 id="graphical-rendering-heading">Rendering</h2>
@@ -2081,6 +2162,12 @@
             </select>
             <p class="admin-toggle-sub">Saved in this browser. Only eligible still-image pixels and the code map use custom graphics. Text, selection, IME and undo stay in the existing editor.</p>
             <p data-graphical-rendering-status role="status" aria-live="polite"></p>
+          </section>
+          <section class="admin-card" aria-labelledby="deliverable-motion-heading">
+            <h2 id="deliverable-motion-heading">Generated deliverables</h2>
+            <label><input type="checkbox" id="deliverable-reduced-motion" disabled> Reduce motion in generated deliverables</label>
+            <p class="admin-toggle-sub">Applies to new output; existing browser and system accessibility settings remain in effect.</p>
+            <p id="deliverable-reduced-motion-status" role="status" aria-live="polite"></p>
           </section>
           <div class="admin-card settings-theme-card" id="settings-theme-surface">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="hue"></svg>Theme</h2>
@@ -2094,26 +2181,12 @@
               <label class="settings-label" for="set-interface-language">Interface language</label>
               <select id="set-interface-language" class="settings-select" data-language-select data-i18n-skip style="width:382.5px;max-width:100%;margin-left:auto">
                 <option value="en">English</option>
-                <option value="zh-Hans">简体中文</option>
-                <option value="ja">日本語</option>
-                <option value="ko">한국어</option>
-                <option value="es">Español</option>
-                <option value="hi">हिन्दी</option>
-                <option value="ar">العربية</option>
-                <option value="ru">Русский</option>
-                <option value="pt">Português</option>
-                <option value="id">Bahasa Indonesia</option>
-                <option value="pa-Guru">ਪੰਜਾਬੀ</option>
-                <option value="bn">বাংলা</option>
-                <option value="sw">Kiswahili</option>
-                <option value="ur">اردو</option>
-                <option value="fa">فارسی</option>
               </select>
             </div>
           </div>
           <div class="admin-card">
             <h2>Context menu</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Use Open Clank's accessible context menu for editing, links and Copal objects in every supported browser.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Use Open Clank's accessible context menu for editing, links and workspace items in every supported browser.</div>
             <label class="vis-row" style="padding-left:0;">
               <span class="vis-label">Enable custom context menu <span class="vis-hint">Turn off to restore the browser menu</span></span>
               <input type="checkbox" id="set-custom-context-menu" checked><span class="vis-switch"></span>
@@ -2297,7 +2370,7 @@
           </div>
           <div class="admin-card" data-copal-notes-appearance-card>
             <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="code"></svg>Editor</h2>
-            <p class="settings-hint">Workspace appearance for this browser and the active Copal workspace.</p>
+            <p class="settings-hint">Editor appearance for this browser and workspace.</p>
             <div class="settings-row">
               <label class="settings-label" for="set-copal-notes-preview-layout">Preview layout</label>
               <select id="set-copal-notes-preview-layout" class="settings-select" data-copal-notes-setting="previewLayout">
@@ -2339,11 +2412,6 @@
                 <span class="vis-label">Show Open Clank tutorial folder <span class="vis-hint">Show the built-in Open Clank tutorial and handbook folder</span></span>
                 <input id="set-copal-notes-show-tutorial-folder" type="checkbox" data-copal-notes-setting="showTutorialFolder"><span class="vis-switch"></span>
               </label>
-              <label class="vis-row">
-                <span class="vis-icon vis-icon-text">⌂</span>
-                <span class="vis-label">Show Copal collections in folder workspaces <span class="vis-hint">Show global Copal collections while a folder workspace is open</span></span>
-                <input id="set-copal-notes-show-copal-folder-workspace" type="checkbox" data-copal-notes-setting="showCopalInFolderWorkspace"><span class="vis-switch"></span>
-              </label>
             </div>
           </div>
           <div class="admin-card" data-copal-navigation-appearance-card>
@@ -2354,11 +2422,13 @@
               <button type="button" class="copal-btn" data-copal-entry-action="show">Show all</button>
               <button type="button" class="copal-btn" data-copal-entry-action="hide">Hide all</button>
               <button type="button" class="copal-btn" data-copal-entry-action="reset">Reset to defaults</button>
+              <button type="button" class="copal-btn" id="set-copal-manage-journals" aria-haspopup="dialog">Manage journals</button>
             </div>
+            <p id="set-copal-journal-status" class="settings-hint" role="status" hidden></p>
           </div>
           <div class="admin-card" data-copal-notes-panels-card>
             <h2>Editor — Sidebar panels</h2>
-            <p class="settings-hint">Files and Search stay on the left. Move, hide, or reorder the six other panels.</p>
+            <p class="settings-hint">Explorer and Search stay on the left. Details stays on the right. Customize the available panels below.</p>
             <div id="set-copal-notes-panels"></div>
           </div>
         </div>
@@ -2385,12 +2455,11 @@
         <div data-settings-panel="help" class="hidden">
           <div class="admin-card">
             <h2>Open Clank documentation</h2>
-            <p>Wiki documentation and the Copal handbook both include the same maintained guides, screenshots and practical steps.</p>
             <div class="settings-help-links">
               <button type="button" id="settings-help-wiki">Wiki documentation</button>
-              <button type="button" id="settings-help-copal">Copal handbook</button>
+              <button type="button" id="settings-help-copal">Instruction Manual</button>
             </div>
-            <p>Wiki opens its page-authoring applet; Copal handbook opens Editor. They share the same articles. Built-in documentation is read-only.</p>
+            <p>The Instruction Manual opens in Editor. Wiki documentation opens in Wiki.</p>
             <p id="settings-help-status" role="status" aria-live="polite"></p>
           </div>
           <div class="admin-card">
@@ -2401,6 +2470,13 @@
         </div>
 
         <div data-settings-panel="advanced" class="hidden">
+          <div class="admin-card">
+            <button type="button" class="admin-btn-sm" id="advanced-export-theme">Export current theme settings</button>
+          </div>
+          <div class="admin-card" data-annotator-settings hidden>
+            <label class="settings-label"><input type="checkbox" id="settings-annotator" disabled> annotator</label>
+            <p class="admin-toggle-sub">Show a floating feedback button. Select a control or pane and write a comment.</p>
+          </div>
           <div class="admin-card">
             <h2>Achievements</h2>
             <div data-achievement-notification-settings>
@@ -2455,35 +2531,10 @@
         </div>
 
         <!-- ═══ EMAIL TAB ═══ -->
-        <div data-settings-panel="email" class="hidden">
-          <div class="admin-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="email"></svg>Email Settings</h2>
-            <div class="settings-row" style="align-items:center;">
-              <div class="admin-toggle-sub" style="margin:0;flex:1;">Auto reply, newsletter unsubscribe, and writing style live in the Email window.</div>
-              <button class="admin-btn-add" id="set-email-open-library-settings" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" style="opacity:0.7" aria-hidden="true" focusable="false" data-ui-icon="external"></svg>Open Email Settings</button>
-            </div>
-          </div>
-
-          <div class="admin-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="email"></svg>Email Accounts</h2>
-            <div class="settings-row" style="align-items:center;">
-              <div class="admin-toggle-sub" style="margin:0;flex:1;">Add, edit, delete, and test accounts in Integrations.</div>
-              <button class="admin-btn-add" id="set-email-open-integrations" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" style="opacity:0.7" aria-hidden="true" focusable="false" data-ui-icon="link"></svg>Open Integrations</button>
-            </div>
-          </div>
-
-          <div class="admin-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="tasks"></svg>Email Tasks</h2>
-            <div class="settings-row" style="align-items:center;">
-              <div class="admin-toggle-sub" style="margin:0;flex:1;">Manage email background tasks in Clanker Tasks.</div>
-              <button class="admin-btn-add" id="set-email-open-tasks" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" style="opacity:0.7" aria-hidden="true" focusable="false" data-ui-icon="tasks"></svg>Open Clanker Tasks</button>
-            </div>
-          </div>
-
-        </div>
 
         <!-- ═══ REMINDERS TAB ═══ -->
         <div data-settings-panel="reminders" class="hidden">
+          <script type="text/html" data-settings-markup>
           <div class="admin-card">
             <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="bell"></svg>How you're reminded<span style="flex:1"></span><span id="set-reminder-test-msg" style="font-size:11px;font-weight:normal;"></span><button class="admin-btn-sm" id="set-reminder-test-btn" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;"><svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="bell"></svg>Test</button></h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Controls how fired note reminders are delivered.</div>
@@ -2558,10 +2609,12 @@
               <div id="set-app-public-url-msg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 55%, transparent);"></div>
             </div>
           </div>
+          </script>
         </div>
 
         <!-- ═══ ADMIN: USERS TAB ═══ -->
         <div data-settings-panel="users" class="hidden">
+          <script type="text/html" data-settings-markup>
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="contact"></svg>Registration</h2>
             <div class="admin-toggle-row">
@@ -2598,10 +2651,17 @@
               <span id="adm-addMsg" style="font-size:11px"></span>
             </div>
           </div>
+          </script>
         </div>
 
         <!-- ═══ SERVICES TAB ═══ -->
         <div data-settings-panel="services">
+          <h2>Provider/Model Management</h2>
+          <div class="settings-row" role="group" aria-label="Provider and model management">
+            <button class="admin-btn-sm" type="button" data-provider-view="services">Add provider</button>
+            <button class="admin-btn-sm" type="button" data-provider-view="added-models">Connected models</button>
+          </div>
+          <div data-provider-section="services">
 
           <div id="provider-control-root">
             <div class="provider-control-page-meta">
@@ -2609,16 +2669,15 @@
               <div id="provider-control-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
               <button type="button" class="admin-btn-sm" id="provider-control-refresh">Refresh</button>
             </div>
+            <div id="provider-login-add"><div id="provider-control-oauth" aria-live="polite"></div></div>
             <div id="provider-control-create"></div>
-
-            <div id="provider-control-oauth" aria-live="polite"></div>
           </div>
 
           <template id="provider-legacy-controls-retired">
 
           <!-- ── Local card ─────────────────────────────────────────── -->
           <div class="admin-card">
-            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="computer"></svg>Add Local Models <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Endpoint)</span>
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="computer"></svg>Add Local Provider <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Endpoint)</span>
               <span style="flex:1"></span>
               <button class="admin-btn-sm" id="adm-epLocalTestBtn" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;">
                 <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="check"></svg>Test
@@ -2663,7 +2722,7 @@
 
           <!-- ── API card ───────────────────────────────────────────── -->
           <div class="admin-card">
-            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="network"></svg>Add API Models <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Endpoint)</span>
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="network"></svg>Add API Provider <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Endpoint)</span>
               <span style="flex:1"></span>
               <button class="admin-btn-sm" id="adm-epApiTestBtn" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;">
                 <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="check"></svg>Test
@@ -2753,7 +2812,7 @@
               <span style="flex:1"></span>
               <button id="mimo-provider-refresh" type="button" class="admin-btn-sm" style="font-size:11px;font-weight:normal;">Refresh</button>
             </h2>
-            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Use browser login or an API key. Connected models appear under Added Models → API.</div>
+            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Use browser login or an API key. Connected models appear under Model Management → API.</div>
             <div class="adm-add-section">
               <div class="mimo-provider-combo">
                 <div class="mimo-provider-search-shell">
@@ -2780,17 +2839,88 @@
 
         </div>
 
-        <!-- ═══ ADDED MODELS TAB ═══ -->
-        <div data-settings-panel="added-models" class="hidden">
+        <div class="admin-card admin-only" id="settings-web-search">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="search"></svg>Web Search</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Search API used for web search and deep research.</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label">Provider</label>
+                <!-- Custom picker (with logos). Hidden native <select> mirrors
+                     its value so the existing JS that reads
+                     set-searchProvider keeps working unchanged. -->
+                <div class="adm-provider-picker search-provider-picker" id="search-provider-picker" style="flex:1;position:relative;top:5px;">
+                  <button type="button" class="adm-provider-btn" id="search-provider-btn">
+                    <span class="adm-provider-current"><span class="adm-provider-logo"></span><span class="adm-provider-name">SearXNG</span></span>
+                    <svg class="adm-provider-caret" width="10" height="10" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="chevron-down"></svg>
+                  </button>
+                  <div class="adm-provider-menu hidden" id="search-provider-menu"></div>
+                </div>
+                <select id="set-searchProvider" class="settings-select" style="display:none;">
+                  <option value="searxng" data-search-logo="searxng">SearXNG (self-hosted)</option>
+                  <option value="duckduckgo" data-search-logo="duckduckgo">DuckDuckGo (free, no key)</option>
+                  <option value="brave" data-search-logo="brave">Brave Search</option>
+                  <option value="kagi" data-search-logo="kagi">Kagi Search</option>
+                  <option value="google_pse" data-search-logo="google_pse">Google PSE</option>
+                  <option value="tavily" data-search-logo="tavily">Tavily</option>
+                  <option value="serper" data-search-logo="serper">Serper.dev</option>
+                  <option value="mimo" data-search-logo="mimo">MiMo hosted search</option>
+                  <option value="disabled" data-search-logo="disabled">Disabled</option>
+                </select>
+                <button type="button" class="admin-btn-sm" id="set-searchTestBtn" title="Run a test query against the configured provider" style="margin-left:2px;flex-shrink:0;position:relative;top:2px;display:inline-flex;align-items:center;gap:4px;">
+                  <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="check"></svg>Test
+                </button>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" title="How many web search results to fetch per query">Results per query</label>
+                <div style="display:flex;gap:8px;flex:1;">
+                  <select id="set-searchResultCount" class="settings-select" style="flex:1;">
+                    <option value="3">3</option>
+                    <option value="5" selected>5</option>
+                    <option value="10">10</option>
+                    <option value="20">20</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  <input id="set-searchResultCountCustom" type="number" class="settings-select" placeholder="Enter custom value" style="flex:1;display:none;min-width:120px;" min="1" max="100">
+                </div>
+              </div>
+              <div id="set-searchUrlRow" class="settings-row">
+                <label class="settings-label">URL</label>
+                <input id="set-searchUrl" type="text" placeholder="http://localhost:8080 (optional)" class="settings-select">
+              </div>
+              <div id="set-searchKeyRow" class="settings-row" style="display:none;">
+                <label class="settings-label">API Key</label>
+                <div style="position:relative;flex:1;display:flex;align-items:center;">
+                  <svg width="13" height="13" viewBox="0 0 24 24" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.55;pointer-events:none;" aria-hidden="true" focusable="false" data-ui-icon="key"></svg>
+                  <input id="set-searchApiKey" type="password" placeholder="API key" class="settings-select" style="flex:1;padding-left:28px;">
+                </div>
+              </div>
+              <div id="set-searchCxRow" class="settings-row" style="display:none;">
+                <label class="settings-label">CX ID</label>
+                <input id="set-searchCx" type="text" placeholder="Google PSE engine ID" class="settings-select">
+              </div>
+              <div class="settings-row" style="align-items:flex-start;">
+                <label class="settings-label" style="margin-top:6px;" title="Providers tried in order when the primary fails or hits a rate limit">Fallbacks</label>
+                <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
+                  <div class="settings-fallbacks" id="set-searchFallbackChain"></div>
+                  <button type="button" class="settings-fallback-add" id="set-searchAddFallback" title="Add a search provider to try if the primary fails">+ Add fallback</button>
+                </div>
+              </div>
+              <div id="set-searchHint" class="admin-toggle-sub"></div>
+              <div id="set-searchMsg" style="font-size:11px;"></div>
+            </div>
+          </div>
+
+        <div data-provider-section="added-models" id="settings-connected-models">
           <div class="admin-card provider-control-added-heading provider-control-added-shell">
             <div class="provider-control-titlebar">
               <div>
-                <h2><span aria-hidden="true" class="provider-control-heading-mark">✓</span> Added Models</h2>
+                <h2><span aria-hidden="true" class="provider-control-heading-mark">✓</span> Connected models</h2>
                 <div class="admin-toggle-sub">Models you've connected. Open a provider to manage its models or account.</div>
               </div>
               <button type="button" class="admin-btn-sm" data-provider-control-refresh>Refresh</button>
             </div>
             <div id="provider-control-added-summary" class="provider-control-summary"></div>
+            <div id="provider-login-added"></div>
             <div id="provider-control-added-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
             <div id="provider-control-connections"></div>
           </div>
@@ -2807,9 +2937,12 @@
           </details>
         </div>
 
+
+        </div>
+
         <template id="provider-legacy-added-models-retired">
           <div class="admin-card">
-            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="model"></svg>Added Models <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Endpoints)</span>
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="model"></svg>Model Management <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Endpoints)</span>
               <span style="flex:1"></span>
               <button class="admin-btn-sm" id="adm-epProbeAllBtn" title="Re-test every endpoint and refresh online status" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;">
                 <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="activity"></svg>Probe
@@ -2836,7 +2969,7 @@
                 <div id="mimo-connected-provider-list"></div>
               </div>
             </div>
-          </div>
+        </div>
         </template>
 
         <!-- ═══ TOOLS TAB ═══ -->
@@ -2851,23 +2984,116 @@
               <button type="button" class="admin-btn-add" id="unified-intg-add-btn" style="text-align:center;display:inline-flex;align-items:center;justify-content:center;gap:5px;flex-shrink:0;"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-ui-icon="add"></svg>Add Integration</button>
             </div>
           </div>
+            <div class="admin-card"><h2>Chat channels</h2><div class="admin-toggle-sub">Talk to Open Clank from Telegram, Matrix, Discord or Feishu. Off by default; the bot answers only people you approve.</div><div id="channel-settings-root"></div></div>
+          <script type="text/html" data-settings-markup>
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="email"></svg>Email Settings</h2>
+            <div class="settings-row" style="align-items:center;">
+              <div class="admin-toggle-sub" style="margin:0;flex:1;">Auto reply, newsletter unsubscribe, and writing style live in the Email window.</div>
+              <button class="admin-btn-add" id="set-email-open-library-settings" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" style="opacity:0.7" aria-hidden="true" focusable="false" data-ui-icon="external"></svg>Open Email Settings</button>
+            </div>
+          </div>
+
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="email"></svg>Email Accounts</h2>
+            <div class="settings-row" style="align-items:center;">
+              <div class="admin-toggle-sub" style="margin:0;flex:1;">Add, edit, delete, and test accounts in Integrations.</div>
+              <button class="admin-btn-add" id="set-email-open-integrations" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" style="opacity:0.7" aria-hidden="true" focusable="false" data-ui-icon="link"></svg>Manage integrations</button>
+            </div>
+          </div>
+
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="tasks"></svg>Email Tasks</h2>
+            <div class="settings-row" style="align-items:center;">
+              <div class="admin-toggle-sub" style="margin:0;flex:1;">Manage email background tasks in Clanker Tasks.</div>
+              <button class="admin-btn-add" id="set-email-open-tasks" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" style="opacity:0.7" aria-hidden="true" focusable="false" data-ui-icon="tasks"></svg>Open Clanker Tasks</button>
+            </div>
+          </div>
+          </script>
+
         </div>
 
         <!-- ═══ TOOLS TAB ═══ -->
-        <div data-settings-panel="logging" class="hidden">
-          <div class="admin-card" data-logging-settings></div>
-        </div>
         <div data-settings-panel="hexes" class="hidden">
           <div class="admin-card" data-general-hex-library></div>
         </div>
+        <div data-settings-panel="memery" class="hidden">
+          <div class="admin-card">
+            <h2>Memery</h2>
+            <form data-memery-preferences>
+              <fieldset disabled>
+                <legend>Account preferences</legend>
+                <label><input type="checkbox" name="enabled"> Enable Memery</label>
+                <label class="memery-setting">Learning mode <select name="mode" class="settings-select">
+                  <option value="manual">Manual review</option>
+                  <option value="automatic">Automatic</option>
+                  <option value="off">Off</option>
+                </select></label>
+                <p class="admin-toggle-sub" data-memery-help></p>
+                <h3>Recall in chat</h3>
+                <label><input type="checkbox" name="memery_prompt_recall_enabled"> Include relevant memories before the model answers</label>
+                <label class="memery-setting">Maximum memories per turn
+                  <input type="number" name="memery_prompt_recall_limit" min="1" max="3" required>
+                </label>
+                <label class="memery-setting">Character budget per turn
+                  <input type="number" name="memery_prompt_recall_chars" min="1" max="1200" required>
+                </label>
+                <label><input type="checkbox" name="memery_agent_search_enabled"> Let the agent search saved memories during a turn</label>
+                <p class="admin-toggle-sub">These limits apply to automatic recall. You can allow agent searches independently.</p>
+                <button type="submit" class="admin-btn-add">Save preferences</button>
+              </fieldset>
+              <p role="status" aria-live="polite"></p>
+            </form>
+            <button type="button" class="settings-select" data-open-memery-models>Background models</button>
+            <button type="button" class="settings-select" data-open-memery-backup>Backups in Lore History</button>
+          </div>
+          <section class="admin-card">
+            <h2>Background learning</h2>
+            <div data-memery-learning-host></div>
+          </section>
+        </div>
         <div data-settings-panel="history" class="hidden">
           <div class="admin-card" data-history-settings>
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="restore"></svg>History storage</h2>
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="restore"></svg>Lore History</h2>
+            <fieldset data-capture-settings disabled>
+              <legend>Automatic history</legend>
+              <label data-capture-target-row hidden>Edit settings for <select data-capture-target class="settings-select">
+                <option value="account">My account</option><option value="installation">Installation defaults</option>
+              </select></label>
+              <label><input type="checkbox" data-capture="enabled"> Automatically save history</label>
+              <p data-capture-scope></p>
+              <p>Turning capture off keeps existing history. Protected edits use a private recovery copy until the operation finishes.</p>
+              <h3>What to keep</h3>
+              <p><label><input type="checkbox" data-capture="files"> Files, Editor and journal changes</label></p>
+              <p><label><input type="checkbox" data-capture="images"> Image projects</label></p>
+              <p><label><input type="checkbox" data-capture="agent_files"> Agent file changes</label></p>
+              <p><label><input type="checkbox" data-capture="memery_records"> Memery records</label></p>
+              <p><label><input type="checkbox" data-capture="memery_evidence"> Saved analyses and source evidence</label></p>
+              <p><label><input type="checkbox" data-capture="memery_artifacts"> Durable approved artifacts</label></p>
+              <button class="admin-btn-add" type="button" data-open-memery>Memery learning settings</button>
+              <button class="admin-btn-add" type="button" data-memery-recorded>Recorded Memery changes</button>
+              <section data-memery-versions aria-label="Recorded Memery changes" aria-live="polite"></section>
+              <h3>Frequency</h3>
+              <label>Automatic backups <select data-capture="frequency" class="settings-select">
+                <option value="every_change">Every committed change</option>
+                <option value="interval">Group changes within an interval</option>
+                <option value="manual">Manual checkpoints only</option>
+              </select></label>
+              <label data-interval-row> Interval in seconds <input type="number" min="1" max="31536000" data-capture="interval_seconds"></label>
+              <h3>Retention</h3>
+              <p><label>Recent revisions per item <input type="number" min="1" max="100000" data-capture="versions_per_item"></label></p>
+              <p><label>Maximum revision age in days <input type="number" min="1" max="36500" placeholder="No age limit" data-capture="max_age_days"></label></p>
+              <p>Limits apply to local revisions. Pins and available storage affect how many versions remain.</p>
+              <label><input type="checkbox" data-capture-inherit> Use installation capture defaults</label>
+            </fieldset>
+            <h3>Storage budget</h3>
+            <p data-history-last-capture></p>
             <div class="admin-toggle-sub" data-history-usage>Loading measured usage…</div>
             <div class="settings-row" style="margin-top:12px;align-items:center;gap:8px;">
-              <label class="settings-label" for="history-total-bytes">Installation target</label>
+              <label data-service-history-row hidden><input type="checkbox" data-service-history> Allow History capture on this installation</label>
+              <label class="settings-label" for="history-total-bytes">Installation budget in bytes</label>
               <input id="history-total-bytes" data-history-total type="number" min="1" step="1048576" class="settings-select" style="max-width:180px;" />
-              <button type="button" class="admin-btn-add" data-history-save><svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="save"></svg>Save target</button>
+              <button type="button" class="admin-btn-add" data-history-save disabled><svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="save"></svg>Save history settings</button>
             </div>
             <div class="admin-toggle-sub" data-history-inherited style="margin-top:8px;"></div>
             <div class="admin-card" style="margin-top:12px;padding:10px;" data-history-scopes>
@@ -2881,6 +3107,7 @@
 
         <!-- ═══ TOOLS TAB ═══ -->
         <div data-settings-panel="file-access" class="hidden">
+          <script type="text/html" data-settings-markup>
           <div class="admin-card" id="odysseus-file-visible-to-me">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px" aria-hidden="true" focusable="false" data-ui-icon="shield"></svg>Your file access</h2>
             <div class="admin-toggle-sub">Files and Editor use your account’s access. Agent access and operation approvals are managed below.</div>
@@ -2942,11 +3169,12 @@
             </details>
             <div id="odysseus-permissions-reset-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
           </div>
-
+          </script>
         </div>
 
         <!-- ═══ TOOLS TAB ═══ -->
         <div data-settings-panel="tools" class="hidden">
+          <script type="text/html" data-settings-markup>
           <div class="admin-card" style="margin-bottom:12px;">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:5px;opacity:0.6" aria-hidden="true" focusable="false" data-ui-icon="agents"></svg>Agent</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Installation-wide tool budgets. The round limit applies to the legacy loop; native agent step policies are configured separately.</div>
@@ -2967,10 +3195,12 @@
             <div class="admin-toggle-sub" style="margin-bottom:8px">Enable or disable tools available to the AI agent.</div>
             <div id="adm-builtin-tools-list" class="admin-user-list"></div>
           </div>
+          </script>
         </div>
 
         <!-- ═══ SYSTEM TAB ═══ -->
         <div data-settings-panel="system" class="hidden">
+          <script type="text/html" data-settings-markup>
 
           <section class="admin-card" data-code-index-settings aria-labelledby="code-index-settings-heading">
             <h2 id="code-index-settings-heading">Code indexing</h2>
@@ -3129,6 +3359,7 @@
             </div>
             <div id="adm-wipeMsg" style="margin-top:8px;"></div>
           </div>
+          </script>
         </div>
 
       </div>
@@ -3170,13 +3401,11 @@
 <script type="module" src="/static/js/spinner.js"></script>
 <script type="module" src="/static/js/tts-ai.js"></script>
 <script type="module" src="/static/js/document.js?v=20260722emailfastindex1"></script>
-<!-- Images open in Files and Imps. -->
+<!-- Files opens images in Editor. -->
 <script type="module" src="/static/js/chatRenderer.js"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js"></script>
 <script type="module" src="/static/js/chat.js?v=20260804doneframe1"></script>
-<script type="module" src="/static/js/cookbook.js"></script>
-<script type="module" src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
@@ -3184,6 +3413,8 @@
 <script src="/static/js/historySettings.js"></script>
 <script type="module" src="/static/js/assistant.js"></script>
 <script type="module" src="/static/js/contextualHelp.js"></script>
+<script type="module" src="/static/js/chatWorkspacePanel.js"></script>
+<script type="module" src="/static/js/chatTurnRail.js"></script>
 <script type="module" src="/static/app.js?v=20261004sidebarhamburger1"></script>  <!-- app.js must be LAST -->
 <script type="module" src="/static/js/usageEntry.js"></script>
   <script type="module" src="/static/js/init.js?v=20260728syncshell1"></script>

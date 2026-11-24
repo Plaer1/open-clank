@@ -14,9 +14,10 @@ function isImage(entry) {
  * It follows one folder at a time and exposes each folder's sealed pagination
  * cursor, so it neither flattens ordinary folders nor enumerates all images.
  */
-export async function openFilesImageBrowser({ onPick, title = 'Pick from Files', empty = 'No images or folders here' } = {}) {
+export async function openFilesImageBrowser({ onPick, onCancel = () => {}, signal = null, title = 'Pick from Files', empty = 'No images or folders here' } = {}) {
   if (typeof onPick !== 'function') throw new TypeError('onPick is required');
   const roots = await filesFacadeClient.roots();
+  if (signal?.aborted) {onCancel(); return;}
   const root = (roots.entries || []).find((entry) => entry.provider === 'files' && entry.name === 'Gallery');
   if (!root?.ref) throw new Error('Gallery folder is unavailable');
 
@@ -38,8 +39,15 @@ export async function openFilesImageBrowser({ onPick, title = 'Pick from Files',
   more.type = 'button'; more.textContent = 'Load more'; more.hidden = true;
   more.style.cssText = 'margin-top:10px;width:100%;';
   panel.append(header, grid, more); overlay.appendChild(panel); document.body.appendChild(overlay);
-  close.addEventListener('click', () => overlay.remove());
-  overlay.addEventListener('click', (event) => { if (event.target === overlay) overlay.remove(); });
+  let settled=false, observer=null;
+  const finish = (entry) => { if (settled) return; settled=true; observer?.disconnect(); document.removeEventListener('keydown',onKey); signal?.removeEventListener('abort',onAbort); overlay.remove(); if (entry) onPick(entry); else onCancel(); };
+  const onKey = event => { if (event.key==='Escape') {event.preventDefault(); finish(null);} };
+  const onAbort = () => finish(null);
+  document.addEventListener('keydown',onKey);
+  signal?.addEventListener('abort',onAbort,{once:true}); if (signal?.aborted) {finish(null); return;}
+  if (typeof MutationObserver==='function') { observer=new MutationObserver(() => {if (!overlay.isConnected) finish(null);}); observer.observe(document.body,{childList:true,subtree:true}); }
+  close.addEventListener('click', () => finish(null));
+  overlay.addEventListener('click', (event) => { if (event.target === overlay) finish(null); });
 
   const stack = [];
   let current = { ref: root.ref, name: root.name, cursor: null };
@@ -58,7 +66,7 @@ export async function openFilesImageBrowser({ onPick, title = 'Pick from Files',
       } else {
         const image = document.createElement('img'); image.src = filesFacadeClient.contentUrl(entry.ref, { purpose: 'preview' }); image.alt = entry.name || 'Image';
         image.style.cssText = 'width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;display:block;'; tile.appendChild(image);
-        tile.addEventListener('click', () => { overlay.remove(); onPick(entry); });
+        tile.addEventListener('click', () => finish(entry));
       }
       grid.appendChild(tile);
     }
@@ -69,5 +77,5 @@ export async function openFilesImageBrowser({ onPick, title = 'Pick from Files',
   function showError(error) { grid.textContent = error?.message || 'Could not load this folder'; more.hidden = true; }
   more.addEventListener('click', () => render({ append: true }).catch(showError));
   back.addEventListener('click', () => { const prior = stack.pop(); if (prior) { current = prior; current.cursor = null; render().catch(showError); } });
-  await render();
+  try { await render(); } catch(error) {finish(null); throw error;}
 }

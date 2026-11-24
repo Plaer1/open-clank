@@ -1,0 +1,61 @@
+[package]
+name = "openclank-native-capture"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+ashpd = { version = "=0.13.13", default-features = false, features = ["tokio", "screenshot", "screencast", "remote_desktop", "global_shortcuts", "clipboard"] }
+tokio = { version = "=1.47.4", features = ["rt", "time", "macros", "io-std", "io-util", "sync"] }
+futures-util = "=0.3.34"
+libc = "=0.2.191"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+image = { version = "=0.25.9", default-features = false, features = ["png"] }
+url = "=2.5.8"
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+
+[dependencies.wayland-client]
+version = "=0.31.15"
+optional = true
+
+[dependencies.wayland-protocols]
+version = "=0.32.12"
+features = ["client", "unstable"]
+optional = true
+
+[dependencies.wayland-protocols-wlr]
+version = "=0.3.12"
+features = ["client"]
+optional = true
+
+[features]
+default = ["cursor-overlay"]
+cursor-overlay = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr"]
+audio-foundation = ["dep:pipewire", "dep:sha2"]
+frames = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+
+[[bin]]
+name = "openclank-native-capture-frame"
+path = "src/bin/openclank-native-capture-frame.rs"
+required-features = ["frames"]
+
+[dependencies.gstreamer]
+version = "=0.24.2"
+optional = true
+
+[dependencies.gstreamer-app]
+version = "=0.24.2"
+optional = true
+
+[dependencies.gstreamer-video]
+version = "=0.24.2"
+optional = true
+
+[dependencies.pipewire]
+version = "=0.10.1"
+optional = true
+
+[dependencies.sha2]
+version = "=0.10.9"
+optional = true

@@ -2,21 +2,21 @@
   "id": "batch-032",
   "group": "docs.openclank-docs-recovery",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 1599,
+  "entry_count": 3,
+  "character_count": 3158,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-recovery.body",
-      "source": "# Recovery\n\nMost of the time nothing goes wrong. When it does, this page is the map.\n\n## A save was refused\n\nGuarded saves refuse to overwrite newer work. Reopen the document and merge —\nthe version you were editing is still in your draft buffer, and the stored\nversion is intact.\n\n## A document looks wrong\n\nIf a document shows a recovery panel instead of its content, the stored bytes\ncould not be decoded. The original source is preserved. Use the recovery\npanel to inspect the preserved source, or restore from history.\n\nNothing silently rewrites a document that failed to decode.\n\n## Undo a managed save\n\nImps project saves capture a preimage first. Restore from the project's\nhistory to replay that preimage and undo the save.\n\n## Restore a document version\n\nDocument history lists checkpoints. Pick a version and restore it. The\nrestore is itself recorded, so you can go forward again.\n\n## Start over on official pages\n\nOfficial handbook pages like this one are read-only and update with the\nproduct. If you made an editable copy and want a fresh original, delete your\ncopy and reopen the official page — the original is still there.\n\n## When to ask for help\n\n- A scheduled task ran but produced nothing: its task chat has the transcript.\n- Files are missing: check [Files](clank://files) trash before assuming loss.\n- Settings look wrong: [Settings](clank://settings) panels are per account.\n\nSee [[Memory and Lore]] for the history and retention side.",
+      "source": "# Recovery\n\nKeep your draft until you know what was saved.\n\n| Problem | What to do |\n| --- | --- |\n| Save conflict | Reopen the stored revision and merge your draft. |\n| Save refused because a recovery version is unavailable | Restore the recovery service before retrying. |\n| Editor cannot read a document | Inspect the preserved source or restore an earlier version. Preserve the original bytes. |\n| Missing file or media | Check the account and **Permissions → Your file access**. Relink a moved resource or replace an expired link with a saved file. |\n| Unsure whether an external action finished | Check the original result or receipt before repeating the action. |\n| Handbook page changed | Reopen it from Help for the current edition. Your personal notes stay in their own documents. |\n| Missing sidebar shortcut | Restore it in **Settings → Appearance → Copal navigation**. |\n\n## Restore a file or project\n\nOpen the resource’s **History** and review the checkpoint before choosing restore. History can recover versions it captured and still retains. See [[Memory and Lore]].\n\n## Restore an installation\n\nThe repository backup helper covers its `data/` directory. Check for Journal storage, host workspaces and other stores outside that directory. **Settings → System → Data Backup** transfers the listed user-data categories as JSON. For full restore steps and coverage, use the [backup guide](https://github.com/Plaer1/open-clank/blob/main/docs/backup-restore.md).\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:638"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
@@ -26,10 +26,20 @@
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:638"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
       "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-recovery.body.compat-d1f14f7b85b9",
+      "source": "# Recovery\n\nMost of the time nothing goes wrong. When it does, this page is the map.\n\n## A save was refused\n\nGuarded saves refuse to overwrite newer work. Reopen the document and merge —\nthe version you were editing is still in your draft buffer, and the stored\nversion is intact.\n\n## A document looks wrong\n\nIf a document shows a recovery panel instead of its content, the stored bytes\ncould not be decoded. The original source is preserved. Use the recovery\npanel to inspect the preserved source, or restore from history.\n\nNothing silently rewrites a document that failed to decode.\n\n## Undo a managed save\n\nImps project saves capture a preimage first. Restore from the project's\nhistory to replay that preimage and undo the save.\n\n## Restore a document version\n\nDocument history lists checkpoints. Pick a version and restore it. The\nrestore is itself recorded, so you can go forward again.\n\n## Start over on official pages\n\nOfficial handbook pages like this one are read-only and update with the\nproduct. If you made an editable copy and want a fresh original, delete your\ncopy and reopen the official page — the original is still there.\n\n## When to ask for help\n\n- A scheduled task ran but produced nothing: its task chat has the transcript.\n- Files are missing: check [Files](clank://files) trash before assuming loss.\n- Settings look wrong: [Settings](clank://settings) panels are per account.\n\nSee [[Memory and Lore]] for the history and retention side.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
     }
   ]
 }

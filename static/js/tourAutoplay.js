@@ -21,7 +21,7 @@ const TOUR_FOR_MODAL = {
   'settings-modal':         'tour-settings',
 };
 
-const SEEN_KEY = (tour) => `odysseus-tour-autoplay-seen-${tour}`;
+const SEEN_KEY = (tour) => `openclank-tour-autoplay-seen-${tour}`;
 
 let _initialized = false;
 // Suppress re-fire if a tour is already active or another modal opens while

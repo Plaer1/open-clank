@@ -46,11 +46,11 @@ def _database(tmp_path, monkeypatch):
 
 def test_open_clank_agent_env_names_override_legacy_names(monkeypatch):
     monkeypatch.setenv("OPEN_CLANK_SMALL_MODEL", "open-clank/primary")
-    monkeypatch.setenv("ODYSSEUS_SMALL_MODEL", "legacy/fallback")
+    monkeypatch.setenv("OPEN_CLANK_SMALL_MODEL", "legacy/fallback")
     assert _pick_small_model({}) == "open-clank/primary"
 
     monkeypatch.setenv("OPEN_CLANK_AGENT_PORT", "43111")
-    monkeypatch.setenv("ODYSSEUS_MIMO_PORT", "43112")
+    monkeypatch.setenv("OPEN_CLANK_AGENT_PORT", "43112")
     assert MimoSupervisor(partitioned=False)._http_port == 43111
 
     monkeypatch.delenv("OPEN_CLANK_SMALL_MODEL")
@@ -84,7 +84,7 @@ def test_partitioned_workers_receive_the_central_owner_filtered_skill_catalog(
     for owner, env in (("alice", alice), ("bob", bob)):
         assert env["OPEN_CLANK_OWNER"] == owner
         assert env["OPEN_CLANK_SKILLS_DIR"] == str(skills_root)
-        config = json.loads(env["MIMOCODE_CONFIG_CONTENT"])
+        config = json.loads(env["OPENCLANK_CONFIG_CONTENT"])
         assert config["skills"]["paths"] == [str(skills_root)]
         assert config["memory"] == {"provider": "frankenmemory"}
     assert alice["OPEN_CLANK_DATA_DIR"] != bob["OPEN_CLANK_DATA_DIR"]
@@ -151,7 +151,8 @@ async def test_model_catalog_warmup_timeout_does_not_block_worker_start(
     class BlockingBridge:
         available_models = []
 
-        async def open_session(self, *, with_agent_tools):
+        async def open_session(self, *, cwd, with_agent_tools):
+            assert cwd == str(worker._bootstrap_directory())
             assert with_agent_tools is False
             started.set()
             try:
@@ -204,14 +205,14 @@ async def test_owner_memory_reset_clears_only_authored_memory_sidecars(
     _database(tmp_path, monkeypatch)
     pool = MimoSupervisorPool(data_dir=tmp_path)
 
-    alice_data = pool._runtime_home("alice") / "mimocode" / "data"
+    alice_data = pool._runtime_home("alice") / "openclank-engine" / "data"
     memory_root = alice_data / "memory" / "projects" / "demo"
     memory_root.mkdir(parents=True)
     authored = memory_root / "MEMORY.md"
     checkpoint = memory_root / "checkpoint.md"
     authored.write_text("private preference", encoding="utf-8")
     checkpoint.write_text("unfinished task", encoding="utf-8")
-    db = alice_data / "mimocode.db"
+    db = alice_data / "openclank.db"
     with sqlite3.connect(db) as connection:
         connection.executescript(
             """
@@ -236,7 +237,7 @@ async def test_owner_memory_reset_clears_only_authored_memory_sidecars(
             (str(checkpoint), "projects", "demo", "checkpoint", "unfinished task", "c1", 1),
         )
 
-    bob_data = pool._runtime_home("bob") / "mimocode" / "data" / "memory" / "global"
+    bob_data = pool._runtime_home("bob") / "openclank-engine" / "data" / "memory" / "global"
     bob_data.mkdir(parents=True)
     bob_memory = bob_data / "MEMORY.md"
     bob_memory.write_text("bob survives", encoding="utf-8")

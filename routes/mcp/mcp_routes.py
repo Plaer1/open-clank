@@ -21,6 +21,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
 
+def _mcp_safe_origin(value: str | None) -> str | None:
+    """Configured transport origin only; never return credentials, path or query."""
+    try:
+        parsed = urllib.parse.urlsplit(value or "")
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return None
+        host = parsed.hostname
+        if len(host) > 253 or any(ord(char) < 33 or ord(char) == 127 for char in host):
+            return None
+        port = parsed.port
+        if ':' in host:
+            host = f"[{host}]"
+        return f"{parsed.scheme.lower()}://{host}" + (f":{port}" if port is not None else "")
+    except (TypeError, ValueError):
+        return None
+
+
 def _mcp_oauth_base_dir() -> Path:
     """Directory that may contain OAuth files managed by Open Clank."""
     return Path(MCP_OAUTH_DIR).resolve(strict=False)
@@ -125,6 +142,9 @@ def setup_mcp_routes(mcp_manager: McpManager):
         try:
             servers = db.query(McpServer).all()
             result = []
+            discovered = {}
+            for tool in mcp_manager.get_all_tools():
+                discovered.setdefault(tool["server_id"], set()).add(tool["name"])
             for srv in servers:
                 status = mcp_manager.get_server_status(srv.id)
                 oauth_cfg = json.loads(srv.oauth_config) if srv.oauth_config else None
@@ -132,7 +152,11 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 if oauth_cfg:
                     needs_oauth = _mcp_oauth_token_missing(oauth_cfg, strict=False)
                 disabled_list = json.loads(srv.disabled_tools) if srv.disabled_tools else []
-                total_tools = status.get("tool_count", 0)
+                names = discovered.get(srv.id, set())
+                observation = mcp_manager.get_observation(srv.id)
+                total_tools = len(names)
+                disabled_valid = isinstance(disabled_list, list) and all(isinstance(value, str) for value in disabled_list)
+                disabled_count = len(names.intersection(disabled_list)) if srv.is_enabled and disabled_valid else total_tools
                 result.append({
                     "id": srv.id,
                     "name": srv.name,
@@ -141,11 +165,17 @@ def setup_mcp_routes(mcp_manager: McpManager):
                     "arg_count": len(json.loads(srv.args)) if srv.args else 0,
                     "env_keys": sorted((json.loads(srv.env) if srv.env else {}).keys()),
                     "has_url": bool(srv.url),
+                    "transport_origin": _mcp_safe_origin(srv.url) if srv.transport in {"http", "sse"} else None,
+                    "configuration_origin": "built_in" if mcp_manager.is_builtin(srv.id) else "configured",
                     "is_enabled": srv.is_enabled,
                     "status": status.get("status", "disconnected"),
                     "tool_count": total_tools,
-                    "disabled_tool_count": len(disabled_list),
-                    "enabled_tool_count": max(0, total_tools - len(disabled_list)),
+                    "disabled_tool_count": disabled_count,
+                    "enabled_tool_count": total_tools - disabled_count,
+                    "observation_owner": "python_manager",
+                    "observation": observation,
+                    "tool_counts_known": status.get("status") == "connected" and bool(observation) and observation.get("status") in {"connected", "degraded"},
+                    "effective_turn_tool_count": None,
                     "error": status.get("error"),
                     "auth_url": status.get("auth_url"),
                     "has_oauth": oauth_cfg is not None,

@@ -6,10 +6,13 @@ import DESCRIPTION from "./question.txt"
 
 const parameters = z.object({
   questions: z.array(Question.Prompt.zod).describe("Questions to ask"),
+  blocking: z.boolean().optional().describe("Wait for an answer before continuing; set false only when independent work can continue safely"),
 })
 
 type Metadata = {
   answers: ReadonlyArray<Question.Answer>
+  requestID?: string
+  blocking?: boolean
 }
 
 export const QuestionTool = Tool.define<typeof parameters, Metadata, Question.Service>(
@@ -41,6 +44,33 @@ export const QuestionTool = Tool.define<typeof parameters, Metadata, Question.Se
               metadata: {
                 answers: params.questions.map(() => [autoAnswer]),
               },
+            }
+          }
+
+          if (params.blocking === false) {
+            const actorID = typeof ctx.extra?.registeredActorID === "string" ? ctx.extra.registeredActorID : undefined
+            if (!actorID) throw new Error("optional question requires a registered actor identity")
+            const actorExecution = ctx.extra?.actorExecution as { actorID?: string; executionRevision?: number } | undefined
+            if (!actorExecution || actorExecution.actorID !== actorID || actorExecution.executionRevision === undefined)
+              throw new Error("optional question requires its exact actor execution")
+            // Main user messages may have no agentID in the in-memory message;
+            // persistence and slice reads normalize that default to `main`.
+            const origin = [...ctx.messages].reverse().find((message) =>
+              message.info.role === "user" && (message.info.agentID ?? "main") === actorID,
+            )
+            if (!origin || !ctx.callID) throw new Error("optional question requires its originating user turn and tool call")
+            const request = yield* question.askOptional({
+              sessionID: ctx.sessionID,
+              actorID,
+              executionRevision: actorExecution.executionRevision,
+              originTurnID: origin.info.id,
+              questions: params.questions,
+              tool: { messageID: ctx.messageID, callID: ctx.callID },
+            })
+            return {
+              title: `Saved ${params.questions.length} optional question${params.questions.length > 1 ? "s" : ""}`,
+              output: "The question is saved for the user. Continue with independent work; do not assume an answer or approval.",
+              metadata: { requestID: String(request.id), blocking: false, answers: [] },
             }
           }
 

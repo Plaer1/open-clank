@@ -8,6 +8,7 @@ import { SessionCwd } from "./session-cwd"
 import DESCRIPTION from "./grep.txt"
 import * as Tool from "./tool"
 import { fileResult } from "./file-contract"
+import { markGrepRows } from '../session/tool-view-grep'
 
 const MAX_LINE_LENGTH = 2000
 const Parameters = z.object({
@@ -211,7 +212,7 @@ export const GrepTool = Tool.define(
             output.push("(Some paths were inaccessible and skipped)")
           }
 
-          return {
+          return markGrepRows({
             title: params.pattern,
             metadata: {
               matches: total,
@@ -249,7 +250,7 @@ export const GrepTool = Tool.define(
               truncated,
             },
             output: output.join("\n"),
-          }
+          },ctx)
         }).pipe(Effect.orDie),
     }
   }),

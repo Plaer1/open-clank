@@ -1,0 +1,3332 @@
+import { noteSameRequestSDK, noteSameRequestModel } from './same-request-route'
+import { notePinnedResponsesSDK, notePinnedResponsesModel, notePinnedChatSDK, notePinnedChatModel, notePinnedCompatibleChatSDK, notePinnedCompatibleChatModel } from "./malformed-origin"
+import { notePinnedAnthropicSDK, notePinnedAnthropicModel } from "./anthropic-origin"
+import anthropicPackage from "@ai-sdk/anthropic/package.json"
+import openaiPackage from "@ai-sdk/openai/package.json"
+import compatiblePackage from "@ai-sdk/openai-compatible/package.json"
+import { HostModelTransport } from "./host-transport"
+import z from "zod"
+import os from "os"
+import fuzzysort from "fuzzysort"
+import { Config } from "../config"
+import { mapValues, mergeDeep, sortBy } from "remeda"
+import { NoSuchModelError, type Provider as SDK } from "ai"
+import { Log } from "../util"
+import { Npm } from "../npm"
+import { Hash } from "@mimo-ai/shared/util/hash"
+import { Plugin } from "../plugin"
+import { NamedError } from "@mimo-ai/shared/util/error"
+import {
+  type EmbeddingModelV3,
+  type ImageModelV3,
+  type LanguageModelV3,
+  type SpeechModelV3,
+  type TranscriptionModelV3,
+} from "@ai-sdk/provider"
+import * as ModelsDev from "./models"
+import { declaredWindowFields } from "../config/model-window-declarations"
+import { recordDeclared, readWindowOrigin, snapshotDeclared, restoreDeclared, type WindowSnapshot, type WindowOrigin } from "./model-window-origin"
+import { Auth, OAUTH_DUMMY_KEY } from "../auth"
+import { Env } from "../env"
+import { InstallationVersion } from "../installation/version"
+import { Flag } from "../flag/flag"
+import { zod } from "@/util/effect-zod"
+import { iife } from "@/util/iife"
+import { Global } from "../global"
+import path from "path"
+import { pathToFileURL } from "url"
+import { Effect, Layer, Context, Schema, Types } from "effect"
+import { EffectBridge } from "@/effect"
+import { transformXiaomiSearchRequestBody } from "@/acp/provider-capabilities"
+import { InstanceState } from "@/effect"
+import { AppFileSystem } from "@mimo-ai/shared/filesystem"
+import { isRecord } from "@/util/record"
+import { withStatics } from "@/util/schema"
+import { closeSync, readSync } from "node:fs"
+
+import * as ProviderTransform from "./transform"
+import { ModelID, ProviderID } from "./schema"
+import { AccountSelection } from "./account-selection"
+import { ManagedProvider } from "@/acp/managed-provider"
+import { scopeBinding } from "@/provider/logging-transport"
+import { captureFetch, observeCodexInnerSend } from "./logging-transport"
+import { CLAUDE_PROFILE, createManagedClaudeFetch } from "@/plugin/claude"
+import { getInstallationID } from "@/metrics/installation"
+import { resolveMimoEndpoint, type MimoBillingLane } from "./mimo-endpoint-policy"
+import { openCodeApiBaseURL, openCodeProtocol, type OpenCodeProtocol } from "./opencode-protocol"
+
+export { createManagedClaudeFetch } from "@/plugin/claude"
+import { isXiaomiFamilyProvider } from "./xiaomi-family"
+
+const log = Log.create({ service: "provider" })
+const DEFAULT_CONTEXT_WINDOW = 1_000_000
+// Reserved built-in model tiers: always resolve, falling back to the default
+// model when not configured in `model_groups` (zero-config never errors).
+const BUILTIN_TIERS = new Set(["ultra", "standard", "lite"])
+// F41: warn once per (providerID, modelID) when limit.context falls back to default
+const warnedContextDefaults = new Set<string>()
+// A stale configured default must not prevent selection of a known provider model.
+const warnedStaleDefaultModels = new Set<string>()
+
+export const DEFAULT_OPENAI_HEADER_TIMEOUT = 300_000
+export const MAX_INHERITED_PROVIDER_AUTH_BYTES = 4 * 1024 * 1024
+
+class ProviderCredentialHandoffError extends Error {}
+
+function readInheritedProviderCredentials(fd: number): string {
+  const chunks: Buffer[] = []
+  let total = 0
+  while (true) {
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_INHERITED_PROVIDER_AUTH_BYTES - total + 1))
+    const count = readSync(fd, chunk, 0, chunk.length, null)
+    if (count === 0) break
+    total += count
+    if (total > MAX_INHERITED_PROVIDER_AUTH_BYTES) {
+      throw new ProviderCredentialHandoffError("Inherited provider credential payload is too large")
+    }
+    chunks.push(chunk.subarray(0, count))
+  }
+  if (total === 0) {
+    throw new ProviderCredentialHandoffError("Inherited provider credential payload is empty")
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total))
+}
+
+export function consumeInheritedProviderCredentials(fdValue?: string): Record<string, string> {
+  const envName = "OPENCLANK_PROVIDER_AUTH_FD"
+  const configured = fdValue !== undefined || Object.prototype.hasOwnProperty.call(process.env, envName)
+  const rawFD = fdValue ?? process.env[envName]
+  delete process.env[envName]
+  if (!configured) return {}
+  if (!rawFD || !/^\d+$/.test(rawFD)) {
+    throw new ProviderCredentialHandoffError("Invalid inherited provider credential descriptor")
+  }
+  const fd = Number(rawFD)
+  if (!Number.isSafeInteger(fd) || fd < 3) {
+    throw new ProviderCredentialHandoffError("Invalid inherited provider credential descriptor")
+  }
+  let payload: string
+  try {
+    payload = readInheritedProviderCredentials(fd)
+  } catch (error) {
+    if (error instanceof ProviderCredentialHandoffError) throw error
+    throw new ProviderCredentialHandoffError("Unable to read inherited provider credential descriptor")
+  } finally {
+    try {
+      closeSync(fd)
+    } catch {}
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(payload)
+  } catch {
+    throw new ProviderCredentialHandoffError("Invalid inherited provider credential payload")
+  }
+  if (!isRecord(parsed)) {
+    throw new ProviderCredentialHandoffError("Invalid inherited provider credential payload")
+  }
+  const entries = Object.entries(parsed)
+  if (
+    entries.length === 0 ||
+    entries.some(
+      ([providerID, credential]) =>
+        providerID.length === 0 || typeof credential !== "string" || credential.length === 0,
+    )
+  ) {
+    throw new ProviderCredentialHandoffError("Invalid inherited provider credential payload")
+  }
+  return Object.fromEntries(entries) as Record<string, string>
+}
+
+const managedProviderMode = process.env.OPEN_CLANK_MANAGED === "1"
+if (managedProviderMode && Object.prototype.hasOwnProperty.call(process.env, "OPENCLANK_PROVIDER_AUTH_FD")) {
+  delete process.env.OPENCLANK_PROVIDER_AUTH_FD
+  throw new ProviderCredentialHandoffError("Managed Open Clank workers reject inherited provider credentials")
+}
+const inheritedProviderCredentials = managedProviderMode ? {} : consumeInheritedProviderCredentials()
+
+export const DEFAULT_CHUNK_TIMEOUT = 480_000 // 8 minutes — bounds single-attempt SSE stall.
+// Tuned for mimo-v2.5-pro on MiMo Router whose cold-path TTFT after context
+// rebuild can dip to ~5 minutes silent. Reasoning models with multi-minute
+// thinking still emit partial chunks / heartbeats within this window. Override
+// per-provider via openclank.json's `chunkTimeout` config for tighter or looser
+// bounds.
+
+function shouldUseCopilotResponsesApi(modelID: string): boolean {
+  const match = /^gpt-(\d+)/.exec(modelID)
+  if (!match) return false
+  return Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini")
+}
+
+function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+  if (typeof ms !== "number" || ms <= 0) return res
+  if (!res.body) return res
+  if (!res.headers.get("content-type")?.includes("text/event-stream")) return res
+
+  const reader = res.body.getReader()
+  const body = new ReadableStream<Uint8Array>({
+    async pull(ctrl) {
+      const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+        const id = setTimeout(() => {
+          const err = new Error("SSE read timed out")
+          ctl.abort(err)
+          void reader.cancel(err)
+          reject(err)
+        }, ms)
+
+        reader.read().then(
+          (part) => {
+            clearTimeout(id)
+            resolve(part)
+          },
+          (err) => {
+            clearTimeout(id)
+            reject(err)
+          },
+        )
+      })
+
+      if (part.done) {
+        ctrl.close()
+        return
+      }
+
+      ctrl.enqueue(part.value)
+    },
+    async cancel(reason) {
+      ctl.abort(reason)
+      await reader.cancel(reason)
+    },
+  })
+
+  return wrapResponse(res, body)
+}
+
+function wrapResponse(res: Response, body: ReadableStream<Uint8Array>) {
+  const wrapped = new Response(body, {
+    headers: new Headers(res.headers),
+    status: res.status,
+    statusText: res.statusText,
+  })
+  Object.defineProperties(wrapped, {
+    redirected: { get: () => res.redirected },
+    type: { get: () => res.type },
+    url: { get: () => res.url },
+  })
+  return wrapped
+}
+
+function timeoutController(ms: number, message = `Response header timed out after ${ms}ms`) {
+  const ctl = new AbortController()
+  const id = setTimeout(() => ctl.abort(Object.assign(new Error(message), { code: "ETIMEDOUT" })), ms)
+  return {
+    signal: ctl.signal,
+    clear: () => clearTimeout(id),
+  }
+}
+
+type AbortSource = "request" | "timeout"
+
+export function trackAbortSource(requestSignal: AbortSignal | null | undefined, timeoutSignals: AbortSignal[]) {
+  const signals = [requestSignal, ...timeoutSignals].filter((signal) => signal !== null && signal !== undefined)
+  let source: AbortSource | undefined = requestSignal?.aborted
+    ? "request"
+    : timeoutSignals.some((signal) => signal.aborted)
+      ? "timeout"
+      : undefined
+  let winner = requestSignal?.aborted ? requestSignal : timeoutSignals.find((signal) => signal.aborted)
+  const listeners = signals.map((signal, index) => {
+    const listener = () => {
+      if (source) return
+      source = index === 0 && requestSignal ? "request" : "timeout"
+      winner = signal
+    }
+    signal.addEventListener("abort", listener, { once: true })
+    if (signal.aborted) listener()
+    return { signal, listener }
+  })
+  return {
+    signal: signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals),
+    source: () => source,
+    winner: () => winner,
+    dispose: () => listeners.forEach((item) => item.signal.removeEventListener("abort", item.listener)),
+  }
+}
+
+export function normalizeTimeoutError(error: unknown, source: AbortSource | undefined, signal?: AbortSignal) {
+  if (source !== "timeout") return error
+  const reason = signal?.reason
+  return Object.assign(new Error(reason instanceof Error ? reason.message : "Request timed out"), {
+    code: "ETIMEDOUT",
+    cause: error,
+  })
+}
+
+export function requestSignal(input: RequestInfo | URL, init?: RequestInit) {
+  return init?.signal ?? (input instanceof Request ? input.signal : undefined)
+}
+
+export function wrapRequestTimeout(
+  res: Response,
+  requestSignal: AbortSignal | null | undefined,
+  timeoutSignal: AbortSignal,
+  clear: () => void,
+) {
+  const tracked = trackAbortSource(requestSignal, [timeoutSignal])
+  let finalized = false
+  const finalize = () => {
+    if (finalized) return
+    finalized = true
+    clear()
+    tracked.dispose()
+  }
+  if (!res.body) {
+    finalize()
+    return res
+  }
+
+  const reader = res.body.getReader()
+  return wrapResponse(
+    res,
+    new ReadableStream<Uint8Array>({
+      async pull(ctrl) {
+        const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+          const onAbort = () => {
+            const error = normalizeTimeoutError(
+              tracked.signal?.reason ?? new DOMException("The operation was aborted", "AbortError"),
+              tracked.source(),
+              tracked.winner(),
+            )
+            cleanup()
+            void reader.cancel(error).catch(() => {})
+            reject(error)
+          }
+          const cleanup = () => tracked.signal?.removeEventListener("abort", onAbort)
+          if (tracked.signal?.aborted) return onAbort()
+          tracked.signal?.addEventListener("abort", onAbort, { once: true })
+          reader.read().then(
+            (part) => {
+              cleanup()
+              resolve(part)
+            },
+            (error) => {
+              cleanup()
+              reject(normalizeTimeoutError(error, tracked.source(), tracked.winner()))
+            },
+          )
+        }).catch((error) => {
+          finalize()
+          throw error
+        })
+        if (part.done) {
+          finalize()
+          ctrl.close()
+          return
+        }
+        ctrl.enqueue(part.value)
+      },
+      async cancel(reason) {
+        finalize()
+        await reader.cancel(reason)
+      },
+    }),
+  )
+}
+
+type BundledSDK = {
+  languageModel(modelId: string): LanguageModelV3
+  embeddingModel?(modelId: string): EmbeddingModelV3
+  imageModel?(modelId: string): ImageModelV3
+  speechModel?(modelId: string): SpeechModelV3
+  transcriptionModel?(modelId: string): TranscriptionModelV3
+}
+
+const MANAGED_ADAPTER_FAMILIES: Record<string, readonly string[]> = {
+  "opencode-native": ["opencode-console", "opencode-go"],
+  "anthropic-messages": ["anthropic"],
+  "openai-responses": ["openai", "openai-compatible"],
+  "openai-chat": ["openai", "openrouter", "openai-compatible", "deepseek"],
+  "copilot-chat": ["github-copilot"],
+  "mimo-native": ["xiaomi"],
+  "google-generative-ai": ["google"],
+  "google-vertex": ["google"],
+  "xai-responses": ["xai"],
+  "grok-cli-chat": ["grok"],
+  ollama: ["ollama"],
+}
+
+const CURATED_MANAGED_FAMILIES = new Set(Object.values(MANAGED_ADAPTER_FAMILIES).flat())
+
+const MANAGED_MODELS_DEV_ADAPTER_PACKAGES = {
+  "models-dev-openai-compatible": "@ai-sdk/openai-compatible",
+  "models-dev-anthropic": "@ai-sdk/anthropic",
+} as const
+
+export type ManagedModelsDevAdapterID = keyof typeof MANAGED_MODELS_DEV_ADAPTER_PACKAGES
+
+/**
+ * Resolve the deliberately small models.dev adapter surface accepted by a
+ * managed worker.  Catalog breadth may change with the bundled snapshot, but
+ * execution remains pinned to these checked-in SDK packages.
+ */
+export function managedModelsDevAdapterID(npm: string | undefined): ManagedModelsDevAdapterID | undefined {
+  if (npm === "@ai-sdk/openai-compatible") return "models-dev-openai-compatible"
+  if (npm === "@ai-sdk/anthropic") return "models-dev-anthropic"
+  return undefined
+}
+
+function managedModelsDevAdapterPackage(adapterID: string): string | undefined {
+  return MANAGED_MODELS_DEV_ADAPTER_PACKAGES[adapterID as ManagedModelsDevAdapterID]
+}
+
+export type ManagedAdapterMetadata = {
+  familyID: string
+  adapterID: string
+  billingLane: Auth.BillingLane
+  connectionID: string
+  apiProtocol?: OpenCodeProtocol
+  apiPackage?: string
+  apiBaseURL?: string
+}
+
+export type ManagedRequestContext = {
+  sessionID?: string
+  actorID?: string
+  executionRevision?: number
+  hostChatID?: string
+  auxiliaryClaude?: ManagedProvider.AuxiliaryClaudeOwner
+}
+
+function requiredManagedOption(options: Record<string, unknown>, key: string): string {
+  const value = options[key]
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`Managed provider projection is missing ${key}`)
+  }
+  return value
+}
+
+/**
+ * Decode the non-secret connection identity supplied by the Open Clank host.
+ * Runtime provider IDs are connection IDs, never family IDs; these checks stop
+ * a leased credential from being applied to a different connection or adapter.
+ */
+export function managedAdapterMetadata(
+  provider: Pick<Info, "id" | "options">,
+  model?: Pick<Model, "id" | "providerID" | "options" | "api">,
+): ManagedAdapterMetadata {
+  const familyID = requiredManagedOption(provider.options, "_openclankFamilyID")
+  const adapterID = requiredManagedOption(provider.options, "_openclankAdapterID")
+  const billingLane = requiredManagedOption(provider.options, "_openclankBillingLane") as Auth.BillingLane
+  const connectionID = requiredManagedOption(provider.options, "_openclankConnectionID")
+  if (!Auth.BillingLane.literals.includes(billingLane)) {
+    throw new Error("Managed provider projection has an invalid billing lane")
+  }
+  if (String(provider.id) !== connectionID || (model && String(model.providerID) !== connectionID)) {
+    throw new Error("Managed provider projection does not match its connection ID")
+  }
+  const families = MANAGED_ADAPTER_FAMILIES[adapterID]
+  const modelsDevPackage = managedModelsDevAdapterPackage(adapterID)
+  if (!families?.includes(familyID) && (modelsDevPackage === undefined || CURATED_MANAGED_FAMILIES.has(familyID))) {
+    throw new Error("Managed provider projection has an invalid family/adapter pairing")
+  }
+  const modelAdapter = model?.options?.["_openclankAdapterID"]
+  if (modelAdapter !== undefined && modelAdapter !== adapterID) {
+    throw new Error("Managed model route does not match its connection adapter")
+  }
+  if (adapterID === "opencode-native") {
+    const protocol = openCodeProtocol(familyID, String(model?.id ?? ""))
+    if (!protocol || model?.options?.["_openclankApiProtocol"] !== protocol.protocol || model.api.npm !== protocol.sdkPackage) {
+      throw new Error("Managed OpenCode model route has no supported protocol descriptor")
+    }
+    const root = familyID === "opencode-console" ? "https://opencode.ai/inference" : "https://opencode.ai/inference/go"
+    const apiBaseURL = openCodeApiBaseURL(root, protocol.protocol)
+    if (model.api.url !== apiBaseURL) throw new Error("Managed OpenCode model route has an invalid API endpoint")
+    return { familyID, adapterID, billingLane, connectionID, apiProtocol: protocol.protocol, apiPackage: protocol.sdkPackage, apiBaseURL }
+  }
+  if (adapterID === "grok-cli-chat") {
+    if (
+      familyID !== "grok" || billingLane !== "subscription" ||
+      (model && (model.api.npm !== "@ai-sdk/openai-compatible" || model.api.url !== "https://cli-chat-proxy.grok.com/v1"))
+    ) {
+      throw new Error("Managed Grok projection has an invalid family, lane, or endpoint")
+    }
+  }
+  return { familyID, adapterID, billingLane, connectionID }
+}
+
+/** The managed engine only loads checked-in, bundled adapter packages. */
+export function managedAdapterPackage(metadata: Pick<ManagedAdapterMetadata, "familyID" | "adapterID" | "apiPackage">): string {
+  const modelsDevPackage = managedModelsDevAdapterPackage(metadata.adapterID)
+  if (modelsDevPackage) {
+    if (CURATED_MANAGED_FAMILIES.has(metadata.familyID)) {
+      throw new Error("Managed provider projection has an invalid family/adapter pairing")
+    }
+    return modelsDevPackage
+  }
+  switch (metadata.adapterID) {
+    case "opencode-native":
+      if (!metadata.apiPackage || !["@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/openai-compatible", "@ai-sdk/google"].includes(metadata.apiPackage)) {
+        throw new Error("Managed OpenCode model route uses an unsupported SDK package")
+      }
+      return metadata.apiPackage
+    case "anthropic-messages":
+      return "@ai-sdk/anthropic"
+    case "openai-responses":
+      return metadata.familyID === "openai-compatible" ? "@ai-sdk/openai-compatible" : "@ai-sdk/openai"
+    case "openai-chat":
+      if (metadata.familyID === "openrouter") return "@openrouter/ai-sdk-provider"
+      if (["openai-compatible", "deepseek"].includes(metadata.familyID)) return "@ai-sdk/openai-compatible"
+      return "@ai-sdk/openai"
+    case "copilot-chat":
+      return "@ai-sdk/github-copilot"
+    case "mimo-native":
+    case "ollama":
+      return "@ai-sdk/openai-compatible"
+    case "google-generative-ai":
+      return "@ai-sdk/google"
+    case "google-vertex":
+      return "@ai-sdk/google-vertex"
+    case "xai-responses":
+      return "@ai-sdk/xai"
+    case "grok-cli-chat":
+      return "@ai-sdk/openai-compatible"
+    default:
+      throw new Error("Managed provider projection uses an unsupported adapter")
+  }
+}
+
+function normalizedBaseURL(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined
+  if (typeof value !== "string") throw new Error("Managed provider projection has an invalid base URL")
+  if (value.trim() === "") return undefined
+  try {
+    const parsed = new URL(value)
+    return parsed.toString().replace(/\/+$/, "")
+  } catch {
+    throw new Error("Managed provider projection has an invalid base URL")
+  }
+}
+
+export function resolveManagedBaseURL(configured: unknown, catalog: unknown): {
+  readonly baseURL: string | undefined
+  readonly catalogFallback: boolean
+} {
+  const absent = configured === undefined || configured === null
+    || (typeof configured === "string" && configured.trim() === "")
+  if (!absent && typeof configured !== "string") {
+    throw new Error("Managed provider projection has an invalid base URL")
+  }
+  if (absent) {
+    if (catalog !== undefined && catalog !== null && typeof catalog !== "string") {
+      throw new Error("Managed provider catalog has an invalid base URL")
+    }
+    return { baseURL: typeof catalog === "string" ? catalog : undefined, catalogFallback: true }
+  }
+  return { baseURL: configured as string, catalogFallback: false }
+}
+
+function mergeFetchHeaders(input: RequestInfo | URL, init?: RequestInit): Headers {
+  const headers = new Headers(input instanceof Request ? input.headers : undefined)
+  if (!init?.headers) return headers
+  const source = new Headers(init.headers)
+  source.forEach((value, key) => headers.set(key, value))
+  return headers
+}
+
+const CODEX_API_BASE = "https://chatgpt.com/backend-api/codex"
+const CODEX_API_ENDPOINT = `${CODEX_API_BASE}/responses`
+const XAI_API_BASE = "https://api.x.ai/v1"
+const COPILOT_API_BASE = "https://api.githubcopilot.com"
+const OAUTH_REFRESH_SKEW_MS = 120_000
+type ManagedOAuthRefresher = (credential: Auth.Oauth) => Promise<Auth.Oauth>
+
+function oauthNeedsRefresh(credential: Auth.Oauth): boolean {
+  return Number.isFinite(credential.expires) && credential.expires <= Date.now() + OAUTH_REFRESH_SKEW_MS
+}
+
+function replayableInput(input: RequestInfo | URL): RequestInfo | URL {
+  return input instanceof Request ? input.clone() : input
+}
+
+export function createManagedCodexFetch(
+  credential: Auth.Oauth,
+  upstream: typeof fetch = globalThis.fetch,
+  refresh?: ManagedOAuthRefresher,
+): typeof fetch {
+  let current = credential
+  let inFlightRefresh: Promise<Auth.Oauth> | undefined
+  const refreshOnce = async () => {
+    if (!refresh) return current
+    if (!inFlightRefresh) {
+      inFlightRefresh = refresh(current)
+        .then((next) => {
+          current = next
+          return next
+        })
+        .finally(() => {
+          inFlightRefresh = undefined
+        })
+    }
+    return inFlightRefresh
+  }
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const parsed = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url)
+    const url =
+      parsed.pathname.includes("/v1/responses") || parsed.pathname.includes("/chat/completions")
+        ? new URL(CODEX_API_ENDPOINT)
+        : parsed
+    const send = async () => {
+      const headers = mergeFetchHeaders(input, init)
+      headers.set("authorization", `Bearer ${current.access}`)
+      headers.set("origin", "https://chatgpt.com")
+      headers.set("referer", "https://chatgpt.com/codex")
+      headers.set("User-Agent", `openclank/${InstallationVersion}`)
+      if (current.accountId) headers.set("ChatGPT-Account-Id", current.accountId)
+      const request = { ...init, headers }
+      return observeCodexInnerSend(url, request, () => upstream(replayableInput(url), request))
+    }
+    let refreshedForRequest = false
+    if (refresh && oauthNeedsRefresh(current)) {
+      await refreshOnce()
+      refreshedForRequest = true
+    }
+    let response = await send()
+    if (refresh && !refreshedForRequest && response.status === 401) {
+      await refreshOnce()
+      response = await send()
+    }
+    return response
+  }) as typeof fetch
+}
+
+export function createManagedXaiFetch(
+  credential: Auth.Oauth,
+  upstream: typeof fetch = globalThis.fetch,
+  refresh?: ManagedOAuthRefresher,
+): typeof fetch {
+  let current = credential
+  let inFlightRefresh: Promise<Auth.Oauth> | undefined
+  const refreshOnce = async () => {
+    if (!refresh) return current
+    if (!inFlightRefresh) {
+      inFlightRefresh = refresh(current)
+        .then((next) => {
+          current = next
+          return next
+        })
+        .finally(() => {
+          inFlightRefresh = undefined
+        })
+    }
+    return inFlightRefresh
+  }
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const send = async () => {
+      const headers = mergeFetchHeaders(input, init)
+      headers.delete("x-api-key")
+      headers.set("authorization", `Bearer ${current.access}`)
+      headers.set("User-Agent", `openclank/${InstallationVersion}`)
+      return upstream(replayableInput(input), { ...init, headers })
+    }
+    let refreshedForRequest = false
+    if (refresh && oauthNeedsRefresh(current)) {
+      await refreshOnce()
+      refreshedForRequest = true
+    }
+    let response = await send()
+    if (refresh && !refreshedForRequest && response.status === 401) {
+      await refreshOnce()
+      response = await send()
+    }
+    return response
+  }) as typeof fetch
+}
+
+export function createManagedGrokFetch(
+  metadata: ManagedAdapterMetadata,
+  credential: Auth.Oauth,
+  upstream: typeof fetch = globalThis.fetch,
+  refresh?: ManagedOAuthRefresher,
+): typeof fetch {
+  const expected = new URL("https://cli-chat-proxy.grok.com/v1")
+  if (metadata.familyID !== "grok" || metadata.adapterID !== "grok-cli-chat" || metadata.billingLane !== "subscription") {
+    throw new Error("Managed Grok request has an invalid provider identity")
+  }
+  let current = credential
+  let inFlightRefresh: Promise<Auth.Oauth> | undefined
+  const refreshOnce = async () => {
+    if (!refresh) return current
+    if (!inFlightRefresh) {
+      inFlightRefresh = refresh(current)
+        .then((next) => {
+          current = next
+          return next
+        })
+        .finally(() => {
+          inFlightRefresh = undefined
+        })
+    }
+    return inFlightRefresh
+  }
+  const send = async (input: RequestInfo | URL, init: RequestInit | undefined, retry: boolean): Promise<Response> => {
+    const parsed = input instanceof URL ? new URL(input) : new URL(typeof input === "string" ? input : input.url)
+    if (parsed.origin !== expected.origin || parsed.pathname !== `${expected.pathname}/chat/completions`) {
+      throw new Error("Managed Grok request escaped its declared Chat Completions endpoint")
+    }
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (["key", "api_key", "token", "access_token"].includes(key.toLowerCase())) parsed.searchParams.delete(key)
+    }
+    const headers = mergeFetchHeaders(input, init)
+    for (const key of ["x-api-key", "api-key", "x-goog-api-key", "proxy-authorization"]) headers.delete(key)
+    headers.set("authorization", `Bearer ${current.access}`)
+    headers.set("x-xai-token-auth", "xai-grok-cli")
+    const body = typeof init?.body === "string" ? init.body : undefined
+    if (body) {
+      try {
+        const model = JSON.parse(body)?.model
+        if (typeof model === "string" && model.length > 0 && model.length <= 256) {
+          headers.set("x-grok-model-override", model)
+        } else {
+          throw new Error("missing model")
+        }
+      } catch {
+        throw new Error("Managed Grok request has no valid model identifier")
+      }
+    } else {
+      throw new Error("Managed Grok request has no replayable JSON body")
+    }
+    const response = await upstream(input instanceof Request ? new Request(parsed, input.clone()) : parsed, {
+      ...init,
+      headers,
+      redirect: "error",
+    })
+    if (retry && response.status === 401 && refresh) {
+      await response.body?.cancel().catch(() => {})
+      await refreshOnce()
+      return send(input, init, false)
+    }
+    return response
+  }
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (refresh && oauthNeedsRefresh(current)) await refreshOnce()
+    return send(input, init, true)
+  }) as typeof fetch
+}
+
+function managedOauthRefresher(
+  metadata: ManagedAdapterMetadata,
+  scope?: AccountSelection.Scope,
+  auxiliary?: ManagedProvider.AuxiliaryClaudeOwner,
+): ManagedOAuthRefresher | undefined {
+  if (
+    !scope?.credentialRequired ||
+    !scope.accountID ||
+    scope.credentialRevision === undefined ||
+    scope.credential?.type !== "oauth"
+  ) {
+    return undefined
+  }
+  let credentialRevision = scope.credentialRevision
+  return async (credential) => {
+    const before = auxiliary?.bound
+    const binding = metadata.familyID === "anthropic" && metadata.billingLane === "subscription" ? scopeBinding(before?.scope ?? scope) : undefined
+    if (metadata.familyID === "anthropic" && metadata.billingLane === "subscription" && (!binding?.methodPolicy || !binding.bindingID))
+      throw new Error("Managed Claude refresh binding is unavailable")
+    auxiliary?.beginRefresh()
+    try {
+    const refreshed = await ManagedProvider.refreshOAuthCredential({
+      ...(auxiliary ? {auxiliary} : {}),
+      ...(metadata.familyID === 'openai' && metadata.billingLane === 'subscription' && scope ? {captureScope:scope} : {}),
+      ...(binding ? { bindingID: binding.bindingID, methodPolicy: binding.methodPolicy } : {}),
+      connectionID: scope.connectionID,
+      accountID: scope.accountID!,
+      expectedRevision: credentialRevision,
+      credential,
+      exchange: async (current) => {
+        if (metadata.familyID === "openai" && metadata.billingLane === "subscription") {
+          const { refreshCodexOAuthCredential } = await import("@/plugin/codex")
+          return refreshCodexOAuthCredential(current)
+        }
+        if (metadata.adapterID === "xai-responses") {
+          const { refreshXaiOAuthCredential } = await import("@/plugin/xai")
+          return refreshXaiOAuthCredential(current)
+        }
+        if (metadata.adapterID === "grok-cli-chat") {
+          const { refreshGrokOAuthCredential } = await import("@/plugin/grok")
+          return refreshGrokOAuthCredential(current)
+        }
+        if (metadata.familyID === "kimi-code-plan-cn" || metadata.familyID === "kimi-code-plan-global") {
+          const { refreshKimiCodeOAuthCredential } = await import("@/plugin/kimi-code")
+          return refreshKimiCodeOAuthCredential(current)
+        }
+        if (metadata.familyID === "anthropic" && metadata.adapterID === "anthropic-messages" && metadata.billingLane === "subscription") {
+          const { refreshClaudeCredential } = await import("@/plugin/claude")
+          const refreshed = await refreshClaudeCredential({
+            refresh: current.refresh,
+            accountId: current.accountId,
+            ...(auxiliary ? {signal:auxiliary.signal} : {}),
+          })
+          return { ...current, ...refreshed, type: "oauth" as const }
+        }
+        throw new Error("Managed provider adapter does not support OAuth refresh")
+      },
+    })
+    if (auxiliary && before) auxiliary.replace(before, refreshed.credential, refreshed.credentialRevision)
+    credentialRevision = refreshed.credentialRevision
+    return refreshed.credential
+    } catch (error) { auxiliary?.failRefresh(); throw error }
+  }
+}
+
+function copilotBaseURL(enterpriseURL?: string): string {
+  if (!enterpriseURL) return COPILOT_API_BASE
+  const domain = enterpriseURL.replace(/^https?:\/\//, "").replace(/\/+$/, "")
+  if (!domain || domain.includes("/") || domain.includes("@")) {
+    throw new Error("Managed Copilot credential has an invalid enterprise host")
+  }
+  return `https://copilot-api.${domain}`
+}
+
+function classifyCopilotRequest(body: BodyInit | null | undefined): { vision: boolean; agent: boolean } {
+  if (typeof body !== "string") return { vision: false, agent: false }
+  try {
+    const payload = JSON.parse(body)
+    const items = Array.isArray(payload?.input)
+      ? payload.input
+      : Array.isArray(payload?.messages)
+        ? payload.messages
+        : []
+    const last = items.at(-1)
+    const parts = items.flatMap((item: any) => (Array.isArray(item?.content) ? item.content : []))
+    const vision = parts.some(
+      (part: any) =>
+        part?.type === "image_url" ||
+        part?.type === "input_image" ||
+        part?.type === "image" ||
+        (part?.type === "tool_result" &&
+          Array.isArray(part.content) &&
+          part.content.some((nested: any) => nested?.type === "image")),
+    )
+    const lastParts = Array.isArray(last?.content) ? last.content : []
+    const synthetic = lastParts.some(
+      (part: any) =>
+        (part?.type === "text" || part?.type === "input_text") && part.text === "Attached file(s) from tool result:",
+    )
+    const agent = last?.role !== "user" || synthetic
+    return { vision, agent }
+  } catch {
+    return { vision: false, agent: false }
+  }
+}
+
+export function createManagedCopilotFetch(
+  credential: Auth.Oauth,
+  upstream: typeof fetch = globalThis.fetch,
+): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const headers = mergeFetchHeaders(input, init)
+    const request = classifyCopilotRequest(init?.body)
+    headers.delete("x-api-key")
+    headers.set("authorization", `Bearer ${credential.refresh}`)
+    headers.set("x-initiator", request.agent ? "agent" : "user")
+    headers.set("Openai-Intent", "conversation-edits")
+    headers.set("User-Agent", `openclank/${InstallationVersion}`)
+    if (request.vision) headers.set("Copilot-Vision-Request", "true")
+    return upstream(input, { ...init, headers })
+  }) as typeof fetch
+}
+
+export function createManagedOpenCodeFetch(
+  metadata: ManagedAdapterMetadata,
+  credential: Auth.Info | undefined,
+  hostChatID: string,
+  upstream: typeof fetch = globalThis.fetch,
+): typeof fetch {
+  if (
+    metadata.adapterID !== "opencode-native" ||
+    credential?.type !== "api" ||
+    !metadata.apiBaseURL ||
+    !hostChatID ||
+    hostChatID.length > 512 ||
+    hostChatID.trim() !== hostChatID
+  ) {
+    throw new Error("Managed OpenCode request binding is incomplete")
+  }
+  const expected = new URL(metadata.apiBaseURL)
+  const endpointPath = expected.pathname.replace(/\/+$/, "")
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target = new URL(input instanceof Request ? input.url : String(input))
+    if (
+      target.origin !== expected.origin ||
+      (target.pathname !== endpointPath && !target.pathname.startsWith(`${endpointPath}/`))
+    ) {
+      throw new Error("Managed OpenCode request escaped its declared API route")
+    }
+    // Google SDK versions may encode their API key in the URL. OpenCode's
+    // inference contract requires one bearer credential for every protocol.
+    for (const key of [...target.searchParams.keys()]) {
+      if (["key", "api_key", "x-api-key", "x-goog-api-key"].includes(key.toLowerCase())) {
+        target.searchParams.delete(key)
+      }
+    }
+    const headers = new Headers(input instanceof Request ? input.headers : undefined)
+    new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
+    for (const key of ["x-api-key", "api-key", "x-goog-api-key"]) headers.delete(key)
+    headers.set("authorization", `Bearer ${credential.key}`)
+    headers.set("x-opencode-session", hostChatID)
+    headers.set("user-agent", `openclank/${InstallationVersion}`)
+    const requestInput = input instanceof Request ? new Request(target, input) : target
+    return upstream(requestInput, { ...init, headers, redirect: "error" })
+  }) as unknown as typeof fetch
+}
+
+export function createManagedKimiCodeFetch(
+  metadata: ManagedAdapterMetadata,
+  credential: Auth.Info,
+  upstream: typeof fetch = globalThis.fetch,
+  refresh?: ManagedOAuthRefresher,
+): typeof fetch {
+  const expectedURL = metadata.familyID === "kimi-code-plan-cn"
+    ? "https://api.kimi.com/coding/v1"
+    : metadata.familyID === "kimi-code-plan-global"
+      ? "https://api.kimi.ai/coding/v1"
+      : undefined
+  if (metadata.adapterID !== "models-dev-openai-compatible" || metadata.billingLane !== "subscription" || !expectedURL) {
+    throw new Error("Managed Kimi Code route is not supported")
+  }
+  let current = credential
+  let inFlightRefresh: Promise<Auth.Oauth> | undefined
+  const refreshOnce = async () => {
+    if (current.type !== "oauth" || !refresh) return
+    if (!inFlightRefresh) {
+      inFlightRefresh = refresh(current).then((next) => {
+        current = next
+        return next
+      }).finally(() => { inFlightRefresh = undefined })
+    }
+    await inFlightRefresh
+  }
+  const replayable = (input: RequestInfo | URL, init?: RequestInit) => {
+    if (input instanceof Request) return input.body === null && !input.bodyUsed && init?.body == null
+    const body = init?.body
+    return body == null || typeof body === "string" || body instanceof URLSearchParams || body instanceof Blob ||
+      body instanceof ArrayBuffer || ArrayBuffer.isView(body)
+  }
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target = new URL(input instanceof Request ? input.url : String(input))
+    const expected = new URL(expectedURL)
+    const endpointPath = `${expected.pathname.replace(/\/+$/, "")}/chat/completions`
+    if (target.origin !== expected.origin || target.pathname !== endpointPath) {
+      throw new Error("Managed Kimi Code request escaped its declared endpoint")
+    }
+    for (const key of [...target.searchParams.keys()]) {
+      if (["key", "api_key", "x-api-key", "x-goog-api-key"].includes(key.toLowerCase())) target.searchParams.delete(key)
+    }
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    let refreshedForRequest = false
+    if (current.type === "oauth") {
+      const device = current.metadata?.device_id
+      if (!device || current.metadata?.credential_profile !== "kimi-code-device-v1") throw new Error("Managed Kimi Code device identity is missing")
+      const region = metadata.familyID === "kimi-code-plan-cn" ? "cn" : "global"
+      if (current.metadata.kimi_region !== region) throw new Error("Managed Kimi Code credential region does not match the selected endpoint")
+      if (oauthNeedsRefresh(current)) {
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+        await refreshOnce()
+        refreshedForRequest = true
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+      }
+    }
+    const send = () => {
+      const headers = mergeFetchHeaders(input, init)
+      for (const key of ["x-api-key", "api-key", "x-goog-api-key"]) headers.delete(key)
+      const token = current.type === "oauth" ? current.access : current.type === "api" ? current.key : current.token
+      headers.set("authorization", `Bearer ${token}`)
+      headers.set("user-agent", `openclank/${InstallationVersion}`)
+      if (current.type === "oauth") {
+        headers.set("X-Msh-Platform", "openclank")
+        headers.set("X-Msh-Version", String(InstallationVersion))
+        headers.set("X-Msh-Device-Id", current.metadata!.device_id)
+      }
+      const requestInput = input instanceof Request ? new Request(target, input) : target
+      return upstream(requestInput, { ...init, headers, redirect: "error" })
+    }
+    const response = await send()
+    if (response.status !== 401 || refreshedForRequest || current.type !== "oauth" || !refresh || !replayable(input, init)) return response
+    if (signal?.aborted) return response
+    void response.body?.cancel().catch(() => {})
+    await refreshOnce()
+    if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+    return send()
+  }) as typeof fetch
+}
+
+function assertManagedBaseURL(options: Record<string, any>, expected: string, label: string): void {
+  const actual = normalizedBaseURL(options["baseURL"])
+  if (actual && actual !== expected) {
+    throw new Error(`Managed ${label} subscription cannot use a different upstream route`)
+  }
+  options["baseURL"] = expected
+}
+
+function assertManagedClaudeScope(
+  metadata: ManagedAdapterMetadata,
+  credential: Auth.Info | undefined,
+  scope: AccountSelection.Scope | undefined,
+): asserts credential is Auth.Oauth {
+  if (
+    credential?.type !== "oauth" ||
+    !scope?.credentialRequired ||
+    scope.connectionID !== metadata.connectionID ||
+    !scope.accountID ||
+    scope.credentialRevision === undefined ||
+    scope.credential?.type !== "oauth" ||
+    scope.credential.access !== credential.access ||
+    scope.credential.refresh !== credential.refresh
+  ) {
+    throw new Error("Managed Claude subscription requires the matching leased OAuth scope")
+  }
+}
+
+export function applyManagedAdapterOptions(
+  metadata: ManagedAdapterMetadata,
+  credential: Auth.Info | undefined,
+  input: Record<string, any>,
+  scope?: AccountSelection.Scope,
+  operation?: { kind: "web.search"; count: number; answer?: boolean },
+  configuredBaseURLIsCatalogFallback = false,
+  requestContext?: ManagedRequestContext,
+): Record<string, any> {
+  const options: Record<string, any> = { ...input, headers: { ...(input["headers"] ?? {}) } }
+  for (const key of Object.keys(options)) {
+    if (key.startsWith("_openclank")) delete options[key]
+  }
+  for (const key of Object.keys(options.headers)) {
+    if (
+      ["authorization", "proxy-authorization", "x-api-key", "api-key", "x-goog-api-key"].includes(key.toLowerCase())
+    ) {
+      delete options.headers[key]
+    }
+  }
+
+  if (metadata.adapterID === "google-vertex") {
+    // createVertex resolves ADC/project state outside the leased API credential.
+    // A service-account credential schema/adapter is required before this path
+    // can satisfy managed mode's no-env/no-file credential invariant.
+    throw new Error("Managed Google Vertex requires a service-account adapter that is not available")
+  }
+  if (metadata.adapterID === "opencode-native") {
+    if (
+      credential?.type !== "api" ||
+      (metadata.familyID === "opencode-console" && metadata.billingLane !== "metered_api") ||
+      (metadata.familyID === "opencode-go" && metadata.billingLane !== "subscription")
+    ) {
+      throw new Error("Managed OpenCode account credential does not match its billing lane")
+    }
+    if (!requestContext?.hostChatID || requestContext.hostChatID.length > 512 || requestContext.hostChatID.trim() !== requestContext.hostChatID) {
+      throw new Error("Managed OpenCode request requires the trusted host chat identity")
+    }
+    if (!metadata.apiBaseURL) throw new Error("Managed OpenCode model route has no validated endpoint")
+    assertManagedBaseURL(options, metadata.apiBaseURL, "OpenCode")
+    options["headers"]["x-opencode-session"] = requestContext.hostChatID
+    options["headers"]["User-Agent"] ??= `openclank/${InstallationVersion}`
+    options["fetch"] = createManagedOpenCodeFetch(metadata, credential, requestContext.hostChatID)
+  }
+  if (metadata.familyID === "kimi-code-plan-cn" || metadata.familyID === "kimi-code-plan-global") {
+    const expected = metadata.familyID === "kimi-code-plan-cn" ? "https://api.kimi.com/coding/v1" : "https://api.kimi.ai/coding/v1"
+    if (
+      metadata.adapterID !== "models-dev-openai-compatible" || metadata.billingLane !== "subscription" ||
+      (credential?.type !== "api" && credential?.type !== "oauth")
+    ) throw new Error("Managed Kimi Code credential does not match its selected plan route")
+    assertManagedBaseURL(options, expected, "Kimi Code")
+    if (credential.type === "oauth") {
+      if (!scope?.credentialRequired || scope.connectionID !== metadata.connectionID || !scope.accountID || scope.credentialRevision === undefined ||
+        scope.credential?.type !== "oauth" || scope.credential.access !== credential.access || scope.credential.refresh !== credential.refresh ||
+        scope.credential.metadata?.device_id !== credential.metadata?.device_id) {
+        throw new Error("Managed Kimi Code device login requires its matching leased OAuth credential")
+      }
+    }
+    const refresher = credential.type === "oauth" ? managedOauthRefresher(metadata, scope) : undefined
+    options["apiKey"] = OAUTH_DUMMY_KEY
+    options["fetch"] = createManagedKimiCodeFetch(metadata, credential, globalThis.fetch, refresher)
+  }
+  if (metadata.adapterID === "anthropic-messages") {
+    if (metadata.billingLane === "custom") {
+      delete options.headers["anthropic-beta"]
+    } else {
+      options.headers["anthropic-beta"] ??= "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
+    }
+    if (metadata.familyID === "anthropic" && metadata.billingLane === "subscription") {
+      assertManagedClaudeScope(metadata, credential, scope)
+      assertManagedBaseURL(options, CLAUDE_PROFILE.apiBaseURL, "Claude")
+      delete options["apiKey"]
+      options["apiKey"] = ""
+      const refresher = managedOauthRefresher(metadata, scope, requestContext?.auxiliaryClaude)
+      options["fetch"] = createManagedClaudeFetch(
+        credential,
+        globalThis.fetch,
+        refresher
+          ? async (current) => {
+              const next = await refresher({ type: "oauth", ...current })
+              return { access: next.access, refresh: next.refresh, expires: next.expires, accountId: next.accountId }
+            }
+          : undefined,
+        async (current) => {
+          const profileID = requestContext?.auxiliaryClaude?.profileID ?? requestContext?.sessionID
+          requestContext?.auxiliaryClaude?.assertCurrent()
+          if (!profileID) {
+            throw new Error("Managed Claude subscription requires the trusted host session identity")
+          }
+          const platform = ({ darwin: "MacOS", win32: "Windows", linux: "Linux", freebsd: "FreeBSD", openbsd: "OpenBSD" } as Record<string, string>)[process.platform]
+            ?? `Other:${process.platform}`
+          const architecture = ({ x64: "x64", arm64: "arm64", ia32: "x86" } as Record<string, string>)[process.arch]
+            ?? `other::${process.arch}`
+          return {
+            ...(current.accountId ? { accountUUID: current.accountId } : {}),
+            sessionID: profileID,
+            deviceID: await getInstallationID(),
+            platform,
+            architecture,
+            runtime: "bun",
+            runtimeVersion: Bun.version,
+          }
+        },
+        async (current) => {
+          if (!scope) throw new Error("Managed Claude subscription scope is unavailable")
+          const identity = requestContext?.sessionID && requestContext.actorID && requestContext.executionRevision !== undefined
+            ? { sessionID: requestContext.sessionID, actorID: requestContext.actorID, executionRevision: requestContext.executionRevision }
+            : undefined
+          await ManagedProvider.admitClaudeDispatch(requestContext?.auxiliaryClaude?.bound.scope ?? scope, identity, current)
+          requestContext?.auxiliaryClaude?.assertCurrent()
+        },
+        requestContext?.auxiliaryClaude ? (retry) => requestContext.auxiliaryClaude!.beforeUpstream(retry) : undefined,
+      )
+    }
+  }
+  if (metadata.familyID === "openrouter") {
+    options.headers["HTTP-Referer"] ??= "https://openclank.app/"
+    options.headers["X-Title"] ??= "Open Clank"
+    options.headers["X-OpenRouter-Categories"] ??= "programming,programming-app,cli-agent"
+  }
+  if (metadata.adapterID === "mimo-native") {
+    options.headers["X-Mimo-Source"] ??= "openclank"
+    const credentialURL = credential?.type === "api" ? credential.metadata?.base_url : undefined
+    const configuredURL = configuredBaseURLIsCatalogFallback ? undefined : options["baseURL"]
+    const endpoint = resolveMimoEndpoint({
+      lane: metadata.billingLane as MimoBillingLane,
+      credentialURL,
+      connectionURL: configuredURL,
+    })
+    if (!endpoint) {
+      throw new Error("Managed Xiaomi credential endpoint does not match its billing lane")
+    }
+    if (metadata.billingLane === "subscription" && credential?.type !== "api") {
+      throw new Error("Managed MiMo Token Plan requires an API credential")
+    }
+    options["baseURL"] = endpoint.url
+    if (operation?.kind === "web.search") {
+      const count = operation.count
+      options["transformRequestBody"] = (body: Record<string, any>) => transformXiaomiSearchRequestBody(body, {
+        count,
+        answer: operation?.answer === true,
+      })
+    }
+  }
+  if (metadata.familyID === "openai" && metadata.billingLane === "subscription") {
+    if (credential?.type !== "oauth") throw new Error("Managed ChatGPT subscription requires an OAuth credential")
+    assertManagedBaseURL(options, CODEX_API_BASE, "ChatGPT")
+    options["apiKey"] = credential.access
+    options["fetch"] = createManagedCodexFetch(credential, globalThis.fetch, managedOauthRefresher(metadata, scope))
+    options["headerTimeout"] ??= DEFAULT_OPENAI_HEADER_TIMEOUT
+  }
+  if (metadata.adapterID === "copilot-chat") {
+    if (credential?.type !== "oauth") throw new Error("Managed Copilot subscription requires an OAuth credential")
+    const expected = copilotBaseURL(credential.enterpriseUrl)
+    assertManagedBaseURL(options, expected, "Copilot")
+    options["apiKey"] = ""
+    options["fetch"] = createManagedCopilotFetch(credential)
+  }
+  if (metadata.adapterID === "xai-responses" && credential?.type === "oauth") {
+    assertManagedBaseURL(options, XAI_API_BASE, "xAI")
+    options["apiKey"] = credential.access
+    options["fetch"] = createManagedXaiFetch(credential, globalThis.fetch, managedOauthRefresher(metadata, scope))
+  }
+  if (metadata.adapterID === "grok-cli-chat") {
+    if (
+      metadata.familyID !== "grok" || metadata.billingLane !== "subscription" ||
+      credential?.type !== "oauth" || !scope?.credentialRequired ||
+      scope.connectionID !== metadata.connectionID || !scope.accountID || scope.credentialRevision === undefined ||
+      scope.credential?.type !== "oauth" || scope.credential.access !== credential.access ||
+      scope.credential.refresh !== credential.refresh
+    ) {
+      throw new Error("Managed Grok subscription requires its matching leased OAuth credential")
+    }
+    const expected = "https://cli-chat-proxy.grok.com/v1"
+    assertManagedBaseURL(options, expected, "Grok")
+    options["apiKey"] = OAUTH_DUMMY_KEY
+    options["fetch"] = createManagedGrokFetch(metadata, credential, globalThis.fetch, managedOauthRefresher(metadata, scope))
+  }
+  return options
+}
+
+export function selectManagedLanguageModel(
+  sdk: BundledSDK & { chat?: (modelID: string) => LanguageModelV3; responses?: (modelID: string) => LanguageModelV3 },
+  metadata: Pick<ManagedAdapterMetadata, "adapterID" | "apiProtocol">,
+  modelID: string,
+): LanguageModelV3 {
+  if (metadata.adapterID === "opencode-native") {
+    if (metadata.apiProtocol === "openai-responses") {
+      if (!sdk.responses) throw new Error("Managed OpenCode model requires the Responses API")
+      return sdk.responses(modelID)
+    }
+    if (metadata.apiProtocol === "openai-chat") return sdk.chat ? sdk.chat(modelID) : sdk.languageModel(modelID)
+    if (metadata.apiProtocol === "anthropic-messages" || metadata.apiProtocol === "google-generative-ai") {
+      return sdk.languageModel(modelID)
+    }
+    throw new Error("Managed OpenCode model has an unsupported protocol")
+  }
+  if (metadata.adapterID === "grok-cli-chat") {
+    return sdk.chat ? sdk.chat(modelID) : sdk.languageModel(modelID)
+  }
+  if (metadata.adapterID === "openai-responses" || metadata.adapterID === "xai-responses") {
+    if (!sdk.responses) throw new Error(`Managed adapter ${metadata.adapterID} does not expose the Responses API`)
+    return sdk.responses(modelID)
+  }
+  if (metadata.adapterID === "openai-chat") {
+    return sdk.chat ? sdk.chat(modelID) : sdk.languageModel(modelID)
+  }
+  if (metadata.adapterID === "copilot-chat") {
+    if (useLanguageModel(sdk)) return sdk.languageModel(modelID)
+    const copilot = sdk as typeof sdk & {
+      chat(modelID: string): LanguageModelV3
+      responses(modelID: string): LanguageModelV3
+    }
+    return shouldUseCopilotResponsesApi(modelID) ? copilot.responses(modelID) : copilot.chat(modelID)
+  }
+  return sdk.languageModel(modelID)
+}
+
+const BUNDLED_PROVIDERS: Record<string, () => Promise<(opts: any) => BundledSDK>> = {
+  "@ai-sdk/amazon-bedrock": () => import("@ai-sdk/amazon-bedrock").then((m) => m.createAmazonBedrock),
+  "@ai-sdk/anthropic": () => import("@ai-sdk/anthropic").then((m) => m.createAnthropic),
+  "@ai-sdk/azure": () => import("@ai-sdk/azure").then((m) => m.createAzure),
+  "@ai-sdk/google": () => import("@ai-sdk/google").then((m) => m.createGoogleGenerativeAI),
+  "@ai-sdk/google-vertex": () => import("@ai-sdk/google-vertex").then((m) => m.createVertex),
+  "@ai-sdk/google-vertex/anthropic": () =>
+    import("@ai-sdk/google-vertex/anthropic").then((m) => m.createVertexAnthropic),
+  "@ai-sdk/openai": () => import("@ai-sdk/openai").then((m) => m.createOpenAI),
+  "@ai-sdk/openai-compatible": () => import("@ai-sdk/openai-compatible").then((m) => m.createOpenAICompatible),
+  "@openrouter/ai-sdk-provider": () => import("@openrouter/ai-sdk-provider").then((m) => m.createOpenRouter),
+  "@ai-sdk/xai": () => import("@ai-sdk/xai").then((m) => m.createXai),
+  "@ai-sdk/mistral": () => import("@ai-sdk/mistral").then((m) => m.createMistral),
+  "@ai-sdk/groq": () => import("@ai-sdk/groq").then((m) => m.createGroq),
+  "@ai-sdk/deepinfra": () => import("@ai-sdk/deepinfra").then((m) => m.createDeepInfra),
+  "@ai-sdk/cerebras": () => import("@ai-sdk/cerebras").then((m) => m.createCerebras),
+  "@ai-sdk/cohere": () => import("@ai-sdk/cohere").then((m) => m.createCohere),
+  "@ai-sdk/gateway": () => import("@ai-sdk/gateway").then((m) => m.createGateway),
+  "@ai-sdk/togetherai": () => import("@ai-sdk/togetherai").then((m) => m.createTogetherAI),
+  "@ai-sdk/perplexity": () => import("@ai-sdk/perplexity").then((m) => m.createPerplexity),
+  "@ai-sdk/vercel": () => import("@ai-sdk/vercel").then((m) => m.createVercel),
+  "@ai-sdk/alibaba": () => import("@ai-sdk/alibaba").then((m) => m.createAlibaba),
+  "gitlab-ai-provider": () => import("gitlab-ai-provider").then((m) => m.createGitLab),
+  "@ai-sdk/github-copilot": () => import("./sdk/copilot").then((m) => m.createOpenaiCompatible),
+  "venice-ai-sdk-provider": () => import("venice-ai-sdk-provider").then((m) => m.createVenice),
+}
+
+type CustomModelLoader = (sdk: any, modelID: string, options?: Record<string, any>) => Promise<any>
+type CustomVarsLoader = (options: Record<string, any>) => Record<string, string>
+type CustomDiscoverModels = () => Promise<Record<string, Model>>
+type CustomLoader = (provider: Info) => Effect.Effect<{
+  autoload: boolean
+  getModel?: CustomModelLoader
+  vars?: CustomVarsLoader
+  options?: Record<string, any>
+  discoverModels?: CustomDiscoverModels
+}>
+
+type CustomDep = {
+  auth: (id: string) => Effect.Effect<Auth.Info | undefined>
+  config: () => Effect.Effect<Config.Info>
+  env: () => Effect.Effect<Record<string, string | undefined>>
+  get: (key: string) => Effect.Effect<string | undefined>
+}
+
+function useLanguageModel(sdk: any) {
+  return sdk.responses === undefined && sdk.chat === undefined
+}
+
+function custom(dep: CustomDep): Record<string, CustomLoader> {
+  return {
+    anthropic: () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+          },
+        },
+      }),
+    opencode: Effect.fnUntraced(function* (input: Info) {
+      const env = yield* dep.env()
+      const hasKey = iife(() => {
+        if (input.env.some((item) => env[item])) return true
+        return false
+      })
+      const ok =
+        hasKey ||
+        Boolean(yield* dep.auth(input.id)) ||
+        Boolean((yield* dep.config()).provider?.["opencode"]?.options?.apiKey)
+
+      // Never surface the free/public tier (cost.input === 0). Without a
+      // subscription/key, hide the remaining (paid) models too — they can't be
+      // used unauthenticated. So: authenticated -> subscription models only,
+      // unauthenticated -> nothing.
+      for (const [key, value] of Object.entries(input.models)) {
+        if (!ok || value.cost.input === 0) delete input.models[key]
+      }
+
+      return {
+        autoload: Object.keys(input.models).length > 0,
+        options: {},
+      }
+    }),
+    openai: () =>
+      Effect.succeed({
+        autoload: false,
+        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
+          return sdk.responses(modelID)
+        },
+        options: { headerTimeout: DEFAULT_OPENAI_HEADER_TIMEOUT },
+      }),
+    xai: () =>
+      Effect.succeed({
+        autoload: false,
+        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
+          return sdk.responses(modelID)
+        },
+        options: {},
+      }),
+    "github-copilot": () =>
+      Effect.succeed({
+        autoload: false,
+        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
+          if (useLanguageModel(sdk)) return sdk.languageModel(modelID)
+          return shouldUseCopilotResponsesApi(modelID) ? sdk.responses(modelID) : sdk.chat(modelID)
+        },
+        options: {},
+      }),
+    azure: Effect.fnUntraced(function* (provider: Info) {
+      const env = yield* dep.env()
+      const resource = iife(() => {
+        const name = provider.options?.resourceName
+        if (typeof name === "string" && name.trim() !== "") return name
+        return env["AZURE_RESOURCE_NAME"]
+      })
+
+      return {
+        autoload: false,
+        async getModel(sdk: any, modelID: string, options?: Record<string, any>) {
+          if (useLanguageModel(sdk)) return sdk.languageModel(modelID)
+          if (options?.["useCompletionUrls"]) {
+            return sdk.chat(modelID)
+          } else {
+            return sdk.responses(modelID)
+          }
+        },
+        options: {},
+        vars(_options) {
+          return {
+            ...(resource && { AZURE_RESOURCE_NAME: resource }),
+          }
+        },
+      }
+    }),
+    "azure-cognitive-services": Effect.fnUntraced(function* () {
+      const resourceName = yield* dep.get("AZURE_COGNITIVE_SERVICES_RESOURCE_NAME")
+      return {
+        autoload: false,
+        async getModel(sdk: any, modelID: string, options?: Record<string, any>) {
+          if (useLanguageModel(sdk)) return sdk.languageModel(modelID)
+          if (options?.["useCompletionUrls"]) {
+            return sdk.chat(modelID)
+          } else {
+            return sdk.responses(modelID)
+          }
+        },
+        options: {
+          baseURL: resourceName ? `https://${resourceName}.cognitiveservices.azure.com/openai` : undefined,
+        },
+      }
+    }),
+    "amazon-bedrock": Effect.fnUntraced(function* () {
+      const providerConfig = (yield* dep.config()).provider?.["amazon-bedrock"]
+      const auth = yield* dep.auth("amazon-bedrock")
+      const env = yield* dep.env()
+
+      // Region precedence: 1) config file, 2) env var, 3) default
+      const configRegion = providerConfig?.options?.region
+      const envRegion = env["AWS_REGION"]
+      const defaultRegion = configRegion ?? envRegion ?? "us-east-1"
+
+      // Profile: config file takes precedence over env var
+      const configProfile = providerConfig?.options?.profile
+      const envProfile = env["AWS_PROFILE"]
+      const profile = configProfile ?? envProfile
+
+      const awsAccessKeyId = env["AWS_ACCESS_KEY_ID"]
+
+      // TODO: Using process.env directly because Env.set only updates a process.env shallow copy,
+      // until the scope of the Env API is clarified (test only or runtime?)
+      const awsBearerToken = iife(() => {
+        const envToken = managedProviderMode ? undefined : process.env.AWS_BEARER_TOKEN_BEDROCK
+        if (envToken) return envToken
+        if (auth?.type === "api") {
+          process.env.AWS_BEARER_TOKEN_BEDROCK = auth.key
+          return auth.key
+        }
+        return undefined
+      })
+
+      const awsWebIdentityTokenFile = env["AWS_WEB_IDENTITY_TOKEN_FILE"]
+
+      const containerCreds = Boolean(
+        !managedProviderMode &&
+          (process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI || process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI),
+      )
+
+      if (!profile && !awsAccessKeyId && !awsBearerToken && !awsWebIdentityTokenFile && !containerCreds)
+        return { autoload: false }
+
+      const { fromNodeProviderChain } = yield* Effect.promise(() => import("@aws-sdk/credential-providers"))
+
+      const providerOptions: Record<string, any> = {
+        region: defaultRegion,
+      }
+
+      // Only use credential chain if no bearer token exists
+      // Bearer token takes precedence over credential chain (profiles, access keys, IAM roles, web identity tokens)
+      if (!awsBearerToken) {
+        // Build credential provider options (only pass profile if specified)
+        const credentialProviderOptions = profile ? { profile } : {}
+
+        providerOptions.credentialProvider = fromNodeProviderChain(credentialProviderOptions)
+      }
+
+      // Add custom endpoint if specified (endpoint takes precedence over baseURL)
+      const endpoint = providerConfig?.options?.endpoint ?? providerConfig?.options?.baseURL
+      if (endpoint) {
+        providerOptions.baseURL = endpoint
+      }
+
+      return {
+        autoload: true,
+        options: providerOptions,
+        async getModel(sdk: any, modelID: string, options?: Record<string, any>) {
+          // Skip region prefixing if model already has a cross-region inference profile prefix
+          // Models from models.dev may already include prefixes like us., eu., global., etc.
+          const crossRegionPrefixes = ["global.", "us.", "eu.", "jp.", "apac.", "au."]
+          if (crossRegionPrefixes.some((prefix) => modelID.startsWith(prefix))) {
+            return sdk.languageModel(modelID)
+          }
+
+          // Region resolution precedence (highest to lowest):
+          // 1. options.region from openclank.json provider config
+          // 2. defaultRegion from AWS_REGION environment variable
+          // 3. Default "us-east-1" (baked into defaultRegion)
+          const region = options?.region ?? defaultRegion
+
+          let regionPrefix = region.split("-")[0]
+
+          switch (regionPrefix) {
+            case "us": {
+              const modelRequiresPrefix = [
+                "nova-micro",
+                "nova-lite",
+                "nova-pro",
+                "nova-premier",
+                "nova-2",
+                "claude",
+                "deepseek",
+              ].some((m) => modelID.includes(m))
+              const isGovCloud = region.startsWith("us-gov")
+              if (modelRequiresPrefix && !isGovCloud) {
+                modelID = `${regionPrefix}.${modelID}`
+              }
+              break
+            }
+            case "eu": {
+              const regionRequiresPrefix = [
+                "eu-west-1",
+                "eu-west-2",
+                "eu-west-3",
+                "eu-north-1",
+                "eu-central-1",
+                "eu-south-1",
+                "eu-south-2",
+              ].some((r) => region.includes(r))
+              const modelRequiresPrefix = ["claude", "nova-lite", "nova-micro", "llama3", "pixtral"].some((m) =>
+                modelID.includes(m),
+              )
+              if (regionRequiresPrefix && modelRequiresPrefix) {
+                modelID = `${regionPrefix}.${modelID}`
+              }
+              break
+            }
+            case "ap": {
+              const isAustraliaRegion = ["ap-southeast-2", "ap-southeast-4"].includes(region)
+              const isTokyoRegion = region === "ap-northeast-1"
+              if (
+                isAustraliaRegion &&
+                ["anthropic.claude-sonnet-4-5", "anthropic.claude-haiku"].some((m) => modelID.includes(m))
+              ) {
+                regionPrefix = "au"
+                modelID = `${regionPrefix}.${modelID}`
+              } else if (isTokyoRegion) {
+                // Tokyo region uses jp. prefix for cross-region inference
+                const modelRequiresPrefix = ["claude", "nova-lite", "nova-micro", "nova-pro"].some((m) =>
+                  modelID.includes(m),
+                )
+                if (modelRequiresPrefix) {
+                  regionPrefix = "jp"
+                  modelID = `${regionPrefix}.${modelID}`
+                }
+              } else {
+                // Other APAC regions use apac. prefix
+                const modelRequiresPrefix = ["claude", "nova-lite", "nova-micro", "nova-pro"].some((m) =>
+                  modelID.includes(m),
+                )
+                if (modelRequiresPrefix) {
+                  regionPrefix = "apac"
+                  modelID = `${regionPrefix}.${modelID}`
+                }
+              }
+              break
+            }
+          }
+
+          return sdk.languageModel(modelID)
+        },
+      }
+    }),
+    llmgateway: () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "HTTP-Referer": "https://mimo.xiaomi.com/coder/",
+            "X-Title": "openclank",
+            "X-Source": "openclank",
+          },
+        },
+      }),
+    "llmgateway-devpass": () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "HTTP-Referer": "https://mimo.xiaomi.com/coder/",
+            "X-Title": "openclank",
+            "X-Source": "openclank",
+          },
+        },
+      }),
+    openrouter: () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "HTTP-Referer": "https://mimo.xiaomi.com/coder/",
+            "X-Title": "openclank",
+            "X-OpenRouter-Categories": "programming,programming-app,cli-agent",
+          },
+        },
+      }),
+    nvidia: () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "HTTP-Referer": "https://mimo.xiaomi.com/coder/",
+            "X-Title": "openclank",
+          },
+        },
+      }),
+    vercel: () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "http-referer": "https://mimo.xiaomi.com/coder/",
+            "x-title": "openclank",
+          },
+        },
+      }),
+    "google-vertex": Effect.fnUntraced(function* (provider: Info) {
+      const env = yield* dep.env()
+      const project =
+        provider.options?.project ?? env["GOOGLE_CLOUD_PROJECT"] ?? env["GCP_PROJECT"] ?? env["GCLOUD_PROJECT"]
+
+      const location = String(
+        provider.options?.location ??
+          env["GOOGLE_VERTEX_LOCATION"] ??
+          env["GOOGLE_CLOUD_LOCATION"] ??
+          env["VERTEX_LOCATION"] ??
+          "us-central1",
+      )
+
+      const autoload = Boolean(project)
+      if (!autoload) return { autoload: false }
+      return {
+        autoload: true,
+        vars(_options: Record<string, any>) {
+          const endpoint = location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`
+          return {
+            ...(project && { GOOGLE_VERTEX_PROJECT: project }),
+            GOOGLE_VERTEX_LOCATION: location,
+            GOOGLE_VERTEX_ENDPOINT: endpoint,
+          }
+        },
+        options: {
+          project,
+          location,
+          fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+            const { GoogleAuth } = await import("google-auth-library")
+            const auth = new GoogleAuth()
+            const client = await auth.getApplicationDefault()
+            const token = await client.credential.getAccessToken()
+
+            const headers = new Headers(init?.headers)
+            headers.set("Authorization", `Bearer ${token.token}`)
+
+            return fetch(input, { ...init, headers })
+          },
+        },
+        async getModel(sdk: any, modelID: string) {
+          const id = String(modelID).trim()
+          return sdk.languageModel(id)
+        },
+      }
+    }),
+    "google-vertex-anthropic": Effect.fnUntraced(function* () {
+      const env = yield* dep.env()
+      const project = env["GOOGLE_CLOUD_PROJECT"] ?? env["GCP_PROJECT"] ?? env["GCLOUD_PROJECT"]
+      const location = env["GOOGLE_CLOUD_LOCATION"] ?? env["VERTEX_LOCATION"] ?? "global"
+      const autoload = Boolean(project)
+      if (!autoload) return { autoload: false }
+      return {
+        autoload: true,
+        options: {
+          project,
+          location,
+        },
+        async getModel(sdk: any, modelID) {
+          const id = String(modelID).trim()
+          return sdk.languageModel(id)
+        },
+      }
+    }),
+    "sap-ai-core": Effect.fnUntraced(function* () {
+      const auth = yield* dep.auth("sap-ai-core")
+      // TODO: Using process.env directly because Env.set only updates a shallow copy (not process.env),
+      // until the scope of the Env API is clarified (test only or runtime?)
+      const envServiceKey = iife(() => {
+        const envAICoreServiceKey = managedProviderMode ? undefined : process.env.AICORE_SERVICE_KEY
+        if (envAICoreServiceKey) return envAICoreServiceKey
+        if (auth?.type === "api") {
+          process.env.AICORE_SERVICE_KEY = auth.key
+          return auth.key
+        }
+        return undefined
+      })
+      const deploymentId = managedProviderMode ? undefined : process.env.AICORE_DEPLOYMENT_ID
+      const resourceGroup = managedProviderMode ? undefined : process.env.AICORE_RESOURCE_GROUP
+
+      return {
+        autoload: !!envServiceKey,
+        options: envServiceKey ? { deploymentId, resourceGroup } : {},
+        async getModel(sdk: any, modelID: string) {
+          return sdk(modelID)
+        },
+      }
+    }),
+    zenmux: () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "HTTP-Referer": "https://mimo.xiaomi.com/coder/",
+            "X-Title": "openclank",
+          },
+        },
+      }),
+    gitlab: Effect.fnUntraced(function* (input: Info) {
+      const {
+        VERSION: GITLAB_PROVIDER_VERSION,
+        isWorkflowModel,
+        discoverWorkflowModels,
+      } = yield* Effect.promise(() => import("gitlab-ai-provider"))
+
+      const instanceUrl = (yield* dep.get("GITLAB_INSTANCE_URL")) || "https://gitlab.com"
+
+      const auth = yield* dep.auth(input.id)
+      const apiKey = yield* Effect.sync(() => {
+        if (auth?.type === "oauth") return auth.access
+        if (auth?.type === "api") return auth.key
+        return undefined
+      })
+      const token = apiKey ?? (yield* dep.get("GITLAB_TOKEN"))
+
+      const providerConfig = (yield* dep.config()).provider?.["gitlab"]
+      const directory = yield* InstanceState.directory
+
+      const aiGatewayHeaders = {
+        "User-Agent": `mimocode/${InstallationVersion} gitlab-ai-provider/${GITLAB_PROVIDER_VERSION} (${os.platform()} ${os.release()}; ${os.arch()})`,
+        "anthropic-beta": "context-1m-2025-08-07",
+        ...providerConfig?.options?.aiGatewayHeaders,
+      }
+
+      const featureFlags = {
+        duo_agent_platform_agentic_chat: true,
+        duo_agent_platform: true,
+        ...providerConfig?.options?.featureFlags,
+      }
+
+      return {
+        autoload: !!token,
+        options: {
+          instanceUrl,
+          apiKey: token,
+          aiGatewayHeaders,
+          featureFlags,
+        },
+        async getModel(sdk: any, modelID: string, options?: Record<string, any>) {
+          if (modelID.startsWith("duo-workflow-")) {
+            const workflowRef = typeof options?.workflowRef === "string" ? options.workflowRef : undefined
+            // Use the static mapping if it exists, otherwise use duo-workflow with selectedModelRef
+            const sdkModelID = isWorkflowModel(modelID) ? modelID : "duo-workflow"
+            const workflowDefinition =
+              typeof options?.workflowDefinition === "string" ? options.workflowDefinition : undefined
+            const model = sdk.workflowChat(sdkModelID, {
+              featureFlags,
+              workflowDefinition,
+            })
+            if (workflowRef) {
+              model.selectedModelRef = workflowRef
+            }
+            return model
+          }
+          return sdk.agenticChat(modelID, {
+            aiGatewayHeaders,
+            featureFlags,
+          })
+        },
+        async discoverModels(): Promise<Record<string, Model>> {
+          if (!apiKey) {
+            log.info("gitlab model discovery skipped: no apiKey")
+            return {}
+          }
+
+          try {
+            const token = apiKey
+            const getHeaders = (): Record<string, string> =>
+              auth?.type === "api" ? { "PRIVATE-TOKEN": token } : { Authorization: `Bearer ${token}` }
+
+            log.info("gitlab model discovery starting", { instanceUrl })
+            const result = await discoverWorkflowModels({ instanceUrl, getHeaders }, { workingDirectory: directory })
+
+            if (!result.models.length) {
+              log.info("gitlab model discovery skipped: no models found", {
+                project: result.project
+                  ? {
+                      id: result.project.id,
+                      path: result.project.pathWithNamespace,
+                    }
+                  : null,
+              })
+              return {}
+            }
+
+            const models: Record<string, Model> = {}
+            for (const m of result.models) {
+              if (!input.models[m.id]) {
+                models[m.id] = {
+                  id: ModelID.make(m.id),
+                  providerID: ProviderID.make("gitlab"),
+                  name: `Agent Platform (${m.name})`,
+                  family: "",
+                  api: {
+                    id: m.id,
+                    url: instanceUrl,
+                    npm: "gitlab-ai-provider",
+                  },
+                  status: "active",
+                  headers: {},
+                  options: { workflowRef: m.ref },
+                  cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+                  limit: { context: m.context, output: m.output },
+                  capabilities: {
+                    temperature: false,
+                    reasoning: true,
+                    attachment: true,
+                    toolcall: true,
+                    input: {
+                      text: true,
+                      audio: false,
+                      image: true,
+                      video: false,
+                      pdf: true,
+                    },
+                    output: {
+                      text: true,
+                      audio: false,
+                      image: false,
+                      video: false,
+                      pdf: false,
+                    },
+                    interleaved: false,
+                  },
+                  release_date: "",
+                  variants: {},
+                }
+              }
+            }
+
+            log.info("gitlab model discovery complete", {
+              count: Object.keys(models).length,
+              models: Object.keys(models),
+            })
+            return models
+          } catch (e) {
+            log.warn("gitlab model discovery failed", { error: e })
+            return {}
+          }
+        },
+      }
+    }),
+    "cloudflare-workers-ai": Effect.fnUntraced(function* (input: Info) {
+      // When baseURL is already configured (e.g. corporate config routing through a proxy/gateway),
+      // skip the account ID check because the URL is already fully specified.
+      if (input.options?.baseURL) return { autoload: false }
+
+      const auth = yield* dep.auth(input.id)
+      const env = yield* dep.env()
+      const accountId = env["CLOUDFLARE_ACCOUNT_ID"] || (auth?.type === "api" ? auth.metadata?.accountId : undefined)
+      if (!accountId)
+        return {
+          autoload: false,
+          async getModel() {
+            throw new Error(
+              "CLOUDFLARE_ACCOUNT_ID is missing. Set it with: export CLOUDFLARE_ACCOUNT_ID=<your-account-id>",
+            )
+          },
+        }
+
+      const apiKey = yield* Effect.gen(function* () {
+        const envToken = env["CLOUDFLARE_API_KEY"]
+        if (envToken) return envToken
+        if (auth?.type === "api") return auth.key
+        return undefined
+      })
+
+      return {
+        autoload: !!apiKey,
+        options: {
+          apiKey,
+          headers: {
+            "User-Agent": `mimocode/${InstallationVersion} cloudflare-workers-ai (${os.platform()} ${os.release()}; ${os.arch()})`,
+          },
+        },
+        async getModel(sdk: any, modelID: string) {
+          return sdk.languageModel(modelID)
+        },
+        vars(_options) {
+          return {
+            CLOUDFLARE_ACCOUNT_ID: accountId,
+          }
+        },
+      }
+    }),
+    "cloudflare-ai-gateway": Effect.fnUntraced(function* (input: Info) {
+      // When baseURL is already configured (e.g. corporate config), skip the ID checks.
+      if (input.options?.baseURL) return { autoload: false }
+
+      const auth = yield* dep.auth(input.id)
+      const env = yield* dep.env()
+      const accountId = env["CLOUDFLARE_ACCOUNT_ID"] || (auth?.type === "api" ? auth.metadata?.accountId : undefined)
+      const gateway = env["CLOUDFLARE_GATEWAY_ID"] || (auth?.type === "api" ? auth.metadata?.gatewayId : undefined)
+
+      if (!accountId || !gateway) {
+        const missing = [
+          !accountId ? "CLOUDFLARE_ACCOUNT_ID" : undefined,
+          !gateway ? "CLOUDFLARE_GATEWAY_ID" : undefined,
+        ].filter((x): x is string => Boolean(x))
+        return {
+          autoload: false,
+          async getModel() {
+            throw new Error(
+              `${missing.join(" and ")} missing. Set with: ${missing.map((x) => `export ${x}=<value>`).join(" && ")}`,
+            )
+          },
+        }
+      }
+
+      // Get API token from env or auth - required for authenticated gateways
+      const apiToken = yield* Effect.gen(function* () {
+        const envToken = env["CLOUDFLARE_API_TOKEN"] || env["CF_AIG_TOKEN"]
+        if (envToken) return envToken
+        if (auth?.type === "api") return auth.key
+        return undefined
+      })
+
+      if (!apiToken) {
+        throw new Error(
+          "CLOUDFLARE_API_TOKEN (or CF_AIG_TOKEN) is required for Cloudflare AI Gateway. " +
+            "Set it via environment variable or run `openclank auth cloudflare-ai-gateway`.",
+        )
+      }
+
+      // Use official ai-gateway-provider package (v2.x for AI SDK v5 compatibility)
+      const { createAiGateway } = yield* Effect.promise(() => import("ai-gateway-provider"))
+      const { createUnified } = yield* Effect.promise(() => import("ai-gateway-provider/providers/unified"))
+
+      const metadata = iife(() => {
+        if (input.options?.metadata) return input.options.metadata
+        try {
+          return JSON.parse(input.options?.headers?.["cf-aig-metadata"])
+        } catch {
+          return undefined
+        }
+      })
+      const opts = {
+        metadata,
+        cacheTtl: input.options?.cacheTtl,
+        cacheKey: input.options?.cacheKey,
+        skipCache: input.options?.skipCache,
+        collectLog: input.options?.collectLog,
+        headers: {
+          "User-Agent": `mimocode/${InstallationVersion} cloudflare-ai-gateway (${os.platform()} ${os.release()}; ${os.arch()})`,
+        },
+      }
+
+      const aigateway = createAiGateway({
+        accountId,
+        gateway,
+        apiKey: apiToken,
+        ...(Object.values(opts).some((v) => v !== undefined) ? { options: opts } : {}),
+      })
+      const unified = createUnified()
+
+      return {
+        autoload: true,
+        async getModel(_sdk: any, modelID: string, _options?: Record<string, any>) {
+          // Model IDs use Unified API format: provider/model (e.g., "anthropic/claude-sonnet-4-5")
+          return aigateway(unified(modelID))
+        },
+        options: {},
+      }
+    }),
+    cerebras: () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "X-Cerebras-3rd-Party-Integration": "openclank",
+          },
+        },
+      }),
+    kilo: () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "HTTP-Referer": "https://mimo.xiaomi.com/coder/",
+            "X-Title": "openclank",
+          },
+        },
+      }),
+  }
+}
+
+const ProviderApiInfo = Schema.Struct({
+  id: Schema.String,
+  url: Schema.String,
+  npm: Schema.String,
+})
+
+const ProviderModalities = Schema.Struct({
+  text: Schema.Boolean,
+  audio: Schema.Boolean,
+  image: Schema.Boolean,
+  video: Schema.Boolean,
+  pdf: Schema.Boolean,
+})
+
+const ProviderInterleaved = Schema.Union([
+  Schema.Boolean,
+  Schema.Struct({
+    field: Schema.Literals(["reasoning", "reasoning_content", "reasoning_details"]),
+  }),
+])
+
+const ProviderCapabilities = Schema.Struct({
+  temperature: Schema.Boolean,
+  reasoning: Schema.Boolean,
+  attachment: Schema.Boolean,
+  toolcall: Schema.Boolean,
+  input: ProviderModalities,
+  output: ProviderModalities,
+  interleaved: ProviderInterleaved,
+  /**
+   * Effort levels declared by models.dev `reasoning_options` (an array of toggle / effort /
+   * budget_tokens controls). undefined = no models.dev declaration (config-only models; every
+   * reasoning model in models.dev has one). [] = declared without effort levels: always-on (empty
+   * array, no caller control), toggle-only, budget-only, or toggle + budget. Drives `ProviderTransform.variants`.
+   */
+  efforts: Schema.optional(Schema.Array(Schema.String)),
+  /** models.dev also declares a `budget_tokens` control (thinking is budget-driven, not adaptive). */
+  reasoningBudget: Schema.optional(Schema.Boolean),
+})
+
+const ProviderCacheCost = Schema.Struct({
+  read: Schema.Number,
+  write: Schema.Number,
+})
+
+const ProviderCost = Schema.Struct({
+  input: Schema.Number,
+  output: Schema.Number,
+  cache: ProviderCacheCost,
+  experimentalOver200K: Schema.optional(
+    Schema.Struct({
+      input: Schema.Number,
+      output: Schema.Number,
+      cache: ProviderCacheCost,
+    }),
+  ),
+})
+
+const ProviderLimit = Schema.Struct({
+  context: Schema.Number,
+  input: Schema.optional(Schema.Number),
+  output: Schema.Number,
+})
+
+export const Model = Schema.Struct({
+  id: ModelID,
+  providerID: ProviderID,
+  baseModelId: Schema.optional(Schema.String),
+  preset: Schema.optional(Schema.String),
+  api: ProviderApiInfo,
+  name: Schema.String,
+  family: Schema.optional(Schema.String),
+  capabilities: ProviderCapabilities,
+  cost: ProviderCost,
+  limit: ProviderLimit,
+  status: Schema.Literals(["alpha", "beta", "deprecated", "active"]),
+  options: Schema.Record(Schema.String, Schema.Any),
+  headers: Schema.Record(Schema.String, Schema.String),
+  release_date: Schema.String,
+  variants: Schema.optional(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Any))),
+  cacheTTL: Schema.optional(Schema.Number),
+  cachePromptTTL: Schema.optional(Schema.Literals(["5m", "1h"])),
+})
+  .annotate({ identifier: "Model" })
+  .pipe(withStatics((s) => ({ zod: zod(s) })))
+export type Model = Types.DeepMutable<Schema.Schema.Type<typeof Model>>
+
+/**
+ * The request base URL a provider will actually hit — same precedence as
+ * `resolveSDK`: non-empty `provider.options.baseURL` wins, else `model.api.url`.
+ * Config load already folds `options.endpoint` into `options.baseURL`.
+ * Callers that need `${var}` expansion should expand the returned string; this
+ * helper only answers "which URL string is in effect".
+ */
+export function effectiveBaseURL(
+  model: Pick<Model, "api">,
+  providerOptions?: Record<string, unknown> | undefined,
+): string | undefined {
+  const fromProvider = providerOptions?.["baseURL"]
+  if (typeof fromProvider === "string" && fromProvider !== "") return fromProvider
+  const fromModel = model.api?.url
+  return typeof fromModel === "string" && fromModel !== "" ? fromModel : undefined
+}
+
+export const Info = Schema.Struct({
+  id: ProviderID,
+  name: Schema.String,
+  source: Schema.Literals(["env", "config", "custom", "api"]),
+  env: Schema.Array(Schema.String),
+  key: Schema.optional(Schema.String),
+  options: Schema.Record(Schema.String, Schema.Any),
+  models: Schema.Record(Schema.String, Model),
+})
+  .annotate({ identifier: "Provider" })
+  .pipe(withStatics((s) => ({ zod: zod(s) })))
+export type Info = Types.DeepMutable<Schema.Schema.Type<typeof Info>>
+
+export const PublicInfo = Schema.Struct({
+  id: ProviderID,
+  name: Schema.String,
+  source: Schema.Literals(["env", "config", "custom", "api"]),
+  env: Schema.Array(Schema.String),
+  options: Schema.Record(Schema.String, Schema.Any),
+  models: Schema.Record(Schema.String, Model),
+})
+  .annotate({ identifier: "PublicProvider" })
+  .pipe(withStatics((s) => ({ zod: zod(s) })))
+export type PublicInfo = Types.DeepMutable<Schema.Schema.Type<typeof PublicInfo>>
+
+export function publicInfo(provider: Info): PublicInfo {
+  return {
+    id: provider.id,
+    name: provider.name,
+    source: provider.source,
+    env: [...provider.env],
+    options: {},
+    models: mapValues(provider.models, (model) => ({ ...model, options: {}, headers: {} })),
+  }
+}
+
+const DefaultModelIDs = Schema.Record(Schema.String, Schema.String)
+
+export const ListResult = Schema.Struct({
+  all: Schema.Array(PublicInfo),
+  default: DefaultModelIDs,
+  connected: Schema.Array(Schema.String),
+  authenticated: Schema.Array(Schema.String),
+}).pipe(withStatics((s) => ({ zod: zod(s) })))
+export type ListResult = Types.DeepMutable<Schema.Schema.Type<typeof ListResult>>
+
+export const ConfigProvidersResult = Schema.Struct({
+  providers: Schema.Array(PublicInfo),
+  default: DefaultModelIDs,
+}).pipe(withStatics((s) => ({ zod: zod(s) })))
+export type ConfigProvidersResult = Types.DeepMutable<Schema.Schema.Type<typeof ConfigProvidersResult>>
+
+export function defaultModelIDs<T extends { models: Record<string, { id: string }> }>(providers: Record<string, T>) {
+  return mapValues(providers, (item) => sort(Object.values(item.models))[0].id)
+}
+
+export interface Interface {
+  readonly prepareRefresh: (config: Config.Info) => Effect.Effect<() => void>
+  readonly list: () => Effect.Effect<Record<ProviderID, Info>>
+  readonly getProvider: (providerID: ProviderID) => Effect.Effect<Info>
+  readonly getModel: (providerID: ProviderID, modelID: ModelID) => Effect.Effect<Model>
+  readonly getLanguage: (model: Model, account?: AccountSelection.Scope, requestContext?: ManagedRequestContext) => Effect.Effect<LanguageModelV3>
+  readonly getSearchLanguage?: (model: Model, account: AccountSelection.Scope, count: number, answer?: boolean) => Effect.Effect<LanguageModelV3>
+  readonly getEmbedding: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<EmbeddingModelV3>
+  readonly getImage: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<ImageModelV3>
+  readonly getSpeech: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<SpeechModelV3>
+  readonly getTranscription: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<TranscriptionModelV3>
+  readonly closest: (
+    providerID: ProviderID,
+    query: string[],
+  ) => Effect.Effect<{ providerID: ProviderID; modelID: string } | undefined>
+  readonly getSmallModel: (providerID: ProviderID, caller?: Model) => Effect.Effect<Model | undefined>
+  // `providerID` is upstream's provider filter; `caller` is ours (managed mode answers from the calling model).
+  readonly getVisionModel: (caller?: Model, providerID?: ProviderID) => Effect.Effect<Model | undefined>
+  readonly getVisionModelWithProvenance?: (caller?: Model) => Effect.Effect<{model:Model | undefined; current:()=>boolean}>
+  readonly resolveModelRef: (ref: string, contextProviderID?: ProviderID) => Effect.Effect<Model>
+  readonly defaultModel: () => Effect.Effect<{ providerID: ProviderID; modelID: ModelID }>
+}
+
+interface State {
+  models: Map<string, LanguageModelV3>
+  providers: Record<ProviderID, Info>
+  sdk: Map<string, BundledSDK>
+  modelLoaders: Record<string, CustomModelLoader>
+  varsLoaders: Record<string, CustomVarsLoader>
+}
+
+const visionProviderLifetimes = new WeakMap<State, {alive:boolean}>()
+
+export function sdkCacheKey(
+  model: Pick<Model, "providerID" | "api">,
+  options: Record<string, unknown>,
+  account?: Pick<AccountSelection.Scope, "connectionID" | "credentialRequired" | "accountID" | "credentialRevision">,
+): string {
+  return Hash.fast(
+    JSON.stringify({
+      providerID: model.providerID,
+      npm: model.api.npm,
+      account: AccountSelection.cacheIdentity(account),
+      options,
+    }),
+  )
+}
+
+export function isManagedProjectedProviderEntry(
+  providerID: string,
+  provider: { options?: Record<string, unknown> },
+): boolean {
+  return provider.options?.["_openclankConnectionID"] === providerID
+}
+
+export class Service extends Context.Service<Service, Interface>()("@opencode/Provider") {}
+
+export function sortVisionModels(models: Model[]): Model[] {
+  const inHouse = (m: Model) => m.providerID === "mimo" || isXiaomiFamilyProvider(m.providerID)
+  return [...models].sort((a, b) => {
+    if (inHouse(a) !== inHouse(b)) return inHouse(a) ? -1 : 1
+    if (a.cost.input !== b.cost.input) return a.cost.input - b.cost.input
+    return `${a.providerID}/${a.id}`.localeCompare(`${b.providerID}/${b.id}`)
+  })
+}
+
+function cost(c: ModelsDev.Model["cost"]): Model["cost"] {
+  const result: Model["cost"] = {
+    input: c?.input ?? 0,
+    output: c?.output ?? 0,
+    cache: {
+      read: c?.cache_read ?? 0,
+      write: c?.cache_write ?? 0,
+    },
+  }
+  if (c?.context_over_200k) {
+    result.experimentalOver200K = {
+      cache: {
+        read: c.context_over_200k.cache_read ?? 0,
+        write: c.context_over_200k.cache_write ?? 0,
+      },
+      input: c.context_over_200k.input,
+      output: c.context_over_200k.output,
+    }
+  }
+  return result
+}
+
+const OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible"
+
+// "default" (and null) in models.dev effort values means "the provider's own default", i.e. send no
+// variant, so it is not a selectable level (and would collide with clients' "default" = unset).
+function declaredEfforts(options: NonNullable<ModelsDev.Model["reasoning_options"]>): string[] {
+  return [
+    ...new Set(
+      options.flatMap((option) =>
+        option.type === "effort"
+          ? (option.values ?? []).filter((v): v is string => typeof v === "string" && v !== "default")
+          : [],
+      ),
+    ),
+  ]
+}
+
+function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
+  const base: Model = {
+    id: ModelID.make(model.id),
+    providerID: ProviderID.make(provider.id),
+    baseModelId: `${provider.id}/${model.id}`,
+    name: model.name,
+    family: model.family,
+    api: {
+      id: model.id,
+      url: model.provider?.api ?? provider.api ?? "",
+      npm: model.provider?.npm ?? provider.npm ?? OPENAI_COMPATIBLE_NPM,
+    },
+    status: model.status ?? "active",
+    headers: {},
+    options: {},
+    cost: cost(model.cost),
+    limit: {
+      context: model.limit.context,
+      input: model.limit.input,
+      output: model.limit.output,
+    },
+    capabilities: {
+      temperature: model.temperature ?? false,
+      reasoning: model.reasoning ?? false,
+      attachment: model.attachment ?? false,
+      toolcall: model.tool_call ?? true,
+      input: {
+        text: model.modalities?.input?.includes("text") ?? false,
+        audio: model.modalities?.input?.includes("audio") ?? false,
+        image: model.modalities?.input?.includes("image") ?? false,
+        video: model.modalities?.input?.includes("video") ?? false,
+        pdf: model.modalities?.input?.includes("pdf") ?? false,
+      },
+      output: {
+        text: model.modalities?.output?.includes("text") ?? false,
+        audio: model.modalities?.output?.includes("audio") ?? false,
+        image: model.modalities?.output?.includes("image") ?? false,
+        video: model.modalities?.output?.includes("video") ?? false,
+        pdf: model.modalities?.output?.includes("pdf") ?? false,
+      },
+      interleaved: model.interleaved ?? false,
+      ...(model.reasoning_options
+        ? {
+            efforts: declaredEfforts(model.reasoning_options),
+            reasoningBudget: model.reasoning_options.some((option) => option.type === "budget_tokens"),
+          }
+        : {}),
+    },
+    release_date: model.release_date ?? "",
+    variants: {},
+  }
+
+  const resolved = {
+    ...base,
+    variants: mapValues(ProviderTransform.variants(base), (v) => v),
+  }
+  recordDeclared(resolved, { context: "catalog", input: "catalog" })
+  return resolved
+}
+
+export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
+  const models: Record<string, Model> = {}
+  for (const [key, model] of Object.entries(provider.models)) {
+    models[key] = fromModelsDevModel(provider, model)
+    for (const [mode, opts] of Object.entries(model.experimental?.modes ?? {})) {
+      const id = `${model.id}-${mode}`
+      const base = fromModelsDevModel(provider, model)
+      models[id] = {
+        ...base,
+        id: ModelID.make(id),
+        preset: mode,
+        name: `${model.name} ${mode[0].toUpperCase()}${mode.slice(1)}`,
+        cost: opts.cost ? mergeDeep(base.cost, cost(opts.cost)) : base.cost,
+        options: opts.provider?.body
+          ? Object.fromEntries(
+              Object.entries(opts.provider.body).map(([k, v]) => [
+                k.replace(/_([a-z])/g, (_, c) => c.toUpperCase()),
+                v,
+              ]),
+            )
+          : base.options,
+        headers: opts.provider?.headers ?? base.headers,
+      }
+      recordDeclared(models[id]!, { context: "catalog", input: "catalog" })
+    }
+  }
+  return {
+    id: ProviderID.make(provider.id),
+    source: "custom",
+    name: provider.name,
+    env: provider.env ?? [],
+    options: {},
+    models,
+  }
+}
+
+const layer: Layer.Layer<
+  Service,
+  never,
+  Config.Service | Auth.Service | Plugin.Service | AppFileSystem.Service | Env.Service
+> = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const fs = yield* AppFileSystem.Service
+    const config = yield* Config.Service
+    const auth = yield* Auth.Service
+    const env = yield* Env.Service
+    const plugin = yield* Plugin.Service
+
+    const buildState = (cfg: Config.Info) =>
+      Effect.gen(function* () {
+        using _ = log.time("state")
+        const bridge = yield* EffectBridge.make()
+        const modelsDev = yield* Effect.promise(() => ModelsDev.get())
+        const database = mapValues(modelsDev, fromModelsDevProvider)
+
+        const providers: Record<ProviderID, Info> = {} as Record<ProviderID, Info>
+        const languages = new Map<string, LanguageModelV3>()
+        const modelLoaders: {
+          [providerID: string]: CustomModelLoader
+        } = {}
+        const varsLoaders: {
+          [providerID: string]: CustomVarsLoader
+        } = {}
+        const sdk = new Map<string, BundledSDK>()
+        const discoveryLoaders: {
+          [providerID: string]: CustomDiscoverModels
+        } = {}
+        const dep = {
+          auth: (id: string) => auth.get(id).pipe(Effect.orDie),
+          config: () => Effect.succeed(cfg),
+          env: () => (managedProviderMode ? Effect.succeed({}) : env.all()),
+          get: (key: string) => (managedProviderMode ? Effect.succeed(undefined) : env.get(key)),
+        }
+
+        log.info("init")
+
+        function snapshotOrigins(provider: Info | undefined): Map<string, WindowSnapshot | undefined> {
+          return new Map(Object.entries(provider?.models ?? {}).map(([id, model]) => [id, snapshotDeclared(model)]))
+        }
+        function restoreOrigins(provider: Info | undefined, snapshots: Map<string, WindowSnapshot | undefined>) {
+          for (const [id, model] of Object.entries(provider?.models ?? {})) restoreDeclared(snapshots.get(id), model)
+        }
+        function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {
+          const source = providers[providerID] ?? database[providerID]
+          if (!source) return
+          const snapshots = snapshotOrigins(source)
+          // @ts-expect-error
+          providers[providerID] = mergeDeep(source, provider)
+          restoreOrigins(providers[providerID], snapshots)
+        }
+
+        // load plugins first so config() hook runs before reading cfg.provider
+        const plugins = yield* plugin.list()
+
+        // now read config providers - includes any modifications from plugin config() hook
+        const configProviders = Object.entries(cfg.provider ?? {}).filter(([providerID, provider]) => {
+          if (!managedProviderMode) return true
+          // Built-in plugin config hooks may register family placeholders (for
+          // example `xiaomi`) before the managed projection is read.  A managed
+          // worker accepts only host-projected, connection-scoped entries.
+          return isManagedProjectedProviderEntry(providerID, provider)
+        })
+        const disabled = new Set(cfg.disabled_providers ?? [])
+        const enabled = cfg.enabled_providers ? new Set(cfg.enabled_providers) : null
+
+        function isProviderAllowed(providerID: ProviderID): boolean {
+          if (enabled && !enabled.has(providerID)) return false
+          if (disabled.has(providerID)) return false
+          return true
+        }
+
+        // extend database from config
+        for (const [providerID, provider] of configProviders) {
+          const existing = database[providerID]
+          const parsed: Info = {
+            id: ProviderID.make(providerID),
+            name: provider.name ?? existing?.name ?? providerID,
+            env: provider.env ?? existing?.env ?? [],
+            options: mergeDeep(existing?.options ?? {}, provider.options ?? {}),
+            source: "config",
+            models: existing?.models ?? {},
+          }
+
+          for (const [modelID, model] of Object.entries(provider.models ?? {})) {
+            const existingModel = parsed.models[model.id ?? modelID]
+            const existingWindow = existingModel ? snapshotDeclared(existingModel) : undefined
+            const apiID = model.id ?? existingModel?.api.id ?? modelID
+            const apiNpm =
+              model.provider?.npm ??
+              provider.npm ??
+              existingModel?.api.npm ??
+              modelsDev[providerID]?.npm ??
+              OPENAI_COMPATIBLE_NPM
+            const name = iife(() => {
+              if (model.name) return model.name
+              if (model.id && model.id !== modelID) return modelID
+              return existingModel?.name ?? modelID
+            })
+            const parsedModel: Model = {
+              id: ModelID.make(modelID),
+              api: {
+                id: apiID,
+                npm: apiNpm,
+                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[providerID]?.api ?? "",
+              },
+              status: model.status ?? existingModel?.status ?? "active",
+              name,
+              providerID: ProviderID.make(providerID),
+              capabilities: {
+                temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
+                reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
+                attachment: model.attachment ?? existingModel?.capabilities.attachment ?? false,
+                toolcall: model.tool_call ?? existingModel?.capabilities.toolcall ?? true,
+                input: {
+                  text: model.modalities?.input?.includes("text") ?? existingModel?.capabilities.input.text ?? true,
+                  audio: model.modalities?.input?.includes("audio") ?? existingModel?.capabilities.input.audio ?? false,
+                  image: model.modalities?.input?.includes("image") ?? existingModel?.capabilities.input.image ?? false,
+                  video: model.modalities?.input?.includes("video") ?? existingModel?.capabilities.input.video ?? false,
+                  pdf: model.modalities?.input?.includes("pdf") ?? existingModel?.capabilities.input.pdf ?? false,
+                },
+                output: {
+                  text: model.modalities?.output?.includes("text") ?? existingModel?.capabilities.output.text ?? true,
+                  audio:
+                    model.modalities?.output?.includes("audio") ?? existingModel?.capabilities.output.audio ?? false,
+                  image:
+                    model.modalities?.output?.includes("image") ?? existingModel?.capabilities.output.image ?? false,
+                  video:
+                    model.modalities?.output?.includes("video") ?? existingModel?.capabilities.output.video ?? false,
+                  pdf: model.modalities?.output?.includes("pdf") ?? existingModel?.capabilities.output.pdf ?? false,
+                },
+                interleaved:
+                  model.interleaved ??
+                  existingModel?.capabilities.interleaved ??
+                  (!existingModel && apiNpm === OPENAI_COMPATIBLE_NPM && apiID.includes("deepseek")
+                    ? { field: "reasoning_content" }
+                    : false),
+                ...(existingModel?.capabilities.efforts
+                  ? { efforts: existingModel.capabilities.efforts, reasoningBudget: existingModel.capabilities.reasoningBudget }
+                  : {}),
+              },
+              cost: {
+                input: model?.cost?.input ?? existingModel?.cost?.input ?? 0,
+                output: model?.cost?.output ?? existingModel?.cost?.output ?? 0,
+                cache: {
+                  read: model?.cost?.cache_read ?? existingModel?.cost?.cache.read ?? 0,
+                  write: model?.cost?.cache_write ?? existingModel?.cost?.cache.write ?? 0,
+                },
+              },
+              options: mergeDeep(existingModel?.options ?? {}, model.options ?? {}),
+              limit: {
+                context: (() => {
+                  const explicit = model.limit?.context ?? existingModel?.limit?.context
+                  if (explicit !== undefined) return explicit
+                  const key = `${providerID}/${modelID}`
+                  if (!warnedContextDefaults.has(key)) {
+                    warnedContextDefaults.add(key)
+                    log.warn("limit.context not configured and not found in models.dev", {
+                      providerID,
+                      modelID,
+                      defaulting_to: DEFAULT_CONTEXT_WINDOW,
+                      fix: `Set limit.context explicitly in openclank.json under provider.${providerID}.models.${modelID}`,
+                    })
+                  }
+                  return DEFAULT_CONTEXT_WINDOW
+                })(),
+                input: model.limit?.input ?? existingModel?.limit?.input,
+                output:
+                  model.limit?.output ?? existingModel?.limit?.output ?? ProviderTransform.DEFAULT_OUTPUT_TOKEN_LIMIT,
+              },
+              headers: mergeDeep(existingModel?.headers ?? {}, model.headers ?? {}),
+              family: model.family ?? existingModel?.family ?? "",
+              release_date: model.release_date ?? existingModel?.release_date ?? "",
+              cachePromptTTL: model.cachePromptTTL ?? existingModel?.cachePromptTTL,
+              variants: {},
+            }
+            // Plugin config hooks can mutate the shared config object. A
+            // reconstructed model inherits evidence only on an exact identity
+            // and both-limit match; changed config values remain unknown.
+            const restoredWindow = restoreDeclared(existingWindow, parsedModel) ? readWindowOrigin(parsedModel) : undefined
+            const declaredFields = declaredWindowFields(cfg, providerID, modelID)
+            const inherited = (origin: WindowOrigin | undefined): WindowOrigin =>
+              origin === "catalog" || origin === "config" || origin === "inherited" ? "inherited" : origin ?? "unknown"
+            recordDeclared(parsedModel, {
+              context: declaredFields.context ? "config" : restoredWindow ? inherited(restoredWindow.context.origin) : model.limit?.context === undefined && !existingModel ? "fallback" : "unknown",
+              input: declaredFields.input ? "config" : restoredWindow ? inherited(restoredWindow.input.origin) : "unknown",
+            })
+            parsedModel.variants = ProviderTransform.configuredVariants(parsedModel, model.variants)
+            parsed.models[modelID] = parsedModel
+          }
+          database[providerID] = parsed
+        }
+
+        // load env (skipped in mimo-only mode so ANTHROPIC_API_KEY etc. don't auto-light other providers)
+        if (!managedProviderMode && !Flag.OPENCLANK_DISABLE_PROVIDER_ENV) {
+          const envs = yield* env.all()
+          for (const [id, provider] of Object.entries(database)) {
+            const providerID = ProviderID.make(id)
+            if (disabled.has(providerID)) continue
+            const apiKey = provider.env.map((item) => envs[item]).find(Boolean)
+            if (!apiKey) continue
+            mergeProvider(providerID, {
+              source: "env",
+              key: provider.env.length === 1 ? apiKey : undefined,
+            })
+          }
+        }
+
+        // load apikeys
+        const auths = yield* auth.all().pipe(Effect.orDie)
+        for (const [id, provider] of Object.entries(auths)) {
+          const providerID = ProviderID.make(id)
+          if (disabled.has(providerID)) continue
+          if (provider.type === "api") {
+            mergeProvider(providerID, {
+              source: "api",
+              key: provider.key,
+            })
+          }
+        }
+
+        // OpenClank sends operator-owned provider keys through a one-shot fd.
+        // Consume and close it before any model tool subprocess can inherit it.
+        for (const [id, key] of Object.entries(inheritedProviderCredentials)) {
+          const providerID = ProviderID.make(id)
+          if (disabled.has(providerID)) continue
+          mergeProvider(providerID, { source: "api", key })
+        }
+
+        // plugin auth loader - database now has entries for config providers
+        for (const plugin of plugins) {
+          if (!plugin.auth) continue
+          const providerID = ProviderID.make(plugin.auth.provider)
+          if (disabled.has(providerID)) continue
+
+          const stored = yield* auth.get(providerID).pipe(Effect.orDie)
+          if (!stored) continue
+          if (!plugin.auth.loader) continue
+
+          const authDatabaseOrigins = snapshotOrigins(database[providerID])
+          const authProviderOrigins = snapshotOrigins(providers[providerID])
+          const catalog = database[plugin.auth.provider]
+          if (!catalog) {
+            log.warn("skipping plugin auth loader; provider missing from model catalog", { providerID })
+            continue
+          }
+
+          const options = yield* Effect.promise(() =>
+            plugin.auth!.loader!(
+              () => bridge.promise(auth.get(providerID).pipe(Effect.orDie)) as any,
+              catalog,
+            ),
+          )
+          restoreOrigins(database[providerID], authDatabaseOrigins)
+          restoreOrigins(providers[providerID], authProviderOrigins)
+          const opts = options ?? {}
+          const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
+          mergeProvider(providerID, patch)
+        }
+
+        for (const [id, fn] of Object.entries(custom(dep))) {
+          const providerID = ProviderID.make(id)
+          if (disabled.has(providerID)) continue
+          const data = database[providerID]
+          if (!data) {
+            log.error("Provider does not exist in model list " + providerID)
+            continue
+          }
+          const customDatabaseOrigins = snapshotOrigins(data)
+          const customProviderOrigins = snapshotOrigins(providers[providerID])
+          const result = yield* fn(data)
+          restoreOrigins(data, customDatabaseOrigins)
+          restoreOrigins(providers[providerID], customProviderOrigins)
+          if (result && (result.autoload || providers[providerID])) {
+            if (result.getModel) modelLoaders[providerID] = result.getModel
+            if (result.vars) varsLoaders[providerID] = result.vars
+            if (result.discoverModels) discoveryLoaders[providerID] = result.discoverModels
+            const opts = result.options ?? {}
+            const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
+            mergeProvider(providerID, patch)
+          }
+        }
+
+        // load config - re-apply with updated data
+        for (const [id, provider] of configProviders) {
+          const providerID = ProviderID.make(id)
+          const partial: Partial<Info> = { source: "config" }
+          if (provider.env) partial.env = provider.env
+          if (provider.name) partial.name = provider.name
+          if (provider.options) partial.options = provider.options
+          mergeProvider(providerID, partial)
+        }
+
+        const gitlab = ProviderID.make("gitlab")
+        if (discoveryLoaders[gitlab] && providers[gitlab] && isProviderAllowed(gitlab)) {
+          yield* Effect.promise(async () => {
+            try {
+              const discovered = await discoveryLoaders[gitlab]()
+              for (const [modelID, model] of Object.entries(discovered)) {
+                if (!providers[gitlab].models[modelID]) {
+                  providers[gitlab].models[modelID] = model
+                }
+              }
+            } catch (e) {
+              log.warn("state discovery error", { id: "gitlab", error: e })
+            }
+          })
+        }
+
+        for (const hook of plugins) {
+          const p = hook.provider
+          const models = p?.models
+          if (!p || !models) continue
+
+          const providerID = ProviderID.make(p.id)
+          if (disabled.has(providerID)) continue
+
+          const provider = providers[providerID]
+          if (!provider) continue
+          const pluginAuth = yield* auth.get(providerID).pipe(Effect.orDie)
+
+          const pluginOrigins = snapshotOrigins(provider)
+          provider.models = yield* Effect.promise(async () => {
+            const next = await models(provider, { auth: pluginAuth })
+            return Object.fromEntries(
+              Object.entries(next).map(([id, model]) => {
+                const resolved = { ...model, id: ModelID.make(id), providerID }
+                restoreDeclared(pluginOrigins.get(id), resolved)
+                return [id, resolved]
+              }),
+            )
+          })
+        }
+
+        for (const [id, provider] of Object.entries(providers)) {
+          const providerID = ProviderID.make(id)
+          if (!isProviderAllowed(providerID)) {
+            delete providers[providerID]
+            continue
+          }
+
+          const configProvider = cfg.provider?.[providerID]
+          // Opt-in implicit whitelist: only when the provider sets
+          // `only_configured_models: true` does a non-empty `models` map hide the
+          // rest of the catalog. Default (false) preserves the augment-only
+          // behavior — `models` overrides/adds without filtering.
+          const configModelKeys = Object.keys(configProvider?.models ?? {})
+          const implicitWhitelist =
+            configProvider?.only_configured_models && configModelKeys.length > 0 ? configModelKeys : undefined
+
+          for (const [modelID, model] of Object.entries(provider.models)) {
+            model.api.id = model.api.id ?? model.id ?? modelID
+            if (
+              modelID === "gpt-5-chat-latest" ||
+              (providerID === ProviderID.openrouter && modelID === "openai/gpt-5-chat")
+            )
+              delete provider.models[modelID]
+            if (model.status === "alpha" && !Flag.OPENCLANK_ENABLE_EXPERIMENTAL_MODELS) delete provider.models[modelID]
+            if (model.status === "deprecated") delete provider.models[modelID]
+            if (
+              (configProvider?.blacklist && configProvider.blacklist.includes(modelID)) ||
+              (configProvider?.whitelist && !configProvider.whitelist.includes(modelID)) ||
+              (implicitWhitelist && !implicitWhitelist.includes(modelID))
+            )
+              delete provider.models[modelID]
+
+            model.variants = ProviderTransform.configuredVariants(model, configProvider?.models?.[modelID]?.variants)
+          }
+
+          if (Object.keys(provider.models).length === 0) {
+            delete providers[providerID]
+            continue
+          }
+
+          log.info("found", { providerID })
+        }
+
+        const result = {models:languages, providers, sdk, modelLoaders, varsLoaders}
+        visionProviderLifetimes.set(result, {alive:true})
+        return result
+      })
+
+    // A provider snapshot stops being "current" for vision provenance when it is
+    // replaced by a refresh or when the instance state is disposed.
+    const retire = (snapshot: State) => {
+      const lifetime = visionProviderLifetimes.get(snapshot)
+      if (lifetime) lifetime.alive = false
+    }
+    const state = yield* InstanceState.make(() => Effect.gen(function* () {
+      const entry = { current: yield* buildState(yield* config.get()) }
+      yield* Effect.addFinalizer(() => Effect.sync(() => retire(entry.current)))
+      return entry
+    }))
+    const getState = () => InstanceState.use(state, (entry) => entry.current)
+    const prepareRefresh = Effect.fn("Provider.prepareRefresh")(function* (cfg: Config.Info) {
+      // Reuse existing hooks; never load a newly configured plugin factory here.
+      for (const hook of yield* plugin.list({ initialize: false })) {
+        const configure = (hook as { config?: (config: Config.Info) => Promise<void> }).config
+        if (configure) yield* Effect.promise(() => Promise.resolve(configure(cfg)))
+      }
+      if (!(yield* InstanceState.has(state))) return () => {}
+      const target = yield* InstanceState.get(state)
+      const next = yield* buildState(cfg)
+      const packages = new Set(Object.values(target.current.providers).flatMap((provider) =>
+        Object.values(provider.models).map((model) => model.api.npm)))
+      for (const provider of Object.values(next.providers)) {
+        for (const model of Object.values(provider.models)) {
+          if (!BUNDLED_PROVIDERS[model.api.npm] && !packages.has(model.api.npm)) {
+            throw new Error("Loading a new provider SDK requires an application restart")
+          }
+        }
+      }
+      return () => {
+        retire(target.current)
+        target.current = next
+      }
+    })
+
+    const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.current.providers))
+
+    async function resolveSDK(
+      model: Model,
+      s: State,
+      envs: Record<string, string | undefined>,
+      account?: AccountSelection.Scope,
+      operation?: { kind: "web.search"; count: number; answer?: boolean },
+      requestContext?: ManagedRequestContext,
+    ) {
+      try {
+        using _ = log.time("getSDK", {
+          providerID: model.providerID,
+        })
+        const provider = s.providers[model.providerID]
+        if (!provider) throw new Error("Provider route is unavailable")
+        const metadata = managedProviderMode ? managedAdapterMetadata(provider, model) : undefined
+        let options = { ...provider.options }
+
+        if (managedProviderMode) {
+          // Managed execution obtains one exact credential lease through ACP.
+          // Config/env/provider keys are never a fallback authority.
+          delete options["apiKey"]
+          if (!account) {
+            throw new Error("Managed provider execution requires an active operation binding")
+          }
+          if (account.connectionID !== metadata!.connectionID || account.billingLane !== metadata!.billingLane) {
+            throw new Error("Managed provider binding does not match its projected connection")
+          }
+          if (account.credentialRequired && !account.credential) {
+            throw new Error("Managed provider execution requires an active credential lease")
+          }
+          if (account.credentialRequired && (!account.accountID || account.credentialRevision === undefined)) {
+            throw new Error("Managed provider credential binding is incomplete")
+          }
+          if (
+            !account.credentialRequired &&
+            (account.billingLane !== "local" ||
+              account.accountID !== undefined ||
+              account.credentialRevision !== undefined ||
+              account.credential !== undefined)
+          ) {
+            throw new Error("Managed keyless provider binding is internally inconsistent")
+          }
+          const expectedPackage = managedAdapterPackage(metadata!)
+          if (model.api.npm !== expectedPackage) {
+            throw new Error("Managed model route does not match its bundled adapter package")
+          }
+        }
+
+        if (
+          (model.providerID === "google-vertex" || metadata?.adapterID === "google-vertex") &&
+          !model.api.npm.includes("@ai-sdk/openai-compatible")
+        ) {
+          delete options.fetch
+        }
+
+        if (model.api.npm.includes("@ai-sdk/openai-compatible") && options["includeUsage"] !== false) {
+          options["includeUsage"] = true
+        }
+
+        const baseURLChoice = resolveManagedBaseURL(options["baseURL"], model.api.url)
+        const baseURL = iife(() => {
+          let url = baseURLChoice.baseURL
+          if (!url) return
+
+          const loader = s.varsLoaders[model.providerID]
+          if (loader) {
+            const vars = loader(options)
+            for (const [key, value] of Object.entries(vars)) {
+              const field = "${" + key + "}"
+              url = url.replaceAll(field, value)
+            }
+          }
+
+          url = url.replace(/\$\{([^}]+)\}/g, (item, key) => {
+            const val = envs[String(key)]
+            return val ?? item
+          })
+          return url
+        })
+
+        if (baseURL !== undefined) options["baseURL"] = baseURL
+        if (account?.credential?.type === "api") options["apiKey"] = account.credential.key
+        else if (account?.credential?.type === "oauth") options["apiKey"] = account.credential.access
+        else if (account?.credential?.type === "wellknown") options["apiKey"] = account.credential.token
+        else if (!managedProviderMode && options["apiKey"] === undefined && provider.key)
+          options["apiKey"] = provider.key
+        if (model.headers)
+          options["headers"] = {
+            ...options["headers"],
+            ...model.headers,
+          }
+        if (metadata) options = applyManagedAdapterOptions(metadata, account?.credential, options, account, operation, baseURLChoice.catalogFallback, requestContext)
+
+        const key = sdkCacheKey(model, options, account)
+        const existing = managedProviderMode ? undefined : s.sdk.get(key)
+        if (existing) return existing
+
+        const customFetch = options["fetch"]
+        // This binds the app-captured default function, not an attestation of pristine runtime intrinsics.
+        const appDefaultFetch = globalThis.fetch
+        const configuredHeaders = options["headers"]
+        const sameRequestDefault = managedProviderMode && model.api.npm === "@ai-sdk/openai-compatible" && compatiblePackage.version === "2.0.41" &&
+          metadata?.adapterID === "openai-chat" && metadata.familyID === "openai-compatible" && metadata.billingLane === "local" &&
+          account?.credentialRequired === false && customFetch === undefined &&
+          options["transformRequestBody"] === undefined && options["queryParams"] === undefined &&
+          options["apiKey"] === undefined && !account?.credential &&
+          (configuredHeaders === undefined || (configuredHeaders !== null && typeof configuredHeaders === 'object' &&
+            !Array.isArray(configuredHeaders) && Object.getPrototypeOf(configuredHeaders) === Object.prototype && Object.keys(configuredHeaders).length === 0))
+        const userChunkTimeout = options["chunkTimeout"]
+        const headerTimeout = options["headerTimeout"]
+        const chunkTimeout =
+          typeof userChunkTimeout === "number"
+            ? userChunkTimeout // user-set value (incl. 0 / negative to disable)
+            : DEFAULT_CHUNK_TIMEOUT
+        delete options["chunkTimeout"]
+        delete options["headerTimeout"]
+
+        options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
+          const chosenFetch = sameRequestDefault ? appDefaultFetch : customFetch ?? fetch
+          const fetchFn = managedProviderMode ? captureFetch(chosenFetch, account) : chosenFetch
+          const opts = init ?? {}
+          const callerSignal = requestSignal(input, opts)
+          const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
+          const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
+          const headerTimeoutCtl = typeof headerTimeoutMs === "number" ? timeoutController(headerTimeoutMs) : undefined
+          const requestTimeoutCtl =
+            typeof options["timeout"] === "number" && options["timeout"] > 0
+              ? timeoutController(options["timeout"], `Request timed out after ${options["timeout"]}ms`)
+              : undefined
+          const tracked = trackAbortSource(
+            callerSignal,
+            [headerTimeoutCtl?.signal, requestTimeoutCtl?.signal].filter((signal) => signal !== undefined),
+          )
+          const signals = [tracked.signal, chunkAbortCtl?.signal].filter((signal) => signal !== undefined)
+          if (signals.length > 0) opts.signal = signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+
+          const res = await Promise.resolve()
+            .then(() =>
+              HostModelTransport.request(input, opts, () => fetchFn(input, {
+                ...opts,
+                // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+                timeout: false,
+              })),
+            )
+            .catch((error: unknown) => {
+              requestTimeoutCtl?.clear()
+              tracked.dispose()
+              throw normalizeTimeoutError(error, tracked.source(), tracked.winner())
+            })
+            .finally(() => {
+              headerTimeoutCtl?.clear()
+            })
+
+          tracked.dispose()
+          const bounded = requestTimeoutCtl
+            ? wrapRequestTimeout(res, callerSignal, requestTimeoutCtl.signal, requestTimeoutCtl.clear)
+            : res
+          if (!chunkAbortCtl) return bounded
+          return wrapSSE(bounded, chunkTimeout, chunkAbortCtl)
+        }
+
+        const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
+        if (bundledLoader) {
+          log.info("using bundled provider", {
+            providerID: model.providerID,
+            pkg: model.api.npm,
+          })
+          const factory = await bundledLoader()
+          const loaded = factory({
+            name: model.providerID,
+            ...options,
+          })
+          if (managedProviderMode && model.api.npm === "@ai-sdk/openai" && openaiPackage.version === "3.0.53"
+              && metadata?.adapterID === "openai-responses" && metadata.familyID === "openai" && metadata.billingLane === "subscription")
+            notePinnedResponsesSDK(loaded as object)
+          if (managedProviderMode && customFetch === undefined && model.api.npm === "@ai-sdk/openai" && openaiPackage.version === "3.0.53"
+              && metadata?.adapterID === "openai-chat" && metadata.familyID === "openai" && metadata.billingLane === "metered_api")
+            notePinnedChatSDK(loaded as object)
+          if (managedProviderMode && customFetch === undefined && options["transformRequestBody"] === undefined && options["queryParams"] === undefined
+              && model.api.npm === "@ai-sdk/openai-compatible" && compatiblePackage.version === "2.0.41"
+              && metadata?.adapterID === "openai-chat" && metadata.familyID === "openai-compatible" && metadata.billingLane === "local"
+              && account?.credentialRequired === false && typeof baseURL === "string") {
+            try {
+              const endpoint = new URL(baseURL.replace(/\/+$/, "") + "/chat/completions")
+              if ((endpoint.protocol === "http:" || endpoint.protocol === "https:") && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash)
+                { notePinnedCompatibleChatSDK(loaded as object, endpoint.toString())
+                  if (sameRequestDefault) noteSameRequestSDK(loaded as object, endpoint.toString(), appDefaultFetch) }
+            } catch { /* Unclassified routes cannot authorize context delivery. */ }
+          }
+          if (managedProviderMode && customFetch === undefined && model.api.npm === "@ai-sdk/anthropic" && anthropicPackage.version === "3.0.82"
+              && metadata?.adapterID === "anthropic-messages" && metadata.familyID === "anthropic" && metadata.billingLane === "metered_api")
+            notePinnedAnthropicSDK(loaded as object)
+          if (!managedProviderMode) s.sdk.set(key, loaded)
+          return loaded as SDK
+        }
+
+        if (managedProviderMode) {
+          throw new Error("Managed provider adapter is not bundled with this engine")
+        }
+
+        let installedPath: string
+        if (!model.api.npm.startsWith("file://")) {
+          const item = await Npm.add(model.api.npm)
+          if (!item.entrypoint) throw new Error(`Package ${model.api.npm} has no import entrypoint`)
+          installedPath = item.entrypoint
+        } else {
+          log.info("loading local provider", { pkg: model.api.npm })
+          installedPath = model.api.npm
+        }
+
+        // `installedPath` is a local entry path or an existing `file://` URL. Normalize
+        // only path inputs so Node on Windows accepts the dynamic import.
+        const importSpec = installedPath.startsWith("file://") ? installedPath : pathToFileURL(installedPath).href
+        const mod = await import(importSpec)
+
+        const fn = mod[Object.keys(mod).find((key) => key.startsWith("create"))!]
+        const loaded = fn({
+          name: model.providerID,
+          ...options,
+        })
+        if (!managedProviderMode) s.sdk.set(key, loaded)
+        return loaded as SDK
+      } catch (e) {
+        throw new InitError({ providerID: model.providerID }, { cause: e })
+      }
+    }
+
+    const getProvider = Effect.fn("Provider.getProvider")((providerID: ProviderID) =>
+      InstanceState.use(state, (s) => s.current.providers[providerID]),
+    )
+
+    const getModel = Effect.fn("Provider.getModel")(function* (providerID: ProviderID, modelID: ModelID) {
+      const s = yield* getState()
+      const provider = s.providers[providerID]
+      if (!provider) {
+        const available = Object.keys(s.providers)
+        const matches = fuzzysort.go(providerID, available, { limit: 3, threshold: -10000 })
+        throw new ModelNotFoundError({ providerID, modelID, suggestions: matches.map((m) => m.target) })
+      }
+
+      const info = provider.models[modelID]
+      if (!info) {
+        const available = Object.keys(provider.models)
+        const matches = fuzzysort.go(modelID, available, { limit: 3, threshold: -10000 })
+        throw new ModelNotFoundError({ providerID, modelID, suggestions: matches.map((m) => m.target) })
+      }
+      // Recheck evidence against this exact selected object; no serialized
+      // model field or plugin-provided marker is accepted as provenance.
+      readWindowOrigin(info)
+      return info
+    })
+
+    const getLanguage = Effect.fn("Provider.getLanguage")(function* (
+      model: Model,
+      account?: AccountSelection.Scope,
+      requestContext?: ManagedRequestContext,
+    ) {
+      const s = yield* getState()
+      const envs = managedProviderMode ? {} : yield* env.all()
+      const key = AccountSelection.languageCacheKey(model, account)
+      if (!managedProviderMode && s.models.has(key)) return s.models.get(key)!
+
+      return yield* Effect.promise(async () => {
+        const provider = s.providers[model.providerID]
+        const sdk = await resolveSDK(model, s, envs, account, undefined, requestContext)
+
+        try {
+          const language = managedProviderMode
+            ? selectManagedLanguageModel(sdk as BundledSDK, managedAdapterMetadata(provider, model), model.api.id)
+            : s.modelLoaders[model.providerID]
+              ? await s.modelLoaders[model.providerID](sdk, model.api.id, {
+                  ...provider.options,
+                  ...model.options,
+                })
+              : sdk.languageModel(model.api.id)
+          if (managedProviderMode) notePinnedResponsesModel(sdk as object, language as object)
+          if (managedProviderMode) notePinnedChatModel(sdk as object, language as object)
+          if (managedProviderMode) notePinnedCompatibleChatModel(sdk as object, language as object)
+          if (managedProviderMode) noteSameRequestModel(sdk as object, language as object, model.api.id)
+          if (managedProviderMode) notePinnedAnthropicModel(sdk as object, language as object)
+          if (!managedProviderMode) s.models.set(key, language)
+          return language
+        } catch (e) {
+          if (e instanceof NoSuchModelError)
+            throw new ModelNotFoundError(
+              {
+                modelID: model.id,
+                providerID: model.providerID,
+              },
+              { cause: e },
+            )
+          throw e
+        }
+      })
+    })
+
+    const getSearchLanguage = Effect.fn("Provider.getSearchLanguage")(function* (
+      model: Model,
+      account: AccountSelection.Scope,
+      count: number,
+      answer = false,
+    ) {
+      if (!Number.isSafeInteger(count) || count < 1 || count > 50) throw new Error("Managed search count is invalid")
+      const s = yield* getState()
+      const envs = managedProviderMode ? {} : yield* env.all()
+      return yield* Effect.promise(async () => {
+        const provider = s.providers[model.providerID]
+        const sdk = await resolveSDK(model, s, envs, account, { kind: "web.search", count, answer })
+        return selectManagedLanguageModel(sdk as BundledSDK, managedAdapterMetadata(provider, model), model.api.id)
+      })
+    })
+
+    const getModalityModel = <T>(
+      label: string,
+      model: Model,
+      account: AccountSelection.Scope | undefined,
+      select: (sdk: BundledSDK, modelID: string) => T | undefined,
+    ) =>
+      Effect.gen(function* () {
+        const s = yield* getState()
+        const envs = managedProviderMode ? {} : yield* env.all()
+        return yield* Effect.promise(async () => {
+          const sdk = await resolveSDK(model, s, envs, account)
+          const selected = select(sdk as BundledSDK, model.api.id)
+          if (!selected) throw new Error(`Provider ${model.providerID} does not support ${label}`)
+          return selected
+        })
+      })
+
+    const getEmbedding = Effect.fn("Provider.getEmbedding")((model: Model, account?: AccountSelection.Scope) =>
+      getModalityModel("embeddings", model, account, (sdk, modelID) => sdk.embeddingModel?.(modelID)),
+    )
+
+    const getImage = Effect.fn("Provider.getImage")((model: Model, account?: AccountSelection.Scope) =>
+      getModalityModel("images", model, account, (sdk, modelID) => sdk.imageModel?.(modelID)),
+    )
+
+    const getSpeech = Effect.fn("Provider.getSpeech")((model: Model, account?: AccountSelection.Scope) =>
+      getModalityModel("speech synthesis", model, account, (sdk, modelID) => sdk.speechModel?.(modelID)),
+    )
+
+    const getTranscription = Effect.fn("Provider.getTranscription")((model: Model, account?: AccountSelection.Scope) =>
+      getModalityModel("transcription", model, account, (sdk, modelID) => sdk.transcriptionModel?.(modelID)),
+    )
+
+    const closest = Effect.fn("Provider.closest")(function* (providerID: ProviderID, query: string[]) {
+      const s = yield* getState()
+      const provider = s.providers[providerID]
+      if (!provider) return undefined
+      for (const item of query) {
+        for (const modelID of Object.keys(provider.models)) {
+          if (modelID.includes(item)) return { providerID, modelID }
+        }
+      }
+      return undefined
+    })
+
+    const resolveModelRef = Effect.fn("Provider.resolveModelRef")(function* (
+      ref: string,
+      contextProviderID?: ProviderID,
+    ) {
+      // Literal "provider/model" — unchanged path.
+      if (ref.includes("/")) {
+        const parsed = parseModel(ref)
+        return yield* getModel(parsed.providerID, parsed.modelID)
+      }
+
+      // Otherwise it's a group name.
+      const cfg = yield* config.get()
+      const group = cfg.model_groups?.[ref]
+      if (!group) {
+        if (BUILTIN_TIERS.has(ref) && !ManagedProvider.enabled()) {
+          const fallback = yield* defaultModel()
+          return yield* getModel(fallback.providerID, fallback.modelID)
+        }
+        const names = Object.keys(cfg.model_groups ?? {})
+        const matches = fuzzysort.go(ref, names, { limit: 3, threshold: -10000 })
+        throw new ModelGroupNotFoundError({ group: ref, suggestions: matches.map((m) => m.target) })
+      }
+
+      const def = typeof group === "string" ? group : group.default
+      const members = typeof group === "string" ? [group] : (group.models ?? [group.default])
+
+      // Provider-aware: prefer a member on the caller's provider.
+      if (contextProviderID) {
+        for (const member of members) {
+          const parsed = parseModel(member)
+          if (parsed.providerID !== contextProviderID) continue
+          const resolved = yield* getModel(parsed.providerID, parsed.modelID).pipe(Effect.exit)
+          if (resolved._tag === "Success") return resolved.value
+        }
+      }
+
+      // Fall back to the group default.
+      const parsedDefault = parseModel(def)
+      return yield* getModel(parsedDefault.providerID, parsedDefault.modelID)
+    })
+
+    const getSmallModel = Effect.fn("Provider.getSmallModel")(function* (providerID: ProviderID, caller?: Model) {
+      const cfg = yield* config.get()
+
+      // Explicit small_model literal wins (back-compat).
+      if (cfg.small_model) {
+        const parsed = parseModel(cfg.small_model)
+        return yield* getModel(parsed.providerID, parsed.modelID)
+      }
+
+      if (ManagedProvider.enabled() && !cfg.model_groups?.lite) return caller
+
+      // Otherwise route through the `lite` tier: configured lite group
+      // (provider-aware) → else the built-in tier fallback to defaultModel().
+      return yield* resolveModelRef("lite", providerID)
+    })
+
+    const getVisionModel = Effect.fn("Provider.getVisionModel")(function* (caller?: Model, providerID?: ProviderID) {
+      const cfg = yield* config.get()
+      // Explicit vision_model literal wins. getModel raises ModelNotFoundError as
+      // a defect, so a misconfigured vision_model must not propagate — catch it and
+      // fall back to the smart default.
+      if (cfg.vision_model) {
+        const parsed = parseModel(cfg.vision_model)
+        const explicit = yield* getModel(parsed.providerID, parsed.modelID).pipe(
+          Effect.catchDefect(() => Effect.succeed(undefined)),
+        )
+        if (ManagedProvider.enabled()) return explicit?.capabilities.input.image ? explicit : undefined
+        if (explicit && (!providerID || explicit.providerID === providerID)) return explicit
+      }
+      if (ManagedProvider.enabled()) {
+        if (cfg.model_groups?.vision) {
+          const explicit = yield* resolveModelRef("vision", caller?.providerID).pipe(Effect.catchDefect(() => Effect.succeed(undefined)))
+          return explicit?.capabilities.input.image ? explicit : undefined
+        }
+        return caller?.capabilities.input.image ? caller : undefined
+      }
+      // Smart default: in-house preferred, then cheapest vision-capable model.
+      const providers = yield* list()
+      const vision = Object.values(providers)
+        .filter((info) => !providerID || info.id === providerID)
+        .flatMap((info) => Object.values(info.models))
+        .filter((m) => m.capabilities.input.image === true)
+      return sortVisionModels(vision)[0]
+    })
+
+    const getVisionModelWithProvenance = Effect.fn("Provider.getVisionModelWithProvenance")(function* (caller?:Model) {
+      const selection = config.visionSelectionWithProvenance ? yield* config.visionSelectionWithProvenance() : undefined
+      const callerInput = caller ? JSON.stringify([caller.providerID,caller.id,caller.capabilities.input.image]) : "null"
+      // The normal managed no-selection branch does not initialize Provider state.
+      const needsCatalog = !ManagedProvider.enabled() || !!selection?.vision_model || !!selection?.vision_group
+      const snapshot = needsCatalog ? yield* getState() : undefined
+      const lifetime = snapshot && visionProviderLifetimes.get(snapshot)
+      const catalog = () => {
+        if (!snapshot) return ""
+        const providers = Object.entries(snapshot.providers)
+        if (providers.length > 128) return
+        let count=0
+        const rows = providers.sort(([a],[b])=>a.localeCompare(b)).map(([id,p]) => {
+          const models=Object.entries(p.models)
+          count += models.length
+          if (id.length>256 || count>2048 || models.some(([name,m])=>name.length>256 || String(m.providerID).length>256 || String(m.id).length>256)) return
+          return [id,models.sort(([a],[b])=>a.localeCompare(b)).map(([name,m])=>[name,m.providerID,m.id,m.capabilities.input.image])]
+        })
+        if (rows.some(row=>!row)) return
+        const value=JSON.stringify(rows)
+        return Buffer.byteLength(value,"utf8")<=131072 ? value : undefined
+      }
+      const before = catalog()
+      const model = yield* getVisionModel(caller)
+      const current = () => {
+        try { return !!selection?.current() && (!needsCatalog || !!lifetime?.alive) && before !== undefined && catalog() === before &&
+          (caller ? JSON.stringify([caller.providerID,caller.id,caller.capabilities.input.image]) : "null") === callerInput } catch { return false }
+      }
+      return {model,current}
+    })
+
+    // Stable default chain. Product-priority substring ranking (`sort`) is for
+    // menus/listings, not for choosing a working default — Desktop's empty
+    // recent + router leftovers made that path pick unavailable models.
+    // Last-resort picks require a usable chat model (toolcall + text input +
+    // non-zero context): live openai id-asc starts at chatgpt-image-latest
+    // (tool_call false, context 0), which titles/agents cannot call.
+    const defaultModel = Effect.fn("Provider.defaultModel")(function* () {
+      const cfg = yield* config.get()
+      const s = yield* getState()
+
+      if (cfg.model) {
+        const parsed = parseModel(cfg.model)
+        const provider = s.providers[parsed.providerID]
+        if (provider?.models[parsed.modelID]) return parsed
+        if (!warnedStaleDefaultModels.has(cfg.model)) {
+          warnedStaleDefaultModels.add(cfg.model)
+          log.warn("configured default model missing from registry, falling through", { model: cfg.model })
+        }
+      }
+
+      const recent = yield* fs.readJson(path.join(Global.Path.state, "model.json")).pipe(
+        Effect.map((x): { providerID: ProviderID; modelID: ModelID }[] => {
+          if (!isRecord(x) || !Array.isArray(x.recent)) return []
+          return x.recent.flatMap((item) => {
+            if (!isRecord(item)) return []
+            if (typeof item.providerID !== "string") return []
+            if (typeof item.modelID !== "string") return []
+            return [{ providerID: ProviderID.make(item.providerID), modelID: ModelID.make(item.modelID) }]
+          })
+        }),
+        Effect.catch(() => Effect.succeed([] as { providerID: ProviderID; modelID: ModelID }[])),
+      )
+      for (const entry of recent) {
+        const provider = s.providers[entry.providerID]
+        if (!provider) continue
+        if (!provider.models[entry.modelID]) continue
+        return { providerID: entry.providerID, modelID: entry.modelID }
+      }
+
+      const allowed = Object.values(s.providers).filter((p) => !cfg.provider || Object.keys(cfg.provider).includes(p.id))
+      if (!allowed.length) throw new Error("no providers found")
+      for (const provider of allowed) {
+        const model = sortBy(
+          Object.values(provider.models).filter(
+            (m) => m.capabilities.toolcall && m.capabilities.input.text && (m.limit?.context ?? 1) > 0,
+          ),
+          [(m) => m.id, "asc"],
+        )[0]
+        if (model) return { providerID: provider.id, modelID: model.id }
+      }
+      throw new Error("no models found")
+    })
+
+    return Service.of({
+      prepareRefresh,
+      list,
+      getProvider,
+      getModel,
+      getLanguage,
+      getSearchLanguage,
+      getEmbedding,
+      getImage,
+      getSpeech,
+      getTranscription,
+      closest,
+      getSmallModel,
+      getVisionModel,
+      getVisionModelWithProvenance,
+      defaultModel,
+      resolveModelRef,
+    })
+  }),
+)
+
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(AppFileSystem.defaultLayer),
+    Layer.provide(Env.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(Auth.defaultLayer),
+    Layer.provide(Plugin.defaultLayer),
+  ),
+)
+
+const priority = ["gpt-5", "claude-sonnet-4", "big-pickle", "gemini-3-pro"]
+export function sort<T extends { id: string }>(models: T[]) {
+  return sortBy(
+    models,
+    [(model) => priority.findIndex((filter) => model.id.includes(filter)), "desc"],
+    [(model) => (model.id.includes("latest") ? 0 : 1), "asc"],
+    [(model) => model.id, "desc"],
+  )
+}
+
+export function parseModel(model: string) {
+  const [providerID, ...rest] = model.split("/")
+  return {
+    providerID: ProviderID.make(providerID),
+    modelID: ModelID.make(rest.join("/")),
+  }
+}
+
+export const ModelNotFoundError = NamedError.create(
+  "ProviderModelNotFoundError",
+  z.object({
+    providerID: ProviderID.zod,
+    modelID: ModelID.zod,
+    suggestions: z.array(z.string()).optional(),
+  }),
+)
+
+export const ModelGroupNotFoundError = NamedError.create(
+  "ProviderModelGroupNotFoundError",
+  z.object({
+    group: z.string(),
+    suggestions: z.array(z.string()).optional(),
+  }),
+)
+
+export const InitError = NamedError.create(
+  "ProviderInitError",
+  z.object({
+    providerID: ProviderID.zod,
+  }),
+)

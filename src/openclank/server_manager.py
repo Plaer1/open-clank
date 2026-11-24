@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -21,8 +22,107 @@ from core.atomic_io import atomic_write_json
 from src.openclank.client_profiles import ClientProfile, ProfileError, default_config_dir
 
 
+# The frozen Windows server verifies the full payload and engine before binding.
+WINDOWS_PACKAGED_START_SECONDS = 480
+_DEFAULT_START_SECONDS = WINDOWS_PACKAGED_START_SECONDS if sys.platform == "win32" and getattr(sys, "frozen", False) else 60
+
+
 class ServerManagerError(RuntimeError):
     pass
+
+
+_LIFETIME_GUARD_ISSUER = object()
+
+
+def require_local_profile_path(path: str | Path) -> None:
+    """Conservative Linux local-filesystem profile; unknown mounts are denied."""
+    if not sys.platform.startswith('linux'):
+        raise ServerManagerError('single-host profile requires a supported local OS lock')
+    target = Path(path).resolve(strict=True)
+    try:
+        mounts = []
+        for line in Path('/proc/self/mountinfo').read_text().splitlines():
+            before, after = line.split(' - ',1)
+            fields = before.split()
+            mount = Path(fields[4].replace('\\040',' ').replace('\\011','\t').replace('\\134','\\'))
+            if target == mount or mount in target.parents:
+                mounts.append((len(mount.parts),after.split()[0]))
+        if not mounts or max(mounts)[1] not in {'ext4','xfs','btrfs','tmpfs','overlay','zfs'}:
+            raise ServerManagerError('single-host profile requires a supported local filesystem')
+    except (OSError, ValueError, IndexError) as exc:
+        raise ServerManagerError('local filesystem identity unavailable') from exc
+
+
+class ServerLifetimeGuard:
+    """Cooperating host lifetime lock; it does not itself verify S05 coverage."""
+    def __init__(self, fd: int, path: Path, exclusive: bool, issuer):
+        if issuer is not _LIFETIME_GUARD_ISSUER:
+            raise ServerManagerError('server lifetime guard is host-issued')
+        self._fd, self.path, self.exclusive, self.pid = fd, path, exclusive, os.getpid()
+
+    def assert_held(self) -> None:
+        if self._fd is None or self.pid != os.getpid():
+            raise ServerManagerError('server lifetime guard unavailable')
+        try:
+            held, current = os.fstat(self._fd), os.stat(self.path, follow_symlinks=False)
+            if ((held.st_dev,held.st_ino) != (current.st_dev,current.st_ino) or not stat.S_ISREG(held.st_mode)
+                or held.st_nlink != 1 or held.st_uid != os.geteuid() or stat.S_IMODE(held.st_mode) & 0o077):
+                raise ServerManagerError('server lifetime guard changed')
+        except OSError as exc:
+            raise ServerManagerError('server lifetime guard unavailable') from exc
+
+    def close(self) -> None:
+        if self._fd is not None:
+            fd, self._fd = self._fd, None
+            os.close(fd)
+
+
+def acquire_server_lifetime_guard(data_dir: str, *, exclusive: bool) -> ServerLifetimeGuard | None:
+    """Shared for ordinary cooperating hosts; exclusive for the S05 profile."""
+    if exclusive:
+        require_local_profile_path(data_dir)
+    path = Path(data_dir).resolve() / '.openclank-server-lifetime.lock'
+    return _acquire_lifetime_guard(path, exclusive=exclusive)
+
+
+def database_lifetime_guard_path(database_path: str | Path) -> Path:
+    path = Path(database_path).resolve(strict=False)
+    return path.parent / ('.' + path.name + '.openclank-lifetime.lock')
+
+
+def acquire_database_lifetime_guard(database_path: str | Path, *, exclusive: bool) -> ServerLifetimeGuard | None:
+    """Lock by canonical DB path even when ordinary startup precedes creation."""
+    path = Path(database_path).resolve(strict=exclusive)
+    if exclusive:
+        require_local_profile_path(path)
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ServerManagerError('single-host profile requires an unlinked local DB')
+    return _acquire_lifetime_guard(database_lifetime_guard_path(path),exclusive=exclusive)
+
+
+def _acquire_lifetime_guard(path: Path, *, exclusive: bool) -> ServerLifetimeGuard | None:
+    try:
+        import fcntl
+    except ImportError:
+        if exclusive:
+            raise ServerManagerError('single-host profile requires a supported local OS lock')
+        return None
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) & 0o077):
+                raise ServerManagerError('server lifetime lock file unavailable')
+            fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BaseException:
+            os.close(fd)
+            raise
+    except OSError as exc:
+        raise ServerManagerError('another incompatible Open Clank host owns the lifetime guard') from exc
+    return ServerLifetimeGuard(fd, path, exclusive, _LIFETIME_GUARD_ISSUER)
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +411,7 @@ class LocalServerManager:
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
 
-    def start(self, profile: ClientProfile, *, wait_seconds: float = 60.0, allow_auth_setup: bool = False) -> ServerStatus:
+    def start(self, profile: ClientProfile, *, wait_seconds: float = _DEFAULT_START_SECONDS, allow_auth_setup: bool = False) -> ServerStatus:
         host, port = self._address(profile)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + max(1.0, wait_seconds)

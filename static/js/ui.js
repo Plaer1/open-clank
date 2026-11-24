@@ -554,7 +554,8 @@ export function getAutoScroll() {
  * Auto-resize textarea based on content
  */
 export function autoResize(textarea) {
-  const lineHeight = parseInt(getComputedStyle(textarea).lineHeight);
+  const style = getComputedStyle(textarea);
+  const lineHeight = parseFloat(style.lineHeight) || 20;
   const isMobile = window.innerWidth <= 768;
   const maxHeight = isMobile ? 150 : lineHeight * 8;
 
@@ -562,7 +563,13 @@ export function autoResize(textarea) {
   let clone = textarea._resizeClone;
   if (!clone) {
     clone = textarea.cloneNode(false);
-    clone.style.cssText = getComputedStyle(textarea).cssText;
+    clone.removeAttribute('id');
+    clone.removeAttribute('name');
+    clone.removeAttribute('autofocus');
+    clone.removeAttribute('required');
+    clone.tabIndex = -1;
+    clone.setAttribute('aria-hidden','true');
+    clone.style.cssText = 'min-height:0;max-height:none;min-width:0;resize:none;';
     clone.style.position = 'absolute';
     clone.style.visibility = 'hidden';
     clone.style.height = '0';
@@ -573,12 +580,13 @@ export function autoResize(textarea) {
     textarea.parentNode.appendChild(clone);
     textarea._resizeClone = clone;
   }
+  for (const property of ['font','lineHeight','letterSpacing','padding','border','boxSizing','whiteSpace','overflowWrap','wordBreak']) clone.style[property] = style[property];
   clone.style.width = textarea.offsetWidth + 'px';
   clone.value = textarea.value;
   clone.style.height = '0';
   const newHeight = Math.min(Math.max(clone.scrollHeight, lineHeight), maxHeight);
   textarea.style.height = newHeight + 'px';
-  textarea.style.overflow = newHeight >= maxHeight ? 'auto' : 'hidden';
+  textarea.style.overflow = clone.scrollHeight > textarea.clientHeight ? 'auto' : 'hidden';
 }
 
 /**

@@ -159,7 +159,7 @@ async def test_rejected_mimo_model_aborts_before_prompt(monkeypatch, tmp_path):
     from src.openclank.acp_bridge import ACPBridge
 
     client = _RejectingClient()
-    monkeypatch.setenv("ODYSSEUS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPEN_CLANK_DATA_DIR", str(tmp_path))
     bridge = ACPBridge(client, cwd=str(tmp_path))
 
     async def ensure(*_args, **_kwargs):
@@ -209,18 +209,6 @@ def test_turn_envelope_maps_public_interaction_mode_to_internal_provider_mode(mo
         )
         assert envelope["mode"] == public_mode
         assert envelope["provider_mode"] == provider_mode
-
-
-def test_public_mode_source_does_not_render_or_dispatch_provider_native_modes():
-    from pathlib import Path
-
-    slash = Path("static/js/slashCommands.js").read_text(encoding="utf-8")
-    autocomplete = Path("static/js/slashAutocomplete.js").read_text(encoding="utf-8")
-    index = Path("static/index.html").read_text(encoding="utf-8")
-    assert "id=\"mimo-mode-select\"" not in index
-    assert "availableModes" not in autocomplete
-    assert "_setMimoConfig('mode'" not in slash
-    assert "/build" not in autocomplete
 
 
 def test_settings_accept_only_live_normalized_route_capabilities(monkeypatch):
@@ -695,11 +683,11 @@ def test_mimo_child_environment_strips_provider_credentials(monkeypatch, tmp_pat
     assert "KUBECONFIG" not in child_env
     assert "SAFE_SETTING" not in child_env
     assert child_env["PATH"] == "/safe/bin"
-    assert child_env["MIMOCODE_DISABLE_PROVIDER_ENV"] == "1"
-    assert child_env["MIMOCODE_DISABLE_PROJECT_CONFIG"] == "1"
-    assert child_env["MIMOCODE_DISABLE_EXTERNAL_SKILLS"] == "1"
-    assert child_env["MIMOCODE_DISABLE_REMOTE_SKILLS"] == "1"
-    assert child_env["MIMOCODE_DISABLE_CLAUDE_CODE"] == "1"
+    assert child_env["OPENCLANK_DISABLE_PROVIDER_ENV"] == "1"
+    assert child_env["OPENCLANK_DISABLE_PROJECT_CONFIG"] == "1"
+    assert child_env["OPENCLANK_DISABLE_EXTERNAL_SKILLS"] == "1"
+    assert child_env["OPENCLANK_DISABLE_REMOTE_SKILLS"] == "1"
+    assert child_env["OPENCLANK_DISABLE_CLAUDE_CODE"] == "1"
     assert child_env["FM_WORKSPACE_ID"] == "goal-workspace"
     for name in (
         "FM_EMBED_API_BASE",
@@ -1182,7 +1170,7 @@ async def test_handshake_modes_config_and_commands_persist_owner_scoped(monkeypa
     finally:
         db.close()
 
-    monkeypatch.setenv("ODYSSEUS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPEN_CLANK_DATA_DIR", str(tmp_path))
     bridge = ACPBridge(_HandshakeClient(), str(tmp_path), owner="alice")
     try:
         mimo_id = await bridge.ensure_session(

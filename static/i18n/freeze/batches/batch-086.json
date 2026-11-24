@@ -1,0 +1,35 @@
+{
+  "id": "batch-086",
+  "group": "docs.openclank-docs-buddy",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 622,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-buddy.title",
+      "source": "Buddy",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-buddy.body",
+      "source": "# Buddy\n\nShow **Buddy** from the main sidebar. Click the eye, choose **Explain this to me** and select a highlighted control or the eye itself. **Escape** cancels selection.\n\nBuddy sends a question in a new chat using the Instruction Manual. Use a regular chat with a working model and finish your draft and attachments first. To read the guide without a model, open **Tools → Instruction Manual**.\n\nChange Buddy’s **Look** or turn off **Show buddy** under **Settings → Appearance → Buddy**.\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

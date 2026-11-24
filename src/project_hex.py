@@ -89,6 +89,8 @@ def ensure_policy_schema(db_path: str) -> None:
                 if not set(columns).issubset(found):
                     raise HexResolutionError("Hex policy store does not match the current native schema")
             return
+        if conn.execute("PRAGMA user_version").fetchone()[0] in (17, 18):
+            raise HexResolutionError("Hex policy schema requires stopped-writer preparation")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS fm_v2_projects (
@@ -2274,6 +2276,7 @@ def publish_contract_update(
     spell_id: Optional[str] = None,
     spell_revision: Optional[int] = None,
     general_hex_source: Optional[Mapping[str, Any]] = None,
+    operation_id: Optional[str] = None,
 ) -> dict[str, Any]:
     owner = str(owner or "").strip()
     project_id = str(project_id or "").strip()
@@ -2302,7 +2305,9 @@ def publish_contract_update(
     if old_bytes is None:
         raise HexResolutionError("project contract disappeared")
     now = datetime.now(timezone.utc).isoformat()
-    transition_id = "transition_" + uuid.uuid4().hex
+    if operation_id is not None and (not isinstance(operation_id, str) or not re.fullmatch(r"transition_[0-9a-f]{32}", operation_id)):
+        raise HexResolutionError("invalid policy transition identity")
+    transition_id = operation_id or "transition_" + uuid.uuid4().hex
     payload_hash = hashlib.sha256(
         json.dumps(
             {
@@ -2319,6 +2324,8 @@ def publish_contract_update(
     ).hexdigest()
     with sqlite3.connect(db_path, timeout=30) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        if _latest_transition_row(conn, owner=owner, operation_id=transition_id) is not None:
+            raise HexResolutionError("policy transition identity already exists")
         projection = conn.execute(
             "SELECT contract_hash,state FROM fm_v2_policy_projections WHERE owner_id=? AND project_id=?",
             (owner, project_id),
@@ -3195,6 +3202,39 @@ def global_policy_context(
     }
 
 
+def project_policy_recovery_snapshot(*, owner: str, workspace: str, db_path: str,
+                                     candidates: Mapping[str, Optional[bytes]]) -> Optional[dict[str, Any]]:
+    """Optional data-only classification, never a policy or actor grant."""
+    root = _canonical_project_root(workspace)
+    project = require_project_mutation_admission(owner=owner, workspace=str(root), db_path=db_path)
+    info = root.stat()
+    root_identity = f"{info.st_dev}:{info.st_ino}"
+    rows = sorted([[_candidate_relative(root,path), None if data is None else hashlib.sha256(data).hexdigest()]
+                   for path,data in candidates.items()], key=lambda row: row[0].encode('utf-8'))
+    if len(rows) != len({row[0] for row in rows}): return None
+    digest = lambda value: hashlib.sha256(json.dumps(value,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
+    result = {'version':1,'classification':'unregistered','rootSHA256':hashlib.sha256(str(root).encode()).hexdigest(),
+        'rootIdentity':root_identity,'projectID':None,'locatorRevision':None,'sourceRevision':None,'activationRevision':None,
+        'contractSHA256':None,'engine':None,'manifestSHA256':None,'stage':'check','candidateSHA256':digest(rows)}
+    if not project: return result
+    with sqlite3.connect(db_path,timeout=30) as conn:
+        row=conn.execute('SELECT state,source_revision,activation_revision,contract_hash,engine_version FROM fm_v2_policy_projections WHERE owner_id=? AND project_id=?',(owner,project['project_id'])).fetchone()
+    if project.get('root_identity')!=root_identity: return None
+    result.update(projectID=project['project_id'],locatorRevision=project.get('locator_revision'))
+    if not row or row[0] in ('never_activated','deactivated'):
+        result.update(classification='inactive',sourceRevision=row[1] if row else None,activationRevision=row[2] if row else None)
+        return result
+    if row[0]!='active': return None
+    resolution=require_hex_activation(root,owner=owner,project_id=project['project_id'],db_path=db_path,workspace_root=root)
+    if resolution.engine_version not in (ENGINE_VERSION,ENGINE_VERSION_V2): return None
+    manifest=policy_executable_manifest(resolution)
+    if any(manifest.get(k) for k in ('files','imports','unresolved_modules','commands','invocations','toolchain')): return None
+    require_executable_trust(resolution,owner=owner,project_id=project['project_id'],db_path=db_path)
+    result.update(classification='active_builtins_only',sourceRevision=row[1],activationRevision=row[2],
+        contractSHA256=resolution.contract_hash,engine=resolution.engine_version,manifestSHA256=manifest['manifest_hash'])
+    return result
+
+
 def validate_registered_project_candidates(
     *,
     owner: str,
@@ -3438,3 +3478,680 @@ def resolve_hex(target: str | os.PathLike[str], *, workspace_root: str | os.Path
             break
         current = current.parent
     return HexResolution(str(root), None, None, None, "never_activated", ("no project contract found",))
+
+
+def get_evolve_mode(*, owner: str, account_id: str, project_id: str, db_path: str) -> dict:
+    """Return protected account/project mode for an existing registered project."""
+    if not get_project(project_id, owner=owner, db_path=db_path):
+        raise HexResolutionError("project identity not found")
+    from routes.prefs_routes import workspace_hex_mode
+    return workspace_hex_mode(owner, account_id, project_id)
+
+
+def set_evolve_mode(*, owner: str, account_id: str, project_id: str, mode: str, expected_revision: int, current, db_path: str) -> dict:
+    if not get_project(project_id, owner=owner, db_path=db_path):
+        raise HexResolutionError("project identity not found")
+    from routes.prefs_routes import set_workspace_hex_mode
+    return set_workspace_hex_mode(owner, account_id, project_id, mode, expected_revision, current)
+
+
+def preview_evolve_candidate(*, owner: str, account_id: str, project_id: str, expected_mode_revision: int,
+                             expected_contract_hash: str, candidate_text: str, reason: str, trigger: dict, db_path: str) -> dict:
+    """Validate a conservative declarative candidate without publishing it."""
+    import collections
+    import difflib
+    import tempfile
+    from src.hex_contract import load_contract, _RESERVED, _BUILTINS
+    if (type(trigger) is not dict or set(trigger) != {'kind','toolCallID','rootOperationID'} or trigger.get('kind') != 'agent_proposal'
+            or any(not isinstance(trigger.get(k), str) or not trigger[k] or len(trigger[k]) > 256
+                   for k in ('toolCallID','rootOperationID'))):
+        raise HexResolutionError("Admitted agent proposal provenance is required")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000:
+        raise HexResolutionError("A bounded reason is required")
+    if not isinstance(candidate_text, str) or not candidate_text or len(candidate_text.encode('utf-8')) > 262144:
+        raise HexResolutionError("Candidate is unavailable or too large")
+    mode = get_evolve_mode(owner=owner, account_id=account_id, project_id=project_id, db_path=db_path)
+    if mode != {"mode": "evolve", "revision": expected_mode_revision}:
+        raise HexResolutionError("Workspace Evolve mode changed")
+    project = get_project(project_id, owner=owner, db_path=db_path)
+    resolution = require_hex_activation(project['canonical_root'], owner=owner, project_id=project_id,
+                                        db_path=db_path, workspace_root=project['canonical_root'])
+    if resolution.contract_hash != expected_contract_hash:
+        raise HexResolutionError("Project contract changed")
+    path = Path(resolution.contract_path or '')
+    old_bytes = _read_contract_bytes(path)
+    if old_bytes is None or hashlib.sha256(old_bytes).hexdigest() != expected_contract_hash:
+        raise HexResolutionError("Project contract changed")
+    old = _safe_yaml(old_bytes)
+    candidate = _safe_yaml(candidate_text.encode('utf-8'))
+    if 'hexes' not in old or 'hexes' not in candidate or 'henxels' in old or 'henxels' in candidate:
+        raise HexResolutionError("Only canonical Hexes vocabulary is supported")
+    if {k:v for k,v in old.items() if k != 'hexes'} != {k:v for k,v in candidate.items() if k != 'hexes'}:
+        raise HexResolutionError("Settings, imports and contract metadata cannot change in Evolve")
+    if not isinstance(old['hexes'], list) or not isinstance(candidate['hexes'], list):
+        raise HexResolutionError("Invalid rule list")
+    def executable_rules(items):
+        result = []
+        for rule in items:
+            if not isinstance(rule, dict): raise HexResolutionError("Invalid rule")
+            executable = (set(rule) - _RESERVED) - (_BUILTINS - {'run_before_commit', 'run_before_push'})
+            if executable:
+                result.append(json.dumps(rule, sort_keys=True, ensure_ascii=False, separators=(',', ':')))
+        return collections.Counter(result)
+    if executable_rules(old['hexes']) != executable_rules(candidate['hexes']):
+        raise HexResolutionError("Rules containing checks require separate trust")
+    with tempfile.TemporaryDirectory(prefix='openclank-evolve-preview-') as directory:
+        temp = Path(directory) / '.clanker' / 'hexes' / 'contract.yaml'
+        temp.parent.mkdir(parents=True)
+        temp.write_text(candidate_text, encoding='utf-8')
+        parsed = load_contract(temp)
+        if parsed.vocabulary != 'hexes': raise HexResolutionError("Canonical Hexes vocabulary required")
+    old_text = old_bytes.decode('utf-8')
+    diff = ''.join(difflib.unified_diff(old_text.splitlines(keepends=True), candidate_text.splitlines(keepends=True),
+                                        fromfile='current contract', tofile='candidate contract'))
+    return {"project_id": project_id, "mode_revision": mode['revision'], "expected_contract_hash": expected_contract_hash,
+            "candidate_sha256": hashlib.sha256(candidate_text.encode('utf-8')).hexdigest(),
+            "reason": reason.strip(), "trigger_evidence": "agent_proposal_unverified", "diff": diff, "state": "preview_only"}
+
+
+def prepare_evolve_history(*, contract_path: str, agents_path: str, context, action_id: str):
+    """Prepare and round-trip both exact preimages; never use single-file capture."""
+    from src.openclank.history_capture import begin_file_capture
+    paths = [Path(contract_path), Path(agents_path)]
+    if not action_id or paths[0].is_symlink() or not paths[0].is_file():
+        raise HexResolutionError("Exact contract preimage is required")
+    expected = [paths[0].read_bytes(), _evolve_agents_bytes(paths[1])]
+    handle = begin_file_capture(str(paths[0]), operation='evolve-contract', context=context,
+                                action_id=action_id, paths=[str(paths[1])])
+    try:
+        if not handle.available or not isinstance(handle.batch_entries, list) or len(handle.batch_entries) != 2:
+            raise HexResolutionError("Exact two-file Lore batch unavailable")
+        response = handle.client.get_capture_action(action_id)
+        action = response.get('Action') if isinstance(response, dict) else None
+        members = action.get('before_resources') if isinstance(action, dict) else None
+        if not isinstance(members, list) or len(members) != 2:
+            raise HexResolutionError("Lore preimage receipts unavailable")
+        by_id = {m.get('resource_key', {}).get('resource_id'): m for m in members if isinstance(m, dict)}
+        receipts = []
+        for entry, original in zip(handle.batch_entries, expected):
+            member = by_id.get(entry['resource_key']['resource_id'])
+            receipt = member.get('before') if isinstance(member, dict) else None
+            if (not isinstance(receipt, dict) or member.get('resource_key') != entry['resource_key']
+                    or member.get('existence') != ('Absent' if original is None else 'Present')
+                    or member.get('resource_type') != 'File'
+                    or handle.client.read_version(action_id, receipt) != original):
+                raise HexResolutionError("Lore preimage verification failed")
+            receipts.append(receipt)
+        if paths[0].read_bytes() != expected[0] or _evolve_agents_bytes(paths[1]) != expected[1]:
+            raise HexResolutionError("Files changed while preparing Lore")
+        return handle, receipts
+    except BaseException:
+        try: handle.abort()
+        finally: handle.close()
+        raise
+
+
+def render_evolve_digest(*, contract_path: str, candidate_text: str, agents_bytes: bytes) -> bytes:
+    """Render the canonical managed digest while preserving surrounding instructions."""
+    from dataclasses import replace
+    from src.hex_contract import load_contract, render_agent_digest, replace_agent_digest
+    if not isinstance(agents_bytes, bytes) or len(agents_bytes) > MAX_BYTES:
+        raise HexResolutionError("AGENTS preimage unavailable or too large")
+    try:
+        original = agents_bytes.decode('utf-8')
+        with tempfile.TemporaryDirectory(prefix='openclank-evolve-render-') as directory:
+            candidate = Path(directory) / '.clanker' / 'hexes' / 'contract.yaml'
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text(candidate_text, encoding='utf-8')
+            parsed = load_contract(candidate)
+            parsed = replace(parsed, path=Path(contract_path))
+            return replace_agent_digest(original, render_agent_digest(parsed)).encode('utf-8')
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise HexResolutionError("Could not render canonical AGENTS digest") from exc
+
+
+def replace_evolve_digest(*, path: Path, expected_hash: str, payload: bytes) -> str:
+    """Replace a bounded regular AGENTS file only while its captured bytes match."""
+    if not isinstance(payload, bytes) or len(payload) > MAX_BYTES:
+        raise HexResolutionError("AGENTS digest exceeds its limit")
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_CLOEXEC', 0))
+    temporary = '.open-clank-agents-' + uuid.uuid4().hex + '.tmp'
+    try:
+        current, mode = _read_contract_at(directory, path.name)
+        if hashlib.sha256(current).hexdigest() != expected_hash:
+            raise HexResolutionError("AGENTS changed before synchronization")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        output = os.open(temporary, flags, 0o600, dir_fd=directory)
+        try:
+            offset = 0
+            while offset < len(payload): offset += os.write(output, payload[offset:])
+            os.fchmod(output, mode)
+            os.fsync(output)
+        finally: os.close(output)
+        current, _ = _read_contract_at(directory, path.name)
+        if hashlib.sha256(current).hexdigest() != expected_hash:
+            raise HexResolutionError("AGENTS changed before synchronization")
+        os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+        actual, _ = _read_contract_at(directory, path.name)
+        observed = hashlib.sha256(actual).hexdigest()
+        if observed != hashlib.sha256(payload).hexdigest():
+            raise HexResolutionError("AGENTS synchronization mismatch")
+        return observed
+    finally:
+        try: os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError: pass
+        os.close(directory)
+
+
+def apply_evolve_candidate(*, owner: str, account_id: str, project_id: str, actor_id: str,
+                           expected_mode_revision: int, expected_policy_revision: int,
+                           expected_contract_hash: str, candidate_text: str, candidate_sha256: str,
+                           reason: str, trigger: dict, history_context, current, db_path: str) -> dict:
+    """Unpublished Host owner for one admitted agent's declarative proposal.
+
+    Caller must supply a trusted managed-agent HistoryContext and currentness
+    witness, never values directly constructed from an external request. Lock
+    order is preference/mode, policy publication, then History completion.
+    """
+    from routes.prefs_routes import PREFERENCE_LOCK, workspace_hex_mode, workspace_hex_operation, set_workspace_hex_operation
+    from src.openclank.history_capture import complete_file_capture
+    if (not callable(current) or not current() or not actor_id or not history_context
+            or getattr(history_context, 'actor_kind', None) != 'agent'
+            or getattr(history_context, 'actor_id', None) != actor_id
+            or getattr(history_context, 'account_id', None) != account_id):
+        raise HexResolutionError("Managed agent authority unavailable")
+    if type(expected_policy_revision) is not int or type(expected_mode_revision) is not int:
+        raise HexResolutionError("Expected generations are required")
+    digest = hashlib.sha256(candidate_text.encode('utf-8')).hexdigest() if isinstance(candidate_text, str) else ''
+    if digest != candidate_sha256: raise HexResolutionError("Candidate identity changed")
+    with PREFERENCE_LOCK:
+        proposal = preview_evolve_candidate(owner=owner, account_id=account_id, project_id=project_id,
+            expected_mode_revision=expected_mode_revision, expected_contract_hash=expected_contract_hash,
+            candidate_text=candidate_text, reason=reason, trigger=trigger, db_path=db_path)
+        project = get_project(project_id, owner=owner, db_path=db_path)
+        if not project or getattr(history_context, 'workspace_id', None) != project['workspace_id']:
+            raise HexResolutionError("Workspace authority changed")
+        projection = inspect_project_policy(project_id, owner=owner, db_path=db_path).get('projection') or {}
+        if projection.get('state') != 'active' or projection.get('source_revision') != expected_policy_revision:
+            raise HexResolutionError("Policy generation changed")
+        previous = workspace_hex_operation(owner, account_id, project_id)
+        if previous and previous.get('state') not in {'complete', 'rolled_back', 'aborted'}:
+            raise HexResolutionError("Previous Evolve operation needs reconciliation")
+        old_id = (previous or {}).get('operation_id')
+        root = Path(project['canonical_root'])
+        resolution = require_hex_activation(root, owner=owner, project_id=project_id, db_path=db_path, workspace_root=root)
+        contract = Path(resolution.contract_path or '')
+        agents = root / 'AGENTS.md'
+        if not current() or workspace_hex_mode(owner, account_id, project_id) != {'mode':'evolve','revision':expected_mode_revision}:
+            raise HexResolutionError("Credential or mode changed")
+        agents_before = _evolve_agents_bytes(agents)
+        agents_hash = _evolve_optional_hash(agents_before)
+        agents_after = render_evolve_digest(contract_path=str(contract), candidate_text=candidate_text, agents_bytes=agents_before or b'')
+        installed_agents_hash = hashlib.sha256(agents_after).hexdigest()
+        operation_id = 'evolve_' + uuid.uuid4().hex
+        action_id = 'evolve-history-' + uuid.uuid4().hex
+        transition_id = 'transition_' + uuid.uuid4().hex
+        handle, receipts = prepare_evolve_history(contract_path=str(contract), agents_path=str(agents), context=history_context, action_id=action_id)
+        operation = {'operation_id':operation_id, 'state':'prepared', 'action_id':action_id, 'before_receipts':receipts,
+                     'resource_ids':[entry['resource_key']['resource_id'] for entry in handle.batch_entries],
+                     'old_contract_hash':expected_contract_hash, 'old_agents_hash':agents_hash,
+                     'installed_contract_hash':candidate_sha256, 'installed_agents_hash':installed_agents_hash,
+                     'mode_revision':expected_mode_revision, 'old_policy_revision':expected_policy_revision,
+                     'transition_id':transition_id,
+                     'reason':proposal['reason'], 'trigger':dict(trigger), 'actor_id':actor_id}
+        attempted = False
+        try:
+            set_workspace_hex_operation(owner, account_id, project_id, mode_revision=expected_mode_revision,
+                expected_operation_id=old_id, operation=operation, current=current)
+            if not current() or workspace_hex_mode(owner, account_id, project_id) != {'mode':'evolve','revision':expected_mode_revision}:
+                raise HexResolutionError("Credential or mode changed")
+            if _evolve_optional_hash(_evolve_agents_bytes(agents)) != agents_hash:
+                raise HexResolutionError("AGENTS changed after capture")
+            attempted = True
+            result = publish_contract_update(owner=owner, project_id=project_id, expected_contract_hash=expected_contract_hash,
+                                             candidate_text=candidate_text, db_path=db_path, actor_id=actor_id,
+                                             operation_id=transition_id)
+            operation.update(state='contract_published', transition_id=result['transition_id'])
+            set_workspace_hex_operation(owner, account_id, project_id, mode_revision=expected_mode_revision,
+                expected_operation_id=operation_id, operation=operation, current=current)
+            if not current(): raise HexResolutionError("Credential changed after contract publication")
+            if agents_hash is None:
+                create_evolve_digest(path=agents, payload=agents_after)
+            else:
+                replace_evolve_digest(path=agents, expected_hash=agents_hash, payload=agents_after)
+            after = inspect_project_policy(project_id, owner=owner, db_path=db_path).get('projection') or {}
+            if (after.get('state') != 'active' or after.get('contract_hash') != candidate_sha256
+                    or after.get('source_revision') != expected_policy_revision + 1):
+                raise HexResolutionError("Published policy generation changed")
+            history = complete_file_capture(handle, str(contract))
+            if history.get('history_status') != 'complete':
+                raise HexResolutionError("Lore completion needs reconciliation")
+            operation.update(state='complete', installed_policy_revision=after['source_revision'])
+            set_workspace_hex_operation(owner, account_id, project_id, mode_revision=expected_mode_revision,
+                expected_operation_id=operation_id, operation=operation, current=current)
+            return {'state':'complete','operation_id':operation_id,'transition_id':result['transition_id'],
+                    'contract_hash':candidate_sha256,'policy_revision':after['source_revision'],
+                    'mode_revision':expected_mode_revision,'history_action_id':action_id,
+                    'trigger_evidence':'agent_proposal_unverified'}
+        except BaseException as exc:
+            if not attempted:
+                handle.abort(); handle.close()
+                raise
+            try:
+                operation.update(state='incomplete')
+                set_workspace_hex_operation(owner, account_id, project_id, mode_revision=expected_mode_revision,
+                    expected_operation_id=operation_id, operation=operation, current=current)
+            except Exception: pass
+            try: complete_file_capture(handle, str(contract))
+            except Exception: handle.close()
+            return {'state':'incomplete','operation_id':operation_id,'history_action_id':action_id,
+                    'transition_id':operation.get('transition_id'), 'reason':str(exc)}
+
+
+def rollback_evolve_candidate(*, owner: str, account_id: str, project_id: str, actor_id: str,
+                              operation_id: str, history_context, current, db_path: str) -> dict:
+    """Roll back the current completed Evolve operation using its exact Lore versions."""
+    from routes.prefs_routes import PREFERENCE_LOCK, workspace_hex_mode, workspace_hex_operation, set_workspace_hex_operation
+    from src.openclank.history_capture import complete_file_capture
+    if (not callable(current) or not current() or not history_context
+            or getattr(history_context, 'actor_kind', None) not in {'agent','human'}
+            or getattr(history_context, 'actor_id', None) != actor_id
+            or getattr(history_context, 'account_id', None) != account_id):
+        raise HexResolutionError("Managed agent authority unavailable")
+    with PREFERENCE_LOCK:
+        op = workspace_hex_operation(owner, account_id, project_id)
+        if (not op or op.get('state') != 'complete' or op.get('operation_id') != operation_id
+                or (history_context.actor_kind == 'agent' and op.get('actor_id') != actor_id) or workspace_hex_mode(owner, account_id, project_id) !=
+                    {'mode':'evolve', 'revision':op.get('mode_revision')}):
+            raise HexResolutionError("Evolve rollback is stale or unavailable")
+        project = get_project(project_id, owner=owner, db_path=db_path)
+        if not project or getattr(history_context, 'workspace_id', None) != project['workspace_id']:
+            raise HexResolutionError("Workspace authority changed")
+        projection = inspect_project_policy(project_id, owner=owner, db_path=db_path).get('projection') or {}
+        if (projection.get('state') != 'active' or projection.get('contract_hash') != op.get('installed_contract_hash')
+                or projection.get('source_revision') != op.get('installed_policy_revision')):
+            raise HexResolutionError("Policy changed after Evolve operation")
+        root = Path(project['canonical_root'])
+        resolution = require_hex_activation(root, owner=owner, project_id=project_id, db_path=db_path, workspace_root=root)
+        contract, agents = Path(resolution.contract_path or ''), root / 'AGENTS.md'
+        if (agents.is_symlink() or not agents.is_file() or
+                hashlib.sha256(agents.read_bytes()).hexdigest() != op.get('installed_agents_hash')):
+            raise HexResolutionError("AGENTS changed after Evolve operation")
+        rollback_action = 'evolve-rollback-' + uuid.uuid4().hex
+        handle, _ = prepare_evolve_history(contract_path=str(contract), agents_path=str(agents),
+                                           context=history_context, action_id=rollback_action)
+        attempted = False
+        try:
+            old_contract, old_agents = _read_evolve_originals(handle.client, op, account_id=account_id, actor_id=actor_id, actor_kind=history_context.actor_kind)
+            if (not isinstance(old_contract, bytes) or (old_agents is not None and not isinstance(old_agents, bytes))
+                    or hashlib.sha256(old_contract).hexdigest() != op.get('old_contract_hash')
+                    or _evolve_optional_hash(old_agents) != op.get('old_agents_hash')):
+                raise HexResolutionError("Original Lore evidence mismatched")
+            if not current(): raise HexResolutionError("Credential changed")
+            rollback_transition = 'transition_' + uuid.uuid4().hex
+            op = dict(op, state='rollback_prepared', rollback_action_id=rollback_action, rollback_transition_id=rollback_transition, rollback_actor_id=actor_id, rollback_actor_kind=history_context.actor_kind)
+            set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                expected_operation_id=operation_id, operation=op, current=current)
+            attempted = True
+            result = publish_contract_update(owner=owner, project_id=project_id,
+                expected_contract_hash=op['installed_contract_hash'], candidate_text=old_contract.decode('utf-8'),
+                db_path=db_path, actor_id=actor_id, operation_id=rollback_transition)
+            if not current(): raise HexResolutionError("Credential changed after rollback publication")
+            if old_agents is None:
+                remove_evolve_created_digest(path=agents, expected_hash=op['installed_agents_hash'])
+            else:
+                replace_evolve_digest(path=agents, expected_hash=op['installed_agents_hash'], payload=old_agents)
+            after = inspect_project_policy(project_id, owner=owner, db_path=db_path).get('projection') or {}
+            if (after.get('state') != 'active' or after.get('contract_hash') != op['old_contract_hash']
+                    or after.get('source_revision') != op['installed_policy_revision'] + 1):
+                raise HexResolutionError("Rollback policy generation changed")
+            history = complete_file_capture(handle, str(contract))
+            if history.get('history_status') != 'complete': raise HexResolutionError("Rollback Lore completion needs reconciliation")
+            op.update(state='rolled_back', rollback_transition_id=result['transition_id'])
+            set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                expected_operation_id=operation_id, operation=op, current=current)
+            return {'state':'rolled_back', 'operation_id':operation_id, 'transition_id':result['transition_id'],
+                    'contract_hash':op['old_contract_hash'], 'policy_revision':after['source_revision'],
+                    'history_action_id':rollback_action}
+        except BaseException as exc:
+            if not attempted:
+                handle.abort(); handle.close()
+                raise
+            try:
+                op.update(state='rollback_incomplete')
+                set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                    expected_operation_id=operation_id, operation=op, current=current)
+            except Exception: pass
+            try: complete_file_capture(handle, str(contract))
+            except Exception: handle.close()
+            return {'state':'incomplete', 'operation_id':operation_id, 'history_action_id':rollback_action,
+                    'reason':str(exc)}
+
+
+def reconcile_evolve_candidate(*, owner: str, account_id: str, project_id: str, actor_id: str,
+                               operation_id: str, history_context, current, db_path: str) -> dict:
+    """Finish an incomplete apply only while its exact installed generation remains current."""
+    from routes.prefs_routes import PREFERENCE_LOCK, workspace_hex_mode, workspace_hex_operation, set_workspace_hex_operation
+    from src.openclank.history_capture import complete_file_capture
+    if (not callable(current) or not current() or not history_context
+            or getattr(history_context, 'actor_kind', None) != 'agent'
+            or getattr(history_context, 'actor_id', None) != actor_id
+            or getattr(history_context, 'account_id', None) != account_id):
+        raise HexResolutionError("Managed agent authority unavailable")
+    with PREFERENCE_LOCK:
+        op = workspace_hex_operation(owner, account_id, project_id)
+        if (not op or op.get('operation_id') != operation_id or op.get('state') not in {'prepared','incomplete','contract_published','recovering'}
+                or op.get('actor_id') != actor_id or workspace_hex_mode(owner, account_id, project_id) !=
+                    {'mode':'evolve','revision':op.get('mode_revision')}):
+            raise HexResolutionError("Evolve recovery is stale or unavailable")
+        project = get_project(project_id, owner=owner, db_path=db_path)
+        if not project or getattr(history_context, 'workspace_id', None) != project['workspace_id']:
+            raise HexResolutionError("Workspace authority changed")
+        recover_policy_transitions(owner=owner, project_id=project_id, db_path=db_path)
+        projection = inspect_project_policy(project_id, owner=owner, db_path=db_path).get('projection') or {}
+        if (projection.get('state') == 'active' and projection.get('contract_hash') == op.get('old_contract_hash')
+                and projection.get('source_revision') == op.get('old_policy_revision')):
+            with sqlite3.connect(db_path, timeout=30) as conn:
+                conn.row_factory = sqlite3.Row
+                prior_transition = _latest_transition_row(conn, owner=owner, operation_id=op.get('transition_id'))
+            if prior_transition and prior_transition['phase'] != 'rolled_back':
+                raise HexResolutionError("Unpublished Evolve transition remains unresolved")
+            root = Path(project['canonical_root'])
+            resolution = require_hex_activation(root, owner=owner, project_id=project_id, db_path=db_path, workspace_root=root)
+            contract, agents = Path(resolution.contract_path or ''), root / 'AGENTS.md'
+            if _evolve_optional_hash(_evolve_agents_bytes(agents)) != op.get('old_agents_hash'):
+                raise HexResolutionError("AGENTS changed during Evolve recovery")
+            action_id = 'evolve-abort-check-' + uuid.uuid4().hex
+            handle, _ = prepare_evolve_history(contract_path=str(contract), agents_path=str(agents), context=history_context, action_id=action_id)
+            try:
+                response = handle.client.get_capture_action(op['action_id'])
+                action = response.get('Action') if isinstance(response, dict) else None
+                members = action.get('before_resources') if isinstance(action, dict) else None
+                receipts = op.get('before_receipts')
+                if (not isinstance(action, dict) or action.get('action_id') != op['action_id']
+                        or action.get('actor_account_id') != account_id or action.get('actor_id') != actor_id
+                        or not isinstance(members, list) or len(members) != 2 or not isinstance(receipts, list) or len(receipts) != 2
+                        or any(not isinstance(r, dict) or not any(isinstance(m, dict) and m.get('before') == r for m in members) for r in receipts)):
+                    raise HexResolutionError("Original Lore evidence unavailable")
+                original_contract, original_agents = [handle.client.read_version(op['action_id'], r) for r in receipts]
+                if (not isinstance(original_contract, bytes) or hashlib.sha256(original_contract).hexdigest() != op['old_contract_hash']
+                        or _evolve_optional_hash(original_agents) != op.get('old_agents_hash')
+                        or contract.read_bytes() != original_contract or _evolve_agents_bytes(agents) != original_agents
+                        or not current()):
+                    raise HexResolutionError("Original Evolve state changed")
+                op = dict(op, state='aborted')
+                set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                    expected_operation_id=operation_id, operation=op, current=current)
+                return {'state':'complete','operation_id':operation_id,'contract_hash':op['old_contract_hash'],
+                        'policy_revision':projection['source_revision'],'history_action_id':op['action_id'],
+                        'reason':'No changes were published; the prepared operation was retired.'}
+            finally:
+                handle.abort(); handle.close()
+        if (projection.get('state') != 'active' or projection.get('contract_hash') != op.get('installed_contract_hash')
+                or projection.get('source_revision') != op.get('old_policy_revision') + 1):
+            raise HexResolutionError("Evolve policy outcome remains incomplete or changed")
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            conn.row_factory = sqlite3.Row
+            transition = _latest_transition_row(conn, owner=owner, operation_id=op.get('transition_id'))
+        if (not transition or transition['phase'] != 'committed' or transition['project_id'] != project_id
+                or transition['actor_id'] != actor_id or transition['old_contract_hash'] != op.get('old_contract_hash')
+                or transition['new_contract_hash'] != op.get('installed_contract_hash')):
+            raise HexResolutionError("Evolve transition identity unavailable")
+        root = Path(project['canonical_root'])
+        resolution = require_hex_activation(root, owner=owner, project_id=project_id, db_path=db_path, workspace_root=root)
+        contract, agents = Path(resolution.contract_path or ''), root / 'AGENTS.md'
+        current_agents_hash = _evolve_optional_hash(_evolve_agents_bytes(agents))
+        if current_agents_hash not in {op.get('old_agents_hash'), op.get('installed_agents_hash')}:
+            raise HexResolutionError("AGENTS changed during Evolve recovery")
+        recovery_action = 'evolve-recovery-' + uuid.uuid4().hex
+        handle, _ = prepare_evolve_history(contract_path=str(contract), agents_path=str(agents),
+                                           context=history_context, action_id=recovery_action)
+        attempted = False
+        try:
+            response = handle.client.get_capture_action(op['action_id'])
+            action = response.get('Action') if isinstance(response, dict) else None
+            members = action.get('before_resources') if isinstance(action, dict) else None
+            receipts = op.get('before_receipts')
+            if (not isinstance(action, dict) or action.get('action_id') != op['action_id']
+                    or action.get('actor_account_id') != account_id or action.get('actor_id') != actor_id
+                    or not isinstance(members, list) or len(members) != 2 or not isinstance(receipts, list) or len(receipts) != 2
+                    or any(not isinstance(r, dict) or not any(isinstance(m, dict) and m.get('before') == r for m in members) for r in receipts)):
+                raise HexResolutionError("Original Lore evidence unavailable")
+            old_contract, old_agents = [handle.client.read_version(op['action_id'], r) for r in receipts]
+            if (not isinstance(old_contract, bytes) or (old_agents is not None and not isinstance(old_agents, bytes))
+                    or hashlib.sha256(old_contract).hexdigest() != op.get('old_contract_hash')
+                    or _evolve_optional_hash(old_agents) != op.get('old_agents_hash')):
+                raise HexResolutionError("Original Lore evidence mismatched")
+            candidate_text = contract.read_text(encoding='utf-8')
+            digest_bytes = render_evolve_digest(contract_path=str(contract), candidate_text=candidate_text, agents_bytes=old_agents or b'')
+            if hashlib.sha256(digest_bytes).hexdigest() != op.get('installed_agents_hash'):
+                raise HexResolutionError("Evolve digest does not match prepared operation")
+            if not current(): raise HexResolutionError("Credential changed")
+            op = dict(op, state='recovering', recovery_action_id=recovery_action)
+            set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                expected_operation_id=operation_id, operation=op, current=current)
+            attempted = True
+            if current_agents_hash == op['old_agents_hash']:
+                if not current(): raise HexResolutionError("Credential changed")
+                if current_agents_hash is None:
+                    create_evolve_digest(path=agents, payload=digest_bytes)
+                else:
+                    replace_evolve_digest(path=agents, expected_hash=current_agents_hash, payload=digest_bytes)
+            history = complete_file_capture(handle, str(contract))
+            if history.get('history_status') != 'complete': raise HexResolutionError("Recovery Lore completion unavailable")
+            op.update(state='complete', installed_policy_revision=projection['source_revision'])
+            set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                expected_operation_id=operation_id, operation=op, current=current)
+            return {'state':'complete','operation_id':operation_id,'transition_id':op['transition_id'],
+                    'contract_hash':op['installed_contract_hash'],'policy_revision':projection['source_revision'],
+                    'history_action_id':recovery_action}
+        except BaseException as exc:
+            if not attempted:
+                handle.abort(); handle.close()
+                raise
+            try:
+                op.update(state='incomplete')
+                set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                    expected_operation_id=operation_id, operation=op, current=current)
+            except Exception: pass
+            try: complete_file_capture(handle, str(contract))
+            except Exception: handle.close()
+            return {'state':'incomplete','operation_id':operation_id,'history_action_id':recovery_action,'reason':str(exc)}
+
+
+def reconcile_evolve_rollback(*, owner: str, account_id: str, project_id: str, actor_id: str,
+                              operation_id: str, history_context, current, db_path: str) -> dict:
+    """Finish an interrupted rollback only for its exact operation and generation."""
+    from routes.prefs_routes import PREFERENCE_LOCK, workspace_hex_mode, workspace_hex_operation, set_workspace_hex_operation
+    from src.openclank.history_capture import complete_file_capture
+    if (not callable(current) or not current() or not history_context
+            or getattr(history_context, 'actor_kind', None) not in {'agent','human'}
+            or getattr(history_context, 'actor_id', None) != actor_id
+            or getattr(history_context, 'account_id', None) != account_id):
+        raise HexResolutionError("Managed agent authority unavailable")
+    with PREFERENCE_LOCK:
+        op = workspace_hex_operation(owner, account_id, project_id)
+        if (not op or op.get('operation_id') != operation_id or op.get('state') not in {'rollback_prepared','rollback_incomplete','rollback_recovering'}
+                or op.get('rollback_actor_id') != actor_id or op.get('rollback_actor_kind') != history_context.actor_kind or workspace_hex_mode(owner, account_id, project_id) !=
+                    {'mode':'evolve','revision':op.get('mode_revision')}):
+            raise HexResolutionError("Rollback recovery is stale or unavailable")
+        project = get_project(project_id, owner=owner, db_path=db_path)
+        if not project or getattr(history_context, 'workspace_id', None) != project['workspace_id']:
+            raise HexResolutionError("Workspace authority changed")
+        recover_policy_transitions(owner=owner, project_id=project_id, db_path=db_path)
+        projection = inspect_project_policy(project_id, owner=owner, db_path=db_path).get('projection') or {}
+        if (projection.get('state') != 'active' or projection.get('contract_hash') != op.get('old_contract_hash')
+                or projection.get('source_revision') != op.get('installed_policy_revision') + 1):
+            raise HexResolutionError("Rollback policy outcome remains incomplete or changed")
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            conn.row_factory = sqlite3.Row
+            transition = _latest_transition_row(conn, owner=owner, operation_id=op.get('rollback_transition_id'))
+        if (not transition or transition['phase'] != 'committed' or transition['project_id'] != project_id
+                or transition['actor_id'] != actor_id or transition['old_contract_hash'] != op.get('installed_contract_hash')
+                or transition['new_contract_hash'] != op.get('old_contract_hash')):
+            raise HexResolutionError("Rollback transition identity unavailable")
+        root = Path(project['canonical_root'])
+        resolution = require_hex_activation(root, owner=owner, project_id=project_id, db_path=db_path, workspace_root=root)
+        contract, agents = Path(resolution.contract_path or ''), root / 'AGENTS.md'
+        current_hash = _evolve_optional_hash(_evolve_agents_bytes(agents))
+        if current_hash not in {op.get('old_agents_hash'), op.get('installed_agents_hash')}:
+            raise HexResolutionError("AGENTS changed during rollback recovery")
+        action_id = 'evolve-rollback-recovery-' + uuid.uuid4().hex
+        handle, _ = prepare_evolve_history(contract_path=str(contract), agents_path=str(agents),
+                                           context=history_context, action_id=action_id)
+        attempted = False
+        try:
+            old_contract, old_agents = _read_evolve_originals(handle.client, op, account_id=account_id, actor_id=actor_id, actor_kind=history_context.actor_kind)
+            if (not isinstance(old_contract, bytes) or (old_agents is not None and not isinstance(old_agents, bytes))
+                    or hashlib.sha256(old_contract).hexdigest() != op.get('old_contract_hash')
+                    or _evolve_optional_hash(old_agents) != op.get('old_agents_hash')):
+                raise HexResolutionError("Original Lore evidence mismatched")
+            if not current(): raise HexResolutionError("Credential changed")
+            op = dict(op, state='rollback_recovering', rollback_recovery_action_id=action_id)
+            set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                expected_operation_id=operation_id, operation=op, current=current)
+            attempted = True
+            if current_hash == op['installed_agents_hash']:
+                if not current(): raise HexResolutionError("Credential changed")
+                if old_agents is None:
+                    remove_evolve_created_digest(path=agents, expected_hash=current_hash)
+                else:
+                    replace_evolve_digest(path=agents, expected_hash=current_hash, payload=old_agents)
+            history = complete_file_capture(handle, str(contract))
+            if history.get('history_status') != 'complete': raise HexResolutionError("Rollback recovery Lore unavailable")
+            op.update(state='rolled_back')
+            set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                expected_operation_id=operation_id, operation=op, current=current)
+            return {'state':'rolled_back','operation_id':operation_id,'transition_id':op['rollback_transition_id'],
+                    'contract_hash':op['old_contract_hash'],'policy_revision':projection['source_revision'],
+                    'history_action_id':action_id}
+        except BaseException as exc:
+            if not attempted:
+                handle.abort(); handle.close()
+                raise
+            try:
+                op.update(state='rollback_incomplete')
+                set_workspace_hex_operation(owner, account_id, project_id, mode_revision=op['mode_revision'],
+                    expected_operation_id=operation_id, operation=op, current=current)
+            except Exception: pass
+            try: complete_file_capture(handle, str(contract))
+            except Exception: handle.close()
+            return {'state':'incomplete','operation_id':operation_id,'history_action_id':action_id,'reason':str(exc)}
+
+
+def _evolve_agents_bytes(path: Path) -> bytes | None:
+    try:
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_CLOEXEC', 0))
+        try:
+            try: return _read_contract_at(directory, path.name)[0]
+            except FileNotFoundError: return None
+        finally: os.close(directory)
+    except OSError as exc:
+        raise HexResolutionError("AGENTS preimage unavailable") from exc
+
+
+def _evolve_optional_hash(value: bytes | None) -> str | None:
+    return None if value is None else hashlib.sha256(value).hexdigest()
+
+
+def create_evolve_digest(*, path: Path, payload: bytes) -> str:
+    if not isinstance(payload, bytes) or len(payload) > MAX_BYTES: raise HexResolutionError("AGENTS digest exceeds its limit")
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_CLOEXEC', 0))
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        output = os.open(path.name, flags, 0o600, dir_fd=directory)
+        try:
+            offset = 0
+            while offset < len(payload): offset += os.write(output, payload[offset:])
+            os.fsync(output)
+        finally: os.close(output)
+        os.fsync(directory)
+        actual, _ = _read_contract_at(directory, path.name)
+        if actual != payload: raise HexResolutionError("AGENTS creation mismatch")
+        return hashlib.sha256(actual).hexdigest()
+    finally: os.close(directory)
+
+
+def remove_evolve_created_digest(*, path: Path, expected_hash: str) -> None:
+    """Quarantine, verify and remove only the exact digest Evolve created."""
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_CLOEXEC', 0))
+    temp = '.open-clank-agents-rollback-' + uuid.uuid4().hex + '.tmp'
+    moved = False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+        placeholder = os.open(temp, flags, 0o600, dir_fd=directory)
+        os.close(placeholder)
+        actual, _ = _read_contract_at(directory, path.name)
+        if hashlib.sha256(actual).hexdigest() != expected_hash:
+            raise HexResolutionError("AGENTS changed before rollback")
+        os.rename(path.name, temp, src_dir_fd=directory, dst_dir_fd=directory)
+        moved = True
+        moved_bytes, _ = _read_contract_at(directory, temp)
+        if hashlib.sha256(moved_bytes).hexdigest() != expected_hash:
+            try:
+                os.link(temp, path.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+                os.unlink(temp, dir_fd=directory); moved = False
+            except FileExistsError: pass
+            raise HexResolutionError("AGENTS changed during rollback; file retained")
+        os.unlink(temp, dir_fd=directory); moved = False
+        os.fsync(directory)
+        try: os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError: return
+        raise HexResolutionError("A new AGENTS file appeared during rollback")
+    finally:
+        if not moved:
+            try: os.unlink(temp, dir_fd=directory)
+            except FileNotFoundError: pass
+        os.close(directory)
+
+
+def _read_evolve_originals(client, op: dict, *, account_id: str, actor_id: str, actor_kind: str):
+    receipts = op.get('before_receipts')
+    if not isinstance(receipts, list) or len(receipts) != 2 or any(not isinstance(r, dict) for r in receipts):
+        raise HexResolutionError("Original Lore evidence unavailable")
+    if actor_kind == 'agent':
+        response = client.get_capture_action(op['action_id'])
+        action = response.get('Action') if isinstance(response, dict) else None
+        members = action.get('before_resources') if isinstance(action, dict) else None
+        if (not isinstance(action, dict) or action.get('action_id') != op['action_id']
+                or action.get('actor_account_id') != account_id or action.get('actor_id') != op.get('actor_id')
+                or not isinstance(members, list) or len(members) != 2
+                or any(not any(isinstance(m, dict) and m.get('before') == r for m in members) for r in receipts)):
+            raise HexResolutionError("Original Lore evidence unavailable")
+        return [client.read_version(op['action_id'], r) for r in receipts]
+    if actor_kind != 'human': raise HexResolutionError("History actor unavailable")
+    resource_ids = op.get('resource_ids')
+    if not isinstance(resource_ids, list) or len(resource_ids) != 2 or any(not isinstance(r, str) or not r for r in resource_ids):
+        raise HexResolutionError("Original History resource identities unavailable")
+    values = []
+    for resource_id, receipt in zip(resource_ids, receipts):
+        version_id, fingerprint = receipt.get('version_id'), receipt.get('fingerprint')
+        if not isinstance(version_id, str) or not isinstance(fingerprint, str):
+            raise HexResolutionError("Original Lore version unavailable")
+        cursor, matches = None, []
+        for _ in range(20):
+            page = client.list_resource_versions(resource_id, cursor=cursor, limit=100)
+            matches.extend(item for item in page['items'] if item.get('action_id') == op['action_id']
+                           and item.get('phase') == 'before' and item.get('version_id') == version_id
+                           and item.get('fingerprint') == fingerprint and item.get('resource_type') == 'file')
+            cursor = page.get('next_cursor')
+            if not cursor: break
+        if cursor or len(matches) != 1: raise HexResolutionError("Original Lore version unavailable")
+        item = matches[0]
+        if fingerprint == 'missing':
+            if item.get('availability') != 'absent': raise HexResolutionError("Original absence unavailable")
+            values.append(None); continue
+        if item.get('availability') != 'available' or item.get('can_read') is not True:
+            raise HexResolutionError("Original Lore version unavailable")
+        data = bytearray()
+        while True:
+            chunk = client.read_resource_version_chunk(resource_id, item['id'], offset=len(data), length=65536)
+            content = chunk.get('content')
+            if not isinstance(content, bytes): raise HexResolutionError("Original Lore bytes unavailable")
+            data.extend(content)
+            if len(data) > MAX_BYTES: raise HexResolutionError("Original Lore bytes exceed limit")
+            if chunk.get('eof'): break
+            if not content: raise HexResolutionError("Original Lore bytes incomplete")
+        values.append(bytes(data))
+    return values

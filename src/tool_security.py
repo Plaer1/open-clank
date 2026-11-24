@@ -51,6 +51,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "manage_files",
     "grep",
     "glob",
+    "gcf_arguments",
     "ls",
     "get_workspace",
     "search_chats",
@@ -58,10 +59,12 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "manage_tasks",
     "manage_endpoints",
     "manage_mcp",
+    "manage_rag",
     "manage_webhooks",
     "manage_tokens",
     "manage_documents",
     "manage_settings",
+    "theme_emoji_assets",
     "api_call",
     "app_api",
     "resolve_contact",
@@ -116,9 +119,13 @@ STRICT_NATIVE_MIMO_TOOLS = frozenset({
 # (read_file, grep, glob, ls) instead of freestyle shell.
 PLAN_MODE_READONLY_TOOLS = {
     "search_code",
+    "json_preview",
+    "toon_preview",
+    "gcf_preview",
     "read_file",
     "grep",
     "glob",
+    "gcf_arguments",
     "ls",
     "get_workspace",
     "web_search",
@@ -151,6 +158,8 @@ PLAN_MODE_READONLY_TOOLS = {
     "chat_with_model",
     "ask_teacher",
     "read_copal",
+    "browser_status",
+    "browser_observe",
 }
 
 
@@ -161,6 +170,7 @@ COMPARE_READONLY_TOOLS = frozenset({
     "read_file",
     "grep",
     "glob",
+    "gcf_arguments",
     "ls",
     "get_workspace",
     "web_search",
@@ -186,11 +196,11 @@ COMPARE_READONLY_TOOLS = frozenset({
 _PLAN_MODE_KNOWN_MUTATORS = {
     "write_file", "edit_file", "apply_patch", "manage_files", "todowrite",
     "create_document", "edit_document", "update_document",
-    "publish_file",
+    "publish_file", "shared_text",
     "suggest_document", "manage_documents", "create_session", "manage_session",
-    "send_to_session", "pipeline", "manage_memory", "manage_skills",
+    "send_to_session", "pipeline", "manage_memory", "manage_rag", "manage_skills", "workflow_artifact",
     "manage_tasks", "manage_notes", "manage_endpoints", "manage_mcp",
-    "manage_webhooks", "manage_tokens", "manage_settings", "manage_contact",
+    "manage_webhooks", "manage_tokens", "manage_settings", "theme_emoji_assets", "manage_contact",
     "manage_copal",
     "manage_calendar", "api_call", "app_api", "ui_control",
     "send_email", "reply_to_email", "bulk_email", "delete_email",
@@ -215,8 +225,8 @@ _PLAN_MODE_KNOWN_MUTATORS = {
 def plan_mode_disabled_tools() -> Set[str]:
     """Tool names to add to the denylist in plan mode.
 
-    Plan mode allows only PLAN_MODE_READONLY_TOOLS. The gate is a denylist, so
-    return the inverse: every known tool name minus the allowlist. Known names
+    Plan mode allows PLAN_MODE_READONLY_TOOLS and the bounded workflow-artifact
+    exception below. The gate is a denylist, so return the inverse: every known tool name minus the allowlist. Known names
     come from the function-tool schemas, backstopped by _PLAN_MODE_KNOWN_MUTATORS
     (see above) so XML-only tools and a failed schema import can't leave a mutator
     enabled. MCP tools are handled separately — the loop drops the MCP manager
@@ -240,18 +250,24 @@ def plan_mode_disabled_tools() -> Set[str]:
     # Subtract the allowlist from all known tool names (schema-derived plus the
     # static mutator backstop). Fail closed: if the schema import failed above,
     # the backstop alone still blocks known mutators.
-    return (all_names | _PLAN_MODE_KNOWN_MUTATORS) - PLAN_MODE_READONLY_TOOLS
+    # This first-party tool can mutate only its admitted Clanker workflow
+    # artifact set through Files/History, so drafts may precede approval.
+    # Generic filesystem and product mutators remain denied in plan mode.
+    return (all_names | _PLAN_MODE_KNOWN_MUTATORS) - PLAN_MODE_READONLY_TOOLS - {"workflow_artifact"}
 
 
 def chat_mode_disabled_tools() -> Set[str]:
     """Tool names to deny in chat mode.
 
     Chat mode is plan mode's read-only surface without the plan machinery:
-    same allowlist (PLAN_MODE_READONLY_TOOLS), same fail-closed inverse
-    construction, but no PLAN_MODE_DIRECTIVE and no plan files are involved.
+    same read-only tools and operation-gated workflow name as plan mode,
+    but no PLAN_MODE_DIRECTIVE and no plan files are involved. The workflow
+    Host callback refuses mutations in chat mode.
     Kept as a separate named entry point so the two modes can diverge without
     another route-level edit.
     """
+    # workflow_artifact is operation-gated by its Host callback: chat may
+    # read or reconcile status, while writes remain unavailable in chat.
     return plan_mode_disabled_tools()
 
 
@@ -280,9 +296,11 @@ def email_tool_policy_names(tool_name: str) -> frozenset:
     them either way — plan mode and the MCP settings toggle write qualified
     names into denylists, chat-level toggles write bare ones. Every gate must
     match against the full alias set, or a call in one spelling slips past a
-    denylist entry written in the other. Non-email names alias only to
-    themselves.
+    denylist entry written in the other. RAG administration also accepts
+    its historical qualified spelling.
     """
+    if tool_name in {"manage_rag", "mcp__rag__manage_rag"}:
+        return frozenset(("manage_rag", "mcp__rag__manage_rag"))
     if not isinstance(tool_name, str):
         return frozenset((tool_name,))
     if tool_name in BUILTIN_EMAIL_TOOLS:
@@ -322,7 +340,7 @@ def non_admin_filesystem_scope_available(owner: Optional[str]) -> bool:
     try:
         from src.openclank.filesystem_registry import FilesystemRootRegistry
 
-        registry_path = os.environ.get("ODYSSEUS_FILES_REGISTRY")
+        registry_path = os.environ.get("OPEN_CLANK_FILES_REGISTRY")
         registry = (
             FilesystemRootRegistry(registry_path)
             if registry_path
@@ -349,12 +367,16 @@ def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
     if not owner or not str(owner).strip():
         return False
     try:
-        from core.auth import AuthManager
+        from core.auth import is_reserved_username
+        from src.constants import AUTH_FILE
+        from src.openclank.operation_approvals import ReadOnlyAuthSnapshot
 
-        auth = AuthManager()
-        if not auth.is_configured:
+        username = str(owner).strip().lower()
+        auth_path = os.environ.get("OPEN_CLANK_AUTHORITY_AUTH_PATH") or AUTH_FILE
+        if is_reserved_username(username) or not os.path.isabs(auth_path):
             return False
-        return auth.is_admin(str(owner).strip().lower()) is True
+        auth = ReadOnlyAuthSnapshot(auth_path)
+        return bool(auth.account_id(username) and auth.is_admin(username))
     except Exception as exc:
         logger.warning("Unable to evaluate owner admin status: %s", exc)
         return False
@@ -385,7 +407,7 @@ def brokered_agent_file_tools(owner: Optional[str], active_workspace: Optional[s
     try:
         from src.openclank.filesystem_registry import FilesystemRootRegistry
 
-        configured = os.environ.get("ODYSSEUS_FILES_REGISTRY")
+        configured = os.environ.get("OPEN_CLANK_FILES_REGISTRY")
         registry = FilesystemRootRegistry(configured) if configured else FilesystemRootRegistry()
         is_admin = owner_is_admin_or_single_user(normalized_owner)
         visibility = None if is_admin else registry.visibility_for_subject(normalized_owner)
@@ -407,6 +429,7 @@ def brokered_agent_file_tools(owner: Optional[str], active_workspace: Optional[s
             for root in registry.list(normalized_owner)
             if str(root.get("id")) in approved_ids
         }
+        roots.update(scope.get("full_agent_roots") or {})
         allowed: Set[str] = set()
         if any("read" in capabilities for capabilities in root_capabilities.values()):
             allowed.add("read_file")
@@ -423,7 +446,7 @@ def brokered_agent_file_tools(owner: Optional[str], active_workspace: Optional[s
             {"read", "write"}.issubset(capabilities)
             for capabilities in root_capabilities.values()
         ):
-            allowed.update({"write_file", "edit_file"})
+            allowed.update({"write_file", "edit_file", "manage_files"})
         return allowed
     except Exception as exc:
         logger.warning("Unable to project brokered Agent file tools: %s", exc)

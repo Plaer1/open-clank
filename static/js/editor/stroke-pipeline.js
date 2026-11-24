@@ -18,9 +18,9 @@
  *   composite:            () => void,
  * }} deps
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 
-export function createStrokePipeline({ activeLayer, getActiveMaskLayer, composite }) {
+export function createStrokePipeline({ state = legacyState, root = null, lifetime = null, activeLayer, getActiveMaskLayer, composite }) {
   function cloneStrokeTo(x, y, layer) {
     if (!state.cloneSourceSnapshot) return;
     const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
@@ -39,7 +39,7 @@ export function createStrokePipeline({ activeLayer, getActiveMaskLayer, composit
     const steps = Math.max(1, Math.ceil(dist / step));
     const stampSize = Math.max(2, Math.ceil(radius * 2));
     const stampRadius = stampSize / 2;
-    const stamp = document.createElement('canvas');
+    const stamp = (state.container?.ownerDocument || document).createElement('canvas');
     stamp.width = stampSize;
     stamp.height = stampSize;
     const stampCtx = stamp.getContext('2d');
@@ -158,5 +158,8 @@ export function createStrokePipeline({ activeLayer, getActiveMaskLayer, composit
     composite();
   }
 
-  return { strokeTo, cloneStrokeTo };
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated stroke requires root and lifetime');
+  let disposed = false;
+  lifetime?.add(() => { disposed = true; state.drawing = false; });
+  return { strokeTo: (...args) => { if (!disposed) strokeTo(...args); }, cloneStrokeTo: (...args) => { if (!disposed) cloneStrokeTo(...args); } };
 }

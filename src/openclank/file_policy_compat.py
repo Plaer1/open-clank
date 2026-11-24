@@ -8,6 +8,16 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The application supplies its lifecycle ledger when Files uses a separate
+# authority database. Standalone Files installations have no account saga.
+_external_lifecycle_aliases = None
+
+
+def configure_lifecycle_alias_lookup(lookup):
+    global _external_lifecycle_aliases
+    _external_lifecycle_aliases = lookup
+
+
 COMPAT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS file_policy_subject_aliases (
  username TEXT PRIMARY KEY, subject_id TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0);
@@ -62,7 +72,14 @@ class CanonicalCompatibility:
             conn.commit()
 
     @staticmethod
-    def _subjects_current(conn, records, *, complete):
+    def _lifecycle_aliases(conn):
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_lifecycle_operations'").fetchone():
+            return _external_lifecycle_aliases() if _external_lifecycle_aliases else set()
+        rows = conn.execute("SELECT source_owner,target_owner,tombstone_owner FROM account_lifecycle_operations WHERE active_account_id IS NOT NULL")
+        return {name.strip().lower() for row in rows for name in row if name}
+
+    @staticmethod
+    def _subjects_current(conn, records, *, complete, protected):
         # One SELECT observes a coherent WAL snapshot without competing with
         # the native publication guard for the authority database writer.
         current = {row['username']: (row['subject_id'], row['is_admin'])
@@ -70,12 +87,14 @@ class CanonicalCompatibility:
         valid_names = set(records)
         if complete:
             for name, (_, admin) in current.items():
+                if name in protected:
+                    continue
                 if name.startswith('deleted:'):
                     if admin != 0:
                         return False
                 elif name not in valid_names:
                     return False
-        return all(current.get(name) == values for name, values in records.items())
+        return all(current.get(name) == values for name, values in records.items() if name not in protected)
 
     def sync_subjects(self, users, *, complete=True):
         # Auth remains the identity authority, SQLite owns all permission state.
@@ -84,14 +103,18 @@ class CanonicalCompatibility:
         records = {str(name).strip().lower(): (str(record['account_id']), int(record.get('is_admin') is True))
                    for name, record in dict(users).items() if isinstance(record, dict) and record.get('account_id')}
         with self._connect() as conn:
-            if self._subjects_current(conn, records, complete=complete):
+            protected = self._lifecycle_aliases(conn)
+            if self._subjects_current(conn, records, complete=complete, protected=protected):
                 return
             # A real delta still needs the writer. Re-read every affected row
             # below after acquisition; never mutate from the earlier snapshot.
             self._begin(conn)
+            protected.update(self._lifecycle_aliases(conn))
             changed = False
             valid_names = set(records)
             for row in (conn.execute('SELECT username FROM file_policy_subject_aliases').fetchall() if complete else []):
+                if row['username'] in protected:
+                    continue
                 if row['username'].startswith('deleted:'):
                     if conn.execute('UPDATE file_policy_subject_aliases SET is_admin=0 WHERE username=? AND is_admin!=0', (row['username'],)).rowcount:
                         changed = True
@@ -100,6 +123,8 @@ class CanonicalCompatibility:
                     conn.execute('DELETE FROM file_policy_subject_aliases WHERE username=?', (row['username'],))
                     changed = True
             for name, (subject, admin) in records.items():
+                if name in protected:
+                    continue
                 values = (name, subject, admin)
                 old = conn.execute('SELECT subject_id,is_admin FROM file_policy_subject_aliases WHERE username=?', (values[0],)).fetchone()
                 if old and tuple(old) == values[1:]:
@@ -110,6 +135,33 @@ class CanonicalCompatibility:
                 generation = self._bump(conn)
                 self._audit(conn, generation=generation, event='identity_projection', actor_subject_id='system', target_type='subjects', target_id='auth', reason_code='identity_sync')
             conn.commit()
+
+    def restore_duplicated_deletion_alias(self, owner, tombstone, subject, *, operation_id, claim_token):
+        """Recover a source alias republished by legacy sync during a claimed rollback."""
+        from src.openclank.file_policy import FilePolicyError
+        if not subject or tombstone != f"deleted:{subject}" or not claim_token:
+            raise FilePolicyError("Account compensation identity changed", code="owner_conflict")
+        with self._connect() as conn:
+            self._begin(conn)
+            active = conn.execute("""SELECT 1 FROM account_lifecycle_operations
+                WHERE id=? AND kind='delete' AND account_id=? AND active_account_id=?
+                AND source_owner=? AND tombstone_owner=? AND json_extract(receipt,'$.claim.token')=?
+                AND json_extract(steps,'$.auth_deleted.state') IS NULL
+                AND json_extract(steps,'$.filesystem_registry_tombstoned.state')='applied'
+                AND json_extract(steps,'$.memory_compensation_pending.state')='applying'""",
+                (operation_id, subject, subject, owner, tombstone, claim_token)).fetchone()
+            if not active:
+                raise FilePolicyError("Account compensation claim changed", code="owner_conflict")
+            rows = conn.execute("SELECT username,is_admin FROM file_policy_subject_aliases WHERE subject_id=?", (subject,)).fetchall()
+            aliases = {r[0]: r[1] for r in rows}
+            if aliases.keys() == {owner, tombstone} and aliases[tombstone] == 0:
+                conn.execute("DELETE FROM file_policy_subject_aliases WHERE username=? AND subject_id=?", (tombstone, subject))
+                generation = self._bump(conn)
+                self._audit(conn, generation=generation, event="rename_alias", actor_subject_id=subject,
+                    target_type="subject", target_id=subject, reason_code="account_compensated")
+                conn.commit()
+            elif aliases.keys() not in ({owner}, {tombstone}):
+                raise FilePolicyError("Account compensation aliases changed", code="owner_conflict")
 
     def move_subject_alias(self, source_name, target_name, expected_subject):
         from src.openclank.file_policy import FilePolicyError
@@ -229,6 +281,8 @@ class CanonicalCompatibility:
             ceiling = set()
             now = int(time.time() * 1000)
             for b in conn.execute("SELECT * FROM file_policy_bindings WHERE subject_kind='user' AND subject_id=? AND binding_class=? AND status='active' AND (expires_unix_ms IS NULL OR expires_unix_ms>?)", (subject_id, binding_class, now)):
+                if b['resource_ref'] is not None:
+                    continue
                 source = locations.get(b['location_id'])
                 if not source or not source['enabled'] or source['availability'] != 'available':
                     continue
@@ -281,6 +335,9 @@ class CanonicalCompatibility:
         for loc in locations.values():
             roots[loc['id']] = physical(loc, loc['id'], '__openclank_app_visibility__', json.loads(loc['capabilities_json']), loc['enabled'])
         for b in bindings:
+            # Exact resource roles cannot be exported as whole physical roots.
+            if b['resource_ref'] is not None:
+                continue
             loc = locations.get(b['location_id'])
             if not loc or b['subject_kind'] != 'user':
                 continue

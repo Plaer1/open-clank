@@ -1,0 +1,73 @@
+import {expect,test} from 'bun:test'
+import {createHash} from 'node:crypto'
+import {Effect,Layer,ManagedRuntime} from 'effect'
+import {sql} from 'drizzle-orm'
+import {AppFileSystem} from '@mimo-ai/shared/filesystem'
+import * as CrossSpawnSpawner from '../../src/effect/cross-spawn-spawner'
+import {Plugin} from '../../src/plugin'
+import {Truncate} from '../../src/tool'
+import {Agent} from '../../src/agent/agent'
+import {BashTool} from '../../src/tool/bash'
+import {Database} from '../../src/storage'
+import {ProjectTable} from '../../src/project/project.sql'
+import {SessionTable,MessageTable} from '../../src/session/session.sql'
+import {Session} from '../../src/session'
+import {AppRuntime} from '../../src/effect/app-runtime'
+import {Instance} from '../../src/project/instance'
+import {tmpdir} from '../fixture/fixture'
+import {createToolTimingIssuer,markAdmittedToolTimingTurn,captureToolTiming} from '../../src/session/tool-timing'
+import {encodeToolViewAdmission,captureToolView,enabledToolViewProfiles} from '../../src/session/tool-view-source'
+import {bindToolViewProducer} from '../../src/session/tool-view-producer-admission'
+import {readBashView,selectBashView,transferBashView} from '../../src/session/tool-view-bash-proof'
+import {compactNdjsonLogs} from '../../src/session/tool-view-ndjson'
+import {prepareToolViews} from '../../src/session/tool-view-assembly'
+const runtime=ManagedRuntime.make(Layer.mergeAll(CrossSpawnSpawner.defaultLayer,AppFileSystem.defaultLayer,Plugin.defaultLayer,Truncate.defaultLayer,Agent.defaultLayer))
+
+test('actual Bash producer admits NDJSON and preserves exact History recovery',async()=>{
+ await using tmp=await tmpdir()
+ await Instance.provide({directory:tmp.path,fn:async()=>{
+  const now=Date.now(),sessionID='ses_rle',messageID='msg_rle',partID='prt_rle'
+  Database.use(db=>{db.insert(ProjectTable).values({id:'proj_rle' as any,worktree:tmp.path,sandboxes:[] as any,time_created:now,time_updated:now} as any).run();db.insert(SessionTable).values({id:sessionID as any,project_id:'proj_rle' as any,slug:'rle',directory:tmp.path,title:'rle',version:'1',time_created:now,time_updated:now}).run();db.insert(MessageTable).values({id:messageID as any,session_id:sessionID as any,agent_id:'main',data:{role:'assistant'} as any,time_created:now,time_updated:now}).run();if(!db.all<{name:string}>(sql`PRAGMA table_info(part)`).some(x=>x.name==='openclank_view_decision'))db.run(sql`ALTER TABLE part ADD COLUMN openclank_view_decision TEXT`)})
+  const identity={sessionID,rootOperationID:'root',actorID:'main',executionRevision:1,innerTurnID:'turn'} as any
+  const route={rootOperationID:'root',connectionID:'conn',providerID:'provider',modelID:'model',modelRouteID:'route'}
+  const admission={version:2,requested:true,...route,sessionID,hostAccountID:'account',holderID:'holder',generation:2,settingsRevision:'a'.repeat(64),routeMethodKey:'route-key',profiles:{jsonWhitespace:false,terminalAnsi:true,htmlMarkdown:false,structuredSearch:false,repeatedLines:false,unifiedDiff:false,schemaAnnotations:false,toon:false,sourceOutlines:false,tap13:false,base64Lines:false,ndjsonLogs:true}}
+  const encoded=encodeToolViewAdmission(admission,sessionID,route,{providerID:'provider',modelID:'model'})!
+  const ctx={sessionID,messageID,callID:'call',agent:'build',abort:AbortSignal.any([]),messages:[],metadata:()=>Effect.void,ask:()=>Effect.void} as any
+  bindToolViewProducer(ctx,enabledToolViewProfiles(encoded,'bash') as any,()=>true)
+  const bash=await runtime.runPromise(BashTool.pipe(Effect.flatMap(info=>info.init())))
+  const line=Array.from({length:30},(_,i)=>JSON.stringify({timestamp:`2026-01-01T00:00:${String(i).padStart(2,'0')}Z`,level:'INFO',message:`event ${i}`})).join('\n')+'\n'
+  const result=await runtime.runPromise(bash.execute({command:`printf '%s' '${line}'`,description:'Print NDJSON fixture'},ctx))
+  expect(readBashView(result)).toBe('ndjson-logs-v1')
+  const final={...result,metadata:{...result.metadata}};transferBashView(result,final)
+  expect(readBashView(final)).toBe('ndjson-logs-v1')
+  expect(JSON.parse(compactNdjsonLogs(final.output)!).rows.length).toBe(30)
+  const running={id:partID,sessionID,messageID,type:'tool',tool:'bash',callID:'call',state:{status:'running',input:{},time:{start:now}}} as any
+  const finished={...running,state:{status:'completed',input:{},output:final.output,title:final.title,metadata:final.metadata,time:{start:now,end:now+1}}} as any
+  await AppRuntime.runPromise(Session.Service.use(s=>s.updatePart(running)))
+  const issuer=createToolTimingIssuer();markAdmittedToolTimingTurn(identity,identity);const timing=captureToolTiming(issuer,identity,running)!
+  const capture=captureToolView(encoded,timing,finished,route,readBashView(final))!
+  expect(capture.admission.profile).toBe('ndjson-logs-v1')
+  await AppRuntime.runPromise(Session.Service.use(s=>s.updateTimedTool(finished,timing,capture)))
+  const stored=JSON.parse(Database.use(db=>db.get<{v:string}>(sql`SELECT openclank_view_decision AS v FROM part WHERE id=${partID}`)!.v))
+  let checked=0;const digest=createHash('sha256').update(final.output).digest('hex')
+  const assembled=await prepareToolViews({encoded,identity,issuer,route,control:{disabled:false},historyAllowed:true,messages:[{info:{id:messageID,role:'assistant'},parts:[finished]}] as any,current:()=>true,ack:async()=>({version:1,accountID:'account',actorID:'main',chatID:'chat',sessionID,messageID,partID,revision:1,contentHash:stored.contentSHA256,outputSHA256:digest,outputBytes:Buffer.byteLength(final.output)}),check:async(refs)=>{checked++;return refs.length===1}})
+  expect(checked).toBe(1);expect(assembled.views.get(partID)).toContain('NDJSON semantic view');expect(assembled.views.get(partID)).toContain('history(');expect(finished.state.output).toBe(final.output)
+  expect(compactNdjsonLogs('{\"timestamp\":\"x\",\"level\":\"x\",\"message\":\"x\",\"message\":\"y\"}\n'.repeat(2))).toBeUndefined()
+  expect(compactNdjsonLogs(line.slice(0,-1))).toBeUndefined()
+  const short='{\"timestamp\":\"x\",\"level\":\"i\",\"message\":\"x\"}\n'.repeat(2)
+  const smallRunning={...running,id:'prt_small',callID:'small'} as any
+  const smallCtx={...ctx,callID:'small'};bindToolViewProducer(smallCtx,enabledToolViewProfiles(encoded,'bash') as any,()=>true)
+  const small=await runtime.runPromise(bash.execute({command:`printf '%s' '${short}'`,description:'Print short NDJSON'},smallCtx))
+  const smallPart={...smallRunning,state:{status:'completed',input:{},output:small.output,title:small.title,metadata:small.metadata,time:{start:now,end:now+1}}} as any
+  await AppRuntime.runPromise(Session.Service.use(s=>s.updatePart(smallRunning)))
+  const smallTiming=captureToolTiming(issuer,identity,smallRunning)!
+  const smallCapture=captureToolView(encoded,smallTiming,smallPart,route,readBashView(small))!
+  await AppRuntime.runPromise(Session.Service.use(s=>s.updateTimedTool(smallPart,smallTiming,smallCapture)))
+  const smallStored=JSON.parse(Database.use(db=>db.get<{v:string}>(sql`SELECT openclank_view_decision AS v FROM part WHERE id=${'prt_small'}`)!.v))
+  const smallView=await prepareToolViews({encoded,identity,issuer,route,control:{disabled:false},historyAllowed:true,messages:[{info:{id:messageID,role:'assistant'},parts:[smallPart]}] as any,current:()=>true,ack:async()=>({version:1,accountID:'account',actorID:'main',chatID:'chat',sessionID,messageID,partID:'prt_small',revision:1,contentHash:smallStored.contentSHA256,outputSHA256:createHash('sha256').update(small.output).digest('hex'),outputBytes:Buffer.byteLength(small.output)}),check:async()=>true})
+  expect(smallView.views.has('prt_small')).toBe(false);expect(smallPart.state.output).toBe(short)
+  expect(selectBashView(final.output,{diff:false,ansi:false,repetition:false,ndjson:true})).toBe('ndjson-logs-v1')
+  const altered={...final,output:final.output+'x'};transferBashView(result,altered);expect(readBashView(altered)).toBeUndefined()
+  expect(enabledToolViewProfiles(undefined,'bash')).toEqual([]);issuer.revoke()
+ }})
+})

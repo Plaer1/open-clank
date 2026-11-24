@@ -60,8 +60,13 @@ export function observeCodeIndex({ request, isCurrent = () => true, onStatus = (
     verificationPending=true;return perform('open');
   }
   function scheduleNext(){
-    if(timer!==null)unschedule(timer);timer=null;if(!active()||!observe)return;
-    if(indexPresentation(latest||{}).pending||latest?.recovering){timer=schedule(()=>{timer=null;void perform('status');},delay);delay=Math.min(maxDelay,delay*1.5);}
+    if(!active()||!observe)return;
+    const polling=indexPresentation(latest||{}).pending||latest?.recovering;
+    // Filesystem notifications may arrive faster than the status poll.
+    // Keep the existing deadline so they cannot postpone a publication.
+    if(polling&&timer!==null)return;
+    if(timer!==null)unschedule(timer);timer=null;
+    if(polling){timer=schedule(()=>{timer=null;void perform('status');},Math.min(delay,maxDelay));delay=Math.min(maxDelay,delay*1.5);}
     else if(mayUseSourceGrant()){timer=schedule(()=>{timer=null;void verifySourceChange();},Math.max(tuning.debounceMs,tuning.cooldownSeconds*1000-(Date.now()-lastVerify)));}
     else if(mayVerify()){const wait=dirty?Math.max(tuning.debounceMs,tuning.cooldownSeconds*1000-(Date.now()-lastVerify)):Math.max(tuning.verifySeconds*1000,delay);
       timer=schedule(()=>{timer=null;void verify();},wait);}
@@ -91,17 +96,20 @@ export function observeCodeIndex({ request, isCurrent = () => true, onStatus = (
   };
   const errorStatus = error => ({ lifecycle:[401,403,404].includes(error.status) ? 'denied' : 'unavailable',
     error:{code:error.code || 'index_unavailable',message:error.message || 'Code index unavailable'} });
-  async function perform(event) {
+  async function perform(event, confirmation = null) {
     if (!active() || inFlight) return;
     inFlight = true;
     let index, failed = false;
     try {
-      try { if(event==='open')verificationPending=true;index = await request(event); }
+      try { if(event==='open'||event==='confirm-removals')verificationPending=true;index = await request(event, confirmation); }
       catch (error) {
         // An erased ensure is rejected. Status distinguishes its tombstone
         // without re-admitting or issuing a second ensure.
-        if (event === 'open' && error.status === 409) index = await request('status');
-        else throw error;
+        if (event !== 'open' || error.status !== 409) throw error;
+        index = await request('status');
+        if (error.code==='code_root_changed' && index?.lifecycle==='missing') {
+          index={...index,error:{code:error.code,message:error.message}};
+        }
       }
     } catch (error) {
       failed = true;
@@ -117,7 +125,7 @@ export function observeCodeIndex({ request, isCurrent = () => true, onStatus = (
     finally { inFlight = false; }
     if (!active()) {
       // Disposal can reach the owner before the in-flight open/admit does.
-      if (event === 'open' || event === 'admit') releaseRequest();
+      if (['open','admit','confirm-removals'].includes(event)) releaseRequest();
       return;
     }
     const wasPending=pendingObserved,previous=latest;
@@ -149,6 +157,7 @@ export function observeCodeIndex({ request, isCurrent = () => true, onStatus = (
     onStatus(latest);
     if (!active()) return;
     scheduleNext();
+    return latest;
   }
   release.verify=()=>verify(true);
   release.captureSourceChange=()=>{
@@ -169,6 +178,8 @@ export function observeCodeIndex({ request, isCurrent = () => true, onStatus = (
   release.refresh = () => { if (timer !== null) unschedule(timer); timer = null; return perform('status'); };
   // This is intentionally a separate user action, never part of polling.
   release.readmit = () => latest?.lifecycle === 'erased' ? perform('admit') : Promise.resolve();
+  release.confirmRemovals = digest => /^[0-9a-f]{64}$/.test(digest)
+    ? perform('confirm-removals',digest) : Promise.resolve();
   void perform('open');
   return release;
 }

@@ -10,6 +10,27 @@ import {classifyStillBlob,markLoadedStillImage,forgetLoadedImage} from '../graph
 const TRANSIENT_STATUSES = new Set([429, 503, 504]);
 const AUTHORITY_STATUSES = new Set([401, 403, 409, 410]);
 
+/** A cache key is presentation identity only; server checks still authorize every fetch. */
+export function thumbnailCacheKey({ owner, entry = {}, icon = false, scale = 1 } = {}) {
+  const format = entry.format && entry.format.version === 1 ? entry.format : null;
+  const stableId = String(entry.resource_id || entry.id || '');
+  const resourceRef = String(entry.resource_ref || entry.ref || '');
+  const revision = format?.providerRevision ?? entry.revision ?? null;
+  const contentHash = format?.contentSHA256 ?? null;
+  // When content identity is unavailable, scope reuse to the issued ref. If
+  // even that is absent, avoid reusing an unknowable representation.
+  const identity = stableId || resourceRef || String(entry.name || '');
+  const unknownVersion = revision == null && !contentHash;
+  const fallback = unknownVersion ? (resourceRef || `uncached:${globalThis.crypto?.randomUUID?.() || Math.random()}`) : '';
+  return JSON.stringify([
+    String(owner || 'anonymous'), String(entry.provider || 'host'), identity,
+    revision, contentHash, format?.decoderGeneration ?? null,
+    format?.policyGeneration ?? entry.policy_generation ?? null, fallback,
+    entry.modified_unix_ms ?? entry.modified ?? null, entry.size ?? null,
+    icon ? 'native-icon:64x64' : 'content-thumbnail:192x192', scale,
+  ]);
+}
+
 function defaultUrlApi() {
   return typeof URL !== 'undefined' ? URL : null;
 }
@@ -94,7 +115,7 @@ export function createThumbnailLoader({
   };
 
   const finishJob = (job) => {
-    jobs.delete(job.key);
+    if (jobs.get(job.key) === job) jobs.delete(job.key);
     active = Math.max(0, active - 1);
     pump();
   };
@@ -102,11 +123,15 @@ export function createThumbnailLoader({
   const schedule = (job, delay) => {
     job.timer = setTimer(() => {
       job.timer = null;
-      if (!destroyed && !job.controller?.signal.aborted) {
-        queue.push(job);
-        pump();
+      if (destroyed || jobs.get(job.key) !== job) return;
+      if (job.controller.signal.aborted || ![...job.subscribers].some(({ img }) => img && img.isConnected !== false)) {
+        jobs.delete(job.key);
+        return;
       }
+      queue.push(job);
+      pump();
     }, delay);
+    pump();
   };
 
   const run = async (job) => {
@@ -122,6 +147,10 @@ export function createThumbnailLoader({
         signal: job.controller.signal,
         headers: { Accept: 'image/png' },
       });
+      if (job.controller.signal.aborted) {
+        finishJob(job);
+        return;
+      }
       if (!response.ok) {
         if (AUTHORITY_STATUSES.has(response.status)) {
           purgeAuthority();
@@ -129,7 +158,7 @@ export function createThumbnailLoader({
           finishJob(job);
           return;
         }
-        if (TRANSIENT_STATUSES.has(response.status) && job.attempts <= RETRY_DELAYS.length + 1) {
+        if (TRANSIENT_STATUSES.has(response.status) && job.attempts <= RETRY_DELAYS.length) {
           active = Math.max(0, active - 1);
           schedule(job, RETRY_DELAYS[job.attempts - 1]);
           return;
@@ -146,7 +175,10 @@ export function createThumbnailLoader({
       const blob = await response.blob();
       if (blob.size > 4 * 1024 * 1024) throw Object.assign(new Error('thumbnail too large'), { permanent: true });
       const still = await classifyStillBlob(blob).catch(()=>false);
-      if (job.controller.signal.aborted) return;
+      if (job.controller.signal.aborted) {
+        finishJob(job);
+        return;
+      }
       const objectUrl = urlApi?.createObjectURL ? urlApi.createObjectURL(blob) : job.url;
       const record = { objectUrl, bytes: blob.size, still, expires: now() + ttlMs, lastUsed: now() };
       evict();
@@ -212,10 +244,10 @@ export function createThumbnailLoader({
       cache.delete(key);
     }
     let job = jobs.get(key);
-    if (!job) {
+    const newJob = !job || job.controller?.signal.aborted;
+    if (newJob) {
       job = { key, url, attempts: 0, subscribers: new Set(), controller: null, timer: null };
       jobs.set(key, job);
-      if (!observer) enqueue(job);
     }
     job.subscribers.add(subscriber);
     img.dataset.nativeThumbnailState = 'idle';
@@ -232,6 +264,7 @@ export function createThumbnailLoader({
     img.__openClankThumbnailKey = key;
     img.__openClankThumbnailDetach = detach;
     if (observer) observer.observe(img);
+    else if (newJob) enqueue(job);
     if (root && observer?.root !== root) {
       // A root change is handled by the next hard observer setup.  The job is
       // keyed and survives this presentation change.

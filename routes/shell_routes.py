@@ -495,7 +495,7 @@ def _find_line_break(buf):
 EXEC_TIMEOUT = 30  # seconds — shorter than agent's 60s
 STREAM_TIMEOUT = 120  # default for short commands
 MAX_OUTPUT = 200_000  # truncate limit
-TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "odysseus-tmux"
+TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "open-clank-tmux"
 PTY_UNSUPPORTED_ERROR = "pty_unsupported"
 
 
@@ -755,10 +755,10 @@ async def _generate_tmux(cmd: str, request: Request):
     script_path = TMUX_LOG_DIR / f"{session_id}.sh"
     script_path.write_text(
         f"#!/bin/bash\n"
-        f'ODYSSEUS_USER_SHELL="${{SHELL:-}}"\n'
-        f'if [ -n "$ODYSSEUS_USER_SHELL" ] && [ -x "$ODYSSEUS_USER_SHELL" ]; then\n'
-        f'  ODYSSEUS_USER_PATH="$("$ODYSSEUS_USER_SHELL" -ic \'printf "__ODYSSEUS_PATH__%s\\n" "$PATH"\' 2>/dev/null | sed -n \'s/^__ODYSSEUS_PATH__//p\' | tail -n 1 || true)"\n'
-        f'  if [ -n "$ODYSSEUS_USER_PATH" ]; then export PATH="$ODYSSEUS_USER_PATH:$PATH"; fi\n'
+        f'OPEN_CLANK_USER_SHELL="${{SHELL:-}}"\n'
+        f'if [ -n "$OPEN_CLANK_USER_SHELL" ] && [ -x "$OPEN_CLANK_USER_SHELL" ]; then\n'
+        f'  OPEN_CLANK_USER_PATH="$("$OPEN_CLANK_USER_SHELL" -ic \'printf "__OPEN_CLANK_PATH__%s\\n" "$PATH"\' 2>/dev/null | sed -n \'s/^__OPEN_CLANK_PATH__//p\' | tail -n 1 || true)"\n'
+        f'  if [ -n "$OPEN_CLANK_USER_PATH" ]; then export PATH="$OPEN_CLANK_USER_PATH:$PATH"; fi\n'
         f"fi\n"
         f"{cmd} 2>&1 | tee '{log_path}'\n"
         f"EC=${{PIPESTATUS[0]}}\n"
@@ -961,6 +961,8 @@ def setup_shell_routes() -> APIRouter:
     async def shell_exec(request: Request, req: ShellExecRequest) -> Dict[str, Any]:
         """Execute a shell command and return output. Admin only."""
         _require_admin(request)
+        from src.auth_helpers import require_privilege
+        require_privilege(request, "can_use_bash")
         cmd = req.command.strip()
         if not cmd:
             return {"stdout": "", "stderr": "No command provided", "exit_code": 1}
@@ -979,6 +981,8 @@ def setup_shell_routes() -> APIRouter:
     async def shell_stream(request: Request, req: ShellExecRequest):
         """Execute a shell command and stream output line-by-line via SSE. Admin only."""
         _require_admin(request)
+        from src.auth_helpers import require_privilege
+        require_privilege(request, "can_use_bash")
         cmd = req.command.strip()
         if not cmd:
 

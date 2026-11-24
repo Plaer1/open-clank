@@ -1,5 +1,6 @@
 import { normalizeGraphSettings } from './graphSettings.js';
 import { cloneEnvelope, resourceKeyId } from './resourceModel.js';
+import { buildReferenceIndex, resolveReference } from './markdownResources.js';
 
 // Graph, Galaxy and structure are presentations of one scoped window.  The
 // structure projection keeps its own local tree selection/camera state while
@@ -343,9 +344,11 @@ export function normalizeGraphState(source = {}) {
   // Legacy `mind` saved state projects onto structure mode so older entry
   // points keep their camera/selection instead of losing the workspace.
   const savedModes = source?.modes || {};
+  const journalDefault = source?.version !== 4;
   const legacyMind = savedModes.mind || null;
   for (const mode of GRAPH_MODES) {
-    const saved = savedModes[mode] || (mode === 'structure' ? legacyMind : null) || {};
+    const saved = journalDefault && mode === 'documents' ? {}
+      : savedModes[mode] || (mode === 'structure' ? legacyMind : null) || {};
     const camera = Object.fromEntries(Object.entries(CAMERA).map(([key, fallback]) => {
       const value = Number(saved.camera?.[key]);
       return [key, Number.isFinite(value) && (!['w', 'h'].includes(key) || value >= 10 && value <= 100000) ? value : fallback];
@@ -366,13 +369,14 @@ export function normalizeGraphState(source = {}) {
         // Kinds are validated against the live facet snapshot when it loads;
         // unknown values are kept here and reconciled by `reconcileFilters`
         // so a renamed/removed value degrades instead of hard-failing.
-        kinds:Array.isArray(saved.filters?.kinds) ? [...new Set(saved.filters.kinds.map(String))] : mode === 'galaxy' ? ['track', 'event'] : ['note', 'wiki', 'base', 'event'],
+        kinds:Array.isArray(saved.filters?.kinds) ? [...new Set(saved.filters.kinds.map(String))] : mode === 'galaxy' ? ['track', 'event'] : mode === 'documents' ? ['note', 'wiki'] : ['note', 'wiki', 'base', 'event'],
         folders:Array.isArray(saved.filters?.folders) ? [...new Set(saved.filters.folders.map(String))] : [],
         tags:Array.isArray(saved.filters?.tags) ? [...new Set(saved.filters.tags.map(String))] : [],
         properties:saved.filters?.properties && typeof saved.filters.properties === 'object' && !Array.isArray(saved.filters.properties)
           ? Object.fromEntries(Object.entries(saved.filters.properties).map(([key, values]) => [String(key), propertySelections(values)]))
           : {},
-        includeOfficial:saved.filters?.includeOfficial === true,
+        ...(mode === 'galaxy' ? {showUnassigned:saved.filters?.showUnassigned === true} : {}),
+        includeOfficial:saved.filters?.includeOfficial ?? (mode === 'documents'),
       },
     };
   }
@@ -380,8 +384,8 @@ export function normalizeGraphState(source = {}) {
   // selection remains in `modes`, while this identity survives a Documents →
   // structure projection switch and can explicitly describe an unavailable source.
   const sharedSource = source?.source && typeof source.source === 'object' ? cloneEnvelope(source.source) : null;
-  const requestedMode = LEGACY_MODE_ALIAS[source?.mode] || source?.mode;
-  return { version:3, settings:normalizeGraphSettings(source?.settings), mode:GRAPH_MODES.includes(requestedMode) ? requestedMode : DEFAULT_MODE, source:sharedSource, modes };
+  const requestedMode = journalDefault ? DEFAULT_MODE : LEGACY_MODE_ALIAS[source?.mode] || source?.mode;
+  return { version:4, settings:normalizeGraphSettings(source?.settings), mode:GRAPH_MODES.includes(requestedMode) ? requestedMode : DEFAULT_MODE, source:sharedSource, modes };
 }
 
 /**
@@ -683,69 +687,134 @@ export function filterDocuments(documents, filters = {}, facets = null) {
   return (Array.isArray(documents) ? documents : []).filter((doc) => matchesFilters(doc, filters, facets));
 }
 
-export function documentGraph(documents, resolveLink) {
+// Match the public resolution endpoint's per-request bounds. An empty or
+// directly linked document needs no lookup, regardless of workspace size.
+export function* documentLinkBatches(docs) {
+  const direct = new Set(docs.flatMap(doc => [String(doc.id), doc.resource?.key?.resourceId].filter(Boolean)));
+  let batch = [], count = 0;
+  for (const doc of docs) {
+    const targets = new Set((doc.links || []).map(String).filter(target => !direct.has(target)));
+    for (const relation of doc.relations || []) {
+      if (relation.origin === 'explicit' || !relation.target) continue;
+      const fragment = relation.fragment ? '#' + relation.fragment : '';
+      targets.add(relation.target === '#' ? fragment || '#' : String(relation.target) + fragment);
+    }
+    const locators = [...targets].filter(target => target.length && target.length <= 2048);
+    for (let i = 0; i < locators.length; i += 256) {
+      const chunk = locators.slice(i, i + 256);
+      if (batch.length === 200 || count + chunk.length > 4000) {
+        yield batch;
+        batch = []; count = 0;
+      }
+      batch.push({ id:String(doc.id), head:String(doc.head), targets:chunk });
+      count += chunk.length;
+    }
+  }
+  if (batch.length) yield batch;
+}
+
+export function documentGraph(documents, resolveLink, verified = null) {
   const nodes = documents.map((doc) => ({
     id:`document:${doc.resource?.key ? resourceKeyId(doc.resource.key) : doc.id}`,
     label:doc.name, kind:documentKind(doc), doc,
     selection:{ kind:'document', id:doc.id, ...(doc.resource?.key ? { resourceKey:doc.resource.key } : {}) },
   }));
-  const byId = new Map(nodes.map((node) => [node.doc.id, node]));
-  const byResourceId = new Map(nodes.flatMap((node) => {
-    const resourceId = node.doc.resource?.key?.resourceId;
-    return resourceId ? [[String(resourceId), node]] : [];
-  }));
-  const edgeMap = new Map();
-  const add = (source, target, type) => {
-    const from = byId.get(source)?.id, to = byId.get(target)?.id;
-    if (!from || !to) return;
-    const id = JSON.stringify([from, to, type]);
-    if (!edgeMap.has(id)) edgeMap.set(id, { id, from, to, type });
+  const byId = new Map(nodes.map((node) => [String(node.doc.id), node]));
+  const byResourceId = new Map(nodes.flatMap((node) => node.doc.resource?.key?.resourceId
+    ? [[String(node.doc.resource.key.resourceId), node]] : []));
+  const referenceIndex = buildReferenceIndex(documents);
+  const edgeMap = new Map(), notices = []; let omittedNotices=0, omittedEdges=0;
+  const add = (doc, relation) => {
+    const source = byId.get(String(doc.id)); if (!source) return;
+    const targetText = String(relation.target || '');
+    const safeLocator = targetText && !/^(?:[a-z][a-z0-9+.-]*:|[\\/]|[a-z]:)/i.test(targetText) ? targetText.slice(0,256) : null;
+    let target = null, reason = null, fragment = String(relation.fragment || '').slice(0,256);
+    if ((relation.origin === 'explicit' || (targetText === '#' && relation.targetDocumentId === doc.id)) && relation.targetDocumentId) {
+      target = byId.get(String(relation.targetDocumentId)) || byResourceId.get(String(relation.targetDocumentId));
+      if (!target) reason = 'not_loaded';
+    } else if (targetText) {
+      const locator = targetText === '#' ? '#'+fragment : targetText + (fragment ? '#'+fragment : '');
+      const proof = verified?.get(JSON.stringify([String(doc.id), String(doc.head), locator]));
+      const candidate = proof?.status === 'resolved' ? byId.get(String(proof.targetDocumentId)) : null;
+      if (candidate && String(candidate.doc.head) === String(proof.targetRevisionId)) target = candidate;
+      else if (proof) reason = proof.status === 'missing' ? 'unresolved' : proof.status === 'resolved' ? (candidate ? 'stale' : 'not_loaded') : proof.status;
+      else {
+        const result = resolveReference({target:locator}, {documents,origin:doc,index:referenceIndex});
+        if (result.status === 'resolved') reason = 'unverified';
+        else reason = result.status === 'ambiguous' ? 'ambiguous' : result.status === 'missing' ? 'unresolved' : 'unsupported';
+      }
+    } else if (relation.targetDocumentId) {
+      target = byId.get(String(relation.targetDocumentId)) || byResourceId.get(String(relation.targetDocumentId));
+      if (!target) reason = 'not_loaded';
+    }
+    if (!target) {
+      if (notices.length < 400) notices.push({sourceNodeId:source.id,kind:relation.kind || 'link',reason:reason || 'unresolved',locator:safeLocator,fragment,sourceLine:Number.isSafeInteger(relation.sourceLine) && relation.sourceLine > 0 ? relation.sourceLine : null});
+      else omittedNotices++;
+      return;
+    }
+    const type = relation.kind || 'link', id = JSON.stringify([source.id,target.id,type,fragment]);
+    if (!edgeMap.has(id)) {
+      if (edgeMap.size < 5000) edgeMap.set(id,{id,from:source.id,to:target.id,type,fragment,sourceLine:Number.isSafeInteger(relation.sourceLine) && relation.sourceLine > 0 ? relation.sourceLine : null});
+      else omittedEdges++;
+    }
   };
   for (const doc of documents) {
     for (const link of doc.links || []) {
       const direct = byId.get(String(link)) || byResourceId.get(String(link));
-      add(doc.id, direct?.doc.id || resolveLink(link, doc)?.id, 'link');
+      add(doc,direct ? {kind:'link',origin:'explicit',targetDocumentId:direct.doc.id} : {kind:'link',target:String(link)});
     }
-    for (const relation of doc.relations || []) {
-      const target = byId.get(String(relation.targetDocumentId || ''))?.doc.id
-        || byResourceId.get(String(relation.targetDocumentId || ''))?.doc.id
-        || resolveLink(relation.target, doc)?.id;
-      add(doc.id, target, relation.kind || 'relation');
-    }
+    for (const relation of doc.relations || []) add(doc,relation);
   }
-  return { version:1, datasetRevision:JSON.stringify(documents.map((doc) => [doc.id, doc.head])), nodes, edges:[...edgeMap.values()] };
+  return {version:1,datasetRevision:JSON.stringify(documents.map(doc=>[doc.id,doc.head])),nodes,edges:[...edgeMap.values()],
+          notices,coverage:{scope:'loaded',complete:false,loadedDocuments:documents.length,omittedNotices,omittedEdges}};
 }
 
-export function galaxyGraph(tracks, events) {
-  const nodes = new Map(tracks.map((track) => [`track:${track.id}`, {
-    id:`track:${track.id}`, label:track.name, kind:'track', track,
-    selection:{ kind:'track', id:track.id },
-  }]));
-  const edges = new Map();
-  for (const event of events) {
-    const sharedTrackIds = Array.isArray(event.sharedTrackIds) ? event.sharedTrackIds : [];
-    // A primary-only event is still a first-class Galaxy event.  Shared
-    // memberships are projected through one set so duplicate IDs become one
-    // typed edge each.
-    if (!event.primaryTrackId && !sharedTrackIds.length) continue;
-    const id = `event:${event.id}`;
-    if (!nodes.has(id)) nodes.set(id, { id, label:event.title, kind:'event', hub:true, task:event, selection:{ kind:'event', id:event.id } });
-    const memberships = new Set([event.primaryTrackId, ...sharedTrackIds].filter(Boolean));
-    for (const trackId of memberships) {
-      const track = `track:${trackId}`;
-      if (!nodes.has(track)) continue;
-      const type = trackId === event.primaryTrackId ? 'primary' : 'shared';
-      const edgeId = JSON.stringify([track, id, type]);
-      edges.set(edgeId, { id:edgeId, from:track, to:id, type });
-    }
+export function galaxyGraph(tracks, events, { showUnassigned = false, registryHead, cache = {} } = {}) {
+  const trackIds = new Set(tracks.map(track => track.id));
+  const byId = new Map(events.filter(event => event?.id).map(event => [event.id, event]));
+  const nodes = [], edges = [];
+  const nextTracks = new Map(), nextEvents = new Map();
+  let changed = false, unassigned = 0, unavailable = 0;
+  for (const track of tracks) {
+    const prior = cache.tracks?.get(track.id);
+    const same = prior && prior.label === track.name && (registryHead ? registryHead === cache.registryHead : prior.track === track);
+    const node = same ? prior : { id:`track:${track.id}`, label:track.name, kind:'track', track, selection:{kind:'track', id:track.id} };
+    nodes.push(node);
+    nextTracks.set(track.id, node);
+    changed ||= !same;
   }
-  return {
-    version:1,
-    datasetRevision:JSON.stringify([
-      tracks.map((track) => [track.id, track.head, track.name]),
-      [...nodes.values()].filter((node) => node.task).map(({ task }) => [task.id, task.head, task.title, task.startDate, task.dueDate]),
-      [...edges.keys()],
-    ]),
-    nodes:[...nodes.values()], edges:[...edges.values()],
-  };
+  // Only current memberships can create an edge. A repeated task in a shared
+  // lane has one canonical identity, including after it is rescheduled.
+  for (const [eventId, event] of byId) {
+    const primary = event.trackId ?? event.primaryTrackId;
+    const memberships = new Set([primary, ...(event.sharedTrackIds || [])].filter(Boolean));
+    const present = [...memberships].filter(id => trackIds.has(id));
+    if (!present.length) {
+      if (memberships.size) unavailable++; else unassigned++;
+      if (!showUnassigned) continue;
+    }
+    const prior = cache.events?.get(eventId);
+    const sameSource = prior && (event.head ? prior.node.task.head === event.head : prior.node.task === event);
+    const node = sameSource ? prior.node : {id:`event:${eventId}`, label:event.title, kind:'event', hub:true, task:event, selection:{kind:'event', id:eventId}};
+    const sameMembership = prior && prior.primary === primary && prior.present.length === present.length && present.every((id,i) => prior.present[i] === id);
+    const membershipEdges = sameMembership ? prior.edges : present.map(id => {
+      const type = id === primary ? 'primary' : 'shared', from = `track:${id}`;
+      return {id:JSON.stringify([from, node.id, type]), from, to:node.id, type};
+    });
+    nodes.push(node);
+    edges.push(...membershipEdges);
+    nextEvents.set(eventId, {node, primary, present, edges:membershipEdges});
+    changed ||= !sameSource || !sameMembership;
+  }
+  for (const {node} of nextEvents.values()) {
+    const target = nextEvents.get(node.task.linkId)?.node;
+    if (target && target !== node) edges.push({id:JSON.stringify([node.id,target.id,'linked-event']), from:node.id,to:target.id,type:'linked-event'});
+  }
+  changed ||= cache.tracks?.size !== nextTracks.size || cache.events?.size !== nextEvents.size;
+  cache.tracks = nextTracks;
+  cache.events = nextEvents;
+  cache.registryHead = registryHead;
+  if (changed) cache.revision = (cache.revision || 0) + 1;
+  return {version:1, datasetRevision:`galaxy:${cache.revision || 0}`, nodes, edges,
+    coverage:{scope:'timeline', eligible:byId.size, unassigned, unavailable, omitted:showUnassigned ? 0 : unassigned + unavailable}};
 }

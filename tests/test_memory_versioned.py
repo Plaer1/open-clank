@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from src.frankenmemory_v2 import V2OperationError, V2Repository
+from src.memery_v2 import V2OperationError, V2Repository
 from tests.fm_sidecar_fixture import install_current_sidecars
 from src.memory_versioned import (
     VersionedMemoryConflict,
@@ -36,7 +36,7 @@ def _schema(path):
             BEGIN SELECT RAISE(ABORT, 'invalid knowledge revision'); END;
             """
         )
-        install_current_sidecars(conn)
+        install_current_sidecars(conn, extra=("fm_v2_revision_evidence",))
 
 
 @pytest.mark.parametrize("missing", ["fm_v2_trust_assignments", "fm_v2_job_manifests"])
@@ -302,7 +302,7 @@ def _question_block(path, block_suffix, memory_id, **payload_overrides):
 def test_resolved_question_stays_visible_with_archived_legacy_row(tmp_path):
     """S02: resolving archives the compatibility row by design; the answer
     must remain reachable through the gated v2 read paths."""
-    from src.frankenmemory_v2 import (
+    from src.memery_v2 import (
         get_current_record,
         list_current_records,
         search_current_records,
@@ -350,7 +350,7 @@ def test_resolved_question_stays_visible_with_archived_legacy_row(tmp_path):
 def test_reopen_after_resolve_requires_live_legacy_row_again(tmp_path):
     """S02: reopen restores the open-question contract — visible only while
     its compatibility row is live (the provider reopens both sides)."""
-    from src.frankenmemory_v2 import get_current_record
+    from src.memery_v2 import get_current_record
 
     path = str(tmp_path / "fm.db")
     _question_block(path, "name", "question-name")
@@ -384,7 +384,7 @@ def test_reopen_after_resolve_requires_live_legacy_row_again(tmp_path):
 def test_resolve_compensation_keeps_question_visible_when_legacy_never_archived(tmp_path):
     """S02: when the legacy resolve fails, the v2 reopen compensation must
     restore visibility — the compatibility row was never archived."""
-    from src.frankenmemory_v2 import get_current_record
+    from src.memery_v2 import get_current_record
 
     path = str(tmp_path / "fm.db")
     _question_block(path, "name", "question-name")
@@ -410,7 +410,7 @@ def test_resolve_compensation_keeps_question_visible_when_legacy_never_archived(
 
 def test_get_current_record_resolves_block_and_memory_identities(tmp_path):
     """S04: the keyed SQL prefilter must not change which identities resolve."""
-    from src.frankenmemory_v2 import get_current_record
+    from src.memery_v2 import get_current_record
 
     path = str(tmp_path / "fm.db")
     _question_block(path, "name", "question-name")

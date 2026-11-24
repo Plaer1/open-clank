@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "purpose": "One table that separates the Open Clank engine from a real MiMo Code install: no shared environment variable, folder, file, database, binary or project folder. Applied by apply.py, enforced by check_leftovers.py. Patterns are Python regular expressions.",
+
+  "names": {
+    "environment": "MIMOCODE_<X> and MIMO_<X> become OPENCLANK_<X>; no fallback to the old name",
+    "project_folder": ".openclank (was .mimocode); project id file .openclank-project-id; project config openclank.json / openclank.jsonc",
+    "home_override": "OPENCLANK_HOME (was MIMOCODE_HOME): data/, cache/, config/, state/ below it",
+    "xdg_fallback": "openclank-engine under each XDG base directory (was mimocode); 'openclank' is not used because the Host already owns ~/.config/openclank",
+    "database": "openclank.db (was mimocode.db), OPENCLANK_DB override",
+    "binary": "openclank-engine (was mimo), openclank-engine.exe, openclank-engine.js",
+    "product": "Open Clank (was MiMoCode / MiMo Code)",
+    "package_scope": "@mimo-ai/* stays: internal workspace scope, never on the user's machine"
+  },
+
+  "skip_dirs": ["node_modules", ".git", ".turbo", "dist", ".artifacts"],
+
+  "skip_files": [
+    {"glob": "*/.mimocode-test-fixtures-*", "why": "disposable test runtime output, not engine source or a namespace migration input"},
+    {"glob": "*/.openclank-test-fixtures-*", "why": "disposable test runtime output, not engine source"},
+    {"glob": "LICENSE", "why": "licence text"},
+    {"glob": "USE_RESTRICTIONS.md", "why": "licence text (Xiaomi's, edited by Open Clank)"},
+    {"glob": "*/LICENSE*", "why": "third-party licence"},
+    {"glob": "*/NOTICE*", "why": "third-party notice"},
+    {"glob": "*/THIRD_PARTY*", "why": "third-party notice"},
+    {"glob": "bun.lock", "why": "lockfile; holds only the kept @mimo-ai scope"},
+    {"glob": "patches/*", "why": "third-party dependency patches"},
+    {"glob": "README.md", "why": "upstream document, not shipped"},
+    {"glob": "README.zh.md", "why": "upstream document, not shipped"},
+    {"glob": "README_npm.md", "why": "upstream document, not shipped"},
+    {"glob": "CONTRIBUTING.md", "why": "upstream document, not shipped"},
+    {"glob": "SECURITY.md", "why": "upstream document, not shipped"},
+    {"glob": "AGENTS.md", "why": "upstream contributor instructions, not shipped"},
+    {"glob": "docs/*", "why": "upstream design documents, not shipped"},
+    {"glob": "assets/*", "why": "upstream readme images, not shipped"},
+    {"glob": ".agents/*", "why": "upstream contributor skills, not shipped"},
+    {"glob": ".github/*", "why": "upstream CI and release workflows, not shipped"},
+    {"glob": "install", "why": "upstream installer of real MiMo Code, not shipped"},
+    {"glob": "install.ps1", "why": "upstream installer of real MiMo Code, not shipped"},
+    {"glob": "install-utf8.ps1", "why": "upstream installer of real MiMo Code, not shipped"},
+    {"glob": "local-install.sh", "why": "upstream installer of real MiMo Code, not shipped"},
+    {"glob": "openclank-vendor.json", "why": "Open Clank vendor manifest: names the upstream project and repository, checked by the Host engine build"},
+    {"glob": "AUDIT-REPORT-FOR-JUNCTION.md", "why": "Open Clank audit document about the fork, historical, not shipped"},
+    {"glob": "AUDIT-VERIFICATION.md", "why": "Open Clank audit document about the fork, historical, not shipped"},
+    {"glob": "MEMORY-SYSTEM-REPORT.md", "why": "Open Clank audit document about the fork, historical, not shipped"},
+    {"glob": "PERSONALITY-AUDIT.md", "why": "Open Clank audit document about the fork, historical, not shipped"},
+    {"glob": "ROBONOTES.md", "why": "Open Clank audit document about the fork, historical, not shipped"}
+  ],
+
+  "protocol_kept": [
+    {"name": "Xiaomi API and Token Plan hosts", "pattern": "[A-Za-z0-9.-]*xiaomimimo\\.com[^\\s\"'`)>\\]]*", "why": "service endpoints"},
+    {"name": "Xiaomi site and provider docs URLs", "pattern": "mimo\\.xiaomi\\.com[^\\s\"'`)>\\]]*", "why": "preserve genuine upstream URLs during mechanical renames. Remove any donor schema assignment from first-party config writers separately; Open Clank validates its own schema."},
+    {"name": "Xiaomi FDS download host", "pattern": "[A-Za-z0-9.-]*mi-fds\\.com[^\\s\"'`)>\\]]*", "why": "service endpoint"},
+    {"name": "Xiaomi privacy URL", "pattern": "privacy\\.mi\\.com[^\\s\"'`)>\\]]*", "why": "service URL"},
+    {"name": "mimocode.ai hosts", "pattern": "[A-Za-z0-9.-]*mimocode\\.ai[^\\s\"'`)>\\]]*", "why": "service endpoints"},
+    {"name": "upstream repository", "pattern": "(?:github\\.com/)?XiaomiMiMo/[A-Za-z0-9._/#-]*", "why": "upstream source reference and model ids"},
+    {"name": "Xiaomi support address", "pattern": "[A-Za-z0-9._-]+@xiaomi\\.com", "why": "contact address"},
+    {"name": "X-Mimo-Source header value", "pattern": "\"mimocode-cli\"", "why": "value of the X-Mimo-Source header sent to Xiaomi services"},
+    {"name": "Xiaomi login key-name parameter", "pattern": "kn: \"mimocode\"|\"kn\"\\)\\)\\.toBe\\(\"mimocode\"\\)", "why": "kn parameter of the Xiaomi platform login URL"},
+    {"name": "User-Agent sent to model services", "pattern": "mimocode/\\$\\{Installation", "why": "client identifier sent to Xiaomi and other model services; not known to be safe to change"},
+    {"name": "User-Agent of the Codex model list request (our fork)", "pattern": "mimo-code/\\$\\{Installation", "why": "our fork sends it to a non-Xiaomi service; carried unchanged"},
+    {"name": "identity-neutral prompt test: list of names that must NOT appear", "pattern": "/MiMoCode/, /MiMo Code/", "why": "a negative assertion; renaming it would forbid our own product name"},
+    {"name": "Xiaomi platform key name", "pattern": "mimo-code-cli-key-", "why": "name of the API key created at the Xiaomi platform"},
+    {"name": "MCP capability namespace", "pattern": "com\\.xiaomi\\.mimo/[a-z-]+", "why": "wire name shared with the Host's MCP servers; changed only together with the Host"},
+    {"name": "model ids", "pattern": "(?i:mimo)-v[0-9][A-Za-z0-9.-]*", "why": "model ids"},
+    {"name": "package scope", "pattern": "@mimo-ai(?:/[A-Za-z0-9._/-]*)?", "why": "internal workspace scope, never on the user's machine"}
+  ],
+
+  "rules": [
+    {"class": "environment", "pattern": "(?:OPENCLANK|MIMOCODE)_MIMO_ONLY\\b", "replace": "OPENCLANK_ISOLATED_CONFIG"},
+    {"class": "environment", "pattern": "(?:OPENCLANK|MIMOCODE)_MIMO_HISTORY_CONTEXT\\b", "replace": "OPEN_CLANK_ENGINE_HISTORY_CONTEXT"},
+    {"class": "environment", "pattern": "MIMOCODE_DATA_DIR\\b", "replace": "OPENCLANK_ENGINE_DATA_DIR"},
+    {"class": "environment", "pattern": "MIMOCODE", "replace": "OPENCLANK"},
+    {"class": "environment", "pattern": "(?<![A-Za-z0-9_])MIMO_(?=[A-Z0-9])", "replace": "OPENCLANK_"},
+
+    {"class": "xdg fallback", "pattern": "const APP = \"mimocode\"", "replace": "const APP = \"openclank-engine\""},
+    {"class": "xdg fallback", "pattern": "(\\.config|\\.local/share|\\.local/state|\\.cache|Application Support|AppData/(?:Local|Roaming))/mimocode\\b", "replace": "\\1/openclank-engine"},
+    {"class": "xdg fallback", "pattern": "(\"(?:cache|config|data|state|share|\\.config|\\.cache)\",\\s*)\"mimocode\"", "replace": "\\1\"openclank-engine\""},
+    {"class": "xdg fallback", "pattern": "path\\.join\\(\"\", \"mimocode\"\\)", "replace": "path.join(\"\", \"openclank-engine\")"},
+
+    {"class": "product", "pattern": "Xiaomi MiMo ?Code", "replace": "Open Clank"},
+    {"class": "product", "pattern": "MiMoCode(?=[A-Za-z0-9_-])", "replace": "OpenClank"},
+    {"class": "product", "pattern": "(?:MiMo|Mimo)[ -]?Code", "replace": "Open Clank"},
+    {"class": "product", "pattern": "Mimocode", "replace": "Openclank"},
+
+    {"class": "binary", "pattern": "scriptName\\(\"mimo\"\\)", "replace": "scriptName(\"openclank-engine\")"},
+    {"class": "binary", "pattern": "startsWith\\(\"mimo \"\\)", "replace": "startsWith(\"openclank-engine \")"},
+    {"class": "binary", "pattern": "(Process\\.(?:spawn|text)\\(\\[)\"mimo\"", "replace": "\\1\"openclank-engine\""},
+    {"class": "binary", "pattern": "(binaryNameFor\\([^()\\n]*\\)\\)\\.toBe\\()\"mimo\"", "replace": "\\1\"openclank-engine\""},
+    {"class": "binary", "pattern": "(\"vendor\",\\s*|\\bwork,\\s*)\"mimo\"", "replace": "\\1\"openclank-engine\""},
+    {"class": "binary", "pattern": "\"mimo\": \"\\./", "replace": "\"openclank-engine\": \"./"},
+    {"class": "binary", "pattern": "\"mimo\\.exe\" : \"mimo\"", "replace": "\"openclank-engine.exe\" : \"openclank-engine\""},
+    {"class": "binary", "pattern": "(?<![A-Za-z0-9_-])mimo\\.(js|exe)\\b", "replace": "openclank-engine.\\1"},
+    {"class": "binary", "pattern": "(?<=bin/)mimo\\b(?![.-])", "replace": "openclank-engine"},
+    {"class": "binary", "pattern": "(?<=vendor/)mimo\\b(?![.-])", "replace": "openclank-engine"},
+    {"class": "binary", "pattern": "(?<![A-Za-z0-9_./@:-])mimo(?= (?:--?[a-z]|<|(?:acp|agent|attach|auth|cron|debug|export|github|import|llm-server|mcp|memory|models|plugin|pr|providers|run|serve|session|skill|stats|tui|uninstall|upgrade|web|workflow|x)\\b))", "replace": "openclank-engine"},
+
+    {"class": "on-disk name", "pattern": "mimo-paste-", "replace": "openclank-paste-"},
+    {"class": "on-disk name", "pattern": "\\.mimo-worktrees", "replace": ".openclank-worktrees"},
+    {"class": "on-disk name", "pattern": "mimocode", "replace": "openclank"}
+  ],
+
+  "path_rules": [
+    {"pattern": "mimocode", "replace": "openclank"},
+    {"pattern": "^mimo\\.js$", "replace": "openclank-engine.js"}
+  ],
+
+  "forbidden": [
+    {"class": "environment", "pattern": "MIMOCODE"},
+    {"class": "environment", "pattern": "(?<![A-Za-z0-9_])MIMO_(?=[A-Z0-9])"},
+    {"class": "on-disk name", "pattern": "(?i:mimocode)"},
+    {"class": "product", "pattern": "(?i:mimo[ _-]code)"},
+    {"class": "binary", "pattern": "(?<![A-Za-z0-9_-])mimo\\.(?:js|exe)\\b"},
+    {"class": "binary", "pattern": "scriptName\\(\"mimo\"\\)"},
+    {"class": "binary", "pattern": "(?<=bin/)mimo\\b(?![.-])"},
+    {"class": "binary", "pattern": "(?<![A-Za-z0-9_./@:-])mimo(?= (?:--?[a-z]|<|(?:acp|agent|attach|auth|cron|debug|export|github|import|llm-server|mcp|memory|models|plugin|pr|providers|run|serve|session|skill|stats|tui|uninstall|upgrade|web|workflow|x)\\b))"},
+    {"class": "on-disk name", "pattern": "mimo-paste-|\\.mimo-worktrees"}
+  ]
+}

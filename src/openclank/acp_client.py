@@ -19,9 +19,11 @@ class ACPClient:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        *, private_diagnostics: bool = False,
     ) -> None:
         self._reader = reader
         self._writer = writer
+        self._private_diagnostics = private_diagnostics
         self._next_id = 1
         self._pending: Dict[int, asyncio.Future] = {}
         self._callbacks: Dict[str, Callback] = {}
@@ -33,6 +35,7 @@ class ACPClient:
         self._close_event = asyncio.Event()
         self.agent_info: Optional[dict] = None
         self.initialize_result: dict = {}
+        self._tool_timing_verifier: Optional[dict] = None
 
     # ── public API ──────────────────────────────────────────────
 
@@ -45,7 +48,7 @@ class ACPClient:
     async def start_reader(self) -> None:
         self._reader_task = asyncio.create_task(self._read_loop())
 
-    async def initialize(self) -> dict:
+    async def initialize(self, *, gcf_artifact=None) -> dict:
         from core.constants import APP_VERSION
         from src.openclank.managed_protocol import (
             client_capability_offer,
@@ -60,14 +63,36 @@ class ACPClient:
                     "writeTextFile": True,
                 },
                 "terminal": True,
-                "_meta": {"openclankManaged": client_capability_offer()},
+                "_meta": {"openclankManaged": client_capability_offer(private_runtime=self._private_diagnostics),
+                          **({'openclankGcfArtifact': dict(gcf_artifact)} if gcf_artifact is not None else {})},
             },
             "clientInfo": {
                 "name": "openclank",
                 "version": APP_VERSION,
             },
         })
-        validate_initialize_result(result)
+        validate_initialize_result(result, private_runtime=self._private_diagnostics)
+        # Optional producer identity belongs only to this exact live transport.
+        # A malformed/old peer remains usable for ordinary history.
+        self._tool_timing_verifier = None
+        metadata = result.get("_meta")
+        timing = metadata.get("openclankToolTiming") if isinstance(metadata, dict) else None
+        if isinstance(timing, dict) and set(timing) == {"version", "algorithm", "publicKey", "clockID"}:
+            try:
+                import base64
+                import re
+                from cryptography.hazmat.primitives.serialization import load_der_public_key
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+                raw = base64.b64decode(timing["publicKey"], validate=True)
+                if (type(timing["version"]) is int and timing["version"] == 1
+                        and timing["algorithm"] == "ed25519"
+                        and isinstance(timing["clockID"], str)
+                        and re.fullmatch(r"[0-9a-f]{32}", timing["clockID"])
+                        and len(raw) == 44 and isinstance(load_der_public_key(raw), Ed25519PublicKey)
+                        and base64.b64encode(raw).decode("ascii") == timing["publicKey"]):
+                    self._tool_timing_verifier = dict(timing)
+            except (TypeError, ValueError, KeyError):
+                pass
         self.initialize_result = result
         self.agent_info = result.get("agentInfo")
         return result
@@ -173,7 +198,7 @@ class ACPClient:
         if result != {"deleted": True}:
             raise RuntimeError("engine did not confirm private session discard")
 
-    async def managed_engine_call(self, method: str, params: dict) -> dict:
+    async def managed_engine_call(self, method: str, params: dict, *, queued_pending=None) -> dict:
         """Call one pinned host-to-engine extension with exact wire checks."""
 
         from src.openclank.managed_protocol import (
@@ -182,32 +207,45 @@ class ACPClient:
         )
 
         request = validate_engine_method_request(method, params)
-        result = await self._send_request(method, request)
+        result = await self._send_request(method, request, queued_pending=queued_pending)
         return validate_engine_method_result(method, result)
 
-    async def execute_managed_operation(self, params: dict) -> dict:
+    async def execute_managed_operation(self, params: dict, *, utility=None) -> dict:
         """Execute one typed, host-authorized model operation in the engine."""
 
         if not isinstance(params, dict):
             raise TypeError("managed operation parameters must be an object")
         try:
-            return await self._send_request("_openclank/operations/v1/execute", params)
+            return await self._send_request("_openclank/operations/v1/execute", params, utility=utility)
         except asyncio.CancelledError:
             cancel = {
                 "rootOperationID": params.get("rootOperationID"),
                 "idempotencyKey": params.get("idempotencyKey"),
             }
             if all(isinstance(value, str) and value for value in cancel.values()):
+                async def notify_cancel():
+                    return await asyncio.wait_for(self._send_request("_openclank/operations/v1/cancel", cancel), timeout=0.25)
+                cleanup = asyncio.create_task(notify_cancel())
                 try:
-                    await asyncio.wait_for(
-                        asyncio.shield(self._send_request("_openclank/operations/v1/cancel", cancel)),
-                        timeout=0.25,
-                    )
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            continue
+                    cleanup.result()
                 except asyncio.TimeoutError:
                     logger.warning("managed operation cancellation notification timed out")
                 except Exception:
                     logger.warning("managed operation cancellation could not reach the engine")
             raise
+
+    async def notify_utility_cancel(self, root: str, key: str) -> None:
+        """Best-effort cancellation only; never settles the execute request."""
+        try:
+            await asyncio.wait_for(self._send_request('_openclank/operations/v1/cancel',
+                {'rootOperationID':root, 'idempotencyKey':key}), timeout=0.25)
+        except Exception:
+            logger.warning('managed operation cancellation notification unavailable')
 
     async def close(self) -> None:
         self._start_cleanup()
@@ -215,6 +253,7 @@ class ACPClient:
 
     def _start_cleanup(self) -> None:
         self._closed = True
+        self._tool_timing_verifier = None
         if self._cleanup_task is None:
             self._cleanup_task = asyncio.create_task(self._finish_close())
 
@@ -242,6 +281,10 @@ class ACPClient:
             pass
         self._close_event.set()
 
+    def tool_timing_verifier(self) -> Optional[dict]:
+        """Public key/clock for this still-open initialized transport only."""
+        return dict(self._tool_timing_verifier) if not self._closed and self._tool_timing_verifier else None
+
     @property
     def is_closed(self) -> bool:
         return self._closed
@@ -253,21 +296,85 @@ class ACPClient:
         self._next_id += 1
         return rid
 
-    async def _send_request(self, method: str, params: dict) -> dict:
+    async def _send_request(self, method: str, params: dict, *, utility=None, queued_pending=None) -> dict:
+        if queued_pending is not None and (queued_pending.client is not self or queued_pending.method!=method
+            or queued_pending.request!=params or queued_pending.issued):
+            raise RuntimeError('queued mutation authority changed')
+        if utility is not None:
+            from src.openclank.operation_journal import canonical_request_hash
+            material = {key:params[key] for key in ('operation','routes','input','artifactInputs','options')}
+            worker, lease = utility.worker, utility.lease
+            if (utility.cancel_requested or not utility.account_current()
+                or not await utility.barrier.is_live(utility.owner, utility.admission)
+                or params.get('rootOperationID') != utility.root or params.get('idempotencyKey') != utility.idempotency_key
+                or canonical_request_hash(material) != utility.request_hash or lease is None
+                or getattr(worker, '_proc', None) is not utility.process or getattr(worker, '_bridge', None) is not utility.bridge
+                or getattr(utility.bridge, '_managed_provider_generation', None) != utility.holder
+                or getattr(worker, 'installed_generation', None) != utility.generation):
+                raise RuntimeError('utility authority changed before dispatch')
+            lease._pool._assert_owner_lifecycle(utility.owner, utility.epoch)
         rid = self._next_request_id()
         msg = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[rid] = fut
-        await self._write(msg)
-        return await fut
+        if utility is not None:
+            fut._openclank_utility = utility
+            utility.request_id = rid
+        if queued_pending is not None:
+            fut._openclank_queued_pending = queued_pending
+            queued_pending.request_id = rid
+        try:
+            if utility is not None and getattr(utility,'owned_send',None) is None:
+                utility.issued = True
+            if queued_pending is not None: queued_pending.issued = True
+            if utility is not None and getattr(utility,'owned_send',None) is not None:
+                await utility.owned_send._wait_for_arm(utility,self,msg)
+                # The worker was prepared outside source locks. Recheck its
+                # actual lifetime after arm, immediately before the frame.
+                if (utility.cancel_requested or not utility.account_current()
+                    or not await utility.barrier.is_live(utility.owner,utility.admission)
+                    or utility.lease is not lease or utility.worker is not worker
+                    or getattr(worker,'_proc',None) is not utility.process
+                    or getattr(worker,'_bridge',None) is not utility.bridge
+                    or getattr(utility.bridge,'_managed_provider_generation',None)!=utility.holder
+                    or getattr(worker,'installed_generation',None)!=utility.generation):
+                    raise RuntimeError('owned utility authority changed before frame')
+                lease._pool._assert_owner_lifecycle(utility.owner,utility.epoch)
+                await self._write(msg,owned_utility=utility)
+            else:
+                await self._write(msg)
+            return await fut
+        except asyncio.CancelledError:
+            pending = self._pending.pop(rid, None)
+            if pending is not None and not pending.done():
+                pending.cancel()
+            raise
+        except Exception:
+            self._pending.pop(rid, None)
+            raise
 
     def _send_notification(self, method: str, params: dict) -> None:
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
         asyncio.ensure_future(self._write(msg))
 
-    async def _write(self, obj: dict) -> None:
+    async def _write(self, obj: dict, *, owned_utility=None) -> None:
         line = json.dumps(obj, separators=(",", ":")) + "\n"
-        self._writer.write(line.encode())
+        data=line.encode()
+        if owned_utility is None:
+            self._writer.write(data)
+        else:
+            # No await occurs between the trusted source check and write.
+            owned=owned_utility.owned_send
+            owned._before_frame(owned_utility,self,obj)
+            try:
+                self._writer.write(data)
+            except BaseException:
+                # A throwing writer may have accepted bytes; never infer unsent.
+                owned_utility.issued=True
+                owned._frame_unknown(owned_utility,self)
+                raise
+            owned_utility.issued=True
+            owned._frame_issued(owned_utility,self)
         await self._writer.drain()
 
     async def _read_loop(self) -> None:
@@ -291,17 +398,33 @@ class ACPClient:
                 try:
                     msg = json.loads(line_str)
                 except json.JSONDecodeError:
-                    logger.warning("ACP reader: non-JSON line: %s", line_str[:200])
+                    if self._private_diagnostics:
+                        logger.warning("private ACP reader received invalid JSON")
+                    else:
+                        logger.warning("ACP reader: non-JSON line: %s", line_str[:200])
                     continue
+                if type(msg) is dict and msg.get("method") == "_openclank/session/v1/git-worktree/phase":
+                    params = msg.get("params")
+                    event = params.get("event") if type(params) is dict else None
+                    kind = event.get("kind") if type(event) is dict else None
+                    maximum = 4 * 1024 * 1024 if kind == "begin" else 256 * 1024
+                    if len(line) > maximum:
+                        rid = msg.get("id")
+                        if type(rid) in (str, int):
+                            await self._write({"jsonrpc":"2.0", "id":rid, "error":{"code":-32600,"message":"worktree staging frame exceeds limit"}})
+                        continue
                 await self._dispatch(msg)
         except asyncio.CancelledError:
             return
         except Exception as e:
-            logger.error("ACP reader error: %s", e, exc_info=True)
+            if self._private_diagnostics:
+                logger.error("private ACP reader failed")
+            else:
+                logger.error("ACP reader error: %s", e, exc_info=True)
             self._closed = True
             for fut in self._pending.values():
                 if not fut.done():
-                    fut.set_exception(TransportError(f"reader error: {e}"))
+                    fut.set_exception(TransportError("private ACP reader failed" if self._private_diagnostics else f"reader error: {e}"))
             self._pending.clear()
             self._start_cleanup()
             self._close_event.set()
@@ -313,7 +436,43 @@ class ACPClient:
         if has_id and not has_method:
             # Response to our request
             rid = msg["id"]
-            fut = self._pending.pop(rid, None)
+            fut = self._pending.get(rid) if type(rid) is int else None
+            utility = getattr(fut, '_openclank_utility', None) if fut else None
+            queued_pending = getattr(fut, '_openclank_queued_pending', None) if fut else None
+            if queued_pending is not None:
+                error=msg.get('error')
+                valid=(msg.get('jsonrpc')=='2.0' and rid==queued_pending.request_id
+                    and set(msg) in ({'jsonrpc','id','result'},{'jsonrpc','id','error'})
+                    and ('error' not in msg or (type(error) is dict and type(error.get('code')) is int
+                         and isinstance(error.get('message'),str) and {'code','message'}<=set(error)
+                         and set(error)<={'code','message','data'})))
+                if not valid:
+                    self._pending.pop(rid,None)
+                    if not fut.done(): fut.set_exception(TransportError('invalid queued mutation response'))
+                    return
+                queued_pending.response_seen=True
+                queued_pending.response_error='error' in msg
+            if utility is not None:
+                owned=getattr(utility,'owned_send',None)
+                if owned is not None and utility.issued is not True:
+                    owned._reject_preissue(utility,self)
+                    self._pending.pop(rid,None)
+                    if not fut.done():
+                        fut.set_exception(TransportError('managed response preceded its frame'))
+                        fut.exception()  # The disarmed writer will not await this response.
+                    return
+                error = msg.get('error')
+                valid = (msg.get('jsonrpc') == '2.0' and rid == utility.request_id
+                    and set(msg) in ({'jsonrpc','id','result'}, {'jsonrpc','id','error'})
+                    and ('error' not in msg or (type(error) is dict and type(error.get('code')) is int
+                         and isinstance(error.get('message'), str) and {'code','message'} <= set(error)
+                         and set(error) <= {'code','message','data'})))
+                if not valid:
+                    self._pending.pop(rid, None)
+                    if not fut.done(): fut.set_exception(TransportError('invalid managed operation response'))
+                    return
+                utility.response_seen = True
+            fut = self._pending.pop(rid, None) if type(rid) is int else None
             if fut and not fut.done():
                 if "error" in msg:
                     err = msg["error"]
@@ -344,9 +503,13 @@ class ACPClient:
                 try:
                     await self._session_update_handler(session_id, update)
                 except Exception as exc:
-                    logger.error("ACP session/update handler error: %s", exc, exc_info=True)
+                    if self._private_diagnostics:
+                        logger.error("private ACP update handler failed")
+                    else:
+                        logger.error("ACP session/update handler error: %s", exc, exc_info=True)
             else:
-                logger.debug("ACP: unhandled notification %s", method)
+                if not self._private_diagnostics:
+                    logger.debug("ACP: unhandled notification %s", method)
 
     async def _dispatch_callback(self, msg: dict) -> None:
         method = msg["method"]
@@ -354,7 +517,10 @@ class ACPClient:
         rid = msg["id"]
         handler = self._callbacks.get(method)
         if handler is None:
-            logger.warning("ACP: no callback for method %s", method)
+            if self._private_diagnostics:
+                logger.warning("private ACP callback unavailable")
+            else:
+                logger.warning("ACP: no callback for method %s", method)
             await self._write({
                 "jsonrpc": "2.0",
                 "id": rid,
@@ -367,7 +533,10 @@ class ACPClient:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error("ACP callback %s error: %s", method, exc, exc_info=True)
+            if self._private_diagnostics:
+                logger.error("private ACP callback failed")
+            else:
+                logger.error("ACP callback %s error: %s", method, exc, exc_info=True)
             await self._write({
                 "jsonrpc": "2.0",
                 "id": rid,

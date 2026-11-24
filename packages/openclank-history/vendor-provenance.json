@@ -1,0 +1,502 @@
+{
+  "schema": "openclank.lore-vendor-provenance/v1",
+  "status": "v0.14.0_source_integrated",
+  "embedded_tree_status": "earlier_stage_fields_below_are_historical",
+  "scope": "The current embedded source, lockfiles and local patch decisions are in current_release. Earlier Stage A and Stage B records preserve the previous inputs and historical results.",
+  "upstream": {
+    "repository": "https://github.com/EpicGames/lore",
+    "embedded_base_commit": "fa606b08781705e24807cfc05e1518c79e1f688b",
+    "embedded_workspace_version": "0.9.1-nightly",
+    "target_tag": "v0.12.0",
+    "target_commit": "f00dbbf07cb449103e211ccbecaa995630f47d2d",
+    "target_license_git_blob": "729d01e16750b0134ff1e9b148cd4e70e5dfe51b",
+    "target_license_sha256": "330ebd9c50fa5d2967f4f9acaa82f6226055b0d9c0c90d367db924069f065ef6",
+    "target_license_sha256_status": "hydrated_exact_blob"
+  },
+  "tree_digest_algorithm": "SHA-256 over UTF-8 lines: lowercase SHA-256(file bytes), two ASCII spaces, vendor-root-relative POSIX path, LF; paths sorted by UTF-8 bytes; all regular files including hidden files; no symlinks.",
+  "patch_digest_algorithm": "SHA-256 of Python difflib.unified_diff over UTF-8 lines with endings, 3 context lines, labels upstream/<path> and embedded/<path>, LF line terminator.",
+  "embedded_tree": {
+    "files": 305,
+    "sha256": "089483331267726c0b3d304b24ffcfedb7fd97df4966d0ef25d5401cf0be2178"
+  },
+  "embedded_components": {
+    "lore-base": {
+      "files": 35,
+      "sha256": "adbacea3989d9792d4680fb5bca0f7b0027303bbc233fd5ab2f5bd864a64fec8"
+    },
+    "lore-credential": {
+      "files": 5,
+      "sha256": "63be530b921bd44a6ce600c8a736f72bf51e87076a3c9b4c284cf7b7ea39b195"
+    },
+    "lore-error-set": {
+      "files": 39,
+      "sha256": "1bdacf590d16b12a8ea9e0d6cead2f8b85f1d5dd5753dc14ab3c161bc5d59817"
+    },
+    "lore-error-set-macro": {
+      "files": 4,
+      "sha256": "fca82c5b389235f14ae47bc6bf02d84210c43f9255a483e48d2b781558f4e32b"
+    },
+    "lore-io": {
+      "files": 18,
+      "sha256": "d06b4c3da671087817683f29697c4f4a7009c4747d4a3efa11a94450c1e1e5f4"
+    },
+    "lore-proto": {
+      "files": 57,
+      "sha256": "5164bc226d69821c39123fb9133fbb4fed663bc7ecf12e3efb8bb03e02d95110"
+    },
+    "lore-storage": {
+      "files": 34,
+      "sha256": "c4b8f0e092e6c98f7c75974f841b49e79f8f87373ad73e1c008633e95aa7e02b"
+    },
+    "lore-telemetry": {
+      "files": 16,
+      "sha256": "e0f2e6a1ccb742f02b317f54e0c95b2d745c0b7172414bb49199dac4c4d2eac8"
+    },
+    "lore-transport": {
+      "files": 27,
+      "sha256": "f14fd70c32c036c81d7835ce818e77b9dc1599e5f1db26154d65827590929376"
+    },
+    "vendor/glob-match": {
+      "files": 6,
+      "sha256": "4dce9b151d1613864dcf0af240b5104db1854e1633058f55a8da5bbc4b04f84e"
+    },
+    "vendor/quinn-proto": {
+      "files": 59,
+      "sha256": "b66c7250b2d9e7634ff051db72f3cd0f979645fe7d01abc83a95505ca97d4e2a"
+    }
+  },
+  "closure": {
+    "direct_runtime_crate": "lore-storage",
+    "local_workspace_crates": [
+      "lore-base",
+      "lore-credential",
+      "lore-error-set",
+      "lore-error-set-macro",
+      "lore-io",
+      "lore-proto",
+      "lore-storage",
+      "lore-telemetry",
+      "lore-transport"
+    ],
+    "note": "Current embedded local-storage closure including its workspace manifests, native build inputs, tests, examples, licenses and two parent overrides. Target release minimum closure must be resolved and reviewed in Stage B; this inventory is not proof that every included file is runtime-required."
+  },
+  "local_changes": [
+    {
+      "path": "Cargo.toml",
+      "base_sha256": "82254a5e4e6820758269928a61c35aad2b0477b70199fb594c7c5d498eb7653f",
+      "embedded_sha256": "93ed97b2070e10ff8208df0a815e546b7ca29350f650d4beade987321a7d519d",
+      "patch_sha256": "2cdefb5ca25a2e710cdf0512f9563ef7e8fba024d6f047c97e98a26ac9b5c9a0",
+      "target_git_blob": "c8f73dcb863bde3df5d4520bda090c292a6051b0",
+      "target_sha256": "399f485b9e78b149e81fa95d55f9a15933d202ef52358e6989843fd52cc9dbc1",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "adapt",
+      "reason": "Preserve minimum embedded workspace; resolve target closure deliberately."
+    },
+    {
+      "path": "Cargo.lock",
+      "base_sha256": "41e9d780bad4dbc600add80ef232e8baef4c01700616107d24fe51c4eabc2cde",
+      "embedded_sha256": "8a76be2a397efe2daae02251b6a25efed4f47c690ec13c53185a49acf6d3cd5a",
+      "patch_sha256": "23bc6e881bafc1c827b80114049347513d3932510ab1a8dd9ccbd780d283e574",
+      "target_git_blob": "a4581cfd5040e1427dfc5a9832978ac069fe4918",
+      "target_sha256": "f2d2ab4ab542c2bfec1018f5719d7c0c2f5e4db19763e26e6e682b574a7b5cff",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "adapt",
+      "reason": "Regenerate and review the target dependency closure; preserve reproducibility."
+    },
+    {
+      "path": "lore-io/Cargo.toml",
+      "base_sha256": "1530a6d46259e3d19155ae99000fe9b6060674fafc3169eb5b9b67a8894d1aa4",
+      "embedded_sha256": "936df86dcb40c9722f4ebd207d61043e8f55763cc41c168a11d0f9aad21f9fb6",
+      "patch_sha256": "72b109aae0960bc88cc5b11e98b1c2fe5df8f0121641285a63ae35d69ebcefe5",
+      "target_git_blob": "4621566b0efe6ea1bfa6f6ced7f779ce5607f417",
+      "target_sha256": "507d250f663869fac0696f11675d8a21fea6c198f0510d4824355738278d56c9",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "adapt",
+      "reason": "Preserve bounded feature-gated durability fault qualification without runtime controls."
+    },
+    {
+      "path": "lore-io/src/lib.rs",
+      "base_sha256": "706a5b971caca52d288f3416e3b597c82fc32d75f22bad518e03f27ec189e219",
+      "embedded_sha256": "cc42203911e858c744c3d8a7d0298b9fbd7416c86d9d83d3b0f1ab35279e2192",
+      "patch_sha256": "62ddf579585298f22bcd9b06960f13dd078cae9fcb06260dc5e8d35fc0f18184",
+      "target_git_blob": "322724f5dfd57ed5ba2abea0da19694a8dbd05dc",
+      "target_sha256": "baaff380f601f14f0a791919393d9570d009d64c7990441d9d385c3a63d35050",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "adapt",
+      "reason": "Reconcile local qualification exports with target test utilities."
+    },
+    {
+      "path": "lore-io/src/psync.rs",
+      "base_sha256": "9dde508048c9c70c56e82b4aabbb2428adc9313bf7f7aaf127d62c15e49a07b2",
+      "embedded_sha256": "4bf05b809a986ce865064d6e0c5d7bd77ec9b7939662f89cf21271e9eafb13d8",
+      "patch_sha256": "d0d1366f0f632789f17efa0b404d98b229c8a251bf271455ed4947131bebeac4",
+      "target_git_blob": "1c89564464047e0191539eabb6aad947fae4ec73",
+      "target_sha256": "9ddef27b6a8c28e063c2d8f9619d432e4f03b463efe68544fb40757b3e9b834c",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "retain_and_adapt",
+      "reason": "Unix atomic publication must propagate parent-directory sync failure; target still discards it and is not equivalent."
+    },
+    {
+      "path": "lore-storage/Cargo.toml",
+      "base_sha256": "9b6fac78c7b90298ba51971b2c37b1c34a2f82612b504ac35a26f659bc37d5bd",
+      "embedded_sha256": "896b658a210d571ddc4cc1827666baabf584b4a41186b2dd0c9834d497114370",
+      "patch_sha256": "f999a1e7fdb13680d1feb18d99f770dd038a1c5cc8bb68b60d32f6f143eda3de",
+      "target_git_blob": "aac6cdc2ffcd409870010c352fd358c0864f8439",
+      "target_sha256": "645d2b9e41bd5a2aa3bb6dd331aa8e62eb12d13f33e2cf03720af6a3f9177824",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "adapt",
+      "reason": "Preserve bounded feature-gated qualification hooks."
+    },
+    {
+      "path": "lore-storage/src/lib.rs",
+      "base_sha256": "b5ff14dcce034a38126127cc9d70eb4109dc5e0089f793b0751ad750fdf450f3",
+      "embedded_sha256": "c4524e79079e9489831e6cebab67621a8572cabf60d59ece974fda4edcc90d27",
+      "patch_sha256": "a38ea105ab572b5aa8a0e98f2d3d3fbf17b5d1d4c3ae7e4c121655fb821ea0e7",
+      "target_git_blob": "8ce7a2ff7d2179e1c516c04943f7069bef86ee79",
+      "target_sha256": "359c8b2e2dd9be683c692ff800ac9d40957c5bfc3bd3e281be833300fd649778",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "adapt",
+      "reason": "Reconcile qualification exports without adding runtime controls."
+    },
+    {
+      "path": "lore-storage/src/local/immutable_store.rs",
+      "base_sha256": "c49d22955a349fc9f4463edb3112c7d6e295f0f55a8584eb7afcfcd8ed40f34a",
+      "embedded_sha256": "be4ecce6f842cbdffea40a802b16be788ed0fe3b52c5356ab83e9ec1725276d7",
+      "patch_sha256": "efc38e4d2b10b4b76e109ccfcedcf9c18faa8637ecc719d701c55fa06bb7425b",
+      "target_git_blob": "e95f2af39182480a0fbc2750ed354249a79ff643",
+      "target_sha256": "e69e297b016268c76ac00b89d96cbc7c9d623de38137300383462da73daa8a4c",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "adapt",
+      "reason": "Preserve checked index, compaction and publication failures while adapting claimed-store lifecycle."
+    },
+    {
+      "path": "lore-storage/src/maintenance.rs",
+      "base_sha256": "19767d36ace49a922dd48d3d335274976f4c1b7dc3546346b3a8fbe3ef7bd6ec",
+      "embedded_sha256": "ce0c03eefb5a39e3888a33895712360794d9958494dcf2c2e74de7ba57885578",
+      "patch_sha256": "26866f9d5a2f055f2d6e937ac5efa1cef218edf6305896c0e923e1b35cbe1547",
+      "target_git_blob": "a27afa4f58e0121d5ff908b1945be00ee9c809ee",
+      "target_sha256": "a19acfe097785b5adde5e436ab18b7e350631d20b5985af077488765397356e0",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "adapt",
+      "reason": "Adapt fixture calls to the changed compaction result contract."
+    },
+    {
+      "path": "lore-storage/src/packstore.rs",
+      "base_sha256": "47013531e9e8d29a6ac7dadc55511a3827b4367294a4c2f89937b7b46b6cf01a",
+      "embedded_sha256": "230ad8295efb522b1d720063d9e82693b17b6952eb2223533d4050424bbd2e22",
+      "patch_sha256": "97c725740e1d4bbcb17914ba8cc2612d998ec2e0aa0279fb9c296251409dd6e0",
+      "target_git_blob": "88abfec1623479ef6d084509a7555fe1a7b06466",
+      "target_sha256": "7ea5099b9404580e39d4f216296f2885b03106a83d3ab82ba2ef3f9c27cf6533",
+      "target_sha256_status": "hydrated_exact_blob",
+      "disposition": "adapt",
+      "reason": "Preserve remove, truncate, obliterate and flush errors and dirty state; compare target semantics per operation."
+    }
+  ],
+  "parent_overrides": [
+    {
+      "crate": "glob-match",
+      "version": "0.2.1",
+      "path": "vendor/glob-match",
+      "tree": {
+        "files": 6,
+        "sha256": "4dce9b151d1613864dcf0af240b5104db1854e1633058f55a8da5bbc4b04f84e"
+      },
+      "source_sha256": "34aca010ab50d11baa70c6e8f48362ad91f1fa896d31f6b8a60c68e3ab4d40c1",
+      "manifest_sha256": "394d22fd0b4287511d680398446e03ef9620a2ddc200f9ccda0dc114ac1837c0",
+      "qualification_test_sha256": "19f8c80da56633180e98f6a1d88aec0fb9d99bdbe26af856a8331c8fa15b8847",
+      "base_relationship": "embedded bytes match the retained Lore base; original unmodified crates.io source was not available for a separate delta",
+      "disposition": "retain_and_adapt",
+      "reason": "Preserve the documented globstar backtracking under-exclusion correction; prove parity before retirement."
+    },
+    {
+      "crate": "quinn-proto",
+      "version": "0.11.13",
+      "path": "vendor/quinn-proto",
+      "tree": {
+        "files": 59,
+        "sha256": "b66c7250b2d9e7634ff051db72f3cd0f979645fe7d01abc83a95505ca97d4e2a"
+      },
+      "manifest_sha256": "57092c3004d5a4423a22706ecff12421e713313d858d49e4479722c85f457836",
+      "vcs_info_sha256": "2520ccf1d54752fa00d598b319bfa6fe138798164eb15c7f9621ac94250fba05",
+      "declared_vcs_commit": "b2b930a0662b18b2e351264a21e175478bb3c3f1",
+      "base_relationship": "embedded bytes match the retained Lore base; independent pristine registry comparison is not established",
+      "disposition": "retain_and_review",
+      "reason": "Preserve the parent path override and inspect its target dependency/patch need before retirement; do not infer a local source delta."
+    }
+  ],
+  "licenses": [
+    {
+      "path": "LICENSE",
+      "sha256": "330ebd9c50fa5d2967f4f9acaa82f6226055b0d9c0c90d367db924069f065ef6"
+    },
+    {
+      "path": "lore-base/native/thirdparty/rpmalloc/LICENSE",
+      "sha256": "0100518799526908a06f4ba93b97a438362b589124c0081ba57dd4bfd7998a84"
+    },
+    {
+      "path": "vendor/glob-match/LICENSE",
+      "sha256": "e783584a3977649d99f16f1c314f6d4a805522a7d9b975fb639d57a28b091c55"
+    },
+    {
+      "path": "vendor/quinn-proto/LICENSE-MIT",
+      "sha256": "4b2d0aca6789fa39e03d6738e869ea0988cceba210ca34ebb59c15c463e93a04"
+    },
+    {
+      "path": "vendor/quinn-proto/LICENSE-APACHE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    }
+  ],
+  "parent_inputs": {
+    "Cargo.toml_sha256": "36f3cad3e6736c7436b937c9b01e9a171e2285102f3ba68c50aaae44d7975dc1",
+    "Cargo.lock_sha256": "8d541bedcc69780e1baa4bc33599eb6a22ffcc744096f2997fd471e7e0446350"
+  },
+  "adapter_contract": {
+    "current_constructor": "LocalImmutableStore::new(Some(PathBuf), settings)",
+    "target_constructor": "Option<PathBuf> is unchanged; opening-claim release, operation claims, refresh and error behavior require review",
+    "settings": {
+      "protect_local_fragment": true,
+      "implicit_durable_stored": false,
+      "isolate_partitions": true,
+      "flush_background": false
+    },
+    "durability": "checked durable flush; propagate failures and preserve partition isolation",
+    "unix_directory_publication": "propagate parent-directory sync failure after atomic rename; target remains non-equivalent"
+  },
+  "limitations": [
+    "Production source build and one disposable new-root durability/partition and old-root refusal case passed.",
+    "No live root, migration, cutover, donor suite, crash or cross-platform qualification was performed."
+  ],
+  "target_source_candidate": {
+    "commit": "f00dbbf07cb449103e211ccbecaa995630f47d2d",
+    "files": 290,
+    "tree_sha256": "9898fe7c3673f927475511ac0d6b4d2de58ff28269d6ff82ca1b42cd93ca6cb0",
+    "selection": "root Cargo.toml/Cargo.lock/LICENSE/build-helper.rs; each listed crate Cargo.toml, build.rs, src, native and proto trees; complete glob-match and quinn-proto override trees; tests/examples outside these paths excluded",
+    "local_storage_crates": [
+      "lore-base",
+      "lore-credential",
+      "lore-error-set",
+      "lore-error-set-macro",
+      "lore-io",
+      "lore-macro",
+      "lore-proto",
+      "lore-storage",
+      "lore-telemetry",
+      "lore-transport"
+    ],
+    "qualification": "Source-derived candidate; the production build passed. Tests and examples outside selected source trees are excluded."
+  },
+  "candidate_stage_b": {
+    "target_commit": "f00dbbf07cb449103e211ccbecaa995630f47d2d",
+    "patchset": "openclank-v012-p04-1",
+    "files": 290,
+    "tree_sha256": "5a8ea7b7935e9c0ae9be5674fa493e7e3eb335ad38c3746ea66f7305cccc2a19",
+    "tree_digest_algorithm": "SHA-256 over UTF-8 lines: lowercase SHA-256(file bytes), two ASCII spaces, vendor-root-relative POSIX path, LF; paths sorted by UTF-8 bytes; all regular files including hidden files; no symlinks.",
+    "local_patches": [
+      {
+        "path": "lore-io/Cargo.toml",
+        "target_sha256": "507d250f663869fac0696f11675d8a21fea6c198f0510d4824355738278d56c9",
+        "candidate_sha256": "4d66efa1ff6c215597db38ae1d2ca49ec25d68756123d819e291e5c622fab8c2",
+        "patch_sha256": "8fa5f28eed8302d8632467c80a684983ebf7628aae93dbc1a4ec8dfa30235253"
+      },
+      {
+        "path": "lore-io/src/lib.rs",
+        "target_sha256": "baaff380f601f14f0a791919393d9570d009d64c7990441d9d385c3a63d35050",
+        "candidate_sha256": "de7e5dce6d34108e8842e6b3144585f2b842d03be8d7022e9a26e4c44cf8d2f7",
+        "patch_sha256": "ab0971b6e0496f66f7df1bb41246b50edf909dd516afa389c63aad93146245db"
+      },
+      {
+        "path": "lore-io/src/psync.rs",
+        "target_sha256": "9ddef27b6a8c28e063c2d8f9619d432e4f03b463efe68544fb40757b3e9b834c",
+        "candidate_sha256": "5f0617d7ce1c87d9fee0dbd24e6bffc1bf6769fc2bc2820cfe5e1b611e553d6d",
+        "patch_sha256": "4fb63e17b47da506682eb60e0def52208b7ca4c706312e92473647764e9def68"
+      },
+      {
+        "path": "lore-proto/Cargo.toml",
+        "target_sha256": "714c00a2b669d7df77ae0a036656bdf11e7fdd70dbaa24e9b28d399fb95ced87",
+        "candidate_sha256": "37600e9e09ab6a2aeaff08613db831fdd5a3b08c669ce7541241b9fbc282ea6f",
+        "patch_sha256": "032df9a49c3e79294a2ab23a782865db748956a0c153ddff4968c345993a9358"
+      },
+      {
+        "path": "lore-proto/build.rs",
+        "target_sha256": "4cc52ed6795617d4847d5ae312feaa87d6b6c698cb68859dac30c228f74dd8ba",
+        "candidate_sha256": "2033578447296321ae88dc7f002d68420f8d8f2257ec7bfa62f36df37b5f08ac",
+        "patch_sha256": "2d437d9a9727b015e2d1a6ca8a2b7f337ce95b2bcbe4d075eee47fa78167219a"
+      },
+      {
+        "path": "lore-storage/Cargo.toml",
+        "target_sha256": "645d2b9e41bd5a2aa3bb6dd331aa8e62eb12d13f33e2cf03720af6a3f9177824",
+        "candidate_sha256": "7533e44bf185344840f1e86d461a135d6b41e54caf232ce0c0e0b129baa1e4f4",
+        "patch_sha256": "bffa2e0d43cbd00320446287b06865a03da8cf83e739fc1b7836dd2babd9624d"
+      },
+      {
+        "path": "lore-storage/src/lib.rs",
+        "target_sha256": "359c8b2e2dd9be683c692ff800ac9d40957c5bfc3bd3e281be833300fd649778",
+        "candidate_sha256": "f10b76217145476f748832ed683c0ee69c7dba91cd24eda0e68c1d07734d1ae1",
+        "patch_sha256": "cb7055d4d19d808d25eeecbcb3d574bd335fce7b7c9c0e7c879a10c2826ad40d"
+      },
+      {
+        "path": "lore-storage/src/local/immutable_store.rs",
+        "target_sha256": "e69e297b016268c76ac00b89d96cbc7c9d623de38137300383462da73daa8a4c",
+        "candidate_sha256": "d85a47c9f6f027a351fe00285744f5272d5f5fc87da2afa2f8535457a2aa2124",
+        "patch_sha256": "abf923e650b6ced8ba2c45d8a8e7552cfbc664ab15951526391f6ac80669c25c"
+      },
+      {
+        "path": "lore-storage/src/packstore.rs",
+        "target_sha256": "7ea5099b9404580e39d4f216296f2885b03106a83d3ab82ba2ef3f9c27cf6533",
+        "candidate_sha256": "3ad87384c669acfd903daf8ef5c1b110b65dfbbc864b7314ae46a48d120eb429",
+        "patch_sha256": "4f96fea1158d563713de1cbe1cb87aa9a006a94d196f31633c89e6c90c659a8a"
+      }
+    ],
+    "parent_Cargo_toml_sha256": "9e19bb5d2c2e4872daa0d6d915f053c5086614bd907e39622b836aed736abaf7",
+    "parent_Cargo_lock_sha256": "4b8581379aac0e15bd4676796e60114cdd7c3982f81515acb8bc0ed81fc16d02",
+    "history_adapter_sha256": "f2f611aadd6079937e77ec5c6e562bf67e4567b97ca92f355c4d89b6a1d61d7d",
+    "proto_policy": "Build checks all 15 pregenerated src/grpc files; it never invokes protoc or rewrites generated sources.",
+    "format_marker": "openclank-history\nformat=2\nlore-source=f00dbbf07cb449103e211ccbecaa995630f47d2d\npatchset=openclank-v012-p04-1\n",
+    "original_patch_dispositions": {
+      "Cargo.toml": "adapted parent workspace and closure",
+      "Cargo.lock": "target vendor lock retained; parent lock resolved for candidate",
+      "lore-io/Cargo.toml": "adapted test_faults feature",
+      "lore-io/src/lib.rs": "adapted fault export",
+      "lore-io/src/psync.rs": "adapted durable parent-sync propagation and fault seam",
+      "lore-storage/Cargo.toml": "adapted fault feature and omitted excluded stress example",
+      "lore-storage/src/lib.rs": "adapted fault exports",
+      "lore-storage/src/local/immutable_store.rs": "adapted index and compaction fault seams to target lifecycle; native error paths retained",
+      "lore-storage/src/maintenance.rs": "old fixture-only patch not carried; target compaction fixture API differs and donor tests were not run",
+      "lore-storage/src/packstore.rs": "adapted sync fault seam to target dirty/sticky-failure semantics"
+    },
+    "override_disposition": {
+      "glob-match": "target six files identical to prior correction",
+      "quinn-proto": "target 0.11.19 override retained; four target Lore deltas documented upstream; prior 0.11.13 override replaced"
+    },
+    "coordinator_sha256": "51809bbb7c3e80275646585508ef1283ceca478b1bb567eda88173b1a8af608c",
+    "boundary_case_sha256": "a0ec084a7f5c0f55b8c0c5cf371e337d5221392ef9b78140f55380db013ea0ea"
+  },
+  "current_release": {
+    "repository": "https://github.com/EpicGames/lore",
+    "tag": "v0.14.0",
+    "commit": "317f48b918f0b4d43de104d99e80ac4a57b697df",
+    "previous_release": "v0.12.0",
+    "intervening_release": {
+      "tag": "v0.13.0",
+      "commit": "9e0b4519a8a246e471d01853955f63bf0cecbeca"
+    },
+    "workspace_version": "0.13.1-nightly",
+    "patchset": "openclank-v014-1",
+    "format_revision": 3,
+    "vendor_tree": {
+      "files": 313,
+      "sha256": "232379abdd00a4a2e9e6c0bea8422d3ce1eda36b25226020c3d8904025b635da"
+    },
+    "local_patches": [
+      {
+        "path": "lore-io/Cargo.toml",
+        "disposition": "Keep local fault injection feature; integrate upstream platform dependencies.",
+        "upstream_sha256": "e9284d9c5eb10ea491cc2f72641899b495e92f548ce1ec2457ec4d314b263b12",
+        "embedded_sha256": "634ec34f7e612f7759fead4fc6d170a640de693963bf657d48107d3624277998",
+        "patch_sha256": "7ce39cf292da09240dda87c44af5d10ec4a2cf4a521d36c43e203b6e222284d3"
+      },
+      {
+        "path": "lore-io/src/lib.rs",
+        "disposition": "Keep feature-gated directory-sync fault export alongside upstream APIs.",
+        "upstream_sha256": "89f8ae8fd64777617dca0ab36a232971310ae945f7a41e60edce08c37a449f0a",
+        "embedded_sha256": "4cfb25113fdb42597106a0d6448c787904b0961574f27270f1e778f6be1937c4",
+        "patch_sha256": "8c96ff99f7c1ebe6318cb0e6a4634eadf59ceac95322377bbdcbc85fd33570bc"
+      },
+      {
+        "path": "lore-io/src/psync.rs",
+        "disposition": "Propagate parent-directory sync failure on durable atomic and in-place publication. Keep gated fault seam.",
+        "upstream_sha256": "d199e8f3391c4fea8297eaecf5d88461d34ed0470ccc6061e7a1cc0f293edee8",
+        "embedded_sha256": "0ebd9a01a09c329017f9116e2231b9a1e9fbef03587abc1fed78ee600e49a315",
+        "patch_sha256": "7220135986794e3158fa73e5f807648760c455faac19eb40421b73d3560d7152"
+      },
+      {
+        "path": "lore-proto/Cargo.toml",
+        "disposition": "Retain packaging without code generator dependencies.",
+        "upstream_sha256": "250e7bed0a3f7817183998fc576e0a03575b055392256e240459f9ac3cccc00c",
+        "embedded_sha256": "34d3615646dd3521292a5f094fd4476cc162c68652efb5e0e240319c104cb2ab",
+        "patch_sha256": "7fc9125bdf8a05497112e7463e0ac5cbf95539408f037ff0058091013150491f"
+      },
+      {
+        "path": "lore-proto/build.rs",
+        "disposition": "Keep pregenerated-only build policy; all 15 binding names still apply.",
+        "upstream_sha256": "dc806ec6f121fd18588aa605033ff9e68dd1d5c538eb52c2a7583599c66aa33c",
+        "embedded_sha256": "2033578447296321ae88dc7f002d68420f8d8f2257ec7bfa62f36df37b5f08ac",
+        "patch_sha256": "7c857e432ce6584fdce278cf84b0a886e93190a165c1fcfefe9ea2c3897d5ade"
+      },
+      {
+        "path": "lore-storage/Cargo.toml",
+        "disposition": "Keep local feature wiring and omission of excluded stress example.",
+        "upstream_sha256": "75092ae8faa94555ae2d3d6d48adc36e5648ef3f90f8dfbe1cb40c711aa10bc8",
+        "embedded_sha256": "f2aaea6779e70b0eafb0fff98bcb30c6782a5bb253dadd33016a74491af5def3",
+        "patch_sha256": "18db967f3cd701c807d518edfc75ee037862153364111f26f48eb9f7cd52b171"
+      },
+      {
+        "path": "lore-storage/src/lib.rs",
+        "disposition": "Keep gated exports and expose upstream FlushOptions.",
+        "upstream_sha256": "945d2dfef7adbb4d3fe17ca0cb14a2ec574b32aa505020b7ebab2b4e7ca3eabe",
+        "embedded_sha256": "2c01fbe527e2a4a121c381bc7a0dc15804296e218fa955fca2c30d5980f0e8af",
+        "patch_sha256": "e36d9a9b6abf991c7c80d8f17db6095c66000dcf7b14f60a74b254d8d7d43eb9"
+      },
+      {
+        "path": "lore-storage/src/local/immutable_store.rs",
+        "disposition": "Adapt index fault after write_bucket_file success, before clearing the failure guard. Keep compaction seam.",
+        "upstream_sha256": "95fe27f93b42dc49dfde5ac75f50982ad4e8772f749b854fa37ec3274cd117bc",
+        "embedded_sha256": "4c881acef61f4450d93362495b7ee74aa44c30a7bf1ac76d48cdb4a233645748",
+        "patch_sha256": "9224747d901b95126b0113a026e7afd04d7780e6220fe82ccd3404be31086393"
+      },
+      {
+        "path": "lore-storage/src/packstore.rs",
+        "disposition": "Keep local sync-error seam and upstream sticky pack error behavior.",
+        "upstream_sha256": "7ea5099b9404580e39d4f216296f2885b03106a83d3ab82ba2ef3f9c27cf6533",
+        "embedded_sha256": "3ad87384c669acfd903daf8ef5c1b110b65dfbbc864b7314ae46a48d120eb429",
+        "patch_sha256": "551921f4217977b27ce4c3ce23f742ccaf61e1a8b99263f5bc7db07a7b7a896b"
+      }
+    ],
+    "parent_inputs": {
+      "Cargo.toml": "052dea31a4b19ccafdd0ef02a395720912654f0a173879f0bf798cc45a00491d",
+      "Cargo.lock": "dbfc080eb5dd8c698c7ab02e858e19abe8332437c8898e8bccdf44d4f61d646c"
+    },
+    "upstream_lock_sha256": "24b7a2b2f809e108e10b186bc50e4c5cc5bdd99c539dc7067992cb336c402f7b",
+    "overrides": {
+      "glob-match": {
+        "disposition": "Replace selected source with v0.14.0 matching and prefix/suffix optimization. Standalone donor tests are excluded.",
+        "tree": {
+          "files": 6,
+          "sha256": "003fd88711529961a9704bcb45ac9a1332a80af04cdd477d09c1242aff77163e"
+        }
+      },
+      "quinn-proto": {
+        "disposition": "Keep upstream pinned patched 0.11.19 override.",
+        "tree": {
+          "files": 59,
+          "sha256": "abb93e694a7bba823075aea4588555d37e1f823ff9d498c080ea6f0b3fc18e06"
+        }
+      }
+    },
+    "generated_bindings": {
+      "epic.events.rs": "28ada852f55efe5714ef82ef4fd504f2b16e47ddb3a0feeb9de43256a0bc347e",
+      "epic_urc.rs": "6e5b56442f8000c9e2b39741e621703875f969f137f9ce504d30580b2d15bcfe",
+      "lore.environment.v1.rs": "e70d5fe75b48ddd1f30544d9dab438b6e869bbf38b836d991a227f3b910da853",
+      "lore.model.v1.rs": "b16a66e23e44c115f465d04dd918bef968da239c93fe603668cf942708f21121",
+      "lore.notification.rs": "bf9f1df874b21500cbf4fdf5873f56a8e130b2d93f8544473b35bc8ca17ae06f",
+      "lore.repository.v1.rs": "64ede0c84a8aa66b8f672be6aa4ad3597e4a2453160124db83da84cd2eb3e249",
+      "lore.revision.v1.rs": "b66cb2f34ac09ff65900f8793819ce681a272a0dd6fef649baa2a0e3178a18b9",
+      "lore.storage.v1.rs": "93391f89b16d189e578740dc06d968291561e2b463a36b11b893cd7f50efc762",
+      "lore.thin_client.v1.rs": "5fc0e02407ca544a1ba8aea8e53fe9e27ddd07ea3115cd2e97c5857c5af0d2c9",
+      "lore.user.v1.rs": "55e7d6e5141e8e7d6948804e6cddb8deb3584d7f6c95ee84976f297dce2af796",
+      "ucs.auth.rs": "c2d7f81b2d9d3c698f1854e8b32fba06c2b168b493bdae553f1c669a777baa4c",
+      "urc.lock.rs": "3caef18423991d66bd1bc2626fa03333f8a386376080c0d3e0eeee277af3bf7c",
+      "urc.model.rs": "912c774a515d9e81a715c2fc14bd680eb3031bdd992b8fe3ed4e141694eabe72",
+      "urc.notification.rs": "ec7b2065582a18c6df6382757b758ad5100444ee14b7ac441b7815e757726258",
+      "urc.rpc.rs": "273fd70c839253d3823e0ad7985ce4a1e5afa5afe2bd500576790acbbfc32039"
+    },
+    "licenses": {
+      "LICENSE": "330ebd9c50fa5d2967f4f9acaa82f6226055b0d9c0c90d367db924069f065ef6",
+      "lore-base/native/thirdparty/rpmalloc/LICENSE": "0100518799526908a06f4ba93b97a438362b589124c0081ba57dd4bfd7998a84",
+      "vendor/glob-match/LICENSE": "e783584a3977649d99f16f1c314f6d4a805522a7d9b975fb639d57a28b091c55",
+      "vendor/quinn-proto/LICENSE-MIT": "4b2d0aca6789fa39e03d6738e869ea0988cceba210ca34ebb59c15c463e93a04",
+      "vendor/quinn-proto/LICENSE-APACHE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    "coverage": "Linux x86_64 production build. An actual v0.12 format-2 fixture with catalog schema 2, seven rows and two references passed offline preparation, atomic cutover, repeat activation, host-client read and file restoration. The selected 48 pre-upgrade bytes matched SHA-256 004aaba77b154171e8c0fadedc1322875066b25a359ee4e0cd5c8924c3581f3f. Other platforms and browser UI were not exercised. A second migration retained four absent auxiliary authorities through cutover."
+  }
+}

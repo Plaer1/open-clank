@@ -191,38 +191,33 @@ export function renderLayerPixelAdjustments(layer, cacheKey) {
 
 
 /**
- * Walk the layer's `adjLayers` stack (skipping the one currently being
- * edited, if any) plus an optional staged preview adjustment, producing
- * a final canvas the composite step can paint. The result is memoised
- * on `layer._adjFinal` keyed by a signature of all adjLayer params +
- * staged + editing id, so repeated composite passes are O(1) when
- * nothing has changed.
+ * Render the committed adjustment stack, or replace the edited entry in
+ * place for a view-owned preview. New previews append to the stack.
+ * Committed results use the layer cache; previews use the popup cache.
  *
  * If the stack is empty AND nothing is staged, returns the layer's own
  * canvas unchanged (no allocation).
  *
- * @param {{
- *   canvas: HTMLCanvasElement,
- *   adjLayers?: Array<{id: string, type: string, params: object, visible: boolean, opacity: number}>,
- *   _stagedAdj?: {type: string, params: object} | null,
- *   _editingAdjId?: string | null,
- *   _adjFinal?: HTMLCanvasElement,
- *   _adjFinalKey?: string,
- * }} layer
+ * @param {{canvas: HTMLCanvasElement, adjLayers?: Array<object>}} layer
+ * @param {{staged: object, editingId: string|null, revision: number, cache: object}|null} preview
+ * The optional preview and its cache are owned by the rendering view.
  * @returns {HTMLCanvasElement}
  */
-export function renderLayerWithAdjLayers(layer) {
-  const editingId = layer._editingAdjId || null;
-  const stack = (layer.adjLayers || []).filter(a => a.visible && a.id !== editingId);
-  const staged = layer._stagedAdj;
-  if (stack.length === 0 && !staged) {
-    layer._adjFinalKey = '';
+export function renderLayerWithAdjLayers(layer, preview = null) {
+  const editingId = preview?.editingId || null;
+  const committed = layer.adjLayers || [];
+  const stack = committed.map(adj => editingId && adj.id === editingId ? {...adj, params:preview.staged.params} : adj).filter(adj => adj.visible);
+  if (preview?.staged && !editingId) stack.push({...preview.staged, visible:true, opacity:1});
+  const signature = items => items.map(a => `${a.id || ''}:${a.visible?1:0}:${a.opacity}:${a.type}:${JSON.stringify(a.params)}`).join('|');
+  const sig = `${signature(committed)}#${signature(stack)}`;
+  const cache = preview?.cache;
+  if (preview && cache && cache.canvas === layer.canvas && cache.width === layer.canvas.width && cache.height === layer.canvas.height && cache.revision === preview.revision && cache.signature === sig) return cache.result;
+  if (!preview && layer._adjFinal && layer._adjFinalKey === sig) return layer._adjFinal;
+  if (!stack.length) {
+    if (!preview) layer._adjFinalKey = '';
+    if (cache) Object.assign(cache,{canvas:layer.canvas,width:layer.canvas.width,height:layer.canvas.height,revision:preview.revision,signature:sig,result:layer.canvas});
     return layer.canvas;
   }
-  const sig = stack.map(a => `${a.id}:${a.visible?1:0}:${a.opacity}:${a.type}:${JSON.stringify(a.params)}`).join('|') +
-    (staged ? `|S:${staged.type}:${JSON.stringify(staged.params)}` : '') +
-    (editingId ? `|E:${editingId}` : '');
-  if (layer._adjFinal && layer._adjFinalKey === sig) return layer._adjFinal;
   let cur = layer.canvas;
   const w = layer.canvas.width, h = layer.canvas.height;
   for (const adj of stack) {
@@ -240,10 +235,7 @@ export function renderLayerWithAdjLayers(layer) {
       cur = blend;
     }
   }
-  if (staged) {
-    cur = applyAdjustment(cur, staged);
-  }
-  layer._adjFinal = cur;
-  layer._adjFinalKey = sig;
+  if (cache) Object.assign(cache,{canvas:layer.canvas,width:layer.canvas.width,height:layer.canvas.height,revision:preview.revision,signature:sig,result:cur});
+  if (!preview) { layer._adjFinal = cur; layer._adjFinalKey = sig; }
   return cur;
 }

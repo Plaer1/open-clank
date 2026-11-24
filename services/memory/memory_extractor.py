@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -293,6 +294,38 @@ def _parse_extraction_json(raw: str) -> list:
     return facts if isinstance(facts, list) else []
 
 
+@dataclass(frozen=True)
+class VerifiedHostUserBody:
+    """Frozen one-body input; authority is rechecked at each use boundary."""
+    session_id: str
+    name: str
+    content: str
+    reader: object
+    ref: object
+    coverage: str = "host_user_body_only"
+    omitted: tuple = ("assistant", "queued", "tool", "unmapped")
+
+    @classmethod
+    def freeze(cls, *, reader, ref, session_id, name):
+        from src.memery_external_sources import CurrentHostUserSource, SourceRef
+        if type(reader) is not CurrentHostUserSource or type(ref) is not SourceRef or ref.chat_id != session_id:
+            return None
+        resolved = reader.hydrate(ref)
+        if resolved.get("state") != "available" or not isinstance(resolved.get("content"), str):
+            return None
+        return cls(session_id, name, resolved["content"], reader, ref)
+
+    def current(self):
+        from src.memery_external_sources import CurrentHostUserSource, SourceRef
+        if type(self.reader) is not CurrentHostUserSource or type(self.ref) is not SourceRef:
+            return False
+        result = self.reader.hydrate(self.ref)
+        return result.get("state") == "available" and result.get("content") == self.content
+
+    def get_context_messages(self):
+        return [{"role": "user", "content": self.content}]
+
+
 async def extract_and_store(
     session,
     memory_manager,
@@ -316,12 +349,16 @@ async def extract_and_store(
         # fallback for legacy/internal callers that predate explicit scoping.
         _owner = owner if owner is not None else getattr(session, "owner", None)
 
-        # Get last N messages from session
+        verified_body = type(session) is VerifiedHostUserBody
+        if verified_body and (session.reader._owner != _owner or not session.current()):
+            logger.info("native memory derivation unavailable for owner %s: source changed", _owner)
+            return
+        # Verified mode carries only its frozen user body, never live history.
         messages = session.get_context_messages()
         recent = messages[-CONTEXT_WINDOW:] if len(messages) > CONTEXT_WINDOW else messages
 
-        if len(recent) < 2:
-            return  # Need at least a user message and assistant response
+        if len(recent) < (1 if verified_body else 2):
+            return
 
         # Strip media (images/audio) from messages — background memory extraction
         # only needs the text. The VL-generated descriptions are already in the
@@ -374,6 +411,9 @@ async def extract_and_store(
         ]
 
         facts = []
+        if verified_body and not session.current():
+            logger.info("native memory derivation unavailable for owner %s: source changed", _owner)
+            return
         try:
             raw = await _complete_text(
                 owner=_owner or "",
@@ -407,7 +447,13 @@ async def extract_and_store(
             logger.info("Auto memory extraction ran: 0 candidates")
             return
 
+        if verified_body and not session.current():
+            logger.info("native memory derivation unavailable for owner %s: source changed", _owner)
+            return
         existing = memory_manager.load_all()
+        import copy
+        original_snapshot = copy.deepcopy(existing)
+        pending_vectors = []
         added = 0
 
         for fact in facts:
@@ -445,7 +491,7 @@ async def extract_and_store(
                     # text dedup below; cross-tenant/stale matches fall through.
                     _match = next((e for e in existing if e.get("id") == existing_id), None)
                     if _match is not None and (_match.get("owner") == _owner or _match.get("owner") is None):
-                        logger.debug(f"Memory dedup (vector): '{fact_text[:50]}' matches {existing_id}")
+                        logger.debug("Memory dedup: vector match")
                         continue
 
             # Text dedup fallback: exact match + fuzzy similarity
@@ -454,9 +500,12 @@ async def extract_and_store(
                 continue
             # Fuzzy text similarity check (catches rephrased duplicates when vector index is unavailable)
             if _is_text_duplicate(fact_text, user_existing):
-                logger.debug(f"Memory dedup (fuzzy): '{fact_text[:50]}' too similar to existing")
+                logger.debug("Memory dedup: fuzzy match")
                 continue
 
+            if verified_body and not session.current():
+                logger.info("native memory derivation unavailable for owner %s: source changed", _owner)
+                return
             entry = memory_manager.add_entry(fact_text, source="auto", category=category, owner=_owner)
             # Auto-pin identity facts (name, job, location) — core context
             if category == "identity":
@@ -472,15 +521,27 @@ async def extract_and_store(
             # truth and the keyword path can still retrieve this entry, so a vector
             # write failure must not drop the fact or abort the remaining batch.
             if memory_vector and memory_vector.healthy:
-                try:
-                    memory_vector.add(entry["id"], fact_text)
-                except Exception as e:
-                    logger.warning(f"Memory vector add failed for {entry['id']}: {e}")
+                if verified_body:
+                    pending_vectors.append((entry["id"], fact_text))
+                else:
+                    try:
+                        memory_vector.add(entry["id"], fact_text)
+                    except Exception as e:
+                        logger.warning(f"Memory vector add failed for {entry['id']}: {e}")
 
             added += 1
 
         if added > 0:
-            memory_manager.save(existing)
+            if verified_body and not session.current():
+                return
+            memory_manager.commit_owner_snapshot(original_snapshot, existing, {_owner, None} if _owner else None)
+            for entry_id, text in pending_vectors:
+                if not session.current():
+                    break
+                try:
+                    memory_vector.add(entry_id, text)
+                except Exception as e:
+                    logger.warning("Memory vector add failed for %s: %s", entry_id, e)
             try:
                 from src.event_bus import fire_event
                 for _ in range(added):
@@ -491,7 +552,7 @@ async def extract_and_store(
 
             global _extractions_since_audit
             _extractions_since_audit += added
-            if _extractions_since_audit >= AUDIT_INTERVAL:
+            if not verified_body and _extractions_since_audit >= AUDIT_INTERVAL:
                 _extractions_since_audit = 0
                 logger.info("Audit threshold reached, running memory audit")
                 await audit_memories(
@@ -697,19 +758,8 @@ async def audit_memories(
             entry["category"] = operation["category"]
             final_entries.append(entry)
 
-        # Merge audited entries back with other users' entries
-        if owner:
-            all_entries = memory_manager.load_all()
-            audited_ids = {e["id"] for e in final_entries}
-            other_entries = [e for e in all_entries if e.get("owner") != owner and (e.get("owner") is not None)]
-            # Also keep legacy entries that weren't part of this audit
-            for e in all_entries:
-                if e.get("owner") is None and e["id"] not in audited_ids and e["id"] not in {o["id"] for o in other_entries}:
-                    other_entries.append(e)
-            saved_entries = final_entries + other_entries
-        else:
-            saved_entries = final_entries
-        memory_manager.save(saved_entries)
+        # Recheck the model's exact owner input at commit; preserve other owners.
+        memory_manager.commit_owner_snapshot(existing, final_entries, {owner} if owner else None)
         logger.info(
             f"Memory audit complete: {before_count} -> {after_count} entries "
             f"({before_count - after_count} removed/merged)"

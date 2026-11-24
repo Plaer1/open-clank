@@ -11,7 +11,7 @@ provider table, auth document, native store or browser preference.
    deployment, active launch command/profile, port and data-root environment.
    Keep private environment values out of issues and screenshots.
 2. Inventory the actual stores using [backup coverage](backup-restore.md): app
-   database/auth/encryption key, provider data, Frankenmemory, the complete Copal
+   database/auth/encryption key, provider data, Memery, the complete Copal
    loose vault (document files, `.copal` metadata and associated media), any
    retained Redb database/assets, History/Lore, mail attachments, integration
    state and host workspaces. Record the installed build's selected Copal backend;
@@ -38,6 +38,14 @@ provider table, auth document, native store or browser preference.
    until the converted stores and important workflows have been checked.
 
 ## Explicit conversion is an operator action
+
+Before restarting an existing installation, preview its configuration rename from the source checkout.
+
+```sh
+python scripts/migrate_openclank_config.py .env
+```
+
+Pass any systemd drop-in `.conf` paths alongside `.env`. Review the preview, then repeat the command with `--apply`.
 
 Current source initializes fresh current stores and validates existing ones.
 Historical provider/core/auth/native/browser formats can need reviewed,

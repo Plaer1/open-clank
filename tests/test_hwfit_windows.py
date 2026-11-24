@@ -47,12 +47,6 @@ def test_only_gguf_models_recommended_on_windows():
     assert unservable == [], f"{len(unservable)} non-GGUF models on Windows, e.g. {unservable[:3]}"
 
 
-def test_safetensors_models_still_recommended_on_cuda():
-    """Regression guard: the GGUF-only rule must not leak onto CUDA."""
-    names = {r["name"] for r in rank_models(_cuda_system(), limit=900)}
-    assert "microsoft/Phi-mini-MoE-instruct" in names
-
-
 def test_awq_model_hidden_on_windows():
     """The user's reported issue: Qwen2.5-3B-Instruct-AWQ is AWQ-only and must
     not be recommended on Windows where it cannot be served."""

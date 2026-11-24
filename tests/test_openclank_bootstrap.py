@@ -149,4 +149,4 @@ def test_runtime_command_reports_admitted_components(capsys):
     assert '"ok": true' in report
     assert '"kind": "python"' in report
     assert '"kind": "lifetools"' in report
-    assert '"kind": "fm_mcp"' in report
+    assert '"kind": "memery_worker"' in report

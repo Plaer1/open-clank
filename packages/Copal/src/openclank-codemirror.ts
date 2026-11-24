@@ -3,7 +3,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { collectSpellingScope, type SpellingToken } from './openclank-spelling-scope';
 import { loadSourceLanguage as loadRegisteredSourceLanguage, sourceLanguageMetadata, sourceCommentCapability, LANGUAGE_REGISTRY } from './openclank-source-languages';
 import { sourceCommentRegions, serializeCommentBody, safeSourceCommentInsertion, wrapSourceComment, type SourceCommentRegion } from './openclank-comment-regions';
-import { CommentInsetWidget, type CommentInsetOptions } from './openclank-comment-widget';
+import { bindCommentLabel, disposeCommentLabel, CommentInsetWidget, type CommentInsetOptions } from './openclank-comment-widget';
 import { HighlightStyle, Language, LanguageDescription, LanguageSupport, bracketMatching, defaultHighlightStyle, foldGutter, forceParsing, indentOnInput, syntaxHighlighting, syntaxTree, syntaxTreeAvailable } from '@codemirror/language';
 import { Compartment, EditorSelection, EditorState, SelectionRange, StateEffect, StateField, Transaction } from '@codemirror/state';
 import {
@@ -706,7 +706,7 @@ class CommentPreviewWidget extends WidgetType {
     root.dataset.commentSourceFrom = String(this.from);
     root.dataset.commentSourceTo = String(this.to);
     root.dataset.commentRevision = String(view.state.doc.length);
-    root.setAttribute('aria-label', 'Rendered source comment; press Enter or choose See source to edit raw comment');
+    bindCommentLabel(root, 'Rendered source comment; press Enter or choose See source to edit raw comment');
     let preview: HTMLElement | null = null;
     try { preview = this.renderPreview?.(this.markdown) || null; } catch (_) { preview = null; }
     if (preview) root.append(preview);
@@ -716,28 +716,26 @@ class CommentPreviewWidget extends WidgetType {
       root.append(raw);
     }
     root.tabIndex = 0;
-    const reveal = () => {
+    const reveal = (event: Event) => {
+      if ((event.target as Element).closest?.('a,button,input,select,textarea')) return;
+      if (this.onSeeSource) {
+        this.onSeeSource({from:this.from,to:this.to,source:this.source,markdown:this.markdown}, event);
+        return;
+      }
       view.dispatch({ selection:EditorSelection.range(this.from, this.to), scrollIntoView:true });
       view.focus();
     };
     root.addEventListener('keydown', (event) => {
-      if ((event as KeyboardEvent).key === 'Enter') { event.preventDefault(); reveal(); }
-      // Range-aware See source from the keyboard.
-      if ((event as KeyboardEvent).key === 'F10' && (event as KeyboardEvent).shiftKey) {
+      if (event.target === root && (event as KeyboardEvent).key === 'Enter') {
         event.preventDefault();
-        this.onSeeSource?.({ from:this.from, to:this.to, source:this.source, markdown:this.markdown }, event);
+        reveal(event);
       }
     });
     root.addEventListener('dblclick', reveal);
-    root.addEventListener('contextmenu', (event) => {
-      // Always offer an explicit See source action on rendered elements.
-      const target = { from:this.from, to:this.to, source:this.source, markdown:this.markdown };
-      if (typeof this.onSeeSource === 'function') {
-        this.onSeeSource(target, event);
-      }
-    });
     return root;
   }
+
+  destroy(dom: HTMLElement) { disposeCommentLabel(dom); }
 
   ignoreEvent() { return false; }
 }
@@ -1018,7 +1016,6 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
       registerPending:options.registerPendingSourceEdit?edit=>{options.registerPendingSourceEdit?.(edit);syncPendingPanel();}:undefined,
       removePending:id=>{options.removePendingSourceEdit?.(id);syncPendingPanel();},
       reveal:(target,region)=>target.dispatch({effects:commentSourceReveal.of([{from:region.from,to:region.to}]),selection:EditorSelection.range(region.from,region.to),scrollIntoView:true}),
-      seeSource:(region,event)=>options.onSeeSource?.({from:region.from,to:region.to,source:region.sourceText,markdown:region.body},event),
     };
     return [...markdownPresentation,...(richComments&&isRichCommentLanguageQualified(languageMetadata.id,regionOptions)?[createRichCommentPlugin(languageMetadata.id,commentRender,regionOptions,options.onSeeSource,inset)]:[])];
   }
@@ -1472,7 +1469,7 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
   };
 }
 
-// Compatibility adapter for the existing Copal Notes surface. Keeping this
+// Compatibility adapter for the existing Journal pages surface. Keeping this
 // public name lets Notes evolve independently while both products share one
 // CodeMirror runtime and dependency graph.
 export function createMarkdownEditor(options: MarkdownEditorOptions) {
@@ -1511,3 +1508,36 @@ export {
 export type { ContentSpan, DelimiterKind, DocumentationRegion, SafeInsertionResult, CommentWrapResult } from './openclank-doc-regions';
 
 export { LANGUAGE_REGISTRY, ADVERTISED_LANGUAGE_LABELS, sourceLanguageMetadata } from './openclank-source-languages';
+
+// Exact parser offsets for bounded source projections. Never a sanitizer.
+export async function xmlSourceTree(source: string) {
+  if (typeof source !== 'string' || source.length > 262144) throw new Error('XML source is unavailable or too large.');
+  const { parser } = await import('@lezer/xml');
+  const tree = parser.parse(source);
+  let count = 0;
+  const copy = (node: any, depth = 0): any => {
+    if (++count > 8192 || depth > 64) throw new Error('XML structure is too complex; use source mode.');
+    if (node.type.isError) throw new Error('Invalid XML; use source mode.');
+    const children: any[] = [];
+    for (let child = node.firstChild; child; child = child.nextSibling) children.push(copy(child, depth + 1));
+    return {type:node.name,from:node.from,to:node.to,children};
+  };
+  return copy(tree.topNode);
+}
+
+// Bounded syntax spans for the source outline; these are not DOM identity.
+async function boundedSourceTree(source: string, language: 'html' | 'css') {
+  if (typeof source !== 'string' || source.length > (language === 'html' ? 262144 : 4096)) throw new Error('Source is unavailable or too large.');
+  const mod = language === 'html' ? await import('@lezer/html') : await import('@lezer/css');
+  const parser = language === 'css' ? mod.parser.configure({top:'Styles'}) : mod.parser;
+  const tree = parser.parse(source); let count = 0;
+  const copy = (node: any, depth = 0): any => {
+    if (++count > 8192 || depth > 64) throw new Error('Source structure is too complex.');
+    const children: any[] = [];
+    for (let child = node.firstChild; child; child = child.nextSibling) children.push(copy(child, depth + 1));
+    return {type:node.name,from:node.from,to:node.to,error:node.type.isError,children};
+  };
+  return copy(tree.topNode);
+}
+export const htmlSourceTree = (source: string) => boundedSourceTree(source,'html');
+export const cssInlineSourceTree = (source: string) => boundedSourceTree(source,'css');

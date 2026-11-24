@@ -29,30 +29,35 @@
  *   syncToolClearIndicators: () => void,
  * }} deps
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 import { canvasCoords } from '../canvas-coords.js';
 
 const STROKE_TOOLS = new Set(['brush', 'eraser', 'inpaint']);
 
-function strokeLabel(tool) {
+function strokeLabel(tool, state) {
   if (tool === 'brush') return 'Brush stroke';
   if (tool === 'eraser') return 'Eraser stroke';
   if (tool === 'inpaint') return state.inpaintEraseStroke ? 'Erase mask' : 'Paint mask';
   return 'Stroke';
 }
 
-export function createStrokeTool({
-  saveState, strokeTo, composite,
+export function createStrokeTool({ state = legacyState, root = null, lifetime = null,
+  saveState, strokeTo, composite, markSceneChanged = () => {}, gesture = {begin:() => true, owns:() => true, end:() => {}},
   getActiveMaskLayer, activeParentLayer, ensureActiveMaskLayer, createLayer,
   renderLayerPanel, syncToolClearIndicators,
 }) {
-  return {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated tool requires root and lifetime');
+  let disposed = false;
+  lifetime?.add(() => { if (state.drawing && gesture.owns()) markSceneChanged(); gesture.end(); disposed = true; state.drawing = false; });
+  const tool = {
     /**
      * Begin a stroke. Returns true if the dispatcher should consider
      * the event handled (i.e. tool is one of brush/eraser/inpaint).
      */
     tryBegin(e) {
       if (!STROKE_TOOLS.has(state.tool)) return false;
+      if (!gesture.begin()) return true;
+      try {
       // Capture the inpaint-erase flag for this stroke. Ctrl+Alt
       // pressed at pointerdown flips the persistent toggle for one
       // stroke only.
@@ -87,13 +92,14 @@ export function createStrokeTool({
           }
         }
       }
-      saveState(strokeLabel(state.tool));
+      saveState(strokeLabel(state.tool, state));
       state.drawing = true;
       const coords = canvasCoords(e, state.mainCanvas);
       state.lastX = coords.x;
       state.lastY = coords.y;
       strokeTo(coords.x, coords.y);
       return true;
+      } catch (error) { state.drawing = false; gesture.end(); throw error; }
     },
 
     /**
@@ -101,7 +107,7 @@ export function createStrokeTool({
      * actually in progress (dispatcher should short-circuit).
      */
     tryContinue(e) {
-      if (!state.drawing) return false;
+      if (!state.drawing || !gesture.owns()) return false;
       e.preventDefault();
       const coords = canvasCoords(e, state.mainCanvas);
       strokeTo(coords.x, coords.y);
@@ -112,12 +118,19 @@ export function createStrokeTool({
      * Wrap up an in-progress stroke. Returns true if there was one.
      */
     tryEnd() {
-      if (!state.drawing) return false;
+      if (!state.drawing || !gesture.owns()) return false;
       const wasDrawingInpaint = state.tool === 'inpaint';
       state.drawing = false;
+      markSceneChanged();
+      gesture.end();
       composite();
       if (wasDrawingInpaint) syncToolClearIndicators();
       return true;
     },
   };
+  for (const key of Object.keys(tool)) {
+    const invoke = tool[key];
+    tool[key] = (...args) => disposed ? false : invoke(...args);
+  }
+  return tool;
 }

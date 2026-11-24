@@ -3,7 +3,7 @@
 
 Right now logs live in two places:
   - logs/                       app-level (compound.log, future runtime)
-  - /tmp/odysseus-tmux/*.log    per-tmux-session model download/serve logs
+  - /tmp/open-clank-tmux/*.log    per-tmux-session model download/serve logs
 
 This CLI surfaces them so you don't have to remember which directory
 holds what.
@@ -30,7 +30,7 @@ from pathlib import Path
 
 
 _APP_LOGS = _REPO_ROOT / "logs"
-_TMUX_LOGS = Path("/tmp/odysseus-tmux")
+_TMUX_LOGS = Path("/tmp/open-clank-tmux")
 
 
 def _enumerate() -> list[dict]:

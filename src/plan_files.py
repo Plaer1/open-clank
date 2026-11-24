@@ -1,17 +1,8 @@
-"""On-disk plan files for approved plans.
+"""Canonical paths for task-bound Clanker plan artifacts.
 
-Owner convention (2026-08-14, canonicalized in S01): a plan's metaplan (the
-outline/guide, built as stages meant to be done sequentially) lives at
-``<workspace>/.clanker/futures/<metaplan>.md``; the primary content of each
-stage is split into slices at ``<workspace>/.clanker/futures/<metaplan>/slice_N.md``;
-and parallelizable work inside a stage goes one level deeper at
-``<workspace>/.clanker/futures/<metaplan>/slice_N/slice_Nx.md``.
-
-Plan mode itself is read-only, so nothing is written while proposing. The
-server materializes the metaplan file when the user approves (Execute sends
-``approved_plan``), and ``update_plan`` mirrors progress back to the same
-file while the agent executes. Slice files are authored by the executing
-agent through the ordinary brokered write tools.
+Planning drafts and notes may precede implementation approval; only the plan
+approval owner grants execution. Metaplans and concept-named slices are written
+through the admitted Files/History workflow owner, never a raw file mirror.
 """
 
 from __future__ import annotations
@@ -21,7 +12,6 @@ import os
 import re
 from typing import Optional
 
-from core.atomic_io import atomic_write_text
 from src.clanker_paths import ClankerPathError, canonical_plan_path
 
 logger = logging.getLogger(__name__)
@@ -60,34 +50,14 @@ def _safe_relative_plan_path(relative_path: str) -> Optional[str]:
     return value
 
 
-def materialize_plan(
-    workspace: str,
-    plan_text: str,
-    *,
-    relative_path: Optional[str] = None,
-) -> Optional[str]:
-    """Write the plan to ``<workspace>/.clanker/futures/<slug>.md``.
+class PlanArtifactUnavailable(RuntimeError):
+    """The caller does not hold an admitted Files/History workflow writer."""
 
-    Returns the workspace-relative path, or ``None`` when there is nothing to
-    write. This is a user-approved artifact write at the plan approval/sync
-    boundary — best-effort: callers log failures rather than fail the turn.
-    """
-    plan = (plan_text or "").strip()
-    if not workspace or not plan:
+
+def materialize_plan(workspace: str, plan_text: str, *, relative_path: Optional[str] = None) -> Optional[str]:
+    """Legacy raw writer retired; callers must use the admitted workflow owner."""
+    if not workspace or not (plan_text or "").strip():
         return None
-    base = os.path.realpath(workspace)
-    if not os.path.isdir(base):
-        return None
-    if relative_path is not None:
-        rel = _safe_relative_plan_path(relative_path)
-        if rel is None:
-            logger.warning("Refused invalid plan artifact path: %r", relative_path)
-            return None
-    else:
-        rel = metaplan_relpath(plan)
-    target = os.path.realpath(os.path.join(base, rel))
-    if os.path.normcase(os.path.commonpath([base, target])) != os.path.normcase(base):
-        logger.warning("Refused plan write outside the workspace: %s", rel)
-        return None
-    atomic_write_text(target, plan + "\n")
-    return rel
+    if relative_path is not None and _safe_relative_plan_path(relative_path) is None:
+        raise ValueError("invalid plan artifact path")
+    raise PlanArtifactUnavailable("Plan artifact requires an admitted Files and History workflow")

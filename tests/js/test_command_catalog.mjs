@@ -178,7 +178,7 @@ test('shipped transcript copy uses rendered display owner and session list is ho
 
 test('coverage inventory classifies every current TUI registration; new source rows fail review', async () => {
   const registered = new Set();
-  const root = '../../packages/mimo-code/packages/opencode/src/cli/cmd/tui/';
+  const root = '../../packages/mimo-code/packages/cli/src/cli/cmd/tui/';
   for (const file of ['app.tsx','routes/session/index.tsx','component/prompt/index.tsx','feature-plugins/system/plugins.tsx','feature-plugins/home/tips.tsx']) {
     const source = await fs.readFile(new URL(root + file, import.meta.url), 'utf8');
     for (const match of source.matchAll(/value:\s*"([a-z][a-z_.]*\.[a-z_.]+)"/g)) registered.add(match[1]);
@@ -337,14 +337,14 @@ test('named profile helper lists eligibility and patches profile without changin
   assert.match(app.replies(),/build/); assert.doesNotMatch(app.replies(),/Reserved Plan|Reserved Chat/);
   await app.commands.handleSlashCommand('/agent-profile plan');
   await app.commands.handleSlashCommand('/agent-profile chat');
-  assert.equal(app.calls.filter(call=>call.url.includes('mimo-config')).length,0);
+  assert.equal(app.calls.filter(call=>call.url.includes('engine-config')).length,0);
   await app.commands.handleSlashCommand('/agent-profile reviewer');
-  const patch = app.calls.find(call => call.url.includes('mimo-config'));
+  const patch = app.calls.find(call => call.url.includes('engine-config'));
   assert.equal(patch.options.method,'PATCH'); assert.deepEqual(JSON.parse(patch.options.body),{config_id:'agent_profile',value:'reviewer'});
   assert.deepEqual(app.selected,[]); assert.match(app.replies(),/next Agent turn/);
-  await app.commands.handleSlashCommand('/agent-profile revoked'); assert.equal(app.calls.filter(call=>call.url.includes('mimo-config')).length,1);
+  await app.commands.handleSlashCommand('/agent-profile revoked'); assert.equal(app.calls.filter(call=>call.url.includes('engine-config')).length,1);
   await app.commands.handleSlashCommand('/agent-profile build');
-  assert.equal(JSON.parse(app.calls.filter(call=>call.url.includes('mimo-config')).at(-1).options.body).value,'build');
+  assert.equal(JSON.parse(app.calls.filter(call=>call.url.includes('engine-config')).at(-1).options.body).value,'build');
   await app.commands.handleSlashCommand('/agent'); assert.deepEqual(app.selected,['agent']);
 });
 

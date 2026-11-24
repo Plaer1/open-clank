@@ -416,7 +416,7 @@ def _cleanup_compose_uploads(tokens) -> None:
 from src.constants import DATA_DIR as _DATA_DIR, MAIL_ATTACHMENTS_DIR, SETTINGS_FILE as _SETTINGS_FILE, SCHEDULED_EMAILS_DB
 DATA_DIR = Path(_DATA_DIR)
 SETTINGS_FILE = Path(_SETTINGS_FILE)
-# Override at deploy time via ODYSSEUS_MAIL_ATTACHMENTS_DIR. Defaults to a
+# Override at deploy time via OPEN_CLANK_MAIL_ATTACHMENTS_DIR. Defaults to a
 # subdir of the install's data/ tree so the app works out-of-the-box without
 # a hardcoded /home/<user>/ path.
 ATTACHMENTS_DIR = Path(MAIL_ATTACHMENTS_DIR)
@@ -840,7 +840,7 @@ def _coerce_imap_timeout_seconds(raw: str | None) -> int:
     return max(5, min(value, 300))
 
 
-_IMAP_TIMEOUT_SECONDS = _coerce_imap_timeout_seconds(os.environ.get("ODYSSEUS_IMAP_TIMEOUT_SECONDS"))
+_IMAP_TIMEOUT_SECONDS = _coerce_imap_timeout_seconds(os.environ.get("OPEN_CLANK_IMAP_TIMEOUT_SECONDS"))
 
 
 def _open_imap_connection(

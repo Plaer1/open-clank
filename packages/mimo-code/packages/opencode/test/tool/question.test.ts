@@ -24,6 +24,20 @@ const it = testEffect(
   Layer.mergeAll(Question.defaultLayer, CrossSpawnSpawner.defaultLayer, Truncate.defaultLayer, Agent.defaultLayer),
 )
 
+const optionalCaptures: Array<{ actorID: string; originTurnID: string }> = []
+const optionalIt = testEffect(Layer.mergeAll(CrossSpawnSpawner.defaultLayer, Truncate.defaultLayer, Agent.defaultLayer, Layer.succeed(Question.Service, {
+  ask: () => Effect.die(new Error("blocking ask was not expected")),
+  askOptional: (input: { actorID: string; originTurnID: string }) => Effect.sync(() => {
+    optionalCaptures.push({ actorID: input.actorID, originTurnID: input.originTurnID })
+    return { id: "question-fixture" } as any
+  }),
+  reply: () => Effect.void,
+  reject: () => Effect.void,
+  list: () => Effect.succeed([]),
+  neverAsk: () => Effect.succeed(false),
+  setNeverAsk: () => Effect.void,
+} as any)))
+
 const pending = Effect.fn("QuestionToolTest.pending")(function* (question: Question.Interface) {
   for (;;) {
     const items = yield* question.list()
@@ -34,6 +48,26 @@ const pending = Effect.fn("QuestionToolTest.pending")(function* (question: Quest
 })
 
 describe("tool.question", () => {
+  optionalIt.effect("uses the registered main actor and normalizes a missing main user agentID", () =>
+    provideTmpdirInstance(() => Effect.gen(function* () {
+      optionalCaptures.length = 0
+      const toolInfo = yield* QuestionTool
+      const tool = yield* toolInfo.init()
+      const userMessage = { info: { id: MessageID.make("msg-main-origin"), role: "user" }, parts: [] }
+      const result = yield* tool.execute({
+        blocking: false,
+        questions: [{ question: "Which?", header: "Choice", options: [{ label: "A", description: "Option A" }] }],
+      }, {
+        ...ctx,
+        actorID: "history-provenance-agent-build-session",
+        extra: { registeredActorID: "main" },
+        messages: [userMessage],
+      } as any)
+      expect(result.metadata.blocking).toBe(false)
+      expect(optionalCaptures).toEqual([{ actorID: "main", originTurnID: "msg-main-origin" }])
+    })),
+  )
+
   it.live("should successfully execute with valid question parameters", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

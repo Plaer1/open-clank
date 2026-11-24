@@ -83,6 +83,7 @@ async def test_active_run_rejects_before_projection_or_database_mutation(tmp_pat
         db.commit()
     finally:
         db.close()
+
     purged = []
 
     async def purge(*_args, **_kwargs):
@@ -100,3 +101,50 @@ async def test_active_run_rejects_before_projection_or_database_mutation(tmp_pat
         assert db.query(DbSession.archived).filter(DbSession.id == "chat-active").scalar() is False
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_erase_marks_execution_retired_only_after_projection_authority_returns(tmp_path, monkeypatch):
+    factory = _factory(tmp_path)
+    db = factory()
+    try:
+        db.add(DbSession(
+            id="chat-delete",
+            name="Delete",
+            endpoint_url="http://model.invalid",
+            model="model-a",
+            owner="alice",
+            archived=False,
+        ))
+        db.commit()
+    finally:
+        db.close()
+    monkeypatch.setattr("src.agent_runs.is_active", lambda _session_id: False)
+    monkeypatch.setattr("src.openclank.conversation_archive.get_conversation_archive", lambda: SimpleNamespace(begin_chat_erasure=lambda **_kwargs: None))
+    deleted = []
+
+    class Manager:
+        sessions = {"chat-delete": SimpleNamespace(owner="alice", incognito=False)}
+
+        @staticmethod
+        def delete_session(session_id, *, retired_execution=False):
+            deleted.append((session_id, retired_execution))
+            return True
+
+    async def successful_purge(*_args, **_kwargs):
+        return False  # Existing authority confirms no native projection is mapped.
+
+    monkeypatch.setattr("src.openclank.transcript_projection.purge_execution_projection", successful_purge)
+    service = ChatLifecycleService(session_factory=factory, session_manager=Manager())
+    await service.erase(owner="alice", session_id="chat-delete")
+    assert deleted == [("chat-delete", True)]
+
+    deleted.clear()
+
+    async def unavailable_purge(*_args, **_kwargs):
+        raise RuntimeError("native projection unavailable")
+
+    monkeypatch.setattr("src.openclank.transcript_projection.purge_execution_projection", unavailable_purge)
+    with pytest.raises(ChatLifecycleError):
+        await service.erase(owner="alice", session_id="chat-delete")
+    assert deleted == []

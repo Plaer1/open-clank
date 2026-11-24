@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict';
 import { withCopalBrowser } from './helpers/copal_browser_fixture.mjs';
 
+const viewportWidth = Number(process.env.COPAL_LAYOUT_WIDTH || 1280);
+
 const page = `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/static/style.css"><body><main id="app"></main>
 <script type="module">
   import { createNotesFeature } from '/static/js/copal/notesFeature.js';
@@ -22,7 +24,7 @@ const page = `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="
   };
   const root = document.querySelector('#app');
   const state = { docs:[], windows:new Map(), accountId:'s03-account', workspace:'s03-workspace', storageNamespace:'s03', contextEpoch:1, selected:null, saveTimers:new Map(), noteEditors:new Set() };
-  const body = document.createElement('section'); root.append(body);
+  const body = document.createElement('section'); body.style.height = '720px'; body.style.width = '100%'; root.append(body);
   state.windows.set('notes', { window:{ root, body, setStatus() {} } });
   window.__run = async () => {
     const feature = createNotesFeature({ h, state, createMarkdownEditor, createSourceEditor,
@@ -30,7 +32,7 @@ const page = `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="
       api:async () => ({}), saveDocument:async () => ({ outcome:'applied', revision:{kind:'copalHead', value:'next'} }), saveResource:async () => ({ outcome:'applied', revision:{kind:'hostFingerprint', value:'next'} }),
       renameNote:async () => {}, deleteDocument:async () => {}, showHistory:()=>{}, showTrash:()=>{}, showForm:()=>{}, importVault:async () => {}, loadDocuments:async () => {}, openDocument:()=>{}, persistActiveContext:()=>{}, deleteDocuments:async () => {}, activateNotes:()=>{}, renderTimeline:()=>h('div'), openEventEditor:()=>{}, resourceBufferRegistry:createBufferRegistry(),
     });
-    await feature.openResource({ key:{accountId:'s03-account', workspaceId:'s03-workspace', provider:'copal', resourceId:'resize-note'}, revision:{kind:'copalHead', value:'r1'}, representation:'markdown', capabilities:{read:true, edit:true}, locator:{displayName:'Resize.md', locationLabel:'Resize.md'} }, { text:'# draft', name:'Resize.md' });
+    await feature.openResource({ key:{accountId:'s03-account', workspaceId:'s03-workspace', provider:'copal', resourceId:'resize-note'}, revision:{kind:'copalHead', value:'r1'}, representation:'markdown', capabilities:{read:true, edit:true}, locator:{displayName:'Projects/Notes/Resize.md', locationLabel:'Projects/Notes/Resize.md'} }, { text:'# draft', name:'Projects/Notes/Resize.md' });
     state.windows.get('notes').noteWorkspace.left.open = true;
     state.windows.get('notes').noteWorkspace.right.open = true;
     state.windows.get('notes').noteShellCache = null;
@@ -55,23 +57,24 @@ const page = `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="
     handle.dispatchEvent(new KeyboardEvent('keydown', { key:'End', bubbles:true }));
     await new Promise(resolve => requestAnimationFrame(resolve));
     const maximum = pane.getBoundingClientRect().width;
-    const persisted = JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.includes('odysseus-copal-notes-layout')) || '') || '{}');
+    const persisted = JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.includes('openclank-copal-notes-layout')) || '') || '{}');
     window.requestAnimationFrame = requestAnimationFrameOriginal;
-    feature.destroy();
+    window.__destroyFixture = () => feature.destroy();
     return { before, keyboard, pointer, minimum, maximum, frames, persisted, keys:Object.keys(localStorage), handles:document.querySelectorAll('.copal-sidebar-resize').length };
   };
 </script>`;
 
 await withCopalBrowser({ page }, async ({ cdp, evaluate, until }) => {
-  await cdp('Emulation.setDeviceMetricsOverride', { width:1280, height:900, deviceScaleFactor:1, mobile:false });
+  await cdp('Emulation.setDeviceMetricsOverride', { width:viewportWidth, height:900, deviceScaleFactor:1, mobile:false });
   await until('window.__run');
   const result = await evaluate('window.__run()');
+  await evaluate('window.__destroyFixture()');
   assert.equal(Math.round(result.keyboard - result.before), 12, 'ArrowRight uses the 12px resize step');
   assert(result.pointer > result.keyboard, 'pointer drag changes the pane');
   assert.equal(Math.round(result.minimum), 150, 'Home clamps to minimum');
   assert.equal(Math.round(result.maximum), 420, 'End clamps to maximum');
   assert(result.frames >= 1, 'pointer movement is coalesced through requestAnimationFrame');
   assert.equal(result.persisted.left.width, 420, 'owner/workspace width persists');
-  assert.equal(result.handles, 2, 'destroy leaves one left and one right resize handle');
-  console.log(JSON.stringify({ passed:'S03 mounted Notes resize lifecycle', ...result }));
+  assert.equal(result.handles, viewportWidth <= 1100 ? 1 : 2, 'resize handles match the visible sidebar layout');
+
 });

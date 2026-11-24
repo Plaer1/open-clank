@@ -12,11 +12,11 @@ fn run() -> Result<(), ()> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--probe")) {
         return if provider::probe() { Ok(()) } else { Err(()) };
     }
-    let encoded = std::env::var("ODYSSEUS_QUICKLOOK_SESSION_TOKEN").map_err(|_| ())?;
+    let encoded = std::env::var("OPEN_CLANK_QUICKLOOK_SESSION_TOKEN").map_err(|_| ())?;
     if encoded.len() != 64 || !encoded.is_ascii() { return Err(()); }
     let mut token = [0;32];
     for (i,byte) in token.iter_mut().enumerate() { *byte = u8::from_str_radix(&encoded[i*2..i*2+2],16).map_err(|_| ())?; }
-    if std::env::var("ODYSSEUS_SHELL_IMAGE_KIND").as_deref() == Ok("icon") { return Err(()); }
+    if std::env::var("OPEN_CLANK_SHELL_IMAGE_KIND").as_deref() == Ok("icon") { return Err(()); }
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
     let respond = |out: &mut io::StdoutLock<'_>, response| {

@@ -1,0 +1,138 @@
+# Open Clank Commands Reference
+
+## CLI (`openclank-engine <command>`)
+
+Invoked from the shell. `mimo` with no command opens the TUI.
+
+| Command | Purpose |
+|---------|---------|
+| `mimo` | Launch the interactive TUI |
+| `openclank-engine run` | Headless, non-interactive run (scripting/eval) |
+| `openclank-engine mcp` | Manage / inspect MCP servers |
+| `openclank-engine agent` | Manage agents |
+| `openclank-engine models` | List available models |
+| `openclank-engine providers` | List / manage providers |
+| `mimo account` (console) | Account / login console |
+| `openclank-engine upgrade` | Update to the latest version |
+| `openclank-engine uninstall` | Uninstall Open Clank |
+| `openclank-engine serve` | Run the server |
+| `openclank-engine llm-server issue`/`list`/`revoke` | Mint and manage tokens that let a task reach this instance's models over `/v1`; it starts nothing — see @capability-api.md |
+| `openclank-engine stats` | Usage statistics |
+| `openclank-engine export` / `openclank-engine import` | Export / import sessions |
+| `openclank-engine session` | Manage sessions |
+| `openclank-engine github` / `openclank-engine pr` | GitHub / pull-request integration |
+| `mimo generate` | Code generation entry |
+| `openclank-engine plugin` (plug) | Manage plugins |
+| `mimo db` | Database utilities |
+| `openclank-engine acp` / `openclank-engine attach` | ACP / attach to a running session |
+| `openclank-engine debug` | Debug utilities |
+| `mimo completion` | Generate shell completion script |
+
+Run `openclank-engine <command> --help` for flags on any command.
+
+Notable TUI flags: `--continue`/`-c` (resume last session), `--session`/`-s`, `--model`/`-m`, `--agent`, `--never-ask`, `--trust`, and `--dangerously-skip-permissions`/`--yolo` (auto-approve everything not explicitly denied; prompts once for confirmation — see permissions.md).
+
+For terminal compatibility, TUI rendering or lag, and local rendering over SSH with `openclank-engine serve` + `openclank-engine attach`, see @guide.md.
+
+## Slash commands (inside the TUI)
+
+Type `/` to see the commands available in the current context. You can also ask in chat, for example, “Which slash commands can I use?” or “How do I switch models?” Open Clank will explain the relevant command without requiring you to remember its name.
+
+Most client commands run only when the whole input is the command. `/btw <question>` and prompt commands that accept arguments are the exceptions.
+
+### Application commands
+
+| Command | Aliases | Purpose / availability |
+|---------|---------|------------------------|
+| `/sessions` | `/resume`, `/continue` | List and continue previous sessions |
+| `/workflows` | — | Open the workflow list; shown when the workflow experiment is enabled |
+| `/new` | `/clear` | Start a new session |
+| `/models` | — | Switch models |
+| `/agents` | — | Switch agents |
+| `/modalities` | — | Configure a custom model's input modalities (image/audio/video/PDF) |
+| `/never-ask` | — | Toggle never-ask permission mode |
+| `/skip-permissions` | — | Toggle runtime auto-allow for permission asks; explicit denies still block |
+| `/mcps` | — | Show MCP server status |
+| `/variants` | — | Switch model variants; shown only when variants are available |
+| `/login` | — | Sign in to Xiaomi MiMo |
+| `/connect` | — | Connect or sign in to a model provider |
+| `/logout` | — | Sign out of Xiaomi MiMo |
+| `/org` | `/orgs`, `/switch-org` | Switch organizations; shown when more than one organization is available |
+| `/status` | — | Show system and session status |
+| `/worktree` | `/wt` | List and switch worktrees |
+| `/themes` | — | Choose a color theme |
+| `/background` | — | Choose the home-screen background |
+| `/logo` | — | Choose the home-screen logo style |
+| `/vivid` | — | Toggle Vivid and Minimal visuals |
+| `/dark` | — | Switch to dark mode |
+| `/light` | — | Switch to light mode |
+| `/help` | — | Open command help |
+| `/doc` | `/docs` | Open the user documentation |
+| `/exit` | `/quit`, `/q` | Exit Open Clank |
+| `/language` | `/lang` | Switch the TUI language |
+
+### Prompt commands
+
+| Command | Purpose |
+|---------|---------|
+| `/editor` | Edit the current prompt in an external editor |
+| `/skills` | Browse and select available skills |
+| `/revoke-consent` | Revoke consent for the free service |
+| `/voice` | Toggle streaming voice input (requires `sox` and a MiMo login) |
+| `/voice-send` | Allow voice control to submit when you say「发送」/ "send it" (ASR always dictates) |
+| `/voice-control` | Toggle voice control |
+
+### Session commands
+
+These commands are available while viewing a session. Some appear only when their action is possible.
+
+| Command | Aliases | Purpose / availability |
+|---------|---------|------------------------|
+| `/rename` | — | Rename the session |
+| `/timeline` | — | Open the message timeline |
+| `/fork` | — | Fork the session from an earlier message |
+| `/compact` | `/summarize` | Summarize a long session to free context |
+| `/btw <question>` | — | Ask a side question without adding it to the main conversation context |
+| `/undo` | — | Undo the latest message and its file changes |
+| `/redo` | — | Restore an undone message and its file changes |
+| `/timestamps` | `/toggle-timestamps` | Toggle message timestamps |
+| `/thinking` | `/toggle-thinking` | Toggle thinking-block visibility |
+| `/copy` | — | Copy the session transcript |
+| `/export` | — | Export the session transcript |
+
+### Built-in prompt commands
+
+These commands submit a predefined prompt to the agent and may accept trailing arguments.
+
+| Command | Purpose |
+|---------|---------|
+| `/init` | Generate or update project `AGENTS.md` guidance from the codebase |
+| `/review [target]` | Review a commit, branch, or pull request; defaults to uncommitted changes |
+| `/goal <condition>` | Set a judge-verified stop condition; `/goal clear` aborts it |
+| `/dream [focus]` | Consolidate durable knowledge from recent work into project memory |
+| `/distill [focus]` | Package repeated workflows into skills, subagents, or commands |
+| `/rebuild` | Rebuild conversation context from the latest checkpoint; messages since the checkpoint are summarized and any unanswered prompt is carried over in full |
+| `/context-limit` | Pick where the current model compacts (`200K`/`300K`/`500K`/`1M`/custom, or the model default); persists per model as `compaction.max_context`. Refuses while a session is running, because the config write reloads the instance |
+| `/deep-research <question>` | Run deep multi-source research; the prompt-command implementation requires the workflow experiment |
+| `/loops [cancel <id>]` | List or cancel scheduled jobs; requires the cron experiment |
+
+### Skills and other dynamic commands
+
+The slash menu also includes commands discovered at runtime:
+
+- `/<skill-name>` invokes an available skill; `/loop [interval] <prompt>` schedules a repeating prompt, and `/compose-next` starts the spec→ship orchestration workflow.
+- Project and global Markdown commands from `command/**/*.md` and `commands/**/*.md` use their relative filename as the slash name.
+- MCP prompts become slash commands and are marked `:mcp` in autocomplete.
+- A custom command or MCP prompt with the same name overrides a built-in prompt command. Skills do not override an existing command.
+- Mentioning two or more skills in one chat message can auto-load up to three skills with an orchestration plan.
+
+## Keybindings
+
+- `Tab` — cycle primary agents (build → plan). Build and Plan can switch at any time; other custom or special modes lock once the first message is sent. (Many models ignore tools injected mid-conversation; a fixed skill/tool set from session start improves tool-call reliability.)
+- Entering plan mode is a user gesture: `Tab` (or the agent dialog) — there is no `plan_enter` tool, so the agent cannot put you in plan mode and will not offer to unless you raise it. Leaving works either way: `Tab` back, or the agent calls `plan_exit` to ask you to approve the finished plan and return to build.
+- Other keybinds are configurable; the keybinds config module governs them.
+
+## Notes
+
+- The web command is currently disabled; TUI is the supported interface.
+- Voice ASR (`mimo-v2.5-asr`) is MiMo-platform only; voice control (`mimo-v2.6-flash`) also runs on OpenRouter and compatible relays via the `voice` config (see config.md and the README voice section).

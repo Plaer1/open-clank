@@ -10,16 +10,23 @@
  *
  * @returns {{ toggleShortcuts: (show?: boolean) => void }}
  */
+import { editorIdSelector } from './dom-identity.js';
 import { shortcutsPopupHTML } from './build/popups.js';
 
-export function createShortcutsPopover() {
+let shortcutInstance = 0;
+export function createShortcutsPopover({ root = null, portal = null, lifetime = null, uniqueIds = false, scopeIds = node => node } = {}) {
+  const doc = root?.ownerDocument || document, win = doc.defaultView || window;
+  const suffix = uniqueIds ? '-' + (++shortcutInstance) : '';
+  const find = id => root ? root.querySelector(editorIdSelector(id)) : doc.getElementById(id);
+  let timer = null, frame = null, disposed = false, capturedHandle = null, capturedPointer = null;
+  lifetime?.add(() => { disposed = true; if (capturedHandle && capturedPointer != null) { try { capturedHandle.releasePointerCapture(capturedPointer); } catch {} } capturedHandle = null; capturedPointer = null; if (timer !== null) clearTimeout(timer); if (frame !== null) win.cancelAnimationFrame(frame); if (outside) doc.removeEventListener('mousedown', outside, true); pop?.remove(); pop = null; outside = null; });
   let pop = null;
   let outside = null;
 
   function ensurePopover() {
     if (pop) return pop;
-    const el = document.createElement('div');
-    el.id = 'ge-shortcuts-popover';
+    const el = doc.createElement('div');
+    el.id = 'ge-shortcuts-popover' + suffix;
     el.style.cssText = [
       'position:fixed', 'z-index:10000', 'display:none',
       // Frosted-glass background: semi-transparent + heavy blur of
@@ -36,20 +43,21 @@ export function createShortcutsPopover() {
       'padding:12px 14px', 'min-width:540px', 'max-width:min(720px,92vw)',
       'font-size:12px', 'line-height:1.5',
     ].join(';');
-    el.innerHTML = shortcutsPopupHTML();
-    document.body.appendChild(el);
-    el.querySelector('#ge-shortcuts-close').addEventListener('click', () => toggleShortcuts(false));
+    el.innerHTML = shortcutsPopupHTML().replaceAll('ge-shortcuts-handle', 'ge-shortcuts-handle' + suffix).replaceAll('ge-shortcuts-close', 'ge-shortcuts-close' + suffix);
+    scopeIds(el);
+    (portal || doc.body).appendChild(el);
+    el.querySelector(editorIdSelector('ge-shortcuts-close' + suffix)).addEventListener('click', () => toggleShortcuts(false));
 
     // Drag by the header handle. Position survives across opens
     // (localStorage).
-    const handle = el.querySelector('#ge-shortcuts-handle');
+    const handle = el.querySelector(editorIdSelector('ge-shortcuts-handle' + suffix));
     if (handle) {
       let drag = null;
       handle.addEventListener('pointerdown', (e) => {
-        if (e.target.closest('#ge-shortcuts-close')) return;
+        if (e.target.closest(editorIdSelector('ge-shortcuts-close' + suffix))) return;
         const r = el.getBoundingClientRect();
         drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, w: r.width, h: r.height };
-        handle.setPointerCapture(e.pointerId);
+        handle.setPointerCapture(e.pointerId); capturedHandle = handle; capturedPointer = e.pointerId;
         handle.style.cursor = 'grabbing';
         // Mark as user-positioned so subsequent toggles don't re-anchor.
         el.dataset.userPositioned = '1';
@@ -60,14 +68,15 @@ export function createShortcutsPopover() {
         let left = e.clientX - drag.dx;
         let top  = e.clientY - drag.dy;
         const m = 4;
-        left = Math.max(m, Math.min(left, window.innerWidth  - drag.w - m));
-        top  = Math.max(m, Math.min(top,  window.innerHeight - drag.h - m));
+        left = Math.max(m, Math.min(left, win.innerWidth  - drag.w - m));
+        top  = Math.max(m, Math.min(top,  win.innerHeight - drag.h - m));
         el.style.left = left + 'px';
         el.style.top  = top + 'px';
       });
       const endDrag = () => {
         if (!drag) return;
         drag = null;
+        if (capturedHandle && capturedPointer != null) { try { capturedHandle.releasePointerCapture(capturedPointer); } catch {} } capturedHandle = null; capturedPointer = null;
         handle.style.cursor = 'grab';
         try {
           localStorage.setItem('ge-shortcuts-pos', JSON.stringify({
@@ -92,13 +101,14 @@ export function createShortcutsPopover() {
     let left = ar.left + (ar.width / 2) - (pr.width / 2);
     let top = ar.top - pr.height - margin;
     if (top < margin) top = ar.bottom + margin;
-    left = Math.max(margin, Math.min(left, window.innerWidth - pr.width - margin));
-    top  = Math.max(margin, Math.min(top, window.innerHeight - pr.height - margin));
+    left = Math.max(margin, Math.min(left, win.innerWidth - pr.width - margin));
+    top  = Math.max(margin, Math.min(top, win.innerHeight - pr.height - margin));
     el.style.left = left + 'px';
     el.style.top  = top + 'px';
   }
 
   function toggleShortcuts(show) {
+    if (disposed) return;
     const el = ensurePopover();
     const open = show === undefined ? el.style.display === 'none' : show;
     if (open) {
@@ -111,30 +121,31 @@ export function createShortcutsPopover() {
         el.style.left = saved.left;
         el.style.top  = saved.top;
         // Re-clamp in case the viewport changed since the user dragged.
-        requestAnimationFrame(() => {
+        frame = win.requestAnimationFrame(() => {
+          frame = null; if (disposed || pop !== el) return;
           const r = el.getBoundingClientRect();
           const m = 4;
-          if (r.right > window.innerWidth)  el.style.left = (window.innerWidth - r.width - m) + 'px';
-          if (r.bottom > window.innerHeight) el.style.top = (window.innerHeight - r.height - m) + 'px';
+          if (r.right > win.innerWidth)  el.style.left = (win.innerWidth - r.width - m) + 'px';
+          if (r.bottom > win.innerHeight) el.style.top = (win.innerHeight - r.height - m) + 'px';
           if (r.left < 0) el.style.left = m + 'px';
           if (r.top  < 0) el.style.top  = m + 'px';
         });
       } else {
-        const anchor = document.getElementById('ge-shortcuts-btn');
+        const anchor = find('ge-shortcuts-btn');
         if (anchor) positionPopover(el, anchor);
         else el.style.display = 'block';
       }
       // Defer outside-click so the click that opened us doesn't close us.
       outside = (e) => {
         if (el.contains(e.target)) return;
-        if (e.target.closest('#ge-shortcuts-btn')) return;
+        if (find('ge-shortcuts-btn')?.contains(e.target)) return;
         toggleShortcuts(false);
       };
-      setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
+      const handler = outside; timer = setTimeout(() => { timer = null; if (!disposed && outside === handler) doc.addEventListener('mousedown', handler, true); }, 0);
     } else {
       el.style.display = 'none';
       if (outside) {
-        document.removeEventListener('mousedown', outside, true);
+        doc.removeEventListener('mousedown', outside, true);
         outside = null;
       }
     }

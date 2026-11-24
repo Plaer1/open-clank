@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs/promises';
-import ts from '../../packages/mimo-code/packages/opencode/node_modules/typescript/lib/typescript.js';
+import ts from '../../packages/mimo-code/packages/cli/node_modules/typescript/lib/typescript.js';
 import { NATIVE_SETTINGS_REFERENCE, NATIVE_SETTINGS_SOURCE_DECLARATIONS, NATIVE_SETTINGS_SOURCE_ROOTS, NATIVE_SETTINGS_SOURCE_EXCLUSIONS, getNativeSettingsReference, findNativeSettingReference, findNativeSettingReferences, searchNativeSettingsReference, unclassifiedNativeSettingDeclarations } from '../../static/js/nativeSettingsReference.js';
 
 function schemaDeclarations(text, filename) {
@@ -35,7 +35,7 @@ const normalized = path => path.replace(/\.\{[^}]+\}/g, '');
 test('reference reconciles every current symbolic native schema declaration to a classified template', async () => {
   const templates = new Set(NATIVE_SETTINGS_REFERENCE.map(row => normalized(row.path)));
   for (const [module, expected] of Object.entries(NATIVE_SETTINGS_SOURCE_DECLARATIONS)) {
-    const source = await fs.readFile(new URL(`../../packages/mimo-code/packages/opencode/src/config/${module}`, import.meta.url), 'utf8');
+    const source = await fs.readFile(new URL(`../../packages/mimo-code/packages/cli/src/config/${module}`, import.meta.url), 'utf8');
     const actual = schemaDeclarations(source, module);
     assert.deepEqual(actual, expected, `${module}: source additions/removals must receive explicit reference review`);
     for (const declaration of actual) {

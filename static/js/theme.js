@@ -1,3 +1,7 @@
+import { pulseGain } from './graphics/kene-pulse.js';
+import { rasterGem, nativeDriftSprite } from './graphics/drift-sprites.js';
+import { CLANKER_THEME_DEFAULTS } from './themeDefaults.js';
+import { projectDeliverableAppearance, readDeliverableThemeRoles } from './theme/deliverableAppearance.js';
 import { recordPresentation, achievementOwner, activityDigest } from './achievementProducer.js';
 // Theme system — preset themes + custom color editing, stored in localStorage
 // ES6 module
@@ -8,11 +12,14 @@ import { initColorPickers, attachColorPicker } from './colorPicker.js';
 import { hexToRgb } from './color/hex.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
+import { backgroundBackingScale, mountBackgroundCanvas } from './graphics/background-canvas.js';
 import { createGraphicsConsumer } from './graphics/consumer.js';
-import { getThemeEmojiAsset, getThemeEmojiCatalog, preloadThemeEmojiAssets } from './themeEmojiAssets.js';
-import { createObstacleField, obstacleCollision, PAINTED_ALPHA_THRESHOLD } from './graphics/obstacle-field.js';
+import { getThemeEmojiAsset, getThemeEmojiCatalog, preloadThemeEmojiAssets, readThemeEmojiLocalState,
+  beginThemeEmojiSelection, decideThemeEmojiSelection, revokeThemeEmojiConsent, cancelThemeEmojiUpdate, setThemeEmojiUpdates, deleteThemeEmojiArtwork, invalidateThemeEmojiAssets } from './themeEmojiAssets.js';
+import { createKeneTailBatch, traceKeneRange } from './graphics/kene-tail-batch.js';
 import { createKenePaintTrail } from './graphics/kene-paint.js';
 import { LCARS_SCANNER_CONTROLS, createLcarsScanner } from './graphics/lcars-scanner.js';
+import { createLcarsStatusSweep } from './graphics/lcars-status-sweep.js';
 import { createJunctionRainScene, stepJunctionRain } from './graphics/junction-rain.js';
 
 export const THEMES = {
@@ -62,8 +69,8 @@ const THEME_LABELS = {
 };
 
 const DEFAULT_THEME = 'clanker-dark';
-const LS_KEY = 'odysseus-theme';
-const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
+const LS_KEY = 'openclank-theme';
+const CUSTOM_THEMES_KEY = 'openclank-custom-themes';
 const THEME_SNAPSHOT_VERSION = 3;
 const THEME_OWNER_PREFIX = `${LS_KEY}:scope:`;
 const THEME_ACCENT_DEFAULT = '#F6BE48';
@@ -73,12 +80,33 @@ const THEME_ACCENT_DISABLED = '#C4A46A';
 const THEME_ERROR_DEFAULT = '#FF776E';
 const THEME_SUCCESS_DEFAULT = '#8DD85D';
 let _themeOwner = null;
+// Committed, owner-fenced runtime projection of the existing per-account preference.
+let _deliverableMotion = null;
+let _deliverableMotionReadEpoch = 0;
+let _appliedDeliverableTheme = null;
+let _themeAccountId = null;
 let _themeHydrationGeneration = 0;
+let _themeSaveRevision = 0;
+let _themeEmojiAuthority = null;
+let _themeEmojiCatalogPromise = null;
+let _themeEmojiCatalogueEpoch = 0;
+let _themeEmojiCatalogueFailed = false;
+let _themeEmojiStatusTimer = null;
+let _themeEmojiInitialRead = null;
+let _requestedBgPattern = 'none';
+let _themePatternEpoch = 0;
+const _THEME_EMOJI_CANVAS_IDS = Object.freeze({
+  'clanker-emoji-drift': 'clanker-emoji-drift-canvas',
+  'clanker-emoji-rain': 'clanker-emoji-rain-canvas',
+  'clanker-matrix-rain': 'clanker-matrix-rain-canvas',
+});
 let _themeHydrationPromise = null;
 let _themeHydrationRequest = null;
 let _themeInitPromise = null;
 
 const FONT_MAP = {
+  'comic-clank': "'Comic Clank', sans-serif",
+  'comic-clank-mono': "'Comic Clank Mono', monospace",
   'liga-comic-mono': "'Liga Comic Mono', 'Fira Code', monospace",
   mono: "'Fira Code', monospace",
   sans: "system-ui, -apple-system, 'Segoe UI', sans-serif",
@@ -98,8 +126,8 @@ const MAX_CUSTOM_THEMES = 8;
 
 // Default background patterns for built-in themes
 const THEME_DEFAULT_PATTERN = {
-  'clanker-dark':  'clanker-emoji-drift',
-  'clanker-light': 'clanker-lcars',
+  'clanker-dark': CLANKER_THEME_DEFAULTS['clanker-dark'].pattern,
+  'clanker-light': CLANKER_THEME_DEFAULTS['clanker-light'].pattern,
   dark:       'none',
   light:      'dots',
   midnight:   'rain',
@@ -116,8 +144,8 @@ const THEME_DEFAULT_PATTERN = {
 
 // Default effect colors for specific themes (overrides --fg)
 const THEME_DEFAULT_EFFECT_COLOR = {
-  'clanker-dark':  '#62C7E8',
-  'clanker-light': '#2469D8',
+  'clanker-dark': CLANKER_THEME_DEFAULTS['clanker-dark'].effectColor,
+  'clanker-light': CLANKER_THEME_DEFAULTS['clanker-light'].effectColor,
   midnight:   '#ffffff',
   organs:     '#451616',
   cute:       '#ff8cb8',
@@ -126,34 +154,21 @@ const THEME_DEFAULT_EFFECT_COLOR = {
 
 // Default effect intensity (0..1) per theme. Any theme not listed defaults to 1.
 const THEME_DEFAULT_INTENSITY = {
-  'clanker-dark':  0.65,
-  'clanker-light': 0.55,
+  'clanker-dark': CLANKER_THEME_DEFAULTS['clanker-dark'].intensity,
+  'clanker-light': CLANKER_THEME_DEFAULTS['clanker-light'].intensity,
   midnight:   0.5,
   terminal:   0.8,
   organs:     0.65,
 };
 
 const THEME_DEFAULT_SIZE = {
-  'clanker-dark': 1.8,
-  'clanker-light': 1,
+  'clanker-dark': CLANKER_THEME_DEFAULTS['clanker-dark'].size,
+  'clanker-light': CLANKER_THEME_DEFAULTS['clanker-light'].size,
 };
 
 const THEME_DEFAULT_FONT = {
   'clanker-dark': 'liga-comic-mono',
   'clanker-light': 'liga-comic-mono',
-};
-
-// Theme-scoped defaults captured from the current Open Clank Dark settings.
-// Explicit saved control values override these; other themes keep their defaults.
-const THEME_DEFAULT_EFFECT_CONTROLS = {
-  'clanker-dark': {
-    'clanker-emoji-drift': {
-      advancedSettings: true, driftSpeed: 5, driftSpeedVariation: 12,
-      gemSizeVariation: 100, intensityVariation: 0, middleIntensity: 200,
-      totalQuantity: 115, glowLikelihood: 6, rotationLikelihood: 71,
-      rotationSpeed: 5, rotationSpeedVariation: 18, useOneEmojiPool: true,
-    },
-  },
 };
 
 // Default frosted-glass state per theme. Themes not listed default to false.
@@ -262,13 +277,8 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
   const rawPattern = suppliedPattern || THEME_DEFAULT_PATTERN[name] || 'none';
   const rawControlValues = options.controls || options.bgEffectControls || {};
   const controls = _isPlainObject(rawControlValues) ? _copyThemeValue(rawControlValues) : {};
-  const defaultControls = THEME_DEFAULT_EFFECT_CONTROLS[name]?.[rawPattern];
-  if (defaultControls) {
-    controls[rawPattern] = { ...defaultControls, ...(controls[rawPattern] || {}) };
-  }
-  if (!suppliedPattern && name === 'clanker-light' && rawPattern === 'clanker-lcars'
-      && controls['clanker-lcars']?.visualMode === undefined) {
-    controls['clanker-lcars'] = { ...(controls['clanker-lcars'] || {}), visualMode: 'status-sweep' };
+  for (const [controlPattern, defaults] of Object.entries(CLANKER_THEME_DEFAULTS[name]?.controls || {})) {
+    controls[controlPattern] = { ...defaults, ...controls[controlPattern] };
   }
   const pattern = rawPattern;
   const effectColor = options.effectColor || options.bgEffectColor || THEME_DEFAULT_EFFECT_COLOR[name] || '';
@@ -277,7 +287,7 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
   const effectSize = options.effectSize ?? options.bgEffectSize ?? THEME_DEFAULT_SIZE[name] ?? 1;
   const font = typography.font || source.font || THEME_DEFAULT_FONT[name] || DEFAULT_FONT;
   const density = typography.density || DEFAULT_DENSITY;
-  const edgeHardness = _normalizeEdgeHardness(source.layout?.edgeHardness);
+  const edgeHardness = source.layout?.useDefaultHardness === true ? DEFAULT_EDGE_HARDNESS : _normalizeEdgeHardness(source.layout?.edgeHardness);
   const frosted = options.frosted !== undefined ? !!options.frosted : THEME_DEFAULT_FROSTED[name] === true;
   const reduced = source.motion?.reduced !== undefined
     ? !!source.motion.reduced : !!source.reducedMotion;
@@ -293,7 +303,7 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
     palette,
     overrides: { colors: paletteOverrides, advanced: normalizedAdvanced },
     typography: { font, density },
-    layout: { edgeHardness },
+    layout: { edgeHardness, useDefaultHardness: typeof source.layout?.useDefaultHardness === 'boolean' ? source.layout.useDefaultHardness : edgeHardness === DEFAULT_EDGE_HARDNESS },
     background: {
       pattern, effectColor, effectIntensity: Number(effectIntensity), effectSize: Number(effectSize),
       controls: _copyThemeValue(controls), frosted,
@@ -499,6 +509,7 @@ function generateHarmonyColors(accentHex, harmonyType, mode) {
 }
 
 export function applyColors(colors) {
+  _effectConfigCache.clear();
   // Start from a known palette on every application. In particular, a custom
   // four-color record without `red` must not inherit the previous theme's
   // accent from the document root.
@@ -684,12 +695,23 @@ export function applyEdgeHardness(value) {
   return hardness;
 }
 
+function _setEdgeHardnessMode(useDefault) {
+  const toggle = document.getElementById('theme-edge-hardness-default');
+  const slider = document.getElementById('theme-edge-hardness');
+  if (toggle) toggle.checked = !!useDefault;
+  if (slider) {
+    slider.disabled = !!useDefault;
+    if (useDefault) slider.value = String(DEFAULT_EDGE_HARDNESS);
+  }
+  _syncEdgeHardnessValue();
+}
+
 function _syncEdgeHardnessValue() {
   const slider = document.getElementById('theme-edge-hardness');
   const output = document.getElementById('theme-edge-hardness-value');
   if (!slider) return;
   const hardness = _normalizeEdgeHardness(slider.value);
-  const label = hardness === DEFAULT_EDGE_HARDNESS ? `${hardness}% · Current`
+  const label = slider.disabled ? `${hardness}% · Default`
     : hardness === 0 ? '0% · Softest' : hardness === 100 ? '100% · Square' : `${hardness}%`;
   if (output) output.textContent = label;
   slider.setAttribute('aria-valuetext', label);
@@ -698,7 +720,7 @@ function _syncEdgeHardnessValue() {
 // UI text-size scale (accessibility). Global and independent of the active
 // theme, so the chosen size persists across theme switches. Stored as a plain
 // percentage string ('100' | '110' | '125' | '150').
-const UI_SCALE_KEY = 'odysseus-ui-scale';
+const UI_SCALE_KEY = 'openclank-ui-scale';
 const DEFAULT_UI_SCALE = '100';
 
 export function applyUiScale(scale) {
@@ -709,7 +731,7 @@ export function applyUiScale(scale) {
   if (s === '125') document.documentElement.classList.add('ui-scale-125');
 }
 
-const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-clanker-routefield', 'bg-pattern-clanker-kene-weave',
+const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-clanker-routefield', 'bg-pattern-clanker-kene-weave', 'bg-pattern-clanker-signal-weave',
   'bg-pattern-clanker-lcars', 'bg-pattern-clanker-gem-drift', 'bg-pattern-clanker-emoji-drift',
   'bg-pattern-clanker-matrix-rain', 'bg-pattern-clanker-emoji-rain', 'bg-pattern-clanker-sweep', 'bg-pattern-clanker-blueprint',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
@@ -717,6 +739,7 @@ const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-clanker-routefield', 'bg-pat
   'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];
 const _CANVAS_PATTERNS = { 'clanker-routefield': _initClankerRoutefield,
   'clanker-kene-weave': _initClankerKeneWeave,
+  'clanker-signal-weave': _initClankerSignalWeave,
   'clanker-lcars': _initClankerLcars,
   'clanker-gem-drift': _initClankerGemDrift,
   'clanker-emoji-drift': _initClankerEmojiDrift,
@@ -725,8 +748,7 @@ const _CANVAS_PATTERNS = { 'clanker-routefield': _initClankerRoutefield,
   synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
   'perlin-flow': _initPerlinFlow,
   petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
-const _BACKGROUND_CANVAS_SELECTOR = '[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas';
-let _activeBackgroundEffectDispose = null;
+const _effectConfigCache = new Map();
 // Duplicate module URLs get separate scopes; keep canvas ownership shared.
 const _BACKGROUND_OWNER_KEY = '__openClankBackgroundOwner';
 let _clankerPaletteEnabled = false;
@@ -771,7 +793,11 @@ function _normalizeBackgroundEffectControlValue(control, value) {
 export function getBackgroundEffectControlValue(pattern, key, fallback) {
   const control = _backgroundEffectControl(pattern, key);
   if (!control) return fallback;
-  return _normalizeBackgroundEffectControlValue(control, _backgroundEffectControlValues[pattern]?.[key]);
+  const values = _backgroundEffectControlValues[pattern] || {};
+  // Preserve old Status Sweep speed without rewriting the stored snapshot.
+  const value = pattern === 'clanker-lcars' && key === 'scanSpeed' && values.visualMode === 'status-sweep'
+    && values.scanSpeed == null && values.statusSweepSpeed != null ? values.statusSweepSpeed : values[key];
+  return _normalizeBackgroundEffectControlValue(control, value);
 }
 
 function _setBackgroundEffectControlValue(pattern, key, value) {
@@ -855,7 +881,7 @@ function _renderBackgroundEffectControls(pattern = _activeBgPattern()) {
         _renderBackgroundEffectControls(pattern);
         if (control.key === 'useOneEmojiPool' || control.key === 'splashEmojiMix') _reselectThemeEmojiAssets(pattern);
         if (pattern === 'clanker-lcars') {
-          if (control.key === 'visualMode') applyBgPattern(pattern, { force: true });
+          if (control.key === 'visualMode') applyBgPattern(pattern);
           else _syncLcarsBackgroundMode(pattern);
         }
         _invalidateBackgroundPaint();
@@ -878,10 +904,12 @@ function _renderBackgroundEffectControls(pattern = _activeBgPattern()) {
       slider.className = 'admin-slider';
       toggle.append(input, slider);
       input.addEventListener('change', () => {
+        if (pattern === 'clanker-matrix-rain' && control.key === 'splashEmojiMix') _themePatternEpoch += 1;
         _setBackgroundEffectControlValue(pattern, control.key, input.checked);
         _persistBackgroundEffectControls();
         _renderBackgroundEffectControls(pattern);
         if (control.key === 'useOneEmojiPool' || control.key === 'splashEmojiMix') _reselectThemeEmojiAssets(pattern);
+        if (pattern === 'clanker-matrix-rain' && control.key === 'splashEmojiMix' && input.checked) void _selectThemeEmojiDeliberately(pattern);
         _invalidateBackgroundPaint();
       });
       group.append(label, toggle);
@@ -919,6 +947,116 @@ function _renderBackgroundEffectControls(pattern = _activeBgPattern()) {
     }
     host.append(group);
   }
+  _renderThemeEmojiArtworkStatus(pattern);
+}
+
+function _renderThemeEmojiArtworkStatus(pattern) {
+  if (pattern !== 'clanker-emoji-drift' || !_themeOwner || !_themeAccountId) return;
+  const controls = document.getElementById('theme-bg-effect-controls');
+  if (!controls) return;
+  const host = document.createElement('div');
+  host.className = 'theme-effect-controls theme-emoji-artwork-status';
+  const previous = controls.querySelector('.theme-emoji-artwork-status');
+  const focusedText = previous?.contains(document.activeElement) ? document.activeElement.textContent : null;
+  if (previous) previous.replaceWith(host);
+  else controls.append(host);
+  if (_themeEmojiAuthority?.consent !== 'accepted') {
+    const consent = document.createElement('button');
+    consent.type = 'button';
+    consent.className = 'theme-fd-select';
+    consent.textContent = 'Review emoji artwork consent';
+    consent.addEventListener('click', () => { void _selectThemeEmojiDeliberately(pattern); });
+    host.append(consent);
+  }
+  const refresh = document.createElement('button');
+  refresh.type = 'button';
+  refresh.className = 'theme-fd-select';
+  refresh.textContent = 'Refresh artwork status';
+  refresh.addEventListener('click', async () => {
+    const owner = _themeOwner, generation = _themeHydrationGeneration;
+    refresh.disabled = true;
+    const refreshed = await _refreshThemeEmojiAuthority(owner, generation);
+    if (refresh.isConnected) refresh.disabled = false;
+    if (!refreshed && refresh.isConnected) uiModule.showToast?.('Artwork status could not be refreshed.');
+  });
+  host.append(refresh);
+  if (_themeEmojiAuthority?.consent === 'accepted' && _themeOwner) {
+    const summary = document.createElement('p');
+    if (!_themeEmojiAuthority.acquisition_available) summary.textContent = 'Artwork downloads and weekly updates are unavailable.';
+    else if (_themeEmojiAuthority.updates_enabled === true) summary.textContent = 'Weekly artwork updates enabled.';
+    else if (_themeEmojiAuthority.updates_enabled === false) summary.textContent = 'Weekly artwork updates are off.';
+    else summary.textContent = 'Weekly artwork update status is unavailable.';
+    if (_themeEmojiCatalogueFailed) summary.textContent += ' Artwork could not be loaded.';
+    else if (_themeEmojiAuthority.acquisition_active) summary.textContent += ' Artwork download in progress.';
+    else if (!_themeEmojiAuthority.ready) summary.textContent += ' No artwork is available yet.';
+    if (_themeEmojiAuthority.next_due) summary.textContent += ` Next check: ${_themeEmojiAuthority.next_due} UTC.`;
+    if (_themeEmojiAuthority.last_check) summary.textContent += ` Last check: ${_themeEmojiAuthority.last_check} UTC.`;
+    if (_themeEmojiAuthority.last_error) summary.textContent += ' The last update failed.';
+    else if (_themeEmojiAuthority.last_warning) summary.textContent += ' Some source metadata could not be refreshed.';
+    if (_themeEmojiAuthority.catalogueGeneration == null) summary.textContent += ' Artwork inventory is unavailable or not yet discovered.';
+    else if (Number.isSafeInteger(_themeEmojiAuthority.expected)) summary.textContent += ` Ready ${_themeEmojiAuthority.readyCount || 0} / ${_themeEmojiAuthority.expected}; failed ${_themeEmojiAuthority.failedCount || 0}.`;
+    const sources = _themeEmojiAuthority.bySource;
+    if (_themeEmojiAuthority.catalogueGeneration != null && sources && typeof sources === 'object' && !Array.isArray(sources)) {
+      const entries=Object.entries(sources), labels={noto:'Noto',flags:'Flags',kitchen:'Kitchen'};
+      if (entries.length<=32 && entries.every(([key,value])=>/^[a-z][a-z0-9_-]{0,63}$/.test(key) && !/[^a-z0-9_-]/.test(key) && value && ['expected','readyCount','pendingCount','failedCount','bytes'].every(field=>Number.isSafeInteger(value[field]) && value[field]>=0))) {
+        summary.textContent += ' ' + entries.map(([key,value]) => `${Object.hasOwn(labels,key) ? labels[key] : key}: ${value.readyCount}/${value.expected} ready, ${value.failedCount} failed`).join(' · ') + '.';
+      }
+    }
+    host.append(summary);
+    if (_themeEmojiAuthority.acquisition_available && _themeAccountId && typeof _themeEmojiAuthority.updates_enabled === 'boolean') {
+      const updates = document.createElement('button');
+      updates.type = 'button'; updates.className = 'theme-fd-select';
+      updates.textContent = _themeEmojiAuthority.updates_enabled ? 'Pause weekly artwork updates' : 'Resume weekly artwork updates';
+      updates.addEventListener('click', async () => {
+        const owner = _themeOwner, account = _themeAccountId, generation = _themeHydrationGeneration;
+        const enabled = !_themeEmojiAuthority.updates_enabled, revision = _themeEmojiAuthority.consent_revision;
+        updates.disabled = true;
+        try { _acceptThemeEmojiAuthority(await setThemeEmojiUpdates(account, revision, enabled), owner, generation); }
+        catch { if (owner === _themeOwner && generation === _themeHydrationGeneration) uiModule.showToast('Weekly artwork updates could not be changed.'); }
+        finally { if (updates.isConnected) updates.disabled = false; }
+      });
+      host.append(updates);
+    }
+    if (_themeEmojiAuthority.cancellable && _themeAccountId) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button'; cancel.className = 'theme-fd-select'; cancel.textContent = 'Cancel artwork update';
+      cancel.addEventListener('click', async () => {
+        const owner = _themeOwner, account = _themeAccountId, generation = _themeHydrationGeneration;
+        cancel.disabled = true;
+        try { _acceptThemeEmojiAuthority(await cancelThemeEmojiUpdate(account, _themeEmojiAuthority.consent_revision), owner, generation); }
+        catch { if (owner === _themeOwner && generation === _themeHydrationGeneration) uiModule.showToast('Artwork update could not be cancelled.'); }
+        finally { if (cancel.isConnected) cancel.disabled = false; }
+      });
+      host.append(cancel);
+    }
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'theme-fd-select'; button.textContent = 'Revoke emoji artwork consent';
+    button.addEventListener('click', () => { void _revokeThemeEmoji(); });
+    host.append(button);
+  } else if (['revoked','declined'].includes(_themeEmojiAuthority?.consent) && _themeAccountId) {
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'theme-fd-select'; remove.textContent = 'Delete local emoji artwork…';
+    remove.addEventListener('click', async () => {
+      const owner = _themeOwner, account = _themeAccountId, generation = _themeHydrationGeneration;
+      const revision = _themeEmojiAuthority.consent_revision;
+      const confirmed = await uiModule.styledConfirm('Delete the shared local artwork? This is refused while another account has consented. The packaged artwork remains, and disk block reclamation cannot be confirmed.', {title:'Delete local artwork',confirmText:'Delete',cancelText:'Cancel'});
+      if (!confirmed || owner !== _themeOwner || generation !== _themeHydrationGeneration) return;
+      remove.disabled = true;
+      try {
+        const result = await deleteThemeEmojiArtwork(account, revision);
+        if (owner !== _themeOwner || generation !== _themeHydrationGeneration) return;
+        _invalidateThemeEmojiCatalogue();
+        uiModule.showToast(result.outcome === 'removed' ? 'Local artwork removed; disk reclamation is unconfirmed.' : 'No local artwork was present.');
+        await _refreshThemeEmojiAuthority(owner, generation);
+      } catch {
+        if (owner === _themeOwner && generation === _themeHydrationGeneration) uiModule.showToast('Artwork is shared, busy or needs review; deletion was not confirmed.');
+      } finally {
+        if (remove.isConnected) remove.disabled = false;
+      }
+    });
+    host.append(remove);
+  }
+  if (focusedText) [...host.querySelectorAll('button')].find(button => button.textContent === focusedText)?.focus();
 }
 
 export function registerBackgroundEffectControls(pattern, controls) {
@@ -960,9 +1098,22 @@ function _withClankerAdvancedSettings(controls) {
   return [_CLANKER_ADVANCED_SETTINGS, ...controls.map(control => ({ ...control, advanced: true }))];
 }
 
-if (typeof document !== 'undefined') registerBackgroundEffectControls('clanker-kene-weave', [
+registerBackgroundEffectControls('clanker-routefield', [
+  { key: 'gridDensity', label: 'Grid density', min: 50, max: 200, step: 5, default: 100, unit: '%' },
+  { key: 'activity', label: 'Signal activity', min: 0, max: 200, step: 5, default: 100, unit: '%' },
+  { key: 'speed', label: 'Signal speed', min: 0, max: 250, step: 5, default: 100, unit: '%' },
+  { key: 'trackBrightness', label: 'Track brightness', min: 0, max: 100, step: 5, default: 100, unit: '%' },
+]);
+
+const _KENE_CONTROLS = [
   _CLANKER_ADVANCED_SETTINGS,
-  { key: 'snakeCount', label: 'Number of snakes', min: 1, max: 64, step: 1, default: 7, advanced: true },
+  { key: 'weaveIntensity', label: 'Background intensity', min: 0, max: 100, step: 1, default: 100, unit: '%' },
+  { key: 'snakeIntensity', label: 'Snake intensity', min: 0, max: 100, step: 1, default: 100, unit: '%' },
+  { key: 'pulseWeave', label: 'Pulse background', type: 'toggle', default: false },
+  { key: 'pulseSnakes', label: 'Pulse snakes', type: 'toggle', default: false },
+  { key: 'pulseVariation', label: 'Pulse variation', min: 0, max: 100, step: 1, default: 30, unit: '%' },
+  { key: 'pulseSpeed', label: 'Pulse speed', min: 10, max: 400, step: 5, default: 100, unit: '%' },
+  { key: 'snakeCount', label: 'Number of snakes', min: 1, max: 128, step: 1, default: 7, advanced: true },
   { key: 'snakeSpeed', label: 'Snake speed', min: 25, max: 500, step: 5, default: 100, unit: '%', advanced: true },
   { key: 'snakeSpeedVariationToggle', label: 'Vary speed per snake', type: 'toggle', default: false, advanced: true },
   { key: 'snakeSpeedVariation', label: 'Speed variation amount', min: 0, max: 100, step: 5, default: 30, unit: '%', advanced: true, showWhen: { key: 'snakeSpeedVariationToggle', value: true } },
@@ -973,7 +1124,15 @@ if (typeof document !== 'undefined') registerBackgroundEffectControls('clanker-k
   { key: 'shorterLifetimeScale', label: 'Short snake lifetime scale', min: 0, max: 200, step: 5, default: 100, unit: '%', advanced: true, showWhen: { key: 'shorterLastLonger', value: true } },
   { key: 'longerDisappearSooner', label: 'Longer snakes disappear sooner', type: 'toggle', default: false, advanced: true },
   { key: 'longerLifetimeScale', label: 'Long snake lifetime scale', min: 0, max: 200, step: 5, default: 100, unit: '%', advanced: true, showWhen: { key: 'longerDisappearSooner', value: true } },
-]);
+];
+if (typeof document !== 'undefined') {
+  registerBackgroundEffectControls('clanker-kene-weave',_KENE_CONTROLS);
+  registerBackgroundEffectControls('clanker-signal-weave',[
+    ..._KENE_CONTROLS.map(control => control.key === 'advancedSettings' ? control : { ...control, advanced:true }),
+    {key:'gridResolution',label:'Grid resolution',advanced:true,min:60,max:180,step:10,default:100,unit:'%'},
+    {key:'signalActivity',label:'Signal traffic',advanced:true,min:0,max:100,step:5,default:50,unit:'%'},
+  ]);
+}
 
 const _LCARS_VISUAL_MODE_CONTROL = {
   key: 'visualMode', label: 'Mode', type: 'select', default: 'classic',
@@ -986,7 +1145,7 @@ const _LCARS_STATUS_SWEEP_CONTROLS = [
   {
     key: 'statusSweepSpeed', label: 'Sweep speed', min: 25, max: 400, step: 5,
     default: 100, unit: '%', advanced: true,
-    showWhen: { key: 'visualMode', value: 'status-sweep' },
+    showWhen: { key: 'visualMode', value: '__legacy__' },
   },
   {
     key: 'statusSweepDirection', label: 'Sweep direction', type: 'select', default: 'ltr',
@@ -999,13 +1158,14 @@ const _LCARS_STATUS_SWEEP_CONTROLS = [
   },
 ];
 const _LCARS_IMMEDIATE_CONTROL_KEYS = new Set(['mode', 'sweepStyle', 'scanSpeed']);
+const _LCARS_SHARED_SWEEP_KEYS = new Set(['mode', 'sweepStyle', 'scanSpeed', 'beamWidth', 'scanRange', 'sweepBrightness', 'gridDetail']);
 registerBackgroundEffectControls('clanker-lcars', [
   _LCARS_VISUAL_MODE_CONTROL,
   _CLANKER_ADVANCED_SETTINGS,
   ...LCARS_SCANNER_CONTROLS.map(control => ({
     ...control,
     advanced: !_LCARS_IMMEDIATE_CONTROL_KEYS.has(control.key),
-    showWhen: { key: 'visualMode', value: 'classic' },
+    ...(_LCARS_SHARED_SWEEP_KEYS.has(control.key) ? {} : { showWhen: { key: 'visualMode', value: 'classic' } }),
   })),
   ..._LCARS_STATUS_SWEEP_CONTROLS,
 ]);
@@ -1047,7 +1207,6 @@ const _CLANKER_CODE_RAIN_CONTROLS = [
   { key: 'splashRainDown', label: 'Rain downward', type: 'toggle', default: true },
   { key: 'splashRainReverseChance', label: 'Reverse chance', min: 0, max: 100, step: .1, default: 0, unit: '%' },
   { key: 'splashRainWaves', label: 'Spawn in waves', type: 'toggle', default: false },
-  { key: 'splashRainBounceSides', label: 'Bounce off sides', type: 'toggle', default: true },
   { key: 'splashCharVariety', label: 'Character variety', min: .05, max: 1, step: .05, default: 1 },
   { key: 'splashMinOpacity', label: 'Minimum opacity', min: .02, max: 1, step: .02, default: .2 },
   { key: 'splashMaxOpacity', label: 'Maximum opacity', min: .02, max: 1, step: .02, default: 1 },
@@ -1060,9 +1219,6 @@ const _CLANKER_CODE_RAIN_CONTROLS = [
   // S24: separate rare-effect toggle. Default ON. Sampled once per spawn at
   // 1/10,000 — never the coarse reverse-chance slider.
   { key: 'splashRareUpward', label: 'Rare upward drop (1 in 10,000)', type: 'toggle', default: true },
-  { key: 'splashBounce', label: 'Bounce force', min: 0, max: 3, step: .1, default: 1.3 },
-  { key: 'splashGravity', label: 'Gravity', min: .1, max: 4, step: .1, default: .2 },
-  { key: 'splashCollisionForce', label: 'Collision force', min: 0, max: 4, step: .1, default: 2.2 },
 ];
 
 registerBackgroundEffectControls('clanker-matrix-rain', [
@@ -1085,27 +1241,34 @@ const _THEME_EMOJI_GLOW_CACHE_PIXEL_BUDGET = 4_194_304;
 const _THEME_EMOJI_GLOW_SOURCE_MAX_DIMENSION = 64;
 const _THEME_EMOJI_GLOW_BLUR = 4;
 const _THEME_EMOJI_GLOW_PADDING = 12;
-let _themeEmojiCatalogPromise = null;
-const _THEME_EMOJI_CANVAS_IDS = Object.freeze({
-  'clanker-emoji-drift': 'clanker-emoji-drift-canvas',
-  'clanker-emoji-rain': 'clanker-emoji-rain-canvas',
-  'clanker-matrix-rain': 'clanker-matrix-rain-canvas',
-});
+function _invalidateThemeEmojiCatalogue(generation = null) {
+  _themeEmojiCatalogPromise = null;
+  _themeEmojiCatalogueFailed = false;
+  _themeEmojiCatalogueEpoch += 1;
+  invalidateThemeEmojiAssets(generation);
+}
+
+function _canRenderThemeEmoji() {
+  return _themeEmojiAuthority?.ready === true && !_themeEmojiCatalogueFailed;
+}
 
 function _prepareThemeEmojiCatalog() {
+  if (!_canRenderThemeEmoji()) return null;
   if (!_themeEmojiCatalogPromise) {
-    _themeEmojiCatalogPromise = getThemeEmojiCatalog()
-      .catch(error => {
-        _themeEmojiCatalogPromise = null;
-        console.error('Local emoji catalogue request failed', error);
-        const message = error.authenticationRequired ? 'Sign in to load emoji artwork.'
-          : error.transient ? (error.connectionInterrupted
-            ? 'Emoji connection interrupted. Reload to try again.'
-            : 'Emoji loading timed out. Reload to try again.')
-          : 'The installed emoji artwork is unavailable. Check the offline artwork installation.';
-        uiModule.showToast?.(message);
-        return [];
-      });
+    const request = getThemeEmojiCatalog().catch(() => {
+      if (_themeEmojiCatalogPromise !== request) return [];
+      _themeEmojiCatalogPromise = null;
+      _themeEmojiCatalogueFailed = true;
+      if (_THEME_EMOJI_CANVAS_IDS[_requestedBgPattern]) {
+        if (_requestedBgPattern === 'clanker-emoji-drift') _renderThemeEmojiArtworkStatus(_requestedBgPattern);
+        else {
+          applyBgPattern(_requestedBgPattern, {preserveIntent:true});
+          if (_requestedBgPattern === 'clanker-matrix-rain') _reselectThemeEmojiAssets(_requestedBgPattern);
+        }
+      }
+      return [];
+    });
+    _themeEmojiCatalogPromise = request;
   }
   return _themeEmojiCatalogPromise;
 }
@@ -1128,26 +1291,48 @@ function _sampleThemeEmojiCatalogueIds(catalogue, kind, requested) {
 }
 
 function _themeEmojiPoolSignature(pattern) {
-  if (getBackgroundEffectControlValue(pattern, 'useOneEmojiPool', true)) return 'unified';
-  return `split:${getBackgroundEffectControlValue(pattern, 'emojiKitchenLikelihood', 50)}`;
+  return `${_themeEmojiCatalogueEpoch}:${_themeEmojiPoolSettings(pattern)}`;
 }
 
-function _createThemeEmojiAssetPool(pattern, capacity = _THEME_EMOJI_SCENE_POOL_SIZE) {
+function _themeEmojiPoolSettings(pattern) {
+  return getBackgroundEffectControlValue(pattern, 'useOneEmojiPool', true) ? 'unified'
+    : `split:${getBackgroundEffectControlValue(pattern, 'emojiKitchenLikelihood', 50)}`;
+}
+
+function _createThemeEmojiAssetPool(pattern, capacity = _THEME_EMOJI_SCENE_POOL_SIZE, retainedPool = null) {
   const signature = _themeEmojiPoolSignature(pattern);
+  const settings = _themeEmojiPoolSettings(pattern);
   const cataloguePromise = _themeEmojiCatalogPromise || Promise.resolve([]);
   return cataloguePromise.then(catalogue => {
     const drift = pattern === 'clanker-emoji-drift';
     const unified = getBackgroundEffectControlValue(pattern, 'useOneEmojiPool', true);
     const likelihood = getBackgroundEffectControlValue(pattern, 'emojiKitchenLikelihood', 50) / 100;
     const pool = unified ? {
-      type: 'unified', signature,
+      type: 'unified', signature, settings,
       entries: _sampleThemeEmojiCatalogueIds(catalogue, null, capacity),
     } : {
-      type: 'split', signature, likelihood,
+      type: 'split', signature, settings, likelihood,
       google: _sampleThemeEmojiCatalogueIds(catalogue, 'google', likelihood >= 1 && (!drift || catalogue.some(entry => entry.kind === 'kitchen')) ? 0 : drift || likelihood <= 0 ? capacity : capacity / 2),
       kitchen: _sampleThemeEmojiCatalogueIds(catalogue, 'kitchen', likelihood <= 0 ? 0 : drift || likelihood >= 1 ? capacity : capacity / 2),
     };
-    if (!drift) return pool;
+    if (!drift) {
+      if (!retainedPool) return pool;
+      const targets = new Set(_themeEmojiPoolIds(retainedPool));
+      const available = new Set();
+      for (const entry of catalogue) {
+        if (targets.has(entry.id)) available.add(entry.id);
+        if (available.size === targets.size) break;
+      }
+      const keepAvailable = (previous, sampled) => [...new Set([
+        ...previous.filter(id => available.has(id)), ...sampled,
+      ])].slice(0, sampled.length);
+      if (pool.type === 'unified') pool.entries = keepAvailable(retainedPool.entries, pool.entries);
+      else {
+        pool.google = keepAvailable(retainedPool.google, pool.google);
+        pool.kitchen = keepAvailable(retainedPool.kitchen, pool.kitchen);
+      }
+      return pool;
+    }
     // Metadata decks are bounded by particle capacity. Draw without replacement
     // while preserving the split pool's probability until a kind is exhausted.
     const shuffle = ids => {
@@ -1172,7 +1357,7 @@ function _createThemeEmojiAssetPool(pattern, capacity = _THEME_EMOJI_SCENE_POOL_
       google: catalogue.filter(entry => entry.kind === 'google').map(entry => entry.id),
       kitchen: catalogue.filter(entry => entry.kind === 'kitchen').map(entry => entry.id),
     };
-    return { type: 'unified', signature, entries, refreshPool };
+    return { type: 'unified', signature, settings, entries, refreshPool };
   });
 }
 
@@ -1228,7 +1413,7 @@ function _queueThemeEmojiAssetPreload(scene, pattern, ids) {
     return;
   }
   Promise.resolve().then(() => sceneIsActive()
-    ? preloadThemeEmojiAssets(toLoad, { concurrency: 6, maxDimension: scene.themeEmojiRasterDimension || 0,
+    ? preloadThemeEmojiAssets(toLoad, { concurrency: pattern === 'clanker-emoji-drift' ? 3 : 6, maxDimension: scene.themeEmojiRasterDimension || 0,
       signal: loadController.signal,
       onAsset: (asset, id) => {
         if (!asset || !sceneIsActive() || scene.themeEmojiLoadController !== loadController || !selectedIds.has(id)) return;
@@ -1412,7 +1597,13 @@ function _themeEmojiPoolSceneIsActive(scene, pattern) {
 }
 
 function _clearThemeEmojiAssetAssignments(scene) {
-  for (const shard of scene.shards || []) shard.emojiAssetId = null;
+  for (const shard of scene.shards || []) {
+    shard.emojiAssetId = null;
+    shard.emojiAsset = null;
+    shard.driftReplacement = null;
+    shard.driftDeparted = false;
+    shard.driftArrivedAt = null;
+  }
   for (const drop of scene.drops || []) {
     drop.emojiAssetId = null;
     drop.themeEmojiAssetAssigned = false;
@@ -1422,17 +1613,30 @@ function _clearThemeEmojiAssetAssignments(scene) {
 function _assignThemeEmojiAssetIds(scene, pattern) {
   const pool = scene.themeEmojiAssetPool;
   if (pattern === 'clanker-emoji-drift') {
-    const ids = pool?.entries || [];
-    for (let i = 0; i < (scene.shards?.length || 0); i += 1) {
-      scene.shards[i].emojiAssetId = ids.length ? ids[i % ids.length] : null;
+    const available = new Set(_themeEmojiPoolIds(pool.refreshPool));
+    const retained = new Set();
+    for (const shard of scene.shards) {
+      if (available.has(shard.emojiAssetId)) retained.add(shard.emojiAssetId);
+      else {
+        shard.emojiAssetId = null;
+        shard.emojiAsset = null;
+        shard.driftDeparted = false;
+        shard.driftArrivedAt = null;
+      }
+      if (!available.has(shard.driftReplacement?.id)) shard.driftReplacement = null;
     }
+    const additions = pool.entries.filter(id => !retained.has(id));
+    let cursor = 0;
+    for (const shard of scene.shards) if (!shard.emojiAssetId) shard.emojiAssetId = additions[cursor++] ?? null;
+    pool.entries = scene.shards.map(shard => shard.emojiAssetId);
     return;
   }
+  const available = new Set(_themeEmojiPoolIds(pool));
   for (const drop of scene.drops || []) {
     if (!drop.emoji) {
       drop.emojiAssetId = null;
       drop.themeEmojiAssetAssigned = false;
-    } else {
+    } else if (!available.has(drop.emojiAssetId)) {
       drop.emojiAssetId = _pickThemeEmojiAssetId(pool);
       drop.themeEmojiAssetAssigned = true;
     }
@@ -1440,29 +1644,39 @@ function _assignThemeEmojiAssetIds(scene, pattern) {
 }
 
 function _requestThemeEmojiAssetPool(scene, pattern) {
-  if (!scene) return;
+  if (!scene || !_canRenderThemeEmoji()) return;
+  const drift = pattern === 'clanker-emoji-drift';
+  const sameSettings = scene.themeEmojiAssetPool?.settings === _themeEmojiPoolSettings(pattern);
+  const authority = `${_themeHydrationGeneration}:${_themeEmojiAuthority?.consent_revision}`;
+  const retainedRainPool = !drift && sameSettings && scene.themeEmojiPoolAuthority === authority
+    ? scene.themeEmojiAssetPool : null;
+  const retainPool = retainedRainPool || (drift && sameSettings);
   const signature = _themeEmojiPoolSignature(pattern);
   if (scene.themeEmojiAssetPool?.signature === signature) return;
   if (scene.themeEmojiPoolRequestSignature === signature && scene.themeEmojiPoolLoading) return;
+  _prepareThemeEmojiCatalog();
   const requestId = (scene.themeEmojiPoolRequestId || 0) + 1;
-  scene.themeEmojiLoadController?.abort();
+  if (!retainPool) scene.themeEmojiLoadController?.abort();
   scene.themeEmojiPoolRequestId = requestId;
   scene.themeEmojiPoolRequestSignature = signature;
-  scene.themeEmojiAssetPool = null;
   scene.themeEmojiPoolLoading = true;
-  _clearThemeEmojiAssetAssignments(scene);
-  if (pattern === 'clanker-emoji-drift') _clearThemeEmojiGlowCache(scene);
-  _createThemeEmojiAssetPool(pattern, pattern === 'clanker-emoji-drift' ? scene.shards.length : _THEME_EMOJI_SCENE_POOL_SIZE).then(pool => {
+  if (!retainPool) {
+    scene.themeEmojiAssetPool = null;
+    _clearThemeEmojiAssetAssignments(scene);
+    if (drift) _clearThemeEmojiGlowCache(scene);
+  }
+  _createThemeEmojiAssetPool(pattern, drift ? scene.shards.length : _THEME_EMOJI_SCENE_POOL_SIZE, retainedRainPool).then(pool => {
     if (scene.themeEmojiPoolRequestId !== requestId) return;
     scene.themeEmojiPoolLoading = false;
-    if (scene.themeEmojiPoolRequestSignature !== _themeEmojiPoolSignature(pattern)
+    if (_themeEmojiCatalogueFailed || scene.themeEmojiPoolRequestSignature !== _themeEmojiPoolSignature(pattern)
         || !_themeEmojiPoolSceneIsActive(scene, pattern)) {
       scene.themeEmojiPoolRequestSignature = null;
       return;
     }
     scene.themeEmojiAssetPool = pool;
+    scene.themeEmojiPoolAuthority = authority;
     _assignThemeEmojiAssetIds(scene, pattern);
-    if (pattern === 'clanker-emoji-drift') scene.themeEmojiActiveLoadKey = null;
+    if (drift) scene.themeEmojiActiveLoadKey = null;
     else _queueThemeEmojiAssetPreload(scene, pattern, _themeEmojiPoolIds(pool));
     _invalidateBackgroundPaint();
   }).catch(() => {
@@ -1478,49 +1692,59 @@ function _reselectThemeEmojiAssets(pattern) {
   const canvas = canvasId && document.getElementById(canvasId);
   const scene = canvas?.__backgroundScene;
   if (!scene) return;
-  if (pattern !== 'clanker-emoji-drift' && pattern === 'clanker-matrix-rain'
-      && !getBackgroundEffectControlValue(pattern, 'splashEmojiMix', false)) {
+  const driftUnavailable = pattern === 'clanker-emoji-drift' && _themeEmojiAuthority?.ready !== true;
+  const rainUnavailable = (pattern === 'clanker-emoji-rain' || pattern === 'clanker-matrix-rain')
+    && (!_canRenderThemeEmoji() || (pattern === 'clanker-matrix-rain'
+      && !getBackgroundEffectControlValue(pattern, 'splashEmojiMix', false)));
+  if (driftUnavailable || rainUnavailable) {
+    scene.themeEmojiLoadController?.abort();
     scene.themeEmojiPoolRequestId = (scene.themeEmojiPoolRequestId || 0) + 1;
     scene.themeEmojiPoolRequestSignature = null;
     scene.themeEmojiPoolLoading = false;
     scene.themeEmojiAssetPool = null;
     scene.themeEmojiAssets = new Map();
+    scene.themeEmojiArrivals?.clear();
     _clearThemeEmojiAssetAssignments(scene);
+    if (driftUnavailable) _clearThemeEmojiGlowCache(scene);
     _invalidateBackgroundPaint();
     return;
   }
-  _prepareThemeEmojiCatalog();
   _requestThemeEmojiAssetPool(scene, pattern);
 }
 
+function _adoptBackgroundOwner(dispose, repaint) {
+  const previous = window[_BACKGROUND_OWNER_KEY];
+  if (previous && previous !== dispose) previous();
+  dispose.repaint = repaint;
+  window[_BACKGROUND_OWNER_KEY] = dispose;
+}
+
+function _releaseBackgroundOwner(dispose) {
+  if (window[_BACKGROUND_OWNER_KEY] !== dispose) return;
+  window[_BACKGROUND_OWNER_KEY] = null;
+  document.body.classList.remove('background-effect-host');
+}
+
 function _disposeBackgroundEffect() {
-  const dispose = window[_BACKGROUND_OWNER_KEY] || _activeBackgroundEffectDispose;
-  _activeBackgroundEffectDispose = null;
-  if (window[_BACKGROUND_OWNER_KEY] === dispose) window[_BACKGROUND_OWNER_KEY] = null;
-  if (dispose) dispose();
-  document.querySelectorAll(_BACKGROUND_CANVAS_SELECTOR).forEach(canvas => {
-    if (typeof canvas.__disposeEffect === 'function') canvas.__disposeEffect();
-    else canvas.remove();
-  });
+  window[_BACKGROUND_OWNER_KEY]?.();
+  document.body.classList.remove('background-effect-host');
 }
 
 // T10: under reduced motion the RAF loop is intentionally stopped, so a style
 // change would otherwise leave a stale painted frame. Ask the active background
 // canvases to paint exactly one frame.
 export function _invalidateBackgroundPaint() {
-  if (typeof document === 'undefined') return;
-  document.querySelectorAll(_BACKGROUND_CANVAS_SELECTOR).forEach(canvas => {
-    if (typeof canvas.__requestBackgroundRepaint === 'function') canvas.__requestBackgroundRepaint();
-    else if (typeof canvas.__backgroundPaint === 'function') canvas.__backgroundPaint();
-  });
+  if (typeof window !== 'undefined') window[_BACKGROUND_OWNER_KEY]?.repaint?.();
 }
 
 export function applyBgEffectColor(color) {
+  _effectConfigCache.clear();
   document.documentElement.style.setProperty('--bg-effect-color', color || '');
   _invalidateBackgroundPaint();
 }
 
 export function applyBgEffectIntensity(v) {
+  _effectConfigCache.clear();
   // v is 0..1. Default 1 (full intensity) when missing.
   const n = (v === undefined || v === null || isNaN(v)) ? 1 : Math.max(0, Math.min(1, Number(v)));
   document.documentElement.style.setProperty('--bg-effect-intensity', String(n));
@@ -1528,6 +1752,7 @@ export function applyBgEffectIntensity(v) {
 }
 
 export function applyBgEffectSize(v) {
+  _effectConfigCache.clear();
   // v is a multiplier 0.3..2.5. Default 1 when missing.
   const n = (v === undefined || v === null || isNaN(v)) ? 1 : Math.max(0.2, Math.min(3, Number(v)));
   document.documentElement.style.setProperty('--bg-effect-size', String(n));
@@ -1545,8 +1770,7 @@ export function applyFrostedGlass(on) {
 
 // Read current size multiplier for JS effects (canvas-based).
 function _getEffectSize() {
-  const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-size'));
-  return isNaN(v) ? 1 : v;
+  return _readClankerEffectConfig(true).size;
 }
 
 // T17: dots paints with `--bg-effect-intensity`, so its intensity control must
@@ -1568,15 +1792,11 @@ function _syncLcarsBackgroundMode(pattern) {
     && getBackgroundEffectControlValue('clanker-lcars', 'visualMode', 'classic') === 'status-sweep';
   document.body.classList.toggle(_LCARS_STATUS_SWEEP_CLASS, statusSweep);
   if (!statusSweep) {
+    document.body.classList.remove('bg-lcars-sweep-canvas-ready');
     document.body.style.removeProperty('--clanker-lcars-sweep-duration');
     document.body.style.removeProperty('--clanker-lcars-sweep-direction');
     return false;
   }
-  const speed = getBackgroundEffectControlValue('clanker-lcars', 'statusSweepSpeed', 100);
-  const duration = Math.max(5.5, Math.min(88, 2200 / Math.max(25, speed)));
-  const direction = getBackgroundEffectControlValue('clanker-lcars', 'statusSweepDirection', 'ltr');
-  document.body.style.setProperty('--clanker-lcars-sweep-duration', `${duration}s`);
-  document.body.style.setProperty('--clanker-lcars-sweep-direction', direction === 'rtl' ? 'reverse' : 'normal');
   return true;
 }
 
@@ -1587,30 +1807,239 @@ function _syncBgPatternControlVisibility(pattern) {
   if (sg) sg.style.display = _NO_SIZE_PATTERNS.has(pattern) ? 'none' : '';
 }
 
+function needsThemeArtwork(pattern) {
+  return Boolean(_THEME_EMOJI_CANVAS_IDS[pattern]) && (pattern !== 'clanker-matrix-rain'
+    || getBackgroundEffectControlValue(pattern, 'splashEmojiMix', false));
+}
+
+function loadThemeArtworkOnFirstUse(pattern) {
+  const generation = _themeHydrationGeneration;
+  if (!_themeAccountId || _themeEmojiAuthority || !needsThemeArtwork(pattern)
+      || _themeEmojiInitialRead === generation) return;
+  _themeEmojiInitialRead = generation;
+  void _refreshThemeEmojiAuthority(_themeOwner, generation, { includeInventory: false }).finally(() => {
+    if (_themeEmojiInitialRead === generation) _themeEmojiInitialRead = null;
+  });
+}
+
 export function applyBgPattern(pattern, config = {}) {
   const requestedPattern = pattern || 'none';
+  if (!config.preserveIntent && _requestedBgPattern !== requestedPattern) { _requestedBgPattern = requestedPattern; _themePatternEpoch += 1; }
+  loadThemeArtworkOnFirstUse(requestedPattern);
+  _scheduleThemeEmojiStatus();
   const p = requestedPattern;
-  if (_THEME_EMOJI_CANVAS_IDS[p]) _prepareThemeEmojiCatalog();
+  if (_THEME_EMOJI_CANVAS_IDS[p] && _canRenderThemeEmoji()
+      && (p !== 'clanker-matrix-rain' || getBackgroundEffectControlValue(p, 'splashEmojiMix', false))) _prepareThemeEmojiCatalog();
   const force = config.force === true;
   const samePattern = _activeBgPattern() === p;
-  const hasActiveOwner = window[_BACKGROUND_OWNER_KEY] || _activeBackgroundEffectDispose;
+  const hasActiveOwner = window[_BACKGROUND_OWNER_KEY];
   const statusSweep = _syncLcarsBackgroundMode(p);
-  const currentModeIsOwned = statusSweep ? !hasActiveOwner : (!_CANVAS_PATTERNS[p] || hasActiveOwner);
+  const lcarsCanvas = p === 'clanker-lcars' ? document.getElementById('clanker-lcars-canvas') : null;
+  const currentModeIsOwned = p === 'clanker-lcars'
+    ? !!hasActiveOwner && lcarsCanvas?.dataset.lcarsMode === (statusSweep ? 'status-sweep' : 'classic')
+    : (!_CANVAS_PATTERNS[p] || hasActiveOwner);
   if (!force && samePattern && currentModeIsOwned) {
-    _syncBgPatternControlVisibility(p);
-    _renderBackgroundEffectControls(p);
+    _syncBgPatternControlVisibility(requestedPattern);
+    _renderBackgroundEffectControls(requestedPattern);
     return;
   }
+  _effectConfigCache.clear();
   document.body.classList.remove(..._BG_CLASSES);
   _disposeBackgroundEffect();
   if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
-  if (_CANVAS_PATTERNS[p] && !(p === 'clanker-lcars' && statusSweep)) _CANVAS_PATTERNS[p]();
-  _syncBgPatternControlVisibility(p);
-  _renderBackgroundEffectControls(p);
+  if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
+  _syncBgPatternControlVisibility(requestedPattern);
+  _renderBackgroundEffectControls(requestedPattern);
+}
+
+function _acceptThemeEmojiAuthority(value, owner, generation, { retryCatalogue = false } = {}) {
+  const previous = _themeEmojiAuthority;
+  if (!owner || owner !== _themeOwner || generation !== _themeHydrationGeneration
+      || (previous && value.generation < previous.generation)) return false;
+  const sameConsent = previous && previous.consent === value.consent
+    && previous.consent_revision === value.consent_revision;
+  // Selection and decision responses may omit scheduler and inventory fields.
+  // Preserve already-read status only within the same consent incarnation.
+  const next = sameConsent ? { ...previous, ...value } : value;
+  const nextCatalogue = next.catalogue_generation ?? null;
+  const previousCatalogue = previous?.catalogue_generation ?? null;
+  if (sameConsent && previousCatalogue != null && nextCatalogue != null
+      && nextCatalogue < previousCatalogue && next.ready) return false;
+
+  const artworkChanged = !sameConsent || previous?.ready !== next.ready
+    || previousCatalogue !== nextCatalogue || (retryCatalogue && _themeEmojiCatalogueFailed);
+  const statusChanged = artworkChanged || ['acquisition_available', 'acquisition_active', 'updates_enabled',
+    'next_due', 'last_check', 'last_error', 'last_warning', 'cancellable', 'catalogueGeneration',
+    'expected', 'readyCount', 'failedCount'].some(key => previous?.[key] !== next[key]);
+  if (artworkChanged) _invalidateThemeEmojiCatalogue(nextCatalogue);
+  _themeEmojiAuthority = next;
+  if (_requestedBgPattern === 'clanker-emoji-drift') {
+    if (artworkChanged) _reselectThemeEmojiAssets(_requestedBgPattern);
+    if (statusChanged) _renderThemeEmojiArtworkStatus(_requestedBgPattern);
+  } else if (_THEME_EMOJI_CANVAS_IDS[_requestedBgPattern]) {
+    applyBgPattern(_requestedBgPattern, {preserveIntent:true});
+    // Same-pattern application intentionally retains its sole canvas owner.
+    // Requalify only the artwork pool when the catalogue changes.
+    if (artworkChanged || _requestedBgPattern === 'clanker-matrix-rain') {
+      _reselectThemeEmojiAssets(_requestedBgPattern);
+      _invalidateBackgroundPaint();
+    }
+  }
+  if (previous?.acquisition_active !== next.acquisition_active && _themeEmojiStatusTimer !== null) {
+    clearTimeout(_themeEmojiStatusTimer);
+    _themeEmojiStatusTimer = null;
+  }
+  _scheduleThemeEmojiStatus();
+  return true;
+}
+
+function _scheduleThemeEmojiStatus() {
+  const authority = _themeEmojiAuthority;
+  if (_requestedBgPattern !== 'clanker-emoji-drift' || !_themeAccountId
+      || authority?.consent !== 'accepted' || !authority.acquisition_available) {
+    clearTimeout(_themeEmojiStatusTimer);
+    _themeEmojiStatusTimer = null;
+    return;
+  }
+  if (_themeEmojiStatusTimer !== null) return;
+  _themeEmojiStatusTimer = setTimeout(async () => {
+    _themeEmojiStatusTimer = null;
+    const owner = _themeOwner, generation = _themeHydrationGeneration;
+    if (!document.hidden) {
+      const status = document.querySelector('.theme-emoji-artwork-status');
+      await _refreshThemeEmojiAuthority(owner, generation, {
+        includeInventory: Boolean(status?.getClientRects().length),
+      });
+    }
+    _scheduleThemeEmojiStatus();
+  }, authority.acquisition_active ? 1500 : 15000);
+}
+
+async function _refreshThemeEmojiAuthority(owner, generation, { includeInventory = true } = {}) {
+  const account = _themeAccountId;
+  if (!account) return false;
+  try {
+    return _acceptThemeEmojiAuthority(await readThemeEmojiLocalState(account, { includeInventory }), owner, generation, { retryCatalogue: true });
+  } catch {
+    return false;
+  }
+}
+
+async function _selectThemeEmojiDeliberately(pattern) {
+  if (!_THEME_EMOJI_CANVAS_IDS[pattern] || !_themeOwner || !_themeAccountId) return;
+  if (pattern === 'clanker-matrix-rain' && !getBackgroundEffectControlValue(pattern, 'splashEmojiMix', false)) return;
+  const owner = _themeOwner, account = _themeAccountId, generation = _themeHydrationGeneration, epoch = _themePatternEpoch;
+  const current = () => owner === _themeOwner && account === _themeAccountId && generation === _themeHydrationGeneration
+    && epoch === _themePatternEpoch && _requestedBgPattern === pattern;
+  try {
+    const fallback = 'Regular emoji are available while artwork is unavailable.';
+    const selection = await beginThemeEmojiSelection(account, pattern);
+    if (!current() || !_acceptThemeEmojiAuthority(selection, owner, generation, { retryCatalogue: true })) return;
+    if (!selection.prompt_required) {
+      if (!selection.ready && !selection.acquisition_active) uiModule.showToast?.(`Emoji artwork is unavailable. ${fallback}`);
+      return;
+    }
+    if (!selection.selection_id) throw new Error('Theme selection is unavailable');
+    const accepted = await uiModule.styledConfirm(
+      selection.acquisition_available
+        ? `Allow this machine to download original theme emoji artwork and check for updates weekly? ${fallback}`
+        : 'Allow theme emoji artwork on this machine? Downloads and weekly updates are unavailable; installed artwork may be used.',
+      {title:'Theme emoji artwork', confirmText:'Allow', cancelText:'No'},
+    );
+    if (!current()) return;
+    const result = await decideThemeEmojiSelection(account, selection.selection_id, selection.consent_revision, accepted === true);
+    if (!current() || !_acceptThemeEmojiAuthority(result, owner, generation)) return;
+    void _refreshThemeEmojiAuthority(owner, generation);
+    if (accepted && !result.ready && !result.acquisition_active) uiModule.showToast?.(result.next_due
+      ? `Artwork update scheduled. ${fallback}` : `Emoji artwork is unavailable. ${fallback}`);
+  } catch {
+    if (current()) uiModule.showToast?.('Emoji artwork consent could not be confirmed.');
+  }
+}
+
+async function _revokeThemeEmoji() {
+  const owner = _themeOwner, account = _themeAccountId, generation = _themeHydrationGeneration, authority = _themeEmojiAuthority;
+  if (!owner || !account || authority?.consent !== 'accepted') return;
+  const confirmed = await uiModule.styledConfirm('Revoke theme emoji artwork consent on this machine?',
+    {title:'Theme emoji artwork', confirmText:'Revoke', cancelText:'Cancel'});
+  if (!confirmed || owner !== _themeOwner || account !== _themeAccountId || generation !== _themeHydrationGeneration
+      || _themeEmojiAuthority?.consent_revision !== authority.consent_revision || _themeEmojiAuthority.consent !== 'accepted') return;
+  try { _acceptThemeEmojiAuthority(await revokeThemeEmojiConsent(account, authority.consent_revision), owner, generation); }
+  catch { uiModule.showToast?.('Emoji artwork consent could not be revoked.'); }
+}
+
+function _renderDeliverableMotion(message = '') {
+  const control = document.getElementById('deliverable-reduced-motion');
+  const status = document.getElementById('deliverable-reduced-motion-status');
+  const ready = _deliverableMotion && _deliverableMotion.owner === _themeOwner && _deliverableMotion.account === _themeAccountId
+    && _deliverableMotion.generation === _themeHydrationGeneration;
+  if (control) { control.disabled = !ready || _deliverableMotion.saving; control.checked = ready ? _deliverableMotion.value : false; }
+  if (status) status.textContent = message;
+}
+async function _loadDeliverableMotion(owner, account, generation) {
+  if (!account) { _renderDeliverableMotion('Sign in to use this preference.'); return; }
+  const readEpoch = ++_deliverableMotionReadEpoch;
+  try {
+    const response = await fetch('/api/prefs/deliverable_reduced_motion', {credentials:'same-origin',cache:'no-store'});
+    if (!response.ok) throw new Error('Preference unavailable');
+    const data = await response.json();
+    if (_themeOwner !== owner || _themeAccountId !== account || _themeHydrationGeneration !== generation || readEpoch !== _deliverableMotionReadEpoch || _deliverableMotion?.saving) return;
+    if (data.account_id !== account || typeof data.value !== 'boolean') throw new Error('Preference unavailable');
+    _deliverableMotion = {owner,account,generation,value:data.value,saving:false}; _renderDeliverableMotion();
+  } catch (_) {
+    if (_themeOwner === owner && _themeAccountId === account && _themeHydrationGeneration === generation && readEpoch === _deliverableMotionReadEpoch) _renderDeliverableMotion('Preference unavailable; try again after signing in.');
+  }
+}
+function _refreshDeliverableMotion(account) {
+  if (!account || account !== _themeAccountId || !_themeOwner) return;
+  const state = _deliverableMotion;
+  if (state?.saving) { state.refreshAfterSave = true; return; }
+  _deliverableMotion = null;
+  _renderDeliverableMotion('Refreshing…');
+  void _loadDeliverableMotion(_themeOwner, account, _themeHydrationGeneration);
+}
+function _bindDeliverableMotion() {
+  const control = document.getElementById('deliverable-reduced-motion');
+  if (!control || control.dataset.motionBound === '1') return;
+  control.dataset.motionBound = '1';
+  control.addEventListener('change', async () => {
+    const state = _deliverableMotion;
+    if (!state || state.saving || state.owner !== _themeOwner || state.account !== _themeAccountId || state.generation !== _themeHydrationGeneration) { _renderDeliverableMotion(); return; }
+    const next = control.checked; ++_deliverableMotionReadEpoch; state.saving = true; _renderDeliverableMotion('Saving…');
+    try {
+      const response = await fetch('/api/prefs/deliverable_reduced_motion', {method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:next,expected_account_id:state.account})});
+      if (!response.ok) throw new Error('Save failed');
+      const data = await response.json();
+      if (_deliverableMotion !== state || _themeOwner !== state.owner || _themeAccountId !== state.account || _themeHydrationGeneration !== state.generation) return;
+      if (data.account_id !== state.account || data.value !== next) throw new Error('Save failed');
+      state.value = next; state.saving = false; _renderDeliverableMotion('Saved for this account.');
+    } catch (_) {
+      if (_deliverableMotion === state && _themeOwner === state.owner && _themeAccountId === state.account && _themeHydrationGeneration === state.generation) { state.saving = false; _renderDeliverableMotion('Could not save; the previous preference remains active.'); }
+    } finally {
+      if (_deliverableMotion === state && !state.saving && state.refreshAfterSave) {
+        state.refreshAfterSave = false; _refreshDeliverableMotion(state.account);
+      }
+    }
+  });
+}
+
+/** Capture before any await. Null means the authenticated theme is not ready.
+ * The returned frozen value does not follow later theme or account changes. */
+export function captureDeliverableAppearance(options = {}) {
+  const applied = _appliedDeliverableTheme;
+  if (!_themeOwner || !_themeAccountId || _themeOwner !== _themeAccountId || !applied || applied.owner !== _themeOwner) return null;
+  const explicitMotion = typeof options.outputReducedMotion === 'boolean';
+  const preference = _deliverableMotion;
+  if (!explicitMotion && (!preference || preference.owner !== _themeOwner || preference.account !== _themeAccountId || preference.generation !== _themeHydrationGeneration)) return null;
+  const roles = readDeliverableThemeRoles(document);
+  if (!roles) return null;
+  const family = getComputedStyle(document.documentElement).getPropertyValue('--font-family').trim();
+  return projectDeliverableAppearance(applied.snapshot, roles, { outputReducedMotion: explicitMotion ? options.outputReducedMotion : preference.value, fontFamily: family });
 }
 
 export function getSaved() {
   const raw = Storage.getJSON(_themeOwnerKey(), null);
+  if (!_isPlainObject(raw)) return null;
   const snapshot = normalizeThemeSnapshot(raw, { accountId: _themeOwner });
   if (!snapshot) return null;
   if (raw && raw.version !== THEME_SNAPSHOT_VERSION) {
@@ -1623,10 +2052,12 @@ export function save(name, colors, opts) {
   const source = { name, colors, ...(opts || {}), accountId: _themeOwner };
   const snapshot = normalizeThemeSnapshot(source, { name, accountId: _themeOwner, preserveExplicit: true });
   if (!snapshot) return null;
+  _appliedDeliverableTheme = { owner: _themeOwner, snapshot };
   Storage.setJSON(_themeOwnerKey(), snapshot);
   // Anonymous/legacy callers still use the original key. Once auth has
   // established an owner, only the namespaced key is durable.
   if (!_themeOwner) Storage.setJSON(LS_KEY, snapshot);
+  _themeSaveRevision++;
   _syncToServer(snapshot);
   return snapshot;
 }
@@ -1648,6 +2079,7 @@ function _syncToServer(obj) {
 }
 
 export function applyThemeIdentity(name) {
+  _effectConfigCache.clear();
   _clankerPaletteEnabled = name === 'clanker-dark' || name === 'clanker-light';
   document.body.classList.remove('theme-clanker-dark', 'theme-clanker-light');
   if (_clankerPaletteEnabled) {
@@ -1727,7 +2159,7 @@ function _syncThemeControls(name, colors, opts) {
     if (el) el.value = value;
   }
   _syncBackgroundEffectPercentValues();
-  _syncEdgeHardnessValue();
+  _setEdgeHardnessMode(opts.layout.useDefaultHardness);
   const font = document.getElementById('theme-font-select');
   if (font) {
     font.disabled = false;
@@ -1761,6 +2193,7 @@ export function applyTheme(name, providedColors = null, config = {}) {
     density: snapshot.typography.density,
     layout: { ...snapshot.layout },
   };
+  _appliedDeliverableTheme = { owner: _themeOwner, snapshot };
   applyColors(normalizedColors);
   applyThemeIdentity(name);
   applyFontDensity(opts.font, opts.density);
@@ -1799,36 +2232,49 @@ async function _hydrateForAccount(detail = {}) {
   const accountId = String(detail.accountId || detail.account_id || '').trim();
   const owner = accountId || username;
   const generation = ++_themeHydrationGeneration;
+  const previousOwner = _themeOwner;
   _themeOwner = owner || null;
+  _themeAccountId = accountId || null;
+  _deliverableMotion = null;
+  _bindDeliverableMotion(); _renderDeliverableMotion('Loading account preference…');
+  void _loadDeliverableMotion(owner, accountId, generation);
+  _themeEmojiAuthority = null;
+  _invalidateThemeEmojiCatalogue();
 
-  // Clear the previous account's visual state before waiting on the network.
   const local = getSaved();
-  if (local) _applySnapshot(local, false);
-  else _applySnapshot(normalizeThemeSnapshot({ name: DEFAULT_THEME }, { accountId: owner }), false);
-
+  if (local || !owner) {
+    _applySnapshot(local || { name: DEFAULT_THEME });
+    initThemeUI();
+  } else if (previousOwner && previousOwner !== owner) {
+    _applySnapshot({ name: DEFAULT_THEME, bgPattern: 'none' });
+  }
   if (!owner) return;
+  const current = () => generation === _themeHydrationGeneration && _themeOwner === owner;
+  const customThemes = fetch('/api/prefs/custom-themes', { credentials: 'same-origin' })
+    .then(response => response.ok ? response.json() : null).catch(() => null);
+  const beforeRead = _themeSaveRevision;
   const hydration = (async () => {
-    const [themeResult, customResult] = await Promise.allSettled([
-      _loadFromServer(),
-      fetch('/api/prefs/custom-themes', { credentials: 'same-origin' }).then(response => response.json()),
-    ]);
-    if (generation !== _themeHydrationGeneration || _themeOwner !== owner) return;
-    const serverTheme = themeResult.status === 'fulfilled' ? themeResult.value : null;
-    if (serverTheme?.version === THEME_SNAPSHOT_VERSION) {
-      const normalized = normalizeThemeSnapshot(serverTheme, { accountId: owner });
-      if (normalized) {
-        Storage.setJSON(_themeOwnerKey(owner), normalized);
-        _applySnapshot(normalized, false);
-        const themeDigest = await activityDigest(normalized);
-        if (generation === _themeHydrationGeneration && _themeOwner === owner) {
-          await recordPresentation('theme.settings.loaded', { rehydrated:true, themeDigest }, { accountId });
-        }
+    const remote = await _loadFromServer();
+    if (!current()) return;
+    if (beforeRead === _themeSaveRevision) {
+      const supported = remote?.version === THEME_SNAPSHOT_VERSION
+        || (remote?.version == null && typeof remote?.name === 'string');
+      const snapshot = supported ? normalizeThemeSnapshot(remote, { accountId: owner }) : null;
+      if (snapshot) {
+        Storage.setJSON(_themeOwnerKey(owner), snapshot);
+        if (JSON.stringify(local) !== JSON.stringify(snapshot)) _applySnapshot(snapshot);
+        void activityDigest(snapshot).then(themeDigest => {
+          if (current()) return recordPresentation('theme.settings.loaded', { rehydrated:true, themeDigest }, { accountId });
+        }).catch(() => {});
+      } else if (!local) {
+        _applySnapshot({ name: DEFAULT_THEME });
       }
+      if (!local) initThemeUI();
     }
-    if (customResult.status === 'fulfilled' && _isPlainObject(customResult.value?.value)) {
-      // A successful owner response is authoritative. Do not merge names from
-      // another account into this account's local custom-theme namespace.
-      Storage.setJSON(_customThemeStorageKey(owner), customResult.value.value);
+    const catalogue = await customThemes;
+    if (!current()) return;
+    if (_isPlainObject(catalogue?.value)) {
+      Storage.setJSON(_customThemeStorageKey(owner), catalogue.value);
       initThemeUI();
     }
     document.dispatchEvent(new CustomEvent('openclank:theme-account-hydrated', {
@@ -2018,7 +2464,7 @@ export function initThemeUI() {
   const grid = document.getElementById('themeGrid');
   if (!grid) return;
 
-  const saved = getSaved();
+  const saved = _appliedDeliverableTheme?.owner === _themeOwner ? _appliedDeliverableTheme.snapshot : getSaved();
   const activeName = saved ? saved.name : DEFAULT_THEME;
   const customThemes = _loadCustomThemes();
 
@@ -2069,7 +2515,7 @@ export function initThemeUI() {
     const sz = document.getElementById('theme-bg-size');
     if (fs) opts.font = fs.value;
     if (ds) opts.density = ds.value;
-    if (eh) opts.layout = { edgeHardness: _normalizeEdgeHardness(eh.value) };
+    if (eh) opts.layout = { edgeHardness: _normalizeEdgeHardness(eh.value), useDefaultHardness: eh.disabled };
     if (ps) opts.bgPattern = ps.value;
     if (ec) opts.bgEffectColor = ec.value;
     if (es) opts.bgEffectIntensity = parseFloat(es.value) / 100;
@@ -2097,7 +2543,8 @@ export function initThemeUI() {
         const name = sw.dataset.theme;
         const colors = sw.dataset.custom ? customThemes[name] : THEMES[name];
         if (!colors) return;
-        applyTheme(name, colors);
+        const applied = applyTheme(name, colors);
+        if (applied) void _selectThemeEmojiDeliberately(applied.opts.bgPattern);
       });
     });
     g.querySelectorAll('.theme-delete-btn').forEach(btn => {
@@ -2114,7 +2561,6 @@ export function initThemeUI() {
 
   // Init color pickers from current theme and apply syntax colors
   const currentColors = THEMES[activeName] || customThemes[activeName] || (saved ? saved.colors : THEMES[DEFAULT_THEME]);
-  applyTheme(activeName, currentColors, { persist: false, storedOptions: saved || {} });
 
   // Reference colors for per-picker reset (the theme you started from)
   const refName = saved ? saved.name : DEFAULT_THEME;
@@ -2290,7 +2736,8 @@ export function initThemeUI() {
       const colors = THEMES[DEFAULT_THEME];
       // Persist through the same owner-bound save path so server hydration
       // cannot restore the old theme (T05).
-      applyTheme(DEFAULT_THEME, colors, { persist: true });
+      const applied = applyTheme(DEFAULT_THEME, colors, { persist: true });
+      if (applied) void _selectThemeEmojiDeliberately(applied.opts.bgPattern);
     });
   }
 
@@ -2434,16 +2881,7 @@ export function initThemeUI() {
   const _initEffectColor = _initialOptions.bgEffectColor;
   const _initEffectIntensity = _initialOptions.bgEffectIntensity;
   const _initEffectSize = _initialOptions.bgEffectSize;
-  const _initEffectControls = _initialOptions.bgEffectControls;
   const _initFrosted = _initialOptions.frosted;
-  applyFontDensity(_initFont, _initDensity);
-  applyEdgeHardness(_initialOptions.layout.edgeHardness);
-  applyBgEffectColor(_initEffectColor);
-  applyBgEffectIntensity(_initEffectIntensity);
-  applyBgEffectSize(_initEffectSize);
-  applyBackgroundEffectControls(_initEffectControls);
-  applyFrostedGlass(_initFrosted);
-
   const fontSelect = document.getElementById('theme-font-select');
   const densitySelect = document.getElementById('theme-density-select');
   const patternSelect = document.getElementById('theme-bg-pattern-select');
@@ -2496,7 +2934,14 @@ export function initThemeUI() {
   if (edgeHardnessSlider) {
     const nh = edgeHardnessSlider.cloneNode(true); edgeHardnessSlider.parentNode.replaceChild(nh, edgeHardnessSlider);
     nh.value = String(_initialOptions.layout.edgeHardness);
-    _syncEdgeHardnessValue();
+    _setEdgeHardnessMode(_initialOptions.layout.useDefaultHardness);
+    const toggle = document.getElementById('theme-edge-hardness-default');
+    if (toggle) toggle.onchange = () => {
+      _setEdgeHardnessMode(toggle.checked);
+      applyEdgeHardness(nh.value);
+      const s = getSaved();
+      if (s) _saveFull(s.name, s.colors);
+    };
     nh.addEventListener('input', () => {
       applyEdgeHardness(nh.value);
       _syncEdgeHardnessValue();
@@ -2525,6 +2970,7 @@ export function initThemeUI() {
     np.addEventListener('change', () => {
       applyBgPattern(np.value);
       const s = getSaved(); if (s) _saveFull(s.name, s.colors);
+      void _selectThemeEmojiDeliberately(np.value);
     });
   }
 
@@ -2638,36 +3084,32 @@ export function initThemeUI() {
   const importGoEl = document.getElementById('theme-import-go');
   const importCancelEl = document.getElementById('theme-import-cancel');
 
-  if (exportBtnEl) {
-    const newExp = exportBtnEl.cloneNode(true);
-    exportBtnEl.parentNode.replaceChild(newExp, exportBtnEl);
-    newExp.addEventListener('click', () => {
-      const colors = readCurrentColors();
-      const adv = readAdvanced();
-      if (adv) colors.advanced = adv;
-      const cur = getSaved();
-      const obj = { name: cur ? cur.name : 'custom', colors };
-      if (cur && cur.font) obj.font = cur.font;
-      if (cur && cur.density) obj.density = cur.density;
-      if (cur && cur.layout) obj.layout = { ...cur.layout };
-      if (cur && cur.bgPattern) obj.bgPattern = cur.bgPattern;
-      if (cur && cur.bgEffectColor) obj.bgEffectColor = cur.bgEffectColor;
-      if (cur && cur.bgEffectControls) obj.bgEffectControls = cur.bgEffectControls;
-      if (cur && cur.bgEffectIntensity !== undefined) obj.bgEffectIntensity = cur.bgEffectIntensity;
-      if (cur && cur.bgEffectSize !== undefined) obj.bgEffectSize = cur.bgEffectSize;
-      if (cur && cur.frosted !== undefined) obj.frosted = cur.frosted;
-      const json = JSON.stringify(obj, null, 2);
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'odysseus_' + (obj.name || 'theme') + '.json';
-      a.click();
-      URL.revokeObjectURL(url);
-      newExp.innerHTML = '&#x2713; Downloaded!';
-      setTimeout(() => { newExp.innerHTML = '&#x2913; Export'; }, 1500);
-    });
+  function exportCurrentTheme() {
+    const cur = getSaved();
+    const opts = _getOpts();
+    const colors = readCurrentColors();
+    colors.advanced = readAdvanced() || cur?.colors?.advanced || {};
+    // Resolve untouched and hidden controls as well as explicit overrides.
+    opts.bgEffectControls = Object.fromEntries([..._BACKGROUND_EFFECT_CONTROLS].map(([pattern, controls]) => [
+      pattern, Object.fromEntries(controls.map(control => [control.key, getBackgroundEffectControlValue(pattern, control.key, control.default)])),
+    ]));
+    const payload = { name:cur?.name || DEFAULT_THEME, colors, ...opts,
+      textSize:document.getElementById('theme-text-size-select')?.value || DEFAULT_UI_SCALE,
+      deliverableReducedMotion:_deliverableMotion?.value ?? null,
+      reducedMotion:window.matchMedia('(prefers-reduced-motion: reduce)').matches };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'open-clank-theme-settings.json';
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+  if (exportBtnEl) exportBtnEl.onclick = exportCurrentTheme;
+  const advancedExport = document.getElementById('advanced-export-theme');
+  if (advancedExport) advancedExport.onclick = exportCurrentTheme;
 
   if (importBtnEl && importAreaEl && importActionsEl) {
     const newImp = importBtnEl.cloneNode(true);
@@ -2704,7 +3146,7 @@ export function initThemeUI() {
       if (parsed.font) opts.font = parsed.font;
       if (parsed.density) opts.density = parsed.density;
       if (parsed.layout?.edgeHardness !== undefined) {
-        opts.layout = { edgeHardness: _normalizeEdgeHardness(parsed.layout.edgeHardness) };
+        opts.layout = { ...parsed.layout, edgeHardness: _normalizeEdgeHardness(parsed.layout.edgeHardness) };
       }
       if (parsed.bgPattern) opts.bgPattern = parsed.bgPattern;
       if (parsed.bgEffectColor) opts.bgEffectColor = parsed.bgEffectColor;
@@ -2912,6 +3354,7 @@ export function closePopup() {
 export function getCustomThemes() { return _loadCustomThemes(); }
 
 function _readClankerEffectConfig(fullPalette = false) {
+  if (_effectConfigCache.has(fullPalette)) return _effectConfigCache.get(fullPalette);
   const styles = getComputedStyle(document.body);
   const color = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
   const rawIntensity = parseFloat(styles.getPropertyValue('--bg-effect-intensity'));
@@ -2924,159 +3367,44 @@ function _readClankerEffectConfig(fullPalette = false) {
     color('--clanker-coral', '#FF776E'),
     color('--clanker-lilac', '#B7A7E8'),
   ];
-  return {
+  const config = {
     intensity: Number.isFinite(rawIntensity) ? Math.max(0, Math.min(1, rawIntensity)) : 0.64,
-    size: _getEffectSize(),
+    size: parseFloat(styles.getPropertyValue('--bg-effect-size')) || 1,
     outline: color('--clanker-outline', '#0E0F12'),
     colors: (fullPalette || _clankerPaletteEnabled) ? clankerColors : clankerColors.map(() => effectColor),
   };
+  _effectConfigCache.set(fullPalette, config);
+  return config;
 }
 
-function _runBackgroundCanvas({ canvas, bodyClass, resize, paint, resizeTarget = null, onLayoutChange = null, onDispose = null, onResizeStart = null, onResizeSettled = null }) {
-  const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
-  let animationFrame = 0;
-  let resizeFrame = 0;
-  let resizeTimer = 0;
-  let animationTime = 0;
-  let previousFrame = 0;
-  let viewportKey = '';
-  let resizeObserver = null;
-  let disposed = false;
-  let painting = false;
+// Dropping a DOM node alone can retain its raster and scene until browser GC.
+function _retireBackgroundSurface(surface) {
+  if (!surface) return;
+  surface.remove();
+  surface.width = 0;
+  surface.height = 0;
+  delete surface.__backgroundScene;
+  delete surface.__backgroundStaticCanvas;
+  delete surface.__backgroundPaint;
+  delete surface.__requestBackgroundRepaint;
+  delete surface.__disposeEffect;
+}
 
-  function cancelFrame() {
-    if (!animationFrame) return;
-    window.cancelAnimationFrame(animationFrame);
-    animationFrame = 0;
-  }
-
-  function scheduleFrame() {
-    if (!disposed && !motion.matches && !animationFrame) {
-      animationFrame = window.requestAnimationFrame(frame);
-    }
-  }
-
-  function resizeIfNeeded(force = false) {
-    const nextViewportKey = `${window.innerWidth}:${window.innerHeight}:${window.devicePixelRatio || 1}`;
-    if (!force && viewportKey === nextViewportKey) return false;
-    viewportKey = nextViewportKey;
-    resize();
-    return true;
-  }
-
-  function dispose() {
-    if (disposed) return;
-    disposed = true;
-    cancelFrame();
-    window.cancelAnimationFrame(resizeFrame);
-    window.clearTimeout(resizeTimer);
-    resizeFrame = 0;
-    resizeTimer = 0;
-    window.removeEventListener('resize', handleResize);
-    if (resizeObserver) resizeObserver.disconnect();
-    resizeObserver = null;
-    if (motion.removeEventListener) motion.removeEventListener('change', handleMotionChange);
-    else if (motion.removeListener) motion.removeListener(handleMotionChange);
-    document.removeEventListener('visibilitychange', handleVisibilityChange);
-    if (_activeBackgroundEffectDispose === dispose) _activeBackgroundEffectDispose = null;
-    if (window[_BACKGROUND_OWNER_KEY] === dispose) window[_BACKGROUND_OWNER_KEY] = null;
-    // Release scene-owned raster caches and paint on unmount (T11 / C8).
-  const activeScene = canvas.__backgroundScene;
-  if (activeScene) {
-      activeScene.themeEmojiLoadController?.abort();
-      if (activeScene.emojiSprites && typeof activeScene.emojiSprites.clear === 'function') activeScene.emojiSprites.clear();
-      if (activeScene.paintField && typeof activeScene.paintField.clear === 'function') activeScene.paintField.clear();
-      if (activeScene.themeEmojiGlowCache instanceof Map || activeScene.themeEmojiGlowIdleHandle != null) {
-        _clearThemeEmojiGlowCache(activeScene);
-      }
-    }
-    canvas.__backgroundScene = null;
-    if (onDispose) onDispose();
-    canvas.remove();
-  }
-
-  function frame(time = 0) {
-    animationFrame = 0;
-    if (disposed) return;
-    if (!canvas.isConnected || !document.body.classList.contains(bodyClass)) {
-      dispose();
-      return;
-    }
-    if (document.hidden) {
-      animationFrame = 0;
-      return;
-    }
-    if (!motion.matches && previousFrame) animationTime += Math.min(Math.max(time - previousFrame, 0), 34);
-    previousFrame = time;
-    painting = true;
-    try { paint(motion.matches ? 0 : animationTime, motion.matches); }
-    finally { painting = false; }
-    scheduleFrame();
-  }
-
-  function handleResize() {
-    if (onResizeStart) onResizeStart();
-    window.clearTimeout(resizeTimer);
-    resizeTimer = window.setTimeout(() => {
-      resizeTimer = 0;
-      if (disposed || resizeFrame) return;
-      resizeFrame = window.requestAnimationFrame(() => {
-        resizeFrame = 0;
-        const resized = resizeIfNeeded();
-        if (onResizeSettled) onResizeSettled();
-        if (!resized || disposed) return;
-        // A canvas resize clears its bitmap. Repaint in this callback so the
-        // compositor never receives a cleared canvas while its RAF is pending.
-        paint(motion.matches ? 0 : animationTime, motion.matches);
-      });
-    }, 96);
-  }
-
-  function handleResizeTarget() {
-    if (onLayoutChange) onLayoutChange();
-  }
-
-  function handleMotionChange() {
-    cancelFrame();
-    previousFrame = 0;
-    frame(performance.now());
-  }
-
-  function handleVisibilityChange() {
-    cancelFrame();
-    previousFrame = 0;
-    if (document.hidden) {
-      animationFrame = 0;
-      return;
-    }
-    frame(performance.now());
-  }
-
-  const activeDispose = window[_BACKGROUND_OWNER_KEY] || _activeBackgroundEffectDispose;
-  if (activeDispose) activeDispose();
-  _activeBackgroundEffectDispose = dispose;
-  window[_BACKGROUND_OWNER_KEY] = dispose;
-  canvas.dataset.backgroundEffectCanvas = 'true';
-  canvas.__disposeEffect = dispose;
-  window.addEventListener('resize', handleResize);
-  if (resizeTarget && typeof ResizeObserver === 'function') {
-    resizeObserver = new ResizeObserver(handleResizeTarget);
-    resizeObserver.observe(resizeTarget);
-  }
-  if (motion.addEventListener) motion.addEventListener('change', handleMotionChange);
-  else if (motion.addListener) motion.addListener(handleMotionChange);
-  document.addEventListener('visibilitychange', handleVisibilityChange);
-  resizeIfNeeded(true);
-  frame(performance.now());
-
-  // T10: one-shot paint for reduced-motion (and any dirty-style) invalidation.
-  canvas.__requestBackgroundRepaint = () => {
-    if (disposed || document.hidden) return;
-    // Animated invalidations join the existing RAF instead of entering frame
-    // recursively from a paint/load callback. Reduced motion paints once.
-    if (!motion.matches) scheduleFrame();
-    else if (!painting) frame(performance.now());
-  };
+function _runBackgroundCanvas(options) {
+  const { canvas } = options;
+  mountBackgroundCanvas(options, {
+    acquire: _adoptBackgroundOwner,
+    release: _releaseBackgroundOwner,
+    clearScene: () => {
+      const scene = canvas.__backgroundScene;
+      scene?.themeEmojiLoadController?.abort();
+      scene?.emojiSprites?.clear();
+      scene?.paintField?.clear();
+      _retireBackgroundSurface(scene?.staticCanvas);
+      if (scene) _clearThemeEmojiGlowCache(scene);
+      _retireBackgroundSurface(canvas);
+    },
+  });
 }
 
 function _clankerSafeBounds(width, height, size) {
@@ -3104,7 +3432,7 @@ function _clankerEdgeAlpha(x, y, extent, bounds) {
   return Math.max(0, Math.min(1, (distance - extent) / fadeBand));
 }
 
-function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null, resizeScene = null }) {
+function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null, resizeScene = null, maxFps = 0 }) {
   if (document.getElementById(id)) return;
   // Keep the selected scene on the persistent shell, outside the chat pane so
   // minimize, pop-out and chat layout changes cannot hide or clip the owner.
@@ -3133,7 +3461,7 @@ function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null, r
   function resize() {
     const nextWidth = Math.max(1, window.innerWidth);
     const nextHeight = Math.max(1, window.innerHeight);
-    const nextDpr = Math.min(window.devicePixelRatio || 1, 2);
+    const nextDpr = backgroundBackingScale(nextWidth, nextHeight, window.devicePixelRatio);
     const geometryChanged = width !== nextWidth || height !== nextHeight || dpr !== nextDpr;
     width = canvasWidth = nextWidth;
     height = canvasHeight = nextHeight;
@@ -3163,7 +3491,15 @@ function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null, r
     if (sceneKey !== nextSceneKey) {
       scene?.themeEmojiLoadController?.abort();
       if (scene) _clearThemeEmojiGlowCache(scene);
+      _retireBackgroundSurface(scene?.staticCanvas);
       scene = build({ width, height, safeBounds, dpr, ...config });
+      // Display cached artwork below the moving layer in the same stacking
+      // context. It has no animation owner and survives style-only updates.
+      if (scene.staticCanvas) {
+        scene.staticCanvas.style.cssText = canvas.style.cssText;
+        scene.staticCanvas.setAttribute('aria-hidden', 'true');
+        canvas.before(scene.staticCanvas);
+      }
       canvas.__backgroundStaticCanvas = scene?.staticCanvas || null;
       sceneKey = nextSceneKey;
     }
@@ -3197,6 +3533,7 @@ function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null, r
     bodyClass,
     resize,
     paint,
+    maxFps,
     onResizeStart: resizeScene ? () => { if (scene) scene.driftResizePending = true; } : null,
     onResizeSettled: resizeScene ? () => { if (scene) scene.driftResizePending = false; } : null,
   });
@@ -3269,6 +3606,7 @@ function _initClankerRoutefield() {
   // Pool and branch policy. `MAX_ROUTE_BEADS` is a hard cap; splits refuse to
   // spawn above it and old beads retire when a younger one needs the slot.
   const MAX_ROUTE_BEADS = 48;
+  const control = key => getBackgroundEffectControlValue('clanker-routefield', key, 100);
   const BEAD_LIFETIME_MS = 42000;
   const BRANCH_COOLDOWN_MS = 5200;
   // Roll weights for the seeded per-frame bead policy. The effective per-frame
@@ -3318,9 +3656,12 @@ function _initClankerRoutefield() {
   _mountClankerEffect({
     id: 'clanker-routefield-canvas',
     bodyClass: 'bg-pattern-clanker-routefield',
-    build: ({ size, safeBounds }) => {
-      const columns = Math.max(6, Math.ceil(safeBounds.width / (210 * size)) + 1);
-      const rows = Math.max(5, Math.ceil(safeBounds.height / (165 * size)) + 1);
+    maxFps: 30,
+    getSceneKey: () => control('gridDensity'),
+    build: ({ width, height, dpr, size, safeBounds }) => {
+      const density = control('gridDensity') / 100;
+      const columns = Math.min(36, Math.max(3, Math.round(density * Math.max(6, Math.ceil(width / (210 * size)) + 1))));
+      const rows = Math.min(24, Math.max(3, Math.round(density * Math.max(5, Math.ceil(height / (165 * size)) + 1))));
       const gapX = safeBounds.width / (columns - 1);
       const gapY = safeBounds.height / (rows - 1);
       const nodes = [];
@@ -3377,7 +3718,7 @@ function _initClankerRoutefield() {
       // rebuilt for style (T08) — only for geometry/topology.
       const beads = [];
       const seedBeads = Math.min(22, Math.max(10, Math.round(routes.length * .28)));
-      for (let index = 0; index < seedBeads && routes.length; index += 1) {
+      const seedBead = (index, time) => {
         const routeIndex = Math.floor(_clankerNoise(index * 53 + 3) * routes.length);
         const route = routes[Math.min(routeIndex, routes.length - 1)];
         beads.push({
@@ -3387,13 +3728,20 @@ function _initClankerRoutefield() {
           color: route.color,
           speed: 34 + _clankerNoise(index * 41 + 13) * 26,
           glow: .55 + _clankerNoise(index * 61 + 17) * .45,
-          bornAt: -_clankerNoise(index * 71 + 19) * BEAD_LIFETIME_MS,
+          bornAt: time - _clankerNoise(index * 71 + 19) * BEAD_LIFETIME_MS,
           // Last time this bead asked for a split — feeds the junction clock.
           lastSplitAt: -BRANCH_COOLDOWN_MS,
         });
-      }
+      };
+
+      const staticCanvas = document.createElement('canvas');
+      const ratio = Math.min(dpr, 1.5, 4096 / width, 4096 / height, Math.sqrt(2_000_000 / (width * height)));
+      staticCanvas.width = Math.max(1, Math.floor(width * ratio));
+      staticCanvas.height = Math.max(1, Math.floor(height * ratio));
+      const tracks = staticCanvas.getContext('2d');
 
       return {
+        staticCanvas, tracks, ratio, seedBeads, seedBead,
         nodes,
         hubs: nodes.filter(node => node.hub),
         routes,
@@ -3415,59 +3763,76 @@ function _initClankerRoutefield() {
         ? Math.min(64, renderTime - scene.lastTime) : 0;
       if (!reduced) scene.lastTime = renderTime;
 
-      for (const node of scene.hubs) {
-        ctx.save();
-        ctx.translate(node.x, node.y);
-        ctx.rotate(-.28);
-        ctx.strokeStyle = outline;
-        ctx.globalAlpha = intensity * .72;
-        ctx.fillRect(-18 * size, -6 * size, 36 * size, 12 * size);
-        for (let segment = 0; segment < 3; segment += 1) {
-          ctx.fillStyle = colors[(node.color + segment) % colors.length];
-          ctx.globalAlpha = intensity * (.5 + segment * .1);
-          ctx.fillRect((-15 + segment * 11) * size, -3 * size, 8 * size, 6 * size);
+      const trackIntensity = intensity * control('trackBrightness') / 100;
+      const trackStyle = `${trackIntensity}:${outline}:${colors.join(',')}`;
+      if (scene.tracks && trackStyle !== scene.trackStyle) {
+        scene.trackStyle = trackStyle;
+        const tracks = scene.tracks;
+        tracks.setTransform(scene.ratio, 0, 0, scene.ratio, 0, 0);
+        tracks.clearRect(0, 0, scene.staticCanvas.width / scene.ratio, scene.staticCanvas.height / scene.ratio);
+        for (const node of scene.hubs) {
+          tracks.save();
+          tracks.translate(node.x, node.y);
+          tracks.rotate(-.28);
+          tracks.fillStyle = outline;
+          tracks.globalAlpha = trackIntensity * .72;
+          tracks.fillRect(-18 * size, -6 * size, 36 * size, 12 * size);
+          for (let segment = 0; segment < 3; segment += 1) {
+            tracks.fillStyle = colors[(node.color + segment) % colors.length];
+            tracks.globalAlpha = trackIntensity * (.5 + segment * .1);
+            tracks.fillRect((-15 + segment * 11) * size, -3 * size, 8 * size, 6 * size);
+          }
+          tracks.restore();
         }
-        ctx.restore();
-      }
-      for (const route of scene.routes) {
-        ctx.beginPath();
-        ctx.moveTo(route.a.x, route.a.y);
-        ctx.quadraticCurveTo(route.cx, route.cy, route.b.x, route.b.y);
-        ctx.setLineDash([]);
-        ctx.strokeStyle = outline;
-        ctx.lineWidth = 3 * size;
-        ctx.globalAlpha = intensity * .34;
-        ctx.stroke();
-        ctx.strokeStyle = colors[route.color];
-        ctx.lineWidth = 1 * size;
-        ctx.globalAlpha = intensity * .12;
-        ctx.stroke();
-        ctx.setLineDash([2 * size, 16 * size]);
-        ctx.lineDashOffset = 0;
-        ctx.strokeStyle = colors[route.color];
-        ctx.lineWidth = 1.2 * size;
-        ctx.globalAlpha = intensity * .30;
-        ctx.stroke();
-      }
-      ctx.setLineDash([]);
-      for (const node of scene.nodes) {
-        const radius = (node.hub ? 5 : 3.5) * size;
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, radius + 2 * size, 0, Math.PI * 2);
-        ctx.fillStyle = outline;
-        ctx.globalAlpha = intensity * 0.82;
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = colors[node.color];
-        ctx.globalAlpha = intensity * (node.hub ? 0.88 : 0.62);
-        ctx.fill();
+        for (const route of scene.routes) {
+          tracks.beginPath();
+          tracks.moveTo(route.a.x, route.a.y);
+          tracks.quadraticCurveTo(route.cx, route.cy, route.b.x, route.b.y);
+          tracks.setLineDash([]);
+          tracks.strokeStyle = outline;
+          tracks.lineWidth = 3 * size;
+          tracks.globalAlpha = trackIntensity * .34;
+          tracks.stroke();
+          tracks.strokeStyle = colors[route.color];
+          tracks.lineWidth = 1 * size;
+          tracks.globalAlpha = trackIntensity * .12;
+          tracks.stroke();
+          tracks.setLineDash([2 * size, 16 * size]);
+          tracks.lineDashOffset = 0;
+          tracks.strokeStyle = colors[route.color];
+          tracks.lineWidth = 1.2 * size;
+          tracks.globalAlpha = trackIntensity * .30;
+          tracks.stroke();
+        }
+        tracks.setLineDash([]);
+        for (const node of scene.nodes) {
+          const radius = (node.hub ? 5 : 3.5) * size;
+          tracks.beginPath();
+          tracks.arc(node.x, node.y, radius + 2 * size, 0, Math.PI * 2);
+          tracks.fillStyle = outline;
+          tracks.globalAlpha = trackIntensity * 0.82;
+          tracks.fill();
+          tracks.beginPath();
+          tracks.arc(node.x, node.y, radius, 0, Math.PI * 2);
+          tracks.fillStyle = colors[node.color];
+          tracks.globalAlpha = trackIntensity * (node.hub ? 0.88 : 0.62);
+          tracks.fill();
+        }
       }
 
+      const activity = control('activity') / 100;
+      if (activity !== scene.activity) {
+        scene.activity = activity;
+        const count = Math.min(MAX_ROUTE_BEADS, Math.round(scene.seedBeads * activity));
+        scene.beads.length = Math.min(scene.beads.length, count);
+        while (scene.beads.length < count) scene.seedBead(scene.beads.length, renderTime);
+        scene.beadPolicy.MAX_ROUTE_BEADS = Math.min(MAX_ROUTE_BEADS, Math.ceil(count * 2.5));
+      }
+      const speed = control('speed') / 100;
       // ── Beads ──
       const policy = scene.beadPolicy;
       const advance = (bead) => {
-        if (!elapsed || !scene.routes.length) return;
+        if (!speed || !elapsed || !scene.routes.length) return;
         const route = scene.routes[bead.routeIndex];
         if (!route) return;
         const now = renderTime;
@@ -3487,7 +3852,7 @@ function _initClankerRoutefield() {
         }
         // `speed` is pixels per second; integrating elapsed milliseconds at
         // 0.001 keeps motion continuous and slow enough to follow on each edge.
-        bead.distance += bead.speed * (size || 1) * .001 * elapsed * bead.direction;
+        bead.distance += bead.speed * speed * size * .001 * elapsed * bead.direction;
 
         // Occasional direction / color changes — seeded, not per-frame random.
         const roll = _clankerNoise(now * .0007 + bead.routeIndex * 13 + bead.distance * .001);
@@ -3500,13 +3865,14 @@ function _initClankerRoutefield() {
         if (bead.distance <= 0 || bead.distance >= total) {
           // Reached a junction. Roll into a connected edge starting at the
           // arrival node — the bead's position stays exactly on the junction.
-          const arrivingAt = bead.direction > 0 ? route.b : route.a;
-          const leavingFrom = bead.direction > 0 ? route.a : route.b;
+          const reachedEnd = bead.distance >= total;
+          const arrivingAt = reachedEnd ? route.b : route.a;
+          const leavingFrom = reachedEnd ? route.a : route.b;
           const candidates = arrivingAt.incident
             .map(index => scene.routes[index])
             .filter(candidate => candidate && candidate !== route);
           if (!candidates.length) {
-            bead.direction *= -1;
+            bead.direction = reachedEnd ? -1 : 1;
             bead.distance = Math.max(0, Math.min(total, bead.distance));
             return;
           }
@@ -3519,7 +3885,7 @@ function _initClankerRoutefield() {
           const next = pool[Math.min(choice, pool.length - 1)];
           bead.routeIndex = next.index;
           // Continuous handoff: enter the new edge at the shared junction.
-          const enterFromB = next.a === arrivingAt;
+          const enterFromB = next.b === arrivingAt;
           bead.direction = enterFromB ? -1 : 1;
           bead.distance = enterFromB ? next.samples.total : 0;
           if (_clankerNoise(now * .0011 + next.index) < policy.COLOR_CHANGE_CHANCE * .2) {
@@ -3535,7 +3901,7 @@ function _initClankerRoutefield() {
             const alternate = candidates.filter(candidate => candidate !== next);
             if (alternate.length) {
               const alt = alternate[Math.floor(_clankerNoise(now * .0023 + next.index) * alternate.length)];
-              const altFromB = alt.a === arrivingAt;
+              const altFromB = alt.b === arrivingAt;
               scene.beads.push({
                 routeIndex: alt.index,
                 distance: altFromB ? alt.samples.total : 0,
@@ -3611,10 +3977,103 @@ function snakeFadeAlpha(progress, duration, fadeOutMs = SNAKE_FADE_OUT_MS) {
 }
 if (typeof window !== 'undefined') window.snakeFadeAlpha = snakeFadeAlpha; // test seam
 
+function kenePoint(route, position) {
+  return position >= 1 ? route.points.at(-1) : _pointOnCachedPolyline(route, position);
+}
+
+function keneHeadGapSquared(point, heads, ignoredIndex) {
+  let nearest = Infinity;
+  for (let index = 0; index < heads.length; index += 1) {
+    const head = heads[index];
+    if (!head || index === ignoredIndex) continue;
+    const dx = point.x - head.x;
+    const dy = point.y - head.y;
+    nearest = Math.min(nearest, dx * dx + dy * dy);
+  }
+  return nearest;
+}
+
+function keneBirthSites(routes, bounds, size, seed) {
+  const padding = Math.min(10 * size, bounds.width / 4, bounds.height / 4);
+  const visible = ({ x, y }, inset = 0) => x >= bounds.left + inset && x <= bounds.right - inset
+    && y >= bounds.top + inset && y <= bounds.bottom - inset;
+  const sites = routes.flatMap((route, routeIndex) => Array.from({ length: 17 }, (_, index) => {
+    const offset = _clankerNoise(seed + routeIndex * 89 + index * 59);
+    const position = .10 + .80 * (index + offset) / 17;
+    return { routeIndex, position, point: kenePoint(route, position) };
+  }));
+  const insetSites = sites.filter(site => visible(site.point, padding));
+  if (insetSites.length) return insetSites;
+  const visibleSites = sites.filter(site => visible(site.point));
+  return visibleSites.length ? visibleSites : sites;
+}
+
+function keneBirthSite(sites, heads, index, seed, clearance) {
+  // Compare the rendered coordinates: different walks can revisit the same
+  // edge, and evenly spaced phases alone do not separate their heads.
+  const start = Math.floor(_clankerNoise(seed) * sites.length);
+  let best = sites[start];
+  let bestGap = -1;
+  for (let offset = 0; offset < sites.length; offset += 1) {
+    const siteIndex = (start + offset) % sites.length;
+    const candidate = sites[siteIndex];
+    const gap = clearance ? clearance[siteIndex] : keneHeadGapSquared(candidate.point, heads, index);
+    if (gap > bestGap) {
+      best = candidate;
+      bestGap = gap;
+    }
+    if (gap === Infinity) break;
+  }
+  return best;
+}
+
+function keneSuccessor(scene, anchor, reverse, progress, index, size) {
+  const { snakeRoutes, heads, maxSnakeStep } = scene;
+  const endpoint = (route, backwards) => backwards ? route.points.at(-1) : route.points[0];
+  const distanceFromAnchor = (route, backwards) => {
+    const start = endpoint(route, backwards);
+    return Math.hypot(start.x - anchor.x, start.y - anchor.y);
+  };
+  let nearestIndex = 0;
+  let nearestDistance = Infinity;
+  for (let routeIndex = 0; routeIndex < snakeRoutes.length; routeIndex += 1) {
+    const distance = distanceFromAnchor(snakeRoutes[routeIndex], reverse);
+    if (distance < nearestDistance) {
+      nearestIndex = routeIndex;
+      nearestDistance = distance;
+    }
+  }
+
+  const nearestPoint = kenePoint(snakeRoutes[nearestIndex], reverse ? 1 - progress : progress);
+  const nearestGapSquared = keneHeadGapSquared(nearestPoint, heads, index);
+  const minGap = 24 * size;
+  if (nearestGapSquared >= minGap * minGap) return { routeIndex: nearestIndex, reverse };
+
+  // Preserve the normal endpoint handoff unless it would put the new head
+  // next to another. Only explore nearby entries so detours still look local.
+  let best = { routeIndex: nearestIndex, reverse, score: Math.sqrt(nearestGapSquared) - nearestDistance };
+  for (let routeIndex = 0; routeIndex < snakeRoutes.length; routeIndex += 1) {
+    const route = snakeRoutes[routeIndex];
+    for (const backwards of [reverse, !reverse]) {
+      const distance = distanceFromAnchor(route, backwards);
+      if (distance > nearestDistance + Math.min(maxSnakeStep, minGap)) continue;
+      const point = kenePoint(route, backwards ? 1 - progress : progress);
+      const score = Math.min(minGap, Math.sqrt(keneHeadGapSquared(point, heads, index))) - distance;
+      if (score > best.score) best = { routeIndex, reverse: backwards, score };
+    }
+  }
+  return best;
+}
+
 // Original signal weave informed by the interconnected symmetry and pathway
 // quality of Shipibo-Konibo kene. It deliberately avoids reproducing a
 // traditional motif or claiming cultural meaning.
-function _initClankerKeneWeave() {
+function _initClankerKeneWeave() { _mountKeneWeave('clanker-kene-weave'); }
+function _initClankerSignalWeave() { _mountKeneWeave('clanker-signal-weave'); }
+
+function _mountKeneWeave(pattern) {
+  const hybrid = pattern==='clanker-signal-weave';
+  const setting = (key,fallback) => getBackgroundEffectControlValue(pattern,key,fallback);
   const snakeSeed = Math.random() * 10000;
   const upper = [
     [0, .5], [.09, .5], [.09, .28], [.22, .28], [.22, .1], [.4, .1], [.4, .36], [.5, .36],
@@ -3623,16 +4082,25 @@ function _initClankerKeneWeave() {
   const lower = upper.map(([x, y]) => [x, 1 - y]);
   const outer = [...upper, ...lower.slice(0, -1).reverse()];
   _mountClankerEffect({
-    id: 'clanker-kene-weave-canvas',
-    bodyClass: 'bg-pattern-clanker-kene-weave',
+    id: pattern+'-canvas',
+    bodyClass: 'bg-pattern-'+pattern,
+    getSceneKey: hybrid ? () => setting('gridResolution',100) : null,
+    maxFps: 20,
     build: ({ width, height, size, safeBounds, dpr, colors, outline, intensity }) => {
       const phase = value => {
         if (typeof window.__kenePhaseProbe !== 'function') return;
         try { window.__kenePhaseProbe(value); } catch (_) { /* diagnostic only */ }
       };
       phase('build-start');
-      const columns = Math.max(4, Math.ceil(width / (220 * size)));
-      const rows = Math.max(4, Math.ceil(height / (220 * size)));
+      const spacing=220*size/(hybrid ? setting('gridResolution',100)/100 : 1);
+      const desiredColumns=Math.max(4,Math.ceil(width/spacing));
+      const desiredRows=Math.max(4,Math.ceil(height/spacing));
+      // The two mirrored layers project eight paths per tile. Bound their
+      // topology independently of DPR and even for very wide displays.
+      const tileBudget=128;
+      const factor=Math.min(1,Math.sqrt(tileBudget/(desiredColumns*desiredRows)));
+      const columns=Math.min(tileBudget/4,Math.max(4,Math.floor(desiredColumns*factor)));
+      const rows=Math.min(Math.floor(tileBudget/columns),Math.max(4,Math.floor(desiredRows*factor)));
       const tileWidth = safeBounds.width / columns;
       const tileHeight = safeBounds.height / rows;
       // Keep a full tile of connected geometry beyond each edge. The canvas
@@ -3743,7 +4211,7 @@ function _initClankerKeneWeave() {
         if (!current) return [];
         let previous = null;
         const points = [{ x: current.x, y: current.y }];
-        // Keep route construction bounded: 64 snakes reuse these routes, so
+        // Keep route construction bounded: all snakes reuse these routes, so
         // generating a small deterministic pool avoids a long synchronous
         // first paint while retaining enough geometry for the stress case.
         for (let step = 0; step < 48; step += 1) {
@@ -3764,7 +4232,7 @@ function _initClankerKeneWeave() {
         .slice(0, 24);
       const maxSnakeStep = snakePoints.reduce((maximum, route) => Math.max(maximum,
         ...route.slice(1).map((point, index) => Math.hypot(point.x - route[index].x, point.y - route[index].y))), 0);
-      const snakeRoutes = snakePoints.map(points => {
+      const measureRoute = points => {
         const cumulative = [0];
         for (let index = 1; index < points.length; index += 1) {
           cumulative.push(cumulative[index - 1] + Math.hypot(
@@ -3773,19 +4241,26 @@ function _initClankerKeneWeave() {
           ));
         }
         return { points, cumulative, total: cumulative[cumulative.length - 1] || 1 };
-      });
+      };
+      const snakeRoutes=snakePoints.map(measureRoute);
+      const transverse=hybrid ? paths.filter(path=>path.layer===1 && path.mirror===0) : [];
+      const laneCount=Math.min(24,transverse.length);
+      const signalLanes=Array.from({length:laneCount},(_,i)=>
+        measureRoute(transverse[Math.floor(i*transverse.length/laneCount)].points));
       phase(`routes:${snakeRoutes.length}`);
+      const birthSites = keneBirthSites(snakeRoutes, safeBounds, size, snakeSeed);
       // A snake owns its route and lifecycle for its entire lifetime.  The
       // previous renderer selected a new random route from the frame clock,
       // so changing speed or crossing the 16s boundary could teleport the
       // head.  Keep this small state beside the immutable route geometry and
       // only choose a successor when a lifetime reaches an endpoint.
-      const snakes = Array.from({ length: 64 }, (_, index) => {
+      const snakes = Array.from({ length: 128 }, (_, index) => {
         const seed = snakeSeed + index * 131;
         return {
-          routeIndex: snakeRoutes.length ? Math.floor(_clankerNoise(seed) * snakeRoutes.length) : 0,
+          routeIndex: 0,
           reverse: _clankerNoise(seed + 17) > .5,
-          progress: _clankerNoise(seed + 23),
+          progress: 0,
+          spawned: false,
           cycle: 0,
           lengthNoise: _clankerNoise(seed + 43),
           lifetimeNoise: _clankerNoise(seed + 61),
@@ -3799,9 +4274,10 @@ function _initClankerKeneWeave() {
       // raster is a named function so a palette/intensity change can repaint
       // it without rebuilding the scene or restarting snake trajectories (T08).
       const staticCanvas = document.createElement('canvas');
-      const pixelRatio = Math.max(1, Math.min(2, dpr || 1));
+      const pixelRatio = dpr || 1;
       staticCanvas.width = Math.max(1, Math.floor(width * pixelRatio));
       staticCanvas.height = Math.max(1, Math.floor(height * pixelRatio));
+      const weaveIntensity = intensity * setting('weaveIntensity', 100) / 100;
       const rasterizeStatic = (staticColors, staticOutline, staticIntensity, staticSize) => {
         const staticCtx = staticCanvas.getContext('2d');
         if (!staticCtx) return;
@@ -3838,16 +4314,30 @@ function _initClankerKeneWeave() {
           staticCtx.arc(junction.x, junction.y, 1.8 * staticSize, 0, Math.PI * 2);
           staticCtx.fill();
         });
+        if (hybrid) {
+          // Square terminals distinguish the transverse packet channels from
+          // the round junctions and snakes without introducing a second grid.
+          const pad=3*staticSize;
+          for (const [i,lane] of signalLanes.entries()) {
+            staticCtx.strokeStyle=staticColors[(i+1)%staticColors.length];
+            staticCtx.lineWidth=staticSize;
+            staticCtx.globalAlpha=staticIntensity*.7;
+            for (const endpoint of [lane.points[0],lane.points.at(-1)]) {
+              staticCtx.strokeRect(endpoint.x-pad,endpoint.y-pad,pad*2,pad*2);
+            }
+          }
+        }
         staticCtx.globalAlpha = 1;
       };
-      rasterizeStatic(colors, outline, intensity, size);
+      rasterizeStatic(colors, outline, weaveIntensity, size);
       phase('static-done');
       // Exact traveled-route paint. The helper retains only clipped route
       // intervals, so residue can never light adjacent lattice geometry.
       const paintField = createKenePaintTrail();
       return { paths, junctions, snakePoints, maxSnakeStep: maxSnakeStep, snakeSeed,
-        snakeRoutes, snakes, staticCanvas, rasterizeStatic, paintField,
-        styleKey: `${intensity}:${outline}:${colors.join(',')}`,
+        snakeRoutes, signalLanes, snakes, birthSites, staticCanvas, rasterizeStatic, paintField,
+        pulsePhase: 0, pulseLastTime: null,
+        styleKey: `${weaveIntensity}:${outline}:${colors.join(',')}`,
         heads: [],
         layerVectors: [{ x: 1, y: 0 }, { x: 0, y: 1 }], mirroredPairs: paths.length / 2,
         junctionOffsetError: junctionNodes.length === junctions.length ? 0 : Infinity };
@@ -3857,38 +4347,103 @@ function _initClankerKeneWeave() {
       ctx.lineJoin = 'round';
       // Style-only updates repaint the static raster in place. Snake state is
       // untouched so trajectories continue through palette/intensity changes.
-      const styleKey = `${intensity}:${outline}:${colors.join(',')}`;
+      const weaveIntensity = intensity * setting('weaveIntensity', 100) / 100;
+      let snakeIntensity = intensity * setting('snakeIntensity', 100) / 100;
+      let weaveGain = 1;
+      const pulseWeave = setting('pulseWeave', false);
+      const pulseSnakes = setting('pulseSnakes', false);
+      if (!reduced && (pulseWeave || pulseSnakes)) {
+        const speed = setting('pulseSpeed', 100) / 100;
+        const depth = setting('pulseVariation', 30) / 100;
+        const delta = scene.pulseLastTime == null ? 0 : Math.max(0, time - scene.pulseLastTime);
+        scene.pulsePhase += delta * speed / 2500;
+        if (pulseWeave) weaveGain = pulseGain(scene.pulsePhase, depth, 761);
+        if (pulseSnakes) snakeIntensity *= pulseGain(scene.pulsePhase, depth, 1453);
+      }
+      scene.pulseLastTime = reduced ? null : time;
+      const styleKey = `${weaveIntensity}:${outline}:${colors.join(',')}`;
       if (scene.styleKey !== styleKey) {
         if (typeof scene.rasterizeStatic === 'function') {
-          scene.rasterizeStatic(colors, outline, intensity, size);
+          scene.rasterizeStatic(colors, outline, weaveIntensity, size);
         }
         scene.styleKey = styleKey;
       }
-      if (scene.staticCanvas) ctx.drawImage(scene.staticCanvas, 0, 0, scene.staticCanvas.width, scene.staticCanvas.height, 0, 0, width, height);
+      if (scene.weaveGain !== weaveGain) {
+        scene.staticCanvas.style.opacity = String(weaveGain);
+        scene.weaveGain = weaveGain;
+      }
       const renderTime = reduced ? 0 : time;
 
       // Exact route residue is drawn before heads/tails. The helper owns both
       // its fade clock and its bounded segment collection.
-      const paintTrailOn = getBackgroundEffectControlValue('clanker-kene-weave', 'snakePaintTrail', false);
+      const paintTrailOn = setting('snakePaintTrail', false);
       const paintField = scene.paintField;
-      if (paintField) {
-        paintField.draw(ctx, { time: renderTime, colors, intensity, size });
+      if (paintTrailOn) {
+        paintField.draw(ctx, { time: renderTime, colors, intensity: weaveIntensity * weaveGain, size });
+      } else if (paintField.segmentCount) {
+        paintField.clear();
       }
 
-      const snakeCount = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeCount', 7);
-      const snakeSpeedPct = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeSpeed', 100) / 100;
-      const speedVariationOn = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeSpeedVariationToggle', false);
-      const speedVariation = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeSpeedVariation', 30) / 100;
-      const lengthVariation = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeLengthVariation', 0) / 100;
-      const lifetimeVariation = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeLifetimeVariation', 0) / 100;
-      const shorterLastLonger = getBackgroundEffectControlValue('clanker-kene-weave', 'shorterLastLonger', false);
-      const shorterLifetimeScale = getBackgroundEffectControlValue('clanker-kene-weave', 'shorterLifetimeScale', 100) / 100;
-      const longerDisappearSooner = getBackgroundEffectControlValue('clanker-kene-weave', 'longerDisappearSooner', false);
-      const longerLifetimeScale = getBackgroundEffectControlValue('clanker-kene-weave', 'longerLifetimeScale', 100) / 100;
+      const snakeCount = setting('snakeCount', 7);
+      const snakeSpeedPct = setting('snakeSpeed', 100) / 100;
+      const speedVariationOn = setting('snakeSpeedVariationToggle', false);
+      const speedVariation = setting('snakeSpeedVariation', 30) / 100;
+      const lengthVariation = setting('snakeLengthVariation', 0) / 100;
+      const lifetimeVariation = setting('snakeLifetimeVariation', 0) / 100;
+      const shorterLastLonger = setting('shorterLastLonger', false);
+      const shorterLifetimeScale = setting('shorterLifetimeScale', 100) / 100;
+      const longerDisappearSooner = setting('longerDisappearSooner', false);
+      const longerLifetimeScale = setting('longerLifetimeScale', 100) / 100;
       const baseTraverse = 16000 / snakeSpeedPct;
-      for (let signalIndex = 0; signalIndex < snakeCount; signalIndex += 1) {
-        if (!scene.snakeRoutes.length || !scene.snakes?.[signalIndex]) break;
+      if (!scene.birthSites.length) return;
+      const visibleCount = Math.min(Math.ceil(snakeCount), scene.snakes.length);
+      if (hybrid) {
+        // Packet lanes use the transverse strands of the same woven lattice.
+        // Interleave their phase so a junction never flashes in unison.
+        const traffic=Math.round(setting('signalActivity',50)*.24);
+        scene.signalCount=traffic;
+        ctx.lineWidth=2.6*size;
+        for (let i=0;i<traffic;i++) {
+          const lane=scene.signalLanes[i%scene.signalLanes.length];
+          const phase=(renderTime*.00012+i*.61803398875)%1;
+          const head=kenePoint(lane,phase);
+          ctx.strokeStyle=colors[i%colors.length]; ctx.globalAlpha=intensity*.85;
+          ctx.beginPath();
+          traceKeneRange(ctx,lane,Math.max(0,phase-.014)*lane.total,phase*lane.total);
+          ctx.stroke();
+          ctx.fillStyle=colors[i%colors.length];
+          for (const [radius,opacity] of [[8,.10],[5,.32],[2.8,.95]]) {
+            ctx.globalAlpha=intensity*opacity;
+            ctx.beginPath();ctx.arc(head.x,head.y,radius*size,0,Math.PI*2);ctx.fill();
+          }
+          ctx.fillStyle=colors[(i+1)%colors.length];
+          ctx.globalAlpha=intensity;
+          ctx.beginPath();ctx.arc(head.x,head.y,1.3*size,0,Math.PI*2);ctx.fill();
+        }
+      }
+      // At the original population limit, short local strokes rasterize
+      // cheaply on software Canvas. Batch the larger populations instead.
+      const denseBatch=visibleCount>64 ? createKeneTailBatch() : null;
+      scene.heads.length = visibleCount;
+      let birthClearance=null;
+      for (let signalIndex = 0; signalIndex < visibleCount; signalIndex += 1) {
         const snake = scene.snakes[signalIndex];
+        if (!snake.spawned) {
+          const seed = scene.snakeSeed + signalIndex * 131;
+          // A newly enabled suffix shares the same candidate sites. Maintain
+          // the nearest occupied distance once instead of rescanning all heads.
+          if (denseBatch && !birthClearance) {
+            birthClearance=scene.birthSites.map(site=>keneHeadGapSquared(site.point,scene.heads,signalIndex));
+          }
+          const site = keneBirthSite(scene.birthSites, scene.heads, signalIndex, seed, birthClearance);
+          if (birthClearance) scene.birthSites.forEach((candidate,i)=>{
+            const dx=candidate.point.x-site.point.x, dy=candidate.point.y-site.point.y;
+            birthClearance[i]=Math.min(birthClearance[i],dx*dx+dy*dy);
+          });
+          snake.routeIndex = site.routeIndex;
+          snake.progress = snake.reverse ? 1 - site.position : site.position;
+          snake.spawned = true;
+        }
         const previousTime = snake.lastTime;
         const elapsed = previousTime && renderTime > previousTime
           ? Math.min(80, renderTime - previousTime) : 0;
@@ -3920,20 +4475,10 @@ function _initClankerKeneWeave() {
         const rolledOver = snake.progress >= 1;
         if (rolledOver) {
           snake.progress %= 1;
-          const anchor = snake.reverse ? oldRoute.points[0] : oldRoute.points[oldRoute.points.length - 1];
-          const nextReverse = _clankerNoise(random + 17) > .5;
-          let bestIndex = snake.routeIndex;
-          let bestDistance = Infinity;
-          scene.snakeRoutes.forEach((candidate, candidateIndex) => {
-            const endpoint = nextReverse ? candidate.points[candidate.points.length - 1] : candidate.points[0];
-            const distance = Math.hypot(endpoint.x - anchor.x, endpoint.y - anchor.y);
-            if (distance < bestDistance) {
-              bestDistance = distance;
-              bestIndex = candidateIndex;
-            }
-          });
-          snake.routeIndex = bestIndex;
-          snake.reverse = nextReverse;
+          const anchor = snake.reverse ? oldRoute.points[0] : oldRoute.points.at(-1);
+          const next = keneSuccessor(scene, anchor, _clankerNoise(random + 17) > .5, snake.progress, signalIndex, size);
+          snake.routeIndex = next.routeIndex;
+          snake.reverse = next.reverse;
           snake.cycle += 1;
           snake.lengthNoise = _clankerNoise(scene.snakeSeed + signalIndex * 131 + snake.cycle * 47 + 43);
           snake.lifetimeNoise = _clankerNoise(scene.snakeSeed + signalIndex * 131 + snake.cycle * 47 + 61);
@@ -3944,7 +4489,9 @@ function _initClankerKeneWeave() {
         const route = scene.snakeRoutes[snake.routeIndex];
         const reverse = snake.reverse;
         const headProgress = reverse ? 1 - progress : progress;
-        const headColorIndex = Math.floor(_clankerNoise(random + 31) * colors.length);
+        const headColorIndex = rolledOver
+          ? Math.floor(_clankerNoise(scene.snakeSeed + signalIndex * 131 + snake.cycle * 47 + 31) * colors.length)
+          : oldColorIndex;
         if (paintTrailOn && paintField && !reduced && elapsed > 0) {
           if (rolledOver) {
             // Do not join routes: close the outgoing path and begin the new
@@ -3966,15 +4513,19 @@ function _initClankerKeneWeave() {
         }
         const fade = Math.max(snakeFadeAlpha(progress, duration), snake.transitionAlpha);
         snake.transitionAlpha = Math.max(0, snake.transitionAlpha - elapsed / SNAKE_FADE_IN_MS);
-        const headPoint = _pointOnCachedPolyline(route, headProgress);
+        const headPoint = kenePoint(route, headProgress);
         scene.heads[signalIndex] = {
           x: headPoint.x, y: headPoint.y, routeIndex: snake.routeIndex,
           reverse: snake.reverse, progress: snake.progress, cycle: snake.cycle,
         };
+        if (denseBatch) {
+          denseBatch.add(route,headProgress,reverse,tailSteps,headColorIndex,fade,headPoint);
+          continue;
+        }
         const tail = [];
         for (let step = tailSteps; step >= 0; step -= 1) {
           const pointProgress = headProgress + (reverse ? step : -step) * .0024;
-          if (pointProgress >= 0 && pointProgress <= 1) tail.push(_pointOnCachedPolyline(route, pointProgress));
+          if (pointProgress >= 0 && pointProgress <= 1) tail.push(kenePoint(route, pointProgress));
         }
         if (tail.length < 2) continue;
         const signalColor = colors[headColorIndex];
@@ -3996,7 +4547,7 @@ function _initClankerKeneWeave() {
               ctx.lineTo(tail[index].x, tail[index].y);
             }
             const midpoint = ((first + last) / 2) / tailSegments;
-            ctx.globalAlpha = intensity * alpha * fade * Math.pow(midpoint, taper);
+            ctx.globalAlpha = snakeIntensity * alpha * fade * Math.pow(midpoint, taper);
             ctx.stroke();
           }
         };
@@ -4010,10 +4561,10 @@ function _initClankerKeneWeave() {
         }
         ctx.strokeStyle = signalColor;
         ctx.lineWidth = 11 * size;
-        ctx.globalAlpha = intensity * fade * .025;
+        ctx.globalAlpha = snakeIntensity * fade * .025;
         ctx.stroke();
         ctx.lineWidth = 6.5 * size;
-        ctx.globalAlpha = intensity * fade * .055;
+        ctx.globalAlpha = snakeIntensity * fade * .055;
         ctx.stroke();
         strokeTailBuckets(outline, 7.5 * size, .72);
         strokeTailBuckets(signalColor, 3 * size, 1);
@@ -4025,23 +4576,24 @@ function _initClankerKeneWeave() {
         ctx.fillStyle = signalColor;
         ctx.beginPath();
         ctx.arc(head.x, head.y, 10 * size, 0, Math.PI * 2);
-        ctx.globalAlpha = intensity * fade * .045;
+        ctx.globalAlpha = snakeIntensity * fade * .045;
         ctx.fill();
         ctx.beginPath();
         ctx.arc(head.x, head.y, 6.2 * size, 0, Math.PI * 2);
-        ctx.globalAlpha = intensity * fade * .12;
+        ctx.globalAlpha = snakeIntensity * fade * .12;
         ctx.fill();
         ctx.beginPath();
         ctx.arc(head.x, head.y, 5.1 * size, 0, Math.PI * 2);
         ctx.fillStyle = outline;
-        ctx.globalAlpha = intensity * fade * .8;
+        ctx.globalAlpha = snakeIntensity * fade * .8;
         ctx.fill();
         ctx.beginPath();
         ctx.arc(head.x, head.y, 3.8 * size, 0, Math.PI * 2);
         ctx.fillStyle = signalColor;
-        ctx.globalAlpha = intensity * fade;
+        ctx.globalAlpha = snakeIntensity * fade;
         ctx.fill();
       }
+      denseBatch?.draw(ctx,colors,outline,size,snakeIntensity);
     },
   });
 }
@@ -4053,6 +4605,23 @@ function _initClankerKeneWeave() {
 // rings. Palette is theme-relative (gold/blue in Clanker) with low-alpha
 // cyan/lilac secondary detail. Reduced motion is composed static art.
 function _initClankerLcars() {
+  const statusSweep = getBackgroundEffectControlValue('clanker-lcars', 'visualMode', 'classic') === 'status-sweep';
+  if (statusSweep) {
+    _mountClankerEffect({
+      id:'clanker-lcars-canvas', bodyClass:'bg-pattern-clanker-lcars',
+      build:() => createLcarsStatusSweep(), resizeScene:() => {},
+      draw:(ctx, frame) => {
+        const controls = {};
+        for (const key of _LCARS_SHARED_SWEEP_KEYS) controls[key] = getBackgroundEffectControlValue('clanker-lcars', key);
+        controls.statusSweepDirection = getBackgroundEffectControlValue('clanker-lcars', 'statusSweepDirection', 'ltr');
+        frame.scene.draw(ctx, { ...frame, controls });
+        document.body.classList.add('bg-lcars-sweep-canvas-ready');
+      },
+    });
+    const canvas = document.getElementById('clanker-lcars-canvas');
+    if (canvas) canvas.dataset.lcarsMode = 'status-sweep';
+    return;
+  }
   _mountClankerEffect({
     id: 'clanker-lcars-canvas',
     bodyClass: 'bg-pattern-clanker-lcars',
@@ -4340,6 +4909,8 @@ function _initClankerLcars() {
       }
     },
   });
+  const canvas = document.getElementById('clanker-lcars-canvas');
+  if (canvas) canvas.dataset.lcarsMode = 'classic';
 }
 
 function _clankerNoise(seed) {
@@ -4347,9 +4918,7 @@ function _clankerNoise(seed) {
   return value - Math.floor(value);
 }
 
-// The curated rain inventory contains complete emoji sequences. It feeds the
-// effect's stable asset IDs; background emoji artwork itself is always loaded
-// from the Google/Kitchen catalogue, never drawn from platform fonts.
+// Rain uses complete emoji sequences and stable catalogue asset IDs.
 const _CLANKER_MATRIX_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$%^&*()_+-=[]{}|;:,.<>?/~`';
 const _CLANKER_RAIN_EMOJI_CHARS = [
   '😀😃😄😁😆😅😂🤣🥲😊😇🙂🙃😉😌😍🥰😘😗😙😚😋😛😝😜🤪🤨🧐🤓😎🥸🤩🥳😏😒😞😔😟😕🙁😣😖😫😩🥺😢😭😤😠😡🤬🤯😳🥵🥶😱😨😰😥😓🤗🤔🫣🤭🫢🫡🤫🫠🤥😶🫥😐🫤😑🙄😯😦😧😮😲🥱😴🤤😪😮‍💨😵😵‍💫🤐🥴🤢🤮🤧😷🤒🤕🤑🤠😈👿👹👺🤡💩👻💀☠👽👾🤖🎃🙈🙉🙊😺😸😹😻😼😽🙀😿😾💋💌💘💝💖💗💓💞💕💟❣💔❤️‍🔥❤️‍🩹❤🩷🧡💛💚💙🩵💜🤎🖤🩶🤍💯💢💥💫💦💨🕳💬👁‍🗨🗨🗯💭💤',
@@ -4386,7 +4955,6 @@ function _buildClankerDriftScene({ width, height, size, safeBounds }) {
       };
     }),
   };
-  _requestThemeEmojiAssetPool(scene, 'clanker-emoji-drift');
   return scene;
 }
 
@@ -4451,51 +5019,44 @@ function _initClankerGemDrift() {
   _mountClankerEffect({
     id: 'clanker-gem-drift-canvas',
     bodyClass: 'bg-pattern-clanker-gem-drift',
+    maxFps: 20,
     build: _buildClankerDriftScene,
     draw: (ctx, { width, height, time, reduced, scene, intensity, size, colors, outline }) => {
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
       const controls = _clankerDriftControls('clanker-gem-drift');
       const renderTime = reduced ? 0 : time;
       const driftFrame = _clankerDriftFrameLerp(scene, renderTime);
       const canvasBounds = { left: 0, top: 0, right: width, bottom: height };
       const count = Math.min(scene.shards.length, Math.round(scene.baseCount * controls.totalQuantity));
+      const paintOpacity = intensity * controls.middleIntensity * (1 + controls.intensityVariation * .28);
+      if (!paintOpacity) return;
+      const pixelsPerUnit = size * Math.min(window.devicePixelRatio || 1, 2);
+      const style = `${colors.join('|')}:${outline}:${paintOpacity}:${pixelsPerUnit}`;
+      if (scene.gemRasterStyle !== style) {
+        scene.gemRasterStyle = style;
+        scene.gemRasters = new Map();
+      }
       for (let index = 0; index < count; index += 1) {
         const shard = scene.shards[index];
         const { x, y, radius, bright, alphaScale, rotation } = _clankerDriftState(shard, index, renderTime, size, controls, driftFrame.lerp, driftFrame.elapsed);
         const extent = radius * Math.max(1, shard.stretch) + (bright ? 12 : 3) * size;
         const edgeAlpha = _clankerEdgeAlpha(x, y, extent, canvasBounds);
         if (!edgeAlpha) continue;
+        // A scene uses only 12 shape/color pairs and 11 radius tiers. Keep
+        // vector paths and shadows out of the animation loop after rasterizing.
+        const radiusTier = Math.round(radius / size);
+        const key = `${shard.shape}:${shard.color}:${radiusTier}:${Number(bright)}`;
+        let sprite = scene.gemRasters.get(key);
+        if (!sprite) {
+          sprite = rasterGem(shard, radiusTier, bright, colors, outline, paintOpacity, pixelsPerUnit);
+          if (!sprite) continue;
+          scene.gemRasters.set(key, sprite);
+        }
+        const half = sprite.half * radius / radiusTier;
         ctx.save();
         ctx.translate(x, y);
         ctx.rotate(rotation);
-        ctx.scale(shard.stretch, 1);
-        ctx.beginPath();
-        if (shard.shape === 0) {
-          ctx.moveTo(0, -radius); ctx.lineTo(radius * .8, 0); ctx.lineTo(0, radius); ctx.lineTo(-radius * .8, 0);
-        } else if (shard.shape === 1) {
-          ctx.moveTo(-radius * .78, -radius * .35); ctx.lineTo(-radius * .18, -radius); ctx.lineTo(radius * .82, -radius * .42); ctx.lineTo(radius * .58, radius * .72); ctx.lineTo(-radius * .55, radius * .9);
-        } else if (shard.shape === 2) {
-          ctx.moveTo(0, -radius); ctx.lineTo(radius * .9, radius * .7); ctx.lineTo(-radius * .9, radius * .7);
-        } else {
-          ctx.moveTo(-radius * .72, -radius * .58); ctx.lineTo(radius * .42, -radius * .88); ctx.lineTo(radius, 0); ctx.lineTo(radius * .35, radius * .86); ctx.lineTo(-radius * .82, radius * .52);
-        }
-        ctx.closePath();
-        ctx.fillStyle = colors[shard.color];
-        ctx.strokeStyle = outline;
-        ctx.lineWidth = (bright ? 2 : 1.4) * size;
-        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .62 : .22)) * edgeAlpha;
-        if (bright) { ctx.shadowColor = colors[shard.color]; ctx.shadowBlur = 9 * size; }
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .8 : .34)) * edgeAlpha;
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(0, -radius * .7); ctx.lineTo(0, 0); ctx.lineTo(radius * .5, radius * .34);
-        ctx.strokeStyle = colors[(shard.color + 2) % colors.length];
-        ctx.lineWidth = .9 * size;
-        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .58 : .26)) * edgeAlpha;
-        ctx.stroke();
+        ctx.globalAlpha = Math.min(1, intensity * alphaScale / paintOpacity) * edgeAlpha;
+        ctx.drawImage(sprite.canvas, -half * shard.stretch, -half, half * 2 * shard.stretch, half * 2);
         ctx.restore();
       }
     },
@@ -4576,7 +5137,15 @@ function _ensureDriftEmojiAssets(scene, count, size, controls, time, width, heig
     const candidate = _pickThemeEmojiAssetId(pool.refreshPool);
     if (candidate && !assigned.has(candidate)) { id = candidate; break; }
   }
-  if (!id) { scene.themeEmojiRefreshAt = time + 2000; return; }
+  if (!id) {
+    const shard = scene.shards[index];
+    if (shard.emojiAsset) {
+      shard.driftReplacement = shard.emojiAsset;
+      _invalidateBackgroundPaint();
+    }
+    scene.themeEmojiRefreshAt = time + 2000;
+    return;
+  }
   scene.themeEmojiRefreshLoading = true;
   const shard = scene.shards[index];
   // The previous artwork has fully departed before this request is launched.
@@ -4597,7 +5166,13 @@ function _initClankerEmojiDrift() {
   _mountClankerEffect({
     id: 'clanker-emoji-drift-canvas',
     bodyClass: 'bg-pattern-clanker-emoji-drift',
-    build: _buildClankerDriftScene,
+    maxFps: 30,
+    build: config => {
+      const scene = _buildClankerDriftScene(config);
+      scene.nativeSprites = new Map();
+      _requestThemeEmojiAssetPool(scene, 'clanker-emoji-drift');
+      return scene;
+    },
     resizeScene: _resizeClankerEmojiDriftScene,
     draw: (ctx, { width, height, time, reduced, scene, intensity, size, colors }) => {
       const controls = _clankerDriftControls('clanker-emoji-drift');
@@ -4606,9 +5181,25 @@ function _initClankerEmojiDrift() {
       ctx.imageSmoothingEnabled = true;
       const count = Math.min(scene.shards.length, Math.round(scene.baseCount * controls.totalQuantity));
       _ensureDriftEmojiAssets(scene, count, size, controls, renderTime, width, height);
+      const now = performance.now();
+      // Spread a lightweight preview through the field while full-resolution
+      // artwork streams in. Every ready slot renders at the selected density.
+      const previewStride = Math.max(1, Math.ceil(count / 64));
       for (let index = 0; index < count; index += 1) {
         const shard = scene.shards[index];
         if (shard.driftDeparted) continue;
+        if (shard.emojiAsset?.id !== shard.emojiAssetId) shard.emojiAsset = null;
+        const artwork = shard.emojiAsset || _getThemeEmojiAssetForScene(scene, shard.emojiAssetId);
+        if (!shard.emojiAsset && artwork && shard.nativeEmojiVisible) shard.nativeEmojiFadeAt = now;
+        shard.emojiAsset = artwork;
+        const previewSlot = index % previewStride === 0;
+        shard.nativeEmojiVisible = !artwork && previewSlot;
+        if (!artwork) shard.nativeEmojiFadeAt = null;
+        const nativeAlpha = !artwork ? 1 : reduced || shard.nativeEmojiFadeAt == null
+          ? 0 : Math.max(0, 1 - (now - shard.nativeEmojiFadeAt) / 220);
+        const native = previewSlot && nativeAlpha > 0 ? nativeDriftSprite(scene.nativeSprites, index) : null;
+        const asset = artwork || native;
+        if (!asset?.image || !asset.width || !asset.height) continue;
         const moving = !reduced && !scene.driftResizePending && controls.driftSpeed > 0;
         // Retain this lifetime's original excursion size, including saved slow
         // speeds; changing speed advances phase without scaling visible offsets.
@@ -4629,22 +5220,15 @@ function _initClankerEmojiDrift() {
         }
         const { x, y, radius, bright, alphaScale, rotation } = _clankerDriftState(shard, index,
           renderTime, size, controls, moving ? driftFrame.lerp : 0, driftFrame.elapsed, shard.driftMotionTime || 0);
-        // Pin the actual artwork for this lifetime, including while DPR or
-        // raster quality changes. Identity alone must not hide a visible swap.
-        if (shard.emojiAsset?.id !== shard.emojiAssetId) shard.emojiAsset = null;
-        const asset = shard.emojiAsset || _getThemeEmojiAssetForScene(scene, shard.emojiAssetId);
-        const assetReady = asset?.image && asset.width > 0 && asset.height > 0;
-        if (assetReady) shard.emojiAsset = asset;
         const imageHeight = Math.max(12, radius * 2.3);
-        const imageWidth = imageHeight * (assetReady ? asset.width / asset.height : 1);
+        const imageWidth = imageHeight * asset.width / asset.height;
         const absCos = Math.abs(Math.cos(rotation));
         const absSin = Math.abs(Math.sin(rotation));
-        const glow = bright && assetReady ? _getThemeEmojiAlphaGlow(scene, asset, colors[shard.color]) : null;
+        const glow = bright && artwork ? _getThemeEmojiAlphaGlow(scene, artwork, colors[shard.color]) : null;
         // Reserve the full glow footprint even before its idle raster finishes.
-        const glowScale = assetReady ? Math.min(1,
-          _THEME_EMOJI_GLOW_SOURCE_MAX_DIMENSION / Math.max(asset.width, asset.height)) : 1;
-        const sourceWidth = assetReady ? Math.max(1, Math.round(asset.width * glowScale)) : 128;
-        const sourceHeight = assetReady ? Math.max(1, Math.round(asset.height * glowScale)) : 128;
+        const glowScale = Math.min(1, _THEME_EMOJI_GLOW_SOURCE_MAX_DIMENSION / Math.max(asset.width, asset.height));
+        const sourceWidth = Math.max(1, Math.round(asset.width * glowScale));
+        const sourceHeight = Math.max(1, Math.round(asset.height * glowScale));
         const glowWidth = glow?.canvas ? imageWidth * glow.canvas.width / glow.sourceWidth
           : imageWidth * (bright ? 1 + _THEME_EMOJI_GLOW_PADDING * 2 / sourceWidth : 1);
         const glowHeight = glow?.canvas ? imageHeight * glow.canvas.height / glow.sourceHeight
@@ -4656,22 +5240,39 @@ function _initClankerEmojiDrift() {
         const outside = x + rotatedHalfWidth < 0 || x - rotatedHalfWidth > width
           || y + rotatedHalfHeight < 0 || y - rotatedHalfHeight > height;
         if (outside && !reduced && !scene.driftResizePending && driftFrame.elapsed > 0) {
-          shard.driftDeparted = true;
+          if (artwork) shard.driftDeparted = true;
+          else {
+            // A native-only slot wraps without waiting for an artwork request.
+            const spanX = width + 2 * rotatedHalfWidth;
+            const spanY = height + 2 * rotatedHalfHeight;
+            const shiftX = x + rotatedHalfWidth < 0 ? spanX : x - rotatedHalfWidth > width ? -spanX : 0;
+            const shiftY = y + rotatedHalfHeight < 0 ? spanY : y - rotatedHalfHeight > height ? -spanY : 0;
+            shard.x += shiftX;
+            shard.y += shiftY;
+            shard.renderX += shiftX;
+            shard.renderY += shiftY;
+          }
           continue;
         }
-        if (!assetReady) continue;
         ctx.save();
         ctx.translate(x, y);
         ctx.rotate(rotation);
-        const arrived = shard.driftArrivedAt ?? scene.themeEmojiArrivals?.get(asset.id);
-        const arrivalAlpha = reduced || arrived == null ? 1 : Math.min(1, Math.max(0, (performance.now() - arrived) / (shard.driftArrivedAt == null ? 180 : 800)));
-        const drawAlpha = Math.min(1, intensity * alphaScale * (bright ? .78 : .34)) * arrivalAlpha;
+        const alpha = Math.min(1, intensity * alphaScale * (bright ? .78 : .34));
+        if (native) {
+          ctx.globalAlpha = alpha * nativeAlpha;
+          ctx.drawImage(native.image, -imageHeight / 2, -imageHeight / 2, imageHeight, imageHeight);
+        }
+        const arrived = shard.driftArrivedAt ?? scene.themeEmojiArrivals?.get(artwork?.id);
+        const arrivalAlpha = reduced || arrived == null ? 1 : Math.min(1, Math.max(0, (now - arrived) / (shard.driftArrivedAt == null ? 180 : 800)));
+        const drawAlpha = alpha * Math.min(1 - nativeAlpha, arrivalAlpha);
         if (glow?.canvas) {
           ctx.globalAlpha = drawAlpha * .34;
           ctx.drawImage(glow.canvas, -glowWidth / 2, -glowHeight / 2, glowWidth, glowHeight);
         }
-        ctx.globalAlpha = drawAlpha;
-        ctx.drawImage(asset.image, -imageWidth / 2, -imageHeight / 2, imageWidth, imageHeight);
+        if (artwork) {
+          ctx.globalAlpha = drawAlpha;
+          ctx.drawImage(artwork.image, -imageWidth / 2, -imageHeight / 2, imageWidth, imageHeight);
+        }
         ctx.restore();
       }
     },
@@ -4686,35 +5287,20 @@ function _clankerGraphemes(value) {
   return Array.from(value);
 }
 
-const _CLANKER_CODE_RAIN_COLLISION_SELECTORS = [
-  '.chat-top-bar',
-  '.chat-input-bar',
-  '.msg-user',
-  '.msg-ai',
-  '.agent-thread-content',
-  '.agent-tool-output',
-  '.mimo-plan-dock',
-  '.chat-context-popup',
-  '.ctx-popup',
-  '.toast.show',
-  '.tour-hint',
-  '[class*="popup"]:not(.hidden)',
-  '[class*="popover"]:not(.hidden)',
-  '.modal:not(.hidden) .modal-content',
-  '.copal-tool-modal:not(.hidden) > *',
-  '[role="dialog"]:not([aria-hidden="true"])',
-  '.welcome-name',
-  '.welcome-sub',
-  '.welcome-tip',
-];
-
 function _clankerCodeRainPattern(mode) {
   return mode === 'emoji' ? 'clanker-emoji-rain' : 'clanker-matrix-rain';
 }
 
+const _clankerCodeRainControlsCache = new Map();
+
 function _clankerCodeRainControls(mode) {
   const pattern = _clankerCodeRainPattern(mode);
-  return {
+  const registry = _BACKGROUND_EFFECT_CONTROLS.get(pattern);
+  const artworkAvailable = _canRenderThemeEmoji();
+  const cached = _clankerCodeRainControlsCache.get(mode);
+  if (cached?.source === _backgroundEffectControlValues && cached.registry === registry
+      && cached.artworkAvailable === artworkAvailable) return cached.controls;
+  const controls = {
     // Junction's registry quantity is 6.3 but its source clamp makes four
     // effective; the UI exposes that actual range. Down/rare-up stay host exceptions.
     quantity: getBackgroundEffectControlValue(pattern, 'splashQuantity', 4),
@@ -4725,16 +5311,12 @@ function _clankerCodeRainControls(mode) {
     reverseChance: getBackgroundEffectControlValue(pattern, 'splashRainReverseChance', 0),
     rareUpward: getBackgroundEffectControlValue(pattern, 'splashRareUpward', true),
     waves: getBackgroundEffectControlValue(pattern, 'splashRainWaves', false),
-    sideBounce: getBackgroundEffectControlValue(pattern, 'splashRainBounceSides', true),
     charVariety: getBackgroundEffectControlValue(pattern, 'splashCharVariety', 1),
     minOpacity: getBackgroundEffectControlValue(pattern, 'splashMinOpacity', .2),
     maxOpacity: getBackgroundEffectControlValue(pattern, 'splashMaxOpacity', 1),
     sizeVariance: getBackgroundEffectControlValue(pattern, 'splashSizeVariance', .45),
     colorVariance: getBackgroundEffectControlValue(pattern, 'splashColorVarianceEnabled', false)
       ? getBackgroundEffectControlValue(pattern, 'splashColorVariance', .32) : 0,
-    bounce: getBackgroundEffectControlValue(pattern, 'splashBounce', 1.3),
-    gravity: getBackgroundEffectControlValue(pattern, 'splashGravity', .2),
-    collisionForce: getBackgroundEffectControlValue(pattern, 'splashCollisionForce', 2.2),
     emojiMix: mode === 'matrix' && getBackgroundEffectControlValue(pattern, 'splashEmojiMix', false),
     emojiRarity: getBackgroundEffectControlValue(pattern, 'splashEmojiRarity', 10000000),
     // The selected host mode is the programmatic source charset choice:
@@ -4742,6 +5324,9 @@ function _clankerCodeRainControls(mode) {
     // emoji charset without a parallel, divergent density implementation.
     charsetPreset: mode === 'emoji' ? 'emoji' : 'katakana',
   };
+  controls.topologyKey = _RAIN_TOPOLOGY_FIELDS.map(field => controls[field]).join(':');
+  _clankerCodeRainControlsCache.set(mode, { source: _backgroundEffectControlValues, registry, artworkAvailable, controls });
+  return controls;
 }
 
 // These values determine source scene construction. Motion-only controls stay
@@ -4750,27 +5335,24 @@ const _RAIN_TOPOLOGY_FIELDS = [
   'quantity', 'charVariety', 'sizeVariance', 'minOpacity', 'maxOpacity', 'emojiMix', 'emojiRarity',
 ];
 
-function _clankerCodeRainTopologyKey(mode, width, height, size) {
-  const controls = _clankerCodeRainControls(mode);
-  const parts = _RAIN_TOPOLOGY_FIELDS.map(field => `${field}=${controls[field]}`);
-  return `${mode}:${width}:${height}:${size}:${parts.join(':')}`;
-}
-
-function _buildClankerCodeRainScene({ width, height, size, mode }) {
+function _buildClankerCodeRainScene({ width, height, size, mode, controls }) {
   return createJunctionRainScene({
     width,
     height,
     size,
     mode,
-    controls: _clankerCodeRainControls(mode),
+    controls,
     emojiCharset: _CLANKER_RAIN_EMOJI_CHARS,
   });
 }
 
-function _ensureCodeRainEmojiAssets(rain, mode) {
-  const pattern = _clankerCodeRainPattern(mode);
-  const enabled = mode === 'emoji'
-    || getBackgroundEffectControlValue(pattern, 'splashEmojiMix', false);
+function _ensureCodeRainEmojiAssets(rain, controls) {
+  const enabled = _canRenderThemeEmoji() && (rain.mode === 'emoji' || controls.emojiMix);
+  if (rain.emojiControls === controls && rain.emojiCatalogueEpoch === _themeEmojiCatalogueEpoch
+      && rain.emojiCatalogueRequest === _themeEmojiCatalogPromise) return;
+  rain.emojiControls = controls;
+  rain.emojiCatalogueEpoch = _themeEmojiCatalogueEpoch;
+  rain.emojiCatalogueRequest = _themeEmojiCatalogPromise;
   if (!enabled) {
     rain.themeEmojiLoadController?.abort();
     if (rain.themeEmojiAssetPool || rain.themeEmojiPoolLoading || rain.themeEmojiPoolRequestSignature) {
@@ -4786,48 +5368,15 @@ function _ensureCodeRainEmojiAssets(rain, mode) {
   // applyBgPattern starts the catalogue request before mounting this owner.
   // Never initiate a catalogue/image request from the frame callback.
   if (!_themeEmojiCatalogPromise) return;
-  const sizeVariance = getBackgroundEffectControlValue(pattern, 'splashSizeVariance', .45);
-  const dimension = Math.min(128, Math.max(32, Math.ceil(rain.fontSize * Math.min(2.4, 1 + sizeVariance) * Math.min(window.devicePixelRatio || 1, 2))));
-  const changedDimension = rain.themeEmojiRasterDimension !== dimension;
-  rain.themeEmojiRasterDimension = dimension;
-  _requestThemeEmojiAssetPool(rain, pattern);
-  const pool = rain.themeEmojiAssetPool;
-  if (pool && changedDimension) _queueThemeEmojiAssetPreload(rain, pattern, _themeEmojiPoolIds(pool));
-  if (!pool) return;
-  for (const drop of rain.drops || []) {
-    if (!drop.emoji) {
-      drop.emojiAssetId = null;
-      drop.themeEmojiAssetAssigned = false;
-    } else if (!drop.themeEmojiAssetAssigned) {
-      drop.emojiAssetId = _pickThemeEmojiAssetId(pool);
-      drop.themeEmojiAssetAssigned = true;
-    }
-  }
-}
-
-function _clankerCodeRainObstacles(scene, field = null) {
-  // Cached DOM masks replace Junction's wordmark canvas. Per-drop probes only
-  // visit this bounded snapshot; they never read layout or rasterize text.
-  if (field) {
-    scene.obstacles = field.obstacles;
-    return scene.obstacles;
-  }
-  return scene.obstacles || [];
-}
-
-function _clankerCodeRainHit(x, y, radius, obstacles) {
-  for (const entry of obstacles) {
-    const surface = obstacleCollision(entry, x, y, radius);
-    if (surface) return surface;
-  }
-  return null;
+  _requestThemeEmojiAssetPool(rain, _clankerCodeRainPattern(rain.mode));
 }
 
 function _clankerCodeRainVaryColor(base, amount, sample) {
   // Junction `varyColor` changes RGB and carries alpha separately. Preserve
   // that separation because the WebGL glyph path accepts hex tint only.
+  if (amount <= 0) return base || '#ffffff';
   const rgb = hexToRgb(base);
-  if (!rgb || amount <= 0) return base || '#ffffff';
+  if (!rgb) return base || '#ffffff';
   const shift = (sample * 2 - 1) * amount;
   const lift = shift > 0 ? 255 * shift : 0;
   const scale = 1 + Math.min(0, shift);
@@ -4852,16 +5401,19 @@ function _acknowledgeRareRainPaint(drop, rain, alpha) {
 
 function _appendClankerCodeRainGlyph(batch, drop, rain, controls, intensity, colors, font) {
   const alpha = Math.min(1, intensity * drop.alpha);
-  const fontSize = Math.max(2, Math.round(rain.fontSize * drop.scale));
+  const fontSize = drop.drawSize;
   if (drop.emoji) {
-    const asset = _getThemeEmojiAssetForScene(rain, drop.emojiAssetId);
-    if (!asset?.image || !(asset.width > 0) || !(asset.height > 0)) return;
-    const imageHeight = fontSize;
-    const imageWidth = imageHeight * asset.width / asset.height;
-    const imageY = drop.y - imageHeight;
-    if (drop.x + imageWidth < 0 || drop.x > rain.width
-        || imageY + imageHeight < 0 || imageY > rain.height) return;
-    batch.sprite(asset.image, drop.x, imageY, imageWidth, imageHeight, alpha);
+    const imageY = drop.y - fontSize;
+    if (alpha <= 0 || drop.y < 0 || imageY > rain.height || drop.x > rain.width) return;
+    if (!drop.themeEmojiAssetAssigned && rain.themeEmojiAssetPool) {
+      drop.emojiAssetId = _pickThemeEmojiAssetId(rain.themeEmojiAssetPool);
+      drop.themeEmojiAssetAssigned = true;
+    }
+    const asset = rain.themeEmojiAssets?.get(drop.emojiAssetId) || nativeDriftSprite(rain.nativeSprites, drop.index);
+    if (!asset) return;
+    const imageWidth = fontSize * (asset.aspectRatio || asset.width / asset.height);
+    if (drop.x + imageWidth < 0) return;
+    batch.sprite(asset.image, drop.x, imageY, imageWidth, fontSize, alpha);
     _acknowledgeRareRainPaint(drop, rain, alpha);
     return;
   }
@@ -4872,45 +5424,32 @@ function _appendClankerCodeRainGlyph(batch, drop, rain, controls, intensity, col
   const paletteIndex = Math.floor(drop.paletteVariant * colors.length) % colors.length;
   const baseColor = colors[paletteIndex] || '#ffffff';
   const color = _clankerCodeRainVaryColor(baseColor, controls.colorVariance, drop.colorShift);
-  batch.glyph(
-    drop.ch,
-    drop.x,
-    drop.y,
-    fontSize,
-    400,
-    color,
-    alpha,
-    'left',
-    'alphabetic',
-    font,
-    null,
-  );
+  const glyph = rain.matrixGlyphs?.get(drop.ch);
+  if (glyph) {
+    batch.sprite(glyph.source, drop.x + glyph.x * fontSize, drop.y + glyph.y * fontSize,
+      glyph.width * fontSize, glyph.height * fontSize, alpha, { color, cache:controls.colorVariance <= 0 });
+  } else {
+    batch.glyph(drop.ch, drop.x, drop.y, fontSize, 400, color, alpha, 'left', 'alphabetic', font, null);
+  }
   _acknowledgeRareRainPaint(drop, rain, alpha);
 }
 
-function _drawClankerCodeRain(batch, { width, height, time, intensity, size, colors, reduced, rain, field }) {
-  const controls = _clankerCodeRainControls(rain.mode);
+function _drawClankerCodeRain(batch, { time, intensity, colors, reduced, rain, controls }) {
   const previousTime = rain.lastTime;
   rain.lastTime = time;
   const deltaSeconds = previousTime == null ? 0 : Math.min(50, Math.max(0, time - previousTime)) / 1000;
-  const obstacles = _clankerCodeRainObstacles(rain, field);
   stepJunctionRain(rain, {
     controls,
     deltaSeconds,
     reduced,
-    hitAt: (x, y, radius) => _clankerCodeRainHit(x, y, radius, obstacles),
   });
-  _ensureCodeRainEmojiAssets(rain, rain.mode);
-  // Preserve Junction's behind/front ordering within the one background batch.
+  _ensureCodeRainEmojiAssets(rain, controls);
   for (const drop of rain.drops) {
-    if (drop.behind) _appendClankerCodeRainGlyph(batch, drop, rain, controls, intensity, colors, 'monospace');
-  }
-  for (const drop of rain.drops) {
-    if (!drop.behind) _appendClankerCodeRainGlyph(batch, drop, rain, controls, intensity, colors, 'monospace');
+    _appendClankerCodeRainGlyph(batch, drop, rain, controls, intensity, colors, 'monospace');
   }
 }
 
-function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
+function _mountClankerCodeRain({ id, bodyClass, mode }) {
   if (document.getElementById(id)) return;
   // Rain uses the same persistent body host as the other Clanker scenes so
   // chat minimize and pop-out cannot hide its viewport canvas.
@@ -4927,22 +5466,14 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
   // WebGL fallback may replace the DOM surface. Keep all theme lifecycle
   // callbacks pointed at the currently mounted canvas.
   let activeCanvas = canvas;
+  let matrixGlyphs = null;
 
 
   // ONE scene owner via the graphics substrate consumer. theme.js must not
   // also run _runBackgroundCanvas for this canvas (hex: duplicate loop = flicker).
-  const field = createObstacleField({
-    selectors: _CLANKER_CODE_RAIN_COLLISION_SELECTORS,
-    minAlpha: PAINTED_ALPHA_THRESHOLD,
-    cacheMs: 110,
-    win: window,
-    root: document,
-  });
-
   let width = 0;
   let height = 0;
   let dpr = 1;
-  let topologyKey = '';
   function measure() {
     return {
       nextWidth: Math.max(1, window.innerWidth),
@@ -4952,13 +5483,10 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
   }
 
 
-  function ensureRain(scene, nextWidth, nextHeight, nextDpr) {
-    const size = _getEffectSize();
-    const key = typeof getSceneKey === 'function'
-      ? `${nextWidth}:${nextHeight}:${nextDpr}:${size}:${getSceneKey()}`
-      : _clankerCodeRainTopologyKey(mode, nextWidth, nextHeight, size);
+  function ensureRain(scene, nextWidth, nextHeight, nextDpr, size, controls) {
     const existing = scene.documentState.rain;
-    if (existing && topologyKey === key && existing.width === nextWidth && existing.height === nextHeight) {
+    if (existing?.topologyKey === controls.topologyKey && existing.width === nextWidth
+        && existing.height === nextHeight && existing.dpr === nextDpr && existing.effectSize === size) {
       return existing;
     }
     const rain = _buildClankerCodeRainScene({
@@ -4966,10 +5494,14 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
       height: nextHeight,
       size,
       mode,
+      controls,
     });
-    rain.width = nextWidth;
-    rain.height = nextHeight;
-    topologyKey = key;
+    rain.nativeSprites = existing?.nativeSprites || new Map();
+    rain.topologyKey = controls.topologyKey;
+    rain.dpr = nextDpr;
+    rain.effectSize = size;
+    rain.themeEmojiRasterDimension = Math.min(128, Math.max(32,
+      Math.ceil(rain.fontSize * Math.min(2.4, 1 + controls.sizeVariance) * nextDpr)));
     existing?.themeEmojiLoadController?.abort();
     scene.resetTopology({ documentState: { rain } });
     return rain;
@@ -4993,25 +5525,25 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
       dpr = measured.nextDpr;
       if (geometryChanged && consumer) {
         consumer.resize(width, height, dpr);
-        field.invalidate();
       }
       const config = _readClankerEffectConfig(true);
-      const rain = ensureRain(scene, width, height, dpr);
+      const controls = _clankerCodeRainControls(mode);
+      const rain = ensureRain(scene, width, height, dpr, config.size, controls);
+      rain.matrixGlyphs = matrixGlyphs;
       // Diagnostics expose the one background surface and its one scene.
       activeCanvas.__backgroundScene = rain;
       _drawClankerCodeRain(batch, {
-        width,
-        height,
         time,
         rain,
-        field,
+        controls,
         intensity: config.intensity,
-        size: config.size,
         colors: config.colors,
         reduced,
       });
     },
     allowWebGL2: true,
+    requireHardware: true,
+    maxFps: 30,
     win: window,
     doc: document,
     ownerHost: window,
@@ -5037,7 +5569,6 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
   });
   bodyWatcher.observe(document.body, { attributes: true, attributeFilter: ['class'] });
   const handleWindowResize = () => {
-    field.invalidate();
     consumer.invalidate();
   };
   window.addEventListener('resize', handleWindowResize, { passive: true });
@@ -5048,22 +5579,20 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
     disposed = true;
     try { bodyWatcher.disconnect(); } catch (_) { /* already gone */ }
     window.removeEventListener('resize', handleWindowResize);
-    field.dispose();
     activeCanvas.__backgroundScene?.themeEmojiLoadController?.abort();
     consumer.dispose();
-    if (_activeBackgroundEffectDispose === dispose) _activeBackgroundEffectDispose = null;
-    if (window[_BACKGROUND_OWNER_KEY] === dispose) window[_BACKGROUND_OWNER_KEY] = null;
+    matrixGlyphs?.dispose();
+    matrixGlyphs = null;
+    _releaseBackgroundOwner(dispose);
     if (addedHostIsolation) host.classList.remove('background-effect-host');
-    activeCanvas.remove();
+    _retireBackgroundSurface(activeCanvas);
   }
 
-  const activeDispose = window[_BACKGROUND_OWNER_KEY] || _activeBackgroundEffectDispose;
-  if (activeDispose) activeDispose();
-  _activeBackgroundEffectDispose = dispose;
-  window[_BACKGROUND_OWNER_KEY] = dispose;
+  _adoptBackgroundOwner(dispose, () => consumer?.invalidate());
   function installCanvasDiagnostics(target = activeCanvas) {
     target.dataset.backgroundEffectCanvas = 'true';
     target.__disposeEffect = dispose;
+    target.__requestBackgroundRepaint = () => consumer?.invalidate();
 
     // Diagnostics seam matching _mountClankerEffect: one paint without a
     // second loop. This remains valid if creation synchronously falls back
@@ -5075,7 +5604,6 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
       dpr = measured.nextDpr;
       if (consumer) {
         consumer.resize(width, height, dpr);
-        field.invalidate();
         consumer.invalidate();
       }
     };
@@ -5087,6 +5615,15 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
   height = start.nextHeight;
   dpr = start.nextDpr;
   consumer.resize(width, height, dpr);
+  if (mode === 'matrix') {
+    void import('./graphics/matrix-glyphs.js').then(({ createMatrixGlyphCache }) => {
+      if (disposed) return;
+      matrixGlyphs = createMatrixGlyphCache(document);
+      consumer.invalidate();
+    }).catch(() => {
+      // Keep the existing text renderer available if preparation cannot load.
+    });
+  }
 }
 
 function _initClankerMatrixRain() {
@@ -5094,7 +5631,6 @@ function _initClankerMatrixRain() {
     id: 'clanker-matrix-rain-canvas',
     bodyClass: 'bg-pattern-clanker-matrix-rain',
     mode: 'matrix',
-    getSceneKey: () => _clankerCodeRainTopologyKey('matrix', 0, 0, 0),
   });
 }
 
@@ -5103,7 +5639,6 @@ function _initClankerEmojiRain() {
     id: 'clanker-emoji-rain-canvas',
     bodyClass: 'bg-pattern-clanker-emoji-rain',
     mode: 'emoji',
-    getSceneKey: () => _clankerCodeRainTopologyKey('emoji', 0, 0, 0),
   });
 }
 
@@ -5119,7 +5654,7 @@ function _initSynapse() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = 1;
   const GRID = 92;
   const MAX_PULSES = 18;
   const TRAIL_LEN = 42;
@@ -5130,7 +5665,7 @@ function _initSynapse() {
     W = window.innerWidth; H = window.innerHeight;
     // T18: recompute backing scale on every resize so zoom/display changes are
     // picked up instead of freezing the DPR captured at init.
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = backgroundBackingScale(W, H, window.devicePixelRatio);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     cols = Math.ceil(W / GRID); rows = Math.ceil(H / GRID);
@@ -5217,7 +5752,7 @@ function _initRain() {
   document.body.classList.add('background-effect-host');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = 1;
   let W, H;
   let drops = [];
   const MAX_DROPS = 130;
@@ -5252,7 +5787,7 @@ function _initRain() {
     W = window.innerWidth; H = window.innerHeight;
     // T18: recompute backing scale on every resize so zoom/display changes are
     // picked up instead of freezing the DPR captured at init.
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = backgroundBackingScale(W, H, window.devicePixelRatio);
     const backingScale = Math.min(dpr, 2048 / Math.max(W, H), Math.sqrt(4 * 1024 * 1024 / Math.max(1, W * H)));
     canvas.width = Math.max(1, Math.floor(W * backingScale));
     canvas.height = Math.max(1, Math.floor(H * backingScale));
@@ -5294,7 +5829,7 @@ function _initConstellations() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = 1;
   let W, H;
   const STAR_COUNT = 88;
   const CONNECT_DIST = 148;
@@ -5304,7 +5839,7 @@ function _initConstellations() {
     W = window.innerWidth; H = window.innerHeight;
     // T18: recompute backing scale on every resize so zoom/display changes are
     // picked up instead of freezing the DPR captured at init.
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = backgroundBackingScale(W, H, window.devicePixelRatio);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (stars.length === 0) initStars();
@@ -5387,13 +5922,13 @@ function _initPerlinFlow() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = 1;
   let W, H, streams = [];
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     // T18: recompute backing scale on every resize so zoom/display changes are
     // picked up instead of freezing the DPR captured at init.
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = backgroundBackingScale(W, H, window.devicePixelRatio);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     streams = Array.from({ length: Math.max(54, Math.ceil(W * H / 24000)) }, (_, index) => {
@@ -5444,7 +5979,7 @@ function _initPetals() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = 1;
   let W, H;
   let petals = [];
   function makePetal(index) {
@@ -5465,7 +6000,7 @@ function _initPetals() {
     W = window.innerWidth; H = window.innerHeight;
     // T18: recompute backing scale on every resize so zoom/display changes are
     // picked up instead of freezing the DPR captured at init.
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = backgroundBackingScale(W, H, window.devicePixelRatio);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     petals = Array.from({ length:64 }, (_, index) => makePetal(index));
@@ -5501,7 +6036,7 @@ function _initSparkles() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = 1;
   let W, H;
   let sparkles = [];
   function makeSpark(index) {
@@ -5515,7 +6050,7 @@ function _initSparkles() {
     W = window.innerWidth; H = window.innerHeight;
     // T18: recompute backing scale on every resize so zoom/display changes are
     // picked up instead of freezing the DPR captured at init.
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = backgroundBackingScale(W, H, window.devicePixelRatio);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     sparkles = Array.from({ length:96 }, (_, index) => makeSpark(index));
@@ -5556,7 +6091,7 @@ function _initEmbers() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = 1;
   let W, H;
   let embers = [];
   let emberSpriteStyleKey = '';
@@ -5606,7 +6141,7 @@ function _initEmbers() {
     W = window.innerWidth; H = window.innerHeight;
     // T18: recompute backing scale on every resize so zoom/display changes are
     // picked up instead of freezing the DPR captured at init.
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = backgroundBackingScale(W, H, window.devicePixelRatio);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     embers = Array.from({ length:96 }, (_, index) => makeEmber(index));
@@ -5645,7 +6180,6 @@ export default themeModule;
 
 // Init on DOM ready, with server-side sync fallback
 async function _initWithSync() {
-  initThemeUI();
   // Auth is intentionally resolved here as well as by init.js. This closes
   // the window where an account switch could leave the prior account's theme
   // visible while an old response is still in flight.
@@ -5654,7 +6188,10 @@ async function _initWithSync() {
   // cannot start a second hydration/network pair before those events arrive.
   if (window.__odysseusAuthContextPromise) {
     const context = await window.__odysseusAuthContextPromise;
-    if (context?.username || context?.accountId) return;
+    if (context?.username || context?.accountId) {
+      if (!_themeHydrationGeneration) await _requestAccountHydration(context);
+      return;
+    }
   }
   try {
     const response = await fetch('/api/auth/status', { credentials: 'same-origin' });
@@ -5664,10 +6201,7 @@ async function _initWithSync() {
       return;
     }
   } catch (_) { /* anonymous/offline boot uses the local snapshot */ }
-  if (!getSaved()) {
-    const serverTheme = await _loadFromServer();
-    if (serverTheme) _applySnapshot(serverTheme, false);
-  }
+  if (!_themeHydrationGeneration) await _requestAccountHydration({});
 }
 
 function _startThemeInit() {
@@ -5676,7 +6210,15 @@ function _startThemeInit() {
   return _themeInitPromise;
 }
 
-if (typeof document !== 'undefined') {
+if (typeof document !== 'undefined' && document.documentElement.dataset.publicLoginTheme !== 'true') {
+  document.addEventListener('openclank:deliverable-motion-refresh', event => {
+    _refreshDeliverableMotion(event.detail?.accountID);
+  });
+  document.addEventListener('openclank:theme-status-refresh', () => {
+    if (_themeOwner && _themeAccountId && needsThemeArtwork(_requestedBgPattern)) {
+      void _refreshThemeEmojiAuthority(_themeOwner, _themeHydrationGeneration);
+    }
+  });
   document.addEventListener('openclank:auth-user-ready', event => {
     _requestAccountHydration(event.detail || {});
   });
@@ -5685,8 +6227,21 @@ if (typeof document !== 'undefined') {
   });
 }
 
-if (typeof document !== 'undefined' && document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => _startThemeInit(), { once: true });
-} else if (typeof document !== 'undefined') {
-  _startThemeInit();
+if (typeof document !== 'undefined' && document.documentElement.dataset.publicLoginTheme !== 'true') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => _startThemeInit(), { once: true });
+  } else {
+    _startThemeInit();
+  }
+}
+
+// Login is a public surface: apply the built-in preset without reading or writing owner settings.
+export function applyCanonicalLoginTheme() {
+  const snapshot = normalizeThemeSnapshot({ name: 'clanker-dark' });
+  applyThemeIdentity(snapshot.name);
+  applyBgEffectColor(snapshot.bgEffectColor);
+  applyBgEffectIntensity(snapshot.bgEffectIntensity);
+  applyBgEffectSize(snapshot.bgEffectSize);
+  applyBackgroundEffectControls(snapshot.bgEffectControls);
+  applyBgPattern(snapshot.bgPattern);
 }

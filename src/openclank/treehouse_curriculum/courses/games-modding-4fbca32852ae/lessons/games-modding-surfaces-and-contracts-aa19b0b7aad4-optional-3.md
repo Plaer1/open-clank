@@ -1,0 +1,7 @@
+# Optional worksheet: route, oracle, and ownership
+
+Try a toy change: a game should display a different greeting when a player enters a room. Record the exact target and version, the intended change, and a supported configuration or mod route to try first. List what you have actually verified and what evidence is still missing. A shared engine name or available source alone does not prove that a route is compatible or complete. If the supported route cannot express the change, explain the evidence before considering a hook.
+
+Before changing anything, write a behavior oracle: the same room and player should produce the old greeting before the change and the new greeting afterward, with other rooms unchanged. Record one observed run and distinguish it from your expectation. A failed or partial run is useful evidence; do not call a rewritten implementation equivalent until the chosen observations agree.
+
+For a toy bridge between two runtimes, draw one message in each direction and specify its fields, version, and who validates it. Assign exactly one owner for each piece of state and each side effect. State what happens if either runtime restarts or a message fails, and whether a retry can duplicate an effect. Check one tiny case against the oracle on both sides and record the actual result and any unknowns. This is a parity check for that case, not proof of universal compatibility.

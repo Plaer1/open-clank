@@ -259,14 +259,12 @@ def externalize_course_files(manifest: dict, files: dict[str, bytes]) -> None:
         metadata['definitionDigest'] = 'sha256:' + hashlib.sha256(files[path]).hexdigest()
 
 
-def write_reviewed(path: Path, raw: bytes) -> None:
+def write_reviewed(path: Path, raw: bytes, overwrite_existing: bool = False) -> None:
     if path.is_file() and path.read_bytes() == raw:
         return
     subprocess.run([str(ROOT / "scripts/openclank"), "hex", "explain", str(path)], cwd=ROOT, check=True, capture_output=True)
-    if path.exists():
-        blob = subprocess.check_output(["git", "hash-object", "-w", str(path)], cwd=ROOT, text=True).strip()
-        key = hashlib.sha256(str(path).encode()).hexdigest()[:16]
-        subprocess.run(["git", "update-ref", f"refs/private/treehouse-content-preimages/{key}/{blob}", blob], cwd=ROOT, check=True)
+    if path.exists() and not overwrite_existing:
+        raise SystemExit(f"Existing file differs: {path}; capture its preimage in Lore, then rerun with --overwrite-existing")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
 
@@ -278,14 +276,15 @@ def main() -> None:
     parser.add_argument("--package-revision", required=True)
     parser.add_argument("--asset-register", type=Path)
     parser.add_argument("--resource-register", type=Path)
-    parser.add_argument("--apply", action="store_true", help="Explicitly write reviewed output, preserving preimages")
+    parser.add_argument("--apply", action="store_true", help="Explicitly write reviewed output")
+    parser.add_argument("--overwrite-existing", action="store_true", help="Allow overwriting differing files; capture preimages in Lore first")
     parser.add_argument('--course-files', action='store_true', help='Publish metadata plus ordinary Markdown/work source files')
     args = parser.parse_args()
     assets = json.loads(args.asset_register.read_text()) if args.asset_register else []
     resources = json.loads(args.resource_register.read_text()) if args.resource_register else []
     manifest, files = convert(args.input, args.package_revision, assets, resources, course_files=args.course_files)
     if args.apply:
-        for relative, raw in files.items(): write_reviewed(args.output / relative, raw)
+        for relative, raw in files.items(): write_reviewed(args.output / relative, raw, args.overwrite_existing)
     print(json.dumps({"written": args.apply, "roots": len(manifest["mainQuests"]), "subjects": len(manifest["subjects"]),
                       "units": len(manifest["units"]), "links": len(manifest["topicLinks"]), "packageDigest": manifest["packageDigest"]}))
 

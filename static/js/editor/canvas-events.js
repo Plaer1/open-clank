@@ -34,27 +34,37 @@
  *   syncZoomControls?: () => void,
  * }} ctx
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 
-export function wireCanvasEvents({ canvasArea, beginDraw, continueDraw, endDraw, updateBrushCursor, syncZoomControls }) {
+export function wireCanvasEvents({ canvasArea, beginDraw, continueDraw, endDraw, updateBrushCursor, syncZoomControls, state = legacyState, root = null, lifetime = null }) {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated canvas events require root and lifetime');
+  const canvas = state.mainCanvas;
+  const eventWindow = (root || state.container || canvasArea).ownerDocument?.defaultView || window;
+  const removers = [];
+  const listen = (target, type, handler, options) => {
+    target.addEventListener(type, handler, options);
+    removers.push(() => target.removeEventListener(type, handler, options));
+  };
+  let mouseActive = false;
   // Mouse — mousedown stays on the canvas; mousemove/up are bound to
   // the WINDOW so a drag can continue (and end) past the canvas edge.
   // Critical for the Resize tool where users overshoot.
-  state.mainCanvas.addEventListener('mousedown', beginDraw);
-  window.addEventListener('mousemove', continueDraw);
-  window.addEventListener('mouseup', endDraw);
+  listen(canvas, 'mousedown', (event) => { mouseActive = true; beginDraw(event); });
+  listen(eventWindow, 'mousemove', (event) => { if (mouseActive || event.target === canvas) continueDraw(event); });
+  listen(eventWindow, 'mouseup', (event) => { if (mouseActive) { mouseActive = false; endDraw(event); } });
   // Lasso can start OUTSIDE the canvas — fallback mousedown on the
   // surrounding canvas-area so the user can begin a lasso path in
   // the empty space around the image. Other tools stay canvas-only.
-  canvasArea.addEventListener('mousedown', (e) => {
+  listen(canvasArea, 'mousedown', (e) => {
     if (state.tool !== 'lasso') return;
     if (e.target === state.mainCanvas) return; // already handled
+    mouseActive = true;
     beginDraw(e);
   });
-  state.mainCanvas.addEventListener('mouseenter', (e) => {
+  listen(canvas, 'mouseenter', (e) => {
     if (['brush', 'eraser', 'inpaint', 'lasso', 'clone'].includes(state.tool)) updateBrushCursor(e);
   });
-  state.mainCanvas.addEventListener('mouseleave', () => {
+  listen(canvas, 'mouseleave', () => {
     // Only hide the brush-cursor overlay on leave — DO NOT end the
     // drag, so the user can drag a resize handle past the canvas edge.
     if (state.cursorEl) state.cursorEl.style.display = 'none';
@@ -81,7 +91,7 @@ export function wireCanvasEvents({ canvasArea, beginDraw, continueDraw, endDraw,
     state.mainCanvas.style.transform = t;
     if (state.transformOverlay) state.transformOverlay.style.transform = t;
   };
-  state.mainCanvas.addEventListener('touchstart', (e) => {
+  listen(canvas, 'touchstart', (e) => {
     e.preventDefault();
     if (e.touches.length >= 2) {
       // End any in-progress single-finger draw before switching modes.
@@ -100,7 +110,7 @@ export function wireCanvasEvents({ canvasArea, beginDraw, continueDraw, endDraw,
     if (multiActive) return;
     beginDraw(e);
   }, { passive: false });
-  state.mainCanvas.addEventListener('touchmove', (e) => {
+  listen(canvas, 'touchmove', (e) => {
     e.preventDefault();
     if (multiActive && e.touches.length >= 2) {
       const info = touchInfo(e);
@@ -122,14 +132,14 @@ export function wireCanvasEvents({ canvasArea, beginDraw, continueDraw, endDraw,
     if (multiActive) return;
     continueDraw(e);
   }, { passive: false });
-  state.mainCanvas.addEventListener('touchend', (e) => {
+  listen(canvas, 'touchend', (e) => {
     if (multiActive) {
       if (e.touches.length < 2) multiActive = false;
       return;
     }
     endDraw(e);
   });
-  state.mainCanvas.addEventListener('touchcancel', () => {
+  listen(canvas, 'touchcancel', () => {
     multiActive = false;
     endDraw();
   });
@@ -154,7 +164,7 @@ export function wireCanvasEvents({ canvasArea, beginDraw, continueDraw, endDraw,
     state.mainCanvas.style.transform = t;
     if (state.transformOverlay) state.transformOverlay.style.transform = t;
   };
-  canvasArea.addEventListener('pointerdown', (e) => {
+  listen(canvasArea, 'pointerdown', (e) => {
     if (state.tool === 'lasso') return;
     if (e.target === state.mainCanvas || e.target === state.transformOverlay) return;
     if (e.target.closest('button, input, .ge-adj-popup, .ge-transform-popup, .ge-fx-popup, .ge-inpaint-popup, .ge-controls, .ge-right-panel, .ge-fx-menu')) return;
@@ -168,7 +178,7 @@ export function wireCanvasEvents({ canvasArea, beginDraw, continueDraw, endDraw,
       // Only swallow the event (skip pan) if a handle was grabbed OR the
       // layer-move fallback engaged; otherwise let the pan logic below
       // run so empty space still pans while the transform tool is open.
-      if (state.transformHandle || state.moving) return;
+      if (state.transformHandle || state.moving) { mouseActive = true; return; }
     }
     const off = getOffset();
     panning = true;
@@ -179,7 +189,7 @@ export function wireCanvasEvents({ canvasArea, beginDraw, continueDraw, endDraw,
     canvasArea.style.cursor = 'grabbing';
     e.preventDefault();
   });
-  canvasArea.addEventListener('pointermove', (e) => {
+  listen(canvasArea, 'pointermove', (e) => {
     if (!panning || e.pointerId !== pid) return;
     applyOffset(e.clientX - startX, e.clientY - startY);
   });
@@ -190,8 +200,28 @@ export function wireCanvasEvents({ canvasArea, beginDraw, continueDraw, endDraw,
     pid = null;
     canvasArea.style.cursor = '';
   };
-  canvasArea.addEventListener('pointerup', endPan);
-  canvasArea.addEventListener('pointercancel', endPan);
+  listen(canvasArea, 'pointerup', endPan);
+  listen(canvasArea, 'pointercancel', endPan);
   // Reset offset whenever zoom/fit changes the canvas size.
-  canvasArea._resetPan = () => applyOffset(0, 0);
+  const resetPan = () => applyOffset(0, 0);
+  canvasArea._resetPan = resetPan;
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return false;
+    disposed = true;
+    mouseActive = false;
+    state.drawing = false;
+    state.moving = false;
+    state.cropping = false;
+    state.cropMoving = false;
+    state.lassoActive = false;
+    state.transformHandle = null;
+    state.activeSnapGuides = null;
+    endPan();
+    for (const remove of removers.splice(0).reverse()) remove();
+    if (canvasArea._resetPan === resetPan) delete canvasArea._resetPan;
+    return true;
+  };
+  lifetime?.add(dispose);
+  return dispose;
 }

@@ -30,6 +30,176 @@ _MONITOR_ID = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 _FOLLOWUP_TIMEOUT_S = 15 * 60
 
 
+async def _bound_followup(candidate: dict, *, owned_run=None) -> None:
+    """Run a single v2 continuation through the existing owner and run authority."""
+    from dataclasses import asdict
+    from core.models import get_session_manager_instance
+    from src import agent_runs
+    from src.endpoint_resolver import ResolvedModelTarget
+    from src.model_dispatch import stream_agent_target
+    from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL, resolve_chat_route
+    from src.openclank.file_policy import FilePolicyRepository
+    from src.openclank.workspace_policy_service import resolve_owned_workspace
+    from src.openclank.memory_job_admission import TargetAuthority, ForegroundRuntime
+    from routes.chat_routes import _resolve_turn_model_request_options
+
+    manager=get_session_manager_instance(); state=getattr(manager,'lifecycle_context',None) if manager else None
+    auth=getattr(state,'auth_manager',None); barrier=getattr(state,'account_request_barrier',None)
+    supervisor=getattr(state,'mimo_supervisor',None)
+    owner=candidate['owner']; account=candidate['account_id']; chat=candidate['session_id']; job_id=candidate['job_id']
+    if not auth or not barrier or not supervisor or auth.account_id(owner)!=account or auth.username_for_account_id(account)!=owner:
+        return
+    pool=supervisor.owner_lifecycle_pool(); worker=pool.worker_for_owner(owner) if pool else None
+    bridge=getattr(worker,'bridge',None); mapping=getattr(bridge,'_durable_session_map',None)
+    runtime=getattr(pool,'_s05_foreground_runtime',None)
+    if (not worker or not worker.is_alive() or not mapping or agent_runs._ACCOUNT_REQUEST_BARRIER is not barrier
+            or (runtime is not None and type(runtime) is not ForegroundRuntime)): return
+    admission=await barrier.acquire(owner)
+    claim=None; started=False; run=owned_run
+    try:
+        async def drained_call(fn,*args,**kwargs):
+            task=asyncio.create_task(asyncio.to_thread(fn,*args,**kwargs)); cancelled=False
+            while not task.done():
+                try: await asyncio.shield(task)
+                except asyncio.CancelledError: cancelled=True
+            result=task.result()
+            if cancelled: raise asyncio.CancelledError
+            return result
+        authority=TargetAuthority(auth_manager=auth,supervisor=pool)
+        baseline=await asyncio.to_thread(authority.resolve,account)
+        snapshot=await asyncio.to_thread(bg_jobs.bound_followup_snapshot,job_id,owner=owner,account_id=account)
+        identity=snapshot['identity']; session=manager.get_session(chat)
+        if (identity.get('session_id')!=chat or identity.get('privacy')!='normal' or not session or session.owner!=owner
+                or getattr(session,'incognito',False) or getattr(session,'archived',False)
+                or getattr(session,'workspace_id',None)!=identity.get('workspace_id')): return
+        workspace=await asyncio.to_thread(resolve_owned_workspace,FilePolicyRepository(),workspace_id=identity['workspace_id'],
+            owner_username=owner,auth_manager=auth,purpose='agent_workspace')
+        if workspace.path!=identity.get('workspace'): return
+        mapped=await mapping.async_lookup(chat)
+        if not mapped or mapped.get('current')!=identity.get('engine_session_id'): return
+
+        async def current():
+            if (auth.account_id(owner)!=account or auth.username_for_account_id(account)!=owner
+                or manager.get_session(chat) is not session or session.owner!=owner
+                or getattr(session,'incognito',False) or getattr(session,'archived',False)
+                or getattr(session,'workspace_id',None)!=identity['workspace_id']
+                or pool.worker_for_owner(owner) is not worker or not worker.is_alive()
+                or getattr(worker,'bridge',None) is not bridge or not await barrier.is_live(owner,admission)):
+                return False
+            if await asyncio.to_thread(authority.resolve,account)!=baseline or await mapping.async_lookup(chat)!=mapped: return False
+            now=await asyncio.to_thread(resolve_owned_workspace,FilePolicyRepository(),workspace_id=identity['workspace_id'],
+                owner_username=owner,auth_manager=auth,purpose='agent_workspace')
+            return now.path==workspace.path
+
+        async def publish(follow):
+            async with mapping.async_chat_admission_lock(chat,existing_only=True) as guard:
+                if not guard or not await current(): return
+                proof=await drained_call(bg_jobs.begin_bound_publication,job_id,follow['attempt_id'],follow['claim_id'])
+                outcome=await manager.publish_bound_shell(proof,mapping=mapping,chat_guard=guard,target_authority=authority)
+                if outcome not in ('inserted','already_present') or not await current(): outcome='unknown'
+                await drained_call(bg_jobs.finish_bound_publication,proof,outcome)
+
+        def busy():
+            run=agent_runs.get_run(chat)
+            if owned_run is not None and run is owned_run: return False
+            return bool(run and (run.status=='running' or run.cleanup_unresolved
+                or (run.task is not None and not run.task.done())))
+
+        follow=snapshot['followup']
+        if follow and follow.get('state') in ('publication_pending','dispatching'):
+            await publish(follow); return
+        if follow is not None or busy(): return
+        async with mapping.async_chat_admission_lock(chat,blocking=False,existing_only=True) as guard:
+            if not guard or not await current() or busy() or bridge._turns.get(identity['engine_session_id']): return
+            claim=await drained_call(bg_jobs.claim_bound_followup,job_id,owner=owner,account_id=account)
+            follow=claim['followup']
+            if not getattr(session,'provider_model_route_id',None): return
+            route=await asyncio.to_thread(resolve_chat_route,owner=owner,endpoint_id=getattr(session,'endpoint_id',None),
+                model_id=getattr(session,'model',None),model_route_id=session.provider_model_route_id)
+            options=await asyncio.to_thread(_resolve_turn_model_request_options,session,owner,None)
+            frozen={'route':asdict(route),'options':options}
+            if not await current() or busy() or bridge._turns.get(identity['engine_session_id']): return
+            again=await asyncio.to_thread(resolve_chat_route,owner=owner,endpoint_id=getattr(session,'endpoint_id',None),
+                model_id=getattr(session,'model',None),model_route_id=session.provider_model_route_id)
+            if asdict(again)!=frozen['route'] or await asyncio.to_thread(_resolve_turn_model_request_options,session,owner,None)!=options: return
+            messages=session.get_context_messages()
+            messages.append({'role':'user','content':f"[System-generated background job result; not a human message: {job_id}]\n\n{follow['shell_output']}\n\nContinue using this output without repeating completed work."})
+            target=ResolvedModelTarget(transport='acp',endpoint_url=MANAGED_ENGINE_PUBLIC_URL,model_id=route.runtime_model,
+                endpoint_id=route.connection_id,provider_id=route.connection_id,headers={},capabilities=dict(route.capabilities),lifecycle='persistent')
+            async def invoke():
+                nonlocal started
+                if not await current() or agent_runs.get_run(chat) is not run: return
+                current_route=await asyncio.to_thread(resolve_chat_route,owner=owner,endpoint_id=getattr(session,'endpoint_id',None),
+                    model_id=getattr(session,'model',None),model_route_id=session.provider_model_route_id)
+                if (asdict(current_route)!=frozen['route'] or await asyncio.to_thread(_resolve_turn_model_request_options,session,owner,None)!=options
+                    or not await current() or agent_runs.get_run(chat) is not run): return
+                def issue():
+                    nonlocal started
+                    bg_jobs.issue_bound_followup(job_id,follow['attempt_id'],follow['claim_id'],frozen)
+                    started=True
+                await drained_call(issue)
+                full=''; tools=[]; saw_error=False
+                async def cleanup_receipt(evidence):
+                    await drained_call(bg_jobs.record_bound_cleanup,job_id,follow['attempt_id'],follow['claim_id'],evidence)
+                async for chunk in stream_agent_target(target,messages,session_id=chat,owner=owner,cwd=workspace.path,
+                    workload='background',_foreground_account_context=(account,auth,barrier,admission),
+                    _direct_settlement_callback=cleanup_receipt,
+                    _direct_account_only=runtime is None,
+                    turn_envelope={'root_operation_id':f"bg-followup:{job_id}:{follow['attempt_id']}",
+                        'provider_model_route_id':route.model_route_id,'provider_grant_id':route.provider_grant_id,
+                        'model_request_options':options,'authority_workspace_id':identity['workspace_id'],
+                        'memory_read_allowed':False,'interaction_policy':'fail_on_interaction'}):
+                    if chunk.startswith('event: error'): saw_error=True
+                    if chunk.strip()=='data: [DONE]':
+                        if not saw_error and (full.strip() or tools):
+                            await drained_call(bg_jobs.record_bound_terminal,job_id,follow['attempt_id'],follow['claim_id'],full,
+                                {'bg_job_id':job_id,'tool_events':tools,'origin':'generated_background_continuation'})
+                        yield chunk
+                        continue
+                    if chunk.startswith('data: '):
+                        try: data=json.loads(chunk[6:].strip())
+                        except (ValueError,TypeError): data={}
+                        if type(data) is dict and type(data.get('delta')) is str and not data.get('thinking'):
+                            full+=data['delta']
+                            if len(full.encode('utf-8'))>262144: raise ValueError('bound continuation output exceeds limit')
+                        elif type(data) is dict and data.get('type')=='tool_output':
+                            tools.append({k:data.get(k) for k in ('tool','output','exit_code')})
+                            if len(json.dumps(tools,ensure_ascii=False).encode('utf-8'))>60000: raise ValueError('bound continuation metadata exceeds limit')
+                    yield chunk
+            if busy(): return
+            if owned_run is None:
+                run=agent_runs.start(chat,invoke(),owner=owner)
+            elif agent_runs.get_run(chat) is not owned_run:
+                return
+        if owned_run is not None:
+            async for _ in invoke(): pass
+        else:
+            cancelled=False
+            while not run.task.done():
+                try: await asyncio.shield(run.task)
+                except asyncio.CancelledError:
+                    if run.task.done(): break
+                    cancelled=True
+            if cancelled: raise asyncio.CancelledError
+        latest=await asyncio.to_thread(bg_jobs.bound_followup_snapshot,job_id,owner=owner,account_id=account)
+        if latest['followup'] and latest['followup'].get('state') in ('publication_pending','dispatching'):
+            await publish(latest['followup'])
+    finally:
+        try:
+            if owned_run is None and run is not None and run.task is not None:
+                while not run.task.done():
+                    try: await asyncio.shield(run.task)
+                    except asyncio.CancelledError: continue
+            if claim is not None and not started:
+                await drained_call(bg_jobs.defer_bound_followup,job_id,claim['followup']['attempt_id'],claim['followup']['claim_id'])
+        finally:
+            task=asyncio.create_task(barrier.release(admission))
+            while not task.done():
+                try: await asyncio.shield(task)
+                except asyncio.CancelledError: continue
+            task.result()
+
+
 async def _drain_agent(
     sess,
     messages,
@@ -219,6 +389,19 @@ async def _run_followup(rec: dict) -> bool:
 async def _loop():
     while True:
         try:
+            for candidate in await asyncio.to_thread(bg_jobs.bound_followup_candidates):
+                try:
+                    from src import agent_runs
+                    chat=candidate['session_id']; previous=agent_runs.get_run(chat)
+                    if previous and (previous.status=='running' or previous.cleanup_unresolved
+                            or (previous.task is not None and not previous.task.done())): continue
+                    holder={}
+                    async def owned(candidate=candidate, holder=holder):
+                        await _bound_followup(candidate,owned_run=holder['run'])
+                        if False: yield ''
+                    holder['run']=agent_runs.start(chat,owned(),owner=candidate['owner'])
+                except Exception as exc:
+                    logger.warning('bound background continuation unavailable: %s',type(exc).__name__)
             for rec in bg_jobs.claim_pending_followups(_MONITOR_ID):
                 claim_token = rec.get("_claim_token") or ""
                 try:

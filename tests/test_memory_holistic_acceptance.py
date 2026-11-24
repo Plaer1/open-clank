@@ -1,4 +1,4 @@
-"""SLICE-08 — cross-host acceptance against the real fm-mcp binary.
+"""SLICE-08 — cross-host acceptance against the real memery-worker binary.
 
 One bank, two windows, one index card. This test walks the whole story in
 a single engine instance:
@@ -18,21 +18,21 @@ import os
 
 import pytest
 
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 from src.memory_digest import DIGEST_SENTINEL, render_digest
 from src.memory_scope import CHAT_WORKSPACE
 
 FM_BIN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "mcp_servers/frankenmemory/target/release/fm-mcp",
+    "native/memery/target/release/memery-worker",
 )
 
-needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="fm-mcp release binary not built")
+needs_fm = pytest.mark.skipif(not os.path.exists(FM_BIN), reason="memery-worker release binary not built")
 
 
 @needs_fm
 async def test_one_bank_two_windows_and_the_index_card(tmp_path):
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    provider = MemeryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
     await asyncio.create_task(provider.initialize())
     try:
         # 1. Brain add → mimo-scoped search hit.

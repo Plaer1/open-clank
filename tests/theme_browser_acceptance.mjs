@@ -127,12 +127,12 @@ test('account hydration ignores stale responses across A to B to A switches', as
     };
     await settle('A', 'clanker-dark', '#AA1111');
     await until('window.__hydrations.length >= 1', 'initial hydration');
-    const initialState = await evaluate(`({ red:getComputedStyle(document.documentElement).getPropertyValue('--red').trim(), stored:localStorage.getItem('odysseus-theme:scope:A'), pending:window.__pendingThemes.length, hydrations:window.__hydrations })`);
+    const initialState = await evaluate(`({ red:getComputedStyle(document.documentElement).getPropertyValue('--red').trim(), stored:localStorage.getItem('openclank-theme:scope:A'), pending:window.__pendingThemes.length, hydrations:window.__hydrations })`);
     assert.equal(initialState.red, '#AA1111', JSON.stringify(initialState));
 
     await evaluate(`window.__account='B'; const detail={ username:'B', accountId:'B' }; document.dispatchEvent(new CustomEvent('openclank:auth-user-ready', { detail })); document.dispatchEvent(new CustomEvent('openclank:auth-context-changed', { detail }))`);
-    await until(`window.__theme.themeStorageKey('B') === 'odysseus-theme:scope:B'`, 'B owner helper');
-    assert.equal(await evaluate(`window.__theme.themeStorageKey()`), 'odysseus-theme:scope:B', 'no-arg helper tracks active owner');
+    await until(`window.__theme.themeStorageKey('B') === 'openclank-theme:scope:B'`, 'B owner helper');
+    assert.equal(await evaluate(`window.__theme.themeStorageKey()`), 'openclank-theme:scope:B', 'no-arg helper tracks active owner');
     const afterSwitch = await evaluate(`({ pending:window.__pendingThemes.map(item => item.owner), hydrations:window.__hydrations.map(item => item.accountId) })`);
     assert.equal(afterSwitch.pending.filter(owner => owner === 'B').length, 1, JSON.stringify(afterSwitch));
     await settle('B', 'clanker-light', '#11AA11');

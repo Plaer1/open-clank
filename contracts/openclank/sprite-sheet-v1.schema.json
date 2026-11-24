@@ -1,0 +1,718 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.local/contracts/sprite-sheet-v1.schema.json",
+  "title": "Four-frame sprite sheet layout",
+  "$ref": "#/$defs/layout",
+  "$defs": {
+    "layout": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "cellWidth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 512
+        },
+        "cellHeight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 512
+        },
+        "sheetWidth": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1024
+        },
+        "sheetHeight": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1024
+        },
+        "frames": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1024
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1024
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1024
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1024
+              },
+              "source": {
+                "type": "object",
+                "properties": {
+                  "resourceID": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "revision": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "value": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "resourceID",
+                  "revision",
+                  "sha256"
+                ],
+                "additionalProperties": false
+              },
+              "pivot": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 512
+                  },
+                  "y": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 512
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "index",
+              "x",
+              "y",
+              "width",
+              "height",
+              "source",
+              "pivot"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "fps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        },
+        "facing": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "palette": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "style": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "version",
+        "cellWidth",
+        "cellHeight",
+        "sheetWidth",
+        "sheetHeight",
+        "frames",
+        "fps",
+        "facing",
+        "palette",
+        "style",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "resourceID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "revision": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "resourceID",
+        "revision",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "frame": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "resourceID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "revision": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "kind",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "resourceID",
+            "revision",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "pivot": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 512
+            },
+            "y": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 512
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "index",
+        "x",
+        "y",
+        "width",
+        "height",
+        "source",
+        "pivot"
+      ],
+      "additionalProperties": false
+    },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "fps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        },
+        "facing": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pivots": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 512
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 512
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "palette": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "style": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "fps",
+        "facing",
+        "pivots",
+        "palette",
+        "style"
+      ],
+      "additionalProperties": false
+    },
+    "prepare": {
+      "type": "object",
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "sourceRefs": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          }
+        },
+        "destinationRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "destinationName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "fps": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60
+            },
+            "facing": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pivots": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 512
+                  },
+                  "y": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 512
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "palette": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "style": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "fps",
+            "facing",
+            "pivots",
+            "palette",
+            "style"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "sessionID",
+        "sourceRefs",
+        "destinationRef",
+        "destinationName",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    "prepared": {
+      "type": "object",
+      "properties": {
+        "jobID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "const": "prepared"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "properties": {
+              "resourceID": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "revision": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
+                },
+                "required": [
+                  "kind",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "resourceID",
+              "revision",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "destination": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "folder": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            }
+          },
+          "required": [
+            "name",
+            "folder"
+          ],
+          "additionalProperties": false
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "fps": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60
+            },
+            "facing": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pivots": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 512
+                  },
+                  "y": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 512
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "palette": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "style": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "fps",
+            "facing",
+            "pivots",
+            "palette",
+            "style"
+          ],
+          "additionalProperties": false
+        },
+        "cellSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 512
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        }
+      },
+      "required": [
+        "jobID",
+        "revision",
+        "state",
+        "sources",
+        "destination",
+        "parameters",
+        "cellSize",
+        "operation"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

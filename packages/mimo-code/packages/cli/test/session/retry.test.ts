@@ -1,0 +1,1595 @@
+import { describe, expect, test, afterEach } from "bun:test"
+import { NamedError } from "@mimo-ai/shared/util/error"
+import { APICallError, RetryError, generateText } from "ai"
+import { setTimeout as sleep } from "node:timers/promises"
+import { Clock, Effect, Exit, Fiber, Schedule, Schema } from "effect"
+import * as TestClock from "effect/testing/TestClock"
+import { it } from "../lib/effect"
+import { ConfigRetry } from "../../src/config/retry"
+import { SessionRetry, decide, isRetryableTransientError, retryable, budgetFor } from "../../src/session/retry"
+import { loadHostErrorCatalog, bindHostError, isSafetyTerminal } from "../../src/error/host-registry"
+import { MessageV2 } from "../../src/session/message-v2"
+import { ProviderID } from "../../src/provider/schema"
+import { ProviderError } from "../../src/provider"
+import { allowsModelNotFoundRetry } from "../../src/provider/error"
+import { AppRuntime } from "../../src/effect/app-runtime"
+import { SessionID } from "../../src/session/schema"
+import { SessionStatus } from "../../src/session/status"
+import { Instance } from "../../src/project/instance"
+import { tmpdir } from "../fixture/fixture"
+
+afterEach(() => { loadHostErrorCatalog({ protocolVersion: 2, rules: [] }) })
+
+const providerID = ProviderID.make("test")
+
+// [TP-RUN-QUOTA-01] Desktop turn-execution: real SDK response, not a synthetic retry flag.
+describe("provider-independent quota response", () => {
+  for (const provider of ["xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp", "test"]) {
+    test(`${provider} quota exhaustion ends request and stream retries`, () => {
+      const responseBody = JSON.stringify({ error: { code: "429", message: "quota exhausted", type: "limitation" } })
+      const error = MessageV2.fromLiveError(new APICallError({
+        message: "Too Many Requests", url: "https://example.test/v1/chat/completions", requestBodyValues: {},
+        statusCode: 429, responseBody, isRetryable: true,
+      }), { providerID: ProviderID.make(provider) })
+      expect(error.data).toMatchObject({ statusCode: 429, responseBody, isRetryable: true })
+      for (const phase of ["request", "stream"] as const) {
+        expect(decide(error, phase)).toMatchObject({ retryable: false, kind: "terminal", message: "quota exhausted", statusCode: 429 })
+        expect(decide(JSON.parse(JSON.stringify(error)), phase).retryable).toBe(false)
+      }
+    })
+  }
+
+  test("normalized quota errors remain terminal without provider metadata", () => {
+    const error = new MessageV2.APIError({
+      message: "quota exhausted", statusCode: 429, isRetryable: true,
+      responseBody: JSON.stringify({ error: { code: "429", type: "limitation", message: "quota exhausted" } }),
+    }).toObject()
+    expect(decide(error, "request")).toMatchObject({ retryable: false, kind: "terminal", message: "quota exhausted" })
+    expect(decide(error, "stream").retryable).toBe(false)
+  })
+
+  test("only complete quota signals terminate and raw SDK errors use the same decision", () => {
+    const body = { error: { code: "429", type: "limitation", message: "quota exhausted" } }
+    const raw = (responseBody: string, statusCode = 429) => new APICallError({
+      message: "Too Many Requests", url: "https://example.test", requestBodyValues: {}, statusCode,
+      responseBody, isRetryable: true,
+    })
+    expect(decide(raw(JSON.stringify(body)), "request")).toMatchObject({ retryable: false, kind: "terminal" })
+    expect(decide(raw(JSON.stringify({ error: { ...body.error, code: 429 } })), "request").retryable).toBe(false)
+    for (const candidate of [
+      raw(JSON.stringify(body), 503), raw("<html>quota exhausted</html>"),
+      raw(JSON.stringify({ error: { ...body.error, type: "rate_limit_error" } })),
+      raw(JSON.stringify({ error: { ...body.error, code: "500" } })),
+      raw(JSON.stringify({ error: { ...body.error, message: "Too many requests" } })),
+      raw(JSON.stringify({ error: { ...body.error, message: "quota exhausted flag is false" } })),
+    ]) expect(decide(candidate, "request").retryable).toBe(true)
+  })
+
+  test("ordinary limitation retains persistent rate-limit recovery for all providers", () => {
+    for (const [provider, message] of [["xiaomi-token-plan-cn", "Too many requests"], ["test", "Too many requests"]]) {
+      const error = MessageV2.fromLiveError(new APICallError({
+        message, url: "https://example.test", requestBodyValues: {}, statusCode: 429,
+        responseBody: JSON.stringify({ error: { code: "429", message, type: "limitation" } }), isRetryable: true,
+      }), { providerID: ProviderID.make(provider) })
+      const decision = decide(error, "request")
+      expect(decision).toMatchObject({ retryable: true, kind: "rate_limit" })
+      expect(SessionRetry.budgetFor(SessionRetry.resolve(undefined), decision).mode).toBe("persistent")
+    }
+  })
+})
+
+function apiError(headers?: Record<string, string>): MessageV2.APIError {
+  return new MessageV2.APIError({
+    message: "boom",
+    isRetryable: true,
+    responseHeaders: headers,
+  }).toObject() as MessageV2.APIError
+}
+
+function wrap(message: unknown): ReturnType<NamedError["toObject"]> {
+  return { data: { message } } as ReturnType<NamedError["toObject"]>
+}
+
+describe("session.retry.delay", () => {
+  test("caps delay at 30 seconds when headers missing", () => {
+    const error = apiError()
+    const delays = Array.from({ length: 10 }, (_, index) => SessionRetry.retryDelay(index + 1, decide(error), 0, 2000, 30_000))
+    expect(delays).toStrictEqual([2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000, 30000, 30000])
+  })
+
+  test("prefers retry-after-ms when shorter than exponential", () => {
+    const error = apiError({ "retry-after-ms": "1500" })
+    expect(SessionRetry.retryDelay(4, decide(error), 0, 2000, SessionRetry.RETRY_MAX_DELAY)).toBe(1500)
+  })
+
+  test("uses retry-after seconds when reasonable", () => {
+    const error = apiError({ "retry-after": "30" })
+    expect(SessionRetry.retryDelay(3, decide(error), 0, 2000, SessionRetry.RETRY_MAX_DELAY)).toBe(30000)
+  })
+
+  test("accepts http-date retry-after values", () => {
+    const date = new Date(Date.now() + 20000).toUTCString()
+    const error = apiError({ "retry-after": date })
+    const d = SessionRetry.retryDelay(1, decide(error), 0, 2000, SessionRetry.RETRY_MAX_DELAY)
+    expect(d).toBeGreaterThanOrEqual(19000)
+    expect(d).toBeLessThanOrEqual(20000)
+  })
+
+  test("ignores invalid retry hints", () => {
+    const error = apiError({ "retry-after": "not-a-number" })
+    expect(SessionRetry.retryDelay(1, decide(error), 0, 2000, 30_000)).toBe(2000)
+  })
+
+  test("ignores malformed date retry hints", () => {
+    const error = apiError({ "retry-after": "Invalid Date String" })
+    expect(SessionRetry.retryDelay(1, decide(error), 0, 2000, 30_000)).toBe(2000)
+  })
+
+  test("ignores past date retry hints", () => {
+    const pastDate = new Date(Date.now() - 5000).toUTCString()
+    const error = apiError({ "retry-after": pastDate })
+    expect(SessionRetry.retryDelay(1, decide(error), 0, 2000, 30_000)).toBe(2000)
+  })
+
+  test("uses retry-after values even when exceeding 10 minutes with headers", () => {
+    const error = apiError({ "retry-after": "50" })
+    expect(SessionRetry.retryDelay(1, decide(error), 0, 2000, SessionRetry.RETRY_MAX_DELAY)).toBe(50000)
+
+    const longError = apiError({ "retry-after-ms": "700000" })
+    expect(SessionRetry.retryDelay(1, decide(longError), 0, 2000, SessionRetry.RETRY_MAX_DELAY)).toBe(700000)
+  })
+
+  test("caps oversized header delays to the runtime timer limit", () => {
+    const error = apiError({ "retry-after-ms": "999999999999" })
+    expect(SessionRetry.retryDelay(1, decide(error), 0, 2000, SessionRetry.RETRY_MAX_DELAY)).toBe(SessionRetry.RETRY_MAX_DELAY)
+  })
+
+  test("policy updates retry status and increments attempts", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const sessionID = SessionID.make("session-retry-test")
+        const error = apiError({ "retry-after-ms": "0" })
+
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const step = yield* Schedule.toStepWithMetadata(
+              SessionRetry.policy({
+                parse: (err) => err as MessageV2.APIError,
+                set: (info) =>
+                  Effect.promise(() =>
+                    AppRuntime.runPromise(
+                      SessionStatus.Service.use((svc) =>
+                        svc.set(sessionID, {
+                          type: "retry",
+                          attempt: info.attempt,
+                          message: info.message,
+                          next: info.next,
+                        }),
+                      ),
+                    ),
+                  ),
+              }),
+            )
+            yield* step(error)
+            yield* step(error)
+          }),
+        )
+
+        expect(await AppRuntime.runPromise(SessionStatus.Service.use((svc) => svc.get(sessionID)))).toMatchObject({
+          type: "retry",
+          attempt: 2,
+          message: "boom",
+        })
+      },
+    })
+  })
+
+  test("status retry attempts stay global across request and stream phases", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const sessionID = SessionID.make("session-retry-phase-counter")
+        const result = await AppRuntime.runPromise(
+          SessionStatus.Service.use((svc) =>
+            Effect.gen(function* () {
+              yield* svc.setRetry(sessionID, {
+                type: "retry",
+                attempt: 1,
+                phaseAttempt: 1,
+                message: "request",
+                next: Date.now(),
+                phase: "request",
+                scope: "request",
+              })
+              yield* svc.set(sessionID, { type: "busy" })
+              const attempt = yield* svc.setRetry(sessionID, {
+                type: "retry",
+                attempt: 1,
+                phaseAttempt: 1,
+                message: "stream",
+                next: Date.now(),
+                phase: "stream",
+                scope: "live-step",
+              })
+              const status = yield* svc.get(sessionID)
+              return { attempt, status }
+            }),
+          ),
+        )
+        expect(result.attempt).toBe(2)
+        expect(result.status).toMatchObject({ type: "retry", attempt: 2, phaseAttempt: 1, phase: "stream" })
+      },
+    })
+  })
+
+  test("requires explicit noDeadline instead of deadlineMs zero", () => {
+    const decode = Schema.decodeUnknownSync(ConfigRetry.Budget)
+    expect(() => decode({ deadlineMs: 0 })).toThrow()
+    expect(() => decode({ deadlineMs: 1000, noDeadline: true })).toThrow("deadlineMs and noDeadline cannot be configured together")
+    expect(decode({ mode: "persistent", noDeadline: true })).toMatchObject({ noDeadline: true })
+    expect(SessionRetry.resolve({ retry: { server: { maxRetries: 2, noDeadline: true } } }).server.maxElapsedMs).toBe(0)
+    expect(
+      SessionRetry.resolve(
+        { retry: { server: { noDeadline: true } }, provider: { test: { retry: { server: { deadlineMs: 1000 } } } } },
+        "test",
+      ).server.maxElapsedMs,
+    ).toBe(1000)
+    expect(
+      SessionRetry.resolve(
+        { retry: { server: { deadlineMs: 1000 } }, provider: { test: { retry: { server: { noDeadline: true } } } } },
+        "test",
+      ).server.maxElapsedMs,
+    ).toBe(0)
+  })
+})
+
+describe("session.retry.retryable", () => {
+  test("resolves persistent network defaults and provider overrides", () => {
+    const resolved = SessionRetry.resolve({
+      retry: {
+        network: { mode: "bounded", maxRetries: 4, initialDelayMs: 100, maxDelayMs: 1000 },
+        stream: { maxRetries: 9 },
+      },
+      provider: {
+        test: { retry: { network: { mode: "persistent", deadlineMs: 60000 }, stream: { maxRetries: 12 } } },
+      },
+    }, "test")
+    expect(resolved.network).toMatchObject({ mode: "persistent", maxRetries: undefined, maxElapsedMs: 0, initialDelayMs: 100, maxDelayMs: 1000 })
+    expect(resolved.stream.maxRetries).toBe(12)
+  })
+
+  test("defaults: unknown stays bounded; network/rateLimit/server are persistent", () => {
+    const resolved = SessionRetry.resolve(undefined, "test")
+    expect(resolved.unknown).toMatchObject({ maxRetries: 8, maxElapsedMs: 15 * 60_000 })
+    expect(resolved.request.jitterRatio).toBe(0.1)
+    expect(resolved.network).toMatchObject({ mode: "persistent", maxRetries: undefined, maxElapsedMs: 0, jitterRatio: 0 })
+    expect(resolved.rateLimit.mode).toBe("persistent")
+    expect(resolved.rateLimit.maxRetries).toBeUndefined()
+    expect(resolved.server.mode).toBe("persistent")
+    expect(resolved.server.maxRetries).toBeUndefined()
+  })
+
+  test("network / rate_limit / server stay persistent even in request phase", () => {
+    const resolved = SessionRetry.resolve(undefined, "test")
+    expect(SessionRetry.budgetFor(resolved, { retryable: true, phase: "stream", scope: "live-step", kind: "network", message: "reset" }).mode).toBe("persistent")
+    const requestNetwork = SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "network", message: "ENOTFOUND" })
+    expect(requestNetwork.mode).toBe("persistent")
+    expect(requestNetwork.maxRetries).toBeUndefined()
+    expect(requestNetwork.maxElapsedMs).toBe(0)
+    const requestServer = SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "server", message: "503" })
+    expect(requestServer.mode).toBe("persistent")
+    const requestRateLimit = SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "rate_limit", message: "429" })
+    expect(requestRateLimit.mode).toBe("persistent")
+    expect(SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "unknown", message: "x" }).maxRetries).toBe(4)
+    expect(SessionRetry.budgetFor(resolved, { retryable: true, phase: "stream", scope: "max-candidate", kind: "network", message: "reset" }).maxRetries).toBe(3)
+  })
+
+  test("classifies ENOTFOUND / Cannot connect to API as network", () => {
+    const dns = new Error("Cannot connect to API: getaddrinfo ENOTFOUND example.internal.srv")
+    ;(dns as Error & { code?: string }).code = "ENOTFOUND"
+    const decision = decide(dns)
+    expect(decision.retryable).toBe(true)
+    expect(decision.kind).toBe("network")
+    expect(ProviderError.isRetryableNetworkError(dns)).toBe(true)
+    expect(decide(new Error("getaddrinfo EAI_AGAIN example.internal.srv")).kind).toBe("network")
+  })
+
+  test("transport classification is shape-based, not a closed code allow-list", () => {
+    // Unlisted undici code still transport
+    const undici = Object.assign(new Error("other side closed"), { code: "UND_ERR_CLOSED" })
+    expect(ProviderError.isTransportErrnoCode("UND_ERR_CLOSED")).toBe(true)
+    expect(ProviderError.isRetryableNetworkError(undici)).toBe(true)
+    // Unlisted network errno family still transport
+    expect(ProviderError.isTransportErrnoCode("ECONNREFUSED")).toBe(true)
+    expect(ProviderError.isTransportErrnoCode("EAI_NODATA")).toBe(true)
+    expect(ProviderError.isTransportErrnoCode("ENETRESET")).toBe(true)
+    // Local fs/process errors are NOT transport
+    expect(ProviderError.isTransportErrnoCode("ENOENT")).toBe(false)
+    expect(ProviderError.isTransportErrnoCode("EACCES")).toBe(false)
+    expect(ProviderError.isTransportErrnoCode("EINVAL")).toBe(false)
+    expect(ProviderError.isRetryableNetworkError(Object.assign(new Error("missing"), { code: "ENOENT" }))).toBe(false)
+    // User abort is never network
+    expect(ProviderError.isRetryableNetworkError(Object.assign(new Error("aborted"), { name: "AbortError", code: "ABORT_ERR" }))).toBe(false)
+    // Nested cause chain: outer message clean, inner code is transport
+    const nested = new Error("request failed", { cause: Object.assign(new Error("boom"), { code: "ECONNRESET" }) })
+    expect(ProviderError.isRetryableNetworkError(nested)).toBe(true)
+  })
+
+  test("caps retry-after by the selected budget", () => {
+    const decision = { retryable: true, phase: "stream" as const, scope: "live-step" as const, kind: "rate_limit" as const, message: "429", retryAfterMs: 120000 }
+    expect(SessionRetry.retryDelay(1, decision, 0, 100, 5000)).toBe(5000)
+  })
+
+  test("parses retry hints with the declared units", () => {
+    const error = new MessageV2.APIError({ message: "Please retry in 1 millisecond", statusCode: 429, isRetryable: false }).toObject()
+    expect(decide(error).retryAfterMs).toBe(100)
+    expect(decide(new MessageV2.APIError({ message: "Please retry in 5s", statusCode: 429, isRetryable: false }).toObject()).retryAfterMs).toBe(5000)
+    expect(decide(new MessageV2.APIError({ message: "Please retry in 5m", statusCode: 429, isRetryable: false }).toObject()).retryAfterMs).toBe(5 * 60_000)
+    expect(decide(new MessageV2.APIError({ message: "Please retry in 1h", statusCode: 429, isRetryable: false }).toObject()).retryAfterMs).toBe(5 * 60_000)
+  })
+
+  test("rejects malformed retry-after-ms and floors zero delay", () => {
+    const zero = new MessageV2.APIError({ message: "429", statusCode: 429, isRetryable: false, responseHeaders: { "retry-after-ms": "0" } }).toObject()
+    const garbage = new MessageV2.APIError({ message: "429", statusCode: 429, isRetryable: false, responseHeaders: { "retry-after-ms": "10oops" } }).toObject()
+    const negative = new MessageV2.APIError({ message: "429", statusCode: 429, isRetryable: false, responseHeaders: { "retry-after-ms": "-10" } }).toObject()
+    expect(decide(zero).retryAfterMs).toBe(SessionRetry.RETRY_MIN_DELAY)
+    expect(decide(garbage).retryAfterMs).toBeUndefined()
+    expect(decide(negative).retryAfterMs).toBeUndefined()
+  })
+
+  test("does not retry deterministic 402, 501, or 505 responses", () => {
+    for (const statusCode of [402, 501, 505]) {
+      const error = new MessageV2.APIError({ message: "failure", statusCode, isRetryable: true }).toObject()
+      expect(decide(error)).toMatchObject({ retryable: false, kind: "terminal", statusCode })
+    }
+  })
+
+  // A gateway error label must not turn an unauthorized response into a stream retry.
+  test("does not retry an unmatched upstream_error HTTP 401", () => {
+    const body = JSON.stringify({ error: { type: "upstream_error", code: "401", message: "Access denied due to invalid subscription key or wrong API endpoint" } })
+    const unauthorized = new MessageV2.APIError({ message: "Access denied", statusCode: 401, isRetryable: false, responseBody: body }).toObject()
+    for (const phase of ["request", "stream"] as const) {
+      expect(decide(unauthorized, phase)).toMatchObject({ retryable: false, phase, kind: "terminal", statusCode: 401 })
+    }
+
+    expect(loadHostErrorCatalog({ protocolVersion: 2, rules: [{
+      match: { providerID, statusCode: 401, response: { kind: "json", value: JSON.parse(body) } },
+      code: "host.temporary", retryClass: "bounded",
+    }] }).ok).toBe(true)
+    const matched = bindHostError(new APICallError({
+      message: "Access denied", url: "https://example.test", requestBodyValues: {},
+      responseBody: body, statusCode: 401, isRetryable: false,
+    }), { providerID })
+    expect(decide(MessageV2.fromError(matched, { providerID }), "request")).toMatchObject({
+      retryable: false, kind: "terminal", hostCode: "host.temporary", hostRetryClass: "bounded", statusCode: 401,
+    })
+
+    const unavailable = new MessageV2.APIError({ message: "Service unavailable", statusCode: 503, isRetryable: true, responseBody: JSON.stringify({ error: { type: "upstream_error", message: "Temporary failure" } }) }).toObject()
+    expect(decide(unavailable, "stream")).toMatchObject({ retryable: true, kind: "stream", statusCode: 503 })
+  })
+
+  test("only retries provider-specific compatible 404 responses", () => {
+    const generic = new MessageV2.APIError({ message: "missing", statusCode: 404, isRetryable: true }).toObject()
+    const compatible = new MessageV2.APIError({ message: "missing", statusCode: 404, isRetryable: true, metadata: { allow404Retry: "true" } }).toObject()
+    expect(decide(generic)).toMatchObject({ retryable: false, kind: "terminal" })
+    expect(decide(compatible)).toMatchObject({ retryable: true, kind: "unknown" })
+    expect(allowsModelNotFoundRetry({ api: { npm: "@ai-sdk/openai-compatible" } })).toBe(true)
+    expect(allowsModelNotFoundRetry({ api: { npm: "custom-provider" } })).toBe(false)
+    expect(allowsModelNotFoundRetry({})).toBe(false)
+  })
+
+  test("jitter never exceeds the configured delay ceiling", () => {
+    const decision = { retryable: true, phase: "stream" as const, scope: "live-step" as const, kind: "server" as const, message: "503" }
+    for (let i = 0; i < 100; i++) expect(SessionRetry.retryDelay(1, decision, 1, 100, 100)).toBeLessThanOrEqual(100)
+  })
+
+  test("uses the 5-to-60-second network backoff without jitter", () => {
+    const decision = { retryable: true, phase: "stream" as const, scope: "live-step" as const, kind: "network" as const, message: "connection failed" }
+    const resolved = SessionRetry.resolve(undefined, "test")
+    const budget = SessionRetry.budgetFor(resolved, decision)
+    expect([1, 2, 3, 4, 5].map((attempt) => SessionRetry.retryDelay(attempt, decision, budget.jitterRatio, budget.initialDelayMs, budget.maxDelayMs))).toStrictEqual([5000, 10000, 20000, 40000, 60000])
+  })
+
+  test("identifies the GPT server overloaded stream error exactly", () => {
+    const body = {
+      type: "error",
+      sequence_number: 2,
+      error: {
+        type: "service_unavailable_error",
+        code: "server_is_overloaded",
+        message: "Our servers are currently overloaded. Please try again later.",
+        param: null,
+      },
+    }
+    const error = new MessageV2.APIError({
+      message: body.error.message,
+      isRetryable: true,
+      responseBody: JSON.stringify(body),
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.isGptServerOverloadedError(error)).toBe(true)
+    expect(
+      SessionRetry.isGptServerOverloadedError({
+        ...error,
+        data: {
+          ...error.data,
+          responseBody: JSON.stringify({ ...body, error: { ...body.error, code: "server_error" } }),
+        },
+      }),
+    ).toBe(false)
+  })
+
+  test("silently retries GPT overload three times before stopping", async () => {
+    const error = new MessageV2.APIError({
+      message: "Our servers are currently overloaded. Please try again later.",
+      isRetryable: true,
+      responseBody: JSON.stringify({
+        type: "error",
+        error: { type: "service_unavailable_error", code: "server_is_overloaded" },
+      }),
+    }).toObject() as MessageV2.APIError
+    const visible: number[] = []
+    let attempts = 0
+
+    await expect(
+      Effect.runPromise(
+        Effect.suspend(() => {
+          attempts++
+          return Effect.fail(error)
+        }).pipe(
+          Effect.retry(
+            SessionRetry.policy({
+              parse: (input) => input as MessageV2.APIError,
+              silentRetry: SessionRetry.isGptServerOverloadedError,
+              initialDelayMs: 0,
+              set: (info) => Effect.sync(() => visible.push(info.attempt)),
+            }),
+          ),
+        ),
+      ),
+    ).rejects.toBe(error)
+    expect(attempts).toBe(4)
+    expect(visible).toEqual([2, 3])
+  })
+
+  test("retries OpenAI server_error stream events", () => {
+    const input = {
+      type: "error",
+      sequence_number: 3,
+      error: {
+        type: "server_error",
+        code: "server_error",
+        message: "An error occurred while processing your request. You can retry your request.",
+        param: null,
+      },
+    }
+    const error = MessageV2.fromError(input, { providerID })
+
+    expect(error).toStrictEqual({
+      name: "APIError",
+      data: {
+        message: input.error.message,
+        isRetryable: true,
+        responseBody: JSON.stringify(input),
+      },
+    })
+    expect(SessionRetry.retryable(error)).toBe(input.error.message)
+  })
+
+  test("maps too_many_requests json messages", () => {
+    const error = wrap(JSON.stringify({ type: "error", error: { type: "too_many_requests" } }))
+    expect(SessionRetry.retryable(error)).toBe("Too Many Requests")
+  })
+
+  test("maps provider 429 limitation error body as rate-limited", () => {
+    const error = wrap(JSON.stringify({ error: { code: "429", message: "Too many requests", type: "limitation" } }))
+    expect(SessionRetry.retryable(error)).toBe("Too Many Requests")
+  })
+
+  test("maps numeric 429 error code as rate-limited", () => {
+    const error = wrap(JSON.stringify({ error: { code: 429, message: "Too many requests" } }))
+    expect(SessionRetry.retryable(error)).toBe("Too Many Requests")
+  })
+
+  test("maps top-level 429 code as rate-limited", () => {
+    const error = wrap(JSON.stringify({ code: "429", message: "slow down" }))
+    expect(SessionRetry.retryable(error)).toBe("Too Many Requests")
+  })
+
+  test("maps nested rate-limit message as rate-limited", () => {
+    const error = wrap(JSON.stringify({ error: { code: "unknown", message: "Rate limit exceeded" } }))
+    expect(SessionRetry.retryable(error)).toBe("Too Many Requests")
+  })
+
+  test("maps overloaded provider codes", () => {
+    const error = wrap(JSON.stringify({ code: "resource_exhausted" }))
+    expect(SessionRetry.retryable(error)).toBe("Provider is overloaded")
+  })
+
+  test("does not retry unknown json messages", () => {
+    const error = wrap(JSON.stringify({ error: { message: "no_kv_space" } }))
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
+  test("does not throw on numeric error codes", () => {
+    const error = wrap(JSON.stringify({ type: "error", error: { code: 123 } }))
+    const result = SessionRetry.retryable(error)
+    expect(result).toBeUndefined()
+  })
+
+  test("returns undefined for non-json message", () => {
+    const error = wrap("not-json")
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
+  test("retries plain text rate limit errors from Alibaba", () => {
+    const msg =
+      "Upstream error from Alibaba: Request rate increased too quickly. To ensure system stability, please adjust your client logic to scale requests more smoothly over time."
+    const error = wrap(msg)
+    expect(SessionRetry.retryable(error)).toBe(msg)
+  })
+
+  test("retries plain text rate limit errors", () => {
+    const msg = "Rate limit exceeded, please try again later"
+    const error = wrap(msg)
+    expect(SessionRetry.retryable(error)).toBe(msg)
+  })
+
+  test("retries too many requests in plain text", () => {
+    const msg = "Too many requests, please slow down"
+    const error = wrap(msg)
+    expect(SessionRetry.retryable(error)).toBe(msg)
+  })
+
+  test("does not retry context overflow errors", () => {
+    const error = new MessageV2.ContextOverflowError({
+      message: "Input exceeds context window of this model",
+      responseBody: '{"error":{"code":"context_length_exceeded"}}',
+    }).toObject() as ReturnType<NamedError["toObject"]>
+
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
+  test("retries 500 errors even when isRetryable is false", () => {
+    const error = new MessageV2.APIError({
+      message: "Internal server error",
+      isRetryable: false,
+      statusCode: 500,
+      responseBody: '{"type":"api_error","message":"Internal server error"}',
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBe("Internal server error")
+  })
+
+  test("retries 502 bad gateway errors", () => {
+    const error = new MessageV2.APIError({
+      message: "Bad gateway",
+      isRetryable: false,
+      statusCode: 502,
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBe("Bad gateway")
+  })
+
+  test("retries 503 service unavailable errors", () => {
+    const error = new MessageV2.APIError({
+      message: "Service unavailable",
+      isRetryable: false,
+      statusCode: 503,
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBe("Service unavailable")
+  })
+
+  test("does not retry 4xx errors when isRetryable is false", () => {
+    const error = new MessageV2.APIError({
+      message: "Bad request",
+      isRetryable: false,
+      statusCode: 400,
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
+  // T18: a 429 APIError the provider marked non-retryable previously fell
+  // through the non-retryable bail (429 < 500) and surfaced as a raw blob.
+  test("retries 429 APIError even when isRetryable is false (by status)", () => {
+    const error = new MessageV2.APIError({
+      message: '429: {"error":{"type":"rate_limit_error","message":"rate limited"}}',
+      isRetryable: false,
+      statusCode: 429,
+      responseBody: '{"error":{"type":"rate_limit_error"}}',
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBe("Too Many Requests")
+  })
+
+  test("retries a rate-limit APIError when status is absent (by message/body)", () => {
+    const error = new MessageV2.APIError({
+      message: "provider error",
+      isRetryable: false,
+      responseBody: '{"error":{"type":"rate_limit_error"}}',
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBe("Too Many Requests")
+  })
+
+  // PR #1680 regression: FreeUsageLimitError arrives as an HTTP 429 whose body
+  // also reads "Rate limit exceeded". It MUST surface the Go upsell prompt, not
+  // be swallowed by the generic 429-retry branch into "Too Many Requests".
+  test("FreeUsageLimitError over 429 returns the Go upsell, not Too Many Requests", () => {
+    const error = new MessageV2.APIError({
+      message: "429: Rate limit exceeded",
+      isRetryable: false,
+      statusCode: 429,
+      responseBody: '{"type":"FreeUsageLimitError","message":"Rate limit exceeded"}',
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBe(SessionRetry.GO_UPSELL_MESSAGE)
+  })
+
+  // PR #1680 follow-up: SubscriptionUsageLimitError is also a terminal 429 —
+  // retrying just hangs the session, so it must not become retryable.
+  test("SubscriptionUsageLimitError over 429 is terminal (not retryable)", () => {
+    const error = new MessageV2.APIError({
+      message: "429: Rate limit exceeded",
+      isRetryable: false,
+      statusCode: 429,
+      responseBody: '{"type":"SubscriptionUsageLimitError","message":"Rate limit exceeded"}',
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
+  test("isRateLimitMessage matches underscore rate_limit variants", () => {
+    expect(SessionRetry.isRateLimitMessage("rate_limit_error")).toBe(true)
+    expect(SessionRetry.isRateLimitMessage("too_many_requests")).toBe(true)
+    expect(SessionRetry.isRateLimitMessage("something unrelated")).toBe(false)
+  })
+
+  test("retries ZlibError decompression failures", () => {
+    const error = new MessageV2.APIError({
+      message: "Response decompression failed",
+      isRetryable: true,
+      metadata: { code: "ZlibError" },
+    }).toObject() as MessageV2.APIError
+
+    const retryable = SessionRetry.retryable(error)
+    expect(retryable).toBeDefined()
+    expect(retryable).toBe("Response decompression failed")
+  })
+})
+
+describe("session.message-v2.fromError", () => {
+  test("treats a normalized provider timeout as retryable", () => {
+    const result = MessageV2.fromError(Object.assign(new Error("Request timed out"), { code: "ETIMEDOUT" }), {
+      providerID,
+    })
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
+    expect((result as MessageV2.APIError).data.metadata?.code).toBe("ETIMEDOUT")
+    expect(SessionRetry.retryable(result as ReturnType<NamedError["toObject"]>)).toBeTruthy()
+  })
+
+  test("keeps AbortError terminal", () => {
+    const result = MessageV2.fromError(new DOMException("The user aborted the request", "AbortError"), {
+      providerID,
+    })
+
+    expect(MessageV2.AbortedError.isInstance(result)).toBe(true)
+    expect(SessionRetry.retryable(result as ReturnType<NamedError["toObject"]>)).toBeUndefined()
+  })
+
+  test.concurrent(
+    "converts ECONNRESET socket errors to retryable APIError",
+    async () => {
+      using server = Bun.serve({
+        port: 0,
+        idleTimeout: 8,
+        async fetch(_req) {
+          return new Response(
+            new ReadableStream({
+              async pull(controller) {
+                controller.enqueue("Hello,")
+                await sleep(10000)
+                controller.enqueue(" World!")
+                controller.close()
+              },
+            }),
+            { headers: { "Content-Type": "text/plain" } },
+          )
+        },
+      })
+
+      const error = await fetch(new URL("/", server.url.origin))
+        .then((res) => res.text())
+        .catch((e) => e)
+
+      const result = MessageV2.fromError(error, { providerID })
+
+      expect(MessageV2.APIError.isInstance(result)).toBe(true)
+      expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
+      expect((result as MessageV2.APIError).data.message).toBe("Connection reset by server")
+      expect((result as MessageV2.APIError).data.metadata?.code).toBe("ECONNRESET")
+      expect((result as MessageV2.APIError).data.metadata?.message).toInclude("socket connection")
+    },
+    15_000,
+  )
+
+  test("ECONNRESET socket error is retryable", () => {
+    const error = new MessageV2.APIError({
+      message: "Connection reset by server",
+      isRetryable: true,
+      metadata: { code: "ECONNRESET", message: "The socket connection was closed unexpectedly" },
+    }).toObject() as MessageV2.APIError
+
+    const retryable = SessionRetry.retryable(error)
+    expect(retryable).toBeDefined()
+    expect(retryable).toBe("Connection reset by server")
+  })
+
+  test("marks OpenAI 404 status codes as retryable", () => {
+    const error = new APICallError({
+      message: "boom",
+      url: "https://api.openai.com/v1/chat/completions",
+      requestBodyValues: {},
+      statusCode: 404,
+      responseHeaders: { "content-type": "application/json" },
+      responseBody: '{"error":"boom"}',
+      isRetryable: false,
+    })
+    const result = MessageV2.fromError(error, { providerID: ProviderID.make("openai"), allow404Retry: true }) as MessageV2.APIError
+    expect(result.data.isRetryable).toBe(true)
+  })
+})
+
+describe("session.message-v2.fromError unwraps AI_RetryError", () => {
+  const apiCall = (statusCode: number) =>
+    new APICallError({
+      message: "No available channel for model claude-sonnet-4.6 under group default",
+      url: "https://api.example.com/v1/messages",
+      requestBodyValues: {},
+      statusCode,
+      responseHeaders: { "content-type": "application/json" },
+      responseBody: '{"error":{"code":"model_not_found","type":"new_api_error"}}',
+      isRetryable: true,
+    })
+
+  const retryWrapping = (statusCode: number) =>
+    new RetryError({
+      message: `Failed after 3 attempts. Last error: boom`,
+      reason: "maxRetriesExceeded",
+      errors: [apiCall(statusCode), apiCall(statusCode), apiCall(statusCode)],
+    })
+
+  // Regression: the AI SDK wraps the underlying failure in AI_RetryError once
+  // its internal maxRetries is exhausted. fromError() previously only matched a
+  // bare APICallError, so a wrapped 5xx fell through to the generic
+  // `e instanceof Error` branch and collapsed to an opaque UnknownError — which
+  // SessionRetry.retryable() cannot classify, so the visible `type: "retry"`
+  // banner never fired and the turn hung with a dead spinner.
+  test("a wrapped 503 becomes a structured APIError, not UnknownError", () => {
+    const out = MessageV2.fromError(retryWrapping(503), { providerID })
+    expect(MessageV2.APIError.isInstance(out)).toBe(true)
+    const api = out as MessageV2.APIError
+    expect(api.data.statusCode).toBe(503)
+    expect(api.data.responseBody).toInclude("model_not_found")
+  })
+
+  test("the unwrapped 503 is classified retryable (drives the retry banner)", () => {
+    const out = MessageV2.fromError(retryWrapping(503), { providerID })
+    expect(SessionRetry.retryable(out as ReturnType<NamedError["toObject"]>)).toBeTruthy()
+  })
+
+  test("uses the last underlying error when attempts had differing statuses", () => {
+    const wrapped = new RetryError({
+      message: "Failed after 2 attempts. Last error: boom",
+      reason: "maxRetriesExceeded",
+      errors: [apiCall(500), apiCall(502)],
+    })
+    // RetryError.lastError === errors[errors.length - 1], so the 502 wins.
+    const out = MessageV2.fromError(wrapped, { providerID })
+    expect(MessageV2.APIError.isInstance(out)).toBe(true)
+    expect((out as MessageV2.APIError).data.statusCode).toBe(502)
+  })
+})
+
+describe("native retry facts", () => {
+  test("real SDK retry history cannot turn a final TypeError into persistent recovery", async () => {
+    let calls = 0
+    const model = {
+      specificationVersion: "v3" as const,
+      provider: "test-native",
+      modelId: "test",
+      supportedUrls: {},
+      async doGenerate(): Promise<never> {
+        if (++calls === 1) throw new APICallError({
+          message: "Request timed out", statusCode: 408, url: "https://example.com",
+          requestBodyValues: {}, isRetryable: true,
+        })
+        throw new TypeError("invalid content.map")
+      },
+      async doStream(): Promise<never> { throw new Error("Unexpected stream call") },
+    }
+    const raw = await generateText({ model, prompt: "test", maxRetries: 1 }).then(
+      () => { throw new Error("Expected SDK failure") },
+      (error: unknown) => error,
+    )
+    expect(RetryError.isInstance(raw)).toBe(true)
+    expect(calls).toBe(2)
+    const normalized = MessageV2.fromError(raw, { providerID })
+    for (const error of [normalized, JSON.parse(JSON.stringify(normalized))]) {
+      const decision = decide(error, "request")
+      expect(decision.kind).toBe("unknown")
+      expect(budgetFor(SessionRetry.resolve({ retry: { request: { maxRetries: 0, deadlineMs: 1 } } }), decision))
+        .toMatchObject({ mode: "bounded", maxRetries: 0, maxElapsedMs: 1 })
+    }
+    expect(normalized.data.metadata?.retryHistory).toContain("Request timed out")
+  })
+
+  test("real SDK retry preserves a single final safety fact through live and JSON normalization", async () => {
+    let calls = 0
+    const timeout = () => new APICallError({
+      message: "Request timed out", statusCode: 408, url: "https://example.com",
+      requestBodyValues: {}, isRetryable: true,
+    })
+    const model = {
+      specificationVersion: "v3" as const,
+      provider: "test-native",
+      modelId: "test",
+      supportedUrls: {},
+      async doGenerate(): Promise<never> {
+        if (++calls === 1) throw timeout()
+        throw Object.assign(new Error("Provider limit reached"), { name: "SubscriptionUsageLimitError" })
+      },
+      async doStream(): Promise<never> { throw new Error("Unexpected stream call") },
+    }
+    const sdk = await generateText({ model, prompt: "test", maxRetries: 1 }).then(
+      () => { throw new Error("Expected SDK failure") },
+      (error: unknown) => error,
+    )
+    expect(RetryError.isInstance(sdk)).toBe(true)
+    expect(calls).toBe(2)
+    for (const raw of [sdk, ...["FreeUsageLimitError", "ProviderAuthError", "ContextOverflowError"].map((name) =>
+      new RetryError({ message: "attempts failed", reason: "maxRetriesExceeded", errors: [
+        timeout(), Object.assign(new Error("Provider stopped"), { name }),
+      ] }),
+    )]) {
+      expect(decide(raw)).toMatchObject({ retryable: false, kind: "terminal" })
+      const live = MessageV2.fromLiveError(raw, { providerID })
+      expect(decide(live)).toMatchObject({ retryable: false, kind: "terminal" })
+      expect(live.data.metadata?.causeChain).toBeDefined()
+      expect(JSON.parse(live.data.metadata!.causeChain!)).toHaveLength(1)
+      expect(live.data.metadata?.retryHistory).toContain("Request timed out")
+      const restored = MessageV2.fromError(JSON.parse(JSON.stringify(live)), { providerID })
+      expect(decide(restored)).toMatchObject({ retryable: false, kind: "terminal" })
+    }
+  })
+
+  test("bare safety errors stay terminal through live normalization and idempotent restoration", () => {
+    for (const name of ["SubscriptionUsageLimitError", "FreeUsageLimitError", "ProviderAuthError", "ContextOverflowError"]) {
+      const raw = Object.assign(new Error("Provider stopped"), { name })
+      expect(isSafetyTerminal(raw)).toBe(true)
+      const live = MessageV2.fromLiveError(raw, { providerID })
+      expect(decide(live)).toMatchObject({ retryable: false, kind: "terminal" })
+      const restored = MessageV2.fromError(JSON.parse(JSON.stringify(live)), { providerID })
+      expect(decide(restored)).toMatchObject({ retryable: false, kind: "terminal" })
+      expect(restored).toEqual(live)
+      expect(MessageV2.fromError(restored, { providerID })).toEqual(restored)
+      expect(MessageV2.fromLiveError(restored, { providerID })).toEqual(restored)
+      expect(JSON.parse(restored.data.metadata!.causeChain!)).toHaveLength(1)
+      expect(restored.data.metadata?.retryHistory).toBeUndefined()
+    }
+  })
+
+  test("only the final SDK attempt and its actual causes supply retry facts", () => {
+    const api = (statusCode: number) => new APICallError({
+      message: "Provider failed", statusCode, url: "https://example.com", requestBodyValues: {}, isRetryable: true,
+    })
+    for (const earlier of [api(404), api(401), Object.assign(new Error("socket closed"), { code: "ECONNRESET" })]) {
+      const wrapped = new RetryError({ message: "attempts failed", reason: "maxRetriesExceeded", errors: [earlier, api(503)] })
+      const normalized = MessageV2.fromError(wrapped, { providerID })
+      expect(decide(normalized).kind).toBe("server")
+      expect(decide(JSON.parse(JSON.stringify(normalized))).kind).toBe("server")
+      expect(normalized.data.metadata?.retryHistory).toBeDefined()
+      expect(ProviderError.summarizeCause(wrapped).map((cause) => cause.statusCode)).toEqual([503])
+    }
+    const last = new TypeError("fetch failed", { cause: Object.assign(new Error("connect"), { code: "ETIMEDOUT" }) })
+    const wrapped = new RetryError({ message: "attempts failed", reason: "maxRetriesExceeded", errors: [api(401), last] })
+    const normalized = MessageV2.fromError(wrapped, { providerID })
+    expect(decide(normalized).kind).toBe("network")
+    expect(decide(JSON.parse(JSON.stringify(normalized))).kind).toBe("network")
+    expect(normalized.data.metadata?.causeChain).toContain("ETIMEDOUT")
+  })
+
+  for (const catalog of ["empty", "unmatched"] as const) {
+    test(`${catalog} catalog preserves native HTTP400 recovery signal precedence`, () => {
+      loadHostErrorCatalog({ protocolVersion: 2, rules: catalog === "empty" ? [] : [{
+        match: { providerID, response: { kind: "field", path: "/error/code", value: "host_only" } },
+        code: "host.only", retryClass: "terminal",
+      }] })
+      for (const [code, message, kind] of [
+        ["stream_read_error", "Upstream stream read failed", "stream"],
+        ["rate_limit_exceeded", "Too many requests", "rate_limit"],
+      ]) {
+        const raw = new APICallError({
+          message, statusCode: 400, responseBody: JSON.stringify({ error: { code, message } }),
+          url: "https://example.com", requestBodyValues: {}, isRetryable: false,
+        })
+        bindHostError(raw, { providerID })
+        const normalized = MessageV2.fromError(raw, { providerID })
+        expect(normalized.data.hostCode).toBeUndefined()
+        expect(decide(normalized)).toMatchObject({ retryable: true, kind })
+        expect(decide(JSON.parse(JSON.stringify(normalized)))).toMatchObject({ retryable: true, kind })
+      }
+    })
+  }
+})
+
+describe("isRetryableTransientError", () => {
+  test("SSE read timed out string match", () => {
+    expect(isRetryableTransientError(new Error("SSE read timed out"))).toBe(true)
+  })
+
+  test("ECONNRESET / EPIPE / ETIMEDOUT codes", () => {
+    for (const code of [
+      "ECONNABORTED",
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "EAI_AGAIN",
+      "EPIPE",
+      "ETIMEDOUT",
+      "UND_ERR_BODY_TIMEOUT",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_HEADERS_TIMEOUT",
+      "UND_ERR_SOCKET",
+    ]) {
+      const err = Object.assign(new Error("network"), { code })
+      expect(isRetryableTransientError(err)).toBe(true)
+    }
+  })
+
+  test("HTTP 429 / 5xx / 529 statuses", () => {
+    for (const status of [429, 500, 502, 503, 504, 529]) {
+      const err = Object.assign(new Error("http"), { status })
+      expect(isRetryableTransientError(err)).toBe(true)
+    }
+  })
+
+  test("status from response.status (sdk shape)", () => {
+    const err = Object.assign(new Error("http"), { response: { status: 503 } })
+    expect(isRetryableTransientError(err)).toBe(true)
+  })
+
+  test("status from statusCode (AI SDK APICallError shape)", () => {
+    // APICallError exposes the HTTP status as `.statusCode`, not `.status`.
+    // Before the fix this fell through and returned false.
+    for (const statusCode of [429, 500, 502, 503, 504, 529]) {
+      const err = Object.assign(new Error("api"), { statusCode })
+      expect(isRetryableTransientError(err)).toBe(true)
+    }
+    const err400 = Object.assign(new Error("bad req"), { statusCode: 400 })
+    expect(isRetryableTransientError(err400)).toBe(false)
+  })
+
+  test("non-transient errors return false", () => {
+    expect(isRetryableTransientError(new Error("syntax error"))).toBe(false)
+    expect(isRetryableTransientError("string not Error")).toBe(false)
+    expect(isRetryableTransientError(undefined)).toBe(false)
+    expect(isRetryableTransientError(null)).toBe(false)
+    const err400 = Object.assign(new Error("bad req"), { status: 400 })
+    expect(isRetryableTransientError(err400)).toBe(false)
+  })
+
+  test("follows a wrapped network cause", () => {
+    const cause = Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" })
+    const error = Object.assign(new TypeError("fetch failed"), { cause })
+    expect(isRetryableTransientError(error)).toBe(true)
+  })
+
+  test("does not retry an aborted request with a network cause", () => {
+    const cause = Object.assign(new Error("socket reset"), { code: "ECONNRESET" })
+    const error = Object.assign(new DOMException("The user aborted the request", "AbortError"), { cause })
+    expect(isRetryableTransientError(error)).toBe(false)
+  })
+})
+
+describe("retryable() with raw Error (Spec ③ P2 regression)", () => {
+  test("SSE read timed out is retryable", () => {
+    const rawErr = new Error("SSE read timed out")
+    expect(retryable(rawErr as unknown as never)).toBeTruthy()
+  })
+
+  test("ECONNRESET raw Error is retryable", () => {
+    const rawErr = Object.assign(new Error("conn reset"), { code: "ECONNRESET" })
+    expect(retryable(rawErr as unknown as never)).toBeTruthy()
+  })
+
+  test("non-transient raw Error returns undefined (existing path)", () => {
+    const rawErr = new Error("some user mistake")
+    expect(retryable(rawErr as unknown as never)).toBeUndefined()
+  })
+})
+
+describe("retry decision and coordinator budget", () => {
+ test("terminal abort wins over a retryable status in its cause chain", () => {
+    const cause = Object.assign(new Error("socket reset"), { code: "ECONNRESET" })
+    const error = Object.assign(new DOMException("user aborted", "AbortError"), { cause, status: 503 })
+   expect(decide(error)).toMatchObject({ retryable: false, kind: "terminal" })
+ })
+
+  test("fromError maps residual stream errors to AbortedError when ctx.aborted", () => {
+    const undici = Object.assign(new Error("request aborted by transport"), {
+      name: "AbortError",
+      code: "UND_ERR_ABORTED",
+    })
+    const parsed = MessageV2.fromError(undici, { providerID, aborted: true })
+    expect(MessageV2.AbortedError.isInstance(parsed)).toBe(true)
+    const timeout = Object.assign(new Error("Request timed out"), { code: "ETIMEDOUT" })
+    const parsed2 = MessageV2.fromError(timeout, { providerID, aborted: true })
+    expect(MessageV2.AbortedError.isInstance(parsed2)).toBe(true)
+  })
+
+  test("treats an Undici transport abort as network-transient, not user abort", () => {
+    const error = Object.assign(new Error("request aborted by transport"), { name: "AbortError", code: "UND_ERR_ABORTED" })
+    expect(decide(error)).toMatchObject({ retryable: true, kind: "network" })
+  })
+
+  test("classifies quota exhaustion as terminal instead of a retry", () => {
+    const error = new MessageV2.APIError({
+      message: "Rate limit exceeded",
+      statusCode: 429,
+      isRetryable: false,
+      responseBody: JSON.stringify({ type: "FreeUsageLimitError" }),
+    }).toObject()
+    expect(decide(error)).toMatchObject({ retryable: false, kind: "terminal", uiMessage: SessionRetry.GO_UPSELL_MESSAGE })
+  })
+
+  test("terminal UI notice is emitted without scheduling a retry", async () => {
+    const error = new MessageV2.APIError({
+      message: "Rate limit exceeded",
+      statusCode: 429,
+      isRetryable: false,
+      responseBody: JSON.stringify({ type: "FreeUsageLimitError" }),
+    }).toObject()
+    let attempts = 0
+    let notices = 0
+    const schedule = SessionRetry.policy({
+      onTerminal: (decision) => decision.uiMessage ? Effect.sync(() => notices++) : Effect.void,
+      parse: (input) => input as ReturnType<NamedError["toObject"]>,
+      set: () => Effect.void,
+    })
+    await expect(
+      Effect.runPromise(Effect.suspend(() => { attempts++; return Effect.fail(error) }).pipe(Effect.retry(schedule))),
+    ).rejects.toBe(error)
+    expect(attempts).toBe(1)
+    expect(notices).toBe(1)
+  })
+
+  test("caps natural-language retry delays and recognizes body-only rate limits", () => {
+    const error = new MessageV2.APIError({
+      message: "Try again in 24 hours",
+      statusCode: 429,
+      isRetryable: false,
+      responseBody: JSON.stringify({ error: { code: "rate_limit_error", message: "Try again in 24 hours" } }),
+    }).toObject()
+    expect(decide(error)).toMatchObject({ retryable: true, kind: "rate_limit", retryAfterMs: 5 * 60_000 })
+  })
+
+  test("starts the retry deadline at the first failure, not policy construction", async () => {
+    const error = new MessageV2.APIError({ message: "server", statusCode: 503, isRetryable: false }).toObject()
+    let attempts = 0
+    const schedule = SessionRetry.policy({
+      maxElapsedMs: 10,
+      initialDelayMs: 0,
+      jitterRatio: 0,
+      parse: (input) => input as ReturnType<NamedError["toObject"]>,
+      set: () => Effect.void,
+    })
+    const result = await Effect.runPromise(Effect.suspend(() => Effect.gen(function* () {
+      attempts++
+      if (attempts === 1) { yield* Effect.sleep("20 millis"); return yield* Effect.fail(error) }
+      return "ok"
+    })).pipe(Effect.retry(schedule)))
+    expect(result).toBe("ok")
+    expect(attempts).toBe(2)
+  })
+
+  test("does not schedule a retry after the attempt crossed the side-effect boundary", async () => {
+    const error = new MessageV2.APIError({ message: "server", statusCode: 503, isRetryable: false }).toObject()
+    let attempts = 0
+    let retryEvents = 0
+    const schedule = SessionRetry.policy({
+      phase: "stream",
+      maxRetries: 5,
+      replaySafe: () => false,
+      parse: (input) => input as ReturnType<NamedError["toObject"]>,
+      set: () => Effect.sync(() => retryEvents++),
+    })
+
+    await expect(
+      Effect.runPromise(
+        Effect.suspend(() => {
+          attempts++
+          return Effect.fail(error)
+        }).pipe(Effect.retry(schedule)),
+      ),
+    ).rejects.toBe(error)
+    expect(attempts).toBe(1)
+    expect(retryEvents).toBe(0)
+  })
+
+  // [UnknownError 有限次重试] uncatalogued ≠ proven terminal:fromError catch-all
+  // (含丢掉 statusCode 的 5xx)应走有界预算,耗尽后再 terminal。
+  // 预算按 phase 分流(retry-coordinator.md budgetFor):
+  //   stream → unknown(默认 8 / 15min);request → request(默认 4 / 30s)。
+  test("UnknownError is retryable under the bounded stream unknown budget, not immediate terminal", () => {
+    const unknown = new NamedError.Unknown({ message: '"Internal Server Error"' }).toObject()
+    const decision = decide(unknown, "stream")
+    expect(decision).toMatchObject({ retryable: true, kind: "unknown", phase: "stream" })
+    const resolved = SessionRetry.resolve(undefined, "test")
+    const budget = SessionRetry.budgetFor(resolved, decision)
+    expect(budget.mode).toBe("bounded")
+    expect(budget.maxRetries).toBe(SessionRetry.UNKNOWN_MAX_RETRIES)
+  })
+
+  test("UnknownError in request phase uses the request budget, not the stream unknown budget", () => {
+    // budgetFor 顺序:max-scope → network/rate_limit/server persistent → phase=request → unknown。
+    // request 相位的 unknown 故意走 request 预算(scope 表:仅作用于非三类可恢复的如 unknown)。
+    const unknown = new NamedError.Unknown({ message: "Internal Server Error" }).toObject()
+    const decision = decide(unknown, "request")
+    expect(decision).toMatchObject({ retryable: true, kind: "unknown", phase: "request" })
+    const resolved = SessionRetry.resolve(undefined, "test")
+    const budget = SessionRetry.budgetFor(resolved, decision)
+    expect(budget.mode).toBe("bounded")
+    expect(budget.maxRetries).toBe(SessionRetry.REQUEST_MAX_RETRIES)
+    expect(budget.maxRetries).not.toBe(SessionRetry.UNKNOWN_MAX_RETRIES)
+  })
+
+  test("UnknownError stream policy retries a bounded number of times then terminal", async () => {
+    const unknown = new NamedError.Unknown({ message: '"Internal Server Error"' }).toObject()
+    let attempts = 0
+    let retries = 0
+    const schedule = SessionRetry.policy({
+      phase: "stream",
+      maxRetries: 2,
+      maxElapsedMs: 60_000,
+      initialDelayMs: 1,
+      parse: (input) => input as ReturnType<NamedError["toObject"]>,
+      set: () => Effect.sync(() => retries++),
+    })
+    await expect(
+      Effect.runPromise(
+        Effect.suspend(() => {
+          attempts++
+          return Effect.fail(unknown)
+        }).pipe(Effect.retry(schedule)),
+      ),
+    ).rejects.toBe(unknown)
+    // attempt 1 fail → retry → attempt 2 fail → retry → attempt 3 fail → give up
+    expect(attempts).toBe(3)
+    expect(retries).toBe(2)
+  })
+
+  test("terminal kinds stay terminal and are not swallowed by UnknownError retry", () => {
+    const aborted = new MessageV2.AbortedError({ message: "Aborted" }).toObject()
+    expect(decide(aborted)).toMatchObject({ retryable: false, kind: "terminal" })
+    const auth = new MessageV2.AuthError({ providerID: "mimo", message: "invalid key" }).toObject()
+    expect(decide(auth)).toMatchObject({ retryable: false, kind: "terminal" })
+    const overflow = new MessageV2.ContextOverflowError({ message: "too long" }).toObject()
+    expect(decide(overflow)).toMatchObject({ retryable: false, kind: "terminal" })
+  })
+
+  test("InvalidOutputError retries persistently under the server budget", () => {
+    const empty = new MessageV2.InvalidOutputError({ message: "empty output" }).toObject()
+    const decision = decide(empty)
+    expect(decision).toMatchObject({ retryable: true, kind: "server", message: "empty output" })
+    expect(isRetryableTransientError(empty)).toBe(true)
+    expect(retryable(empty)).toBe("empty output")
+    const budget = budgetFor(SessionRetry.resolve(undefined), decision)
+    expect(budget.mode).toBe("persistent")
+    expect(budget.maxRetries).toBeUndefined()
+    expect(budget.maxElapsedMs).toBe(0)
+  })
+})
+
+describe("mandatory network recovery", () => {
+  test("global/provider count and deadline overrides cannot downgrade network", () => {
+    const config = SessionRetry.resolve({
+      retry: { network: { mode: "bounded", maxRetries: 0, deadlineMs: 1, initialDelayMs: 10, maxDelayMs: 100, jitterRatio: 0 } },
+      provider: { test: { retry: { network: { mode: "bounded", maxRetries: 1, deadlineMs: 2, initialDelayMs: 20 } } } },
+    }, "test")
+    expect(config.network).toEqual({ mode: "persistent", maxRetries: undefined, maxElapsedMs: 0, initialDelayMs: 20, maxDelayMs: 100, jitterRatio: 0 })
+    for (const phase of ["request", "stream"] as const) {
+      for (const kind of ["network", "server", "rate_limit", "stream", "unknown"] as const) {
+        const decision = { retryable: true, kind, phase, scope: phase === "request" ? "request" as const : "live-step" as const, message: "failure" }
+        const budget = budgetFor(config, decision)
+        expect(budget.mode).toBe(["network", "server", "rate_limit"].includes(kind) ? "persistent" : "bounded")
+        for (const scope of ["max-candidate", "max-judge"] as const) {
+          expect(budgetFor(config, { ...decision, scope })).toEqual(scope === "max-candidate" ? config.maxCandidate : config.maxJudge)
+        }
+      }
+    }
+    const configured = { ...config, network: { ...config.network, mode: "bounded" as const, maxRetries: 1, maxElapsedMs: 1 } }
+    expect(budgetFor(configured, { retryable: true, kind: "network", phase: "request", scope: "request", message: "timeout" })).toMatchObject({ mode: "persistent", maxRetries: undefined, maxElapsedMs: 0 })
+  })
+
+  for (const phase of ["request", "stream"] as const) {
+    test(`${phase} coordinator retries eight HTTP timeouts then succeeds despite host/config limits`, async () => {
+      loadHostErrorCatalog({ protocolVersion: 2, rules: [] })
+      const config = SessionRetry.resolve({ retry: { network: { mode: "bounded", maxRetries: 1, deadlineMs: 1, initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 } } })
+      let attempts = 0
+      const updates: Array<{ hostCode?: string; kind: string; maxAttempts: number }> = []
+      const schedule = SessionRetry.policy({
+        phase,
+        parse: (error) => MessageV2.fromError(error, { providerID }),
+        budget: (decision) => budgetFor(config, decision),
+        set: (info) => Effect.sync(() => { updates.push(info) }),
+      })
+      const result = await Effect.runPromise(Effect.suspend(() => {
+        attempts++
+        return attempts <= 8
+          ? Effect.fail(new APICallError({ message: "request timeout", url: "https://example.com", requestBodyValues: {}, statusCode: 408, isRetryable: false }))
+          : Effect.succeed("recovered")
+      }).pipe(Effect.retry(schedule)))
+      expect(result).toBe("recovered")
+      expect(attempts).toBe(9)
+      expect(updates).toHaveLength(8)
+      for (const update of updates) expect(update).toMatchObject({ hostCode: undefined, kind: "network", maxAttempts: 0 })
+    })
+  }
+
+  test("policy also ignores bounded custom session network budgets", async () => {
+    let attempts = 0
+    const schedule = SessionRetry.policy({
+      parse: (error) => MessageV2.fromError(error, { providerID }),
+      budget: () => ({ mode: "bounded", maxRetries: 0, maxElapsedMs: 1, initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 }),
+      set: () => Effect.void,
+    })
+    await Effect.runPromise(Effect.suspend(() => ++attempts <= 4
+      ? Effect.fail(new TypeError("fetch failed", { cause: Object.assign(new Error("connect failed"), { code: "ETIMEDOUT" }) }))
+      : Effect.succeed("ok")).pipe(Effect.retry(schedule)))
+    expect(attempts).toBe(5)
+  })
+
+  test("max isolation and unsafe replay still stop network retries", async () => {
+    for (const scope of ["max-candidate", "max-judge", "live-step"] as const) {
+      let attempts = 0
+      const schedule = SessionRetry.policy({
+        scope,
+        parse: (error) => MessageV2.fromError(error, { providerID }),
+        budget: () => ({ mode: "bounded", maxRetries: 2, maxElapsedMs: 1000, initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 }),
+        replaySafe: () => scope !== "live-step",
+        set: () => Effect.void,
+      })
+      await expect(Effect.runPromise(Effect.suspend(() => {
+        attempts++
+        return Effect.fail(Object.assign(new Error("socket failed"), { code: "ECONNRESET" }))
+      }).pipe(Effect.retry(schedule)))).rejects.toBeDefined()
+      expect(attempts).toBe(scope === "live-step" ? 1 : 3)
+    }
+  })
+})
+
+describe("host registry budget and publish (R006/R011)", () => {
+  test("budgetFor selects host kind budgets by phase/scope", () => {
+    loadHostErrorCatalog({ protocolVersion: 2, rules: [] })
+    const cfg = {
+      request: { mode: "bounded", maxRetries: 4, maxElapsedMs: 30_000, initialDelayMs: 200, maxDelayMs: 30_000, jitterRatio: 0 },
+      stream: { mode: "bounded", maxRetries: 5, maxElapsedMs: 60_000, initialDelayMs: 2000, maxDelayMs: 30_000, jitterRatio: 0 },
+      maxCandidate: { mode: "bounded", maxRetries: 1, maxElapsedMs: 1, initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+      maxJudge: { mode: "bounded", maxRetries: 1, maxElapsedMs: 1, initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+      network: { mode: "persistent", maxRetries: 0, maxElapsedMs: 0, initialDelayMs: 2000, maxDelayMs: 30_000, jitterRatio: 0 },
+      server: { mode: "persistent", maxRetries: 0, maxElapsedMs: 0, initialDelayMs: 2000, maxDelayMs: 30_000, jitterRatio: 0 },
+      rateLimit: { mode: "persistent", maxRetries: 0, maxElapsedMs: 0, initialDelayMs: 2000, maxDelayMs: 30_000, jitterRatio: 0 },
+      unknown: { mode: "bounded", maxRetries: 8, maxElapsedMs: 900_000, initialDelayMs: 2000, maxDelayMs: 30_000, jitterRatio: 0 },
+      jitterRatio: 0,
+    } as never
+    const base = { retryable: true, message: "m", hostCode: "host.x" }
+    expect(budgetFor(cfg, { ...base, phase: "stream", scope: "live-step", kind: "network" }).mode).toBe("persistent")
+    expect(budgetFor(cfg, { ...base, phase: "request", scope: "request", kind: "rate_limit" }).mode).toBe("persistent")
+    expect(budgetFor(cfg, { ...base, phase: "stream", scope: "max-candidate", kind: "server" }).maxRetries).toBe(1)
+    expect(budgetFor(cfg, { ...base, phase: "request", scope: "request", kind: "unknown" }).maxRetries).toBe(4)
+    expect(budgetFor(cfg, { ...base, phase: "stream", scope: "live-step", kind: "unknown" }).maxRetries).toBe(8)
+    expect(budgetFor(cfg, { ...base, phase: "request", scope: "request", kind: "terminal" as never }).mode).toBe("bounded")
+  })
+
+  test("host behavior is independent of diagnostic kind", () => {
+    const cases = [
+      ["persistent", "unknown"],
+      ["bounded", "unknown"],
+      ["terminal", "terminal"],
+    ] as const
+    for (const [cls, kind] of cases) {
+      const d = decide({
+        name: "APIError",
+        data: { message: "x", isRetryable: true, hostCode: "h.x", hostRetryClass: cls },
+      })
+      expect(d.kind).toBe(kind)
+      expect(d.hostCode).toBe("h.x")
+      expect(d.retryable).toBe(cls !== "terminal")
+    }
+  })
+
+  test("RetryAttempt/policy set carries hostCode only when host-driven", () => {
+    loadHostErrorCatalog({ protocolVersion: 2, rules: [] })
+    const hostDriven = decide({
+      name: "APIError",
+      data: { message: "x", isRetryable: true, hostCode: "h.r", hostRetryClass: "bounded" },
+    })
+    expect(hostDriven.hostCode).toBe("h.r")
+    const heuristic = decide({
+      name: "APIError",
+      data: { message: "Too Many Requests", statusCode: 429, isRetryable: true },
+    })
+    expect(heuristic.retryable).toBe(true)
+    expect(heuristic.hostCode).toBeUndefined()
+  })
+})
+
+describe("policy set hostCode publish (R006/R011)", () => {
+  test("opts.set receives hostCode iff host-driven", async () => {
+    loadHostErrorCatalog({ protocolVersion: 2, rules: [] })
+    const captured: Array<{ hostCode?: string; message: string }> = []
+    const schedule = SessionRetry.policy({
+      parse: (err) => err as ReturnType<NamedError["toObject"]>,
+      set: (info) =>
+        Effect.sync(() => {
+          captured.push({ hostCode: info.hostCode, message: info.message })
+        }),
+      maxElapsedMs: 5,
+      initialDelayMs: 0,
+      jitterRatio: 0,
+      maxRetries: 1,
+    })
+    const hostErr = {
+      name: "APIError",
+      data: { message: "host-fail", isRetryable: true, hostCode: "h.r", hostRetryClass: "bounded" },
+    }
+    await expect(
+      Effect.runPromise(Effect.suspend(() => Effect.fail(hostErr)).pipe(Effect.retry(schedule))),
+    ).rejects.toBe(hostErr)
+    expect(captured.length).toBeGreaterThanOrEqual(1)
+    expect(captured[0]!.hostCode).toBe("h.r")
+
+    captured.length = 0
+    const heurSchedule = SessionRetry.policy({
+      parse: (err) => err as ReturnType<NamedError["toObject"]>,
+      set: (info) =>
+        Effect.sync(() => {
+          captured.push({ hostCode: info.hostCode, message: info.message })
+        }),
+      maxElapsedMs: 50,
+      initialDelayMs: 0,
+      jitterRatio: 0,
+      maxRetries: 1,
+    })
+    const heurErr = {
+      name: "APIError",
+      data: { message: "weird transient failure", isRetryable: true },
+    }
+    await expect(
+      Effect.runPromise(Effect.suspend(() => Effect.fail(heurErr)).pipe(Effect.retry(heurSchedule))),
+    ).rejects.toBe(heurErr)
+    expect(captured.length).toBeGreaterThanOrEqual(1)
+    expect(captured[0]!.hostCode).toBeUndefined()
+  })
+})
+
+describe("host v2 enforced budgets", () => {
+  const restricted = { error: "Example restricted account", code: 403 }
+  function failure(retryClass: "persistent" | "bounded" | "terminal", statusCode = 503) {
+    expect(loadHostErrorCatalog({ protocolVersion: 2, rules: [{
+      match: { providerID, statusCode, response: { kind: "json", value: restricted } },
+      code: "host.example", retryClass,
+    }] }).ok).toBe(true)
+    return bindHostError(new APICallError({
+      message: "fetch failed ETIMEDOUT", url: "https://example.com", requestBodyValues: {},
+      responseBody: JSON.stringify(restricted), statusCode, isRetryable: false,
+    }), { providerID })
+  }
+
+  test("host phase budgets remain finite or unlimited regardless of kind defaults/config", () => {
+    const config = SessionRetry.resolve({ retry: {
+      request: { mode: "persistent", noDeadline: true }, stream: { mode: "persistent", noDeadline: true },
+      server: { mode: "persistent", noDeadline: true },
+    } })
+    const bounded = MessageV2.fromError(failure("bounded", 403), { providerID })
+    const persistent = MessageV2.fromError(failure("persistent"), { providerID })
+    for (const phase of ["request", "stream"] as const) {
+      expect(budgetFor(config, decide(bounded, phase))).toMatchObject({
+        mode: "bounded", maxRetries: phase === "request" ? 4 : 5, maxElapsedMs: phase === "request" ? 30_000 : 600_000,
+      })
+      expect(budgetFor(config, decide(persistent, phase))).toMatchObject({ mode: "persistent", maxRetries: undefined, maxElapsedMs: 0 })
+      for (const scope of ["max-candidate", "max-judge"] as const) {
+        expect(budgetFor(config, decide(persistent, phase, scope))).toEqual(scope === "max-candidate" ? config.maxCandidate : config.maxJudge)
+      }
+    }
+  })
+
+  for (const phase of ["request", "stream"] as const) {
+    it.effect(`${phase} persistent host retry stops at the interactive wait budget`, () => Effect.gen(function* () {
+      const raw = failure("persistent")
+      let attempts = 0
+      const updates: Array<{ hostCode?: string; maxAttempts: number }> = []
+      const start = yield* Clock.currentTimeMillis
+      const fiber = yield* Effect.suspend(() => ++attempts <= 70 ? Effect.fail(raw) : Effect.succeed("recovered")).pipe(
+        Effect.retry(SessionRetry.policy({
+          phase, parse: (error) => MessageV2.fromError(error, { providerID }),
+          budget: () => ({ mode: "bounded", maxRetries: 1, maxElapsedMs: 30_000, initialDelayMs: 10_000, maxDelayMs: 10_000, jitterRatio: 0 }),
+          silentRetry: () => true,
+          set: (info) => Effect.sync(() => { updates.push(info) }),
+        })), Effect.exit, Effect.forkChild,
+      )
+      yield* TestClock.adjust("31 seconds")
+      expect(Exit.isFailure(yield* Fiber.join(fiber))).toBe(true)
+      expect((yield* Clock.currentTimeMillis) - start).toBe(31_000)
+      expect(attempts).toBe(4)
+      expect(updates).toHaveLength(3)
+      for (const update of updates) expect(update).toMatchObject({ hostCode: "host.example", maxAttempts: 0 })
+    }))
+
+    it.effect(`${phase} exact restricted 403 actually exhausts despite persistent configuration`, () => Effect.gen(function* () {
+      const raw = failure("bounded", 403)
+      let attempts = 0
+      const updates: number[] = []
+      const fiber = yield* Effect.suspend(() => { attempts++; return Effect.fail(raw) }).pipe(
+        Effect.retry(SessionRetry.policy({
+          phase, parse: (error) => MessageV2.fromError(error, { providerID }),
+          budget: () => ({ mode: "persistent", maxElapsedMs: 0, initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 }),
+          set: (info) => Effect.sync(() => { updates.push(info.maxAttempts) }),
+        })), Effect.exit, Effect.forkChild,
+      )
+      yield* TestClock.adjust("1 second")
+      expect(Exit.isFailure(yield* Fiber.join(fiber))).toBe(true)
+      expect(attempts).toBe(phase === "request" ? 5 : 6)
+      expect(updates).toEqual(Array.from({ length: attempts - 1 }, () => attempts - 1))
+    }))
+  }
+
+  it.effect("user cancellation interrupts a persistent wait without reopening requests", () => Effect.gen(function* () {
+    const raw = failure("persistent")
+    let attempts = 0
+    const fiber = yield* Effect.suspend(() => { attempts++; return Effect.fail(raw) }).pipe(
+      Effect.retry(SessionRetry.policy({
+        parse: (error) => MessageV2.fromError(error, { providerID }),
+        initialDelayMs: 30_000, set: () => Effect.void,
+      })), Effect.forkChild,
+    )
+    yield* TestClock.adjust("1 second")
+    expect(attempts).toBe(1)
+    yield* Fiber.interrupt(fiber)
+    yield* TestClock.adjust("2 hours")
+    expect(attempts).toBe(1)
+  }))
+
+  it.effect("native network with empty catalog stops at the interactive wait budget", () => Effect.gen(function* () {
+    loadHostErrorCatalog({ protocolVersion: 2, rules: [] })
+    let attempts = 0
+    const raw = new TypeError("fetch failed", { cause: Object.assign(new Error("connect failed"), { code: "ETIMEDOUT" }) })
+    const fiber = yield* Effect.suspend(() => ++attempts <= 70 ? Effect.fail(raw) : Effect.succeed("recovered")).pipe(
+      Effect.retry(SessionRetry.policy({
+        parse: (error) => MessageV2.fromError(error, { providerID }),
+        budget: () => ({ mode: "bounded", maxRetries: 1, maxElapsedMs: 1, initialDelayMs: 10_000, maxDelayMs: 10_000, jitterRatio: 0 }),
+        set: (info) => Effect.sync(() => { expect(info.hostCode).toBeUndefined() }),
+      })), Effect.exit, Effect.forkChild,
+    )
+    yield* TestClock.adjust("31 seconds")
+    expect(Exit.isFailure(yield* Fiber.join(fiber))).toBe(true)
+    expect(attempts).toBe(4)
+  }))
+
+  test("max candidate and judge retain finite isolation around host persistent failures", async () => {
+    for (const scope of ["max-candidate", "max-judge"] as const) {
+      const raw = failure("persistent")
+      let attempts = 0
+      await expect(Effect.runPromise(Effect.suspend(() => { attempts++; return Effect.fail(raw) }).pipe(Effect.retry(SessionRetry.policy({
+        scope, parse: (error) => MessageV2.fromError(error, { providerID }),
+        budget: () => ({ mode: "bounded", maxRetries: 2, maxElapsedMs: 1000, initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 }),
+        set: () => Effect.void,
+      }))))).rejects.toBe(raw)
+      expect(attempts).toBe(3)
+    }
+  })
+
+  test("terminal API responses and unsafe replay never schedule a retry", async () => {
+    for (const retryClass of ["terminal", "persistent"] as const) {
+      const raw = failure(retryClass)
+      let attempts = 0
+      let scheduled = 0
+      await expect(Effect.runPromise(Effect.suspend(() => { attempts++; return Effect.fail(raw) }).pipe(Effect.retry(SessionRetry.policy({
+        parse: (error) => MessageV2.fromError(error, { providerID }), replaySafe: () => retryClass !== "persistent",
+        set: () => Effect.sync(() => { scheduled++ }),
+      }))))).rejects.toBe(raw)
+      expect(attempts).toBe(1)
+      expect(scheduled).toBe(0)
+    }
+  })
+})
+
+describe("quota exhaustion is terminal (no retry before the provider reset)", () => {
+  const zaiMessage = "Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-07-23 03:49:14"
+
+  test("z.ai weekly/monthly limit APIError is not retryable", () => {
+    const error = new MessageV2.APIError({
+      message: zaiMessage,
+      statusCode: 429,
+      isRetryable: true,
+      responseBody: `{"error":{"message":"${zaiMessage}","code":"1310"}}`,
+    }).toObject()
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
+  test("quota text only in responseBody still blocks retry", () => {
+    const error = new MessageV2.APIError({
+      message: "Too Many Requests",
+      statusCode: 429,
+      isRetryable: true,
+      responseBody: '{"error":{"message":"exceeded your current quota"}}',
+    }).toObject()
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
+  test("openai / anthropic / google quota phrasings are not retryable", () => {
+    for (const message of [
+      "insufficient_quota",
+      "You exceeded your current quota, please check your plan and billing details.",
+      "Your credit balance is too low to access the Anthropic API.",
+      "Quota exceeded for quota metric",
+    ]) {
+      const error = new MessageV2.APIError({
+        message,
+        statusCode: 429,
+        isRetryable: true,
+      }).toObject()
+      expect(SessionRetry.retryable(error)).toBeUndefined()
+    }
+  })
+
+  test("plain rate-limit 429s stay retryable", () => {
+    const error = new MessageV2.APIError({
+      message: "Rate limit exceeded, please try again later",
+      statusCode: 429,
+      isRetryable: true,
+    }).toObject()
+    expect(SessionRetry.retryable(error)).toBeTruthy()
+  })
+
+  test("isRetryableTransientError treats quota 429 as terminal", () => {
+    const quota = Object.assign(new Error(zaiMessage), { statusCode: 429 })
+    expect(isRetryableTransientError(quota)).toBe(false)
+    const bodyOnly = Object.assign(new Error("http"), {
+      statusCode: 429,
+      responseBody: '{"error":{"message":"credit balance is too low"}}',
+    })
+    expect(isRetryableTransientError(bodyOnly)).toBe(false)
+    const plain = Object.assign(new Error("http"), { statusCode: 429 })
+    expect(isRetryableTransientError(plain)).toBe(true)
+  })
+})
+
+
+it.effect("request and stream retries share the operation wait budget", () => Effect.gen(function* () {
+  const shared = SessionRetry.createInteractiveBudget()
+  const error = new MessageV2.APIError({ message: "rate limited", statusCode: 429, isRetryable: true }).toObject()
+  const budget = (delay: number) => ({ mode: "bounded" as const, maxRetries: 4, maxElapsedMs: 0, initialDelayMs: delay, maxDelayMs: delay, jitterRatio: 0 })
+  let requests = 0
+  const request = yield* Effect.suspend(() => ++requests === 1 ? Effect.fail(error) : Effect.succeed("ok")).pipe(
+    Effect.retry(SessionRetry.policy({ phase: "request", parse: (e) => e as typeof error, budget: () => budget(20_000), interactiveBudget: shared, set: () => Effect.void })),
+    Effect.forkChild,
+  )
+  yield* TestClock.adjust("20 seconds")
+  expect(yield* Fiber.join(request)).toBe("ok")
+  let streams = 0
+  const stream = yield* Effect.suspend(() => { streams++; return Effect.fail(error) }).pipe(
+    Effect.retry(SessionRetry.policy({ phase: "stream", parse: (e) => e as typeof error, budget: () => budget(15_000), interactiveBudget: shared, set: () => Effect.void })),
+    Effect.exit,
+  )
+  expect(Exit.isFailure(stream)).toBe(true)
+  expect(requests).toBe(2)
+  expect(streams).toBe(1)
+}))

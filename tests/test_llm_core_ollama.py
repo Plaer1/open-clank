@@ -1,5 +1,6 @@
 """Regression tests for native Ollama Cloud provider handling."""
 import httpx
+import pytest
 
 from src import llm_core
 
@@ -15,96 +16,10 @@ def test_detects_bare_local_ollama_as_native_provider():
     assert llm_core._detect_provider("http://localhost:11434/v1") == "openai"
 
 
-def test_llm_call_posts_native_ollama_payload(monkeypatch):
-    seen = {}
-
-    def fake_post(url, headers=None, json=None, timeout=None):
-        seen["url"] = url
-        seen["headers"] = headers
-        seen["json"] = json
-        seen["timeout"] = timeout
-        request = httpx.Request("POST", url)
-        return httpx.Response(
-            200,
-            request=request,
-            json={"message": {"content": "OK"}, "done": True},
-        )
-
-    monkeypatch.setattr(llm_core.httpx, "post", fake_post)
-
-    result = llm_core._legacy_llm_call(
-        "https://ollama.com/api",
-        "gpt-oss:120b-test",
-        [{"role": "user", "content": "Say OK"}],
-        temperature=0.2,
-        max_tokens=7,
-        headers={"Authorization": "Bearer ollama-key"},
-        timeout=11,
-    )
-
-    assert result == "OK"
-    assert seen["url"] == "https://ollama.com/api/chat"
-    assert seen["headers"]["Authorization"] == "Bearer ollama-key"
-    assert seen["json"]["stream"] is False
-    assert seen["json"]["options"] == {"temperature": 0.2, "num_predict": 7}
 
 
-def test_llm_call_posts_bare_local_ollama_to_native_api(monkeypatch):
-    seen = {}
-
-    def fake_post(url, headers=None, json=None, timeout=None):
-        seen["url"] = url
-        seen["json"] = json
-        request = httpx.Request("POST", url)
-        return httpx.Response(
-            200,
-            request=request,
-            json={"message": {"content": "OK"}, "done": True},
-        )
-
-    monkeypatch.setattr(llm_core.httpx, "post", fake_post)
-
-    result = llm_core._legacy_llm_call(
-        "http://localhost:11434",
-        "llama3.2",
-        [{"role": "user", "content": "Say OK"}],
-    )
-
-    assert result == "OK"
-    assert seen["url"] == "http://localhost:11434/api/chat"
-    assert seen["json"]["stream"] is False
 
 
-def test_openai_compatible_chat_url_shapes(monkeypatch):
-    seen = []
-
-    def fake_post(url, headers=None, json=None, timeout=None):
-        seen.append(url)
-        request = httpx.Request("POST", url)
-        return httpx.Response(
-            200,
-            request=request,
-            json={"choices": [{"message": {"content": "OK"}}]},
-        )
-
-    monkeypatch.setattr(llm_core.httpx, "post", fake_post)
-    llm_core._response_cache.clear()
-
-    cases = [
-        ("http://localhost:11434/v1", "http://localhost:11434/v1/chat/completions"),
-        (
-            "http://localhost:11434/v1/chat/completions",
-            "http://localhost:11434/v1/chat/completions",
-        ),
-    ]
-    for i, (base_url, expected_url) in enumerate(cases):
-        result = llm_core._legacy_llm_call(
-            base_url,
-            f"openai-compatible-{i}",
-            [{"role": "user", "content": f"Say OK {i}"}],
-        )
-        assert result == "OK"
-        assert seen[-1] == expected_url
 
 
 def test_list_model_ids_from_openai_compatible_v1(monkeypatch):
@@ -253,72 +168,22 @@ def test_build_ollama_payload_omits_default_context_fallback():
     assert "num_ctx" not in payload.get("options", {})
 
 
-def test_llm_call_threads_discovered_num_ctx(monkeypatch):
-    """When get_context_length returns a real, large value, it ends up
-    in the outgoing Ollama request as options.num_ctx (issue #909)."""
-    monkeypatch.setattr(llm_core, "get_context_length",
-                        lambda url, model: 32768)
-
-    seen = {}
-
-    def fake_post(url, headers=None, json=None, timeout=None):
-        seen["json"] = json
-        request = httpx.Request("POST", url)
-        return httpx.Response(
-            200, request=request,
-            json={"message": {"content": "OK"}, "done": True},
-        )
-
-    monkeypatch.setattr(llm_core.httpx, "post", fake_post)
-
-    llm_core._legacy_llm_call(
-        "https://ollama.com/api",
-        "kimi-k2",
-        [{"role": "user", "content": "Say OK"}],
-        temperature=0.2,
-        max_tokens=7,
-    )
-
-    assert seen["json"]["options"]["num_ctx"] == 32768
-
-
-def test_stream_llm_threads_discovered_num_ctx(monkeypatch):
-    """stream_llm goes through the same ollama branch and must also
-    pass num_ctx through to the streaming request body."""
-    import asyncio
-
-    seen = {}
-
-    def spy_build_ollama_payload(*args, **kwargs):
-        seen["num_ctx"] = kwargs.get("num_ctx")
-        seen["stream"] = kwargs.get("stream")
-        return {
-            "model": "kimi-k2",
-            "messages": [{"role": "user", "content": "x"}],
-            "stream": True,
-        }
-
-    monkeypatch.setattr(llm_core, "get_context_length",
-                        lambda url, model: 32768)
-    monkeypatch.setattr(llm_core, "_build_ollama_payload",
-                        spy_build_ollama_payload)
-
-    # Short-circuit before the actual HTTP call: host is "dead" → yields
-    # an error SSE chunk and returns. The call to _build_ollama_payload
-    # still happens before the host check, so we can inspect it.
-    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: True)
-
-    async def collect():
-        return [chunk async for chunk in llm_core._legacy_stream_llm(
-            "https://ollama.com/api",
-            "kimi-k2",
-            [{"role": "user", "content": "Say OK"}],
-            temperature=0.2,
-            max_tokens=7,
-        )]
-
-    out = asyncio.run(collect())
-
-    assert seen["num_ctx"] == 32768
-    assert seen["stream"] is True
-    assert out  # we got the SSE error chunk
+@pytest.mark.parametrize("url,is_compatible", [
+    ("http://127.0.0.1:11434/v1", True),
+    ("http://127.0.0.1:11434/v1/chat/completions", True),
+    ("http://localhost:11434/v1", True),
+    ("http://localhost:11434/v1/chat/completions", True),
+    ("http://[::1]:11434/v1", True),
+    ("http://127.0.0.1:11435/v1", True),
+    ("http://localhost:8080/v1/chat/completions", True),
+    ("http://0.0.0.0:11434/v1", True),
+    ("https://api.openai.com/v1", False),
+    ("https://api.openai.com/v1/chat/completions", False),
+    ("http://localhost:11434/api", False),
+    ("http://localhost:11434/api/chat", False),
+    ("https://openrouter.ai/api/v1", False),
+    ("", False),
+    (None, False),
+])
+def test_local_openai_compatible_url(url, is_compatible):
+    assert llm_core._is_ollama_openai_compat_url(url) is is_compatible

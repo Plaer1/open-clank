@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.openclank import code_performance as metrics
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 
 
 def test_disabled_capture_does_not_read_clock(monkeypatch):
@@ -70,7 +70,7 @@ async def test_queue_explicitly_binds_origin_task_not_owner_context(monkeypatch)
 
 
 def provider_with_call(call):
-    provider = FrankenmemoryProvider.__new__(FrankenmemoryProvider)
+    provider = MemeryProvider.__new__(MemeryProvider)
     provider._broker_url = None
     provider._scope = lambda owner: None
     provider._call_tool = call

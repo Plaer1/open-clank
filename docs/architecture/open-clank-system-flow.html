@@ -316,7 +316,7 @@
   <main class="page">
     <header class="topbar">
       <div>
-        <h1>Open-Clank: Odysseus, MiMo Code, Frankenmemory, and the custom glue</h1>
+        <h1>Open-Clank: Odysseus, MiMo Code, Memery, and the custom glue</h1>
         <p class="subtitle">
           Current architecture map of the hybrid stack: Odysseus remains the app shell, data plane, UI, auth, and owner-facing product. MiMo Code is the child agent brain. Open-Clank glue binds them through ACP, shared memory, permission UX, and repo governance.
         </p>
@@ -336,8 +336,8 @@
 
       <div class="flow-wrap">
         <svg viewBox="0 0 1560 990" role="img" aria-labelledby="diagram-title diagram-desc">
-          <title id="diagram-title">Detailed flowchart showing Odysseus, MiMo Code, Frankenmemory, and Open-Clank glue</title>
-          <desc id="diagram-desc">Browser requests enter Odysseus, agent turns route through the Open-Clank ACP bridge to MiMo Code, memory converges on Frankenmemory, and permission or governance loops feed back through Odysseus.</desc>
+          <title id="diagram-title">Detailed flowchart showing Odysseus, MiMo Code, Memery, and Open-Clank glue</title>
+          <desc id="diagram-desc">Browser requests enter Odysseus, agent turns route through the Open-Clank ACP bridge to MiMo Code, memory converges on Memery, and permission or governance loops feed back through Odysseus.</desc>
 
           <defs>
             <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -382,7 +382,7 @@
           <text class="label" x="382" y="144">routes/chat_routes.py</text>
           <text class="label" x="382" y="162">POST /api/chat_stream</text>
           <text class="small" x="382" y="184">Session owner gate, model gate, stream save</text>
-          <text class="small" x="382" y="202">Routes agent mode to MiMo when OPENTHESIUS_DRIVE=mimo</text>
+          <text class="small" x="382" y="202">Routes agent mode to the engine when OPEN_CLANK_AGENT_DRIVE=acp</text>
 
           <rect class="box box-hot" x="362" y="250" width="316" height="112"></rect>
           <text class="title" x="382" y="276">Odysseus app core</text>
@@ -393,9 +393,9 @@
           <rect class="box box-blue" x="362" y="402" width="316" height="134"></rect>
           <text class="title" x="382" y="428">MimoSupervisor</text>
           <text class="label" x="382" y="450">src/openclank/mimo_supervisor.py</text>
-          <text class="small" x="382" y="472">Starts bin/mimo acp as child process</text>
-          <text class="small" x="382" y="490">Injects MIMOCODE_CONFIG_CONTENT</text>
-          <text class="small" x="382" y="508">Passes MIMOCODE_HOME, FM_DB_PATH, safe dirs</text>
+          <text class="small" x="382" y="472">Starts openclank-engine acp as child process</text>
+          <text class="small" x="382" y="490">Injects OPENCLANK_CONFIG_CONTENT</text>
+          <text class="small" x="382" y="508">Passes engine home and approved workspace</text>
           <text class="small" x="382" y="526">Creates permission handler + ACPBridge</text>
 
           <rect class="box box-blue" x="362" y="578" width="316" height="136"></rect>
@@ -404,7 +404,7 @@
           <text class="small" x="382" y="648">Maps Odysseus session to MiMo session id</text>
           <text class="small" x="382" y="666">Pre-turn recall injects GT context</text>
           <text class="small" x="382" y="684">Converts MiMo session/update to Odysseus SSE</text>
-          <text class="small" x="382" y="702">Provides lifetools + frankenmemory MCP descriptors</text>
+          <text class="small" x="382" y="702">Connects Lifetools and scoped Memery access</text>
 
           <rect class="box box-purple" x="362" y="754" width="316" height="116"></rect>
           <text class="title" x="382" y="780">PermissionHandler + GrantStore</text>
@@ -452,25 +452,25 @@
 
           <!-- Shared lane -->
           <rect class="box box-green" x="1160" y="96" width="336" height="144"></rect>
-          <text class="title" x="1180" y="122">Frankenmemory MCP engine</text>
-          <text class="label" x="1180" y="144">mcp_servers/frankenmemory/target/release/fm-mcp</text>
-          <text class="small" x="1180" y="166">Rust MCP over stdio</text>
+          <text class="title" x="1180" y="122">Memery worker</text>
+          <text class="label" x="1180" y="144">native/memery/target/release/memery-worker</text>
+          <text class="small" x="1180" y="166">Host-owned Rust worker</text>
           <text class="small" x="1180" y="184">capture / recall / search / groom</text>
           <text class="small" x="1180" y="202">graph_upsert / graph_walk / code_index</text>
           <text class="small" x="1180" y="220">Auto-built at app startup if needed</text>
 
           <rect class="box box-green" x="1160" y="278" width="336" height="136"></rect>
-          <text class="title" x="1180" y="304">data/frankenmemory.db</text>
+          <text class="title" x="1180" y="304">Memery SQLite store</text>
           <text class="label" x="1180" y="326">SQLite + WAL + FTS5 + vectors</text>
           <text class="small" x="1180" y="348">raw, curated, facts</text>
           <text class="small" x="1180" y="366">graph_nodes, graph_edges, graph_cues</text>
           <text class="small" x="1180" y="384">code_files + code graph nodes</text>
-          <text class="small" x="1180" y="402">Converged through FM_DB_PATH</text>
+          <text class="small" x="1180" y="402">Host selects the Memery store</text>
 
           <rect class="box box-green" x="1160" y="452" width="336" height="128"></rect>
-          <text class="title" x="1180" y="478">Odysseus FrankenmemoryProvider</text>
-          <text class="label" x="1180" y="500">src/frankenmemory_provider.py</text>
-          <text class="small" x="1180" y="522">Owner-task actor owns MCP stdio session</text>
+          <text class="title" x="1180" y="478">Open Clank Memery provider</text>
+          <text class="label" x="1180" y="500">src/memery_provider.py</text>
+          <text class="small" x="1180" y="522">Host owns worker lifecycle</text>
           <text class="small" x="1180" y="540">Prevents cross-task cancel-scope transport bug</text>
           <text class="small" x="1180" y="558">Feeds pre-turn recall back into ACPBridge</text>
 
@@ -529,10 +529,10 @@
           <text class="tiny" x="930" y="548">pre-turn recall hits</text>
 
           <path class="arrow arrow-green" d="M1160 486 C1088 486, 1052 122, 1074 122"></path>
-          <text class="tiny" x="1085" y="111">MCP recall/search</text>
+          <text class="tiny" x="1085" y="111">Scoped recall/search</text>
 
           <path class="arrow arrow-green" d="M1226 452 C1128 420, 1062 412, 1074 402"></path>
-          <text class="tiny" x="1095" y="423">shared FM_DB_PATH</text>
+          <text class="tiny" x="1095" y="423">host-selected store</text>
 
           <!-- tools and permission -->
           <path class="arrow arrow-hot" d="M1074 302 C1116 302, 1118 682, 1160 682"></path>
@@ -568,7 +568,7 @@
           <path class="arrow arrow-gold" d="M678 424 C720 424, 728 418, 770 418"></path>
 
           <!-- labels at bottom -->
-          <text class="small" x="54" y="936">Odysseus owns UX and persistence. MiMo owns agent execution. Frankenmemory owns cross-process memory. Open-Clank glue owns the fit.</text>
+          <text class="small" x="54" y="936">Odysseus owns UX and persistence. MiMo owns agent execution. Memery owns cross-process memory. Open-Clank glue owns the fit.</text>
           <text class="tiny" x="54" y="958">Generated as a static HTML/SVG architecture artifact. No runtime dependencies; open directly in browser.</text>
         </svg>
       </div>
@@ -594,11 +594,11 @@
       </article>
 
       <article class="note">
-        <h2>Frankenmemory is the shared memory plane</h2>
+        <h2>Memery is the shared memory plane</h2>
         <ul>
-          <li>Odysseus pre-turn recall and MiMo capture both call <code>fm-mcp</code>.</li>
-          <li><code>FM_DB_PATH</code> converges all spawners on one SQLite DB.</li>
-          <li>Graph extraction, graph walk, groom, and code_index ride the same MCP surface.</li>
+          <li>Open Clank prepares memory before model dispatch and owns completed-turn capture.</li>
+          <li>The host selects the SQLite store with <code>OPEN_CLANK_MEMERY_DB_PATH</code>.</li>
+          <li>Graph extraction, graph walk, groom, and code_index use the host-owned Memery service.</li>
         </ul>
       </article>
 

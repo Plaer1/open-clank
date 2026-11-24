@@ -27,6 +27,16 @@ export const ActorModel = z.strictObject({
 })
 export type ActorModel = z.infer<typeof ActorModel>
 
+export const ActorModelOptions = z.strictObject({
+  version: z.literal(1), routeID: z.string().min(1), optionRouteID: z.string().min(1),
+  catalogRevision: z.number().int().positive(), model: ActorModel,
+  options: z.strictObject({ reasoning_effort: z.string().min(1).optional() }),
+  source: z.strictObject({ kind: z.enum(["parent_execution", "default", "receipt"]), requestID: z.string().optional(),
+    sessionID: z.string().optional(), actorID: z.string().optional(), executionRevision: z.number().int().nonnegative().optional(),
+    rootOperationID: z.string().optional(), messageID: z.string().optional() }),
+})
+export type ActorModelOptions = z.infer<typeof ActorModelOptions>
+
 // Host-owned continuation identity. Provider OAuth account identifiers are
 // deliberately absent: they are adapter/header metadata and must never become
 // actor identity. The binding is copied at spawn time and remains stable for a
@@ -55,12 +65,14 @@ export const Actor = z
     lifecycle: Lifecycle,
     agent: z.string(),
     description: z.string(),
+    display: z.strictObject({ ordinal:z.number().int().positive().safe(), label:z.string().min(1).max(200), revision:z.number().int().nonnegative().safe(), origin:z.enum(["deterministic","helper","manual"]), renameAvailable:z.boolean() }).optional(),
     contextMode: ContextMode,
     contextWatermark: MessageID.zod.optional(),
     background: z.boolean(),
     tools: ToolWhitelist.optional(),
     requestedModel: z.string().min(1).optional(),
     effectiveModel: ActorModel.optional(),
+    modelRequestOptions: ActorModelOptions.optional(),
     hostContext: ActorHostContext.optional(),
     lastTurnTime: z.number(),
     turnCount: z.number(),

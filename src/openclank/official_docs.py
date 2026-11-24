@@ -4,9 +4,9 @@ This module owns the first-party official content that is exposed through
 small top-level read-only reference records in every account's Copal. Canonical
 bodies live in official_docs_content; owner records retain identity and revision metadata
 without duplicating the handbook bytes. Content reflects the approved
-host/product behavior: Wiki has a distinct page-authoring applet over the
-shared Editor document core, image work uses Files/Imps, Theme lives in Settings, Graph hides
-provisioned docs by identity. Repository docs under ``docs/`` remain
+host/product behavior: Wiki is a page-authoring mode over the
+shared Editor document core. Journals and images open in Editor, Theme lives in
+Settings, and Graph hides provisioned docs by identity. Repository docs under ``docs/`` remain
 learning/reference material and are not relocated by this module.
 
 The manifest is data, not a home-directory side effect. Stable article IDs,
@@ -51,7 +51,11 @@ from typing import Any
 # v27 — shared learning discovery, solo Records and per-window navigation labels.
 # v28 — editable shared/private course sources, explicit Save and metadata reindex.
 # v33 — current Beta 2 release/setup prose; historical media identities retained.
-OFFICIAL_DOCS_SEED_VERSION = 33
+# v34 — Journal handbook navigation and one Editor for documents and images.
+# v42 — revised manual, including Journal, Deliverables, Buddy and Clankshop.
+# v43 — contextual figures, canonical Instruction Manual title and localized articles.
+# v51 — current settings paths, turn previews, per-lane prompts, languages and fonts.
+OFFICIAL_DOCS_SEED_VERSION = 51
 
 # Top-level folder that holds every provisioned official page. Derived identity
 # (product/builtin markers) is the real recognition mechanism; this name is the
@@ -67,9 +71,7 @@ _ARTICLE: dict[str, dict[str, Any]] = {}
 
 
 def _article(article_id: str, name: str, title: str, body: str, *, aliases: tuple[str, ...] = (), order: int = 0) -> None:
-    media = article_media(ARTICLE_ASSETS.get(article_id, ()))
-    if media:
-        body = body.rstrip() + "\n\n## Demonstration media\n\n" + media + "\n"
+    body = place_article_media(body, ARTICLE_ASSETS.get(article_id, ()))
     _ARTICLE[article_id] = {
         "id": article_id,
         "name": name,
@@ -82,17 +84,11 @@ def _article(article_id: str, name: str, title: str, body: str, *, aliases: tupl
 
 # ── Canonical content bundle ────────────────────────────────────────────────
 # Keep provisioning and native-note encoding here; author bodies in one place.
-from .official_docs_assets import ASSETS, article_media
-from .official_docs_content import (
-    ADDITIONAL_ARTICLES, ARTICLE_ASSETS, ARTICLE_CONTENT, ARTICLE_EXAMPLES,
-    EXISTING_ARTICLES,
-)
+from .official_docs_assets import ASSETS, place_article_media
+from .official_docs_content import ARTICLE_ASSETS, ARTICLE_EXAMPLES, manual_pages
 
-for _id, _name, _title, _aliases, _order in EXISTING_ARTICLES:
-    _article(_id, _name, _title, ARTICLE_CONTENT[_id], aliases=_aliases, order=_order)
-for _order, (_id, _title, _body) in enumerate(ADDITIONAL_ARTICLES, start=len(EXISTING_ARTICLES)):
-    _aliases = ("TreeHouse and Field Guide", "OpenClank/TreeHouse and Field Guide") if _id == "openclank-docs-treehouse" else ()
-    _article(_id, f"{OFFICIAL_ROOT_FOLDER}/{_title}", _title, _body, aliases=_aliases, order=_order)
+for _id, _name, _title, _body, _aliases, _order in manual_pages():
+    _article(_id, _name, _title, _body, aliases=_aliases, order=_order)
 
 
 # ── Manifest access ──────────────────────────────────────────────────────────
@@ -189,7 +185,7 @@ def _property_records(properties: dict[str, Any], namespace: str) -> list[dict[s
 
 
 def encode_official_note(body: str, properties: dict[str, Any]) -> str:
-    """Encode one official article body as a native Copal note record.
+    """Encode one official article body as a native journal page record.
 
     ``properties`` must already carry the identity markers (product, builtin,
     docId). The returned JSON is the document content stored by the bridge.
@@ -335,6 +331,59 @@ def official_reference(article_id: str) -> dict[str, Any] | None:
     """Resolve one installed handbook payload without creating an owner copy."""
     reference = _cached_official_references(OFFICIAL_DOCS_SEED_VERSION).get(str(article_id or ""))
     return dict(reference) if reference is not None else None
+
+
+# Known labels map to their maintained handbook topic. A passing mention
+# elsewhere in the manual cannot displace the relevant article.
+_BUDDY_TOPICS = {
+    label: (f"openclank-docs-{article}", topic)
+    for article, topics in (
+        ("chat-workspaces", {"New Chat": "new chat", "Chat Workspace": "workspace", "Chat composer": "chat composer", "Chats": "chat", "Chat": "chat"}),
+        ("app-windows", {"Copal": "Copal", "Tools": "Tools", "Chat title bar": "Arrange the work"}),
+        ("journal", {"Journal": "Write a journal page", "Journal page": "Write a journal page", "New journal page": "New journal page", "Journal explorer": "Editor’s file sidebar", "Manage journals": "Manage Journals"}),
+        ("buddy", {"Buddy": "Explain this to me"}),
+        ("clankshop", {"Clankshop": "Workshop", "Drift route selector": "Drift"}),
+        ("editor", {"Explorer": "Explorer", "Text editor": "Editor", "Editor": "editor",
+                    "Save file": "Save, Undo and close", "Document tabs": "Open and arrange work", "Editor activity rail": "left rail",
+                    "Document details": "Details", "Document outline": "active document",
+                    "Document links": "linked pages", "Recent documents": "Explore the workspace",
+                    "Document search": "Explore the workspace"}),
+        ("wiki-recipes", {"Wiki reader and editor": "Open Wiki and preserve native data", "Wiki": "Wiki"}),
+        ("files-imps", {"Files": "Files", "Image editor": "Image projects in Editor"}),
+        ("graph", {"Graph viewer": "Find a useful view", "Graph": "graph", "Graph view selector": "graph view", "Reset graph filters": "filters", "Graph inspector": "relationships", "Graph sidebar": "Find a useful view"}),
+        ("treehouse", {"TreeHouse": "TreeHouse", "Achievements": "Achievements"}),
+        ("home", {"Help": "self-hosted AI workspace", "Instruction Manual": "Open Clank"}),
+        ("tasks", {"Meatbag Tasks": "meatbag", "Clanker Tasks": "clanker"}),
+        ("calendar-email", {"Email": "Email", "Calendar": "Calendar", "Timeline": "Timeline"}),
+        ("compare-cookbook", {"Compare": "compare", "Cookbook": "cookbook"}),
+        ("memory-lore", {"Memery": "memory"}),
+        ("settings-themes", {"Theme": "theme", "Settings": "settings"}),
+        ("usage", {"Usage": "usage"}),
+        ("search-media", {"Deep Research": "deep research"}),
+    )
+    for label, topic in topics.items()
+}
+
+
+def buddy_help_prompt(element: str) -> str:
+    if not isinstance(element, str) or element not in _BUDDY_TOPICS:
+        raise ValueError("Unknown Open Clank help target")
+    return f"Explain the {element} in the Open Clank app, tell me -quiet (but with all required info)."
+
+
+@lru_cache(maxsize=len(_BUDDY_TOPICS))
+def run_buddy_help_tool(element: str) -> tuple[str, dict[str, str] | None]:
+    """Retrieve installed handbook passages for the explicit Buddy action."""
+    from src.memery_rag import search_bundled_documents
+
+    article_id, topic = _BUDDY_TOPICS[element]
+    article = _ARTICLE[article_id]
+    passages = search_bundled_documents([{**article, "docId": article_id}], topic)
+    if not passages:
+        return "", None
+    evidence = "\n\n".join(f'{page["article"]} · {page["article_id"]}\n{page["text"][:1700]}' for page in passages)
+    source = passages[0]
+    return evidence, {"article_id": source["article_id"], "title": source["article"], "term": element}
 
 
 # ── Provisioning plan ────────────────────────────────────────────────────────

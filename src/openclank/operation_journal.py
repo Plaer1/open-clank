@@ -64,6 +64,43 @@ class OperationJournalStore:
         db.expunge(row)
         return row
 
+    def lookup_exact(self, *, owner: str, root_operation_id: str, idempotency_key: str,
+                     operation_id: str, revision: int, request: Mapping[str, Any]) -> OperationJournal:
+        """Read a caller-authenticated exact journal identity; never mutate it."""
+        normalized_owner = str(owner or '').strip().lower()
+        if (not normalized_owner or not root_operation_id or not operation_id or not idempotency_key
+            or type(revision) is not int or revision < 1):
+            raise OperationJournalError('exact operation identity unavailable')
+        digest = canonical_request_hash(request)
+        db = self._session_factory()
+        try:
+            row = db.query(OperationJournal).filter_by(owner=normalized_owner,id=operation_id,
+                root_operation_id=root_operation_id,idempotency_key=idempotency_key).first()
+            if row is None or row.revision != revision or row.request_hash != digest:
+                raise OperationJournalError('exact operation evidence unavailable')
+            db.expunge(row)
+            return row
+        finally:
+            db.close()
+
+    def discover_exact(self, *, owner: str, root_operation_id: str, idempotency_key: str,
+                       request: Mapping[str, Any]) -> tuple[str, int] | None:
+        """Discover only the uniquely keyed matching journal row, without writing."""
+        normalized_owner = str(owner or '').strip().lower()
+        if (not normalized_owner or not root_operation_id or not isinstance(idempotency_key, str)
+            or idempotency_key != idempotency_key.strip() or not 16 <= len(idempotency_key) <= 128):
+            return None
+        digest = canonical_request_hash(request)
+        db = self._session_factory()
+        try:
+            rows = db.query(OperationJournal).filter_by(owner=normalized_owner, root_operation_id=root_operation_id,
+                idempotency_key=idempotency_key).limit(2).all()
+            if len(rows) != 1 or rows[0].request_hash != digest or type(rows[0].revision) is not int or rows[0].revision < 1:
+                return None
+            return rows[0].id, rows[0].revision
+        finally:
+            db.close()
+
     def begin(
         self,
         *,

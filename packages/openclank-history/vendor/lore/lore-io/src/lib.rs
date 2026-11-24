@@ -26,19 +26,54 @@
 //!   kernel finishes during the issuing call never reach the port, and the
 //!   rest are completed by a single reaper. Control-plane operations run on
 //!   the syscall pool.
+//!
+//! The [`clone`] module is the exception: blocking calls that clone or copy a
+//! directory tree, which a caller on an async runtime runs on a blocking thread.
 
 mod buffer;
+pub mod clone;
 mod dir;
+#[cfg(not(feature = "test-util"))]
 mod driver;
+#[cfg(feature = "test-util")]
+pub mod driver;
+#[cfg(not(feature = "test-util"))]
 mod file;
-#[cfg(target_family = "windows")]
+#[cfg(feature = "test-util")]
+pub mod file;
+#[cfg(all(target_family = "windows", not(feature = "test-util")))]
+mod find;
+#[cfg(all(target_family = "windows", feature = "test-util"))]
+pub mod find;
+#[cfg(all(target_family = "windows", not(feature = "test-util")))]
 mod iocp;
+#[cfg(all(target_family = "windows", feature = "test-util"))]
+pub mod iocp;
 #[cfg(target_family = "windows")]
 mod overlapped;
+#[cfg(not(feature = "test-util"))]
 mod pool;
+#[cfg(feature = "test-util")]
+pub mod pool;
+#[cfg(not(feature = "test-util"))]
+mod priority;
+#[cfg(feature = "test-util")]
+pub mod priority;
+#[cfg(not(feature = "test-util"))]
 mod psync;
+#[cfg(feature = "test_faults")]
+pub use psync::inject_directory_sync_failures;
+#[cfg(feature = "test-util")]
+pub mod psync;
+pub mod rename;
+#[cfg(not(feature = "test-util"))]
+mod stat;
+#[cfg(feature = "test-util")]
+pub mod stat;
 #[cfg(target_os = "linux")]
 mod uring;
+#[cfg(target_family = "windows")]
+pub mod win_path;
 
 pub use buffer::StableBuf;
 pub use buffer::StableBufList;
@@ -56,8 +91,8 @@ pub use iocp::IocpStats;
 pub use pool::PoolStats;
 pub use pool::requested_max_threads;
 pub use pool::set_max_threads;
-#[cfg(feature = "test_faults")]
-pub use psync::inject_directory_sync_failures;
+pub use stat::Stat;
+pub use stat::StatKind;
 #[cfg(target_os = "linux")]
 pub use uring::UringStats;
 

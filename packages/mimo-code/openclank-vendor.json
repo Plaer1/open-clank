@@ -5,7 +5,7 @@
   "vendor": {
     "name": "MiMo Code",
     "upstream_repository": "https://github.com/XiaomiMiMo/mimo-code.git",
-    "upstream_commit": "2bda17944b346ab85c8ee3cf0a0d4ab24819d37c",
+    "upstream_commit": "c9c91d7b6fff20164629475218fa0a58e16d14b8",
     "open_clank_import_commit": "f53c8a3e86f258164ff47eae00a03559a38895cf",
     "open_clank_import_tree": "26804958956abe82dfe4d46bec0f9ac07d334c39"
   },
@@ -49,11 +49,11 @@
   "inputs": {
     "lockfile": {
       "path": "bun.lock",
-      "sha256": "bc98f5726eb7d0482ca5c04dcc5493134f0300d647b763a7f454dccd65af92bb"
+      "sha256": "5cff2be21599e29f72f834a126dc7d7efaeea1c294899f6338f4158dbf4422fb"
     },
     "model_catalog": {
-      "path": "packages/opencode/test/tool/fixtures/models-api.json",
-      "sha256": "33f836f532fd8ada58f255f11030ff5500d45b0cf7e63587772221050ffb1f48"
+      "path": "packages/cli/test/tool/fixtures/models-api.json",
+      "sha256": "3595f259b98f5dff524317aee8acfce4bd8944129b7767bf38a7ff9ad49b8c7a"
     }
   },
   "protocols": {
@@ -65,13 +65,13 @@
     "id": "https://openclank.dev/contracts/managed-provider/v2",
     "version": 2,
     "repository_path": "contracts/openclank/managed-provider-v2.schema.json",
-    "sha256": "41620c9c18f1be69b82efd0413840cf2839e16e21193369d7311eb40595c430f"
+    "sha256": "6f814b20c4a138996b2885725091ee28656da0f806a8d6753afb79f01f0eea8a"
   },
   "build": {
     "contract_version": 1,
-    "source_date_epoch": 1785240447,
+    "source_date_epoch": 1794499778,
     "source_hash_algorithm": "openclank-tree-sha256-v1",
-    "source_sha256": "8249ae560f4c155c09c6c86a2fbfbe19c9eaa41ae54b4ff2764a0edb135be654",
+    "source_sha256": "da1f25fbb5c4cc3f5393c4ec5661b3d097cc18d5282b7717e91651c53e7b67fc",
     "tier_1_targets": [
       "linux-x64",
       "linux-arm64",

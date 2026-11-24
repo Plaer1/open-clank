@@ -1,110 +1,61 @@
-# Open Clank · Beta 2
+# Open Clank · Beta 3
 
-![Open Clank](docs/assets/open-clank-banner.svg)
+![Open Clank Beta 3, with the gold eye and six woven color bands.](docs/assets/open-clank-banner.webp)
 
-A self-hosted workspace for models, agents, files and knowledge.
+Open Clank brings an Obsidian-style journal, a code editor, and a code graph into one self-hosted workspace. Your agent can work with the same notes and source files you do.
 
-| Work | Where |
-| --- | --- |
-| Talk to models and use agent tools | Chat, Add Models, MiMo Code |
-| Create, edit and link material | Files, Editor, Wiki, Graph |
-| Plan and follow work | Tasks, calendar, email, reminders |
-| Learn and practice | TreeHouse: Programming, Games, AI and Open Clank |
-| Inspect and customize | History, Usage, Settings, themes and applet layouts |
+[Get started](#get-started) · [Explore the workspace](#journal-source-and-graph) · [See the backgrounds](#make-the-workspace-yours)
 
-Editor and Wiki share documents, drafts and Undo. **Save** or Command/Control+S
-persists changes. Closing dirty work offers Save, Discard or Cancel. Local draft
-recovery is not a save. Files owns managed resources and image/Imps work.
+## Journal, source, and graph
 
-TreeHouse has four shared **Main Quests**: Programming, Games, AI and Open Clank.
-General concepts and product practice have separate homes, with linked topics
-and independent subject resume. Read freely; required work collects responses
-or actual outcome evidence. Self-report is labeled separately from reviewed or
-verified work. Responses, drafts and failed attempts stay available;
-prerequisites gate only confirmed practical success. Private courses, sharing
-and click-through Tutorials remain available. Read the maintained **TreeHouse**
-article through **Settings → Help**.
+**Copal** is an open-source alternative to Obsidian. Connect journal pages with `[[page names]]`, follow backlinks in Wiki, and keep the source file you’re writing about open beside your notes. Editor renders Markdown and pictures inside supported code comments.
 
-![Programming, Games, AI and Open Clank in the TreeHouse hub](static/docs/media/treehouse-four-main-quests-20261014/preview-960.webp)
+![Open Clank Editor displaying agent_loop.py, with Rick Astley at the microphone inside its rendered Python docstring.](docs/assets/agent-loop-editor.webp)
 
-**Code Graph remains Alpha.** Open an approved code folder to inspect files,
-lazy symbol children and supported typed relationships. Indexed metadata and
-literal source-content search have separate scopes. Resource and display controls
-remain bounded by native limits; indexing may report explicit partial coverage.
-See [Beta 2 notes](docs/beta2.md) for the scope and limits.
+*The image is part of [agent_loop.py](src/agent_loop.py). Open the file in Editor and its docstring renders in place.*
 
-## Start
+![Journal open in Editor, with project notes in the sidebar and links on the welcome page.](docs/assets/journal.webp)
 
-**macOS 15+, Apple Silicon:** use `Open-Clank-1.0.3-macos-arm64.dmg` when offered
-by the [application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2).
-Check its checksum and source/target provenance. Drag **OpenClank.app** to
-Applications, [install the verified offline artwork](docs/setup.md#macos-app-package)
-with its packaged CLI, then open the app. Private Python, Engine and native
-helpers are included. The pyramid-and-eye menu offers **Open** and **Quit**;
-there is no Dock icon. The Beta app is ad-hoc signed, not notarized.
+**Graph** gives you two ways to follow a connection. In Journal & Wiki, trace a page to related notes and referenced files. In Code, open a project folder, expand a file into symbols, and follow a call to its definition.
 
-Create the first administrator in browser setup, then sign in. Authentication
-is required even on localhost. The normal address is `http://127.0.0.1:7777`;
-use the address printed by your launcher. Keep generated setup credentials
-private and change temporary passwords.
+![Code Graph in Editor showing the agent loop and its indexed Python symbols.](docs/assets/code-graph.webp)
 
-Your Open Clank account owns workspace data. Model access is separate:
-**Settings → Add Models → Local, API or Subscription**, then select a model in
-Chat. Provider subscriptions may not include API credits; check provider charges
-and quotas before sending requests.
+**Files** opens the same workspace as a directory. Here the agent loop sits alongside its settings, run tracking, and accounting modules.
 
-Source setup needs Python 3.11+, Rust/Cargo and the platform prerequisites in
-[setup](docs/setup.md). On Apple Silicon, install Homebrew, ARM-native Python and
-Xcode Command Line Tools. A clone/source archive omits the full offline artwork:
-obtain matching part files and `emoji-assets.parts.json` from the
-[compact artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact),
-then run from the extracted source root:
+![Files displaying the workspace’s src folder and four Python modules in Details view.](docs/assets/files.webp)
 
-```bash
-python3 scripts/emoji_asset_bundle.py assemble --parts /path/to/emoji-parts
-python3 scripts/emoji_asset_bundle.py verify
-./start-macos.sh
-```
+## Learn, plan, and pick up where you left off
 
-First source setup downloads dependencies and builds native workers. Follow
-[complete source/artwork instructions](docs/setup.md#offline-emoji-artwork) and
-[upgrade preflight](docs/upgrading.md) for existing data.
+**TreeHouse**, the pre-alpha learning suite, connects lessons with hands-on practice. A lesson on recursive calls leads straight to induction and recursive data. Follow the connection now or resume it later.
 
-## Support and limits
+![The Recursive calls lesson shows related topics and the prerequisite for practice.](static/docs/media/manual-treehouse-linked-lesson/preview.webp)
 
-- Beta 2 is the second beta release; machine version is `1.0.3`. Include the
-  installed revision when reporting problems.
-- macOS Apple Silicon package/source workflows have bounded qualification;
-  Intel/universal builds are not claimed. Windows **source** workflows are
-  tested; ARM64/x64 frozen packages still need release qualification. Use only
-  artifacts/architectures actually offered by a published release.
-- Linux release support remains unqualified. Docker is unsupported legacy material.
-- Models, tools and integrations depend on configuration and permissions.
-  Browser learning assets and JavaScript provide practice, not trusted grading
-  or arbitrary host-language execution. See [known limits](docs/known-limits.md).
-- Agents use the server account's OS permissions. Use an appropriately restricted
-  OS account or VM, protect credentials/backups, and read [security](SECURITY.md).
-- The inherited Odysseus document editor is no longer an improvement target;
-  Editor/Wiki own future authoring. Existing document and email compatibility
-  paths remain.
+- **Tasks, Calendar, and Timeline** separate your next steps from scheduled agent work. Sync your calendar and revisit project milestones.
+- **Memery** brings approved facts and preferences into later chats. **History** lets you inspect a file change and restore an earlier version.
+- **Model Comparison** runs one prompt across several models. Compare answers side by side or hide their identities while you choose.
 
-## Documentation and contributions
+## Make the workspace yours
 
-**Settings → Help → Wiki documentation** or **Copal handbook** opens the same
-maintained read-only handbook in Wiki or Editor. Create personal documents for
-practice.
+Tile chat beside your editor. Ask **Buddy** to explain a control by pointing at it. Open **Clankshop** to watch tool activity move a factory or drive a car in Drift.
 
-[Setup](docs/setup.md) · [Upgrading](docs/upgrading.md) ·
-[Backup & restore](docs/backup-restore.md) · [Beta notes](docs/beta2.md) ·
-[Contributing](CONTRIBUTING.md) · [Security CI](docs/security-ci.md)
+![Six Open Clank backgrounds: Signal Routes, Kene-inspired Signal Weave, Signal Loom, Emoji Drift, Matrix Rain, and Emoji Rain.](docs/assets/backgrounds.webp)
+
+## Image tools
+
+Image mode is in alpha. Open a file to edit its layers, paint on the canvas, or mark a region for feedback in chat.
+
+![The Rickroll frame open in Editor’s Alpha image mode, with tools on the left and Layers on the right.](docs/assets/image-editor-alpha.webp)
+
+## Get started
+
+1. Download Beta 3 for [Windows x64](https://github.com/Plaer1/open-clank/releases/download/v1.0.3-beta.3/Open-Clank-1.0.3-windows-x64-Setup.exe) or Linux x86_64 ([AppImage](https://github.com/Plaer1/open-clank/releases/download/v1.0.3-beta.3/Open-Clank-Beta-3-Setup-x86_64.AppImage) or [manual tarball](https://github.com/Plaer1/open-clank/releases/download/v1.0.3-beta.3/Open-Clank-Beta-3-linux-x86_64.tar.gz)). The Beta 3 macOS installer is pending. See the [setup guide](docs/setup.md).
+2. Open the local address printed by the launcher and create the first administrator account. In **Settings → Provider/Model Management**, add a local model server, API provider, or supported subscription. Usage and billing depend on the provider.
+3. Start a chat and choose a working folder, or open **Copal → Journal** to write your first page. **Tools → Instruction Manual** opens the illustrated guides in Editor.
+
+Agents use the server account’s OS permissions. Read the [security guide](SECURITY.md) before granting access to personal files.
+
+[Upgrade](docs/upgrading.md) · [Backup and restore](docs/backup-restore.md) · [Known limits](docs/known-limits.md) · [Contribute](CONTRIBUTING.md)
 
 ## Credits and license
 
-Built on [Odysseus](https://github.com/odysseus-dev/odysseus), with Copal,
-[MiMo Code](https://github.com/XiaomiMiMo/mimo-code)/[opencode](https://github.com/anomalyco/opencode)
-and [Epic Games’ Lore](https://github.com/EpicGames/lore).
-[AgentsView](https://github.com/kenn-io/agentsview) inspired interface work;
-Google Noto Emoji and Emoji Kitchen supply artwork, with Xavier Salazar's Kitchen
-catalogue. [Acknowledgments](ACKNOWLEDGMENTS.md) contains component notices and
-provenance. **AGPL-3.0-or-later**; see [LICENSE](LICENSE). Included components retain
-their own licenses.
+Open Clank builds on Odysseus, MiMo Code, opencode, and Lore. See the [acknowledgments](ACKNOWLEDGMENTS.md) for contributors, artwork, and component licenses. Open Clank is [AGPL-3.0-or-later](LICENSE).

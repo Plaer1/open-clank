@@ -72,7 +72,7 @@ const putBodies = [];
 const environment = {
   ...process.env, APP_BIND:'127.0.0.1', APP_PORT:String(appPort), AUTH_ENABLED:'true',
   DEBUG:'false', OPENCLANK_DEBUG:'false', OPENCLANK_RECOVERY_MODE:'true',
-  OPEN_CLANK_DATA_DIR:dataDir, ODYSSEUS_DATA_DIR:dataDir,
+  OPEN_CLANK_DATA_DIR:dataDir,
   DATABASE_URL:`sqlite:///${path.join(dataDir, 'app.db')}`, COPAL_LOOSE_ROOT:copalDir,
   PYTHONUNBUFFERED:'1',
 };
@@ -86,7 +86,7 @@ try {
   const login = await fetch(`${appBase}/api/auth/login`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ username:'g02-owner', password:'g02-disposable-password', remember:true }) });
   assert.equal(login.status, 200, await login.text());
   const cookie = String(login.headers.get('set-cookie') || '').split(';', 1)[0];
-  assert.match(cookie, /^odysseus_session=/);
+  assert.match(cookie, /^open_clank_session=/);
   const create = await fetch(`${appBase}/api/copal/documents?workspace=default`, { method:'POST', headers:{'content-type':'application/json', cookie}, body:JSON.stringify({ name:'G02 rapid save.md', kind:'markdown', content:'# G02 initial\n\nStable body.\n' }) });
   const createPayload = await create.json();
   assert.equal(create.status, 200, JSON.stringify(createPayload));

@@ -8,10 +8,12 @@ All modules should import from here instead of accessing files directly.
 import json
 import time
 import logging
+from contextlib import contextmanager
 from threading import RLock
 from typing import Any
 
 from src.constants import SETTINGS_FILE, FEATURES_FILE
+from src.openclank.code_index_settings import MANAGED_DEFAULTS, upgrade_unsaved_defaults
 
 logger = logging.getLogger(__name__)
 SETTINGS_LOCK = RLock()
@@ -31,13 +33,9 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
-    "code_index_max_threads": 2,
-    "code_index_max_files": 10000,
-    "code_index_max_source_bytes": 64 * 1024 * 1024,
-    "code_index_max_file_bytes": 512 * 1024,
-    "code_index_max_generation_bytes": 2 * 1024 * 1024 * 1024,
+    **MANAGED_DEFAULTS,
     "code_index_settings_revision": 0,  # internal monotonic revision, not client writable
-    "agent_settings": {"compaction": {"auto": True, "prune": True, "tail_turns": 2, "preserve_recent_tokens": None, "reserved": 20000, "max_context": None}, "checkpoint": {"reserved": 13000, "max_writer_failures": 3, "fork": False, "push_caps": {}}},
+    "agent_settings": {"compaction": {"auto": True, "prune": True, "tail_turns": 2, "preserve_recent_tokens": None, "reserved": 20000, "max_context": None}, "checkpoint": {"reserved": 13000, "max_writer_failures": 3, "fork": False, "push_caps": {}}, "dream": {"auto": False, "interval_days": 7}, "distill": {"auto": False, "interval_days": 30}},
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a
@@ -53,6 +51,18 @@ DEFAULT_SETTINGS = {
     "vision_enabled": True,
     # Desktop capture is a separate owner-scoped opt-in and is never model-controlled.
     "desktop_capture_enabled": False,
+    # Real-desktop input is a second, separate opt-in; it does not depend on desktop_capture_enabled.
+    "desktop_control_enabled": False,
+    # Reading an application window's accessibility tree (names, roles, values) is a third, separate opt-in, Off by default.
+    "desktop_accessibility_enabled": False,
+    # Plain-text actions-only log of what the agent did in a control session (M2-P05): Off by default, nothing is written while Off.
+    "desktop_action_log_enabled": False,
+    # Independent opt-in: offering a bounded recording never starts one by itself.
+    "desktop_control_recording_enabled": False,
+    # More than one agent may control or read the same app at once; Off: a second agent is refused while another holds the app (C9 row 24).
+    "desktop_multi_agent_same_app_enabled": False,
+    # Chat channels (Telegram, Matrix): global switch, Off by default; each channel also has its own switch and secrets.
+    "channels_enabled": False,
     # Ordered fallback chain for the Vision model (image analysis, OCR, tagging).
     "vision_model_fallbacks": [],
     # Public base URL used to build clickable deep-links in outgoing alerts
@@ -248,31 +258,135 @@ def load_settings() -> dict:
             saved = json.load(f)
         if not isinstance(saved, dict):
             raise ValueError("settings must be an object")
-        merged = {**DEFAULT_SETTINGS, **saved}
+        merged = {**DEFAULT_SETTINGS, **upgrade_unsaved_defaults(saved)}
     except (FileNotFoundError, PermissionError, json.JSONDecodeError, ValueError):
         merged = dict(DEFAULT_SETTINGS)
     _settings_cache = (now, merged)
     return merged
 
 
-def save_settings(settings: dict):
-    """Persist settings to disk (atomic; see core.atomic_io)."""
+def _read_persisted_settings():
+    try:
+        with open(SETTINGS_FILE, 'r', encoding='utf-8') as stream:
+            persisted = json.load(stream)
+        return persisted if isinstance(persisted, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _write_settings_unlocked(value, persisted, *, policy_token=None):
     from core.atomic_io import atomic_write_json
+    from src.openclank.memory_policy_projection import global_settings_fingerprint, policy_coordinator
+    coordinator = policy_coordinator()
+    if coordinator is not None and global_settings_fingerprint(persisted) != global_settings_fingerprint(value):
+        coordinator.validate_global(policy_token, persisted)
+    atomic_write_json(SETTINGS_FILE, value, indent=2)
+    _invalidate_caches()
+
+
+def save_settings(settings: dict, *, allow_memory_graph: bool = False):
+    """Persist settings with a fenced global memory-policy transition."""
     from src.openclank.code_index_settings import preserve_scheduler_revision
+    from src.openclank.memory_policy_projection import exact_json, global_settings_fingerprint, policy_coordinator
     with SETTINGS_LOCK:
         # Existing unrelated callers save whole snapshots. Preserve the latest
         # indexing revision even if one of those snapshots predates an admin
         # save; never silently restore an older native CPU ceiling.
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as stream:
-                persisted = json.load(stream)
-            if not isinstance(persisted, dict):
-                persisted = {}
-        except (FileNotFoundError, json.JSONDecodeError):
-            persisted = {}
+        persisted = _read_persisted_settings()
         value = preserve_scheduler_revision(settings, persisted)
-        atomic_write_json(SETTINGS_FILE, value, indent=2)
-        _invalidate_caches()
+        if not allow_memory_graph:
+            if 'memory_graph' in persisted: value['memory_graph'] = persisted['memory_graph']
+            else: value.pop('memory_graph', None)
+        if exact_json(value) == exact_json(persisted):
+            return
+        coordinator = policy_coordinator() if global_settings_fingerprint(value) != global_settings_fingerprint(persisted) else None
+        if coordinator is None:
+            _write_settings_unlocked(value, persisted)
+            return
+        token = coordinator.active_global_token(persisted)
+        if token is not None:
+            _write_settings_unlocked(value, persisted, policy_token=token)
+            return
+    if getattr(SETTINGS_LOCK, '_is_owned', lambda: False)():
+        raise ValueError('policy transition requires outer settings lock release')
+    token = coordinator.begin_global(persisted)
+    try:
+        with SETTINGS_LOCK:
+            current = _read_persisted_settings()
+            if exact_json(current) != exact_json(persisted):
+                raise ValueError('settings changed during policy transition')
+            _write_settings_unlocked(value, current, policy_token=token)
+            after = _read_persisted_settings()
+        coordinator.finish_global(token, after)
+    finally:
+        coordinator.close(token)
+
+
+@contextmanager
+def settings_policy_guard(patch: dict, *, user=None, before_preferences=None, proposed_preferences=None, before_save=None):
+    """Fence global and, when needed, exact account policy under one owner."""
+    from src.openclank.memory_policy_projection import exact_json, global_settings_fingerprint, policy_coordinator, preference_inputs, PolicyTransitionUnavailable
+    if type(patch) is not dict:
+        raise ValueError('settings patch unavailable')
+    with SETTINGS_LOCK:
+        before = _read_persisted_settings()
+        proposed = dict(before)
+        if 'memory_graph' in patch:
+            proposed['memory_graph'] = patch['memory_graph']
+        coordinator = policy_coordinator() if global_settings_fingerprint(before) != global_settings_fingerprint(proposed) else None
+        if coordinator is None:
+            yield
+            return
+    combined = (user is not None and type(before_preferences) is dict and type(proposed_preferences) is dict
+        and exact_json(preference_inputs(before_preferences)) != exact_json(preference_inputs(proposed_preferences)))
+    if not combined:
+        if before_save is not None and before_save() is not True:
+            raise PolicyTransitionUnavailable('global policy authority unavailable')
+        token = coordinator.begin_global(before)
+        try:
+            with SETTINGS_LOCK:
+                try:
+                    if exact_json(_read_persisted_settings()) != exact_json(before):
+                        raise ValueError('settings changed during policy transition')
+                    if before_save is not None and before_save() is not True:
+                        raise PolicyTransitionUnavailable('global policy authority changed')
+                    yield
+                finally:
+                    after = _read_persisted_settings()
+                    if ((before_save is not None and before_save() is not True)
+                            or global_settings_fingerprint(after) not in {global_settings_fingerprint(before), global_settings_fingerprint(proposed)}):
+                        raise PolicyTransitionUnavailable('global policy outcome is unknown; reconciliation required')
+                    coordinator.finish_global(token, after)
+        finally:
+            coordinator.close(token)
+        return
+
+    from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
+    if not callable(before_save) or before_save() is not True:
+        raise PolicyTransitionUnavailable('combined policy authority unavailable')
+    token = coordinator.begin_combined(user,before_preferences,before)
+    try:
+        with SETTINGS_LOCK:
+            try:
+                with PREFERENCE_LOCK:
+                    if (exact_json(_read_persisted_settings()) != exact_json(before)
+                            or exact_json(_load_for_user(user)) != exact_json(before_preferences)
+                            or before_save() is not True):
+                        raise PolicyTransitionUnavailable('combined policy inputs changed')
+                yield
+            finally:
+                # Settle only exact known before/proposed policy states under
+                # the original current owner. Partial writes are not rolled back.
+                with PREFERENCE_LOCK:
+                    now_preferences = _load_for_user(user)
+                    now_settings = _read_persisted_settings()
+                    if (before_save() is not True
+                            or exact_json(now_preferences) not in {exact_json(before_preferences), exact_json(proposed_preferences)}
+                            or global_settings_fingerprint(now_settings) not in {global_settings_fingerprint(before), global_settings_fingerprint(proposed)}):
+                        raise PolicyTransitionUnavailable('combined policy outcome is unknown; reconciliation required')
+                    coordinator.finish_combined(token,user,now_preferences,now_settings)
+    finally:
+        coordinator.close(token)
 
 
 def get_setting(key: str, default: Any = None) -> Any:
@@ -306,7 +420,7 @@ PER_USER_MODEL_SETTING_KEYS = frozenset({
     "memory_endpoint_id", "memory_model", "memory_model_fallbacks",
     "research_endpoint_id", "research_model",
     "task_endpoint_id", "task_model",
-    "vision_model", "vision_enabled", "vision_model_fallbacks", "desktop_capture_enabled",
+    "vision_model", "vision_enabled", "vision_model_fallbacks", "desktop_capture_enabled", "desktop_control_enabled", "desktop_accessibility_enabled", "desktop_action_log_enabled", "desktop_control_recording_enabled", "desktop_multi_agent_same_app_enabled",
     "image_model", "image_gen_enabled", "image_quality",
     "teacher_model", "teacher_enabled", "teacher_tier2_enabled",
     "tts_enabled", "tts_provider", "tts_model", "tts_voice", "tts_speed",

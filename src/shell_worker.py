@@ -242,6 +242,7 @@ class _ShellCapture:
             if stable < 2:
                 self.result = self.handle.finish(
                     committed=True,
+                    writers_settled=False,
                     after_read_error=(
                         "late writer reconciliation did not reach a stable after-state "
                         "before the authenticated worker deadline"
@@ -260,7 +261,7 @@ class _ShellCapture:
             self._journal_settle_or_abandon()
             return self.result
         except Exception as exc:
-            self.result = self.handle.finish(committed=True, after_read_error=str(exc))
+            self.result = self.handle.finish(committed=True, after_read_error=str(exc), writers_settled=False)
             self._state("failed", result=self.result)
             self._journal_abandon("capture_failed")
             return self.result
@@ -273,7 +274,7 @@ class _ShellCapture:
     def _journal_settle_or_abandon(self) -> None:
         if self.root_journal is None or self.result is None:
             return
-        if self.result.get("history_status") == "complete":
+        if self.result.get("history_status") == "complete" or self.result.get("capture_phase") == "recovery_settled":
             self.root_journal.settle(self.result)
         else:
             self._journal_abandon(str(self.result.get("capture_phase") or "after_failed"))
@@ -426,6 +427,7 @@ def _prepare_shell_capture(spec: dict, workspace: str, command: str) -> _ShellCa
             action_id=action_id,
             paths=roots[1:],
             strict_tree=True,
+            required_recovery=True,
             expected_identities=expected_identities,
         )
     except Exception as exc:
@@ -759,8 +761,87 @@ def _load_spec(path: Path) -> dict:
             pass
 
 
+def _run_bound_terminate_pump(job_id, nonce, child, stop, child_lock):
+    """Consume controls only while this worker retains the original child."""
+    from src.bg_jobs import claim_bound_shell_terminate, ack_bound_shell_terminate
+    while not stop.wait(0.1):
+        control = None
+        try:
+            control = claim_bound_shell_terminate(job_id, nonce)
+            if control is None: continue
+            with child_lock:
+                if child.poll() is None:
+                    child.terminate()
+                    state = 'requested'
+                else:
+                    state = 'not_needed'
+            ack_bound_shell_terminate(job_id, nonce, control['id'], state)
+        except Exception:
+            if control is not None:
+                try: ack_bound_shell_terminate(job_id, nonce, control['id'], 'unknown')
+                except Exception: pass
+            return
+
+
+def _wait_bound_child(child, child_lock, timeout=None):
+    """Reap only while holding the same lock used for child signals."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        with child_lock:
+            if child.poll() is not None:
+                return child.wait()
+        if deadline is not None and time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(child.args, timeout)
+        time.sleep(0.05)
+
+
+def _run_bound_input_pump(job_id, nonce, child, channel, stop):
+    """Forward one exact content-free reserved write to the owned child."""
+    import socket,struct,select
+    from src.bg_jobs import claim_bound_shell_input,finish_bound_shell_input,close_bound_shell_input
+    channel.settimeout(0.2)
+    def read_exact(length, *, idle=False):
+        data=bytearray();deadline=None if idle else time.monotonic()+5
+        while len(data)<length and not stop.is_set() and (deadline is None or time.monotonic()<deadline):
+            try: chunk=channel.recv(length-len(data))
+            except socket.timeout:continue
+            if not chunk:raise EOFError()
+            data.extend(chunk)
+            if deadline is None: deadline=time.monotonic()+5
+        if len(data)!=length:raise TimeoutError()
+        return bytes(data)
+    try:
+        while not stop.is_set():
+            try:
+                control=read_exact(64,idle=True).decode('ascii');length=struct.unpack('!I',read_exact(4))[0]
+                if not 1<=length<=16384:raise ValueError()
+                payload=read_exact(length);claim_bound_shell_input(job_id,nonce,control,payload)
+                result='unknown'
+                try:
+                    fd=child.stdin.fileno();os.set_blocking(fd,False);offset=0;deadline=time.monotonic()+5
+                    while offset<len(payload) and not stop.is_set() and time.monotonic()<deadline:
+                        _,ready,_=select.select([],[fd],[],min(0.1,max(0,deadline-time.monotonic())))
+                        if ready:offset+=os.write(fd,payload[offset:])
+                    if offset==len(payload):result='accepted'
+                except (OSError,ValueError):pass
+                finish_bound_shell_input(job_id,nonce,control,result)
+                if result!='accepted':break
+            except socket.timeout:continue
+            except (EOFError,TimeoutError,OSError,ValueError,UnicodeError):break
+    finally:
+        channel.close()
+        try:
+            if child.stdin is not None:child.stdin.close()
+        except (OSError,ValueError):pass
+        try:close_bound_shell_input(job_id,nonce)
+        except Exception:pass
+
+
 def run(spec_path: str) -> int:
     spec = _load_spec(Path(spec_path))
+    if 'execution_gate' in spec:
+        from src.bg_jobs import validate_inherited_execution_gate
+        validate_inherited_execution_gate(spec['execution_gate'])
     command_size = int(spec["command_size"])
     if command_size < 0 or command_size > _MAX_COMMAND_BYTES:
         raise ValueError("invalid background shell command size")
@@ -768,6 +849,12 @@ def run(spec_path: str) -> int:
     if len(raw_command) != command_size:
         raise ValueError("background shell command transport was incomplete")
     command = raw_command.decode("utf-8")
+    if "bound_shell_nonce" in spec:
+        runtime=spec.get("bound_max_runtime_s")
+        if type(runtime) is not int or not 1 <= runtime <= 86400:
+            raise ValueError("invalid bound shell runtime")
+        from src.bg_jobs import claim_bound_shell
+        claim_bound_shell(str(spec["job_id"]), str(spec["bound_shell_nonce"]), raw_command, runtime)
     workspace = os.path.realpath(str(spec["workspace"]))
     cwd = os.path.realpath(str(spec.get("cwd") or workspace))
     log_path = Path(spec["log_path"])
@@ -791,7 +878,9 @@ def run(spec_path: str) -> int:
         )
 
     pipe_listener = None
-    if os.name != "nt":
+    if os.name != "nt" and "bound_input_fd" in spec:
+        stdin_handle = subprocess.PIPE
+    elif os.name != "nt":
         fifo_path = Path(stdin_path)
         fifo_path.parent.mkdir(parents=True, exist_ok=True)
         if not fifo_path.exists():
@@ -898,11 +987,24 @@ def run(spec_path: str) -> int:
         workspace=workspace,
     )
     child: Optional[subprocess.Popen] = None
+    bound_child_exit: Optional[int] = None
+    legacy_child_exit: Optional[int] = None
+    legacy_reconciled = False
+    bound_timeout: Optional[threading.Timer] = None
+    bound_timer_stop = threading.Event()
+    bound_control_stop = threading.Event()
+    bound_control_thread: Optional[threading.Thread] = None
+    bound_control_joined = True
+    bound_child_lock = threading.RLock()
     input_thread: Optional[threading.Thread] = None
     input_stop = threading.Event()
 
     def stop_child(_signum=None, _frame=None):
-        if child is not None:
+        if child is not None and "bound_shell_nonce" in spec:
+            with bound_child_lock:
+                if child.poll() is None:
+                    child.terminate()
+        elif child is not None:
             kill_process_tree(child.pid)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -973,6 +1075,32 @@ def run(spec_path: str) -> int:
             )
             input_thread.start()
         atomic_write_text(str(child_pid_path), str(child.pid))
+        if 'bound_input_fd' in spec:
+            import socket
+            from src.bg_jobs import open_bound_shell_input
+            input_channel=socket.socket(fileno=int(spec['bound_input_fd']))
+            input_thread=threading.Thread(target=_run_bound_input_pump,args=(str(spec['job_id']),str(spec['bound_shell_nonce']),child,input_channel,input_stop),name='open-clank-bound-input',daemon=True)
+            open_bound_shell_input(str(spec['job_id']),str(spec['bound_shell_nonce']));input_thread.start()
+        if "bound_shell_nonce" in spec:
+            owned_child=child
+            bound_control_thread = threading.Thread(target=_run_bound_terminate_pump,
+                args=(str(spec['job_id']),str(spec['bound_shell_nonce']),owned_child,bound_control_stop,bound_child_lock),
+                name='open-clank-bound-control',daemon=True)
+            bound_control_thread.start()
+            from src.bg_jobs import open_bound_shell_terminate
+            open_bound_shell_terminate(str(spec['job_id']),str(spec['bound_shell_nonce']))
+            def expire_bound_child():
+                try:
+                    with bound_child_lock:
+                        if owned_child.poll() is None: owned_child.terminate()
+                    if not bound_timer_stop.wait(3):
+                        with bound_child_lock:
+                            if owned_child.poll() is None: owned_child.kill()
+                except (OSError,ProcessLookupError):
+                    pass
+            bound_timeout=threading.Timer(runtime,expire_bound_child)
+            bound_timeout.daemon=True
+            bound_timeout.start()
         written = 0
         capped = False
         redactor = StreamingRedactor()
@@ -1010,7 +1138,11 @@ def run(spec_path: str) -> int:
                 log.write(_TRUNCATED)
             log.flush()
             os.fsync(log.fileno())
-        code = child.wait()
+        code = _wait_bound_child(child,bound_child_lock) if 'bound_shell_nonce' in spec else child.wait()
+        if "bound_shell_nonce" in spec:
+            bound_child_exit = code
+        elif 'legacy_cleanup_nonce' in spec:
+            legacy_child_exit = code
         if overlay_upper is not None:
             _publish_overlay(
                 workspace,
@@ -1020,13 +1152,20 @@ def run(spec_path: str) -> int:
             )
         if shell_capture is not None:
             capture_result = shell_capture.finish(committed=True)
-            if capture_result.get("history_status") not in {"complete", "paused", "unavailable", "unconfigured"}:
+            if (capture_result.get("history_status") not in {"complete", "paused", "unavailable", "unconfigured"}
+                    and capture_result.get("capture_phase") != "recovery_settled"):
                 raise ShellApprovalError(
                     "shell mutation completed with pending history reconciliation: "
                     + str(capture_result.get("error") or capture_result.get("capture_phase"))
                 )
+        legacy_reconciled = True
     except BaseException as exc:
         stop_child()
+        if "bound_shell_nonce" in spec and child is not None and bound_child_exit is None:
+            try:
+                bound_child_exit = _wait_bound_child(child,bound_child_lock,timeout=3)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
         if shell_capture is not None:
             # A cancelled or failed command may have committed a partial write;
             # reconcile it when a child existed, otherwise mark the prepared
@@ -1047,6 +1186,25 @@ def run(spec_path: str) -> int:
                 log.truncate()
             log.write(error)
     finally:
+        if bound_timeout is not None:
+            bound_timeout.cancel()
+            bound_timer_stop.set()
+            bound_timeout.join()
+        input_stop.set()
+        if 'bound_input_fd' in spec and input_thread is not None:
+            input_thread.join(timeout=6)
+            if input_thread.is_alive(): bound_control_joined=False
+        if 'bound_shell_nonce' in spec:
+            bound_control_stop.set()
+            if bound_control_thread is not None:
+                bound_control_thread.join(timeout=5)
+                bound_control_joined = bound_control_joined and not bound_control_thread.is_alive()
+            if bound_control_joined:
+                try:
+                    from src.bg_jobs import close_bound_shell_terminate
+                    close_bound_shell_terminate(str(spec['job_id']),str(spec['bound_shell_nonce']))
+                except Exception:
+                    bound_control_joined = False
         if snapshot_context is not None:
             snapshot_context.__exit__(None, None, None)
         if overlay_context is not None:
@@ -1084,6 +1242,13 @@ def run(spec_path: str) -> int:
         actions=actions,
         event="exit",
     )
+    if "bound_shell_nonce" in spec and bound_control_joined:
+        from src.bg_jobs import settle_bound_shell
+        settle_bound_shell(str(spec["job_id"]), str(spec["bound_shell_nonce"]), raw_command,
+            child_waited=bound_child_exit is not None, child_exit_code=bound_child_exit, worker_exit_code=code)
+    elif 'legacy_cleanup_nonce' in spec and legacy_reconciled and legacy_child_exit is not None:
+        from src.bg_jobs import settle_legacy_cleanup
+        settle_legacy_cleanup(str(spec['job_id']),str(spec['legacy_cleanup_nonce']),child_exit_code=legacy_child_exit,worker_exit_code=code)
     return code
 
 

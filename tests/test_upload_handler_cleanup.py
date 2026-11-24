@@ -28,6 +28,7 @@ from src.upload_handler import (
     reserve_message_upload_references,
     reserve_upload_references,
 )
+from src.openclank.attachment_inventory import input_receipt_attempt_prefix, input_receipt_claim_scope
 from tests.helpers.sqlite_db import make_temp_sqlite
 
 
@@ -276,6 +277,35 @@ def test_cleanup_retains_lone_row_without_authoritative_lifecycle_metadata(tmp_p
     assert handler.cleanup_old_uploads(set(), set()) == 0
     assert path.is_file()
     assert json.loads(index_path.read_text(encoding="utf-8")) == index
+
+
+def test_retire_chat_receipt_claims_preserves_other_chat_and_owner_claims(tmp_path):
+    handler = _make_handler(tmp_path)
+    upload_ids = ["a" * 32 + ".txt", "b" * 32 + ".txt", "c" * 32 + ".txt"]
+    _seed_old_uploads(handler, [
+        {"id": upload_ids[0], "hash": "1" * 64, "mime": "text/plain", "owner": "alice"},
+        {"id": upload_ids[1], "hash": "2" * 64, "mime": "text/plain", "owner": "alice"},
+        {"id": upload_ids[2], "hash": "3" * 64, "mime": "text/plain", "owner": "bob"},
+    ])
+    index_path = Path(handler.upload_dir, "uploads.json")
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    by_id = {row["id"]: row for row in index.values()}
+    same_chat = input_receipt_claim_scope("alice", "chat-a", "request-a")
+    same_chat_attempt = input_receipt_attempt_prefix("alice", "chat-a", "request-a") + "attempt-1"
+    other_chat = input_receipt_claim_scope("alice", "chat-b", "request-b")
+    other_owner = input_receipt_claim_scope("bob", "chat-a", "request-c")
+    by_id[upload_ids[0]]["reference_claims"] = [same_chat, same_chat_attempt, "chat:chat-a"]
+    by_id[upload_ids[1]]["reference_claims"] = [other_chat]
+    by_id[upload_ids[2]]["reference_claims"] = [other_owner]
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    handler._index_cache = None
+
+    assert handler.retire_chat_input_receipt_claims(owner="alice", session_id="chat-a") == 2
+    updated = {row["id"]: row for row in handler._load_upload_index().values()}
+    assert updated[upload_ids[0]]["reference_claims"] == ["chat:chat-a"]
+    assert updated[upload_ids[1]]["reference_claims"] == [other_chat]
+    assert updated[upload_ids[2]]["reference_claims"] == [other_owner]
+    assert all(Path(updated[item]["path"]).is_file() for item in upload_ids)
 
 
 def test_reservation_and_cleanup_are_serialized_without_dangling_references(
@@ -853,3 +883,27 @@ def _files_image(**values):
         favorite=values.pop("favorite", False), is_active=values.pop("is_active", True),
         provenance=provenance or None, **values,
     )
+
+def test_unused_upload_store_allows_empty_chat_erasure_only(tmp_path):
+    handler = _make_handler(tmp_path)
+    root = Path(handler.upload_dir)
+    (root / ".attachment-inventory.json").write_text(json.dumps({
+        "contract": "openclank.attachment-reference-inventory/v1", "complete": True, "origin": "new-empty-owner",
+    }))
+    handler.conversation_attachment_intent(owner="alice", session_id="fresh", persist=True)
+    assert handler.attachment_reference_generations() == {}
+    assert handler.retire_chat_input_receipt_claims(owner="alice", session_id="fresh") == 0
+    args = dict(owner="alice", candidate_ids=set(), shared_ids=set(), shared_hashes=set(), session_id="fresh")
+    assert handler.erase_conversation_attachments(**args)["exclusive_ids"] == []
+    with pytest.raises(ValueError, match="live uploads database is missing"):
+        handler.erase_conversation_attachments(**{**args, "candidate_ids": {"required"}})
+    assert not (root / "uploads.json").exists()
+    for name in ("uploads.json.bak", "retained.bin"):
+        (root / name).write_bytes(b"retained")
+        with pytest.raises(ValueError, match="live uploads database is missing"):
+            handler.attachment_reference_generations()
+        assert (root / name).read_bytes() == b"retained"
+        (root / name).unlink()
+    (root / ".attachment-inventory.json").unlink()
+    with pytest.raises(ValueError, match="live uploads database is missing"):
+        handler.retire_chat_input_receipt_claims(owner="alice", session_id="fresh")

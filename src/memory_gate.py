@@ -58,13 +58,15 @@ def capture_allowed(
         return False
     if not isinstance(prefs, Mapping):
         return True
+    if prefs.get("memory_enabled") is False:
+        return False
     if prefs.get(PREF_KEY) is not None:
         return memory_mode(prefs) != "off"
     return prefs.get("auto_memory", True)
 
 
 def capture_mode(prefs: Any) -> str:
-    """Return the mode automatic turn capture should pass to Frankenmemory.
+    """Return the mode automatic turn capture should pass to Memery.
 
     Persisted users are backfilled with ``memory_mode``. A compatibility caller
     can still provide only the legacy ``auto_memory`` flag, though, and that
@@ -73,6 +75,8 @@ def capture_mode(prefs: Any) -> str:
     decision to queue capture and the admission mode sent to the provider
     cannot disagree.
     """
+    if isinstance(prefs, Mapping) and prefs.get("memory_enabled") is False:
+        return "off"
     if not isinstance(prefs, Mapping) or PREF_KEY not in prefs:
         legacy_enabled = (
             not isinstance(prefs, Mapping)
@@ -89,7 +93,7 @@ def write_allowed(prefs: Any) -> tuple[bool, str]:
     because the user has chosen to review every memory before it lands —
     a direct-to-curated write would bypass that contract.
     """
-    mode = memory_mode(prefs)
+    mode = "off" if isinstance(prefs, Mapping) and prefs.get("memory_enabled") is False else memory_mode(prefs)
     if mode == "off":
         return False, "Memory is off — no writes allowed."
     if mode == "manual":

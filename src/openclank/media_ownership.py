@@ -55,6 +55,7 @@ __all__ = [
     "AssetMove",
     "ReferenceEdit",
     "MoveConflict",
+    "MoveFrame",
     "MovePlan",
     "plan_document_move",
     "recover_move_plan",
@@ -66,6 +67,12 @@ class MediaOwnershipError(ValueError):
     def __init__(self, message: str, *, code: str = "invalid_media_request") -> None:
         super().__init__(message)
         self.code = code
+
+
+def _layout_version(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value not in {1, 2}:
+        raise MediaOwnershipError("media layout version is invalid", code="invalid_media_request")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +161,7 @@ class MediaLayout:
     media_dir: str  # relative to canonical_root
     owner_subject_id: str = ""
     workspace_id: str | None = None
+    layout_version: int = 1
 
     @property
     def is_loose(self) -> bool:
@@ -172,24 +180,29 @@ def document_media_dir(
     workspace_relative_folder: str = "",
     owner_subject_id: str = "",
     workspace_id: str | None = None,
+    layout_version: int = 1,
 ) -> MediaLayout:
-    """Compute the approved ``media/<stem>/`` placement for a document.
+    """Compute a versioned media placement without reinterpreting old callers.
 
     A registered workspace mirrors the document path relative to that workspace
-    root (``/foo/projects/design.md`` -> ``/foo/media/projects/design``).  A
+    root. Version 1 uses ``media/<stem>`` and version 2 uses
+    ``.media/<document-parent>/<document-stem>``. A
     loose document uses its containing folder as the media root
     (``/stuff/note.md`` -> ``/stuff/media/note``).  The directory is not created
     here; a media-producing edit decides when to materialize it.
     """
+    version = _layout_version(layout_version)
     normalized_origin = str(origin or "").strip().lower()
-    if normalized_origin not in {"workspace", "loose"}:
+    if normalized_origin not in {"workspace", "loose", "selected_root"}:
         raise MediaOwnershipError("media origin is invalid", code="invalid_media_request")
     root = str(canonical_root or "").strip()
     if not root or "\x00" in root:
         raise MediaOwnershipError("canonical root is required", code="invalid_media_request")
     root = os.path.normpath(root)
 
-    if normalized_origin == "workspace":
+    if normalized_origin in {"workspace", "selected_root"}:
+        if normalized_origin == "selected_root" and (version != 2 or workspace_id is not None):
+            raise MediaOwnershipError("selected root requires an explicit v2 layout", code="invalid_media_request")
         rel_folder = _normalize_relative(workspace_relative_folder, field_name="workspace relative folder") if workspace_relative_folder else ""
         document = _normalize_relative(document_path, field_name="document path")
         if rel_folder:
@@ -197,8 +210,10 @@ def document_media_dir(
                 raise MediaOwnershipError("document is outside the workspace relative folder", code="invalid_media_request")
             document = document[len(rel_folder) + 1 :]
         stem = _document_stem(document)
-        media_dir = f"media/{stem}"
+        media_dir = f"{'.media' if version == 2 else 'media'}/{stem}"
     else:
+        if version == 2:
+            raise MediaOwnershipError("layout v2 requires an established workspace root", code="invalid_media_request")
         document = _normalize_relative(document_path, field_name="document path")
         if "/" in document:
             raise MediaOwnershipError("loose document path must be file-shaped", code="invalid_media_request")
@@ -212,6 +227,7 @@ def document_media_dir(
         media_dir=media_dir,
         owner_subject_id=str(owner_subject_id or ""),
         workspace_id=str(workspace_id) if workspace_id else None,
+        layout_version=version,
     )
 
 
@@ -222,6 +238,7 @@ def layout_for_absolute(
     origin: str,
     owner_subject_id: str = "",
     workspace_id: str | None = None,
+    layout_version: int = 1,
 ) -> MediaLayout:
     """Layout for callers that hold an absolute document path.
 
@@ -245,6 +262,7 @@ def layout_for_absolute(
         origin=origin,
         owner_subject_id=owner_subject_id,
         workspace_id=workspace_id,
+        layout_version=layout_version,
     )
 
 
@@ -363,18 +381,25 @@ class MediaProvenance:
     references: tuple[str, ...] = ()
     asset_id: str = ""
     created_unix_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    layout_version: int = 1
+    media_dir: str | None = None
 
     def __post_init__(self) -> None:
-        if self.origin not in {"workspace", "loose"}:
+        if self.origin not in {"workspace", "loose", "selected_root"}:
             raise MediaOwnershipError("provenance origin is invalid", code="invalid_media_request")
         object.__setattr__(self, "canonical_root", os.path.normpath(str(self.canonical_root)))
         if not str(self.asset_digest).startswith("sha256:"):
             raise MediaOwnershipError("provenance digest is invalid", code="invalid_media_request")
         _digest_hex(self.asset_digest)
+        object.__setattr__(self, "layout_version", _layout_version(self.layout_version))
         object.__setattr__(self, "references", tuple(str(item) for item in self.references))
+        if self.media_dir is not None:
+            if not isinstance(self.media_dir, str) or re.match(r"^[A-Za-z]:", self.media_dir):
+                raise MediaOwnershipError("media directory is invalid", code="invalid_media_request")
+            object.__setattr__(self, "media_dir", _normalize_relative(self.media_dir, field_name="media directory"))
 
     def as_receipt(self) -> dict[str, Any]:
-        return {
+        result = {
             "canonical_root": self.canonical_root,
             "origin": self.origin,
             "owner_subject_id": self.owner_subject_id,
@@ -386,7 +411,11 @@ class MediaProvenance:
             "asset_digest": self.asset_digest,
             "references": list(self.references),
             "created_unix_ms": int(self.created_unix_ms),
+            "layout_version": self.layout_version,
         }
+        if self.media_dir is not None:
+            result["media_dir"] = self.media_dir
+        return result
 
     @classmethod
     def from_receipt(cls, value: Mapping[str, Any]) -> "MediaProvenance":
@@ -405,6 +434,8 @@ class MediaProvenance:
                 asset_digest=str(value["asset_digest"]),
                 references=tuple(value.get("references") or ()),
                 created_unix_ms=int(value.get("created_unix_ms") or 0),
+                layout_version=value.get("layout_version", 1),
+                media_dir=value.get("media_dir"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise MediaOwnershipError("provenance receipt is invalid", code="invalid_media_request") from exc
@@ -414,6 +445,15 @@ class MediaProvenance:
             return binary_digest(data) == self.asset_digest
         except MediaOwnershipError:
             return False
+
+    def resolved_media_dir(self) -> str:
+        """Return the root-relative recorded location or the legacy layout."""
+        if self.media_dir is not None:
+            return self.media_dir
+        document_path = str(PurePosixPath(self.document_path).name) if self.origin == "loose" else self.document_path
+        return document_media_dir(document_path=document_path, canonical_root=self.canonical_root,
+                                  origin=self.origin, owner_subject_id=self.owner_subject_id,
+                                  workspace_id=self.workspace_id, layout_version=self.layout_version).media_dir
 
 
 # ---------------------------------------------------------------------------
@@ -551,12 +591,7 @@ def classify_adoption_candidates(
             })
             continue
         try:
-            loose_layout = document_media_dir(
-                document_path=str(PurePosixPath(record.document_path).name),
-                canonical_root=record.canonical_root,
-                origin="loose",
-                owner_subject_id=record.owner_subject_id,
-            )
+            media_dir = record.resolved_media_dir()
         except MediaOwnershipError:
             rejected.append({
                 "code": "ambiguous_layout",
@@ -564,7 +599,7 @@ def classify_adoption_candidates(
                 "reason": "asset path cannot be mirrored into the workspace layout",
             })
             continue
-        source_path = os.path.join(record.canonical_root, loose_layout.media_dir.replace("/", os.sep), record.asset_name)
+        source_path = os.path.join(record.canonical_root, media_dir.replace("/", os.sep), record.asset_name)
         adoptable.append(
             AdoptionCandidate(
                 provenance=record,
@@ -777,6 +812,25 @@ class MoveConflict:
     asset_name: str = ""
 
 
+@dataclass(frozen=True)
+class MoveFrame:
+    """One root's placement rules: where a document and its media live.
+
+    Paths in a plan are relative to the frame's ``canonical_root``.
+    """
+
+    origin: str  # "workspace" | "selected_root" | "loose"
+    canonical_root: str
+    layout_version: int = 1
+    workspace_id: str | None = None
+    workspace_relative_folder: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"origin": self.origin, "canonical_root": os.path.normpath(str(self.canonical_root)),
+                "layout_version": self.layout_version, "workspace_id": self.workspace_id,
+                "workspace_relative_folder": self.workspace_relative_folder}
+
+
 @dataclass
 class MovePlan:
     """Recoverable document/media move transaction."""
@@ -795,13 +849,21 @@ class MovePlan:
     conflicts: tuple[MoveConflict, ...]
     preimages: dict[str, str] = field(default_factory=dict)
     resource_receipt: dict[str, Any] | None = None
+    source_layout_version: int = 1
+    destination_layout_version: int = 1
+    # Set only for a move between two frames (roots); absent for a same-frame move.
+    source_frame: dict[str, Any] | None = None
+    destination_frame: dict[str, Any] | None = None
 
     @property
     def applied(self) -> bool:
         return self.phase == MovePhase.PUBLISHED and not self.conflicts
 
     def as_receipt(self) -> dict[str, Any]:
+        frames = ({"source_frame": dict(self.source_frame), "destination_frame": dict(self.destination_frame)}
+                  if self.source_frame is not None and self.destination_frame is not None else {})
         return {
+            **frames,
             "operation_id": self.operation_id,
             "phase": self.phase,
             "document_id": self.document_id,
@@ -809,6 +871,8 @@ class MovePlan:
             "destination_document_path": self.destination_document_path,
             "source_media_dir": self.source_media_dir,
             "destination_media_dir": self.destination_media_dir,
+            "source_layout_version": self.source_layout_version,
+            "destination_layout_version": self.destination_layout_version,
             "owner_subject_id": self.owner_subject_id,
             "expected_revision": self.expected_revision,
             "asset_moves": [
@@ -878,6 +942,10 @@ class MovePlan:
                 destination_document_path=str(value["destination_document_path"]),
                 source_media_dir=str(value["source_media_dir"]),
                 destination_media_dir=str(value["destination_media_dir"]),
+                source_layout_version=_layout_version(value.get("source_layout_version", 1)),
+                destination_layout_version=_layout_version(value.get("destination_layout_version", 1)),
+                source_frame=dict(value["source_frame"]) if isinstance(value.get("source_frame"), Mapping) else None,
+                destination_frame=dict(value["destination_frame"]) if isinstance(value.get("destination_frame"), Mapping) else None,
                 owner_subject_id=str(value.get("owner_subject_id") or ""),
                 expected_revision=str(value.get("expected_revision") or ""),
                 asset_moves=tuple(
@@ -927,6 +995,89 @@ class MovePreflight:
     additional_conflicts: tuple[MoveConflict, ...] = ()
 
 
+def plan_folder_reference_edits(
+    *, source_folder: str, destination_folder: str,
+    moved_targets: Mapping[str, str],
+    referencing_documents: Sequence[tuple[str, str, str, bool]], absolute_paths: bool = False,
+) -> tuple[tuple[ReferenceEdit, ...], tuple[MoveConflict, ...]]:
+    """Resolve one frozen folder mapping against app-known document texts.
+
+    Entries are ``(document_id, root_relative_path, text, protected)``.
+    The caller supplies only authorized declared references and separately
+    proves each input and asset; this function performs no I/O.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    if type(absolute_paths) is not bool:
+        raise MediaOwnershipError("folder path mode is invalid", code="invalid_media_request")
+    def normalize(value: str, name: str) -> str:
+        if not absolute_paths:
+            return _normalize_relative(value, field_name=name)
+        raw=str(value or "")
+        if not raw.startswith("/") or raw.startswith("//") or os.path.normpath(raw) != raw:
+            raise MediaOwnershipError(f"{name} is invalid", code="invalid_media_request")
+        result = "/" + _normalize_relative(raw[1:], field_name=name)
+        if result != raw:
+            raise MediaOwnershipError(f"{name} is invalid", code="invalid_media_request")
+        return result
+    source = normalize(source_folder, "source folder")
+    destination = normalize(destination_folder, "destination folder")
+    source_path, destination_path = PurePosixPath(source), PurePosixPath(destination)
+    if source_path == destination_path or source_path in destination_path.parents or destination_path in source_path.parents:
+        raise MediaOwnershipError("folder paths overlap", code="invalid_media_request")
+    explicit: dict[str, str] = {}
+    for old, new in moved_targets.items():
+        old_path = normalize(old, "source target")
+        new_path = normalize(new, "destination target")
+        if old_path in explicit and explicit[old_path] != new_path:
+            raise MediaOwnershipError("folder target mapping conflicts", code="invalid_media_request")
+        explicit[old_path] = new_path
+
+    def mapped(path: str) -> str:
+        if path in explicit:
+            return explicit[path]
+        value = PurePosixPath(path)
+        try:
+            suffix = value.relative_to(source_path)
+        except ValueError:
+            return path
+        return str(destination_path / suffix)
+
+    edits: list[ReferenceEdit] = []
+    conflicts: list[MoveConflict] = []
+    seen_documents: set[str] = set()
+    for document_id, document_path, text, protected in referencing_documents:
+        old_document = normalize(document_path, "reference document")
+        if str(document_id) in seen_documents:
+            raise MediaOwnershipError("folder reference document is duplicated", code="invalid_media_request")
+        seen_documents.add(str(document_id))
+        new_document = mapped(old_document)
+        old_dir = str(PurePosixPath(old_document).parent)
+        new_dir = str(PurePosixPath(new_document).parent)
+        for site in scan_references(str(document_id), str(text), protected=bool(protected)):
+            raw = str(site.target or "").strip()
+            if not raw or re.match(r"^[a-z][a-z\d+.-]*:", raw, re.IGNORECASE) or raw.startswith("//"):
+                continue
+            parsed = urlsplit(raw.replace("\\", "/"))
+            if parsed.path.startswith("/") or not parsed.path:
+                continue
+            old_target = os.path.normpath(os.path.join(old_dir, parsed.path)).replace(os.sep, "/")
+            new_target_path = mapped(old_target)
+            if old_document == new_document and old_target == new_target_path:
+                continue
+            rendered = os.path.relpath(new_target_path, new_dir).replace(os.sep, "/")
+            new_target = urlunsplit(("", "", rendered, parsed.query, parsed.fragment))
+            if new_target == raw:
+                continue
+            if site.protected:
+                conflicts.append(MoveConflict(code="protected_reference", document_id=str(document_id),
+                    reason="protected reference cannot be updated; move left unapplied", reference_target=raw))
+                continue
+            edits.append(ReferenceEdit(document_id=str(document_id), site=site, new_target=new_target,
+                new_text=rewrite_reference(site, new_target), preimage=str(text)))
+    return tuple(edits), tuple(conflicts)
+
+
 def plan_document_move(
     *,
     operation_id: str,
@@ -939,8 +1090,19 @@ def plan_document_move(
     preflight: MovePreflight,
     referencing_documents: Sequence[tuple[str, str, bool]] = (),
     workspace_relative_folder: str = "",
+    source_layout_version: int = 1,
+    destination_layout_version: int | None = None,
+    preserve_media_location: bool = False,
+    destination_frame: MoveFrame | None = None,
+    source_workspace_id: str | None = None,
 ) -> MovePlan:
     """Build a recoverable move plan with surgical reference repairs.
+
+    ``destination_frame`` plans a move into a different root: source assets,
+    provenance and references stay in the source frame (``canonical_root`` and
+    ``origin``), while the destination document path, media directory and every
+    rewritten reference use the destination frame's own layout. A move that
+    cannot be expressed exactly aborts with conflicts and plans nothing.
 
     ``referencing_documents`` is the app-known authorized set as
     ``(document_id, source_text, protected)``.  Only those documents are ever
@@ -970,32 +1132,77 @@ def plan_document_move(
                     reason="document revision changed before the move",
                 ),
             ),
+            source_layout_version=_layout_version(source_layout_version),
+            destination_layout_version=_layout_version(
+                source_layout_version if destination_layout_version is None else destination_layout_version
+            ),
         )
 
-    source_layout = document_media_dir(
-        document_path=source_document_path,
-        canonical_root=canonical_root,
-        origin=origin,
-        workspace_relative_folder=workspace_relative_folder,
-        owner_subject_id=owner_subject_id,
-    )
-    destination_layout = document_media_dir(
-        document_path=destination_document_path,
-        canonical_root=canonical_root,
-        origin=origin,
-        workspace_relative_folder=workspace_relative_folder,
-        owner_subject_id=owner_subject_id,
-    )
+    source_version = _layout_version(source_layout_version)
+    # Different origin or root: a cross-frame move. The same origin and root with another
+    # layout version is the ordinary same-frame layout change.
+    cross = destination_frame is not None and (
+        destination_frame.origin != origin
+        or os.path.normpath(str(destination_frame.canonical_root)) != os.path.normpath(str(canonical_root)))
+    if destination_frame is not None and not cross and destination_layout_version is None:
+        destination_layout_version = destination_frame.layout_version
+    destination_version = _layout_version(source_version if destination_layout_version is None else destination_layout_version)
+    if cross:
+        destination_version = _layout_version(destination_frame.layout_version)
+    def move_layout(document_path: str, version: int, frame_origin: str = origin, root: str = canonical_root,
+                    relative_folder: str = workspace_relative_folder) -> MediaLayout:
+        relative = _normalize_relative(document_path, field_name="document path")
+        if frame_origin != "loose":
+            return document_media_dir(document_path=relative, canonical_root=root, origin=frame_origin,
+                                      workspace_relative_folder=relative_folder,
+                                      owner_subject_id=owner_subject_id, layout_version=version)
+        # The transaction root may encompass several loose containing folders;
+        # each document still uses its own v1 parent/media/stem layout.
+        parts = PurePosixPath(relative)
+        local = document_media_dir(document_path=parts.name, canonical_root=root, origin="loose",
+                                   owner_subject_id=owner_subject_id, layout_version=version)
+        parent = str(parts.parent)
+        media_dir = local.media_dir if parent == "." else f"{parent}/{local.media_dir}"
+        return MediaLayout(origin="loose", canonical_root=root, document_path=relative,
+                           media_dir=media_dir, owner_subject_id=owner_subject_id, layout_version=version)
+
+    source_layout = move_layout(source_document_path, source_version)
+    source_frame_out = destination_frame_out = None
+    if cross:
+        source_frame_out = MoveFrame(origin, canonical_root, source_version, source_workspace_id, workspace_relative_folder).as_dict()
+        destination_frame_out = destination_frame.as_dict()
+
+        def refuse(code: str, reason: str, **extra: str) -> MovePlan:
+            # Cross-frame refusal plans nothing: no assets, edits or preimages.
+            return MovePlan(
+                operation_id=str(operation_id), phase=MovePhase.ABORTED, document_id=str(document_id),
+                source_document_path=str(source_document_path), destination_document_path=str(destination_document_path),
+                source_media_dir=source_layout.media_dir, destination_media_dir="", owner_subject_id=str(owner_subject_id or ""),
+                expected_revision=str(preflight.expected_revision or ""), asset_moves=(), reference_edits=(),
+                conflicts=(MoveConflict(code=code, document_id=str(document_id), reason=reason, **extra),),
+                source_layout_version=source_version, destination_layout_version=destination_version,
+                source_frame=source_frame_out, destination_frame=destination_frame_out)
+
+        if preserve_media_location:
+            return refuse("media_location_not_preservable", "media cannot stay in the source root")
+        try:
+            destination_layout = move_layout(destination_document_path, destination_version, destination_frame.origin,
+                                             destination_frame.canonical_root, destination_frame.workspace_relative_folder)
+        except MediaOwnershipError:
+            return refuse("invalid_destination_frame", "destination root cannot hold this document")
+    else:
+        destination_layout = source_layout if preserve_media_location else move_layout(destination_document_path, destination_version)
 
     conflicts: list[MoveConflict] = list(preflight.additional_conflicts)
     asset_moves: list[AssetMove] = []
-    seen_assets: set[str] = set()
+    seen_assets: dict[tuple[str, str], str] = {}
+    destination_names: set[str] = set()
     for asset in preflight.assets:
         name = str(asset.get("name") or "").strip()
         digest = str(asset.get("digest") or "").strip()
         asset_id = str(asset.get("asset_id") or "").strip()
         owner_document = str(asset.get("owner_document_id") or document_id)
-        if not name or not digest.startswith("sha256:"):
+        if not name or name in {".", ".."} or not _MEDIA_SEGMENT.fullmatch(name) or not digest.startswith("sha256:"):
             conflicts.append(
                 MoveConflict(
                     code="invalid_asset",
@@ -1016,65 +1223,69 @@ def plan_document_move(
                 )
             )
             continue
-        if name in seen_assets:
+        source_dir = asset.get("media_dir")
+        if source_dir is None:
+            source_dir = source_layout.media_dir
+        elif not isinstance(source_dir, str) or re.match(r"^[A-Za-z]:", source_dir):
+            conflicts.append(MoveConflict(code="invalid_asset", document_id=str(document_id), reason="asset media location is invalid", asset_name=name))
             continue
-        seen_assets.add(name)
+        else:
+            try:
+                source_dir = _normalize_relative(source_dir, field_name="media directory")
+            except MediaOwnershipError:
+                conflicts.append(MoveConflict(code="invalid_asset", document_id=str(document_id), reason="asset media location is invalid", asset_name=name))
+                continue
+        identity = (source_dir, name)
+        if identity in seen_assets:
+            if seen_assets[identity] != digest:
+                conflicts.append(MoveConflict(code="asset_conflict", document_id=str(document_id), reason="asset provenance digests disagree", asset_name=name))
+            continue
+        seen_assets[identity] = digest
+        if preserve_media_location:
+            continue
+        if name in destination_names:
+            conflicts.append(MoveConflict(code="asset_collision", document_id=str(document_id), reason="assets would share a destination name", asset_name=name))
+            continue
+        destination_names.add(name)
+        if source_dir == destination_layout.media_dir and not cross:
+            continue
         asset_moves.append(
             AssetMove(
                 asset_id=asset_id,
                 asset_name=name,
-                source_media_dir=source_layout.media_dir,
+                source_media_dir=source_dir,
                 destination_media_dir=destination_layout.media_dir,
                 digest=digest,
                 owner_document_id=str(document_id),
             )
         )
 
-    old_media_prefix = f"{source_layout.media_dir}/"
-    relative_document_dir = str(PurePosixPath(source_document_path)).rsplit("/", 1)[0] if "/" in str(source_document_path) else ""
     preimages: dict[str, str] = {}
     edits: list[ReferenceEdit] = []
-
-    def _new_target(site: ReferenceSite) -> str | None:
-        raw = str(site.target or "").strip()
-        if not raw or re.match(r"^[a-z][a-z\d+.-]*:", raw, re.IGNORECASE) or raw.startswith("//"):
-            return None
-        normalized = raw.replace("\\", "/")
-        if normalized.startswith("/"):
-            # Absolute workspace-style target of the moved document itself.
-            if normalized.strip("/") == str(source_document_path).strip("/"):
-                return "/" + str(destination_document_path).strip("/")
-            return None
-        # Relative targets inside the document's own media directory follow
-        # the media folder.  Relative document links follow the document path.
-        if normalized.startswith(old_media_prefix) or normalized.startswith(f"./{old_media_prefix}"):
-            suffix = normalized.split(old_media_prefix, 1)[1]
-            return f"{destination_layout.media_dir}/{suffix}"
-        if normalized.startswith("media/"):
-            # Root-anchored media reference into this document's mirror.
-            rest = normalized[len("media/") :]
-            stem_prefix = _document_stem(source_document_path) + "/"
-            if rest.startswith(stem_prefix):
-                return f"{destination_layout.media_dir}/{rest[len(stem_prefix) :]}"
-            return None
-        # A relative reference to the moved document or into its media dir.
-        if relative_document_dir:
-            joined = str(PurePosixPath(relative_document_dir, normalized))
-        else:
-            joined = normalized
-        joined_norm = os.path.normpath(joined).replace(os.sep, "/")
-        if joined_norm == str(source_document_path):
-            # Repoint at the destination using the referencing document's own
-            # directory as the origin; computed by the caller's document path.
-            return None  # handled per referencing document below
-        return None
 
     def _relative_between(from_document: str, to_document: str) -> str:
         from_dir = str(PurePosixPath(from_document)).rsplit("/", 1)[0] if "/" in from_document else ""
         relative = os.path.relpath(to_document, from_dir or ".").replace(os.sep, "/")
         return relative
 
-    for doc_id, source_text, protected in referencing_documents:
+    moved_targets = {
+        f"{item.source_media_dir}/{item.asset_name}": f"{item.destination_media_dir}/{item.asset_name}"
+        for item in asset_moves
+    }
+
+    def _cross_conflict(code: str, doc: str, reason: str, target: str) -> None:
+        conflicts.append(MoveConflict(code=code, document_id=str(doc), reason=reason, reference_target=target))
+
+    for reference in referencing_documents:
+        if len(reference) not in {3, 4}:
+            raise MediaOwnershipError("move reference entry is invalid", code="invalid_media_request")
+        doc_id, source_text, protected = reference[:3]
+        reference_path = str(reference[3]) if len(reference) == 4 else str(doc_id)
+        render_path = reference_path
+        # A moved document's links are rendered from its future location. Other
+        # documents remain at their current paths.
+        if str(doc_id) == str(document_id) and (len(reference) == 4 or cross):
+            render_path = str(destination_document_path)
         sites = scan_references(str(doc_id), str(source_text), protected=bool(protected))
         doc_changed = False
         rebuilt = str(source_text)
@@ -1085,41 +1296,52 @@ def plan_document_move(
             normalized = raw.replace("\\", "/")
             if re.match(r"^[a-z][a-z\d+.-]*:", normalized, re.IGNORECASE) or normalized.startswith("//"):
                 continue
-            new_target: str | None = None
-            if normalized.startswith(old_media_prefix) or normalized.startswith(f"./{old_media_prefix}"):
-                suffix = normalized.split(old_media_prefix, 1)[1]
-                new_target = f"{destination_layout.media_dir}/{suffix}"
-            elif normalized.startswith(f"/{source_layout.media_dir}/"):
-                suffix = normalized[len(f"/{source_layout.media_dir}/") :]
-                new_target = f"/{destination_layout.media_dir}/{suffix}"
-            elif normalized.strip("/") == str(source_document_path).strip("/") or normalized.strip("/") == str(PurePosixPath(source_document_path).name):
-                new_target = _relative_between(str(doc_id), str(destination_document_path))
-            elif normalized.startswith("media/"):
-                rest = normalized[len("media/") :]
-                stem_prefix = _document_stem(source_document_path) + "/"
-                if rest.startswith(stem_prefix):
-                    new_target = f"{destination_layout.media_dir}/{rest[len(stem_prefix) :]}"
+            from urllib.parse import urlsplit, urlunsplit
+            parsed = urlsplit(normalized)
+            # Absolute workspace paths, fragments, and query-only targets keep
+            # their authored semantics. Resolve relative paths from the old
+            # owner location before deciding whether a target moves.
+            if not parsed.path:
+                continue
+            if parsed.path.startswith("/"):
+                if cross and str(doc_id) == str(document_id):
+                    _cross_conflict("unresolvable_reference", doc_id, "absolute reference cannot follow the document to another root", raw)
+                continue
+            owner_dir = str(PurePosixPath(reference_path)).rsplit("/", 1)[0] if "/" in reference_path else ""
+            resolved_target = os.path.normpath(os.path.join(owner_dir, parsed.path)).replace(os.sep, "/")
+            is_moved_document = str(doc_id) == str(document_id)
+            new_path: str | None = None
+            escaped = False
+            if cross and resolved_target not in moved_targets and resolved_target != str(source_document_path) and "%" in parsed.path:
+                from urllib.parse import unquote
+                plain = os.path.normpath(os.path.join(owner_dir, unquote(parsed.path))).replace(os.sep, "/")
+                if plain in moved_targets or plain == str(source_document_path):
+                    resolved_target, escaped = plain, True
+            if cross and (resolved_target in moved_targets or resolved_target == str(source_document_path)) and not is_moved_document:
+                _cross_conflict("reference_outside_move", doc_id, "another document points at the moved document or media", raw)
+                continue
+            if cross and is_moved_document and resolved_target not in moved_targets and resolved_target != str(source_document_path):
+                _cross_conflict("unmanaged_local_reference", doc_id, "local reference is not an owned asset and cannot follow the document", raw)
+                continue
+            if resolved_target in moved_targets:
+                new_path = _relative_between(render_path, moved_targets[resolved_target])
+            elif is_moved_document:
+                if resolved_target == str(source_document_path):
+                    new_path = _relative_between(render_path, str(destination_document_path))
                 else:
-                    # Relative from the referencing document's own directory.
-                    candidate = os.path.normpath(
-                        os.path.join(
-                            str(PurePosixPath(doc_id)).rsplit("/", 1)[0] if "/" in str(doc_id) else "",
-                            normalized,
-                        )
-                    ).replace(os.sep, "/")
-                    if candidate == f"{source_layout.media_dir}/{rest}".removeprefix("./"):
-                        new_target = f"{destination_layout.media_dir}/{rest}"
-            if new_target is None:
-                # Resolve a plain relative path against the referencing
-                # document's directory and see if it lands in the moved media.
-                from_dir = str(PurePosixPath(str(doc_id))).rsplit("/", 1)[0] if "/" in str(doc_id) else ""
-                candidate = os.path.normpath(os.path.join(from_dir, normalized)).replace(os.sep, "/")
-                source_media_abs = f"{source_layout.media_dir}"
-                if candidate.startswith(source_media_abs + "/") or candidate == source_media_abs:
-                    suffix = candidate[len(source_media_abs) :].lstrip("/")
-                    new_target = _relative_between(str(doc_id), f"{destination_layout.media_dir}/{suffix}")
-                elif candidate == str(source_document_path):
-                    new_target = _relative_between(str(doc_id), str(destination_document_path))
+                    # Preserve unrelated local references, including legacy
+                    # media in a mixed v1/v2 document, from the new location.
+                    new_path = _relative_between(render_path, resolved_target)
+            elif resolved_target == str(source_document_path):
+                # A supplied owner path is authoritative; never match by name.
+                new_path = _relative_between(render_path, str(destination_document_path))
+            if escaped and new_path is not None:
+                from urllib.parse import quote
+                new_path = quote(new_path, safe="/")
+            new_target = (
+                urlunsplit(("", "", new_path, parsed.query, parsed.fragment))
+                if new_path is not None else None
+            )
             if new_target is None:
                 continue
             if site.protected:
@@ -1168,6 +1390,8 @@ def plan_document_move(
         unique[(conflict.code, conflict.document_id, conflict.reference_target)] = conflict
 
     phase = MovePhase.STAGED if not unique else MovePhase.ABORTED
+    if cross and unique:
+        asset_moves, edits, preimages = [], [], {}
     return MovePlan(
         operation_id=str(operation_id),
         phase=phase,
@@ -1182,6 +1406,10 @@ def plan_document_move(
         reference_edits=tuple(edits),
         conflicts=tuple(unique.values()),
         preimages=preimages,
+        source_layout_version=source_version,
+        destination_layout_version=destination_version,
+        source_frame=source_frame_out,
+        destination_frame=destination_frame_out,
     )
 
 

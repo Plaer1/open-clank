@@ -8,6 +8,7 @@ import type { Provider } from "../provider"
 import { LLM } from "./llm"
 import { ToolRegistry } from "../tool"
 import { ProviderTransform } from "../provider"
+import { resolveTools } from "./prefix-snapshot"
 
 /**
  * Build the LLM request prefix (system + tools + inheritedMessages) from the
@@ -39,6 +40,13 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
   additions: string[]
   /** Main rebuild requests compact an already-rendered checkpoint tail. */
   collapseCheckpointTail?: boolean
+  gcfViewIdentity?: string
+  gcfArtifact?: import("./gcf-native").GcfArtifact
+  gcfMemoScope?: string
+  gcfFrameRecord?: import("./gcf-request-frames").GcfFrameRecorder
+  toolViews?: ReadonlyMap<string,string>
+  nativeMembership?: import('./context-inspection').NativeMembershipCapture
+  sourceWitness?: {environment:import('./closed-source-provenance').EnvironmentProvenanceHandle;environmentStrings:string[];skills?:import('./system').SkillInvocation;instructions?:import('./instruction').InstructionResult;persona?:{result:import('../acp/openclank-protocol').OpenClankManagedProtocol.ManagedTurnStartResult;identity:import('../actor/turn').ActorExecutionIdentity}}
 }) {
   const llm = yield* LLM.Service
   const toolRegistry = yield* ToolRegistry.Service
@@ -48,6 +56,12 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
   // See spec changelog at docs/superpowers/specs/2026-05-26-fork-agent-prefix-cache-design.md
   const inheritedMessages = yield* MessageV2.toModelMessagesEffect(input.msgs, input.model, {
     collapseCheckpointTail: input.collapseCheckpointTail,
+    gcfViewIdentity: input.gcfViewIdentity,
+    gcfArtifact: input.gcfArtifact,
+    gcfMemoScope: input.gcfMemoScope,
+    gcfFrameRecord: input.gcfFrameRecord,
+    toolViews: input.toolViews,
+    nativeMembership: input.nativeMembership,
   })
 
   // Find the last user message; required for system "user.system" pass-through
@@ -64,6 +78,7 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
     user: lastUser,
     sessionID: input.sessionID as string,
     agentID: lastUser.agentID,
+    ...(input.sourceWitness ? {sourceWitness:input.sourceWitness} : {}),
   })
 
   // Resolve tools using parent agent's permission and toolAllowlist
@@ -81,5 +96,6 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
     })
   }
 
-  return { system, tools, inheritedMessages }
+  const resolved = yield* Effect.promise(() => resolveTools(tools, Object.keys(tools)))
+  return { system, tools: resolved.tools, inheritedMessages }
 })

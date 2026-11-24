@@ -946,7 +946,7 @@ def mimo_connection_model_ids(
     ]
     hidden = {
         item.strip()
-        for item in os.environ.get("MIMO_HIDDEN_MODELS", "").split(",")
+        for item in os.environ.get("OPEN_CLANK_HIDDEN_MODELS", "").split(",")
         if item.strip()
     }
     if hidden:
@@ -1087,7 +1087,7 @@ def _mimo_provider_breakdown(supervisor, owner: str | None = None) -> list[dict]
     ]
     hidden = {
         item.strip()
-        for item in os.environ.get("MIMO_HIDDEN_MODELS", "").split(",")
+        for item in os.environ.get("OPEN_CLANK_HIDDEN_MODELS", "").split(",")
         if item.strip()
     }
     if hidden:
@@ -1163,7 +1163,7 @@ def _mimo_catalog(supervisor, owner: str | None = None):
     models = _public_mimo_model_ids(supervisor, owner)
     original_count = len(models)
     models = [model_id for model_id in models if _is_chat_model(model_id)]
-    hidden = {item.strip() for item in os.environ.get("MIMO_HIDDEN_MODELS", "").split(",") if item.strip()}
+    hidden = {item.strip() for item in os.environ.get("OPEN_CLANK_HIDDEN_MODELS", "").split(",") if item.strip()}
     if hidden:
         models = [m for m in models if m not in hidden and m.rsplit("/", 1)[0] not in hidden]
     covered = _covered_direct_models(models, owner)
@@ -2078,7 +2078,7 @@ def _is_mlx_deepseek_v4_repo_id(model_id: str) -> bool:
 
 def _is_mlx_deepseek_v4_shim_id(model_id: str) -> bool:
     m = str(model_id or "").lower()
-    return "/.cache/odysseus/mlx-shims/deepseek-v4" in m
+    return "/.cache/open-clank/mlx-shims/deepseek-v4" in m
 
 
 def _filter_mlx_deepseek_v4_repo_when_shimmed(model_ids):

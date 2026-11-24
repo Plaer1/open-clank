@@ -1,0 +1,1 @@
+Session checkpoints and task records support operational continuity where authorized; they are distinct from scoped semantic memory.

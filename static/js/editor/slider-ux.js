@@ -18,14 +18,20 @@
  *   registerDocClickAway: (handler: (e: Event) => void) => void,
  * }} deps
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 
-export function wireSliderUx({ registerDocClickAway }) {
-  const container = state.container;
+export function wireSliderUx({ state = legacyState, root = null, lifetime = null } = {}) {
+  if (state !== legacyState && (!root || !lifetime)) throw new TypeError('isolated slider UX requires ownership');
+  const container = root || state.container;
   if (!container) return;
+  const doc = container.ownerDocument, win = doc.defaultView;
+  const removers = [], timers = new Set(), frames = new Set(), edits = new Set();
+  const listen = (node, type, fn, options) => { node.addEventListener(type, fn, options); removers.push(() => node.removeEventListener(type, fn, options)); };
+  const frame = fn => { const id = win.requestAnimationFrame(() => { frames.delete(id); if (!lifetime?.disposed) fn(); }); frames.add(id); };
+  lifetime?.add(() => { for (const remove of removers.splice(0)) remove(); for (const id of timers) clearTimeout(id); for (const id of frames) win.cancelAnimationFrame(id); for (const cleanup of edits) cleanup(); sliderBubble.remove(); });
 
   // ── Floating bubble ──
-  const sliderBubble = document.createElement('div');
+  const sliderBubble = doc.createElement('div');
   sliderBubble.className = 'ge-slider-bubble';
   sliderBubble.hidden = true;
   let sliderBubbleSlider = null;
@@ -50,7 +56,7 @@ export function wireSliderUx({ registerDocClickAway }) {
     return slider.value;
   }
   function bubblePos(slider, cursorX) {
-    // Bubble is fixed-positioned on document.body so it escapes any
+    // Bubble is fixed-positioned on doc.body so it escapes any
     // overflow:hidden / overflow:auto on the row's ancestors. The
     // bubble's X is CLAMPED to the slider's track so it can't follow
     // a finger that drags way past either end.
@@ -62,7 +68,7 @@ export function wireSliderUx({ registerDocClickAway }) {
     sliderBubble.style.top  = (sliderRect.top - 8) + 'px';
   }
   function showSliderBubble(slider, e) {
-    if (sliderBubble.parentElement !== document.body) document.body.appendChild(sliderBubble);
+    if (sliderBubble.parentElement !== doc.body) doc.body.appendChild(sliderBubble);
     sliderBubble.textContent = bubbleText(slider);
     bubblePos(slider, e ? e.clientX : slider.getBoundingClientRect().left + slider.offsetWidth / 2);
     sliderBubble.hidden = false;
@@ -78,12 +84,12 @@ export function wireSliderUx({ registerDocClickAway }) {
   const slidingTimers = new WeakMap();
   // Desktop: only the layer-opacity slider gets the bubble (eraser-
   // rows have their own chip). Mobile: every slider gets one.
-  const isMobileSliders = window.matchMedia('(max-width: 820px)').matches;
+  const isMobileSliders = win.matchMedia('(max-width: 820px)').matches;
   const SLIDER_SEL = isMobileSliders
     ? '.ge-layer-opacity, .ge-eraser-row input[type="range"], .ge-control-row input[type="range"], .ge-adj-row input[type="range"]'
     : '.ge-layer-opacity';
 
-  container.addEventListener('pointerdown', (e) => {
+  listen(container, 'pointerdown', (e) => {
     const slider = e.target.closest(SLIDER_SEL);
     if (!slider) return;
     const t = slidingTimers.get(slider);
@@ -102,18 +108,18 @@ export function wireSliderUx({ registerDocClickAway }) {
       const step = parseFloat(slider.step) || 1;
       const raw = min + valFrac * (max - min);
       const stepped = Math.round(raw / step) * step;
-      requestAnimationFrame(() => {
+      frame(() => {
         slider.value = String(stepped);
         slider.dispatchEvent(new Event('input', { bubbles: true }));
         sliderBubble.textContent = bubbleText(slider);
       });
     } else {
-      requestAnimationFrame(() => {
+      frame(() => {
         sliderBubble.textContent = bubbleText(slider);
       });
     }
   }, true);
-  document.addEventListener('pointermove', (e) => {
+  listen(doc, 'pointermove', (e) => {
     if (!sliderBubbleSlider) return;
     bubblePos(sliderBubbleSlider, e.clientX);
     sliderBubble.textContent = bubbleText(sliderBubbleSlider);
@@ -126,9 +132,10 @@ export function wireSliderUx({ registerDocClickAway }) {
       slider.classList.remove('is-using');
       slidingTimers.delete(slider);
     }, 500);
+    timers.add(t);
     slidingTimers.set(slider, t);
   };
-  document.addEventListener('pointerup', () => {
+  listen(doc, 'pointerup', () => {
     container.querySelectorAll('input[type="range"].is-using').forEach(scheduleSliderRelease);
     hideSliderBubble();
   });
@@ -139,7 +146,8 @@ export function wireSliderUx({ registerDocClickAway }) {
   // previews react. Matches the legacy chip AND the pulled-out
   // `.ge-slider-value` chip so every slider row in the editor is
   // click-to-type editable.
-  registerDocClickAway((e) => {
+  listen(doc, 'click', (e) => {
+    if (!container.contains(e.target)) return;
     const chip = e.target.closest(
       '.ge-eraser-row .ge-slider-value, ' +
       '.ge-eraser-row label > span[id$="-label"], ' +
@@ -153,7 +161,7 @@ export function wireSliderUx({ registerDocClickAway }) {
     e.preventDefault();
     e.stopPropagation();
     const numeric = (slider.value ?? '').toString();
-    const inp = document.createElement('input');
+    const inp = doc.createElement('input');
     inp.type = 'text';
     inp.value = numeric;
     inp.className = 'ge-slider-edit';
@@ -181,7 +189,9 @@ export function wireSliderUx({ registerDocClickAway }) {
     const cleanup = () => {
       inp.remove();
       chip.style.visibility = '';
+      edits.delete(cleanup);
     };
+    edits.add(cleanup);
     inp.addEventListener('blur', commit);
     inp.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') { ev.preventDefault(); commit(); }

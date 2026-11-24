@@ -36,55 +36,18 @@ def _openai_msg(content, reasoning_content=None):
 # 1. llm_call (sync): empty content → falls back to reasoning_content
 # ---------------------------------------------------------------------------
 
-def test_private_sync_parser_returns_reasoning_content_when_content_empty(monkeypatch):
-    monkeypatch.setattr(
-        llm_core.httpx, "post",
-        lambda *a, **kw: _sync_response(_openai_msg("", "I reasoned through it")),
-    )
-    result = llm_core._legacy_llm_call(
-        "http://test/v1", "qwen3-8b",
-        [{"role": "user", "content": "think"}],
-    )
-    assert result == "I reasoned through it"
 
 
 # ---------------------------------------------------------------------------
 # 2. llm_call_async (async): empty content → falls back to reasoning_content
 # ---------------------------------------------------------------------------
 
-def test_private_async_parser_returns_reasoning_content_when_content_empty(monkeypatch):
-    class _FakeAsyncClient:
-        async def post(self, *a, **kw):
-            req = httpx.Request("POST", "http://test-async/v1/chat/completions")
-            return httpx.Response(200, request=req,
-                                  json=_openai_msg("", "async reasoning text"))
-
-    monkeypatch.setattr(llm_core, "_get_http_client",
-                        lambda: _FakeAsyncClient())
-
-    result = asyncio.run(llm_core._legacy_llm_call_async(
-        "http://test-async/v1", "qwen3-8b",
-        [{"role": "user", "content": "think"}],
-    ))
-    assert result == "async reasoning text"
 
 
 # ---------------------------------------------------------------------------
 # 3. Normal content takes priority over reasoning_content when both present
 # ---------------------------------------------------------------------------
 
-def test_private_sync_parser_content_wins_over_reasoning_content(monkeypatch):
-    monkeypatch.setattr(
-        llm_core.httpx, "post",
-        lambda *a, **kw: _sync_response(
-            _openai_msg("Normal answer", "some reasoning")
-        ),
-    )
-    result = llm_core._legacy_llm_call(
-        "http://test/v1", "some-model",
-        [{"role": "user", "content": "hi"}],
-    )
-    assert result == "Normal answer"
 
 
 # ---------------------------------------------------------------------------

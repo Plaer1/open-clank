@@ -1,6 +1,6 @@
 """Root-owned actual-child code-query checks; no app, live data or installed fallback.
 
-Run only with the matching s03-fixtures fm-mcp binary and fully isolated env-i
+Run only with the matching s03-fixtures memery-worker binary and fully isolated env-i
 startup. These checks qualify private native jobs, not friendly tools/context.
 """
 import asyncio
@@ -9,23 +9,23 @@ from pathlib import Path
 
 import pytest
 
-if not os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN"):
+if not os.environ.get("OPEN_CLANK_TEST_MEMERY_WORKER_BIN"):
     pytest.skip("Explicit matching s03-fixtures binary is required; no installed fallback", allow_module_level=True)
 
 
 def _assert_isolated_startup():
     root = Path(os.environ["OPEN_CLANK_DATA_DIR"]).resolve()
     assert root.name.startswith("openclank-s03-"), "explicit isolated startup root required"
-    for key in ("ODYSSEUS_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH",
+    for key in ("OPEN_CLANK_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH",
                 "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH",
                 "OPENCLANK_CONVERSATION_ARCHIVE_DB"):
         assert Path(os.environ[key]).resolve().is_relative_to(root), key
     assert os.environ["DATABASE_URL"] == "sqlite:///:memory:"
-    assert os.environ["ODYSSEUS_INPROCESS_POLLERS"] == "0"
+    assert os.environ["OPEN_CLANK_INPROCESS_POLLERS"] == "0"
     assert os.environ["PYTHONDONTWRITEBYTECODE"] == "1"
-    binary = Path(os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"]).resolve()
+    binary = Path(os.environ["OPEN_CLANK_TEST_MEMERY_WORKER_BIN"]).resolve()
     assert binary.is_file()
-    assert Path(os.environ["FM_MCP_COMMAND"]).resolve() == binary
+    assert Path(os.environ["OPEN_CLANK_MEMERY_WORKER"]).resolve() == binary
     assert "OPEN_CLANK_AGENT_HOME" not in os.environ
     assert "THESIUS_AGENT_HOME" not in os.environ
 

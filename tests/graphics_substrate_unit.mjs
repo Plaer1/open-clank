@@ -182,6 +182,24 @@ test('capability: webgl2 throw and null context fall back with reasons', () => {
   assert.equal(missing.reason, 'webgl2-unavailable');
 });
 
+test('capability: hardware-only probe releases a software context and preserves hardware', () => {
+  for (const [renderer, software] of [['ANGLE (SwiftShader Device)', true], ['AMD Radeon', false]]) {
+    let released = false;
+    const gl = {
+      RENDERER: 1,
+      getParameter: key => key === 2 ? renderer : 'WebKit WebGL',
+      getExtension: name => name === 'WEBGL_debug_renderer_info'
+        ? { UNMASKED_RENDERER_WEBGL: 2 }
+        : { loseContext() { released = true; } },
+    };
+    const result = probeGraphicsCapability({
+      canvas: mockCanvas2d(), requireHardware: true, createWebGL2: () => gl, device: {},
+    });
+    assert.equal(result.backend, software ? BACKEND_CANVAS2D : BACKEND_WEBGL2);
+    assert.equal(released, software);
+  }
+});
+
 test('capability: successful webgl2 probe reports accelerated backend and clamped limits', () => {
   const canvas = mockCanvas2d();
   const gl = {

@@ -2,21 +2,21 @@
   "id": "batch-033",
   "group": "docs.openclank-docs-settings-themes",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 2239,
+  "entry_count": 3,
+  "character_count": 5055,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-settings-themes.body",
-      "source": "# Settings and Themes\n\nSettings owns configuration and appearance. Theme lives here — there is no\nseparate theme applet.\n\nOpen [Settings](clank://settings).\n\n## Panels\n\n| Panel | What it holds |\n| --- | --- |\n| [Appearance](clank://settings/appearance) | Theme, colors, background effects |\n| [Providers](clank://settings/providers) | Model providers and keys |\n| [History](clank://settings/history) | Memory and retention budgets |\n| [File access](clank://settings/file-access) | What the assistant may touch |\n\nSettings panels are reachable by direct navigation. Opening a panel from a\nlink focuses it; it never closes a window you already had open.\n\n## Themes\n\nThemes change colors, backgrounds and effects across the whole shell. The\ntheme picker shows live previews. Custom accent colors are available on every\ntheme, and you can save your own named themes (up to eight) and share them as\nJSON.\n\nBackground / Effect chooses the decorative background. The shipped effects\nare: Solid, Clanker Signal Routes, Shipibo Kene-Inspired Signal Weave,\nClanker LCARS, Clanker Gem Drift, Clanker Emoji Drift, Clanker Matrix Rain,\nClanker Emoji Rain, Clanker LCARS Status Sweep, Dots, Synapse, Rain,\nConstellations, Perlin Flow, Petals, Sparkles and Embers. Each effect that\nsupports it exposes an effect color, an Intensity slider and a Size slider;\neffects without those controls hide them.\n\nBackground effects are decorative. On machines where an effect is too heavy\nit can be turned off without changing the rest of the theme.\n\n## Typography and accessibility\n\nAppearance also controls typography: a font choice, a density setting\n(comfortable, compact, spacious) and a UI text-size scale that is independent\nof the active theme. A frosted-glass toggle softens panels where the theme\nsupports it. These are readability controls, not decoration.\n\n## What settings does not do\n\n- It does not migrate your documents.\n- It does not change other accounts' settings.\n- It does not require a restart for appearance changes.\n\n[[Accounts and Models]] covers provider setup in more detail.",
+      "source": "# Settings and Themes\n\nUse **Find a setting…** to jump to a control. Theme and keyboard bindings are browser-local. Provider connections and launcher visibility belong to your account. [Settings](clank://settings).\n\n## Files, Editor and agent access\n\n**Permissions → Your file access** shows what you can open in Files and Editor. Administrators share a **Location** through **People**, with **Browse / download** or **Modify** access. **Operation approvals** shows saved agent approvals and when they expire.\n\nThe owner and administrators can set **Permissions → Full filesystem access** for their own accounts. **Files and Editor** and **Agents for this account** are separate switches. On uses the host OS account’s permissions. Off uses existing folder grants. **Account → Full access** enables models and optional tools where offered.\n\n## Account and administration\n\nSet up your authenticator under **Account → Two-Factor Authentication**. For a provider login, see [[Accounts and Models]]. Administrators manage scoped API tokens at `/api/tokens`.\n\nCheck **Logging → Storage inventory**, or use the administrator’s **System → Stack health**, **Terminal Logs** and **Data Backup**. For what backups cover, see [[Recovery#Restore an installation|Restore an installation]].\n\n**Tokenomics** lets you opt into changes such as reusing exact repeated Browser snapshot text. Check the effective settings there and observed usage under [[Usage and Stats]].\n\n## Connect an MCP tool server\n\nAs an administrator, open **Settings → Integrations → MCP Tool Server**. Select **stdio** for a command, arguments and environment on the host, or **SSE** or **Streamable HTTP** for a server URL. Put credentials in the connection settings. Choose **Save**, complete **Authorize** if prompted and check the tool list. A local command uses the host’s access. A remote tool receives the data you pass to it.\n\n## Change appearance\n\nOpen [Appearance](clank://settings/appearance). Choose **Solid** to stop background motion. **Copal navigation** restores a hidden Journal shortcut. [Shortcuts](clank://settings/shortcuts) shows your bindings.\n\nNew supported workbooks and decks use the current theme. To change an existing one, see [[Deliverables#Edit a slide deck|Apply the current theme]]. **Reduce motion in generated deliverables** is an account preference.\n\n## Google Emoji Drift artwork\n\nSelect the effect to review consent. **Allow** permits artwork acquisition. Emoji Drift and Emoji Rain use Kene Weave until consent and local artwork are available. **Refresh artwork status** shows the installation and update state. Pause or resume weekly updates there, or **Revoke emoji artwork consent**. See [[Credits and Included Components]].\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:579"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
@@ -26,10 +26,20 @@
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:579"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
       "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-settings-themes.body.compat-52bb1b006c5b",
+      "source": "# Settings and Themes\n\nSettings owns configuration and appearance. Theme lives here — there is no\nseparate theme applet.\n\nOpen [Settings](clank://settings).\n\n## Panels\n\n| Panel | What it holds |\n| --- | --- |\n| [Appearance](clank://settings/appearance) | Theme, colors, background effects |\n| [Providers](clank://settings/providers) | Model providers and keys |\n| [History](clank://settings/history) | Memory and retention budgets |\n| [File access](clank://settings/file-access) | What the assistant may touch |\n\nSettings panels are reachable by direct navigation. Opening a panel from a\nlink focuses it; it never closes a window you already had open.\n\n## Themes\n\nThemes change colors, backgrounds and effects across the whole shell. The\ntheme picker shows live previews. Custom accent colors are available on every\ntheme, and you can save your own named themes (up to eight) and share them as\nJSON.\n\nBackground / Effect chooses the decorative background. The shipped effects\nare: Solid, Clanker Signal Routes, Shipibo Kene-Inspired Signal Weave,\nClanker LCARS, Clanker Gem Drift, Clanker Emoji Drift, Clanker Matrix Rain,\nClanker Emoji Rain, Clanker LCARS Status Sweep, Dots, Synapse, Rain,\nConstellations, Perlin Flow, Petals, Sparkles and Embers. Each effect that\nsupports it exposes an effect color, an Intensity slider and a Size slider;\neffects without those controls hide them.\n\nBackground effects are decorative. On machines where an effect is too heavy\nit can be turned off without changing the rest of the theme.\n\n## Typography and accessibility\n\nAppearance also controls typography: a font choice, a density setting\n(comfortable, compact, spacious) and a UI text-size scale that is independent\nof the active theme. A frosted-glass toggle softens panels where the theme\nsupports it. These are readability controls, not decoration.\n\n## What settings does not do\n\n- It does not migrate your documents.\n- It does not change other accounts' settings.\n- It does not require a restart for appearance changes.\n\n[[Accounts and Models]] covers provider setup in more detail.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
     }
   ]
 }

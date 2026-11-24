@@ -36,13 +36,13 @@ def isolated_file_authority(tmp_path, monkeypatch):
              "AUTH_FILE": str(data / "auth.json"), "FM_DB_PATH": str(data / "fm.db")}
     for name, value in paths.items():
         monkeypatch.setattr(constants, name, value)
-    for name, value in {"OPEN_CLANK_DATA_DIR": paths["DATA_DIR"], "ODYSSEUS_DATA_DIR": paths["DATA_DIR"],
+    for name, value in {"OPEN_CLANK_DATA_DIR": paths["DATA_DIR"],
                         "OPEN_CLANK_AUTHORITY_DB_PATH": paths["APP_DB"],
                         "OPEN_CLANK_AUTHORITY_AUTH_PATH": paths["AUTH_FILE"], "FM_DB_PATH": paths["FM_DB_PATH"]}.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("ODYSSEUS_FILES_TRANSPORT", "framed")
+    monkeypatch.setenv("OPEN_CLANK_FILES_TRANSPORT", "framed")
     for name in list(os.environ):
-        if name.startswith("OPENCLANK_HISTORY_") or name in {"ODYSSEUS_FILES_SOCKET", "ODYSSEUS_FILES_GRPC_SOCKET", "ODYSSEUS_FILES_GRPC_SESSION", "OPEN_CLANK_AGENT_HOME", "THESIUS_AGENT_HOME"}:
+        if name.startswith("OPENCLANK_HISTORY_") or name in {"OPEN_CLANK_FILES_SOCKET", "OPEN_CLANK_FILES_GRPC_SOCKET", "OPEN_CLANK_FILES_GRPC_SESSION", "OPEN_CLANK_AGENT_HOME", "THESIUS_AGENT_HOME"}:
             monkeypatch.delenv(name, raising=False)
     for module in (file_policy, filesystem_registry):
         monkeypatch.setattr(module, "APP_DB", paths["APP_DB"])
@@ -61,8 +61,8 @@ def isolated_file_authority(tmp_path, monkeypatch):
     original_environment = files_service_client.OdysseusFilesClient._service_environment
     def checked_environment(self):
         environment = original_environment(self)
-        for name in ("OPEN_CLANK_DATA_DIR", "ODYSSEUS_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH",
-                     "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "ODYSSEUS_FILES_REGISTRY"):
+        for name in ("OPEN_CLANK_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH",
+                     "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "OPEN_CLANK_FILES_REGISTRY"):
             if environment.get(name):
                 assert Path(environment[name]).resolve().is_relative_to(tmp_path.resolve()), name
         return environment
@@ -82,7 +82,7 @@ def isolated_file_authority(tmp_path, monkeypatch):
 
 
 def _service_binary() -> str:
-    if configured := os.environ.get("ODYSSEUS_FILES_SERVICE_BIN"):
+    if configured := os.environ.get("OPEN_CLANK_FILES_SERVICE_BIN"):
         assert Path(configured).is_file(), "explicit Files binary is missing"
         return configured
     return str(
@@ -99,7 +99,7 @@ def test_s02a_search_scope_revoke_cursor_and_mode_with_real_service(tmp_path, mo
     ceiling = registry.add("administrator", str(root), "recursive_directory", ["read"])
     registry.assign_visibility("administrator", "alice", ceiling["id"], ["read"])
     record = registry.add("alice", str(root), "recursive_directory", ["read"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
     client = AgentFilesClient("alice", str(root), binary=_service_binary())
     try:
         found = asyncio.run(client.request("content_search", str(root), {"query": "a*b", "mode": "literal", "file_glob": "*.py"}))
@@ -166,7 +166,7 @@ def test_rust_scope_snapshot_is_wire_compatible(tmp_path):
 def test_app_scope_is_explicitly_sent_to_rust_service(tmp_path, monkeypatch, isolated_file_authority):
     registry_path = tmp_path / "roots.json"
     registry_path.write_text(json.dumps({"version": 1, "roots": {}}), encoding="utf-8")
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry_path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry_path))
     client = OdysseusFilesClient(
         "non-admin",
         app_scope={
@@ -179,8 +179,8 @@ def test_app_scope_is_explicitly_sent_to_rust_service(tmp_path, monkeypatch, iso
         },
     )
     environment = client._service_environment()
-    scope = json.loads(environment["ODYSSEUS_FILES_APP_SCOPE"])
-    snapshot_path = Path(environment["ODYSSEUS_FILES_REGISTRY"])
+    scope = json.loads(environment["OPEN_CLANK_FILES_APP_SCOPE"])
+    snapshot_path = Path(environment["OPEN_CLANK_FILES_REGISTRY"])
     assert snapshot_path.parent == Path(isolated_file_authority.db_path).parent
     assert json.loads(snapshot_path.read_text())["generation"] == isolated_file_authority.generation()
     assert scope == {
@@ -196,7 +196,7 @@ def test_app_scope_is_explicitly_sent_to_rust_service(tmp_path, monkeypatch, iso
 def test_files_child_receives_supervisor_scoped_history_binding(tmp_path, monkeypatch):
     registry_path = tmp_path / "roots.json"
     registry_path.write_text(json.dumps({"version": 1, "roots": {}}), encoding="utf-8")
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry_path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry_path))
     set_history_binding_provider(
         lambda owner, lane: {
             "socket": "/private/history.sock",
@@ -227,7 +227,7 @@ def test_non_admin_app_scope_reads_only_assigned_root_with_real_service(tmp_path
     registry = FilesystemRootRegistry(tmp_path / "roots.json")
     root = registry.add("administrator", str(visible), "recursive_directory", ["read"])
     registry.assign_visibility("administrator", "bob", root["id"], ["read"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
     client = OdysseusFilesClient(
         "bob",
         binary=_service_binary(),
@@ -277,7 +277,7 @@ def test_non_admin_app_scope_does_not_bleed_capabilities_between_roots(tmp_path,
     )
     registry.assign_visibility("administrator", "bob", read_root["id"], ["read"])
     registry.assign_visibility("administrator", "bob", write_root["id"], ["write"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
     client = OdysseusFilesClient(
         "bob",
         binary=_service_binary(),
@@ -317,7 +317,7 @@ def test_scoped_app_client_rejects_registry_generation_change(tmp_path, monkeypa
     registry = FilesystemRootRegistry(tmp_path / "roots.json")
     root = registry.add("administrator", str(visible), "recursive_directory", ["read"])
     registry.assign_visibility("administrator", "bob", root["id"], ["read"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
     client = OdysseusFilesClient(
         "bob",
         binary=_service_binary(),
@@ -494,7 +494,7 @@ def test_tonic_stream_cancels_on_non_admin_policy_generation_change(tmp_path, mo
     registry = FilesystemRootRegistry(tmp_path / "roots.json")
     root = registry.add("administrator", str(visible), "recursive_directory", ["read"])
     registry.assign_visibility("administrator", "bob", root["id"], ["read"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
     client = OdysseusFilesClient(
         "bob",
         binary=_service_binary(),
@@ -528,7 +528,7 @@ def test_agent_client_cache_key_tracks_policy_generation(tmp_path, monkeypatch):
     ceiling = registry.add("administrator", str(visible), "recursive_directory", ["read"])
     registry.assign_visibility("administrator", "bob", ceiling["id"], ["read"])
     root = registry.add("bob", str(visible), "recursive_directory", ["read"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
     close_all_clients()
     first = agent_client_for("bob", str(visible))
     registry.update("bob", root["id"], enabled=False)
@@ -541,9 +541,9 @@ def test_agent_client_cache_key_tracks_policy_generation(tmp_path, monkeypatch):
 
 def test_cached_clients_do_not_cross_transport_selection(monkeypatch):
     close_all_clients()
-    monkeypatch.setenv("ODYSSEUS_FILES_TRANSPORT", "framed")
+    monkeypatch.setenv("OPEN_CLANK_FILES_TRANSPORT", "framed")
     framed = client_for_owner("owner")
-    monkeypatch.setenv("ODYSSEUS_FILES_TRANSPORT", "grpc")
+    monkeypatch.setenv("OPEN_CLANK_FILES_TRANSPORT", "grpc")
     tonic = client_for_owner("owner")
     try:
         assert tonic is not framed
@@ -565,9 +565,9 @@ def test_manage_files_uses_rust_move_trash_restore_for_scoped_agent(tmp_path, mo
     app_root = registry.add("administrator", str(visible), "recursive_directory", ["read", "write"])
     registry.assign_visibility("administrator", "bob", app_root["id"], ["read", "write"])
     registry.add("bob", str(visible), "recursive_directory", ["read", "write"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
-    monkeypatch.setenv("ODYSSEUS_FILES_SERVICE_BIN", _service_binary())
-    monkeypatch.setenv("ODYSSEUS_FILES_AGENT_RUNTIME", "1")
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_SERVICE_BIN", _service_binary())
+    monkeypatch.setenv("OPEN_CLANK_FILES_AGENT_RUNTIME", "1")
 
     from src import tool_execution
     token = tool_execution._active_workspace.set(str(visible))
@@ -622,9 +622,9 @@ def test_rust_manage_files_rejects_source_changed_during_approval(tmp_path, monk
     root = registry.add("administrator", str(visible), "recursive_directory", ["read", "write"])
     registry.assign_visibility("administrator", "bob", root["id"], ["read", "write"])
     registry.add("bob", str(visible), "recursive_directory", ["read", "write"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
-    monkeypatch.setenv("ODYSSEUS_FILES_SERVICE_BIN", _service_binary())
-    monkeypatch.setenv("ODYSSEUS_FILES_AGENT_RUNTIME", "1")
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_SERVICE_BIN", _service_binary())
+    monkeypatch.setenv("OPEN_CLANK_FILES_AGENT_RUNTIME", "1")
 
     token = tool_execution._active_workspace.set(str(visible))
     try:
@@ -669,9 +669,9 @@ def test_brokered_read_uses_rust_scope_without_legacy_path_ceiling(tmp_path, mon
     ceiling = registry.add("administrator", str(visible), "recursive_directory", ["read"])
     registry.assign_visibility("administrator", "bob", ceiling["id"], ["read"])
     registry.add("bob", str(visible), "recursive_directory", ["read"])
-    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
-    monkeypatch.setenv("ODYSSEUS_FILES_SERVICE_BIN", _service_binary())
-    monkeypatch.setenv("ODYSSEUS_FILES_AGENT_RUNTIME", "1")
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("OPEN_CLANK_FILES_SERVICE_BIN", _service_binary())
+    monkeypatch.setenv("OPEN_CLANK_FILES_AGENT_RUNTIME", "1")
     # The Rust lane must not ask the legacy resolver for a second, unrelated
     # allowlist decision before the service sees the request.
     monkeypatch.setattr(
@@ -700,7 +700,7 @@ def test_linux_unavailable_renderer_keeps_files_ready(tmp_path, monkeypatch, fai
         helper.write_text("#!" + sys.executable + "\n" +
                           ("raise SystemExit(2)\n" if failure == "exit" else "import time; time.sleep(30)\n"))
         helper.chmod(0o700)
-    monkeypatch.setenv("ODYSSEUS_LINUX_THUMBNAIL_HELPER_BIN", str(helper))
+    monkeypatch.setenv("OPEN_CLANK_LINUX_THUMBNAIL_HELPER_BIN", str(helper))
     client = OdysseusFilesClient("owner", binary=_service_binary(), transport="grpc")
     target = tmp_path / "ordinary.txt"
     target.write_text("ordinary files remain available\n")

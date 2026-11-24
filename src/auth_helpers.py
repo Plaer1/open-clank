@@ -125,14 +125,14 @@ def require_user(request: Request) -> str:
 def require_privilege(request: Request, key: str) -> str:
     """Require an explicit true privilege from the verified identity authority."""
     user = require_user(request)
-    if is_internal_tool_identity(user):
-        # This lane is admitted only by loopback plus the internal capability.
-        return user
+    owner = effective_user(request) if is_internal_tool_identity(user) else user
+    if not owner:
+        raise HTTPException(403, "An account-bound tool capability is required")
     auth_mgr = getattr(request.app.state, "auth_manager", None)
     if auth_mgr is None:
         raise HTTPException(503, "Privilege authority unavailable")
     try:
-        privs = auth_mgr.get_privileges(user)
+        privs = auth_mgr.get_privileges(owner)
     except Exception as exc:
         raise HTTPException(503, "Privilege authority unavailable") from exc
     if not isinstance(privs, dict) or privs.get(key) is not True:

@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from src.openclank.file_policy import FilePolicyError, FilePolicyRepository
 from src.openclank.files_principal import files_principal
-from src.openclank.files_service_client import close_all_clients
+from src.openclank.files_service_client import close_all_clients, close_clients_for_owner
 from src.openclank.filesystem_registry import FilesystemRegistryError, FilesystemRootRegistry
 from src.openclank.media_attachment_targets import adopt_loose_media_for_workspace
 from src.openclank.history_capture import trusted_tool_context
@@ -38,7 +39,13 @@ class CreateLocationRequest(_StrictModel):
     path: str = Field(min_length=1, max_length=4096)
     kind: Literal["exact_file", "directory", "whole_root"]
     capabilities: list[Literal["read", "write"]] = Field(min_length=1, max_length=2)
-    agent_access: bool = True
+    app_access: StrictBool = False
+    agent_access: StrictBool = False
+
+
+class FullFilesystemAccessRequest(_StrictModel):
+    scope: Literal["human", "agent"]
+    enabled: StrictBool
 
 
 class PeopleAccessRequest(_StrictModel):
@@ -72,6 +79,8 @@ class WorkspaceIndexRequest(_StrictModel):
     purpose: Literal["app_folder", "agent_workspace"] = "agent_workspace"
     subscriber_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9:_-]+$")
     session_id: str | None = Field(default=None, min_length=1, max_length=256)
+    removal_confirmation: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    replace_stale_root: bool = False
 
 
 class UpdateOperationApprovalRequest(_StrictModel):
@@ -94,10 +103,10 @@ def setup_file_policy_routes(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/file-policy", tags=["file-policy"])
     policy = repository or FilePolicyRepository()
-    # Kept as a constructor argument for legacy callers; state is SQLite only.
+    registry = filesystem_registry or FilesystemRootRegistry(repository=policy)
 
     def principal(request: Request) -> tuple[str, str, bool]:
-        return files_principal(request, repository=policy)
+        return files_principal(request, repository=policy, management=True)
 
     def location_view(location) -> dict:
         return {
@@ -150,7 +159,10 @@ def setup_file_policy_routes(
 
     @router.get("/state")
     async def state(request: Request, include_inactive: bool = False):
-        subject_id, _username, is_admin = principal(request)
+        subject_id, username, is_admin = principal(request)
+        auth = request.app.state.auth_manager
+        eligible = auth.filesystem_access_eligible(username, subject_id)
+        broad = policy.full_filesystem_access(subject_id) if eligible else {"human": False, "agent": False}
         bindings = policy.list_bindings(
             subject_id=None if is_admin else subject_id,
             include_inactive=bool(include_inactive),
@@ -195,8 +207,33 @@ def setup_file_policy_routes(
             ],
             "bindings": [binding_view(binding) for binding in bindings],
             "operation_approvals": [binding_view(binding) for binding in bindings if binding.binding_class == "operation"],
-            "effective_scope": effective_scope(subject_id, is_admin),
+            "effective_scope": {**effective_scope(subject_id, False), "host": broad["human"]},
+            "full_filesystem_access": {"eligible": eligible, **broad},
         }
+
+    @router.put("/full-filesystem-access")
+    async def set_full_filesystem_access(body: FullFilesystemAccessRequest, request: Request):
+        subject_id, username, _is_admin = principal(request)
+        auth = request.app.state.auth_manager
+        cookie = request.cookies.get("open_clank_session")
+        if (getattr(request.state, "api_token", False) or getattr(request.state, "internal_tool_authenticated", False)
+                or not cookie or auth.get_username_for_token(cookie) != username):
+            raise HTTPException(401, "Browser session required")
+        if request.headers.get("X-Openclank-Account") != subject_id:
+            raise HTTPException(409, "The active account changed")
+        result = auth.set_filesystem_access(
+            username, subject_id, body.scope, body.enabled, repository=policy,
+        )
+        if result is None:
+            raise HTTPException(403, "Only the signed-in owner or an administrator can change full filesystem access")
+        broad, generation, changed = result
+        if changed:
+            close_clients_for_owner(username)
+            if body.scope == "agent":
+                from src.agent_tools.filesystem_tools import reject_file_approval_scope
+
+                reject_file_approval_scope(owner=username, all_pending=True)
+        return {"version": 1, "generation": generation, "full_filesystem_access": {"eligible": True, **broad}}
 
     @router.get("/location-presets")
     async def location_presets(request: Request):
@@ -288,6 +325,9 @@ def setup_file_policy_routes(
         subject_id, username, is_admin = principal(request)
         if not is_admin:
             raise HTTPException(403, "Only an administrator can register a host location")
+        expected = request.headers.get("X-Openclank-Account")
+        if expected is not None and expected != subject_id:
+            raise HTTPException(409, "The active account changed")
         canonical = Path(body.path).expanduser().resolve(strict=False)
         try:
             metadata = canonical.stat()
@@ -300,6 +340,8 @@ def setup_file_policy_routes(
         if body.kind == "whole_root" and canonical != Path(canonical.anchor):
             raise HTTPException(400, detail={"code": "invalid_whole_root", "message": "Whole disk must name an OS filesystem root"})
         capabilities = tuple(sorted(set(body.capabilities)))
+        if body.app_access and "read" not in capabilities:
+            raise HTTPException(422, "Browsing the folder requires read access")
         platform_identity = {
             "device": getattr(metadata, "st_dev", None),
             "inode": getattr(metadata, "st_ino", None),
@@ -330,33 +372,45 @@ def setup_file_policy_routes(
         except FilePolicyError as error:
             raise_policy(error)
 
-        binding = None
-        legacy_root = None
-        if body.agent_access:
-            binding = next((
-                item for item in policy.list_bindings(subject_id=subject_id, binding_class="agent")
-                if item.location_id == location.id and item.lifetime == "always" and item.status == "active"
-            ), None)
-            if binding is None:
-                try:
-                    binding = policy.create_binding(
-                        actor_subject_id=subject_id,
-                        binding_class="agent",
-                        subject_id=subject_id,
-                        location_id=location.id,
-                        capabilities=capabilities,
-                        lifetime="always",
-                    )
-                except FilePolicyError as error:
-                    raise_policy(error)
+        app_binding_id = None
+        agent_binding_id = None
+        access_pending = []
+        for requested, grant in ((body.app_access, "people"), (body.agent_access, "agent")):
+            if not requested:
+                continue
+            try:
+                current = canonical.stat()
+                if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise FilePolicyError("The chosen folder changed", code="location_changed")
+                if any(location.platform_identity.get(key) not in (None, platform_identity[key]) for key in ("device", "inode")):
+                    raise FilePolicyError("The registered folder identity changed", code="location_changed")
+                binding_id = policy.ensure_self_location_access(subject_id, location, capabilities, binding_class=grant)
+                if grant == "people":
+                    app_binding_id = binding_id
+                else:
+                    agent_binding_id = binding_id
+            except (FilePolicyError, OSError):
+                access_pending.append("app" if grant == "people" else "agent")
 
-            close_all_clients()
-
+        if app_binding_id or agent_binding_id:
+            close_clients_for_owner(username)
+        app_access = policy.resolve(
+            subject_id=subject_id, is_admin=False, origin="app", location_id=location.id,
+            capability="read", observation_only=True,
+        ).allowed
+        agent_access = policy.resolve(
+            subject_id=subject_id, is_admin=False, origin="agent", location_id=location.id,
+            capability="read", observation_only=True,
+        ).allowed
         return {
             "version": 1,
             "generation": policy.generation(),
             "location": location_view(location),
-            "agent_binding_id": binding.id if binding else None,
+            "app_binding_id": app_binding_id,
+            "app_access": app_access,
+            "agent_binding_id": agent_binding_id,
+            "agent_access": agent_access,
+            "access_pending": access_pending,
             "compatibility_projected": True,
             "os_managed": body.kind == "whole_root",
         }
@@ -390,13 +444,15 @@ def setup_file_policy_routes(
 
     @router.post("/workspaces/from-path")
     async def create_workspace_from_path(body: WorkspacePathRequest, request: Request):
-        subject_id, _username, is_admin = principal(request)
+        subject_id, _username, human_host = files_principal(request, repository=policy)
+        broad_agent = body.purpose == "agent_workspace" and registry.full_filesystem_choices(_username, subject_id)["agent"]
         try:
             binding = bind_workspace_path(
                 policy,
                 actor_subject_id=subject_id,
                 owner_subject_id=subject_id,
-                is_admin=is_admin,
+                is_admin=human_host if body.purpose == "app_folder" else False,
+                agent_full_access=broad_agent,
                 path=body.path,
                 purpose=body.purpose,
                 name=body.name,
@@ -424,19 +480,21 @@ def setup_file_policy_routes(
 
     @router.get("/workspaces/{workspace_id}/resolve")
     async def resolve_workspace(workspace_id: str, request: Request, purpose: Literal["app_folder", "agent_workspace"]):
-        subject_id, _username, is_admin = principal(request)
+        subject_id, _username, human_host = files_principal(request, repository=policy)
+        broad_agent = purpose == "agent_workspace" and registry.full_filesystem_choices(_username, subject_id)["agent"]
         try:
             workspace = policy.get_workspace(workspace_id)
         except FilePolicyError as error:
             raise_policy(error)
-        if workspace.owner_subject_id != subject_id:
+        if workspace.archived or workspace.owner_subject_id != subject_id:
             raise HTTPException(404, "Workspace was not found")
         try:
             binding = resolve_workspace_binding(
                 policy,
                 workspace,
                 subject_id=subject_id,
-                is_admin=is_admin,
+                is_admin=human_host if purpose == "app_folder" else False,
+                agent_full_access=broad_agent,
                 purpose=purpose,
             )
         except WorkspacePolicyServiceError as error:
@@ -447,9 +505,33 @@ def setup_file_policy_routes(
             "workspace": workspace_view(binding),
         }
 
+    @router.get("/workspaces/{workspace_id}/index/watch")
+    async def watch_workspace_index(workspace_id: str, request: Request):
+        from src.openclank.code_index_lifecycle import workspace_index_changes
+        subject_id, owner, _is_admin = principal(request)
+        auth_manager = getattr(request.app.state, "auth_manager", None)
+        session_token = request.cookies.get("open_clank_session")
+
+        def session_current():
+            return bool(session_token and auth_manager
+                and auth_manager.get_username_for_token(session_token) == owner
+                and auth_manager.account_id(owner) == subject_id)
+
+        if not session_current():
+            raise HTTPException(401, "Workspace watch requires a current browser session")
+        try:
+            changes = workspace_index_changes(
+                repository=policy, auth_manager=auth_manager,
+                owner=owner, workspace_id=workspace_id, session_current=session_current,
+            )
+        except WorkspacePolicyServiceError as error:
+            raise_workspace(error, resolving=True)
+        return StreamingResponse(changes, media_type="text/event-stream",
+            headers={"Cache-Control": "private, no-store", "X-Accel-Buffering": "no"})
+
     @router.post("/workspaces/{workspace_id}/index/{event}")
     async def workspace_index_lifecycle(
-        workspace_id: str, event: Literal["open", "status", "release", "cancel", "remove", "admit"],
+        workspace_id: str, event: Literal["open", "status", "release", "cancel", "remove", "admit", "preview-removals", "confirm-removals"],
         body: WorkspaceIndexRequest, request: Request,
     ):
         from src.openclank.code_index_lifecycle import CodeIndexLifecycleError, workspace_index_event
@@ -470,7 +552,9 @@ def setup_file_policy_routes(
                 repository=policy, provider=getattr(request.app.state, "memory_provider", None),
                 auth_manager=getattr(request.app.state, "auth_manager", None), owner=owner,
                 workspace_id=workspace_id, subscriber_id="view:" + body.subscriber_id,
-                action="ensure" if event == "open" else event, purpose=body.purpose, session=session,
+                action="ensure" if event == "open" else event.replace("-", "_"), purpose=body.purpose, session=session,
+                **({"removal_confirmation": body.removal_confirmation} if body.removal_confirmation is not None else {}),
+                **({"replace_stale_root": True} if body.replace_stale_root else {}),
             )
         except WorkspacePolicyServiceError as error:
             raise_workspace(error, resolving=True)
@@ -478,6 +562,11 @@ def setup_file_policy_routes(
             code = 403 if error.code in {"scope_denied", "incognito"} else 409 if error.code == "stale_binding" else 503
             raise HTTPException(code, detail={"code": error.code, "message": str(error)}) from error
         except MemoryRequestRejectedError as error:
+            if error.code == "code_root_changed":
+                raise HTTPException(409, detail={
+                    "code": "code_root_changed",
+                    "message": "The directory identity changed. Use File > Open folder to select it again.",
+                }) from error
             raise HTTPException(409, detail={
                 "code": "index_request_rejected",
                 "message": "Code index request was rejected. Refresh Workspace access; erased indexes need explicit re-admission.",

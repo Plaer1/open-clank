@@ -203,7 +203,7 @@ def test_configured_recoverable_batch_is_gated_when_prepare_fails(tmp_path):
 
 
 def test_batch_staging_cleans_every_upload_when_publish_fails():
-    class FailingPublish:
+    class FailingPublish(HistoryClient):
         def __init__(self):
             self.staged: list[str] = []
             self.aborted: list[tuple[str, str]] = []
@@ -236,7 +236,7 @@ def test_batch_staging_cleans_every_upload_when_publish_fails():
     with pytest.raises(HistoryClientError, match="worker stopped"):
         # The method only relies on these transport hooks, so this test does
         # not start a worker or create a live service.
-        HistoryClient.prepare_batch(client, {"action_id": "batch-stage"}, entries)
+        client.prepare_batch({"action_id": "batch-stage"}, entries)
     assert client.staged == ["upload-0", "upload-1"]
     assert client.aborted == [
         ("batch-stage", "upload-0"),
@@ -245,8 +245,7 @@ def test_batch_staging_cleans_every_upload_when_publish_fails():
 
 
 def test_batch_staging_obeys_aggregate_inline_cap():
-    class RecordingClient:
-        _wire_content = staticmethod(HistoryClient._wire_content)
+    class RecordingClient(HistoryClient):
 
         def __init__(self):
             self.staged: list[str] = []
@@ -271,8 +270,7 @@ def test_batch_staging_obeys_aggregate_inline_cap():
             return {"Accepted": None}
 
     one = RecordingClient()
-    HistoryClient.prepare_batch(
-        one,
+    one.prepare_batch(
         {"action_id": "aggregate-one"},
         [{"content": b"x" * (600 * 1024), "fingerprint": "one"}],
     )
@@ -280,8 +278,7 @@ def test_batch_staging_obeys_aggregate_inline_cap():
     assert one.payload["PrepareBatch"]["entries"][0]["content"] is None
 
     many = RecordingClient()
-    HistoryClient.prepare_batch(
-        many,
+    many.prepare_batch(
         {"action_id": "aggregate-many"},
         [
             {"content": b"a" * (300 * 1024), "fingerprint": "first"},
@@ -395,24 +392,74 @@ def test_excluded_target_is_not_read_before_containment_check(tmp_path, monkeypa
 
 
 def test_registered_filesystem_tool_receives_trusted_context(tmp_path, monkeypatch):
-    client = FakeHistoryClient()
-    context = _context(tmp_path, client)
-    from src.agent_tools import filesystem_tools
+    import asyncio
+    from pathlib import Path
     from src.agent_tools import TOOL_HANDLERS
+    from src.openclank import files_service_client as files
+    from src.openclank.file_policy import FilePolicyRepository
+    from src.openclank.history_client import HistoryServiceSupervisor, ScopedHistoryCredential
 
-    monkeypatch.setattr(filesystem_tools, "_history_context", lambda _ctx: context)
-    monkeypatch.setattr(filesystem_tools, "_validate_file_policy", lambda *_args, **_kwargs: {"warnings": []})
-    monkeypatch.setenv("ODYSSEUS_FILES_AGENT_RUNTIME", "0")
-    target = tmp_path / "registered.md"
-    result = __import__("asyncio").run(
-        TOOL_HANDLERS["write_file"](
-            '{"path": "' + str(target) + '", "content": "registered"}',
-            {"owner": "account", "workspace": str(tmp_path)},
-        )
-    )
-    assert result["exit_code"] == 0
-    assert result["history"]["history_status"] == "complete"
-    assert [name for name, _ in client.calls] == ["prepare", "record_live", "complete"]
+    root = tmp_path / "work"
+    root.mkdir()
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"users": {"alice": {"account_id": "acct-a"}}}))
+    monkeypatch.setenv("OPEN_CLANK_AUTHORITY_AUTH_PATH", str(auth))
+    monkeypatch.setenv("OPEN_CLANK_AUTHORITY_DB_PATH", str(tmp_path / "policy.db"))
+    monkeypatch.setenv("OPEN_CLANK_FILES_REGISTRY", str(tmp_path / "registry.json"))
+    monkeypatch.setenv("OPEN_CLANK_MANAGED_AGENT_HISTORY_REQUIRED", "1")
+    monkeypatch.setattr("src.constants.DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("src.tool_execution.get_active_workspace", lambda: str(root))
+    monkeypatch.setattr(files, "_AGENT_CLIENTS", {})
+    try:
+        files_binary = files.OdysseusFilesClient("alice")._binary_path()
+    except files.FilesServiceError:
+        pytest.skip("Requires packaged Files service")
+    history_binary = os.getenv("OPENCLANK_HISTORY_SERVICE_BIN") or str(Path(files_binary).with_name("openclank-history-service"))
+    if not Path(history_binary).is_file():
+        pytest.skip("Requires packaged History service")
+
+    repo = FilePolicyRepository(str(tmp_path / "policy.db"))
+    repo.sync_subjects({"alice": {"account_id": "acct-a"}})
+    location = repo.create_location(actor_subject_id="acct-a", path=str(root), kind="directory", capabilities=["read", "write"])
+    repo.create_workspace(actor_subject_id="acct-a", owner_subject_id="acct-a", location_id=location.id, name="Work", workspace_id="work")
+    bindings = {kind: repo.create_binding(actor_subject_id="acct-a", binding_class=kind, subject_id="acct-a",
+        location_id=location.id, capabilities=["read", "write"]) for kind in ("people", "agent")}
+    root_id = bindings["agent"].id
+    actor = "agent:alice"
+    sup = HistoryServiceSupervisor(history_binary, socket_path=tmp_path/"history.sock", catalog_path=tmp_path/"catalog.redb",
+        lore_root=tmp_path/"payloads", credential_file=tmp_path/"credentials", host_root=root, resource_map=tmp_path/"resources",
+        credentials=[ScopedHistoryCredential(actor, "acct-a", frozenset({"capture", "read"}))],
+        authorized_roots=[{"root_id":root_id, "canonical_path":str(root), "workspace_ids":["work"],
+                           "actor_ids":[actor], "account_ids":["acct-a"]}])
+
+    def binding(owner, lane, scope, **kwargs):
+        assert (owner, lane, scope["visible_root_ids"]) == ("alice", "agent", [root_id])
+        return {"socket":str(sup.socket_path), "account_id":"acct-a", "actor_id":actor, "token":sup.credential_token(actor,"acct-a"),
+                "workspace_id":"work", "workspace_root":str(root), "root_bindings":[{"root_id":root_id,"canonical_path":str(root)}]}
+
+    target = root / "registered.md"
+    target.write_text("prior")
+    async def write():
+        await sup.start()
+        try:
+            monkeypatch.setattr(files, "_HISTORY_BINDING_PROVIDER", binding)
+            result = await TOOL_HANDLERS["write_file"](json.dumps({"path":str(target), "content":"registered"}),
+                {"owner":"alice", "authority_workspace_id":"work"})
+            assert result["exit_code"] == 0, result
+            assert target.read_text() == "registered"
+            client = sup.client_for(actor, "acct-a")
+            resources = client.list_registered_resources()["items"]
+            assert len(resources) == 1
+            resource_id = resources[0]["resource_id"]
+            versions = client.list_resource_versions(resource_id)["items"]
+            assert len(versions) == 2
+            content = {client.read_resource_version_chunk(resource_id, item["id"])["content"] for item in versions}
+            assert content == {b"prior", b"registered"}
+        finally:
+            files.agent_client_for("alice", str(root), workspace_id="work").close()
+            await sup.stop()
+
+    asyncio.run(write())
 
 
 def test_root_journal_owns_every_granted_root_for_persistent_writer_handoff(tmp_path):

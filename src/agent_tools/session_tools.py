@@ -430,7 +430,8 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
                     keep_count = int(value)
                 except ValueError:
                     pass
-            success = _session_manager.truncate_messages(target_sid, keep_count)
+            db.rollback()  # close the read transaction before the native fence await
+            success = await _session_manager.truncate_messages_guarded(target_sid, keep_count)
             if success:
                 return {"action": "truncate", "session_id": target_sid,
                         "results": f"Session truncated to last {keep_count} messages"}

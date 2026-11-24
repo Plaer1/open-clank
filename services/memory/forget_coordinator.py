@@ -32,6 +32,11 @@ _SKILL_LOCK = ".lifecycle.lock"
 logger = logging.getLogger(__name__)
 
 
+class MemoryRecoveryBindingUnavailable(ValueError):
+    """An existing recovery cannot be attributed to this exact store."""
+
+
+
 def require_memory_lifecycle_convergence(counts: dict[str, object]) -> None:
     """Keep unresolved provider/local splits outside the readiness boundary."""
     if int(counts.get("errors") or 0):
@@ -47,6 +52,18 @@ def _sync_directories(*directories: Path) -> None:
             continue
         seen.add(value)
         _fsync_directory(value)
+
+
+def _guarded_scope(value, *, owner, workspace_id):
+    """Validate denial-only original scope; never a credential or permission."""
+    if value is None: return None
+    if (type(value) is not dict or set(value)!={'version','account_id','owner','workspace_id'}
+            or type(value.get('version')) is not int or value['version']!=1
+            or any(type(value.get(k)) is not str or not value[k] or value[k]!=value[k].strip() or len(value[k])>512
+                   for k in ('account_id','owner','workspace_id'))
+            or value['owner']!=owner or value['workspace_id']!=workspace_id):
+        raise ValueError('guarded forget scope unavailable')
+    return dict(value)
 
 
 def pack_forget_token(kind: str, **parts: str) -> str:
@@ -82,8 +99,9 @@ def unpack_forget_token(token: str, kind: str) -> dict[str, str]:
 class MemorySkillForgetCoordinator:
     """Reversibly quarantine owner-scoped artifacts derived from memories."""
 
-    def __init__(self, skills_manager):
+    def __init__(self, skills_manager, provider=None):
         self.skills = skills_manager
+        self._provider = provider
         data_root = Path(skills_manager.data_dir).resolve()
         self.recovery_root = data_root / ".memory-forget-skills"
         if self.recovery_root.is_symlink():
@@ -92,8 +110,38 @@ class MemorySkillForgetCoordinator:
             skills_manager.skills_root,
             "PROMOTIONS",
         )
-        with locked(self.lock_target):
-            self._recover_staging()
+        # Recovery is deferred to an admitted operation or guarded startup.
+
+    def _binding(self, owner: str, workspace_id: str | None) -> dict:
+        from src.memery_provider import MemeryProvider
+        provider = self._provider
+        if type(provider) is not MemeryProvider:
+            raise MemoryRecoveryBindingUnavailable("memory recovery provider identity unavailable")
+        try:
+            identity = provider.persisted_database_identity()
+            if (type(identity) is not dict or set(identity) != {"database_id", "database_path"}
+                    or not isinstance(identity["database_id"], str) or not identity["database_id"]):
+                raise ValueError("invalid persisted identity")
+        except Exception as exc:
+            raise MemoryRecoveryBindingUnavailable("memory recovery store identity unavailable") from exc
+        return {"version": 1, "provider": "memery", "store_id": identity["database_id"],
+                "owner": memory_owner(owner), "workspace_id": self._workspace_id(workspace_id)}
+
+    def _binding_matches(self, manifest: dict) -> bool:
+        binding = manifest.get("provider_binding")
+        if not isinstance(binding, dict) or set(binding) != {"version","provider","store_id","owner","workspace_id"} or binding.get("version") != 1:
+            raise MemoryRecoveryBindingUnavailable("memory recovery provider binding unavailable")
+        from src.memery_provider import MemeryProvider
+        if type(self._provider) is not MemeryProvider:
+            return False
+        current = self._binding(manifest.get("provider_owner", manifest.get("owner")), manifest.get("workspace_id"))
+        if binding["provider"] == "frankenmemory":  # Existing recovery receipts
+            binding = {**binding, "provider": "memery"}
+        return binding == current
+
+    def _require_binding(self, manifest: dict) -> None:
+        if not self._binding_matches(manifest):
+            raise MemoryRecoveryBindingUnavailable("memory recovery belongs to another provider")
 
     @staticmethod
     def _memory_ids(values: Iterable[object]) -> list[str]:
@@ -326,6 +374,8 @@ class MemorySkillForgetCoordinator:
                     or manifest.get("state") not in {"preparing", "prepared"}
                 ):
                     raise ValueError("invalid staging manifest")
+                if not self._binding_matches(manifest):
+                    continue
                 self._validate_recovery_id(str(manifest.get("id") or ""))
                 if not isinstance(manifest.get("promotions"), list) or not isinstance(
                     manifest.get("skills"),
@@ -440,6 +490,7 @@ class MemorySkillForgetCoordinator:
             if (
                 manifest.get("state") == "restored"
                 and float(manifest.get("expires_at") or 0) < time.time()
+                and self._binding_matches(manifest)
             ):
                 shutil.rmtree(item)
                 _sync_directories(self.recovery_root)
@@ -464,6 +515,7 @@ class MemorySkillForgetCoordinator:
         operation_kind: str = "forget",
         workspace_id: str | None = None,
         provider_owner: str | None = None,
+        guarded_scope: dict | None = None,
     ) -> str:
         """Quarantine affected artifacts before the provider forget commits."""
         if operation_kind not in {"forget", "retention"}:
@@ -472,6 +524,9 @@ class MemorySkillForgetCoordinator:
         provider_owner = memory_owner(
             provider_owner if provider_owner is not None else owner
         )
+        binding = self._binding(provider_owner, workspace_id)
+        guarded_scope = _guarded_scope(guarded_scope, owner=provider_owner, workspace_id=workspace_id)
+        if guarded_scope is not None and operation_kind != 'forget': raise ValueError('guarded forget scope unavailable')
         local_id = self._validate_recovery_id(recovery_id or uuid.uuid4().hex)
         with locked(self.lock_target):
             self._recover_staging()
@@ -489,9 +544,12 @@ class MemorySkillForgetCoordinator:
                     and manifest.get("memory_ids") == self._memory_ids(memory_ids)
                     and manifest.get("preview_token") == preview_token
                     and manifest.get("operation_kind", "forget") == operation_kind
+                    and manifest.get("guarded_scope") == guarded_scope
                     and manifest.get("state")
                     in {"prepared", "committed", "provider_restored"}
                 ):
+                    if guarded_scope is not None:
+                        raise ValueError('guarded forget original requires status')
                     return local_id
                 raise ValueError("memory-derived skill recovery identity conflicts")
             initial = self._snapshot(owner, memory_ids)
@@ -519,6 +577,7 @@ class MemorySkillForgetCoordinator:
                     "owner": owner,
                     "provider_owner": provider_owner,
                     "workspace_id": workspace_id,
+                    "provider_binding": binding,
                     "operation_kind": operation_kind,
                     "state": "preparing",
                     "created_at": time.time(),
@@ -527,6 +586,7 @@ class MemorySkillForgetCoordinator:
                     "promotions": current["promotions"],
                     "skills": current["skills"],
                 }
+                if guarded_scope is not None: manifest['guarded_scope'] = guarded_scope
                 atomic_write_json(
                     str(staging / "manifest.json"),
                     manifest,
@@ -579,6 +639,8 @@ class MemorySkillForgetCoordinator:
                     # entry instead of turning a transient rollback error into
                     # permanent skill loss.
                     rollback_source = final if final.is_dir() else staging
+                    # A changed store must leave the recovery payload intact.
+                    self._require_binding(manifest)
                     self._restore_local_path(rollback_source, manifest)
                     self.skills._save_promotions(all_promotions)
                     if rollback_source.exists():
@@ -665,7 +727,7 @@ class MemorySkillForgetCoordinator:
             )
             return True
 
-    def _manifest(self, local_id: str) -> tuple[Path, dict]:
+    def _manifest(self, local_id: str, *, require_binding: bool = True) -> tuple[Path, dict]:
         local_id = self._validate_recovery_id(local_id)
         if self.recovery_root.is_symlink():
             raise ValueError("memory-derived skill recovery root cannot be a symlink")
@@ -684,6 +746,8 @@ class MemorySkillForgetCoordinator:
             or manifest.get("version") != 1
         ):
             raise ValueError("invalid memory-derived skill tombstone")
+        if require_binding:
+            self._require_binding(manifest)
         return path, manifest
 
     def _validate_restore_contents(self, path: Path, manifest: dict) -> None:
@@ -757,6 +821,19 @@ class MemorySkillForgetCoordinator:
                 for row in active_promotions
             ):
                 raise ValueError("promotion identity now conflicts with recovery")
+
+    def mark_guarded_restore_issued(self, local_id, *, owner, guarded_scope, provider_tombstone_id):
+        """Durable denial-only fence before the single guarded restore issue."""
+        with locked(self.lock_target):
+            path, manifest = self._manifest(local_id)
+            scope = _guarded_scope(guarded_scope, owner=memory_owner(manifest.get('provider_owner', manifest.get('owner'))),
+                workspace_id=self._workspace_id(manifest.get('workspace_id')))
+            if (scope is None or manifest.get('guarded_scope') != scope or manifest.get('owner') != owner
+                    or manifest.get('state') != 'committed' or manifest.get('provider_tombstone_id') != provider_tombstone_id
+                    or manifest.get('guarded_restore_issued') is not None):
+                raise ValueError('guarded restore original requires status')
+            manifest['guarded_restore_issued'] = {'version':1,'operation_id':local_id,'tombstone_id':provider_tombstone_id,'scope':scope}
+            atomic_write_json(str(path / 'manifest.json'), manifest, indent=2)
 
     def preflight_restore(
         self,
@@ -900,6 +977,25 @@ class MemorySkillForgetCoordinator:
             _sync_directories(path)
             return result
 
+    def recovery_bindings(self) -> list[dict]:
+        """Read pending manifests, including staging, without changing them."""
+        with locked(self.lock_target):
+            if not self.recovery_root.is_dir():
+                return []
+            rows = []
+            for path in sorted(self.recovery_root.iterdir()):
+                if not path.is_dir() or path.is_symlink():
+                    continue
+                try:
+                    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise MemoryRecoveryBindingUnavailable("memory recovery manifest unavailable") from exc
+                if not isinstance(manifest, dict) or manifest.get("version") != 1:
+                    raise MemoryRecoveryBindingUnavailable("memory recovery manifest unavailable")
+                if manifest.get("state") in {"preparing", "prepared", "committed", "provider_restored", "restoring"}:
+                    rows.append(manifest)
+            return rows
+
     def pending_operations(self) -> list[dict]:
         with locked(self.lock_target):
             self._recover_staging()
@@ -914,7 +1010,7 @@ class MemorySkillForgetCoordinator:
                 ):
                     continue
                 try:
-                    _, manifest = self._manifest(path.name)
+                    _, manifest = self._manifest(path.name, require_binding=False)
                 except ValueError as exc:
                     raise ValueError(
                         "memory-derived skill recovery ledger is invalid"
@@ -938,6 +1034,8 @@ class MemorySkillForgetCoordinator:
                             manifest.get("workspace_id")
                         ),
                         "operation_kind": manifest.get("operation_kind", "forget"),
+                        "guarded_scope": _guarded_scope(manifest.get("guarded_scope"), owner=memory_owner(manifest.get("provider_owner", manifest.get("owner"))), workspace_id=self._workspace_id(manifest.get("workspace_id"))),
+                        "provider_binding": manifest.get("provider_binding"),
                         "state": manifest.get("state"),
                         "memory_ids": list(manifest.get("memory_ids") or ()),
                         "provider_tombstone_id": manifest.get(
@@ -962,6 +1060,8 @@ class MemorySkillForgetCoordinator:
         with locked(self.lock_target):
             try:
                 _, manifest = self._manifest(local_id)
+            except MemoryRecoveryBindingUnavailable:
+                raise
             except ValueError:
                 return None
             if (
@@ -982,6 +1082,8 @@ class MemorySkillForgetCoordinator:
                 ),
                 "workspace_id": manifest.get("workspace_id"),
                 "operation_kind": manifest.get("operation_kind", "forget"),
+                "guarded_scope": _guarded_scope(manifest.get("guarded_scope"), owner=provider_owner, workspace_id=workspace_id),
+                "guarded_restore_issued": manifest.get("guarded_restore_issued"),
                 "state": manifest.get("state"),
                 "preview_token": manifest.get("preview_token"),
                 "memory_ids": list(manifest.get("memory_ids") or ()),
@@ -1007,6 +1109,8 @@ class MemorySkillForgetCoordinator:
         with locked(self.lock_target):
             try:
                 _, manifest = self._manifest(local_id)
+            except MemoryRecoveryBindingUnavailable:
+                raise
             except ValueError:
                 return None
             if (
@@ -1033,12 +1137,31 @@ class MemorySkillForgetCoordinator:
         *,
         owner: str = "",
         filter_owner: bool = False,
+        coverage=None,
     ) -> dict[str, int]:
-        counts = {"rolled_back": 0, "committed": 0, "restored": 0, "errors": 0}
+        if memory_provider is not self._provider:
+            raise MemoryRecoveryBindingUnavailable("memory recovery provider changed")
+        counts = {"rolled_back": 0, "committed": 0, "restored": 0, "errors": 0, "deferred": 0}
         for row in await asyncio.to_thread(self.pending_operations):
             if filter_owner and row["owner"] != str(owner or ""):
                 continue
             try:
+                binding = row.get("provider_binding")
+                if not isinstance(binding, dict):
+                    raise MemoryRecoveryBindingUnavailable("memory recovery provider binding unavailable")
+                from src.memery_provider import MemeryProvider
+                expected = (self._binding(row["provider_owner"], row.get("workspace_id"))
+                            if type(self._provider) is MemeryProvider else None)
+                if binding != expected:
+                    if type(coverage) is MemoryRecoveryCoverage and coverage.deferred(row["id"], self._provider):
+                        continue
+                    raise MemoryRecoveryBindingUnavailable("memory recovery provider coverage unavailable")
+                # Guarded scope is denial-only. Background has no original human
+                # credential; even an absent generic status cannot prove unsent.
+                prepared = getattr(memory_provider, '_guarded_preparation', None)
+                if row['operation_kind'] == 'forget' and (row.get('guarded_scope') is not None or getattr(prepared, 'schema_version', None) == 18):
+                    counts['deferred'] += 1
+                    continue
                 if row["operation_kind"] == "retention":
                     if row["state"] != "prepared":
                         raise ValueError(
@@ -1169,6 +1292,58 @@ class MemorySkillForgetCoordinator:
         return counts
 
 
+_RECOVERY_COVERAGE_SEAL = object()
+
+
+class MemoryRecoveryCoverage:
+    def __init__(self, assignments, seal):
+        if seal is not _RECOVERY_COVERAGE_SEAL:
+            raise ValueError("memory recovery coverage unavailable")
+        self._assignments = frozenset(assignments)
+        self._seal = seal
+
+    def deferred(self, operation_id, provider):
+        return self._seal is _RECOVERY_COVERAGE_SEAL and any(
+            item == operation_id and bound != id(provider) for item, bound in self._assignments)
+
+
+async def require_memory_recovery_provider_coverage(coordinators) -> MemoryRecoveryCoverage | None:
+    """Require one exact available provider for every unfinished recovery."""
+    unique = []
+    seen = set()
+    for coordinator in coordinators:
+        if coordinator is None or coordinator.skill_forget is None or id(coordinator.provider) in seen:
+            continue
+        seen.add(id(coordinator.provider))
+        unique.append(coordinator)
+    if not unique:
+        return
+    rows = await asyncio.to_thread(unique[0].skill_forget.recovery_bindings)
+    from src.memery_provider import MemeryProvider
+    assignments = []
+    seen_operations = set()
+    for row in rows:
+        binding = row.get("provider_binding")
+        if not isinstance(binding, dict):
+            raise MemoryRecoveryBindingUnavailable("memory recovery provider binding unavailable")
+        operation_id = row.get("id")
+        if not isinstance(operation_id, str) or not operation_id or operation_id in seen_operations:
+            raise MemoryRecoveryBindingUnavailable("memory recovery identity unavailable")
+        seen_operations.add(operation_id)
+        matches = []
+        for coordinator in unique:
+            if type(coordinator.provider) is not MemeryProvider:
+                continue
+            candidate = await asyncio.to_thread(coordinator.skill_forget._binding,
+                row.get("provider_owner", row.get("owner")), row.get("workspace_id"))
+            if candidate == binding:
+                matches.append(coordinator.provider)
+        if len(matches) != 1:
+            raise MemoryRecoveryBindingUnavailable("memory recovery provider coverage unavailable")
+        assignments.append((operation_id, id(matches[0])))
+    return MemoryRecoveryCoverage(assignments, _RECOVERY_COVERAGE_SEAL)
+
+
 class MemoryLifecycleCoordinator:
     """One destructive-memory boundary shared by REST, Agent, and MiMo."""
 
@@ -1193,7 +1368,7 @@ class MemoryLifecycleCoordinator:
             skill_forget
             if skill_forget is not None
             else (
-                MemorySkillForgetCoordinator(skills_manager)
+                MemorySkillForgetCoordinator(skills_manager, memory_provider)
                 if skills_manager is not None
                 else None
             )
@@ -1284,21 +1459,26 @@ class MemoryLifecycleCoordinator:
         return str(owner or "")
 
     @staticmethod
-    def _normalized_closure(value: object) -> dict[str, list[str]]:
+    def _normalized_closure(value: object) -> dict:
         closure = value if isinstance(value, dict) else {}
-        return {
-            key: sorted({
-                str(item)
-                for item in closure.get(key, ())
-                if str(item or "")
-            })
-            for key in (
-                "raw_ids",
-                "candidate_ids",
-                "curated_ids",
-                "graph_node_ids",
-            )
+        result = {
+            key: sorted({str(item) for item in closure.get(key, ()) if str(item or "")})
+            for key in ("raw_ids", "candidate_ids", "curated_ids", "graph_node_ids")
         }
+        links = closure.get("native_event_links", [])
+        if not isinstance(links, list) or len(links) > 128:
+            raise ValueError("native event closure unavailable")
+        fields = {"source_id", "source_revision", "source_hash", "source_uri_hash", "raw_id", "evidence_id", "locator_hash", "revisions"}
+        normalized = []
+        for item in links:
+            if not isinstance(item, dict) or set(item) != fields or type(item["source_revision"]) is not int or item["source_revision"] < 1 or any(not isinstance(item[k], str) or not item[k] for k in fields - {"source_revision", "revisions"}):
+                raise ValueError("native event closure unavailable")
+            revisions = item["revisions"]
+            if not isinstance(revisions, list) or len(revisions) > 128 or any(not isinstance(row, (list, tuple)) or len(row) != 3 or not isinstance(row[0], str) or type(row[1]) is not int or row[1] < 1 or not isinstance(row[2], str) for row in revisions):
+                raise ValueError("native event closure unavailable")
+            normalized.append({**item, "revisions": sorted([list(row) for row in revisions])})
+        result["native_event_links"] = sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+        return result
 
     @classmethod
     def _require_same_closure(
@@ -1324,7 +1504,7 @@ class MemoryLifecycleCoordinator:
             closure.get("curated_ids") or (),
         )
 
-    async def reconcile(self, *, owner: str | None = None) -> dict[str, int]:
+    async def reconcile(self, *, owner: str | None = None, coverage=None) -> dict[str, int]:
         if self.skill_forget is None:
             return {
                 "rolled_back": 0,
@@ -1342,6 +1522,7 @@ class MemoryLifecycleCoordinator:
             self.provider,
             owner=reconcile_owner,
             filter_owner=filter_owner,
+            coverage=coverage,
         )
 
     async def forget(
@@ -1355,12 +1536,19 @@ class MemoryLifecycleCoordinator:
         preview_token=None,
         tombstone_id=None,
         operation_id=None,
+        provider_forget=None,
+        guarded_scope=None,
     ) -> dict:
+        if provider_forget is not None and not callable(provider_forget):
+            raise ValueError("guarded forget adapter unavailable")
+        selected_forget = provider_forget or self.provider.forget
         if action not in {"preview", "commit", "status", "restore"}:
             raise ValueError("unsupported coordinated forget action")
         scope = self._scope(owner, workspace_id)
         artifact_owner = self._artifact_owner(owner)
         workspace_id = scope["workspace_id"]
+        guarded_scope = _guarded_scope(guarded_scope, owner=scope['owner'], workspace_id=workspace_id)
+        if (guarded_scope is None) != (provider_forget is None): raise ValueError('guarded forget scope unavailable')
         provider_selector = {
             **scope,
             "selector_kind": selector_kind,
@@ -1370,14 +1558,40 @@ class MemoryLifecycleCoordinator:
         if action == "status":
             if not operation_id:
                 raise ValueError("forget operation_id is required")
-            return await self.provider.forget(
-                "status",
-                **scope,
-                operation_id=operation_id,
-            )
+            result = await selected_forget("status", **scope, operation_id=operation_id)
+            if guarded_scope is not None and self.skill_forget is not None:
+                local = await asyncio.to_thread(self.skill_forget.operation_info, operation_id,
+                    owner=artifact_owner, workspace_id=workspace_id, provider_owner=scope['owner'])
+                if local is not None:
+                    if local.get('guarded_scope') != guarded_scope: raise ValueError('guarded forget original changed')
+                    marker = local.get('guarded_restore_issued')
+                    expected_marker = {'version':1,'operation_id':operation_id,'tombstone_id':local.get('provider_tombstone_id'),'scope':guarded_scope}
+                    if marker is not None and marker != expected_marker: raise ValueError('guarded restore original changed')
+                    if marker is not None and result.get('state') not in ('restored','terminal_erased'): return {'state':'unknown'}
+                    if result.get('state') in ('committed','restored'):
+                        closure = result.get('closure'); tombstone = result.get('tombstone_id')
+                        if (type(closure) is not dict or type(tombstone) is not str or not tombstone
+                                or sorted(set(closure.get('curated_ids') or ())) != sorted(set(local.get('memory_ids') or ()))):
+                            raise ValueError('guarded forget closure changed')
+                        if result['state']=='restored':
+                            if marker is None or tombstone != expected_marker['tombstone_id']:
+                                raise ValueError('guarded restore original unavailable')
+                            checked = await selected_forget('status', **scope, operation_id=operation_id)
+                            if checked != result: raise ValueError('guarded restore status changed')
+                            await asyncio.to_thread(self.skill_forget.mark_provider_restored, operation_id,
+                                owner=artifact_owner, provider_tombstone_id=tombstone)
+                            checked = await selected_forget('status', **scope, operation_id=operation_id)
+                            if checked != result: raise ValueError('guarded restore status changed')
+                            await asyncio.to_thread(self.skill_forget.restore, operation_id, owner=artifact_owner)
+                        else:
+                            await asyncio.to_thread(self.skill_forget.finalize, operation_id,
+                                provider_tombstone_id=tombstone, recover_until=result.get('recover_until'))
+            if guarded_scope is not None and result.get('state') == 'absent':
+                return {'state':'unknown'}
+            return result
 
         if action == "preview":
-            result = await self.provider.forget(
+            result = await selected_forget(
                 "preview",
                 **provider_selector,
             )
@@ -1402,6 +1616,8 @@ class MemoryLifecycleCoordinator:
             }
 
         if action == "commit":
+            if guarded_scope is not None and self.skill_forget is None:
+                raise ValueError('guarded forget recovery owner unavailable')
             tokens = unpack_forget_token(str(preview_token or ""), "preview")
             if set(tokens) != {"provider", "skills", "operation"}:
                 raise ValueError("invalid composite memory forget token")
@@ -1421,6 +1637,7 @@ class MemoryLifecycleCoordinator:
                 if local_info is not None and (
                     local_info.get("operation_kind") != "forget"
                     or local_info.get("preview_token") != tokens["skills"]
+                    or local_info.get("guarded_scope") != guarded_scope
                 ):
                     raise ValueError(
                         "memory-derived skill recovery binding changed"
@@ -1434,8 +1651,10 @@ class MemoryLifecycleCoordinator:
                         "memory forget operation was already restored"
                     )
 
+            if guarded_scope is not None and local_info is not None:
+                raise ValueError('guarded forget original requires status')
             try:
-                status = await self.provider.forget(
+                status = await selected_forget(
                     "status",
                     **scope,
                     operation_id=operation_id,
@@ -1445,6 +1664,8 @@ class MemoryLifecycleCoordinator:
             except Exception:
                 status = {}
             provider_state = status.get("state")
+            if guarded_scope is not None and provider_state != 'absent':
+                raise ValueError('guarded forget original requires status')
             if provider_state == "restored":
                 raise ValueError("memory forget operation was already restored")
 
@@ -1456,7 +1677,7 @@ class MemoryLifecycleCoordinator:
                             "committed memory forget has no observable closure"
                         )
                 else:
-                    current = await self.provider.forget(
+                    current = await selected_forget(
                         "preview",
                         **provider_selector,
                     )
@@ -1477,7 +1698,7 @@ class MemoryLifecycleCoordinator:
                             "committed memory forget has no observable closure"
                         )
                 else:
-                    current = await self.provider.forget(
+                    current = await selected_forget(
                         "preview",
                         **provider_selector,
                     )
@@ -1497,10 +1718,11 @@ class MemoryLifecycleCoordinator:
                         recovery_id=operation_id,
                         workspace_id=workspace_id,
                         provider_owner=scope["owner"],
+                        guarded_scope=guarded_scope,
                     )
 
             try:
-                committed = await self.provider.forget(
+                committed = await selected_forget(
                     "commit",
                     **provider_selector,
                     preview_token=tokens["provider"],
@@ -1527,7 +1749,7 @@ class MemoryLifecycleCoordinator:
             except Exception:
                 observed = None
                 try:
-                    observed = await self.provider.forget(
+                    observed = await selected_forget(
                         "status",
                         **scope,
                         operation_id=operation_id,
@@ -1569,7 +1791,7 @@ class MemoryLifecycleCoordinator:
             if not isinstance(provider_tombstone, str) or not provider_tombstone:
                 observed = None
                 try:
-                    observed = await self.provider.forget(
+                    observed = await selected_forget(
                         "status",
                         **scope,
                         operation_id=operation_id,
@@ -1655,6 +1877,11 @@ class MemoryLifecycleCoordinator:
                 workspace_id=workspace_id,
                 provider_owner=scope["owner"],
             )
+        if guarded_scope is not None and local_info is not None:
+            marker = local_info.get('guarded_restore_issued')
+            expected_marker = {'version':1,'operation_id':operation_id,'tombstone_id':tombstones['provider'],'scope':guarded_scope}
+            if local_info.get('guarded_scope') != guarded_scope or (marker is not None and marker != expected_marker):
+                raise ValueError('guarded restore original changed')
         if local_info is None:
             if tombstones.get("skills"):
                 raise ValueError(
@@ -1675,12 +1902,14 @@ class MemoryLifecycleCoordinator:
                 )
             preflight = None
 
-        status = await self.provider.forget(
+        status = await selected_forget(
             "status",
             **scope,
             operation_id=operation_id,
         )
         provider_state = status.get("state") if isinstance(status, dict) else None
+        if guarded_scope is not None and provider_state == "terminal_erased":
+            return status
         if provider_state in {"committed", "restored"} and (
             status.get("tombstone_id") != tombstones["provider"]
             or status.get("operation_id") not in (None, operation_id)
@@ -1718,8 +1947,12 @@ class MemoryLifecycleCoordinator:
             )
 
         if not preflight.get("provider_restored"):
+            if guarded_scope is not None:
+                if local_info is None: raise ValueError('guarded restore original unavailable')
+                await asyncio.to_thread(self.skill_forget.mark_guarded_restore_issued, operation_id,
+                    owner=artifact_owner, guarded_scope=guarded_scope, provider_tombstone_id=tombstones['provider'])
             try:
-                provider_result = await self.provider.forget(
+                provider_result = await selected_forget(
                     "restore",
                     **scope,
                     tombstone_id=tombstones["provider"],
@@ -1736,7 +1969,7 @@ class MemoryLifecycleCoordinator:
                 # derived artifacts.
                 provider_result = {}
             try:
-                status = await self.provider.forget(
+                status = await selected_forget(
                     "status",
                     **scope,
                     operation_id=operation_id,
@@ -1805,13 +2038,18 @@ class MemoryLifecycleCoordinator:
         *,
         owner: str,
         workspace_id: str | None = None,
+        provider_forget=None,
+        guarded_scope=None,
     ) -> dict | None:
+        # d7-guarded-delete: a guarded store deletes only through its account-bound adapter (never the generic forget).
+        guarded = {"provider_forget": provider_forget, "guarded_scope": guarded_scope} if provider_forget is not None else {}
         preview = await self.forget(
             "preview",
             owner=owner,
             workspace_id=workspace_id,
             selector_kind="record_id",
             selector=memory_id,
+            **guarded,
         )
         closure = preview.get("closure") or {}
         if not any(
@@ -1831,6 +2069,7 @@ class MemoryLifecycleCoordinator:
             selector_kind="record_id",
             selector=memory_id,
             preview_token=preview["token"],
+            **guarded,
         )
 
     async def retention(

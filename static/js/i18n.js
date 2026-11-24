@@ -6,13 +6,15 @@ const USER_CONTENT_SELECTOR = [
   '.research-job-report-body', '.task-log-row-body',
 ].join(',');
 const SKIP_SELECTOR = [
-  'script', 'style', 'code', 'pre', 'textarea', '[contenteditable="true"]', '[data-i18n-skip]', '[data-user-content]',
+  'script', 'style', 'code', 'pre', '[contenteditable="true"]', '[data-i18n-skip]', '[data-user-content]',
   '.msg .body', '.document-content', '.document-title', '.note-editor', '.note-content-preview', '.note-title',
   '.memory-item-content', '.session-title', '.email-reader-body', '.email-subject', '.email-sender',
   '.research-job-report-body', '.task-log-row-body',
 ].join(',');
 const PROMPTS = {
   'zh-Hans': ['是否将语言切换为简体中文？', '切换', '暂不'],
+  'zh-Hant': ['要將介面語言切換為繁體中文嗎？', '切換', '暫時不要'],
+  'es-419': ['¿Quieres cambiar el idioma a español latinoamericano?', 'Cambiar', 'Ahora no'],
   ja: ['言語を日本語に変更しますか？', '変更する', '今はしない'],
   ko: ['언어를 한국어로 변경하시겠습니까?', '변경', '나중에'],
   es: ['¿Quieres cambiar el idioma a español?', 'Cambiar', 'Ahora no'],
@@ -29,6 +31,7 @@ const PROMPTS = {
 };
 const LANGUAGE_CHANGED = {
   en: 'Language changed to English.', 'zh-Hans': '语言已切换为简体中文。', ja: '言語を日本語に変更しました。',
+  'zh-Hant': '介面語言已切換為繁體中文。', 'es-419': 'Se cambió el idioma a español latinoamericano.',
   ko: '언어가 한국어로 변경되었습니다.', es: 'El idioma cambió a español.', hi: 'भाषा हिन्दी में बदल दी गई है।',
   ar: 'تم تغيير اللغة إلى العربية.', ru: 'Язык изменён на русский.', pt: 'O idioma foi alterado para português.',
   id: 'Bahasa diubah ke Bahasa Indonesia.', 'pa-Guru': 'ਭਾਸ਼ਾ ਪੰਜਾਬੀ ਵਿੱਚ ਬਦਲ ਦਿੱਤੀ ਗਈ ਹੈ।', bn: 'ভাষা বাংলায় পরিবর্তন করা হয়েছে।',
@@ -76,7 +79,10 @@ const escapeRegex = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function rebuildIndex() {
   const exact = new Map();
   templates = [];
+  window.__openClankI18nExact = exact;
+  if (locale === 'en') return;
   for (const [key, source] of Object.entries(english)) {
+    if (key.startsWith('docs.')) continue;
     const target = catalog[key] ?? source;
     exact.set(normalize(source), target);
     if (/\{\d+\}/.test(source)) {
@@ -85,10 +91,14 @@ function rebuildIndex() {
         names.push(name);
         return '(.+?)';
       });
-      templates.push({ regex: new RegExp(`^${pattern}$`, 'u'), names, target });
+      const literalLength = normalize(source).replace(/\{\d+\}/g, '').length;
+      const anchor = normalize(source).split(/\{\d+\}/).reduce((a, b) => a.length >= b.length ? a : b);
+      templates.push({ literalLength, anchor, regex: new RegExp(`^${pattern}$`, 'u'), names, target });
     }
   }
-  window.__openClankI18nExact = exact;
+  // A broad pattern such as "{0}{1}d {2}" also matches ordinary sentences.
+  // Prefer the template with the most fixed text, independent of catalog order.
+  templates.sort((a, b) => b.literalLength - a.literalLength);
 }
 
 function translateValue(value) {
@@ -97,6 +107,7 @@ function translateValue(value) {
   const exact = window.__openClankI18nExact.get(normalized);
   if (exact != null) return exact;
   for (const template of templates) {
+    if (!normalized.includes(template.anchor)) continue;
     const match = normalized.match(template.regex);
     if (!match) continue;
     const values = {};
@@ -106,13 +117,31 @@ function translateValue(value) {
   return value;
 }
 
+function officialArticleTranslation(articleId, field, canonical) {
+  if (!/^openclank-docs-[a-z0-9-]+$/.test(articleId) || !['title', 'body'].includes(field)) return null;
+  const key = `docs.${articleId}.${field}`;
+  const source = english[key];
+  const translated = catalog[key];
+  if (typeof source !== 'string' || typeof translated !== 'string' || !translated.trim() || source === translated) return null;
+  const lang = registry.locales[locale].html_lang || registry.locales[locale].catalog || locale;
+  const dir = registry.locales[locale].dir;
+  if (canonical === source) return { text:translated, lang, dir };
+  // The locale catalog has the author body. Provisioning appends media after
+  // extraction, so keep that exact suffix from the installed article.
+  const body = source.trimEnd();
+  if (field === 'body' && canonical.startsWith(`${body}\n\n## Demonstration media\n\n`)) {
+    return { text:translated.trimEnd() + canonical.slice(body.length), lang, dir };
+  }
+  return null;
+}
+
 function shouldSkip(node) {
   const parent = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
   return !parent || parent.closest(SKIP_SELECTOR);
 }
 
 function translateText(node) {
-  if (shouldSkip(node) || !normalize(node.nodeValue)) return;
+  if (shouldSkip(node) || node.parentElement?.closest('textarea') || !normalize(node.nodeValue)) return;
   const current = node.nodeValue;
   const last = rendered.get(node);
   if (!originals.has(node) || current !== last) originals.set(node, current);
@@ -181,10 +210,10 @@ function queueTranslation(root) {
 
 function syncLanguageControls() {
   document.querySelectorAll('[data-language-select]').forEach(select => {
-    // Keep the selector registry-driven so adding a catalog never requires a
-    // second hand-maintained HTML list. Existing endonyms remain untouched;
-    // fallback entries use the registry's canonical display name.
     if (registry?.locales) {
+      for (const option of [...select.options]) {
+        if (!Object.hasOwn(registry.locales, option.value)) option.remove();
+      }
       const known = new Set([...select.options].map(option => option.value));
       for (const [id, descriptor] of Object.entries(registry.locales)) {
         if (known.has(id)) continue;
@@ -202,12 +231,8 @@ function syncLanguageControls() {
 }
 
 async function setLocale(next, { persist = true } = {}) {
-  if (!registry?.locales[next]) next = 'en';
+  if (!Object.hasOwn(registry.locales, next)) next = 'en';
   const descriptor = registry.locales[next];
-  // New locale entries may intentionally point at the English source while
-  // their translated catalog is being prepared.  This keeps selection,
-  // aliases, directionality, and formatting usable without pretending that
-  // untranslated strings are complete translations.
   const catalogName = descriptor.catalog || next;
   const nextCatalog = catalogName === 'en' ? english : await fetchJson(catalogName);
   locale = next;
@@ -256,11 +281,15 @@ function browserLocale() {
   for (const requested of navigator.languages || [navigator.language]) {
     if (!requested) continue;
     if (registry.do_not_auto_map.some(blocked => requested.toLowerCase().startsWith(blocked.toLowerCase()))) continue;
-    if (registry.locales[requested]) return requested;
-    if (aliasFor(requested)) return aliasFor(requested);
-    const base = requested.split('-')[0];
-    if (registry.locales[base]) return base;
-    if (aliasFor(base)) return aliasFor(base);
+    // Keep a requested script when falling back from a regional tag (zh-Hant-TW).
+    let tag = requested;
+    while (tag) {
+      const id = Object.keys(registry.locales).find(key => key.toLowerCase() === tag.toLowerCase()) || aliasFor(tag);
+      if (id) return id;
+      const separator = tag.lastIndexOf('-');
+      if (separator < 0) break;
+      tag = tag.slice(0, separator);
+    }
   }
   return 'en';
 }
@@ -304,6 +333,9 @@ function offerLocale(candidate) {
 
 async function init() {
   [registry, english] = await Promise.all([fetchJson('registry'), fetchJson('en')]);
+  const released = new Set(registry.released_locales || ['en']);
+  registry.locales = Object.fromEntries(Object.entries(registry.locales).filter(([id]) => released.has(id)));
+  registry.aliases = Object.fromEntries(Object.entries(registry.aliases || {}).filter(([, id]) => released.has(id)));
   document.addEventListener('change', event => {
     if (event.target.matches('[data-language-select]')) {
       setLocale(event.target.value).catch(error => {
@@ -337,6 +369,7 @@ window.openClankI18n = {
   get locale() { return locale; },
   get locales() { return registry?.locales || {}; },
   setLocale,
+  officialArticleTranslation,
   t(value) { return translateValue(value); },
   key(key, parameters) { return interpolate(catalog[key] ?? english[key] ?? key, parameters); },
   plural(count, forms) { const category = new Intl.PluralRules(locale).select(count); return forms[category] ?? forms.other; },

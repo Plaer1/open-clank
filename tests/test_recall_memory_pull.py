@@ -138,7 +138,7 @@ class TestLaneRegistration:
         # Chat mode returned as a read-only lane (QOL-pass slice 3) — it
         # shares plan mode's fail-closed tool gate; the old generic chat
         # branch with its own tool subsetting stays gone.
-        assert "chat_mode_disabled_tools" in source
+        assert "chat_mode_disabled_tools" in pathlib.Path("src/tool_policy.py").read_text()
         assert 'relevant_tools={"recall_memory"}' not in source
 
     def test_memory_pull_remains_a_registered_read_only_agent_tool(self):

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, func, inspect, text, update
+from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, CheckConstraint, func, inspect, text, update
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.types import TypeDecorator
@@ -234,6 +234,9 @@ class Session(TimestampMixin, Base):
     __table_args__ = (
         Index('ix_sessions_active', 'archived', 'last_accessed'),
         Index('ix_sessions_search', 'name', 'archived'),
+        CheckConstraint("response_style IN ('normal','concise','brief','minimal')"),
+        CheckConstraint("response_style_revision >= 0 AND response_style_revision <= 9007199254740991"),
+        CheckConstraint("typeof(response_style_revision) = 'integer' AND response_style_revision >= 0 AND response_style_revision <= 9007199254740991").ddl_if(dialect='sqlite'),
     )
     
     # Properties
@@ -249,6 +252,9 @@ class Session(TimestampMixin, Base):
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
     mimo_session_id = Column(String, nullable=True)  # durable lazy-cache for pre-migration uuid4 rows
     transcript_revision = Column(Integer, nullable=False, default=0)
+    connector_create_digest = Column(String(64), nullable=True)
+    response_style = Column(String, nullable=False, default='normal', server_default='normal')
+    response_style_revision = Column(Integer, nullable=False, default=0, server_default='0')
     mimo_state = Column(JSON, nullable=False, default=dict)
 
     # Relationship to chat messages
@@ -280,6 +286,8 @@ class Session(TimestampMixin, Base):
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
             'workspace_id': self.workspace_id,
+            'response_style': self.response_style,
+            'response_style_revision': self.response_style_revision,
         }
 
 class ChatMessage(Base):
@@ -481,6 +489,10 @@ class PublishedFile(Base):
     size        = Column(Integer, nullable=False)
     sha256      = Column(String, nullable=False, index=True)
     source      = Column(String, nullable=False, default="agent")
+    # NULL denotes a legacy owned snapshot. New typed targets are encrypted;
+    # immutable account identity is separate from the display/legacy username.
+    owner_subject_id = Column(String, nullable=True, index=True)
+    target_ciphertext = Column(Text, nullable=True)
     created_at  = Column(DateTime, default=utcnow_naive, nullable=False)
 
     grants = relationship(
@@ -944,6 +956,7 @@ class ScheduledTask(TimestampMixin, Base):
 
     id             = Column(String, primary_key=True, index=True)
     owner          = Column(String, nullable=True, index=True)
+    host_account_id = Column(String, nullable=True)  # immutable original host account; NULL is legacy unknown
     name           = Column(String, nullable=False, default="Untitled Task")
     prompt         = Column(Text, nullable=True)              # LLM prompt (for task_type="llm")
     task_type      = Column(String, default="llm")            # "llm" | "action"
@@ -1293,11 +1306,43 @@ def init_db():
     tables += list(ProviderBase.metadata.sorted_tables) + list(OperationBase.metadata.sorted_tables)
     existing = set(inspect(engine).get_table_names())
     if not existing:
-        Base.metadata.create_all(bind=engine, tables=[table for table in tables if table.metadata is Base.metadata])
-        ProviderBase.metadata.create_all(bind=engine)
-        OperationBase.metadata.create_all(bind=engine)
-        LoggingBase.metadata.create_all(bind=engine)
-        _initialize_empty_transcript_search()
+        if engine.dialect.name == 'sqlite':
+            # The empty check and every fresh DDL share one exclusive SQLite
+            # transaction. A concurrent/partial pre-existing schema is never
+            # reinterpreted as a new installation.
+            with engine.connect() as connection:
+                connection.exec_driver_sql('BEGIN EXCLUSIVE')
+                try:
+                    if connection.exec_driver_sql("SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").first() is not None:
+                        raise RuntimeError('Fresh database changed during initialization; existing stores require offline preparation')
+                    Base.metadata.create_all(bind=connection, tables=[table for table in tables if table.metadata is Base.metadata])
+                    ProviderBase.metadata.create_all(bind=connection)
+                    OperationBase.metadata.create_all(bind=connection)
+                    LoggingBase.metadata.create_all(bind=connection)
+                    # Fresh stores receive the optional receipt profile atomically.
+                    # Existing stores are never altered at startup.
+                    from src.openclank.tui_turns import validate_profile_connection
+                    for column in ('tui_profile', 'tui_account_id', 'tui_root_id', 'tui_run_id'):
+                        connection.exec_driver_sql(f'ALTER TABLE tui_turn_submissions ADD COLUMN {column} TEXT')
+                    if not validate_profile_connection(connection):
+                        raise RuntimeError('Fresh TUI receipt profile unavailable')
+                    connection.exec_driver_sql('ALTER TABLE scheduled_tasks ADD COLUMN creation_witness_json TEXT')
+                    connection.exec_driver_sql('ALTER TABLE task_runs ADD COLUMN execution_context_json TEXT')
+                    _initialize_empty_transcript_search_on(connection)
+                    from src.openclank.host_source_schema import initialize_fresh_connection
+                    initialize_fresh_connection(connection)
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
+        else:
+            Base.metadata.create_all(bind=engine, tables=[table for table in tables if table.metadata is Base.metadata])
+            ProviderBase.metadata.create_all(bind=engine)
+            OperationBase.metadata.create_all(bind=engine)
+            LoggingBase.metadata.create_all(bind=engine)
+            with engine.begin() as connection:
+                connection.exec_driver_sql('ALTER TABLE scheduled_tasks ADD COLUMN creation_witness_json TEXT')
+                connection.exec_driver_sql('ALTER TABLE task_runs ADD COLUMN execution_context_json TEXT')
         global CORE_CREATED_FRESH
         CORE_CREATED_FRESH = True
     else:
@@ -1311,6 +1356,13 @@ def init_db():
             columns = {column["name"] for column in inspector.get_columns(table.name)}
             missing.extend(f"{table.name}.{column.name}" for column in table.columns if column.name not in columns)
         if engine.dialect.name == "sqlite":
+            from src.openclank.tui_turns import validate_profile_connection
+            with engine.connect() as connection:
+                validate_profile_connection(connection)
+            if not {'sessions.response_style', 'sessions.response_style_revision'}.intersection(missing):
+                from src.openclank.response_style import validate_response_style_schema
+                with engine.connect() as connection:
+                    validate_response_style_schema(connection.connection.driver_connection)
             if "chat_messages_fts" not in existing:
                 missing.append("chat_messages_fts")
             with engine.connect() as connection:
@@ -1370,11 +1422,13 @@ def _initialize_empty_transcript_search():
     if engine.dialect.name != "sqlite":
         return
     with engine.begin() as connection:
-        connection.exec_driver_sql("CREATE VIRTUAL TABLE chat_messages_fts USING fts5(content, message_id UNINDEXED, session_id UNINDEXED, role UNINDEXED)")
-        expression = "CASE WHEN instr(COALESCE(new.content, ''), ';base64,') > 0 OR instr(COALESCE(new.content, ''), 'data:image/') > 0 OR instr(COALESCE(new.content, ''), 'data:audio/') > 0 THEN '[inline media omitted from search index]' ELSE COALESCE(new.content, '') END"
-        connection.exec_driver_sql(f"CREATE TRIGGER chat_messages_fts_ai AFTER INSERT ON chat_messages BEGIN INSERT INTO chat_messages_fts(content,message_id,session_id,role) VALUES ({expression},new.id,new.session_id,new.role); END")
-        connection.exec_driver_sql("CREATE TRIGGER chat_messages_fts_ad AFTER DELETE ON chat_messages BEGIN DELETE FROM chat_messages_fts WHERE message_id=old.id; END")
-        connection.exec_driver_sql(f"CREATE TRIGGER chat_messages_fts_au AFTER UPDATE ON chat_messages BEGIN DELETE FROM chat_messages_fts WHERE message_id=old.id; INSERT INTO chat_messages_fts(content,message_id,session_id,role) VALUES ({expression},new.id,new.session_id,new.role); END")
+        _initialize_empty_transcript_search_on(connection)
+
+
+def _initialize_empty_transcript_search_on(connection):
+    """Create transcript search on the caller's already-owned connection."""
+    from src.openclank.host_source_schema import initialize_fresh_transcript_search
+    initialize_fresh_transcript_search(connection)
 
 
 def get_db():

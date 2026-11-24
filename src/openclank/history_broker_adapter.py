@@ -1,11 +1,11 @@
 """Scoped history broker adapter over the conversation archive.
 
 Exposes the shared typed history surface (``history.search`` / ``history.around``
-/ ``history.get`` / ``history.media``) through the existing Frankenmemory
+/ ``history.get`` / ``history.media``) through the existing Memery
 broker pattern. Scope always derives from the authenticated binding; same-owner
 ``global`` scope is not cross-account scope. Guessed ids fail closed.
 
-No new daemon. Frankenmemory remains the retrieval surface for authored memory;
+No new daemon. Memery remains the retrieval surface for authored memory;
 this adapter is the conversation-history surface only. Lore remains the recovery
 authority for versions. On shared-service failure the adapter returns an
 explicit recoverable-unavailable result and never falls back to an unscoped

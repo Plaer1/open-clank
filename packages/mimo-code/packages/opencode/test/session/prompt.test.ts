@@ -599,6 +599,16 @@ describe("session.prompt agent variant", () => {
               if (override.info.role !== "user") throw new Error("expected user message")
               expect(override.info.model.variant).toBe("high")
 
+              const explicitDefault = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                noReply: true,
+                variant: null,
+                parts: [{ type: "text", text: "explicit default" }],
+              })
+              if (explicitDefault.info.role !== "user") throw new Error("expected user message")
+              expect(explicitDefault.info.model.variant).toBeUndefined()
+
               yield* sessions.remove(session.id)
             }),
           ),

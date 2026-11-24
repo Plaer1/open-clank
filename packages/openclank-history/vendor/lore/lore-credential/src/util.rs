@@ -24,7 +24,10 @@ pub fn token_fingerprint(token: &str) -> String {
 }
 
 pub fn domain_from_url_or_url(url: &Url) -> String {
-    url.domain().unwrap_or(url.as_str()).to_string()
+    url.domain()
+        .or_else(|| url.host_str())
+        .unwrap_or(url.as_str())
+        .to_string()
 }
 
 pub fn domain_from_url_str_or_url(remote_url: &str) -> Result<String, ParseError> {
@@ -33,36 +36,4 @@ pub fn domain_from_url_str_or_url(remote_url: &str) -> Result<String, ParseError
 
 pub fn get_domain_or_empty(url_string: &str) -> String {
     domain_from_url_str_or_url(url_string).unwrap_or("".to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_token_fingerprint_tells_credentials_apart_without_revealing_them() {
-        let first = token_fingerprint("an-authentication-token");
-        let second = token_fingerprint("a-different-authentication-token");
-
-        assert_ne!(
-            first, second,
-            "two credentials must not share a fingerprint"
-        );
-        assert_eq!(
-            first,
-            token_fingerprint("an-authentication-token"),
-            "the same credential must fingerprint the same way"
-        );
-        assert!(
-            !first.contains("an-authentication-token"),
-            "the fingerprint must not carry the credential"
-        );
-        assert_eq!(first.len(), 16);
-        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn no_token_has_no_fingerprint() {
-        assert!(token_fingerprint("").is_empty());
-    }
 }

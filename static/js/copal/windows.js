@@ -1,4 +1,5 @@
-import { maximizeChatVisibleWindow, clearRightDock } from '../modalSnap.js';
+import { maximizeChatVisibleWindow } from '../modalSnap.js';
+import { maximizeApplet, restoreAppletPlacement } from '../tileManager.js';
 import { uiIcon } from '../uiIcons.js';
 import * as Modals from '../modalManager.js';
 import { makeWindowDraggable } from '../windowDrag.js';
@@ -19,7 +20,7 @@ export function createOpenClankWindow({
   subtitle = 'Copal · Redb',
   minWidth = 560,
   minHeight = 420,
-  sizeKey = `odysseus-${id}-size`,
+  sizeKey = `openclank-${id}-size`,
   className = '',
   onActivate = null,
   onBeforeClose = null,
@@ -29,6 +30,7 @@ export function createOpenClankWindow({
   accountScope = null,
   workspaceScope = null,
   chatVisibleMaximize = false,
+  focusTarget = null,
 }) {
   const existing = document.getElementById(id);
   const existingWindow = existing?.__openClankWindow || existing?.__copalWindow;
@@ -87,23 +89,15 @@ export function createOpenClankWindow({
   if (navigationChrome) actions.append(backButton, forwardButton);
   header.append(heading, actions, status, closeButton);
   if (chatVisibleMaximize) {
-    const maximize = document.createElement('button');
-    maximize.type = 'button'; maximize.textContent = 'Maximize'; maximize.title = 'Enlarge beside chat';
     const chat = document.createElement('button');
     chat.type = 'button'; chat.textContent = 'Show chat'; chat.style.display = 'none';
-    maximize.addEventListener('click', () => {
-      if (content._chatVisibleMaximized) clearRightDock(root);
-      else maximizeChatVisibleWindow(root);
-    });
     chat.addEventListener('click', () => Modals.minimize(id));
     root.addEventListener('openclank:window-placement', event => {
       const placement = event.detail;
-      maximize.textContent = placement.maximized ? 'Restore' : 'Maximize';
-      maximize.title = placement.maximized ? 'Restore floating window' : 'Enlarge beside chat';
       chat.style.display = placement.state === 'single' ? '' : 'none';
       if (placement.blocked) { status.textContent = placement.blocked; status.classList.add('error'); }
     });
-    actions.append(maximize, chat);
+    actions.append(chat);
   }
   content.append(header, body);
   root.append(content);
@@ -178,9 +172,13 @@ export function createOpenClankWindow({
     },
     updateNavigationButtons,
     minimize() { return Modals.minimize(id); },
-    maximize() { if (chatVisibleMaximize) return maximizeChatVisibleWindow(root); },
-    restorePlacement() { if (chatVisibleMaximize) clearRightDock(root); },
-    focus() { focusGeneration += 1; body.focus({ preventScroll: true }); },
+    maximize() { return maximizeApplet(content); },
+    restorePlacement() { return restoreAppletPlacement(content); },
+    dockBesideChat() { if (chatVisibleMaximize) return maximizeChatVisibleWindow(root); },
+    focus() {
+      focusGeneration += 1;
+      (focusTarget?.() || body).focus({ preventScroll: true });
+    },
     show(trigger = document.activeElement) {
       const showFocusGeneration = ++focusGeneration;
       const focusAtShow = document.activeElement;

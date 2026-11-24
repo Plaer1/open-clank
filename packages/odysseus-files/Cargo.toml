@@ -47,6 +47,8 @@ tower = { version = "=0.5.3", features = ["limit"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 md5 = "=0.7.0"
+shlex = "2.0"
+tempfile = "3"
 
 [target.'cfg(any(target_os = "linux", windows))'.dependencies]
 png = "=0.17.16"

@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+base=$(dirname "$(readlink -f "$0")")
+export PYTHONDONTWRITEBYTECODE=1
+if [ "$#" -gt 0 ] && [ "$1" != "--setup" ]; then
+    exec /usr/bin/python3 "$base/install.py" "$@"
+fi
+exec /usr/bin/python3 "$base/setup_host.py"

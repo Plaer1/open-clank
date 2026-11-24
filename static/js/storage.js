@@ -3,8 +3,8 @@
 
 // ── Key constants ──
 export const KEYS = {
-  THEME: 'odysseus-theme',
-  TOGGLES: 'odysseus-toggles',
+  THEME: 'openclank-theme',
+  TOGGLES: 'openclank-toggles',
   SIDEBAR_COLLAPSED: 'sidebar-collapsed',
   SIDEBAR_WIDTH: 'sidebar-width',
   SIDEBAR_SIDE: 'sidebar-side',
@@ -13,20 +13,20 @@ export const KEYS = {
   COMPARE_CHAT: 'compare-continue-chat',
   COMPARE_BLIND: 'compare-blind',
   COMPARE_RANDOM: 'compare-randomize',
-  MODELS_EXPANDED: 'odysseus-model-expanded',
-  MODEL_ENDPOINTS: 'odysseus-model-endpoints',
-  MODEL_SELECTED: 'odysseus-selected-model',
-  SORT_ORDER: 'odysseus-sessions-sort',
-  CHAT_SEARCH_SCOPE: 'odysseus-search-scope',
-  INCOGNITO: 'odysseus-incognito',
-  RAG_ACTIVE: 'odysseus-rag-active',
-  MCP_ACTIVE: 'odysseus-mcp-active',
+  MODELS_EXPANDED: 'openclank-model-expanded',
+  MODEL_ENDPOINTS: 'openclank-model-endpoints',
+  MODEL_SELECTED: 'openclank-selected-model',
+  SORT_ORDER: 'openclank-sessions-sort',
+  CHAT_SEARCH_SCOPE: 'openclank-search-scope',
+  INCOGNITO: 'openclank-incognito',
+  RAG_ACTIVE: 'openclank-rag-active',
+  MCP_ACTIVE: 'openclank-mcp-active',
   SECTION_ORDER: 'sidebar-section-order',
   ADMIN_LAST_TAB: 'admin-last-tab',
-  DENSITY: 'odysseus-density',
-  UI_SCALE: 'odysseus-ui-scale',
-  WORKSPACE: 'odysseus-workspace',
-  WORKSPACE_ID: 'odysseus-workspace-id'
+  DENSITY: 'openclank-density',
+  UI_SCALE: 'openclank-ui-scale',
+  WORKSPACE: 'openclank-workspace',
+  WORKSPACE_ID: 'openclank-workspace-id'
 };
 
 /**

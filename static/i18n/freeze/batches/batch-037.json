@@ -2,8 +2,8 @@
   "id": "batch-037",
   "group": "editor",
   "surface": "editor",
-  "entry_count": 195,
-  "character_count": 15105,
+  "entry_count": 206,
+  "character_count": 16083,
   "complexity": "mixed",
   "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
   "entries": [
@@ -2735,6 +2735,143 @@
       "locations": [
         "static/js/galleryEditor.js:2720",
         "static/js/galleryEditor.js:2721"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.access.changed.open.the.applet.again",
+      "source": "Workspace access changed. Open the applet again to reconnect.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:387"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.open.this.applet.open.it.again.to.retry",
+      "source": "Could not open this applet. Open it again to retry.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:482",
+        "static/js/copal.js:4890"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.open.the.journal.select.journal.to.retry",
+      "source": "Could not open the Journal. Select Journal to retry.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:4701"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.note.in.folder",
+      "source": "New note in folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:4369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.journal.page",
+      "source": "New journal page",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:3490",
+        "static/js/copal/notesFeature.js:4369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.journal.page.in.folder",
+      "source": "New journal page in folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:4369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.journal",
+      "source": "Close Journal",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:4079",
+        "static/js/copal/notesFeature.js:4633",
+        "static/js/copal/notesFeature.js:5076",
+        "static/js/copal/notesFeature.js:8416"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.file.ellipsis",
+      "source": "New file…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.journal.page.ellipsis",
+      "source": "New journal page…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.note.ellipsis",
+      "source": "New note…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.from.template.ellipsis",
+      "source": "New from template…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:8410"
       ],
       "context": "",
       "complexity": "label"

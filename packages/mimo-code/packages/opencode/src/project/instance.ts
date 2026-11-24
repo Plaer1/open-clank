@@ -18,6 +18,10 @@ export interface InstanceContext {
 
 const context = LocalContext.create<InstanceContext>("instance")
 const cache = new Map<string, Promise<InstanceContext>>()
+const settled = new Map<string, { promise: Promise<InstanceContext>; context: InstanceContext }>()
+const transitions = new Map<string, number>()
+function beginTransition(directory: string) { transitions.set(directory, (transitions.get(directory) ?? 0) + 1); settled.delete(directory) }
+function endTransition(directory: string) { const count = (transitions.get(directory) ?? 1) - 1; if (count) transitions.set(directory, count); else transitions.delete(directory) }
 const directoryDisposals = new Map<string, Promise<void>>()
 const active = new Map<string, number>()
 const project = makeRuntime(Project.Service, Project.defaultLayer)
@@ -79,6 +83,7 @@ function track(directory: string, next: Promise<InstanceContext>) {
     throw error
   })
   cache.set(directory, task)
+  void task.then((ctx) => { if (cache.get(directory) === task) settled.set(directory, {promise:task, context:ctx}) }, () => {})
   return task
 }
 
@@ -100,6 +105,7 @@ async function disposeCached(directory: string, current: Promise<InstanceContext
   if (!ctx || cache.get(directory) !== current) return
 
   cache.delete(directory)
+  settled.delete(directory)
   Log.Default.info("disposing instance", { directory })
   await context.provide(ctx, () => disposeInstance(directory))
 
@@ -139,6 +145,23 @@ export const Instance = {
     } finally {
       leave(directory)
     }
+  },
+  /** Use only an already-settled instance; never create or wait for initialization. */
+  async provideIfReady<R>(input: { directory: string; fn: () => R }): Promise<{ ready: true; value: R } | { ready: false }> {
+    const directory = AppFileSystem.resolve(input.directory)
+    assertSafeDirectory(directory)
+    const current = settled.get(directory)
+    if (!current || cache.get(directory) !== current.promise || directoryDisposals.has(directory) || transitions.has(directory) || disposal.all)
+      return { ready: false }
+    enter(directory)
+    try {
+      if (settled.get(directory) !== current || cache.get(directory) !== current.promise || directoryDisposals.has(directory) || transitions.has(directory) || disposal.all)
+        return { ready: false }
+      const value = await context.provide(current.context, async () => input.fn())
+      if (settled.get(directory) !== current || cache.get(directory) !== current.promise || directoryDisposals.has(directory) || transitions.has(directory) || disposal.all)
+        return { ready: false }
+      return { ready: true, value }
+    } finally { leave(directory) }
   },
   get current() {
     return context.use()
@@ -185,6 +208,8 @@ export const Instance = {
   },
   async reload(input: { directory: string; init?: () => Promise<any>; project?: Project.Info; worktree?: string }) {
     const directory = AppFileSystem.resolve(input.directory)
+    beginTransition(directory)
+    try {
     await directoryDisposals.get(directory)
     Log.Default.info("reloading instance", { directory })
     await disposeInstance(directory)
@@ -204,6 +229,7 @@ export const Instance = {
     })
 
     return await next
+    } finally { endTransition(directory) }
   },
   async disposeDirectory(input: string) {
     const directory = AppFileSystem.resolve(input)
@@ -212,6 +238,7 @@ export const Instance = {
     if (pending) return pending
     const current = cache.get(directory)
     if (!current) return
+    settled.delete(directory)
 
     // NOTE: withTimeout only bounds the *wait*, not the underlying promise —
     // a slow disposer may still complete after the timeout fires.  The
@@ -234,6 +261,8 @@ export const Instance = {
     const directory = Instance.directory
     const project = Instance.project
     Log.Default.info("disposing instance", { directory })
+    beginTransition(directory)
+    try {
     await disposeInstance(directory)
     cache.delete(directory)
 
@@ -248,6 +277,7 @@ export const Instance = {
         },
       },
     })
+    } finally { endTransition(directory) }
   },
   async disposeAll() {
     if (disposal.all) return disposal.all

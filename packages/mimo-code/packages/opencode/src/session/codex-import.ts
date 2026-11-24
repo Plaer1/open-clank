@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm"
 import path from "path"
 import { existsSync } from "fs"
 import { readFile } from "fs/promises"
@@ -14,6 +15,8 @@ import { SessionTable, MessageTable, PartTable } from "./session.sql"
 import { ExternalImportTable } from "./external-import.sql"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
+import { stripGcfReceipt } from "./gcf-source-proof"
+import { stripCaptureMembership } from "./capture-membership"
 
 const log = Log.create({ service: "codex-import" })
 
@@ -324,6 +327,7 @@ export async function run(opts?: { force?: boolean }): Promise<ImportStats> {
       const messageIds = parsed.messages.map((m) => m.info.id)
 
       Database.transaction((tx) => {
+        const hasStepRecovery = tx.all<{name:string}>(sql`PRAGMA table_info('part')`).some(column => column.name === 'openclank_step_recovery')
         tx.insert(ProjectTable)
           .values({
             id: project.id,
@@ -372,6 +376,7 @@ export async function run(opts?: { force?: boolean }): Promise<ImportStats> {
         }
 
         for (const m of parsed.messages) {
+          if (hasStepRecovery) tx.run(sql`UPDATE part SET openclank_step_recovery=NULL WHERE message_id=${m.info.id} AND session_id=${sessionId} AND openclank_step_recovery IS NOT NULL`)
           const { id, sessionID: _s, agentID: _a, ...data } = m.info
           tx.insert(MessageTable)
             .values({ id, session_id: sessionId, agent_id: "main", time_created: m.info.time.created, data })
@@ -379,9 +384,12 @@ export async function run(opts?: { force?: boolean }): Promise<ImportStats> {
             .run()
           for (const p of m.parts) {
             const { id: pid, sessionID: _ps, messageID: _pm, ...pdata } = p.part
+            // A replacement, even with identical data, cannot inherit local recovery issuance.
+            if (hasStepRecovery)
+              tx.run(sql`UPDATE part SET openclank_step_recovery=NULL WHERE id=${pid}`)
             tx.insert(PartTable)
-              .values({ id: pid, message_id: m.info.id, session_id: sessionId, time_created: p.time, data: pdata })
-              .onConflictDoUpdate({ target: PartTable.id, set: { data: pdata } })
+              .values({ id: pid, message_id: m.info.id, session_id: sessionId, time_created: p.time, data: stripCaptureMembership(stripGcfReceipt(pdata)) })
+              .onConflictDoUpdate({ target: PartTable.id, set: { data: stripCaptureMembership(stripGcfReceipt(pdata)) } })
               .run()
           }
         }

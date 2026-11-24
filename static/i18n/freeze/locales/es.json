@@ -9,9 +9,9 @@
   "advertised": true,
   "english_fallback": false,
   "counts": {
-    "keys": 9622,
-    "translated": 7161,
-    "english_fallback": 2461
+    "keys": 9759,
+    "translated": 8853,
+    "english_fallback": 906
   },
   "missing_keys": 0,
   "extra_keys": 0,

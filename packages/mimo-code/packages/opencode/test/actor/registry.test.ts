@@ -4,10 +4,13 @@ import { Instance } from "../../src/project/instance"
 import { Session } from "../../src/session"
 import { ActorRegistry } from "../../src/actor/registry"
 import { ActorRegistryTable } from "../../src/actor/actor.sql"
-import { SessionID } from "../../src/session/schema"
+import { SessionID, MessageID } from "../../src/session/schema"
 import { Database, eq, and } from "../../src/storage"
 import { Log } from "../../src/util"
 import { tmpdir } from "../fixture/fixture"
+import { encodeForkContext } from "../../src/actor/fork-context"
+import type { ForkContext } from "../../src/actor/fork-context"
+import { ProviderID, ModelID } from "../../src/provider/schema"
 
 void Log.init({ print: false })
 
@@ -45,6 +48,89 @@ async function withRegistry(directory: string, fn: (rt: ManagedRuntime.ManagedRu
 }
 
 describe("ActorRegistry", () => {
+  test("beginExecution binds a route preflight to the exact registry revision", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await withRegistry(tmp.path, async (rt) => {
+      const parent = await rt.runPromise(Session.Service.use((svc) => svc.create()))
+      const actor = await rt.runPromise(ActorRegistry.Service.use((svc) => svc.register({
+        sessionID: parent.id,
+        actorID: "cas-actor",
+        mode: "subagent",
+        agent: "explore",
+        description: "CAS fixture",
+        contextMode: "full",
+        background: false,
+        lifecycle: "persistent",
+      })))
+      const stale = await rt.runPromise(ActorRegistry.Service.use((svc) =>
+        svc.beginExecution(parent.id, actor.actorID, "pending", 1),
+      ))
+      expect(stale).toBeUndefined()
+      const unchanged = await rt.runPromise(ActorRegistry.Service.use((svc) => svc.get(parent.id, actor.actorID)))
+      expect(unchanged?.executionRevision).toBe(0)
+      const started = await rt.runPromise(ActorRegistry.Service.use((svc) =>
+        svc.beginExecution(parent.id, actor.actorID, "pending", 0),
+      ))
+      expect(started).toBe(1)
+    })
+  })
+
+  test("stores full-context snapshots durably and retains them after actor settlement", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await withRegistry(tmp.path, async (rt) => {
+      const sessions = rt.runPromise(Session.Service.use((svc) => svc.create()))
+      const parent = await sessions
+      const child = await rt.runPromise(Session.Service.use((svc) => svc.create({ parentID: parent.id })))
+      const model = { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") }
+      const hostContext = {
+        chatID: "chat-fork", workspaceID: "workspace-fork", cwd: tmp.path,
+        accountID: "source-account", grantID: "source-grant", grantRevision: 2, credentialRevision: 4,
+      }
+      const registry = await rt.runPromise(ActorRegistry.Service.use((svc) => Effect.succeed(svc)))
+      await rt.runPromise(registry.updateModel(parent.id, "main", undefined, model))
+      await rt.runPromise(registry.updateHostContext(parent.id, "main", hostContext))
+      const context = {
+        system: ["frozen prefix"],
+        tools: {},
+        parentPermission: [{ permission: "read", pattern: "*", action: "allow" }],
+        inheritedMessages: [{ role: "user", content: "captured message" }],
+        watermarkMsgID: MessageID.ascending(),
+        model,
+      } satisfies ForkContext
+      const encoded = await encodeForkContext(context, { sessionID: parent.id, actorID: "main" })
+      const childActorID = SessionID.descending()
+      await rt.runPromise(registry.register({
+        sessionID: child.id,
+        actorID: childActorID,
+        mode: "subagent",
+        parentActorID: "main",
+        agent: "explore",
+        description: "durable fork fixture",
+        contextMode: "full",
+        contextWatermark: context.watermarkMsgID,
+        background: true,
+        lifecycle: "persistent",
+        effectiveModel: model,
+        hostContext,
+        forkContext: encoded,
+      }))
+
+      const stored = await rt.runPromise(registry.getForkContext(child.id, childActorID))
+      expect(stored?.snapshotSHA256).toBe(encoded.snapshotSHA256)
+      await rt.runPromise(registry.updateHostContext(parent.id, "main", {
+        ...hostContext, accountID: "refreshed-source-account", grantRevision: 3, credentialRevision: 5,
+      }))
+      expect((await rt.runPromise(registry.getForkContext(child.id, childActorID)))?.snapshotSHA256)
+        .toBe(encoded.snapshotSHA256)
+      await rt.runPromise(registry.updateStatus(child.id, childActorID, { status: "idle", lastOutcome: "success" }))
+      const afterSettlement = await rt.runPromise(registry.getForkContext(child.id, childActorID))
+      expect(afterSettlement?.snapshotJSON).toBe(encoded.snapshotJSON)
+      const row = Database.use((db) => db.select().from(ActorRegistryTable).where(and(
+        eq(ActorRegistryTable.session_id, child.id), eq(ActorRegistryTable.actor_id, childActorID),
+      )).get())
+      expect(row?.status).toBe("idle")
+    })
+  })
   describe("register", () => {
     test("registers a new task and returns a Actor", async () => {
       await using tmp = await tmpdir({ git: true })

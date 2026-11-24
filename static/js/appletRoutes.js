@@ -11,8 +11,10 @@ export const SHELL_PATHS = Object.freeze([
   '/editor',
   '/wiki',
   '/files',
+  '/browser',
   '/graph',
   '/treehouse',
+  '/clankshop',
   '/timeline',
   '/todo',
   '/calendar',
@@ -37,13 +39,13 @@ export const SHELL_PATH_PREFIXES = Object.freeze(['/settings/', '/copal/']);
 // Editor workspace; they only differ by view/mode intent.
 const DIRECT = Object.freeze({
   editor: '/editor',
-  wiki: '/wiki',
-  graph: '/graph',
+  graph: '/editor',
   treehouse: '/treehouse',
   achievements: '/treehouse',
   timeline: '/timeline',
   todo: '/todo',
   files: '/files',
+  browser: '/browser',
   calendar: '/calendar',
   email: '/email',
   memory: '/memory',
@@ -63,6 +65,8 @@ const SEGMENTS = {
   editor:    { target: 'editor', view: 'notes' },
   notes:     { target: 'editor', view: 'notes' },
   code:      { target: 'editor', view: 'notes' },
+  imps:      { target: 'editor', view: 'notes' },
+  'image-editor': { target: 'editor', view: 'notes' },
   bases:     { target: 'editor', view: 'notes', openBases: true },
   wiki:      { target: 'editor', view: 'wiki' },
   timeline:  { target: 'editor', view: 'timeline' },
@@ -71,8 +75,10 @@ const SEGMENTS = {
   mind:      { target: 'editor', view: 'graph', mode: 'mind' },
   galaxy:    { target: 'editor', view: 'graph', mode: 'galaxy' },
   treehouse: { target: 'editor', view: 'treehouse' },
+  clankshop: { target: 'editor', view: 'clankshop' },
   achievements: { target: 'editor', view: 'achievements' },
   files:     { target: 'files' },
+  browser:   { target: 'browser' },
   calendar:  { target: 'calendar' },
   email:     { target: 'email' },
   memory:    { target: 'memory' },
@@ -88,11 +94,12 @@ const SEGMENTS = {
 // Editor-family view -> canonical address.
 const VIEW_PATH = Object.freeze({
   notes: '/editor',
-  wiki: '/wiki',
+  wiki: '/editor',
   timeline: '/timeline',
   todo: '/todo',
-  graph: '/graph',
+  graph: '/editor',
   treehouse: '/treehouse',
+  clankshop: '/clankshop',
   achievements: '/treehouse',
 });
 
@@ -129,7 +136,7 @@ function withQuery(path, params) {
 /**
  * Canonical address for an applet. Always a direct path — never /copal/*.
  * @param {string} name editor|wiki|graph|treehouse|timeline|todo|files|calendar|
- *                      email|memory|gallery|tasks|library|cookbook|settings|
+ *                      email|memory|gallery|tasks|library|cookbook|settings|browser|
  *                      notes|code|bases|mind|galaxy
  * @param {{doc?: string, mode?: string, panel?: string, search?: string|URLSearchParams,
  *          liveSearch?: string|URLSearchParams}} [opts]
@@ -156,7 +163,11 @@ export function appletPath(name, opts = {}) {
   if (opts.doc) params.set('doc', String(opts.doc));
   if (seg.openBases) params.set('open', 'bases');
   const mode = opts.mode || seg.mode;
-  if (mode && seg.view === 'graph') params.set('mode', String(mode));
+  if (seg.view === 'wiki') params.set('view', 'wiki');
+  if (seg.view === 'graph') {
+    params.set('view', 'graph');
+    if (mode) params.set('mode', String(mode));
+  }
   if (opts.liveSearch != null) carryUnconsumedOneShotTokens(params, opts.liveSearch);
   return withQuery(path, params);
 }
@@ -213,6 +224,10 @@ export function resolveAppletLocation(pathname, search) {
   if (!seg) return null;
 
   const params = normalizeSearch(search);
+  if (segment === 'editor') {
+    if (params.get('view') === 'graph') seg = SEGMENTS.graph;
+    if (params.get('view') === 'wiki') seg = SEGMENTS.wiki;
+  }
   if (seg.view === 'treehouse' && params.get('section') === 'achievements') seg = SEGMENTS.achievements;
   if (seg.view === 'achievements') params.set('section', 'achievements');
   const mode = params.get('mode') || seg.mode || null;
@@ -221,7 +236,7 @@ export function resolveAppletLocation(pathname, search) {
   // refresh of the canonical /editor?open=bases form). Symmetric with
   // SEGMENTS.bases.openBases and appletPath so aliases cannot drop it.
   const openBases = !!seg.openBases
-    || (seg.target === 'editor' && (params.get('open') || '').toLowerCase() === 'bases');
+    || (seg.view === 'notes' && (params.get('open') || '').toLowerCase() === 'bases');
 
   let canonicalPath;
   if (seg.target === 'editor') {
@@ -229,7 +244,11 @@ export function resolveAppletLocation(pathname, search) {
     const q = new URLSearchParams(params);
     if (openBases) q.set('open', 'bases');
     if (doc) q.set('doc', doc);
-    if (mode && view === 'graph') q.set('mode', mode);
+    if (view === 'wiki') q.set('view', 'wiki');
+    if (view === 'graph') {
+      q.set('view', 'graph');
+      if (mode) q.set('mode', mode);
+    }
     canonicalPath = withQuery(VIEW_PATH[view] || '/editor', q);
   } else if (seg.target === 'settings') {
     canonicalPath = settingsPanel ? `/settings/${encodeURIComponent(settingsPanel)}` : '/settings';

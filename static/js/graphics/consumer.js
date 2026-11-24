@@ -53,8 +53,10 @@ export function createGraphicsConsumer(options = {}) {
     scene: initialScene = null,
     draw,
     allowWebGL2 = true,
+    requireHardware = false,
     forceCanvas2D = false,
     renderMode = 'continuous',
+    maxFps = 0,
     ownerHost = globalThis,
     win = typeof window !== 'undefined' ? window : globalThis,
     doc = typeof document !== 'undefined' ? document : null,
@@ -228,6 +230,7 @@ export function createGraphicsConsumer(options = {}) {
     const probe = probeGraphicsCapability({
       canvas,
       allowWebGL2,
+      requireHardware,
       forceCanvas2D,
       createWebGL2,
     });
@@ -250,6 +253,7 @@ export function createGraphicsConsumer(options = {}) {
   }
 
   const owner = createSceneOwner({
+    maxFps,
     id,
     renderMode,
     scene,

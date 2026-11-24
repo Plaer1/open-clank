@@ -82,6 +82,7 @@ impl CaptureEnvelope {
             expected_revision: self.expected_revision.clone(),
             actor_id: self.actor_id.clone(),
             actor_kind: self.actor_kind.clone(),
+            managed_tool_origin_v1: None,
             session_id: self.session_id.clone(),
             run_id: self.run_id.clone(),
             task_id: self.task_id.clone(),

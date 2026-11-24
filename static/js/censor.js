@@ -7,7 +7,7 @@
 
 let _enabled = true;
 let _observer = null;
-const PREF_KEY = 'odysseus-sensitive-blur';
+const PREF_KEY = 'openclank-sensitive-blur';
 export const _prefEnabled = () => {
   try {
     return localStorage.getItem(PREF_KEY) === 'on';

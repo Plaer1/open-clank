@@ -1,4 +1,12 @@
-import { Cause, Deferred, Duration, Effect, Layer, Context, Scope } from "effect"
+import { transferGuardedToolDefinition } from "./tool-definition-provenance"
+import { startSourceOutput, appendSourceOutput, endSourceOutput, finishSourceOutputStep, noteSourceOutputFinish, finishSourceOutputStream, invalidateSourceOutput, type SourceAttemptHandle } from "./closed-source-provenance"
+import { createStepRecoveryRecorder } from "./step-recovery-recorder"
+import { createStepRecoveryCapability, publishStepRecovery } from "./step-recovery-owner"
+import { emitMalformedDiagnostic, hasMalformedResponse, hasObservedMalformedResponse } from "@/provider/logging-transport"
+import { captureToolTiming, isAdmittedToolTimingTurn, type ToolTimingCapture } from "./tool-timing"
+import { contextFrameWriter, nativeTextDeliveryWriter, nativeMembershipDeliveryWriter } from "./context-inspection"
+import type { ActorExecutionIdentity } from "@/actor/turn"
+import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Context, Scope } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
@@ -11,6 +19,14 @@ import { Snapshot } from "@/snapshot"
 import * as Session from "./session"
 import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
+import { gcfCandidate } from "./gcf-source-proof"
+import { captureToolView, selectedToolViewProfile } from "./tool-view-source"
+import { readTerminalAnsi } from "./tool-view-terminal-ansi"
+import { readBashView } from "./tool-view-bash-proof"
+import { readWebfetchHtml, readWebfetchMarkdown } from "../tool/webfetch-view"
+import { readGrepRows } from './tool-view-grep'
+import { readReadViewProfile } from './tool-view-read'
+import { readStructuredSearch } from "./tool-view-structured-search"
 import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
@@ -27,6 +43,11 @@ import { isRecord } from "@/util/record"
 import { createTextNgramMonitor, type TextNgramMonitor } from "./prompt/text-ngram-detection"
 import { Flag } from "@/flag/flag"
 import { ManagedProvider } from "@/acp/managed-provider"
+import { takeSdkSuccessStep } from "@/provider/logging-transport"
+import type { AccountSelection } from "@/provider/account-selection"
+import { EffectBridge } from "@/effect"
+import type { AppFileSystem } from "@mimo-ai/shared/filesystem"
+import type { CaptureMembership } from "./capture-membership"
 import { monitor as tryBestMonitor, type TryBestIncident } from "./try-best-detector"
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -133,7 +154,12 @@ export interface Handle {
     output: unknown,
     providerMetadata?: Record<string, any>,
   ) => Effect.Effect<void>
-  readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  readonly beginArgumentResolution: (callID:string, expectedInput:unknown, target:'glob'|'grep', schemaSHA256:string, binding:object) => Effect.Effect<boolean>
+  readonly checkArgumentResolution: (callID:string, expectedInput:unknown, binding:object, claim:boolean) => Effect.Effect<boolean>
+  readonly recordGcfCandidate: (toolCallID: string, output: string, toonCurrent?:()=>boolean, outline?:{sidecar:string;current:()=>boolean}) => void
+  readonly stepRecovery?: () => ReturnType<typeof createStepRecoveryRecorder> | undefined
+  readonly observedCaptureMembership?: (toolCallID: string, expectedStepID?: string) => NonNullable<AppFileSystem.HistoryContext["observedCaptureMembership"]> | undefined
+  readonly process: (streamInput: LLM.StreamInput, rebuildAlternative?: (context: ManagedProvider.OwnedAlternativeRebuild) => Effect.Effect<LLM.StreamInput, unknown>) => Effect.Effect<Result>
   /**
    * Replay a pre-selected candidate (max mode): synthesize the stream events a
    * real model call would have produced for the winner — reasoning, text, then
@@ -156,6 +182,7 @@ type Input = {
   sessionID: SessionID
   model: Provider.Model
   agentMetrics?: AgentMetrics
+  actorExecution?: ActorExecutionIdentity
   /** Immutable configuration captured by the admitting turn. */
   cfg?: Config.Info
 }
@@ -169,12 +196,17 @@ type ToolCall = {
   messageID: MessageV2.ToolPart["messageID"]
   sessionID: MessageV2.ToolPart["sessionID"]
   done: Deferred.Deferred<void>
+  freshTask?: boolean
 }
 
 interface ProcessorContext extends Input {
   toolcalls: Record<string, ToolCall>
   shouldBreak: boolean
   snapshot: string | undefined
+  snapshotAttempted: boolean
+  lazySnapshot: boolean
+  snapshotRecoveryNotices: Set<string>
+  stepStartPartID: PartID | undefined
   blocked: boolean
   needsOverflowHandling: boolean
   currentText: MessageV2.TextPart | undefined
@@ -217,20 +249,81 @@ export const layer: Layer.Layer<
     const summary = yield* SessionSummary.Service
     const scope = yield* Scope.Scope
     const status = yield* SessionStatus.Service
+    const bridge = yield* EffectBridge.make()
 
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
-      // Pre-capture snapshot before the LLM stream starts. The AI SDK
-      // may execute tools internally before emitting start-step events,
-      // so capturing inside the event handler can be too late.
-      const initialSnapshot = yield* snapshot.track()
+      const timingCaptures = new Map<string, ToolTimingCapture>()
+      const gcfCandidates = new Map<string, {sha256:string;bytes:number;toonCurrent?:()=>boolean;outline?:{sidecar:string;current:()=>boolean}}>()
+      const invalidGcfCalls = new Set<string>()
+      let stepRecovery: ReturnType<typeof createStepRecoveryRecorder> | undefined
+      let observedStep: { id: PartID; closed: boolean; admitted: boolean;
+        binding?: Omit<CaptureMembership,"revision"|"coverage"|"members"> } | undefined
+      const observedCaptureMembership: NonNullable<Handle["observedCaptureMembership"]> = (toolCallID, expectedStepID) => {
+        const actor = input.actorExecution
+        const step = observedStep
+        if (!actor || !step || step.closed || (expectedStepID !== undefined && step.id !== expectedStepID) || !toolCallID || !actor.rootOperationID || !actor.innerTurnID || !session.changeCaptureMembership) return
+        const host = ManagedProvider.currentActorHostContext(input.sessionID, actor.actorID, actor.executionRevision)
+        const issuer = ManagedProvider.currentActorToolTimingIssuer(input.sessionID, actor.actorID, actor.executionRevision, actor.rootOperationID)
+        if (!host || !issuer) return
+        let admittedAction: string | undefined
+        const current = (allowClosed: boolean) => {
+          const actual = ManagedProvider.currentActorHostContext(input.sessionID, actor.actorID, actor.executionRevision)
+          return observedStep === step && (allowClosed || !step.closed) && !!actual
+            && actual.accountID === host.accountID && actual.workspaceID === host.workspaceID && actual.chatID === host.chatID
+            && ManagedProvider.currentActorToolTimingIssuer(input.sessionID, actor.actorID, actor.executionRevision, actor.rootOperationID!) === issuer
+        }
+        return Object.freeze({
+          begin: async (history: AppFileSystem.HistoryContext, actionID: string) => {
+            const origin = history.managedToolOrigin
+            if (admittedAction || !current(false) || !origin || history.accountId !== host.accountID || history.workspaceId !== host.workspaceID
+                || origin.host_chat_id !== host.chatID || origin.engine_session_id !== input.sessionID || origin.actor_id !== actor.actorID
+                || origin.execution_revision !== actor.executionRevision || origin.root_operation_id !== actor.rootOperationID
+                || origin.inner_turn_id !== actor.innerTurnID || origin.tool_call_id !== toolCallID || origin.assistant_message_id !== input.assistantMessage.id)
+              throw new Error("capture membership authority unavailable")
+            const binding = {version:1 as const, sessionID:input.sessionID, messageID:input.assistantMessage.id, stepID:step.id,
+              accountID:host.accountID, hostChatID:host.chatID, workspaceID:host.workspaceID, actorID:actor.actorID,
+              executionRevision:actor.executionRevision, rootOperationID:actor.rootOperationID!, innerTurnID:actor.innerTurnID!}
+            if (step.binding && JSON.stringify(step.binding) !== JSON.stringify(binding)) throw new Error("capture membership scope changed")
+            step.binding = binding
+            await bridge.promise(session.changeCaptureMembership!(binding,{kind:"begin",actionID,toolCallID},() => current(false)))
+            admittedAction = actionID
+            step.admitted = true
+            if (step.closed) {
+              await bridge.promise(session.changeCaptureMembership!(binding,{kind:"seal"},() => current(true))).catch(() => undefined)
+              throw new Error("capture membership step closed")
+            }
+          },
+          complete: async (_history: AppFileSystem.HistoryContext, actionID: string, actionRef: string) => {
+            if (admittedAction !== actionID || !step.binding || !current(true)) throw new Error("capture membership settlement unavailable")
+            await bridge.promise(session.changeCaptureMembership!(step.binding,{kind:"complete",actionID,toolCallID,actionRef},() => current(true)))
+          },
+        })
+      }
+      const recordGcfCandidate = (toolCallID:string, output:string, toonCurrent?:()=>boolean, outline?:{sidecar:string;current:()=>boolean}) => {
+        if (!toolCallID || invalidGcfCalls.has(toolCallID)) return
+        if (gcfCandidates.has(toolCallID) || gcfCandidates.size >= 128) {
+          gcfCandidates.delete(toolCallID); invalidGcfCalls.add(toolCallID); return
+        }
+        const candidate = gcfCandidate(output)
+        if (candidate) gcfCandidates.set(toolCallID,{...candidate,toonCurrent,outline})
+      }
+      if (ManagedProvider.enabled() && !input.actorExecution) throw new Error("managed actor execution identity is unavailable")
+      const lazySnapshot = ManagedProvider.enabled() && input.actorExecution !== undefined &&
+        ManagedProvider.currentActorHostContext(input.sessionID, input.actorExecution.actorID, input.actorExecution.executionRevision) !== undefined
+      const initialSnapshot = lazySnapshot ? undefined : yield* snapshot.track()
       const ctx: ProcessorContext = {
         assistantMessage: input.assistantMessage,
         sessionID: input.sessionID,
         model: input.model,
         agentMetrics: input.agentMetrics,
+        actorExecution: input.actorExecution,
         toolcalls: {},
         shouldBreak: false,
         snapshot: initialSnapshot,
+        snapshotAttempted: !lazySnapshot,
+        lazySnapshot,
+        snapshotRecoveryNotices: new Set(),
+        stepStartPartID: undefined,
         blocked: false,
         needsOverflowHandling: false,
         currentText: undefined,
@@ -252,7 +345,7 @@ export const layer: Layer.Layer<
 
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
-          providerID: input.model.providerID,
+          providerID: ctx.model.providerID,
           aborted,
         })
 
@@ -305,7 +398,27 @@ export const layer: Layer.Layer<
           .pipe(Effect.ignore)
       })
 
+      const snapshotRecoveryNotice = Effect.fn("SessionProcessor.snapshotRecoveryNotice")(function* (
+        phase: "step_finish" | "cleanup",
+        reason: "final_capture_failed" | "patch_failed",
+      ) {
+        if (!ctx.lazySnapshot || ctx.snapshotRecoveryNotices.has(phase)) return
+        ctx.snapshotRecoveryNotices.add(phase)
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: ctx.assistantMessage.id,
+          sessionID: ctx.sessionID,
+          type: "text",
+          text: "The follow-up recovery snapshot could not be saved. Tool results already recorded are preserved; undo and diff coverage may be incomplete.",
+          synthetic: true,
+          metadata: { origin: { kind: "snapshot_recovery", phase, reason } },
+          time: { start: Date.now(), end: Date.now() },
+        })
+      })
+
+      const argumentResolutions = new Map<string,{partID:string;input:string;binding:object;claimed:boolean}>()
       const settleToolCall = Effect.fn("SessionProcessor.settleToolCall")(function* (toolCallID: string) {
+        argumentResolutions.delete(toolCallID)
         const done = ctx.toolcalls[toolCallID]?.done
         delete ctx.toolcalls[toolCallID]
         if (done) yield* Deferred.succeed(done, undefined).pipe(Effect.ignore)
@@ -324,6 +437,27 @@ export const layer: Layer.Layer<
           return
         }
         return { call, part }
+      })
+
+      const beginArgumentResolution = Effect.fn("SessionProcessor.beginArgumentResolution")(function* (callID:string, expectedInput:unknown, target:'glob'|'grep', schemaSHA256:string, binding:object) {
+        const match = yield* readToolCall(callID)
+        if (!match || !match.call.freshTask || match.part.tool !== 'gcf_arguments' || match.part.state.status !== 'running' || match.part.metadata?.providerExecuted || argumentResolutions.has(callID) || !/^[a-f0-9]{64}$/.test(schemaSHA256)) return false
+        let encoded:string
+        try { encoded=JSON.stringify(expectedInput); if (encoded!==JSON.stringify(match.part.state.input) || Buffer.byteLength(encoded,'utf8')>60000) return false } catch {return false}
+        argumentResolutions.set(callID,{partID:match.part.id,input:encoded,binding,claimed:false})
+        stepRecovery?.invalidate()
+        const metadata={...(match.part.metadata ?? {})}
+        delete metadata.openclankArgumentResolution
+        metadata.openclankArgumentResolution={version:1,target,schemaSHA256,policy:'gcf-generic-v3-safe-integers-v1'}
+        yield* session.updatePart({...match.part,metadata})
+        return true
+      })
+      const checkArgumentResolution = Effect.fn("SessionProcessor.checkArgumentResolution")(function* (callID:string, expectedInput:unknown, binding:object, claim:boolean) {
+        const relation=argumentResolutions.get(callID), match=yield* readToolCall(callID)
+        if (!relation || relation.binding!==binding || (claim && relation.claimed) || !match || !match.call.freshTask || match.part.id!==relation.partID || match.part.tool!=='gcf_arguments' || match.part.state.status!=='running') return false
+        try {if (JSON.stringify(expectedInput)!==relation.input || JSON.stringify(match.part.state.input)!==relation.input) return false} catch {return false}
+        if (claim) relation.claimed=true
+        return true
       })
 
       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
@@ -349,9 +483,11 @@ export const layer: Layer.Layer<
       ) {
         const match = yield* readToolCall(toolCallID)
         if (!match || match.part.state.status !== "running") return
+        const candidate = gcfCandidates.get(toolCallID)
+        gcfCandidates.delete(toolCallID)
         const result = isToolExecutionResult(output) ? output : undefined
         const structured = !result && match.part.metadata?.providerExecuted
-        const part = yield* session.updatePart({
+        const completed: MessageV2.ToolPart = {
           ...match.part,
           state: {
             status: "completed",
@@ -364,7 +500,27 @@ export const layer: Layer.Layer<
             time: { start: match.part.state.time.start, end: Date.now() },
             attachments: result?.attachments,
           },
-        })
+        }
+        const final = result ? gcfCandidate(result.output) : undefined
+        const qualify = candidate && final && candidate.sha256 === final.sha256 && candidate.bytes === final.bytes &&
+          !match.part.metadata?.providerExecuted && result?.metadata?.truncated === false &&
+          result.metadata.outputPath === undefined && result.metadata.mcp?.isError === false &&
+          match.part.contextSelection?.action !== "trim" && match.part.contextSelection?.action !== "omit" &&
+          (!result.attachments || result.attachments.length === 0)
+        const timing=timingCaptures.get(toolCallID); timingCaptures.delete(toolCallID)
+        const actor=input.actorExecution
+        const current=actor && ManagedProvider.currentActorHostContext(input.sessionID,actor.actorID,actor.executionRevision)
+        const issuer=actor?.rootOperationID && ManagedProvider.currentActorToolTimingIssuer(input.sessionID,actor.actorID,actor.executionRevision,actor.rootOperationID)
+        const admission=current?.toolViewAdmission ?? current?.jsonWhitespaceAdmission
+        const verified = qualify && candidate.outline ? 'source-outline-v1' as const : qualify && candidate.toonCurrent?.() === true ? 'toon-v1' as const : result && timing && completed.tool==='bash' ? (readBashView(result) ?? (readTerminalAnsi(result) ? 'terminal-ansi-v1' as const : undefined))
+          : result && timing && completed.tool==='webfetch' ? (readWebfetchMarkdown(result,{sessionID:input.sessionID,messageID:completed.messageID,callID:completed.callID}) ? 'markdown-slim-v1' as const : readWebfetchHtml(result,{sessionID:input.sessionID,messageID:completed.messageID,callID:completed.callID}) ? 'html-markdown-v1' as const : undefined)
+          : result && timing && completed.tool==='read' ? readReadViewProfile(result)
+          : result && timing && completed.tool==='grep' && readGrepRows(result) ? selectedToolViewProfile(admission,'grep')
+          : result && timing && completed.tool==='mcp_tool_search' && readStructuredSearch(result) ? 'structured-search-v1' as const : undefined
+        const view=match.call.freshTask && admission && timing && issuer===timing.owner && issuer.isAlive() && actor
+          ? captureToolView(admission,timing,completed,
+              ManagedProvider.currentToolViewRoute(input.sessionID,actor.actorID,actor.executionRevision),verified) : undefined
+        const part = qualify ? yield* session.updateGcfCompleted(completed,timing,view,verified==='source-outline-v1' ? (candidate.outline?.current() === true ? candidate.outline.sidecar : 'null') : undefined) : yield* session.updateTimedTool(completed,timing,view)
         yield* detectTryBest(part)
         yield* settleToolCall(toolCallID)
       })
@@ -385,7 +541,8 @@ export const layer: Layer.Layer<
           const parsed = MessageV2.FilePart.safeParse(attachment)
           return parsed.success ? [parsed.data] : []
         })
-        const part = yield* session.updatePart({
+        const timing=timingCaptures.get(toolCallID); timingCaptures.delete(toolCallID)
+        const part = yield* session.updateTimedTool({
           ...match.part,
           state: {
             status: "error",
@@ -395,7 +552,7 @@ export const layer: Layer.Layer<
             ...(attachments && attachments.length > 0 ? { attachments } : {}),
             time: { start: match.part.state.time.start, end: Date.now() },
           },
-        })
+        }, timing)
         yield* detectTryBest(part)
         if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
           ctx.blocked = ctx.blocked || ctx.shouldBreak
@@ -409,17 +566,60 @@ export const layer: Layer.Layer<
         if (ctx.textNgramMonitor.append(text)) ctx.textNgramRepeat = true
       }
 
-      const commitManagedAttempt = () =>
+      let attemptCommitted = false
+      const commitManagedAttempt = () => Effect.suspend(() => {
+        // Set first: a host commit failure leaves the actual outcome unknown.
+        attemptCommitted = true
+        return ManagedProvider.enabled()
+          ? Effect.promise(() => ManagedProvider.commitSessionOperation(ctx.sessionID, ctx.actorExecution?.actorID, ctx.actorExecution?.executionRevision))
+          : Effect.void
+      })
+
+      const recordManagedSuccess = (observation?:AccountSelection.DispatchObservation) =>
         ManagedProvider.enabled()
-          ? Effect.promise(() => ManagedProvider.commitSessionOperation(ctx.sessionID))
+          ? Effect.promise(() => ManagedProvider.recordSessionSuccess(ctx.sessionID, ctx.actorExecution?.actorID, ctx.actorExecution?.executionRevision, observation))
           : Effect.void
 
-      const recordManagedSuccess = () =>
-        ManagedProvider.enabled()
-          ? Effect.promise(() => ManagedProvider.recordSessionSuccess(ctx.sessionID))
-          : Effect.void
+      // Capture lazily, but before the first actual hook/tool callback. The
+      // shared promise is owned by this processor; interrupting an individual
+      // waiter only stops that wait, while processor interruption aborts Git.
+      let captureFiber: Fiber.Fiber<void, unknown> | undefined
+      const ensureSnapshot = (): Effect.Effect<void, unknown> =>
+        Effect.gen(function* () {
+          if (!ctx.lazySnapshot) return
+          if (ctx.snapshot || ctx.snapshotAttempted) return
+          if (!captureFiber) {
+            captureFiber = bridge.fork(
+              Effect.gen(function* () {
+                const captured = yield* snapshot.track({ strict: true })
+                if (captured !== undefined) {
+                  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(captured)) {
+                    throw new Error("Snapshot capture failed: Git returned an invalid tree reference")
+                  }
+                  ctx.snapshot = captured
+                  if (ctx.stepStartPartID) {
+                    yield* session.updatePart({
+                      id: ctx.stepStartPartID,
+                      messageID: ctx.assistantMessage.id,
+                      sessionID: ctx.sessionID,
+                      snapshot: captured,
+                      type: "step-start",
+                    })
+                  }
+                }
+                // Undefined is the existing explicit disabled/non-Git result.
+                ctx.snapshotAttempted = true
+              }),
+            )
+          }
+          yield* Fiber.join(captureFiber)
+        })
 
+      let replaying = false
+      let outputAttempt:SourceAttemptHandle | undefined
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
+        if (outputAttempt && (replaying || !["start","start-step","text-start","text-delta","text-end","finish-step","finish"].includes(value.type)))
+          invalidateSourceOutput(outputAttempt)
         switch (value.type) {
           case "start":
             if (isMain) yield* status.set(ctx.sessionID, { type: "busy" })
@@ -470,10 +670,12 @@ export const layer: Layer.Layer<
             return
 
           case "tool-input-start":
+            if (!replaying) stepRecovery?.emit(value.id)
             yield* commitManagedAttempt()
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
             }
+            const newlyAllocated = !ctx.toolcalls[value.id]
             const part = yield* session.updatePart({
               id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -490,6 +692,7 @@ export const layer: Layer.Layer<
               partID: part.id,
               messageID: part.messageID,
               sessionID: part.sessionID,
+              freshTask: !replaying && newlyAllocated && !value.providerExecuted,
             }
             return
 
@@ -513,10 +716,25 @@ export const layer: Layer.Layer<
                 input: value.input,
                 time: { start: Date.now() },
               },
-              metadata: match.metadata?.providerExecuted
-                ? { ...value.providerMetadata, providerExecuted: true }
-                : value.providerMetadata,
+              metadata: (() => {
+                const meta={...(value.providerMetadata ?? {})}
+                delete meta.openclankArgumentResolution
+                return match.metadata?.providerExecuted ? {...meta,providerExecuted:true} : meta
+              })(),
             }))
+
+            const timingPart = yield* readToolCall(value.toolCallId)
+            if (timingPart?.call.freshTask && timingPart.part.state.status === "running" && input.actorExecution?.rootOperationID && input.actorExecution.innerTurnID) {
+              const part = timingPart.part
+              ManagedProvider.markFreshTaskCall({ sessionID: part.sessionID, rootOperationID: input.actorExecution.rootOperationID,
+                actorID: input.actorExecution.actorID, executionRevision: input.actorExecution.executionRevision,
+                innerTurnID: input.actorExecution.innerTurnID, messageID: part.messageID, partID: part.id,
+                toolCallID: part.callID, toolName: part.tool })
+            }
+            if (timingPart && input.actorExecution && ManagedProvider.currentActorHostContext(input.sessionID,input.actorExecution.actorID,input.actorExecution.executionRevision)) {
+              const timing=captureToolTiming(ManagedProvider.currentActorToolTimingIssuer(input.sessionID,input.actorExecution.actorID,input.actorExecution.executionRevision,input.actorExecution.rootOperationID ?? ""),input.actorExecution,timingPart.part)
+              if (timing) timingCaptures.set(value.toolCallId,timing)
+            }
 
             const parts = MessageV2.parts(ctx.assistantMessage.id)
             const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
@@ -554,6 +772,7 @@ export const layer: Layer.Layer<
           }
 
           case "tool-error": {
+            stepRecovery?.invalidate()
             yield* failToolCall(value.toolCallId, value.error)
             yield* bus
               .publish(Metrics.ToolCall, {
@@ -568,8 +787,20 @@ export const layer: Layer.Layer<
             return
           }
 
-          case "error":
+          case "error": {
+            try {
+              const scope=ManagedProvider.currentScope(ctx.sessionID,ctx.actorExecution?.actorID,ctx.actorExecution?.executionRevision)
+              const original=ManagedProvider.originalRefreshObservationScope(ctx.sessionID,ctx.actorExecution?.actorID,ctx.actorExecution?.executionRevision)
+              const observedScope=hasObservedMalformedResponse(value.error,scope) ? scope :
+                hasObservedMalformedResponse(value.error,original) ? original : undefined
+              if (observedScope) {
+                if (attemptCommitted && hasMalformedResponse(value.error,observedScope)) emitMalformedDiagnostic(value.error,observedScope, ManagedProvider.committedRefreshDiagnostic(ctx.sessionID,ctx.actorExecution?.actorID,ctx.actorExecution?.executionRevision))
+                // The provider returned 2xx; missing step does not prove no work.
+                attemptCommitted=true
+              }
+            } catch {}
             throw value.error
+          }
 
           case "start-step":
             // A provider start-step means the remote request was accepted and
@@ -577,8 +808,10 @@ export const layer: Layer.Layer<
             yield* commitManagedAttempt()
             ctx.stepStartedAt = Date.now()
             ctx.firstTokenAt = undefined
-            if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
+            if (!ctx.lazySnapshot && !ctx.snapshot) ctx.snapshot = yield* snapshot.track()
             const stepStartPartId = PartID.ascending()
+            ctx.stepStartPartID = stepStartPartId
+            observedStep = {id:stepStartPartId, closed:false, admitted:false}
             yield* session.updatePart({
               id: stepStartPartId,
               messageID: ctx.assistantMessage.id,
@@ -587,23 +820,59 @@ export const layer: Layer.Layer<
               type: "step-start",
             })
             ctx.stepPartIds.push(stepStartPartId)
+            if (!replaying) stepRecovery?.start(stepStartPartId)
             return
 
           case "finish-step": {
+            if (!replaying) finishSourceOutputStep(outputAttempt,value.finishReason)
+            if (!replaying) stepRecovery?.close()
+            if (observedStep) {
+              const step = observedStep
+              step.closed = true
+              if (step.admitted && step.binding && session.changeCaptureMembership) {
+                const bound = step.binding
+                yield* session.changeCaptureMembership(bound,{kind:"seal"},() => {
+                  const current = ManagedProvider.currentActorHostContext(bound.sessionID,bound.actorID,bound.executionRevision)
+                  return observedStep === step && !!current && current.accountID === bound.accountID && current.chatID === bound.hostChatID && current.workspaceID === bound.workspaceID
+                    && !!ManagedProvider.currentActorToolTimingIssuer(bound.sessionID,bound.actorID,bound.executionRevision,bound.rootOperationID)
+                }).pipe(Effect.ignore)
+              }
+            }
+            let scoped:ReturnType<typeof takeSdkSuccessStep>={metadata:undefined,observation:undefined}
+            try { scoped=takeSdkSuccessStep(ManagedProvider.successObservationScope(ctx.sessionID, ctx.actorExecution?.actorID, ctx.actorExecution?.executionRevision),value.providerMetadata) } catch {}
             yield* commitManagedAttempt()
             const usage = Session.getUsage({
               model: ctx.model,
               usage: value.usage,
-              captureScope: ManagedProvider.currentScope(ctx.sessionID),
-              metadata: value.providerMetadata,
+              captureScope: ManagedProvider.currentScope(ctx.sessionID, ctx.actorExecution?.actorID, ctx.actorExecution?.executionRevision),
+              metadata: scoped.metadata,
             })
             ctx.assistantMessage.finish = value.finishReason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
+            const finalSnapshot = ctx.lazySnapshot
+              ? ctx.snapshot
+                ? yield* snapshot.track({ strict: true }).pipe(
+                    Effect.flatMap((tree) =>
+                      tree === undefined || /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(tree)
+                        ? Effect.succeed(tree)
+                        : Effect.fail(new Error("Git returned an invalid tree reference")),
+                    ),
+                    Effect.catchCause((cause) =>
+                      Cause.hasInterruptsOnly(cause)
+                        ? Effect.failCause(cause)
+                        : Effect.gen(function* () {
+                            yield* snapshotRecoveryNotice("step_finish", "final_capture_failed")
+                            return undefined
+                          }),
+                    ),
+                  )
+                : undefined
+              : yield* snapshot.track()
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.finishReason,
-              snapshot: yield* snapshot.track(),
+              snapshot: finalSnapshot,
               messageID: ctx.assistantMessage.id,
               sessionID: ctx.assistantMessage.sessionID,
               type: "step-finish",
@@ -613,20 +882,38 @@ export const layer: Layer.Layer<
             yield* session.updateMessage(ctx.assistantMessage)
             let stepFilesChanged = 0
             if (ctx.snapshot) {
-              const patch = yield* snapshot.patch(ctx.snapshot)
-              stepFilesChanged = patch.files.length
-              if (patch.files.length) {
-                yield* session.updatePart({
-                  id: PartID.ascending(),
-                  messageID: ctx.assistantMessage.id,
-                  sessionID: ctx.sessionID,
-                  type: "patch",
-                  hash: patch.hash,
-                  files: patch.files,
-                })
+              const patch = ctx.lazySnapshot
+                ? yield* snapshot.patch(ctx.snapshot, { strict: true }).pipe(
+                    Effect.catchCause((cause) =>
+                      Cause.hasInterruptsOnly(cause)
+                        ? Effect.failCause(cause)
+                        : Effect.gen(function* () {
+                            yield* snapshotRecoveryNotice("step_finish", "patch_failed")
+                            return undefined
+                          }),
+                    ),
+                  )
+                : yield* snapshot.patch(ctx.snapshot)
+              if (!patch) {
+                ctx.snapshot = undefined
+              } else {
+                stepFilesChanged = patch.files.length
+                if (patch.files.length) {
+                  yield* session.updatePart({
+                    id: PartID.ascending(),
+                    messageID: ctx.assistantMessage.id,
+                    sessionID: ctx.sessionID,
+                    type: "patch",
+                    hash: patch.hash,
+                    files: patch.files,
+                  })
+                }
+                ctx.snapshot = undefined
               }
-              ctx.snapshot = undefined
             }
+            ctx.snapshotAttempted = false
+            ctx.stepStartPartID = undefined
+            captureFiber = undefined
             const stepTokensIn = usage.tokens.input + usage.tokens.cache.read + usage.tokens.cache.write
             const stepTokensOut = usage.tokens.output + usage.tokens.reasoning
             if (ctx.agentMetrics) {
@@ -654,7 +941,7 @@ export const layer: Layer.Layer<
                 messageID: ctx.assistantMessage.parentID,
               })
               .pipe(Effect.ignore, Effect.forkIn(scope))
-            yield* recordManagedSuccess()
+            yield* recordManagedSuccess(scoped.observation)
             if (
               !ctx.assistantMessage.summary &&
               isOverflow({ cfg: ctx.cfg ?? (yield* config.get()), tokens: usage.tokens, model: ctx.model })
@@ -677,11 +964,13 @@ export const layer: Layer.Layer<
             }
             yield* session.updatePart(ctx.currentText)
             ctx.stepPartIds.push(ctx.currentText.id)
+            if (!replaying) startSourceOutput(outputAttempt,ctx.actorExecution,ctx.currentText.messageID,ctx.currentText.id,value.id)
             return
 
           case "text-delta":
             if (!ctx.firstTokenAt) ctx.firstTokenAt = Date.now()
             if (!ctx.currentText) return
+            if (!replaying) appendSourceOutput(outputAttempt,value.id,value.text)
             ctx.currentText.text += value.text
             checkTextNgram(value.text)
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
@@ -698,15 +987,16 @@ export const layer: Layer.Layer<
             if (!ctx.currentText) return
             // oxlint-disable-next-line no-self-assign -- reactivity trigger
             ctx.currentText.text = ctx.currentText.text
+            const textTransform = { text: ctx.currentText.text }
+            const textIdentity = {sessionID:ctx.sessionID,messageID:ctx.assistantMessage.id,partID:ctx.currentText.id}
+            if (outputAttempt && !replaying) plugin.requestEmptyTextTransform?.(textTransform)
             ctx.currentText.text = (yield* plugin.trigger(
               "experimental.text.complete",
-              {
-                sessionID: ctx.sessionID,
-                messageID: ctx.assistantMessage.id,
-                partID: ctx.currentText.id,
-              },
-              { text: ctx.currentText.text },
+              textIdentity,
+              textTransform,
             )).text
+            if (!replaying) endSourceOutput(outputAttempt,value.id,ctx.currentText.text,
+              () => plugin.readEmptyTextTransform?.(textTransform,textIdentity) === true)
             {
               const end = Date.now()
               ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
@@ -717,19 +1007,32 @@ export const layer: Layer.Layer<
             return
 
           case "finish":
+            if (!replaying) noteSourceOutputFinish(outputAttempt)
             yield* commitManagedAttempt()
             return
 
           default:
-            slog.info("unhandled", { event: value.type, value })
+            if (!Flag.OPEN_CLANK_PRIVATE_RUNTIME) slog.info("unhandled", { event: value.type, value })
             return
         }
       })
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
+        if (observedStep) observedStep.closed = true
         if (ctx.snapshot) {
-          const patch = yield* snapshot.patch(ctx.snapshot)
-          if (patch.files.length) {
+          const patch = ctx.lazySnapshot
+            ? yield* snapshot.patch(ctx.snapshot, { strict: true }).pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.failCause(cause)
+                    : Effect.gen(function* () {
+                        yield* snapshotRecoveryNotice("cleanup", "patch_failed")
+                        return undefined
+                      }),
+                ),
+              )
+            : yield* snapshot.patch(ctx.snapshot)
+          if (patch?.files.length) {
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -802,30 +1105,138 @@ export const layer: Layer.Layer<
         if (isMain) yield* status.set(ctx.sessionID, { type: "idle" })
       })
 
-      const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
+      const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput,
+        rebuildAlternative?: (context: ManagedProvider.OwnedAlternativeRebuild) => Effect.Effect<LLM.StreamInput, unknown>) {
         slog.info("process")
+        outputAttempt=streamInput.sourceAttempt
+        const sourceActor=ctx.actorExecution
+        const originalTurn=isMain && sourceActor?.actorID === "main" && sourceActor.sessionID === ctx.sessionID && sourceActor.rootOperationID && sourceActor.innerTurnID
+          ? {sessionID:sourceActor.sessionID,rootOperationID:sourceActor.rootOperationID,actorID:sourceActor.actorID,executionRevision:sourceActor.executionRevision,innerTurnID:sourceActor.innerTurnID}
+          : undefined
         ctx.needsOverflowHandling = false
         ctx.shouldBreak = (ctx.cfg ?? (yield* config.get())).experimental?.continue_loop_on_deny !== true
 
-        return yield* Effect.gen(function* () {
+        let contextAttempt = 0
+        const run = Effect.gen(function* () {
           const oneAttempt = Effect.gen(function* () {
+            const attemptNumber = ++contextAttempt
+            stepRecovery?.abort()
+            stepRecovery = createStepRecoveryRecorder()
+            const attemptRecorder = stepRecovery
+            if (attemptNumber !== 1) attemptRecorder.invalidate()
+            attemptCommitted = false
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             ctx.stepPartIds = []
             ctx.toolcalls = {}
+            gcfCandidates.clear(); invalidGcfCalls.clear()
             ctx.textNgramRepeat = false
             ctx.textNgramMonitor = createTextNgramMonitor()
-            const stream = llm.stream(streamInput)
+            if (ctx.lazySnapshot) {
+              ctx.snapshot = undefined
+              ctx.snapshotAttempted = false
+            }
+            ctx.stepStartPartID = undefined
+            captureFiber = undefined
+            ctx.snapshotRecoveryNotices.clear()
+            const guardedTools = ManagedProvider.enabled() ? Object.fromEntries(
+              Object.entries(streamInput.tools).map(([name, tool]) => {
+                if (!tool.execute) return [name, tool]
+                const execute = tool.execute
+                const guarded = {
+                    ...tool,
+                    execute: (...args: Parameters<typeof execute>) => {
+                      const id = (args[1] as {toolCallId?:string} | undefined)?.toolCallId ?? ""
+                      const token = attemptRecorder.enter(id)
+                      return (async () => {
+                      let succeeded = false
+                      try {
+                      const signal = (args[1] as { abortSignal?: AbortSignal } | undefined)?.abortSignal
+                      const capture = ctx.lazySnapshot ? bridge.promise(ensureSnapshot()) : Promise.resolve()
+                      if (!signal) await capture
+                      else {
+                        await new Promise<void>((resolve, reject) => {
+                          const onAbort = () => {
+                            signal.removeEventListener("abort", onAbort)
+                            reject(signal.reason ?? new DOMException("Aborted", "AbortError"))
+                          }
+                          signal.addEventListener("abort", onAbort, { once: true })
+                          if (signal.aborted) onAbort()
+                          capture.then(
+                            () => {
+                              signal.removeEventListener("abort", onAbort)
+                              resolve()
+                            },
+                            (error) => {
+                              signal.removeEventListener("abort", onAbort)
+                              reject(error)
+                            },
+                          )
+                        })
+                      }
+                      if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+                      if (token && !attemptRecorder.isCurrent(token)) attemptRecorder.invalidate()
+                      const output = await execute.apply(tool, args)
+                      succeeded = !signal?.aborted
+                      return output
+                      } finally { attemptRecorder.finish(token,succeeded) }
+                      })()
+                    },
+                  }
+                transferGuardedToolDefinition(tool,guarded)
+                return [name,guarded]
+              }),
+            ) as LLM.StreamInput["tools"] : streamInput.tools
+            const evidenceActor=ctx.actorExecution, managedEvidence=ManagedProvider.enabled()
+            const evidenceTurn=evidenceActor?.rootOperationID && evidenceActor.innerTurnID ? {sessionID:evidenceActor.sessionID,rootOperationID:evidenceActor.rootOperationID,actorID:evidenceActor.actorID,executionRevision:evidenceActor.executionRevision,innerTurnID:evidenceActor.innerTurnID} : undefined
+            const evidenceScope=evidenceActor ? ManagedProvider.currentScope(ctx.sessionID,evidenceActor.actorID,evidenceActor.executionRevision) : undefined
+            const evidenceCurrent=()=>!managedEvidence || (!!evidenceTurn && !!evidenceScope && ctx.actorExecution===evidenceActor && isAdmittedToolTimingTurn(evidenceActor,evidenceTurn) &&
+              ManagedProvider.currentScope(ctx.sessionID,evidenceTurn.actorID,evidenceTurn.executionRevision)===evidenceScope &&
+              ManagedProvider.currentToolViewRoute(ctx.sessionID,evidenceTurn.actorID,evidenceTurn.executionRevision)?.rootOperationID===evidenceTurn.rootOperationID)
+            const evidenceOwner={id:ctx.assistantMessage.id,sessionID:ctx.assistantMessage.sessionID,parentID:ctx.assistantMessage.parentID,created:ctx.assistantMessage.time.created,actorID:evidenceActor?.actorID ?? ctx.assistantMessage.agentID ?? 'main',...(managedEvidence ? {executionRevision:evidenceTurn?.executionRevision ?? -1} : {})}
+            const evidenceSave=(message:MessageV2.Assistant)=>bridge.promise(session.updateContextEvidence(message,evidenceOwner,evidenceCurrent))
+            const stream = llm.stream({ ...streamInput, tools: guardedTools, contextSequence: { attempt: attemptNumber, transform: 0 },
+              onNativeTextDelivery: nativeTextDeliveryWriter(ctx.assistantMessage,
+                evidenceSave,
+                () => slog.warn("native text delivery evidence unavailable"),evidenceCurrent),
+              onNativeMembership: nativeMembershipDeliveryWriter(ctx.assistantMessage,
+                evidenceSave,
+                () => slog.warn("native membership evidence unavailable"),evidenceCurrent),
+              onContextFrame: contextFrameWriter(ctx.assistantMessage,
+                evidenceSave,
+                () => slog.warn("context inspection persistence unavailable"),evidenceCurrent),
+            })
 
+            let completedSteps = 0
             yield* stream.pipe(
-              Stream.tap((event) => handleEvent(event)),
+              Stream.tap((event) => handleEvent(event).pipe(
+                Effect.tap(() => Effect.sync(() => { if (event.type === "finish-step") completedSteps++ })),
+              )),
               Stream.takeUntil(() => ctx.needsOverflowHandling || ctx.textNgramRepeat || ctx.blocked),
               Stream.runDrain,
+              Effect.onExit(exit => Effect.sync(() => { if (Exit.isFailure(exit)) attemptRecorder.abort() })),
             )
+            if (ctx.needsOverflowHandling || ctx.textNgramRepeat || ctx.blocked || ctx.assistantMessage.error || !ctx.actorExecution) {
+              attemptRecorder.abort()
+            } else {
+              const declarations = attemptRecorder.drain()
+              for (const declaration of declarations) {
+                try {
+                  if (!(yield* Effect.promise(() => Promise.all(declaration.current.map(check=>check())).catch(()=>[false]))).every(Boolean)) continue
+                  const capability=createStepRecoveryCapability(declaration.binding,ctx.actorExecution)
+                  if (capability) publishStepRecovery(capability,declaration.members)
+                } catch { /* Recovery evidence is optional; Git remains authoritative. */ }
+              }
+            }
+            if (completedSteps === 0 && !ctx.needsOverflowHandling && !ctx.textNgramRepeat && !ctx.blocked) {
+              return yield* Effect.fail(new Error("Provider stream ended without a completed step"))
+            }
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
+                stepRecovery?.abort()
                 aborted = true
+                if (captureFiber) yield* Fiber.interrupt(captureFiber).pipe(Effect.ignore)
                 if (!ctx.assistantMessage.error) {
                   yield* halt(new DOMException("Aborted", "AbortError"))
                 }
@@ -835,30 +1246,50 @@ export const layer: Layer.Layer<
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) => Effect.fail(Cause.squash(cause)),
             ),
-            Effect.tapError(() =>
-              Effect.gen(function* () {
-                for (const partId of ctx.stepPartIds) {
-                  yield* session.removePart({
-                    sessionID: ctx.sessionID,
-                    messageID: ctx.assistantMessage.id,
-                    partID: partId,
-                  })
-                }
-                ctx.stepPartIds = []
-              }),
-            ),
           )
 
           const managedRetry = (attempt: number): Effect.Effect<void, unknown> =>
             oneAttempt.pipe(
-              Effect.catch((error: unknown) =>
-                Effect.promise(() => ManagedProvider.recordSessionAttempt(ctx.sessionID, error)).pipe(
+              Effect.catch((error: unknown) => {
+                if (attemptCommitted) return Effect.fail(error)
+                return Effect.promise(() => originalTurn ? ManagedProvider.recordOwnedAnthropicTerminal(originalTurn,error) : Promise.resolve('not_eligible' as const)).pipe(
+                  Effect.flatMap((terminal) => terminal === 'stopped' && originalTurn && rebuildAlternative
+                    ? Effect.gen(function* () {
+                        const context=yield* Effect.promise(() => ManagedProvider.prepareOwnedAlternative(originalTurn))
+                        if (!context || !context.current()) return yield* Effect.fail(error)
+                        const rebuilt=yield* rebuildAlternative(context)
+                        if (!context.current()) return yield* Effect.fail(error)
+                        const previous={model:ctx.model,providerID:ctx.assistantMessage.providerID,modelID:ctx.assistantMessage.modelID,variant:ctx.assistantMessage.variant}
+                        ctx.model=rebuilt.model;ctx.assistantMessage.providerID=rebuilt.model.providerID;ctx.assistantMessage.modelID=rebuilt.model.id
+                        ctx.assistantMessage.variant=rebuilt.user.model.variant
+                        yield* session.updateMessage(ctx.assistantMessage)
+                        if (!(yield* Effect.promise(() => ManagedProvider.activateOwnedAlternative(context)))) {
+                          ctx.model=previous.model;ctx.assistantMessage.providerID=previous.providerID;ctx.assistantMessage.modelID=previous.modelID
+                          ctx.assistantMessage.variant=previous.variant
+                          yield* session.updateMessage(ctx.assistantMessage)
+                          return yield* Effect.fail(error)
+                        }
+                        yield* session.updatePart({
+                          id: PartID.ascending(),
+                          messageID: ctx.assistantMessage.id,
+                          sessionID: ctx.sessionID,
+                          type: "text",
+                          text: `Switched from ${previous.providerID}/${previous.modelID} to ${rebuilt.model.providerID}/${rebuilt.model.id}: the first model's API key was rejected before any output.`,
+                          synthetic: true,
+                          metadata: { origin: { kind: "model_switch" } },
+                          time: { start: Date.now(), end: Date.now() },
+                        })
+                        streamInput=rebuilt
+                        return yield* oneAttempt
+                      })
+                    : terminal !== 'not_eligible' ? Effect.fail(error) : Effect.promise(() => ManagedProvider.recordSessionAttempt(ctx.sessionID, error, ctx.actorExecution?.actorID, ctx.actorExecution?.executionRevision)).pipe(
                   Effect.flatMap((decision) => {
                     if (!decision.retry) return Effect.fail(error)
                     const nextAttempt = attempt + 1
                     const baseDelay = decision.rotated ? 0 : Math.min(500 * 2 ** attempt, 5_000)
-                    const delayMs =
-                      baseDelay === 0 ? 0 : Math.max(1, Math.round(baseDelay * (0.75 + Math.random() * 0.5)))
+                    const localDelay = baseDelay === 0 ? 0 : Math.max(1, Math.round(baseDelay * (0.75 + Math.random() * 0.5)))
+                    const delayMs = decision.rotated ? 0 : Math.max(localDelay, decision.retryAfterMs ?? 0)
+                    if (!ManagedProvider.reserveRetryWait(ctx.sessionID, ctx.actorExecution?.actorID, ctx.actorExecution?.executionRevision, delayMs)) return Effect.fail(error)
                     const update = isMain
                       ? status.set(ctx.sessionID, {
                           type: "retry",
@@ -869,13 +1300,21 @@ export const layer: Layer.Layer<
                           next: Date.now() + delayMs,
                         })
                       : Effect.void
-                    return update.pipe(
+                    const discardProvisional = Effect.gen(function* () {
+                      for (const partId of ctx.stepPartIds) {
+                        yield* session.removePart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID: partId })
+                      }
+                      ctx.stepPartIds = []
+                    })
+                    return discardProvisional.pipe(
+                      Effect.andThen(update),
                       Effect.andThen(Effect.sleep(Duration.millis(delayMs))),
                       Effect.andThen(managedRetry(nextAttempt)),
                     )
                   }),
-                ),
-              ),
+                  )),
+                )
+              }),
             )
 
           const execution = ManagedProvider.enabled()
@@ -884,6 +1323,7 @@ export const layer: Layer.Layer<
                 Effect.retry(
                   SessionRetry.policy({
                     parse,
+                    canRetry: () => !attemptCommitted,
                     set: (info) =>
                       isMain
                         ? status.set(ctx.sessionID, {
@@ -902,14 +1342,20 @@ export const layer: Layer.Layer<
             Effect.ensuring(cleanup()),
           )
 
+          if (ctx.needsOverflowHandling || ctx.textNgramRepeat || ctx.blocked || ctx.assistantMessage.error)
+            invalidateSourceOutput(outputAttempt)
+          else finishSourceOutputStream(outputAttempt)
           if (ctx.needsOverflowHandling) return "overflow"
           if (ctx.textNgramRepeat) return "text-repeat"
           if (ctx.blocked || ctx.assistantMessage.error) return "stop"
           return "continue"
         })
+        return yield* (ctx.lazySnapshot ? run.pipe(Effect.provideService(Snapshot.CaptureBarrier, ensureSnapshot)) : run)
       })
 
       const replay = Effect.fn("SessionProcessor.replay")(function* (input: ReplayInput) {
+        replaying = true
+        invalidateSourceOutput(outputAttempt)
         slog.info("replay", { toolCalls: input.toolCalls.length, finish: input.finishReason })
         ctx.needsOverflowHandling = false
         ctx.shouldBreak = (ctx.cfg ?? (yield* config.get())).experimental?.continue_loop_on_deny !== true
@@ -922,7 +1368,7 @@ export const layer: Layer.Layer<
           totalTokens: 0,
         }
 
-        return yield* Effect.gen(function* () {
+        const run = Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
@@ -1011,6 +1457,8 @@ export const layer: Layer.Layer<
                 continue
               }
 
+              yield* ensureSnapshot()
+
               const outcome = yield* Effect.tryPromise({
                 try: () =>
                   t.execute!(call.input, {
@@ -1086,6 +1534,7 @@ export const layer: Layer.Layer<
                 // Propagate cancellation into the currently-executing tool so a
                 // long-running winner tool call is actually interrupted.
                 ctrl.abort()
+                if (captureFiber) yield* Fiber.interrupt(captureFiber).pipe(Effect.ignore)
                 if (!ctx.assistantMessage.error) {
                   yield* halt(new DOMException("Aborted", "AbortError"))
                 }
@@ -1103,6 +1552,11 @@ export const layer: Layer.Layer<
           if (ctx.blocked || ctx.assistantMessage.error) return "stop"
           return "continue"
         })
+        try {
+          return yield* (ctx.lazySnapshot ? run.pipe(Effect.provideService(Snapshot.CaptureBarrier, ensureSnapshot)) : run)
+        } finally {
+          replaying = false
+        }
       })
 
       return {
@@ -1111,6 +1565,11 @@ export const layer: Layer.Layer<
         },
         updateToolCall,
         completeToolCall,
+        beginArgumentResolution,
+        checkArgumentResolution,
+        recordGcfCandidate,
+        observedCaptureMembership,
+        stepRecovery: () => stepRecovery,
         process,
         replay,
       } satisfies Handle

@@ -1,13 +1,14 @@
 {
   "schema": 1,
   "advertised_count": 69,
-  "dedicated_catalog_locales": 37,
-  "english_fallback_locales": 31,
+  "dedicated_catalog_locales": 39,
+  "english_fallback_locales": 29,
   "display_alias_locales": 1,
   "catalog_files": [
     "ar",
     "bg",
     "bn",
+    "bs",
     "cs",
     "da",
     "de",
@@ -19,6 +20,7 @@
     "fi",
     "fr",
     "hi",
+    "hr",
     "hu",
     "id",
     "it",
@@ -55,9 +57,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -74,9 +76,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 7273,
-        "english_fallback": 2349
+        "keys": 9759,
+        "translated": 8817,
+        "english_fallback": 942
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -93,9 +95,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 7187,
-        "english_fallback": 2435
+        "keys": 9759,
+        "translated": 8837,
+        "english_fallback": 922
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -112,9 +114,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 7222,
-        "english_fallback": 2400
+        "keys": 9759,
+        "translated": 8948,
+        "english_fallback": 811
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -131,9 +133,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 7161,
-        "english_fallback": 2461
+        "keys": 9759,
+        "translated": 8853,
+        "english_fallback": 906
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -150,9 +152,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 6675,
-        "english_fallback": 2947
+        "keys": 9759,
+        "translated": 8888,
+        "english_fallback": 871
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -169,9 +171,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 7277,
-        "english_fallback": 2345
+        "keys": 9759,
+        "translated": 8783,
+        "english_fallback": 976
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -188,9 +190,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 7228,
-        "english_fallback": 2394
+        "keys": 9759,
+        "translated": 9028,
+        "english_fallback": 731
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -207,9 +209,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 7090,
-        "english_fallback": 2532
+        "keys": 9759,
+        "translated": 8814,
+        "english_fallback": 945
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -226,9 +228,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 7070,
-        "english_fallback": 2552
+        "keys": 9759,
+        "translated": 8788,
+        "english_fallback": 971
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -245,9 +247,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 6434,
-        "english_fallback": 3188
+        "keys": 9759,
+        "translated": 8253,
+        "english_fallback": 1506
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -264,9 +266,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 6533,
-        "english_fallback": 3089
+        "keys": 9759,
+        "translated": 8747,
+        "english_fallback": 1012
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -283,9 +285,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 6426,
-        "english_fallback": 3196
+        "keys": 9759,
+        "translated": 8842,
+        "english_fallback": 917
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -302,9 +304,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 6432,
-        "english_fallback": 3190
+        "keys": 9759,
+        "translated": 8611,
+        "english_fallback": 1148
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -321,9 +323,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 6429,
-        "english_fallback": 3193
+        "keys": 9759,
+        "translated": 8557,
+        "english_fallback": 1202
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -340,9 +342,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 5011,
-        "english_fallback": 4611
+        "keys": 9759,
+        "translated": 7836,
+        "english_fallback": 1923
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -359,9 +361,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4910,
-        "english_fallback": 4712
+        "keys": 9759,
+        "translated": 8845,
+        "english_fallback": 914
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -378,9 +380,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4900,
-        "english_fallback": 4722
+        "keys": 9759,
+        "translated": 8900,
+        "english_fallback": 859
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -397,9 +399,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -416,9 +418,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4814,
-        "english_fallback": 4808
+        "keys": 9759,
+        "translated": 7482,
+        "english_fallback": 2277
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -435,9 +437,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4835,
-        "english_fallback": 4787
+        "keys": 9759,
+        "translated": 7802,
+        "english_fallback": 1957
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -454,9 +456,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4835,
-        "english_fallback": 4787
+        "keys": 9759,
+        "translated": 7802,
+        "english_fallback": 1957
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -473,9 +475,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4800,
-        "english_fallback": 4822
+        "keys": 9759,
+        "translated": 6192,
+        "english_fallback": 3567
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -492,9 +494,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4886,
-        "english_fallback": 4736
+        "keys": 9759,
+        "translated": 6629,
+        "english_fallback": 3130
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -511,9 +513,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4784,
-        "english_fallback": 4838
+        "keys": 9759,
+        "translated": 8093,
+        "english_fallback": 1666
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -523,16 +525,16 @@
       "id": "bs",
       "name": "Bosanski",
       "dir": "ltr",
-      "catalog": "en",
-      "html_lang": "en",
-      "kind": "english-fallback",
+      "catalog": "bs",
+      "html_lang": "bs",
+      "kind": "dedicated",
       "alias_of": null,
       "advertised": true,
-      "english_fallback": true,
+      "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 0,
-        "english_fallback": 9622
+        "keys": 9759,
+        "translated": 1784,
+        "english_fallback": 7975
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -549,9 +551,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4798,
-        "english_fallback": 4824
+        "keys": 9759,
+        "translated": 6747,
+        "english_fallback": 3012
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -568,9 +570,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4989,
-        "english_fallback": 4633
+        "keys": 9759,
+        "translated": 8269,
+        "english_fallback": 1490
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -587,9 +589,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4814,
-        "english_fallback": 4808
+        "keys": 9759,
+        "translated": 6667,
+        "english_fallback": 3092
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -606,9 +608,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4845,
-        "english_fallback": 4777
+        "keys": 9759,
+        "translated": 6652,
+        "english_fallback": 3107
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -625,9 +627,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4763,
-        "english_fallback": 4859
+        "keys": 9759,
+        "translated": 6424,
+        "english_fallback": 3335
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -644,9 +646,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4860,
-        "english_fallback": 4762
+        "keys": 9759,
+        "translated": 6499,
+        "english_fallback": 3260
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -663,9 +665,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -682,9 +684,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4849,
-        "english_fallback": 4773
+        "keys": 9759,
+        "translated": 6221,
+        "english_fallback": 3538
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -701,9 +703,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4722,
-        "english_fallback": 4900
+        "keys": 9759,
+        "translated": 6038,
+        "english_fallback": 3721
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -720,9 +722,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -739,9 +741,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4950,
-        "english_fallback": 4672
+        "keys": 9759,
+        "translated": 7644,
+        "english_fallback": 2115
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -758,9 +760,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -777,9 +779,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4868,
-        "english_fallback": 4754
+        "keys": 9759,
+        "translated": 6107,
+        "english_fallback": 3652
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -796,9 +798,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -815,9 +817,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -834,9 +836,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4859,
-        "english_fallback": 4763
+        "keys": 9759,
+        "translated": 7084,
+        "english_fallback": 2675
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -853,9 +855,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -872,9 +874,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -884,16 +886,16 @@
       "id": "hr",
       "name": "Hrvatski",
       "dir": "ltr",
-      "catalog": "en",
-      "html_lang": "en",
-      "kind": "english-fallback",
+      "catalog": "hr",
+      "html_lang": "hr",
+      "kind": "dedicated",
       "alias_of": null,
       "advertised": true,
-      "english_fallback": true,
+      "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 0,
-        "english_fallback": 9622
+        "keys": 9759,
+        "translated": 2567,
+        "english_fallback": 7192
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -910,9 +912,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4825,
-        "english_fallback": 4797
+        "keys": 9759,
+        "translated": 7692,
+        "english_fallback": 2067
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -929,9 +931,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -948,9 +950,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -967,9 +969,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -986,9 +988,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1005,9 +1007,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1024,9 +1026,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1043,9 +1045,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1062,9 +1064,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1081,9 +1083,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1100,9 +1102,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4812,
-        "english_fallback": 4810
+        "keys": 9759,
+        "translated": 7890,
+        "english_fallback": 1869
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1119,9 +1121,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1138,9 +1140,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1157,9 +1159,9 @@
       "advertised": true,
       "english_fallback": false,
       "counts": {
-        "keys": 9622,
-        "translated": 4748,
-        "english_fallback": 4874
+        "keys": 9759,
+        "translated": 6755,
+        "english_fallback": 3004
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1176,9 +1178,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1195,9 +1197,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1214,9 +1216,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1233,9 +1235,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1252,9 +1254,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1271,9 +1273,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1290,9 +1292,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1309,9 +1311,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1328,9 +1330,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,
@@ -1347,9 +1349,9 @@
       "advertised": true,
       "english_fallback": true,
       "counts": {
-        "keys": 9622,
+        "keys": 9759,
         "translated": 0,
-        "english_fallback": 9622
+        "english_fallback": 9759
       },
       "missing_keys": 0,
       "extra_keys": 0,

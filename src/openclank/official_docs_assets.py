@@ -1,4 +1,9 @@
-"""Verified documentation media. JPEG masters are provenance; WebP variants are runtime URLs."""
+"""Documentation media, source provenance, and inline figure placement."""
+
+import re
+
+
+_MEDIA_MARKER = re.compile(r'^\{\{manual-media:([a-z0-9]+(?:-[a-z0-9]+)*)\}\}[ \t]*$', re.MULTILINE)
 
 ASSETS = {'handbook-home': {'id': 'handbook-home',
                    'state': 'ready',
@@ -7089,20 +7094,23 @@ ASSETS.update({'treehouse-player-20261007': {'id': 'treehouse-player-20261007',
                                              'sha256': 'fac9671bfa7f4183de24b13de2cfd5464a96df7223a605ec8bf36740cd5b0bd9'}],
                                'reduced_motion_url': '/static/docs/media/treehouse-player-20261007/preview.webp'}})
 
-def article_media(asset_ids):
-    """Resolve shipped stills; historical motion never becomes current evidence implicitly."""
-    blocks = []
-    for asset_id in asset_ids:
-        asset = ASSETS.get(asset_id, {})
-        if asset.get("state") != "ready":
-            continue
+def place_article_media(body, asset_ids):
+    """Expand an article's approved, shipped figures at authored markers."""
+    allowed = frozenset(asset_ids)
+
+    def render(match):
+        asset_id = match[1]
+        asset = ASSETS.get(asset_id)
+        if asset_id not in allowed or not asset or asset.get("state") != "ready":
+            return ""
         variants = {variant["role"]: variant for variant in asset["variants"]}
-        blocks.append(f'![{asset["alt"]}]({variants["image"]["url"]})')
-        blocks.append(asset["caption"])
+        blocks = [f'![{asset["alt"]}]({variants["image"]["url"]})', f'*{asset["caption"]}*']
         if "video" in variants and asset.get("motion_state") == "current":
             blocks.append(f'![{asset["alt"]} — qualified current demonstration]({variants["video"]["url"]})')
             blocks.append(f'[Captions and frame transcript]({variants["captions"]["url"]})')
-    return "\n\n".join(blocks)
+        return "\n\n".join(blocks)
+
+    return _MEDIA_MARKER.sub(render, body)
 
 
 # Accepted normal-auth full-source-shell captures; historical assets stay recoverable.
@@ -7916,206 +7924,470 @@ ASSETS.update({'treehouse-four-main-quests-20261014': {'id': 'treehouse-four-mai
                                      'reduced_motion_url': '/static/docs/media/treehouse-current-work-20261014/preview.webp'}})
 
 
-# Actual deployed Alpha containment previews; source frames remain private.
-ASSETS.update({'code-graph-web-alpha-20261019': {'id': 'code-graph-web-alpha-20261019',
-                                   'state': 'ready',
-                                   'qualification': 'actual-deployed-alpha-containment-preview',
-                                   'scene': 'Code Graph Alpha in Web presentation with nested '
-                                            'folder and file containment preview.',
-                                   'alt': 'Code Graph Alpha in Web presentation with nested folder '
-                                          'and file containment preview.',
-                                   'caption': 'Web arranges the retained multilevel folder/file '
-                                              'preview. Alpha capture during source extraction: '
-                                              'containment preview only; dependencies are not yet '
-                                              'published. Import/call visibility choices do not '
-                                              'prove import/call edges exist.',
-                                   'provenance': {'kind': 'actual running local-app native Mozart '
-                                                          'CUA capture',
-                                                  'capture_date': '2026-10-19',
-                                                  'timezone': 'Pacific/Honolulu',
-                                                  'git_head': 'f37ae817',
-                                                  'revision': 'main f37ae817 plus approved '
-                                                              'working-source changes and accepted '
-                                                              'copal.js / codeMapScene.js '
-                                                              'overlays, running local port7777',
-                                                  'capture_by': 'root coordinator',
-                                                  'source_frame': 'deployed-web.png',
-                                                  'source_sha256': 'bf0c369ef6ff4d277e7cd0333beb276c72e760a8d77ce64d1ac485e37590499d',
-                                                  'native_width': 3360,
-                                                  'native_height': 1994,
-                                                  'crop_box': [455, 384, 2587, 1775],
-                                                  'capture_framing': 'Graph window only; browser '
-                                                                     'tabs, app sidebar and chat '
-                                                                     'background omitted. No '
-                                                                     'redraw, annotation, pixel '
-                                                                     'replacement or generative '
-                                                                     'editing.',
-                                                  'variant_derivation': 'PNG crop at native '
-                                                                        'pixels; same-size WebP '
-                                                                        'quality92. Learning PNG '
-                                                                        'is byte-identical to '
-                                                                        'cropped handbook master.',
-                                                  'data': 'Owner-approved first-party repository '
-                                                          'filename/folder containment; no source '
-                                                          'bodies or chat content.',
-                                                  'limitations': 'Index actively extracting '
-                                                                 'source; folder containment '
-                                                                 'preview only, dependencies not '
-                                                                 'yet published, stale freshness '
-                                                                 'visible. Not proof of current '
-                                                                 'import/call evidence or runtime '
-                                                                 'execution.',
-                                                  'license': 'Open Clank UI, AGPL-3.0-only'},
-                                   'masters': [{'path': 'static/docs/media/code-graph-web-alpha-20261019/master.png',
-                                                'width': 2132,
-                                                'height': 1391,
-                                                'mime': 'image/png',
-                                                'bytes': 1220400,
-                                                'sha256': 'abea99d83b9f08b839e0446a6841bb18872952db0a8aa3c8647a1c33c0a5b169'}],
-                                   'variants': [{'role': 'image',
-                                                 'url': '/static/docs/media/code-graph-web-alpha-20261019/preview.webp',
-                                                 'mime': 'image/webp',
-                                                 'width': 2132,
-                                                 'height': 1391,
-                                                 'bytes': 217670,
-                                                 'sha256': '041b95efaad455f4ba21e598387b60955e8b68be77e1feddd56384f0ba9b6f8f'}],
-                                   'reduced_motion_url': '/static/docs/media/code-graph-web-alpha-20261019/preview.webp'},
- 'code-graph-gravity-alpha-20261019': {'id': 'code-graph-gravity-alpha-20261019',
-                                       'state': 'ready',
-                                       'qualification': 'actual-deployed-alpha-containment-preview',
-                                       'scene': 'Code Graph Alpha in Gravity presentation with the '
-                                                'retained folder and file containment preview.',
-                                       'alt': 'Code Graph Alpha in Gravity presentation with the '
-                                              'retained folder and file containment preview.',
-                                       'caption': 'Gravity rearranges the retained folder/file '
-                                                  'preview; layout is not additional evidence. '
-                                                  'Alpha capture during source extraction: '
-                                                  'containment preview only; dependencies are not '
-                                                  'yet published. Import/call visibility choices '
-                                                  'do not prove import/call edges exist.',
-                                       'provenance': {'kind': 'actual running local-app native '
-                                                              'Mozart CUA capture',
-                                                      'capture_date': '2026-10-19',
-                                                      'timezone': 'Pacific/Honolulu',
-                                                      'git_head': 'f37ae817',
-                                                      'revision': 'main f37ae817 plus approved '
-                                                                  'working-source changes and '
-                                                                  'accepted copal.js / '
-                                                                  'codeMapScene.js overlays, '
-                                                                  'running local port7777',
-                                                      'capture_by': 'root coordinator',
-                                                      'source_frame': 'deployed-gravity.png',
-                                                      'source_sha256': 'cf982a18f16ea8e8d8fdee116ce3b31d77fadf6bbb5ac3d801f907d272ca1e7f',
-                                                      'native_width': 3360,
-                                                      'native_height': 1994,
-                                                      'crop_box': [455, 384, 2587, 1775],
-                                                      'capture_framing': 'Graph window only; '
-                                                                         'browser tabs, app '
-                                                                         'sidebar and chat '
-                                                                         'background omitted. No '
-                                                                         'redraw, annotation, '
-                                                                         'pixel replacement or '
-                                                                         'generative editing.',
-                                                      'variant_derivation': 'PNG crop at native '
-                                                                            'pixels; same-size '
-                                                                            'WebP quality92. '
-                                                                            'Learning PNG is '
-                                                                            'byte-identical to '
-                                                                            'cropped handbook '
-                                                                            'master.',
-                                                      'data': 'Owner-approved first-party '
-                                                              'repository filename/folder '
-                                                              'containment; no source bodies or '
-                                                              'chat content.',
-                                                      'limitations': 'Index actively extracting '
-                                                                     'source; folder containment '
-                                                                     'preview only, dependencies '
-                                                                     'not yet published, stale '
-                                                                     'freshness visible. Not proof '
-                                                                     'of current import/call '
-                                                                     'evidence or runtime '
-                                                                     'execution.',
-                                                      'license': 'Open Clank UI, AGPL-3.0-only'},
-                                       'masters': [{'path': 'static/docs/media/code-graph-gravity-alpha-20261019/master.png',
-                                                    'width': 2132,
-                                                    'height': 1391,
-                                                    'mime': 'image/png',
-                                                    'bytes': 1186188,
-                                                    'sha256': '3b769a3f9277a3dea1d7130be2e042dc08b210b8db48693f382a49a0857f8be8'}],
-                                       'variants': [{'role': 'image',
-                                                     'url': '/static/docs/media/code-graph-gravity-alpha-20261019/preview.webp',
-                                                     'mime': 'image/webp',
-                                                     'width': 2132,
-                                                     'height': 1391,
-                                                     'bytes': 209638,
-                                                     'sha256': 'fe370bbfc298f4019b642d96c3306ed77a62d594d5ca02748cfee28651351ea1'}],
-                                       'reduced_motion_url': '/static/docs/media/code-graph-gravity-alpha-20261019/preview.webp'},
- 'code-graph-menus-alpha-20261019': {'id': 'code-graph-menus-alpha-20261019',
-                                     'state': 'ready',
-                                     'qualification': 'actual-deployed-alpha-containment-preview',
-                                     'scene': 'Code Graph Alpha View menu showing graph canvas, '
-                                              'Explorer, Inspector and relationship visibility '
-                                              'commands.',
-                                     'alt': 'Code Graph Alpha View menu showing graph canvas, '
-                                            'Explorer, Inspector and relationship visibility '
-                                            'commands.',
-                                     'caption': 'The shared View menu offers graph navigation and '
-                                                'visibility commands; Search & evidence is '
-                                                'unavailable in this capture. Alpha capture during '
-                                                'source extraction: containment preview only; '
-                                                'dependencies are not yet published. Import/call '
-                                                'visibility choices do not prove import/call edges '
-                                                'exist.',
-                                     'provenance': {'kind': 'actual running local-app native '
-                                                            'Mozart CUA capture',
-                                                    'capture_date': '2026-10-19',
-                                                    'timezone': 'Pacific/Honolulu',
-                                                    'git_head': 'f37ae817',
-                                                    'revision': 'main f37ae817 plus approved '
-                                                                'working-source changes and '
-                                                                'accepted copal.js / '
-                                                                'codeMapScene.js overlays, running '
-                                                                'local port7777',
-                                                    'capture_by': 'root coordinator',
-                                                    'source_frame': 'deployed-menus.png',
-                                                    'source_sha256': '3d6d2cbcaf026f2495111c19ab9b53140783dd601e1296297ff77190dcdf3428',
-                                                    'native_width': 3360,
-                                                    'native_height': 1994,
-                                                    'crop_box': [455, 384, 2587, 1775],
-                                                    'capture_framing': 'Graph window only; browser '
-                                                                       'tabs, app sidebar and chat '
-                                                                       'background omitted. No '
-                                                                       'redraw, annotation, pixel '
-                                                                       'replacement or generative '
-                                                                       'editing.',
-                                                    'variant_derivation': 'PNG crop at native '
-                                                                          'pixels; same-size WebP '
-                                                                          'quality92. Learning PNG '
-                                                                          'is byte-identical to '
-                                                                          'cropped handbook '
-                                                                          'master.',
-                                                    'data': 'Owner-approved first-party repository '
-                                                            'filename/folder containment; no '
-                                                            'source bodies or chat content.',
-                                                    'limitations': 'Index actively extracting '
-                                                                   'source; folder containment '
-                                                                   'preview only, dependencies not '
-                                                                   'yet published, stale freshness '
-                                                                   'visible. Not proof of current '
-                                                                   'import/call evidence or '
-                                                                   'runtime execution.',
-                                                    'license': 'Open Clank UI, AGPL-3.0-only'},
-                                     'masters': [{'path': 'static/docs/media/code-graph-menus-alpha-20261019/master.png',
-                                                  'width': 2132,
-                                                  'height': 1391,
-                                                  'mime': 'image/png',
-                                                  'bytes': 912236,
-                                                  'sha256': '14f27c164aed05403222ca0317733048e6e897d67a8e6923eb4a878f3dca68ae'}],
-                                     'variants': [{'role': 'image',
-                                                   'url': '/static/docs/media/code-graph-menus-alpha-20261019/preview.webp',
-                                                   'mime': 'image/webp',
-                                                   'width': 2132,
-                                                   'height': 1391,
-                                                   'bytes': 159590,
-                                                   'sha256': 'fcb65515bc2b11b6d474e3928738d7ca4cc29ed52eeb52b6e2b40d96a622a4d0'}],
-                                     'reduced_motion_url': '/static/docs/media/code-graph-menus-alpha-20261019/preview.webp'}})
+_COMIC_CLANK_DIAGRAM_FACES = (
+    {
+        "family": "Comic Clank", "style": "Bold", "version": "0.300", "weight": 700,
+        "source_sha256": "89747be712074dd16482c0e2f14fe80c61f07a0b33a8d39a4293361ae22c0366",
+    },
+    {
+        "family": "Comic Clank", "style": "Regular", "version": "0.300", "weight": 400,
+        "source_sha256": "d61ede0a75a9efe1588862304769fa6c759be0adfb7aef983ce2e1ac408c6975",
+    },
+)
+_COMIC_CLANK_DIAGRAM_MONO_FACE = ({
+    "family": "Comic Clank Mono", "style": "Regular", "version": "0.300", "weight": 400,
+    "source_sha256": "1188a3ce929d5750e0019c414b5428b04b95f1d9e45f30f84857fb0111c8f52f",
+},)
+
+
+# Original instructional diagrams of the named controls. No live account data.
+ASSETS.update({
+    "manual-home-workspace": {
+        "id": "manual-home-workspace",
+        "state": "ready",
+        "qualification": "original-source-based-diagram",
+        "scene": "Feedback on a selected image region in the original chat.",
+        "alt": (
+            "Editor selects the bottom-right corner of a robot eye's triangular frame. "
+            "A feedback draft in the original chat targets the saved image revision and asks to round that corner."
+        ),
+        "caption": "Image feedback ties a requested edit to a region of the saved revision. Review the draft in the original chat before sending.",
+        "provenance": {
+            "kind": "original instructional diagram",
+            "source_date": "2026-11-19",
+            "source": "static/js/copal/notesFeature.js, static/js/planFeedback.js",
+            "typefaces": _COMIC_CLANK_DIAGRAM_FACES + _COMIC_CLANK_DIAGRAM_MONO_FACE,
+            "license": "Open Clank, AGPL-3.0-only",
+        },
+        "masters": [{
+            "path": "static/docs/media/manual-home-workspace/master.svg",
+            "mime": "image/svg+xml",
+            "width": 1120,
+            "height": 490,
+            "bytes": 309316,
+            "sha256": "f1dc049d0389f6c0c319f949d4c705384b5e9de9affdd4d4414bd4b6b5b953bd",
+        }],
+        "variants": [{
+            "role": "image",
+            "url": "/static/docs/media/manual-home-workspace/preview.webp",
+            "mime": "image/webp",
+            "width": 1120,
+            "height": 490,
+            "bytes": 41084,
+            "sha256": "33a4499124c0147b1a5d2e2b8ec393e04bf58f90d1dd0a59361801bf08bb8a5a",
+        }],
+        "reduced_motion_url": "/static/docs/media/manual-home-workspace/preview.webp",
+    },
+    "manual-editor-journal-navigation": {
+        "id": "manual-editor-journal-navigation",
+        "state": "ready",
+        "qualification": "original-source-based-diagram",
+        "scene": "Sidebar launchers and the Editor activity rail.",
+        "alt": (
+            "In the sidebar, Copal contains Journal, its Manage journals menu, and Editor. "
+            "Tools contains Instruction Manual. Editor's activity rail contains Text, Wiki, and Graph."
+        ),
+        "caption": (
+            "Navigation diagram. Journal opens the configured default. If Journal is hidden, "
+            "open Settings → Appearance → Copal navigation → Manage journals."
+        ),
+        "provenance": {
+            "kind": "original instructional diagram",
+            "source_date": "2026-11-19",
+            "source": "static/index.html, static/js/copal.js",
+            "typefaces": _COMIC_CLANK_DIAGRAM_FACES,
+            "license": "Open Clank, AGPL-3.0-only",
+        },
+        "masters": [{
+            "path": "static/docs/media/manual-editor-journal-navigation/master.svg",
+            "mime": "image/svg+xml",
+            "width": 1120,
+            "height": 510,
+            "bytes": 392399,
+            "sha256": "4617b64d8bb9b5326ba56bedba4a87ff674749e639d5537fbff5abca9b73f1d4",
+        }],
+        "variants": [{
+            "role": "image",
+            "url": "/static/docs/media/manual-editor-journal-navigation/preview.webp",
+            "mime": "image/webp",
+            "width": 1120,
+            "height": 510,
+            "bytes": 44948,
+            "sha256": "153fd7c472d601c3358b01b162181d4906e7fb38c53befc157712a354f6776cc",
+        }],
+        "reduced_motion_url": "/static/docs/media/manual-editor-journal-navigation/preview.webp",
+    },
+    "manual-graph-source-scope": {
+        "id": "manual-graph-source-scope",
+        "state": "ready",
+        "qualification": "original-source-based-diagram",
+        "scene": "Graph source selection for linked pages and a code folder.",
+        "alt": (
+            "Editor activity rail → Graph → Graph view. Journal & Wiki uses saved workspace pages "
+            "and links. For Code, use File → Open folder… to select an authorized code folder, "
+            "then expand a file to load symbols."
+        ),
+        "caption": (
+            "Graph source diagram. Inspect saved links in Journal & Wiki. In Code, "
+            "check index coverage before interpreting a gap in the graph."
+        ),
+        "provenance": {
+            "kind": "original instructional diagram",
+            "source_date": "2026-11-19",
+            "source": "static/js/copal.js, static/js/copal/codeMapWorkbench.js",
+            "typefaces": _COMIC_CLANK_DIAGRAM_FACES,
+            "license": "Open Clank, AGPL-3.0-only",
+        },
+        "masters": [{
+            "path": "static/docs/media/manual-graph-source-scope/master.svg",
+            "mime": "image/svg+xml",
+            "width": 1120,
+            "height": 520,
+            "bytes": 404338,
+            "sha256": "eedc13d7305adc84632e1d4eb5be0e209b8dd487e10e162c7c8cf785d4520807",
+        }],
+        "variants": [{
+            "role": "image",
+            "url": "/static/docs/media/manual-graph-source-scope/preview.webp",
+            "mime": "image/webp",
+            "width": 1120,
+            "height": 520,
+            "bytes": 42184,
+            "sha256": "df981c5cbdc124f353606dfebbad7fb9d88b52e1c62983e39f8b141e8205d137",
+        }],
+        "reduced_motion_url": "/static/docs/media/manual-graph-source-scope/preview.webp",
+    },
+    "manual-workbook-to-pdf": {
+        "id": "manual-workbook-to-pdf",
+        "state": "ready",
+        "qualification": "original-source-based-diagram",
+        "scene": "PDF export from an editable workbook or deck to Files.",
+        "alt": (
+            "Save the workbook or deck in Editor, choose Export PDF to Files and select a destination. "
+            "Files holds the separate PDF and the editable source remains available."
+        ),
+        "caption": "Export an editable workbook or deck to PDF.",
+        "provenance": {
+            "kind": "original instructional diagram",
+            "source_date": "2026-11-19",
+            "source": "static/js/copal/notesFeature.js, static/js/editor/deliverablePdfFiles.js",
+            "typefaces": _COMIC_CLANK_DIAGRAM_FACES + _COMIC_CLANK_DIAGRAM_MONO_FACE,
+            "license": "Open Clank, AGPL-3.0-only",
+        },
+        "masters": [{
+            "path": "static/docs/media/manual-workbook-to-pdf/master.svg",
+            "mime": "image/svg+xml",
+            "width": 1120,
+            "height": 418,
+            "bytes": 241349,
+            "sha256": "8944d3466e9d0cccf827b26eb2e5dcd3246d3e2efb931fc5ee6520f8dfb3de7a",
+        }],
+        "variants": [{
+            "role": "image",
+            "url": "/static/docs/media/manual-workbook-to-pdf/preview.webp",
+            "mime": "image/webp",
+            "width": 1120,
+            "height": 418,
+            "bytes": 31582,
+            "sha256": "4e47091f1b29c321d978db97ff6a800f46dfaab72cce04947366d37800a3e32c",
+        }],
+        "reduced_motion_url": "/static/docs/media/manual-workbook-to-pdf/preview.webp",
+    },
+    "manual-recording-review": {
+        "id": "manual-recording-review",
+        "state": "ready",
+        "qualification": "original-source-based-diagram",
+        "scene": "Nondestructive range selection and review in Editor.",
+        "alt": (
+            "In Editor, Mark start and Mark end define a playback range. Annotating opens a draft "
+            "in the original task. Trimming creates a separate output and reports observed coverage."
+        ),
+        "caption": "Mark a range in a saved recording.",
+        "provenance": {
+            "kind": "original instructional diagram",
+            "source_date": "2026-11-19",
+            "source": "static/js/files.js, static/js/editor/videoReview.js",
+            "typefaces": _COMIC_CLANK_DIAGRAM_FACES,
+            "license": "Open Clank, AGPL-3.0-only",
+        },
+        "masters": [{
+            "path": "static/docs/media/manual-recording-review/master.svg",
+            "mime": "image/svg+xml",
+            "width": 1120,
+            "height": 453,
+            "bytes": 316226,
+            "sha256": "1f32b9cd27c0e724224ee8a75a843b0edb08b838c82a470476894c561c5fc531",
+        }],
+        "variants": [{
+            "role": "image",
+            "url": "/static/docs/media/manual-recording-review/preview.webp",
+            "mime": "image/webp",
+            "width": 1120,
+            "height": 453,
+            "bytes": 36106,
+            "sha256": "f75a3a756592086af239a7693cfbe44243be04c0e5990fb6c0f80100d9d143f0",
+        }],
+        "reduced_motion_url": "/static/docs/media/manual-recording-review/preview.webp",
+    },
+})
+
+
+# Current local-app controls and their capture provenance.
+ASSETS.update({'manual-treehouse-linked-lesson': {'id': 'manual-treehouse-linked-lesson',
+                                    'state': 'ready',
+                                    'qualification': 'actual-local-app-typography-capture',
+                                    'scene': 'TreeHouse lesson links.',
+                                    'alt': 'The Recursive calls lesson links to Induction and recursive '
+                                           'data under Related and labels Calls, parameters, scope as '
+                                           'needed for practice.',
+                                    'caption': 'TreeHouse example. Open Related to follow a connected '
+                                               'topic. Needed for practice identifies a prerequisite for '
+                                               'practical work.',
+                                    'provenance': {'kind': 'actual signed-in local TreeHouse app capture',
+                                                   'capture_date': '2026-11-19',
+                                                   'source': 'static/js/copal/treehouseTopicWeb.js',
+                                                   'scene_source': 'TreeHouse Library → Open lesson → '
+                                                                   'Recursive calls',
+                                                   'source_frame_sha256': '308a039dc15ab6f385daa6d7161150307ccd4beedfc96912730c9dab4756d033',
+                                                   'native_width': 1500,
+                                                   'native_height': 863,
+                                                   'crop_box': [477, 352, 1482, 807],
+                                                   'capture_framing': 'Native pixel crop omits global '
+                                                                      'navigation, account chrome and '
+                                                                      'browser chrome.',
+                                                   'variant_derivation': 'PNG crop and lossless WebP '
+                                                                         'derivative.',
+                                                   'typography': 'Owner-supplied fonts applied in the '
+                                                                 'capture tab via in-memory CSS.',
+                                                   'typefaces': [{'family': 'Comic Clank',
+                                                                  'style': 'Regular',
+                                                                  'version': '0.300',
+                                                                  'weight': 400,
+                                                                  'source_sha256': '1abdf18c0e312917c1619b3583ff31636cedce7a70add58058522fa0a0e006c6',
+                                                                  'format': 'WOFF2'},
+                                                                 {'family': 'Comic Clank',
+                                                                  'style': 'Bold',
+                                                                  'version': '0.300',
+                                                                  'weight': 700,
+                                                                  'source_sha256': 'b3e7d5b53162f3370192fb8a6d57bbfa5c823ff60859abaaea6568e507f711c2',
+                                                                  'format': 'WOFF2'},
+                                                                 {'family': 'Comic Clank Mono',
+                                                                  'style': 'Regular',
+                                                                  'version': '0.300',
+                                                                  'weight': 400,
+                                                                  'source_sha256': '8477c7565cd3f7e749a35e1614666751120b8c9ed6f4067a5da512f110a34231',
+                                                                  'format': 'WOFF2'},
+                                                                 {'family': 'Comic Clank Mono',
+                                                                  'style': 'Bold',
+                                                                  'version': '0.300',
+                                                                  'weight': 700,
+                                                                  'source_sha256': '73a4863ef41c912c18f6f29d1e9b027c45125333de8c202555d6dcd6e08ef487',
+                                                                  'format': 'WOFF2'}],
+                                                   'license': 'Open Clank UI with synthetic '
+                                                              'demonstration data'},
+                                    'masters': [{'path': 'static/docs/media/manual-treehouse-linked-lesson/master.png',
+                                                 'mime': 'image/png',
+                                                 'width': 1005,
+                                                 'height': 455,
+                                                 'bytes': 36056,
+                                                 'sha256': 'ae6ffea452b058b2827fadeeed385fef378f8ff3049355531553d0c6e9bcd0d7'}],
+                                    'variants': [{'role': 'image',
+                                                  'url': '/static/docs/media/manual-treehouse-linked-lesson/preview.webp',
+                                                  'mime': 'image/webp',
+                                                  'width': 1005,
+                                                  'height': 455,
+                                                  'bytes': 13756,
+                                                  'sha256': 'fa27d6a5565582f26b970e5251dff4fc56c451e95be70dce4ea350a0e30689c6'}],
+                                    'reduced_motion_url': '/static/docs/media/manual-treehouse-linked-lesson/preview.webp'},
+ 'manual-treehouse-practice-evidence': {'id': 'manual-treehouse-practice-evidence',
+                                        'state': 'ready',
+                                        'qualification': 'actual-local-app-typography-capture',
+                                        'scene': 'TreeHouse practical evidence controls.',
+                                        'alt': 'A filled TreeHouse form shows Practical outcome, I '
+                                               'achieved the stated outcome, Actual evidence or failure '
+                                               'details, Save draft, and Save attempt.',
+                                        'caption': 'TreeHouse example. Record what reopened, then choose '
+                                                   'Save attempt. The example shows an unsubmitted '
+                                                   'self-report.',
+                                        'provenance': {'kind': 'actual signed-in local TreeHouse app '
+                                                               'capture',
+                                                       'capture_date': '2026-11-19',
+                                                       'source': 'static/js/copal/treehouseTopicWeb.js',
+                                                       'scene_source': 'TreeHouse Library → Open lesson '
+                                                                       '→ Check that an edit survived '
+                                                                       'reopening',
+                                                       'source_frame_sha256': 'c9b8fd5645971ca162d7a133c99384d8d462853b04cdff1fc5c12714e4d0232a',
+                                                       'native_width': 1500,
+                                                       'native_height': 863,
+                                                       'crop_box': [493, 472, 1464, 715],
+                                                       'capture_framing': 'Native pixel crop omits '
+                                                                          'global navigation, account '
+                                                                          'chrome and browser chrome.',
+                                                       'variant_derivation': 'PNG crop and lossless WebP '
+                                                                             'derivative.',
+                                                       'typography': 'Owner-supplied fonts applied in '
+                                                                     'the capture tab via in-memory CSS.',
+                                                       'typefaces': [{'family': 'Comic Clank',
+                                                                      'style': 'Regular',
+                                                                      'version': '0.300',
+                                                                      'weight': 400,
+                                                                      'source_sha256': '1abdf18c0e312917c1619b3583ff31636cedce7a70add58058522fa0a0e006c6',
+                                                                      'format': 'WOFF2'},
+                                                                     {'family': 'Comic Clank',
+                                                                      'style': 'Bold',
+                                                                      'version': '0.300',
+                                                                      'weight': 700,
+                                                                      'source_sha256': 'b3e7d5b53162f3370192fb8a6d57bbfa5c823ff60859abaaea6568e507f711c2',
+                                                                      'format': 'WOFF2'},
+                                                                     {'family': 'Comic Clank Mono',
+                                                                      'style': 'Regular',
+                                                                      'version': '0.300',
+                                                                      'weight': 400,
+                                                                      'source_sha256': '8477c7565cd3f7e749a35e1614666751120b8c9ed6f4067a5da512f110a34231',
+                                                                      'format': 'WOFF2'},
+                                                                     {'family': 'Comic Clank Mono',
+                                                                      'style': 'Bold',
+                                                                      'version': '0.300',
+                                                                      'weight': 700,
+                                                                      'source_sha256': '73a4863ef41c912c18f6f29d1e9b027c45125333de8c202555d6dcd6e08ef487',
+                                                                      'format': 'WOFF2'}],
+                                                       'license': 'Open Clank UI with synthetic '
+                                                                  'demonstration data'},
+                                        'masters': [{'path': 'static/docs/media/manual-treehouse-practice-evidence/master.png',
+                                                     'mime': 'image/png',
+                                                     'width': 971,
+                                                     'height': 243,
+                                                     'bytes': 20722,
+                                                     'sha256': '69ed7e7948d9fa2f17ef66be66f7094f33aadad2721cef660aa9f633ee7b9903'}],
+                                        'variants': [{'role': 'image',
+                                                      'url': '/static/docs/media/manual-treehouse-practice-evidence/preview.webp',
+                                                      'mime': 'image/webp',
+                                                      'width': 971,
+                                                      'height': 243,
+                                                      'bytes': 8754,
+                                                      'sha256': 'f9234430811f858ce87169d1ffd1890e13ff57bbf3e9948a2b3c79a46fef31a3'}],
+                                        'reduced_motion_url': '/static/docs/media/manual-treehouse-practice-evidence/preview.webp'},
+ 'manual-editor-rich-comments': {'id': 'manual-editor-rich-comments',
+                                 'state': 'ready',
+                                 'qualification': 'actual-local-app-typography-capture',
+                                 'scene': 'Formatted comments in a Python buffer.',
+                                 'alt': 'A Python source pane shows a formatted module comment with a '
+                                        'local image, a function docstring, and an inline comment. The '
+                                        'Save control is visible.',
+                                 'caption': 'Editor example. Click into a supported rich comment to edit '
+                                            'it, then Save the source file.',
+                                 'provenance': {'kind': 'actual signed-in local Editor app capture',
+                                                'capture_date': '2026-11-19',
+                                                'source': 'static/js/copal/notesFeature.js',
+                                                'scene_source': 'rich-comments.py opened through '
+                                                                'authorized Files',
+                                                'capture_framing': 'Selector-bounded PNG capture omits '
+                                                                   'account and browser chrome.',
+                                                'variant_derivation': 'PNG capture and lossless WebP '
+                                                                      'derivative.',
+                                                'typography': 'Owner-supplied fonts applied in the '
+                                                              'capture tab via in-memory CSS. Loaded '
+                                                              'faces and computed families confirmed in '
+                                                              'browser.',
+                                                'typefaces': [{'family': 'Comic Clank',
+                                                               'style': 'Regular',
+                                                               'version': '0.300',
+                                                               'weight': 400,
+                                                               'source_sha256': '1abdf18c0e312917c1619b3583ff31636cedce7a70add58058522fa0a0e006c6',
+                                                               'format': 'WOFF2'},
+                                                              {'family': 'Comic Clank',
+                                                               'style': 'Bold',
+                                                               'version': '0.300',
+                                                               'weight': 700,
+                                                               'source_sha256': 'b3e7d5b53162f3370192fb8a6d57bbfa5c823ff60859abaaea6568e507f711c2',
+                                                               'format': 'WOFF2'},
+                                                              {'family': 'Comic Clank Mono',
+                                                               'style': 'Regular',
+                                                               'version': '0.300',
+                                                               'weight': 400,
+                                                               'source_sha256': '8477c7565cd3f7e749a35e1614666751120b8c9ed6f4067a5da512f110a34231',
+                                                               'format': 'WOFF2'},
+                                                              {'family': 'Comic Clank Mono',
+                                                               'style': 'Italic',
+                                                               'version': '0.300',
+                                                               'weight': 400,
+                                                               'source_sha256': 'c9422d541c2800e0f5959c54075ae8e74e03cb8b123c52317c0ec1fd0612b369',
+                                                               'format': 'WOFF2'}],
+                                                'license': 'Open Clank UI with synthetic demonstration '
+                                                           'data'},
+                                 'masters': [{'path': 'static/docs/media/manual-editor-rich-comments/master.png',
+                                              'mime': 'image/png',
+                                              'width': 580,
+                                              'height': 508,
+                                              'bytes': 33648,
+                                              'sha256': 'a1ac10e7f7be626525407cea502d16d0adc6251d7f2d69e6b68f7f8f9075c054'}],
+                                 'variants': [{'role': 'image',
+                                               'url': '/static/docs/media/manual-editor-rich-comments/preview.webp',
+                                               'mime': 'image/webp',
+                                               'width': 580,
+                                               'height': 508,
+                                               'bytes': 14472,
+                                               'sha256': '2f8a951868565f0a5617f1b404742f96483c470685965285c04df07ab6a215ae'}],
+                                 'reduced_motion_url': '/static/docs/media/manual-editor-rich-comments/preview.webp'},
+ 'manual-editor-find-and-replace': {'id': 'manual-editor-find-and-replace',
+                                    'state': 'ready',
+                                    'qualification': 'actual-local-app-typography-capture',
+                                    'scene': 'Find and replace in Editor.',
+                                    'alt': 'Editor’s Find and replace dialog searches for tint and '
+                                           'offers accent as the replacement. The controls are Find '
+                                           'next, Replace, Replace all, and Close.',
+                                    'caption': 'Editor example. Use Find next to inspect a match before '
+                                               'you choose Replace or Replace all.',
+                                    'provenance': {'kind': 'actual signed-in local Editor app capture',
+                                                   'capture_date': '2026-11-19',
+                                                   'source': 'static/js/copal/notesFeature.js',
+                                                   'scene_source': 'Find and replace dialog on an '
+                                                                   'authorized disposable Host file',
+                                                   'capture_framing': 'Selector-bounded PNG capture '
+                                                                      'omits account and browser chrome.',
+                                                   'variant_derivation': 'PNG capture and lossless WebP '
+                                                                         'derivative.',
+                                                   'typography': 'Owner-supplied fonts applied in the '
+                                                                 'capture tab via in-memory CSS. Loaded '
+                                                                 'faces and computed families confirmed '
+                                                                 'in browser.',
+                                                   'typefaces': [{'family': 'Comic Clank',
+                                                                  'style': 'Regular',
+                                                                  'version': '0.300',
+                                                                  'weight': 400,
+                                                                  'source_sha256': '1abdf18c0e312917c1619b3583ff31636cedce7a70add58058522fa0a0e006c6',
+                                                                  'format': 'WOFF2'},
+                                                                 {'family': 'Comic Clank',
+                                                                  'style': 'Bold',
+                                                                  'version': '0.300',
+                                                                  'weight': 700,
+                                                                  'source_sha256': 'b3e7d5b53162f3370192fb8a6d57bbfa5c823ff60859abaaea6568e507f711c2',
+                                                                  'format': 'WOFF2'},
+                                                                 {'family': 'Comic Clank Mono',
+                                                                  'style': 'Regular',
+                                                                  'version': '0.300',
+                                                                  'weight': 400,
+                                                                  'source_sha256': '8477c7565cd3f7e749a35e1614666751120b8c9ed6f4067a5da512f110a34231',
+                                                                  'format': 'WOFF2'},
+                                                                 {'family': 'Comic Clank Mono',
+                                                                  'style': 'Italic',
+                                                                  'version': '0.300',
+                                                                  'weight': 400,
+                                                                  'source_sha256': 'c9422d541c2800e0f5959c54075ae8e74e03cb8b123c52317c0ec1fd0612b369',
+                                                                  'format': 'WOFF2'}],
+                                                   'license': 'Open Clank UI with synthetic '
+                                                              'demonstration data'},
+                                    'masters': [{'path': 'static/docs/media/manual-editor-find-and-replace/master.png',
+                                                 'mime': 'image/png',
+                                                 'width': 536,
+                                                 'height': 222,
+                                                 'bytes': 9935,
+                                                 'sha256': 'a49f33d9432d8010abc7373adea23f809791628a1814990a2b3f1e1a54aa7d29'}],
+                                    'variants': [{'role': 'image',
+                                                  'url': '/static/docs/media/manual-editor-find-and-replace/preview.webp',
+                                                  'mime': 'image/webp',
+                                                  'width': 536,
+                                                  'height': 222,
+                                                  'bytes': 4694,
+                                                  'sha256': 'e8e5d6f98a5ff10c804e3624946cccc844b2e5ef3fcdba62625d1c04d46d5b86'}],
+                                    'reduced_motion_url': '/static/docs/media/manual-editor-find-and-replace/preview.webp'}})

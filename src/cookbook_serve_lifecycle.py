@@ -158,26 +158,19 @@ async def _tick() -> None:
                     break
     if stopped_any:
         try:
-            from core.atomic_io import atomic_write_json
-            # Re-read the state file so concurrent UI writes (task adds,
-            # status flips, config edits) are not silently overwritten.
-            # Apply only our stop mutations to the fresh snapshot.
-            try:
-                fresh = json.loads(state_path.read_text(encoding="utf-8"))
+            from src.openclank.cookbook_state import transaction, save
+            with transaction(state_path) as fresh:
                 fresh_tasks = fresh.get("tasks") or []
-            except Exception:
-                fresh = state
-                fresh_tasks = tasks
-            for ft in fresh_tasks:
-                if not isinstance(ft, dict):
-                    continue
-                ft_sid = ft.get("sessionId") or ft.get("id")
-                if ft_sid in successfully_stopped_sids:
-                    ft["status"] = "stopped"
-                    ft["_scheduledStopAtMs"] = None
-                    ft["_lastStatusFlipAt"] = now_ms
-            fresh["tasks"] = fresh_tasks
-            atomic_write_json(state_path, fresh)
+                for ft in fresh_tasks:
+                    if not isinstance(ft, dict):
+                        continue
+                    ft_sid = ft.get("sessionId") or ft.get("id")
+                    if ft_sid in successfully_stopped_sids:
+                        ft["status"] = "stopped"
+                        ft["_scheduledStopAtMs"] = None
+                        ft["_lastStatusFlipAt"] = now_ms
+                fresh["tasks"] = fresh_tasks
+                save(state_path, fresh)
         except Exception as e:
             logger.warning(f"cookbook_serve_lifecycle: state write failed: {e}")
 

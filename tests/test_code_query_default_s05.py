@@ -22,7 +22,7 @@ scope = lifecycle.scope
 
 
 async def test_default_index_and_query_ignore_fixture_gate(scope, tmp_path, monkeypatch):
-    binary = Path(os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"]).resolve()
+    binary = Path(os.environ["OPEN_CLANK_TEST_MEMERY_WORKER_BIN"]).resolve()
     assert hashlib.sha256(binary.read_bytes()).hexdigest() == os.environ["OPEN_CLANK_TEST_DEFAULT_FM_SHA256"]
     provider, gate = await lifecycle.native_provider(scope, tmp_path, monkeypatch)
     try:

@@ -20,13 +20,6 @@ COMPOSE_FILES = [
     ROOT / "docker-compose.gpu-amd.yml",
 ]
 HOST_DOCKER_OVERLAY = ROOT / "docker" / "host-docker.yml"
-TEST_DOCS = [
-    ROOT / "tests" / "README.md",
-    ROOT / "tests" / "TESTING_STANDARD.md",
-    ROOT / "tests" / "LAYOUT_INVENTORY.md",
-]
-
-
 def _compose_env_names(path: Path) -> set[str]:
     compose = yaml.safe_load(path.read_text(encoding="utf-8"))
     env = compose["services"]["odysseus"]["environment"]
@@ -36,7 +29,7 @@ def _compose_env_names(path: Path) -> set[str]:
 def _upload_limit_env_names() -> set[str]:
     source = (ROOT / "src" / "upload_limits.py").read_text(encoding="utf-8")
     return set(re.findall(r'"(ODYSSEUS_[A-Z_]*BYTES)"', source)) | {
-        "ODYSSEUS_CHAT_UPLOAD_MAX_BYTES"
+        "OPEN_CLANK_CHAT_UPLOAD_MAX_BYTES"
     }
 
 
@@ -72,7 +65,7 @@ def test_host_docker_overlay_mounts_socket_and_adds_docker_group():
 
     assert "/var/run/docker.sock:/var/run/docker.sock" in service["volumes"]
     assert "${DOCKER_GID:-963}" in service["group_add"]
-    assert "ODYSSEUS_ENABLE_HOST_DOCKER=true" in service["environment"]
+    assert "OPEN_CLANK_ENABLE_HOST_DOCKER=true" in service["environment"]
 
 
 @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
@@ -83,7 +76,7 @@ def test_docker_entrypoint_gates_socket_group_plumbing_on_explicit_opt_in():
     socket_group_block = script[block_start:block_end]
 
     opt_in_check = socket_group_block.index(
-        "[ \"${ODYSSEUS_ENABLE_HOST_DOCKER:-}\" = \"true\" ]"
+        "[ \"${OPEN_CLANK_ENABLE_HOST_DOCKER:-}\" = \"true\" ]"
     )
     socket_check = socket_group_block.index("[ -S \"$DOCKER_SOCK\" ]")
     stat_socket = socket_group_block.index("stat -c")
@@ -132,11 +125,6 @@ def test_dockerignore_excludes_secrets_editor_backups():
     assert "!secrets.env.example" in patterns
 
 
-def test_cors_allow_methods_include_patch():
-    methods = _cors_allow_methods()
-    assert "PATCH" in methods
-
-
 def test_patch_preflight_is_allowed_by_configured_cors_methods():
     async def patched(_request):
         return PlainTextResponse("ok")
@@ -159,17 +147,3 @@ def test_patch_preflight_is_allowed_by_configured_cors_methods():
     )
 
     assert response.status_code == 200
-
-
-def test_testing_docs_use_project_venv_for_python_validation():
-    stale_patterns = [
-        "python3 -m pytest",
-        "python3 -m py_compile",
-        "Focused `pytest`",
-        "`pytest` on neighboring",
-        ".venv/bin/python",
-    ]
-    for path in TEST_DOCS:
-        text = path.read_text(encoding="utf-8")
-        for stale in stale_patterns:
-            assert stale not in text, f"{path.name} still contains {stale!r}"

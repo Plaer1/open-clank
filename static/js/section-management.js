@@ -14,8 +14,8 @@ export function initSectionCollapse(Storage) {
     const section = header.closest('.section');
     if (!section || !section.id) return;
 
-    // Skip email section — it doesn't collapse (title opens popup instead)
-    if (section.id === 'email-section') return;
+    // Buddy is a primary launcher, with no children to collapse.
+    if (section.id === 'buddy-section') return;
 
     // Add chevron (always visible — rotates when collapsed)
     header.insertAdjacentHTML('beforeend', _chevronHtml);
@@ -263,8 +263,12 @@ export function initSectionDrag(Storage, loadUIVis) {
       const order = JSON.parse(saved);
       order.forEach(id => {
         const section = document.getElementById(id);
-        if (section) sidebarInner.appendChild(section);
+        if (section?.parentElement === sidebarInner) sidebarInner.appendChild(section);
       });
     }
   } catch (e) {}
+  const chats = document.getElementById('sessions-section');
+  const buddy = document.getElementById('buddy-section');
+  const copal = document.getElementById('copal-section');
+  if (chats && buddy && copal) chats.after(buddy, copal);
 }

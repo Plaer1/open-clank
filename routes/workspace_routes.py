@@ -2,15 +2,14 @@
 import os
 from fastapi import APIRouter, Request, HTTPException, Query
 
-from src.auth_helpers import get_current_user
-from src.tool_security import owner_is_admin_or_single_user
+from src.openclank.files_principal import files_principal
 from src.openclank.filesystem_registry import FilesystemRegistryError, FilesystemRootRegistry
 
 # Cap entries returned per directory (mirrors filesystem_tools._CODENAV_MAX_HITS).
 # A huge directory shouldn't dump thousands of rows into the picker; the user can
 # type/paste a path to jump straight in instead.
 _MAX_BROWSE_DIRS = 500
-_SELECTION_KINDS = {"agent_workspace", "app_folder"}
+_SELECTION_KINDS = {"agent_workspace", "app_folder", "register_location"}
 
 
 def setup_workspace_routes():
@@ -33,6 +32,12 @@ def setup_workspace_routes():
             ]
         except FilesystemRegistryError as error:
             raise HTTPException(status_code=503, detail={"code": error.code, "message": str(error)}) from error
+
+    def visible_agent_roots(owner: str) -> list[dict]:
+        scope = registry.agent_scope(owner, registered_only=True)
+        caps = scope.get("root_capabilities") or {}
+        return [{"root": root} for root in registry.list(owner)
+                if root.get("kind") == "recursive_directory" and "read" in caps.get(root.get("id"), ())]
 
     def _contains(root: str, target: str) -> bool:
         try:
@@ -71,11 +76,22 @@ def setup_workspace_routes():
         """
         selection = selection_kind if isinstance(selection_kind, str) else "agent_workspace"
         if selection not in _SELECTION_KINDS:
-            raise HTTPException(status_code=400, detail="selection_kind must be agent_workspace or app_folder")
-        owner = get_current_user(request)
-        is_admin = owner_is_admin_or_single_user(owner)
-        visible_roots = [] if is_admin else visible_recursive_roots(str(owner))
-        if not is_admin and not path.strip():
+            raise HTTPException(status_code=400, detail="Unknown folder selection purpose")
+        generation = registry.generation()
+        subject, owner, human_host = files_principal(request, repository=registry.repository)
+        agent_workspace = selection == "agent_workspace"
+        if selection == "register_location" and not request.app.state.auth_manager.is_admin(owner):
+            raise HTTPException(403, "Only an administrator can choose a location to register")
+        host_access = (registry.full_filesystem_choices(owner, subject)["agent"] if agent_workspace
+                       else selection == "register_location" or human_host)
+        visible_roots = ([] if host_access else
+                         visible_agent_roots(owner) if agent_workspace else visible_recursive_roots(owner))
+        def require_current_scope():
+            if registry.generation() != generation:
+                raise HTTPException(409, detail={"code": "policy_generation_changed", "message": "File access changed. Refresh and try again."})
+
+        require_current_scope()
+        if not host_access and not path.strip():
             # A non-admin's picker starts at a virtual list of assigned roots;
             # it never probes home or a filesystem parent to discover them.
             dirs = []
@@ -97,7 +113,7 @@ def setup_workspace_routes():
         # inside one of their assigned roots; otherwise response differences
         # could turn this browser into a host-path existence oracle.
         target = os.path.realpath(os.path.expanduser(path.strip() or "~"))
-        if not is_admin and not any(
+        if not host_access and not any(
             _contains(str((item.get("root") or {}).get("canonical_path") or ""), target)
             for item in visible_roots
         ):
@@ -107,11 +123,12 @@ def setup_workspace_routes():
         # existing picker keeps its response shape while directory metadata is
         # supplied by the long-lived app-principal service. The legacy path
         # remains the safe fallback until the service is packaged by default.
-        if os.environ.get("ODYSSEUS_FILES_WORKSPACE_ADAPTER", "0") == "1":
+        if os.environ.get("OPEN_CLANK_FILES_WORKSPACE_ADAPTER", "0") == "1":
             from src.openclank.files_service_client import FilesServiceError, client_for_owner
-            scope = registry.app_scope(str(owner), is_admin=is_admin)
+            scope = registry.app_scope(owner, is_admin=host_access)
+            require_current_scope()
             try:
-                service_client = client_for_owner(str(owner)) if scope.get("host") else client_for_owner(str(owner), app_scope=scope)
+                service_client = client_for_owner(owner, app_scope=scope)
                 response = _run_service_browse(service_client, target)
                 entries = ((response.get("data") or {}).get("entries") or [])
                 dirs = [
@@ -119,13 +136,14 @@ def setup_workspace_routes():
                     for entry in entries
                     if str(entry.get("kind", "")).lower().endswith("directory")
                     and (
-                        selection == "app_folder"
+                        not agent_workspace
                         or not str(entry.get("name", "")).startswith(".")
                     )
                 ]
+                require_current_scope()
                 return {
                     "path": target,
-                    "parent": visible_parent(target, is_admin=is_admin, visible_roots=visible_roots),
+                    "parent": visible_parent(target, is_admin=host_access, visible_roots=visible_roots),
                     "dirs": dirs,
                     "truncated": bool((response.get("data") or {}).get("next_cursor")),
                     # The Code Editor's app folder is user-directed UI state,
@@ -134,7 +152,7 @@ def setup_workspace_routes():
                     # including a filesystem root for an administrator.
                     "selectable": (
                         True
-                        if selection == "app_folder"
+                        if not agent_workspace
                         else vet_workspace(target) is not None
                     ),
                 }
@@ -145,11 +163,12 @@ def setup_workspace_routes():
         # Resolve symlinks so the reported path is canonical and the UI navigates
         # real directories (defends against symlink games in displayed paths).
         if not os.path.isdir(target):
-            if is_admin:
+            if host_access:
                 target = os.path.realpath(os.path.expanduser("~"))
             else:
                 raise HTTPException(status_code=403, detail="Workspace is outside assigned user-visible roots")
 
+        require_current_scope()
         dirs = []
         try:
             with os.scandir(target) as it:
@@ -161,7 +180,7 @@ def setup_workspace_routes():
                         # legacy hidden-folder omission; the user-directed Code
                         # picker shows every directory in the app-visible scope.
                         if entry.is_dir(follow_symlinks=False) and (
-                            selection == "app_folder" or not entry.name.startswith(".")
+                            not agent_workspace or not entry.name.startswith(".")
                         ):
                             # Build the child path server-side with os.path.join
                             # so it's correct on Windows (backslashes) and Linux.
@@ -171,23 +190,24 @@ def setup_workspace_routes():
         except (PermissionError, OSError):
             dirs = []
 
+        require_current_scope()
         dirs_sorted = sorted(dirs, key=lambda d: d["name"].lower())
         truncated = len(dirs_sorted) > _MAX_BROWSE_DIRS
         return {
             "path": target,
-            "parent": visible_parent(target, is_admin=is_admin, visible_roots=visible_roots),
+            "parent": visible_parent(target, is_admin=host_access, visible_roots=visible_roots),
             "dirs": dirs_sorted[:_MAX_BROWSE_DIRS],
             "truncated": truncated,
             # Whether this directory may be bound as a workspace (filesystem
             # roots and sensitive dirs may be browsed through but not chosen).
             "selectable": (
-                is_admin
+                host_access
                 or any(
                     _contains(str((item.get("root") or {}).get("canonical_path") or ""), target)
                     for item in visible_roots
                 )
             ) and (
-                selection == "app_folder"
+                not agent_workspace
                 or vet_workspace(target) is not None
             ),
         }
@@ -203,11 +223,12 @@ def setup_workspace_routes():
         The server confirms path existence only inside the caller's effective
         app scope; paths outside a non-admin assignment are rejected uniformly.
         """
-        owner = get_current_user(request)
-        is_admin = owner_is_admin_or_single_user(owner)
+        generation = registry.generation()
+        subject, owner, _human_host = files_principal(request, repository=registry.repository)
+        agent_host = registry.full_filesystem_choices(owner, subject)["agent"]
         from src.tool_execution import vet_workspace
-        if not is_admin:
-            roots = visible_recursive_roots(str(owner))
+        if not agent_host:
+            roots = visible_agent_roots(owner)
             # Do the assignment containment check before vetting existence,
             # sensitivity, or directory shape. A standard user must not be
             # able to turn this compatibility endpoint into an existence or
@@ -226,6 +247,8 @@ def setup_workspace_routes():
                 raise HTTPException(status_code=403, detail="Workspace is outside assigned user-visible roots")
         else:
             resolved = vet_workspace(path)
+        if registry.generation() != generation:
+            raise HTTPException(409, detail={"code": "policy_generation_changed", "message": "File access changed. Refresh and try again."})
         return {"ok": resolved is not None, "path": resolved}
 
     return router

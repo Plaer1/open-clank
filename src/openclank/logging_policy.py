@@ -129,6 +129,30 @@ class LoggingPolicyStore:
             self.pins[key]["holders"].add(holder_id)
             return copy.deepcopy(self.pins[key]["policy"])
 
+    def pin_actor_snapshot(self, owner, binding_id, snapshot, *, holder_id="host", private=False):
+        """Pin only a host-validated binding snapshot under its own lifetime."""
+        from src.openclank.provider_store import _validate_logging_policy_snapshot
+        owner = self._owner(owner)
+        if not isinstance(binding_id,str) or not binding_id or not holder_id or type(private) is not bool:
+            raise LoggingPolicyError('invalid_operation','Actor logging identity unavailable')
+        value = _validate_logging_policy_snapshot(snapshot)
+        if value is None:
+            raise LoggingPolicyError('snapshot_unavailable','Actor logging snapshot unavailable')
+        policy = {key:value[key] for key in ('revision','advanced_enabled','request_body_enabled','response_body_enabled','binary_body_enabled')}
+        key = (owner,'actor-binding:' + binding_id)
+        with PREFERENCE_LOCK:
+            entry = self.pins.get(key)
+            if entry is None:
+                if len(self.pins) >= 10000:
+                    raise LoggingPolicyError('pin_capacity','Logging operation capacity is full')
+                entry = {'policy':policy,'holders':set(),'private':bool(value['private'] or private)}
+                self.pins[key] = entry
+            elif entry['policy'] != policy:
+                raise LoggingPolicyError('snapshot_conflict','Actor logging snapshot changed')
+            entry['private'] = bool(entry['private'] or value['private'] or private)
+            entry['holders'].add(holder_id)
+            return copy.deepcopy(entry['policy'])
+
     def private_operation(self, owner, operation_id):
         with PREFERENCE_LOCK:
             entry = self.pins.get((self._owner(owner), operation_id))

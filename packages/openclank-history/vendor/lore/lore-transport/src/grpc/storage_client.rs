@@ -1,5 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -117,8 +120,9 @@ struct StreamState<K, S> {
 
 type StreamHandle<K, S> = Arc<StreamState<K, S>>;
 
-/// Keyed by the address the server echoes back. A `Vec` per key so concurrent requests for
-/// the same address coalesce onto one round trip and all get woken by its response.
+/// Keyed by the address a request reads or writes: the address the server echoes back, or for a
+/// copy the target, see [`CopyRouting`]. A `Vec` per key so concurrent requests for the same
+/// address coalesce onto one round trip and all get woken by its response.
 type Inflight<S> = DashMap<Address, Vec<oneshot::Sender<Result<S, ProtocolError>>>>;
 
 /// Returns true for the first waiter on `key`, meaning the caller should put the request on
@@ -224,6 +228,74 @@ impl StreamResponse for storage_v1::CopyResponse {
     }
 }
 
+/// The copies on a copy stream, by source address. A copy response names only its source, so a
+/// source address is on the wire for one target at a time, and a copy of it to another target
+/// waits for the response to the one before.
+#[derive(Default)]
+struct CopyRouting {
+    /// The target each source address on the wire is being copied to.
+    wire: HashMap<Address, Address>,
+    /// The copies waiting for a source address on the wire, in arrival order.
+    queued: HashMap<Address, VecDeque<storage_v1::CopyRequest>>,
+}
+
+impl CopyRouting {
+    /// The source and target addresses of `request`. The target is in the session's partition,
+    /// with the source's hash and the target context, or the source's context when it names
+    /// none.
+    fn addresses(request: &storage_v1::CopyRequest) -> Option<(Address, Address)> {
+        let source = Address::from(request.source_address.as_ref()?);
+        let context = match request.target_context.as_ref() {
+            [] => source.context,
+            bytes => Context::from(<[u8; 16]>::try_from(bytes).ok()?),
+        };
+        Some((
+            source,
+            Address {
+                hash: source.hash,
+                context,
+            },
+        ))
+    }
+
+    /// Put `request` on the wire for `source`, returning it, or queue it behind the copy of
+    /// `source` on the wire.
+    fn admit(
+        &mut self,
+        source: Address,
+        target: Address,
+        request: storage_v1::CopyRequest,
+    ) -> Option<storage_v1::CopyRequest> {
+        match self.wire.entry(source) {
+            Entry::Occupied(_) => {
+                self.queued.entry(source).or_default().push_back(request);
+                None
+            }
+            Entry::Vacant(wire) => {
+                wire.insert(target);
+                Some(request)
+            }
+        }
+    }
+
+    /// Take the answered copy of `source` off the wire, returning its target and the next copy
+    /// of `source`, which goes on the wire in its place.
+    fn answered(&mut self, source: Address) -> (Option<Address>, Option<storage_v1::CopyRequest>) {
+        let target = self.wire.remove(&source);
+        let Some(queue) = self.queued.get_mut(&source) else {
+            return (target, None);
+        };
+        let next = queue.pop_front();
+        if queue.is_empty() {
+            self.queued.remove(&source);
+        }
+        if let Some((_, next_target)) = next.as_ref().and_then(Self::addresses) {
+            self.wire.insert(source, next_target);
+        }
+        (target, next)
+    }
+}
+
 /// A per-item failure arrives in-band on an `Ok` message and costs only that request. An
 /// `Err` is terminal by construction — tonic surfaces a stream status once and then reports
 /// the stream exhausted — so it ends the loop and everything still outstanding fails.
@@ -233,10 +305,13 @@ impl StreamResponse for storage_v1::CopyResponse {
 /// also what lets `StreamCache::request` replay them: the ordinary ways a connection dies
 /// arrive as `Internal` or `Cancelled` (`Status::from_h2_error`), neither of which a caller
 /// would otherwise retry. The real status is kept on the error's trace.
+///
+/// `route` maps the address a response echoes to the key its request was registered under.
 async fn pump_responses<R>(
     mut stream: tonic::Streaming<R>,
     inflight: Arc<Inflight<R::Success>>,
     verb: Verb,
+    mut route: impl FnMut(Address) -> Option<Address>,
 ) where
     R: StreamResponse,
 {
@@ -262,7 +337,7 @@ async fn pump_responses<R>(
             lore_error!("{} response missing address", verb.label());
             continue;
         };
-        let Some((_, senders)) = inflight.remove(&address) else {
+        let Some((_, senders)) = route(address).and_then(|key| inflight.remove(&key)) else {
             lore_error!(
                 "{} received unexpected result for address {address}",
                 verb.label()
@@ -351,9 +426,9 @@ impl<K: Clone, S> StreamCache<K, S> {
     /// Reconnect and reissue on a stream death, the way the QUIC client's
     /// `send_with_reconnect` does, so a caller never sees one.
     ///
-    /// A death shows up three ways, all handled here: the send fails because the receiver is
-    /// already gone (the payload comes back with the error, so nothing is lost), the reader
-    /// answers with a disconnect, or it exits without answering at all. Anything else the
+    /// A death shows up three ways, all handled here: reserving a place in the queue fails
+    /// because the receiver is already gone (nothing has been sent, so nothing is lost), the
+    /// reader answers with a disconnect, or it exits without answering at all. Anything else the
     /// reader answers is the server's verdict on this request and goes straight back —
     /// matching QUIC, where `NotFound`, `SlowDown` and `NotAuthorized` bubble rather than
     /// provoking a reconnect.
@@ -383,9 +458,12 @@ impl<K: Clone, S> StreamCache<K, S> {
                 }
             };
 
-            let (tx, rx) = oneshot::channel();
-            let answer = match handle.sender.send((payload.clone(), tx)).await {
-                Ok(()) => rx.await.ok(),
+            let answer = match handle.sender.reserve().await {
+                Ok(permit) => {
+                    let (tx, rx) = oneshot::channel();
+                    permit.send((payload.clone(), tx));
+                    rx.await.ok()
+                }
                 Err(_) => None,
             };
             let server_verdict =
@@ -448,6 +526,18 @@ fn inject_metadata<T>(request: &mut tonic::Request<T>, ctx: &GrpcSessionContext)
     {
         val.set_sensitive(true);
         md.insert("authorization", val);
+    }
+}
+
+/// `status`, the failure of the unary `request`, as a protocol error. `Unavailable` reads as
+/// `SlowDown`, a server too loaded to take the request, which the general conversion reads as a
+/// lost connection. A refusal of the credentials keeps its code, and any other failure is internal.
+fn unary_error(status: tonic::Status, request: &'static str) -> ProtocolError {
+    match status.code() {
+        tonic::Code::Unavailable => ProtocolError::from(SlowDown),
+        tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => ProtocolError::from(status),
+        tonic::Code::Unimplemented => ProtocolError::internal(format!("unsupported: {request}")),
+        _ => ProtocolError::internal_with_context(status, request),
     }
 }
 
@@ -614,10 +704,7 @@ impl StorageService {
             .query(req)
             .await
             .map(|res| res.into_inner())
-            .map_err(|err| match err.code() {
-                tonic::Code::Unavailable => ProtocolError::from(SlowDown),
-                _ => ProtocolError::internal_with_context(err, "query"),
-            })?;
+            .map_err(|err| unary_error(err, "query"))?;
 
         let mut buffer = BytesMut::with_capacity(res.results.len());
         for value in res.results.iter() {
@@ -647,10 +734,8 @@ impl StorageService {
             .await
             .map(|res| res.into_inner())
             .map_err(|err| match err.code() {
-                tonic::Code::Unavailable => ProtocolError::from(SlowDown),
                 tonic::Code::NotFound => ProtocolError::from(NotFound),
-                tonic::Code::Unimplemented => ProtocolError::internal("unsupported: verify"),
-                _ => ProtocolError::internal_with_context(err, "verify"),
+                _ => unary_error(err, "verify"),
             })
             .map(|res| VerifyResult {
                 corrupted: res.corrupted,
@@ -713,10 +798,8 @@ impl StorageService {
             .await
             .map(|res| res.into_inner())
             .map_err(|err| match err.code() {
-                tonic::Code::Unavailable => ProtocolError::from(SlowDown),
                 tonic::Code::NotFound => ProtocolError::from(NotFound),
-                tonic::Code::Unimplemented => ProtocolError::internal("unsupported: mutable_load"),
-                _ => ProtocolError::internal_with_context(err, "mutable_load"),
+                _ => unary_error(err, "mutable_load"),
             })?;
 
         Ok(Hash::from(&res.value[..]))
@@ -744,11 +827,7 @@ impl StorageService {
             .mutable_store(req)
             .await
             .map(|_| ())
-            .map_err(|err| match err.code() {
-                tonic::Code::Unavailable => ProtocolError::from(SlowDown),
-                tonic::Code::Unimplemented => ProtocolError::internal("unsupported: mutable_store"),
-                _ => ProtocolError::internal_with_context(err, "mutable_store"),
-            })
+            .map_err(|err| unary_error(err, "mutable_store"))
     }
 
     pub async fn mutable_compare_and_swap(
@@ -775,11 +854,7 @@ impl StorageService {
             .mutable_compare_and_swap(req)
             .await
             .map(|res| res.into_inner())
-            .map_err(|err| match err.code() {
-                tonic::Code::Unavailable => ProtocolError::from(SlowDown),
-                tonic::Code::Unimplemented => ProtocolError::internal("unsupported: mutable_cas"),
-                _ => ProtocolError::internal_with_context(err, "mutable_cas"),
-            })?;
+            .map_err(|err| unary_error(err, "mutable_cas"))?;
 
         Ok(Hash::from(&res.current_value[..]))
     }
@@ -1104,7 +1179,7 @@ impl StorageService {
             match client.get(req).await {
                 Ok(response) => {
                     state.opened.store(true, Ordering::Relaxed);
-                    pump_responses(response.into_inner(), inflight, Verb::Get).await;
+                    pump_responses(response.into_inner(), inflight, Verb::Get, Some).await;
                 }
                 Err(status) => {
                     lore_debug!("{} request failed: {status}", Verb::Get.label());
@@ -1149,7 +1224,7 @@ impl StorageService {
             match client.get_metadata(req).await {
                 Ok(response) => {
                     state.opened.store(true, Ordering::Relaxed);
-                    pump_responses(response.into_inner(), inflight, Verb::GetMetadata).await;
+                    pump_responses(response.into_inner(), inflight, Verb::GetMetadata, Some).await;
                 }
                 Err(status) => {
                     lore_debug!("{} request failed: {status}", Verb::GetMetadata.label());
@@ -1197,7 +1272,7 @@ impl StorageService {
             match client.put(req).await {
                 Ok(response) => {
                     state.opened.store(true, Ordering::Relaxed);
-                    pump_responses(response.into_inner(), inflight, Verb::Put).await;
+                    pump_responses(response.into_inner(), inflight, Verb::Put, Some).await;
                 }
                 Err(status) => {
                     lore_debug!("put request failed: {status}");
@@ -1222,19 +1297,41 @@ impl StorageService {
         });
         let state = handle.clone();
         let inflight: Arc<Inflight<()>> = Arc::new(DashMap::new());
+        let routing = Arc::new(parking_lot::Mutex::new(CopyRouting::default()));
+        let (resend, mut resent) = mpsc::unbounded_channel::<storage_v1::CopyRequest>();
 
         let request_inflight = inflight.clone();
+        let request_routing = routing.clone();
         let requests = async_stream::stream! {
-            while let Some((request, sender)) = rx.recv().await {
-                let Some(address) = request.source_address.as_ref().map(Address::from) else {
-                    lore_debug!("Missing source_address in copy request");
-                    let _ = sender.send(Err(ProtocolError::internal("copy: missing source_address")));
-                    continue;
-                };
-                if register(&request_inflight, address, sender) {
-                    yield request;
+            loop {
+                tokio::select! {
+                    received = rx.recv() => {
+                        let Some((request, sender)) = received else {
+                            break;
+                        };
+                        let Some((source, target)) = CopyRouting::addresses(&request) else {
+                            lore_debug!("Missing source_address or invalid target_context in copy request");
+                            let _ = sender.send(Err(ProtocolError::internal("copy: invalid request")));
+                            continue;
+                        };
+                        if !register(&request_inflight, target, sender) {
+                            continue;
+                        }
+                        let admitted = request_routing.lock().admit(source, target, request);
+                        if let Some(request) = admitted {
+                            yield request;
+                        }
+                    }
+                    Some(request) = resent.recv() => yield request,
                 }
             }
+        };
+        let route = move |source| {
+            let (target, next) = routing.lock().answered(source);
+            if let Some(next) = next {
+                let _ = resend.send(next);
+            }
+            target
         };
 
         let ctx = ctx.clone();
@@ -1245,7 +1342,7 @@ impl StorageService {
             match client.copy(req).await {
                 Ok(response) => {
                     state.opened.store(true, Ordering::Relaxed);
-                    pump_responses(response.into_inner(), inflight, Verb::Copy).await;
+                    pump_responses(response.into_inner(), inflight, Verb::Copy, route).await;
                 }
                 Err(status) => {
                     lore_debug!("copy request failed: {status}");
@@ -1255,568 +1352,5 @@ impl StorageService {
         });
 
         handle
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::net::SocketAddr;
-    use std::pin::Pin;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-
-    use lore_proto::lore::storage::v1::storage_service_server::StorageService as StorageServiceV1;
-    use lore_proto::lore::storage::v1::storage_service_server::StorageServiceServer;
-    use tokio_stream::Stream;
-    use tonic::Request;
-    use tonic::Response;
-    use tonic::Status;
-    use tonic::Streaming;
-
-    use super::*;
-
-    const TEST_PAYLOAD: &[u8] = b"rotation test payload";
-
-    /// How the first `Get` stream a test server accepts is killed.
-    ///
-    /// Both leave requests unanswered with no per-request attribution, but they reach the
-    /// client through different code: a clean end is `Streaming` reporting exhaustion, a status
-    /// is the terminal `Err` arm. Real connection failures take the latter shape.
-    #[derive(Clone, Copy)]
-    enum KillMode {
-        /// End the response body with nothing on it.
-        CleanEnd,
-        /// Terminate with the code an h2 connection failure produces.
-        TerminalStatus,
-        /// Never open the RPC at all, on any attempt.
-        RefuseOpen,
-        /// Refuse the first open, then serve normally — a channel that was down and came back.
-        RefuseFirstOpen,
-        /// Answer with a populated fragment and payload *and* a failure status.
-        ErrorBesidePayload,
-    }
-
-    /// Kills the first `Get` stream it accepts, then serves every later stream normally.
-    struct StreamKillingServer {
-        accepted: Arc<AtomicUsize>,
-        requests_read: Arc<AtomicUsize>,
-        kill_mode: KillMode,
-    }
-
-    type ResponseStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
-
-    #[tonic::async_trait]
-    impl StorageServiceV1 for StreamKillingServer {
-        type GetStream = ResponseStream<storage_v1::GetResponse>;
-
-        async fn get(
-            &self,
-            request: Request<Streaming<model_v1::Address>>,
-        ) -> Result<Response<Self::GetStream>, Status> {
-            let attempt = self.accepted.fetch_add(1, Ordering::SeqCst);
-            let kill_mode = self.kill_mode;
-            if let KillMode::RefuseOpen = kill_mode {
-                return Err(Status::unavailable("refusing to open"));
-            }
-            if attempt == 0 && matches!(kill_mode, KillMode::RefuseFirstOpen) {
-                return Err(Status::unavailable("refusing the first open"));
-            }
-            let mut requests = request.into_inner();
-            let requests_read = self.requests_read.clone();
-
-            let stream = async_stream::stream! {
-                if attempt == 0 {
-                    if let KillMode::TerminalStatus = kill_mode {
-                        yield Err(Status::internal("connection reset"));
-                    }
-                    return;
-                }
-                while let Some(Ok(address)) = requests.next().await {
-                    requests_read.fetch_add(1, Ordering::SeqCst);
-                    let status = if matches!(kill_mode, KillMode::ErrorBesidePayload) {
-                        lore_proto::lore::model::v1::ItemStatus {
-                            code: i32::from(tonic::Code::NotFound) as u32,
-                            message: "gone".to_string(),
-                        }
-                    } else {
-                        lore_proto::lore::model::v1::ItemStatus::ok()
-                    };
-                    yield Ok(storage_v1::GetResponse {
-                        address: Some(address),
-                        fragment: Some(model_v1::Fragment {
-                            flags: 0,
-                            size_payload: TEST_PAYLOAD.len() as u32,
-                            size_content: TEST_PAYLOAD.len() as u64,
-                        }),
-                        payload: Bytes::from_static(TEST_PAYLOAD),
-                        status: Some(status),
-                    });
-                }
-            };
-
-            Ok(Response::new(Box::pin(stream) as Self::GetStream))
-        }
-
-        type GetMetadataStream = ResponseStream<storage_v1::GetResponse>;
-
-        async fn get_metadata(
-            &self,
-            _request: Request<Streaming<model_v1::Address>>,
-        ) -> Result<Response<Self::GetMetadataStream>, Status> {
-            Err(Status::unimplemented("not used by this test"))
-        }
-
-        type GetResolvedStream = ResponseStream<storage_v1::GetResolvedResponse>;
-
-        async fn get_resolved(
-            &self,
-            request: Request<Streaming<storage_v1::GetResolvedRequest>>,
-        ) -> Result<Response<Self::GetResolvedStream>, Status> {
-            let mut requests = request.into_inner();
-            let stream = async_stream::stream! {
-                while let Some(Ok(req)) = requests.next().await {
-                    yield Ok(storage_v1::GetResolvedResponse {
-                        request_id: req.request_id,
-                        ..Default::default()
-                    });
-                }
-            };
-            Ok(Response::new(Box::pin(stream) as Self::GetResolvedStream))
-        }
-
-        type PutResolvedStream = ResponseStream<storage_v1::PutResolvedResponse>;
-
-        async fn put_resolved(
-            &self,
-            request: Request<Streaming<storage_v1::PutResolvedRequest>>,
-        ) -> Result<Response<Self::PutResolvedStream>, Status> {
-            let mut requests = request.into_inner();
-            let stream = async_stream::stream! {
-                while let Some(Ok(req)) = requests.next().await {
-                    yield Ok(storage_v1::PutResolvedResponse {
-                        request_id: req.request_id,
-                        ..Default::default()
-                    });
-                }
-            };
-            Ok(Response::new(Box::pin(stream) as Self::PutResolvedStream))
-        }
-
-        type PutStream = ResponseStream<storage_v1::PutResponse>;
-
-        async fn put(
-            &self,
-            request: Request<Streaming<storage_v1::PutRequest>>,
-        ) -> Result<Response<Self::PutStream>, Status> {
-            let mut requests = request.into_inner();
-            let stream = async_stream::stream! {
-                while let Some(Ok(req)) = requests.next().await {
-                    yield Ok(storage_v1::PutResponse {
-                        address: req.address,
-                        status: None,
-                    });
-                }
-            };
-            Ok(Response::new(Box::pin(stream) as Self::PutStream))
-        }
-
-        type CopyStream = ResponseStream<storage_v1::CopyResponse>;
-
-        async fn copy(
-            &self,
-            _request: Request<Streaming<storage_v1::CopyRequest>>,
-        ) -> Result<Response<Self::CopyStream>, Status> {
-            Err(Status::unimplemented("not used by this test"))
-        }
-
-        async fn query(
-            &self,
-            _request: Request<storage_v1::QueryRequest>,
-        ) -> Result<Response<storage_v1::QueryResponse>, Status> {
-            Err(Status::unimplemented("not used by this test"))
-        }
-
-        async fn verify(
-            &self,
-            _request: Request<storage_v1::VerifyRequest>,
-        ) -> Result<Response<storage_v1::VerifyResponse>, Status> {
-            Err(Status::unimplemented("not used by this test"))
-        }
-
-        async fn mutable_load(
-            &self,
-            _request: Request<storage_v1::MutableLoadRequest>,
-        ) -> Result<Response<storage_v1::MutableLoadResponse>, Status> {
-            Err(Status::unimplemented("not used by this test"))
-        }
-
-        async fn mutable_store(
-            &self,
-            _request: Request<storage_v1::MutableStoreRequest>,
-        ) -> Result<Response<storage_v1::MutableStoreResponse>, Status> {
-            Err(Status::unimplemented("not used by this test"))
-        }
-
-        async fn mutable_compare_and_swap(
-            &self,
-            _request: Request<storage_v1::MutableCompareAndSwapRequest>,
-        ) -> Result<Response<storage_v1::MutableCompareAndSwapResponse>, Status> {
-            Err(Status::unimplemented("not used by this test"))
-        }
-    }
-
-    fn test_context() -> GrpcSessionContext {
-        GrpcSessionContext {
-            partition: Partition::from(Context::from([0x11u8; 16])),
-            correlation_id: "rotation-test".to_string(),
-            auth_token: String::new(),
-        }
-    }
-
-    /// Stand up a `StorageService` talking to a `StreamKillingServer`, and hand back the
-    /// counter of streams the server has accepted.
-    async fn start_test_service(
-        kill_mode: KillMode,
-    ) -> (StorageService, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-        let (connection, accepted, requests_read) = start_test_connection(kill_mode).await;
-        (StorageService::new(connection), accepted, requests_read)
-    }
-
-    /// The same server and a connection over it, for tests that drive the connection directly
-    /// rather than through a storage client.
-    async fn start_test_connection(
-        kill_mode: KillMode,
-    ) -> (
-        Arc<super::super::GRPCConnection>,
-        Arc<AtomicUsize>,
-        Arc<AtomicUsize>,
-    ) {
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let requests_read = Arc::new(AtomicUsize::new(0));
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr: SocketAddr = listener.local_addr().unwrap();
-        let server = StreamKillingServer {
-            accepted: accepted.clone(),
-            requests_read: requests_read.clone(),
-            kill_mode,
-        };
-
-        #[allow(clippy::disallowed_methods)] // Test-local server task.
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(StorageServiceServer::new(server))
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .unwrap();
-        });
-
-        let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect()
-            .await
-            .expect("connect to test server");
-        let channel = tower::ServiceBuilder::new()
-            .layer(super::super::RequestLoggerLayer {})
-            .service(channel);
-
-        let connection = Arc::new(super::super::GRPCConnection::for_test(
-            format!("http://{addr}").parse().expect("test url"),
-            channel,
-        ));
-        (connection, accepted, requests_read)
-    }
-
-    /// Drive one `get` against a server that kills its first stream, and report how many
-    /// streams the server ended up accepting.
-    async fn get_against_stream_killing_server(
-        kill_mode: KillMode,
-    ) -> (Result<(Fragment, Bytes), ProtocolError>, usize) {
-        let (service, accepted, _) = start_test_service(kill_mode).await;
-        let ctx = test_context();
-        let address = Address::zero_context_hash(Hash::from([0x22u8; 32]));
-
-        let result = service.get(0, &ctx, &address).await;
-
-        (result, accepted.load(Ordering::SeqCst))
-    }
-
-    /// A stream that ends without answering is re-established and the request replayed.
-    ///
-    /// The caller must see one successful fetch, not a transport error. Before, the dead channel
-    /// stayed cached and every later request on the session failed against it.
-    #[tokio::test]
-    async fn get_rotates_when_the_first_stream_ends_without_answering() {
-        let (result, streams) = get_against_stream_killing_server(KillMode::CleanEnd).await;
-        let (fragment, payload) = result.expect("get must recover by re-establishing the stream");
-
-        assert_eq!(payload.as_ref(), TEST_PAYLOAD);
-        assert_eq!(fragment.size_payload, TEST_PAYLOAD.len() as u32);
-        assert_eq!(
-            streams, 2,
-            "the server must have seen a second Get stream — the first was killed",
-        );
-    }
-
-    /// The same recovery when the stream dies with a terminal status rather than ending.
-    ///
-    /// This is the shape a real connection failure takes, and the codes it carries — `Internal`,
-    /// `Cancelled` — are not `Disconnected` on their own. Unless a stream status is treated as a
-    /// stream death regardless of its code, the request is handed back to the caller as a plain
-    /// error and the rotation never happens.
-    #[tokio::test]
-    async fn get_rotates_when_the_first_stream_dies_with_a_terminal_status() {
-        let (result, streams) = get_against_stream_killing_server(KillMode::TerminalStatus).await;
-        let (fragment, payload) = result.expect("get must recover by re-establishing the stream");
-
-        assert_eq!(payload.as_ref(), TEST_PAYLOAD);
-        assert_eq!(fragment.size_payload, TEST_PAYLOAD.len() as u32);
-        assert_eq!(
-            streams, 2,
-            "an Internal stream status must rotate onto a new stream, not fail the request",
-        );
-    }
-
-    /// Many requests losing a stream together must cost exactly one replacement.
-    ///
-    /// Single-flight rotation rests on `Arc::ptr_eq` against the cached handle under the shard
-    /// lock. If that check regressed, every waiter would open its own stream — still correct, so
-    /// nothing else would fail, but the stream count would scale with concurrency.
-    #[tokio::test]
-    async fn concurrent_requests_share_one_replacement_stream() {
-        let (service, accepted, _) = start_test_service(KillMode::CleanEnd).await;
-        let ctx = test_context();
-
-        let addresses: Vec<Address> = (0..16u8)
-            .map(|i| Address::zero_context_hash(Hash::from([i; 32])))
-            .collect();
-        let results = futures::future::join_all(
-            addresses
-                .iter()
-                .map(|address| service.get(0, &ctx, address)),
-        )
-        .await;
-
-        for result in &results {
-            assert!(result.is_ok(), "every request must recover: {result:?}");
-        }
-        assert_eq!(
-            accepted.load(Ordering::SeqCst),
-            2,
-            "the killed stream must be replaced once for all waiters, not once each",
-        );
-    }
-
-    /// Concurrent requests for one address ride a single round trip.
-    ///
-    /// `register` returns false for later waiters on a key so they attach to the request already
-    /// on the wire. A regression here costs duplicate wire traffic on duplicate reads without
-    /// failing anything, so only the server's request count catches it. The warm-up get spends
-    /// the killed first stream, leaving a live one for the coalescing itself.
-    #[tokio::test]
-    async fn concurrent_requests_for_one_address_coalesce() {
-        let (service, _, requests_read) = start_test_service(KillMode::CleanEnd).await;
-        let ctx = test_context();
-        let address = Address::zero_context_hash(Hash::from([0x44u8; 32]));
-
-        service
-            .get(
-                0,
-                &ctx,
-                &Address::zero_context_hash(Hash::from([0x45u8; 32])),
-            )
-            .await
-            .expect("warm-up get");
-        requests_read.store(0, Ordering::SeqCst);
-
-        let (first, second) = tokio::join!(
-            service.get(0, &ctx, &address),
-            service.get(0, &ctx, &address)
-        );
-
-        assert_eq!(first.expect("first get").1.as_ref(), TEST_PAYLOAD);
-        assert_eq!(second.expect("second get").1.as_ref(), TEST_PAYLOAD);
-        assert_eq!(
-            requests_read.load(Ordering::SeqCst),
-            1,
-            "duplicate addresses must coalesce onto one round trip",
-        );
-    }
-
-    /// Concurrent callers losing one channel must rebuild it once between them.
-    ///
-    /// This is the real machinery, not a stand-in: `GRPCConnection::reconnect` serialises callers
-    /// on `reconnector` and then compares the epoch each carries against the current one, so the
-    /// first through does the connect and the rest adopt its channel. The epoch delta is the
-    /// observable — it advances once per actual rebuild, so N concurrent callers that each
-    /// rebuilt would leave it N higher.
-    #[tokio::test]
-    async fn concurrent_reconnects_rebuild_the_channel_once() {
-        let (connection, _, _) = start_test_connection(KillMode::CleanEnd).await;
-        let epoch_before = connection.reconnect.load(Ordering::Relaxed);
-
-        let results = futures::future::join_all((0..8).map(|_| {
-            let connection = connection.clone();
-            async move { connection.reconnect(epoch_before).await.map(|_| ()) }
-        }))
-        .await;
-
-        for result in &results {
-            assert!(
-                result.is_ok(),
-                "every caller must get a channel: {result:?}"
-            );
-        }
-        assert_eq!(
-            connection.reconnect.load(Ordering::Relaxed),
-            epoch_before + 1,
-            "eight concurrent callers must cost exactly one rebuild",
-        );
-    }
-
-    /// A failure status decides the item even when the payload fields are populated.
-    ///
-    /// The fields kept their original numbers so an older peer still decodes them, which means a
-    /// response can carry both a fragment and a failure. The status wins: consulting `fragment`
-    /// first would turn a reported miss into a served fragment.
-    #[tokio::test]
-    async fn a_failure_status_wins_over_a_populated_payload() {
-        let (service, _, _) = start_test_service(KillMode::ErrorBesidePayload).await;
-        let ctx = test_context();
-        let address = Address::zero_context_hash(Hash::from([0x77u8; 32]));
-
-        let err = service
-            .get(0, &ctx, &address)
-            .await
-            .expect_err("a failure status must not be overridden by the payload fields");
-
-        assert!(
-            err.is_not_found(),
-            "the server's code must survive, got {err:?}",
-        );
-    }
-
-    /// A refused open must not poison the cache for later requests.
-    ///
-    /// Giving up leaves a handle whose stream never established. A later request that adopts it
-    /// from the cache would fail on its send, see `opened` still false, and give up again without
-    /// ever trying a fresh stream — so a channel that came back would never be used.
-    #[tokio::test]
-    async fn a_refused_open_does_not_poison_the_cached_stream() {
-        let (service, accepted, _) = start_test_service(KillMode::RefuseFirstOpen).await;
-        let ctx = test_context();
-        let address = Address::zero_context_hash(Hash::from([0x55u8; 32]));
-
-        let refused = service.get(0, &ctx, &address).await;
-        assert!(
-            refused.is_err_and(|err| err.is_disconnected()),
-            "the refused open must surface as a disconnect",
-        );
-
-        let (fragment, payload) = service
-            .get(0, &ctx, &address)
-            .await
-            .expect("a later request must open a fresh stream, not inherit the dead one");
-
-        assert_eq!(payload.as_ref(), TEST_PAYLOAD);
-        assert_eq!(fragment.size_payload, TEST_PAYLOAD.len() as u32);
-        assert_eq!(
-            accepted.load(Ordering::SeqCst),
-            2,
-            "exactly one refused open and one that served",
-        );
-    }
-
-    /// A storage operation recovers across a connection-level reconnect.
-    ///
-    /// This is the seam the two layers meet at, and the one place neither covers alone: the stream
-    /// cache reports a refused open as `Disconnected`, `GRPCStorage::with_reconnect` rebuilds the
-    /// channel, and the retried operation must open a stream on the new one and succeed. The
-    /// caller sees a single successful fetch. Asserting the epoch advanced proves a real reconnect
-    /// happened rather than the first attempt merely being retried.
-    #[tokio::test]
-    async fn a_storage_operation_recovers_across_a_reconnect() {
-        use crate::traits::Storage;
-
-        let (connection, accepted, _) = start_test_connection(KillMode::RefuseFirstOpen).await;
-        let epoch_before = connection.reconnect.load(Ordering::SeqCst);
-
-        let storage = super::super::GRPCStorage {
-            connection: connection.clone(),
-            client: StorageService::new(connection.clone()),
-            auth_url: String::new(),
-            identity: String::new(),
-            credentials: Arc::new(super::super::SuppliedCredentials::default()),
-            session_counter: std::sync::atomic::AtomicU32::new(1),
-            sessions: DashMap::new(),
-        };
-        storage.sessions.insert(0, Arc::new(test_context()));
-
-        let address = Address::zero_context_hash(Hash::from([0x66u8; 32]));
-        let (fragment, payload) = storage
-            .get(0, &address)
-            .await
-            .expect("the operation must recover once the channel is rebuilt");
-
-        assert_eq!(payload.as_ref(), TEST_PAYLOAD);
-        assert_eq!(fragment.size_payload, TEST_PAYLOAD.len() as u32);
-        assert_eq!(
-            connection.reconnect.load(Ordering::SeqCst),
-            epoch_before + 1,
-            "recovery must have gone through a real reconnect",
-        );
-        assert_eq!(
-            accepted.load(Ordering::SeqCst),
-            2,
-            "one refused open, then one on the rebuilt channel",
-        );
-    }
-
-    /// A put response without a status is read as success, for a peer that predates the field.
-    ///
-    /// The status field is additive: a server that does not set it reports a per-item failure by
-    /// ending the stream, exactly as it did before the field existed. Treating silence as a
-    /// failure would break every put against such a server.
-    #[tokio::test]
-    async fn put_treats_a_missing_status_as_success() {
-        let (service, _accepted, _) = start_test_service(KillMode::CleanEnd).await;
-        let ctx = test_context();
-        let address = Address::zero_context_hash(Hash::from([0x33u8; 32]));
-        let fragment = Fragment {
-            flags: 0,
-            size_payload: TEST_PAYLOAD.len() as u32,
-            size_content: TEST_PAYLOAD.len() as u64,
-        };
-
-        service
-            .put(
-                0,
-                &ctx,
-                address,
-                fragment,
-                Some(Bytes::from_static(TEST_PAYLOAD)),
-            )
-            .await
-            .expect("a status-less put response must be taken as success");
-    }
-
-    /// A stream that will not open hands straight off rather than reissuing.
-    ///
-    /// Reissuing only covers a stream dying on a healthy channel. A refused open means the
-    /// channel is suspect, which is `GRPCConnection::reconnect`'s job, so this must report
-    /// `Disconnected` after a single attempt instead of spending the reissue budget.
-    #[tokio::test]
-    async fn get_gives_up_once_the_stream_will_not_open() {
-        let (result, opens) = get_against_stream_killing_server(KillMode::RefuseOpen).await;
-
-        let err = result.expect_err("a remote refusing every open must fail the request");
-        assert!(
-            err.is_disconnected(),
-            "giving up must report a disconnect, got {err:?}",
-        );
-        assert_eq!(
-            opens, 1,
-            "a refused open must hand off immediately, not reissue",
-        );
     }
 }

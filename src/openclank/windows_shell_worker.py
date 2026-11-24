@@ -25,6 +25,11 @@ from .windows_shell_cancel import CancelEndpoint, wait_owned
 CONTAINMENT = "windows-lpac-stage"
 
 
+def _settled_receipt(receipt):
+    return bool(receipt is not None and receipt.empty and receipt.active_processes == 0
+                and type(receipt.direct_exit_code) is int)
+
+
 def system_shell():
     if os.name != "nt":
         raise OSError("native Windows shell requires Windows")
@@ -86,12 +91,19 @@ def run_native_shell(spec, command, *, capture_factory, publish, excluded, audit
     verify_authority()
     profile = process = endpoint = capture = stage = None
     receipt = None
+    bound = "bound_shell_nonce" in spec
+    drain_complete = False
+    cleanup_complete = True
+    control_stop = threading.Event()
+    control_failed = threading.Event()
+    control_thread = None
     publication_started = False
     published = False
     cancelled = False
     code = 1
     stop_input = threading.Event()
     listener = None
+    input_thread = None
     root = Path(tempfile.gettempdir()) / ("open-clank-native-shell-" + uuid.uuid4().hex)
     log_path = Path(spec["log_path"])
     try:
@@ -143,11 +155,29 @@ def run_native_shell(spec, command, *, capture_factory, publish, excluded, audit
                 cwd=str(active_cwd), env=environment, appcontainer_sid=profile.sid, network=network)
         except BaseException as error:
             receipt = getattr(error, "tree_receipt", None)
-            profile.empty = bool(receipt is not None and receipt.empty)
+            profile.empty = _settled_receipt(receipt)
             raise
         if capture is not None:
             capture._state("running", native_owner=True)
         atomic_write_text(spec["child_pid_path"], str(process.pid))
+        if bound:
+            from src.bg_jobs import open_bound_shell_terminate, claim_bound_shell_terminate, ack_bound_shell_terminate
+            def control_pump():
+                while not control_stop.wait(0.1):
+                    try:
+                        item = claim_bound_shell_terminate(str(spec["job_id"]), str(spec["bound_shell_nonce"]))
+                        if item:
+                            state = "unknown"
+                            try:
+                                if endpoint.kernel.SetEvent(endpoint.handle): state = "requested"
+                            finally:
+                                ack_bound_shell_terminate(str(spec["job_id"]), str(spec["bound_shell_nonce"]), item["id"], state)
+                    except Exception:
+                        control_failed.set()
+                        return
+            control_thread = threading.Thread(target=control_pump, daemon=True, name="native-shell-control")
+            control_thread.start()
+            open_bound_shell_terminate(str(spec["job_id"]), str(spec["bound_shell_nonce"]))
         # Signals latch the same irreversible Event; lifetime calls stay in the
         # main owner supervisor, never the signal handler or IO threads.
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -170,7 +200,8 @@ def run_native_shell(spec, command, *, capture_factory, publish, excluded, audit
                 except (OSError, EOFError):
                     return
 
-        threading.Thread(target=input_pump, daemon=True, name="native-shell-input").start()
+        input_thread = threading.Thread(target=input_pump, daemon=True, name="native-shell-input")
+        input_thread.start()
         lock = threading.Lock()
         total = [0]
         errors = []
@@ -199,7 +230,7 @@ def run_native_shell(spec, command, *, capture_factory, publish, excluded, audit
             for thread in threads:
                 thread.start()
             receipt, cancelled = wait_owned(process, endpoint,
-                timeout=max(1, int(spec.get("reconciliation_timeout_s") or 600)))
+                timeout=spec["bound_max_runtime_s"] if bound else max(1, int(spec.get("reconciliation_timeout_s") or 600)))
             if not receipt.empty or receipt.active_processes != 0 or receipt.direct_exit_code is None:
                 raise ShellApprovalError("native shell owned Job did not become empty")
             profile.empty = True
@@ -209,6 +240,7 @@ def run_native_shell(spec, command, *, capture_factory, publish, excluded, audit
                 raise ShellApprovalError("native shell output drain did not complete")
             log.flush()
             os.fsync(log.fileno())
+            drain_complete = True
         if cancelled or endpoint.requested():
             cancelled = True
             raise ShellApprovalError("native shell cancelled before publication")
@@ -237,7 +269,7 @@ def run_native_shell(spec, command, *, capture_factory, publish, excluded, audit
         if process is not None and not profile.empty:
             try:
                 receipt = process.stop_tree(timeout=10)
-                profile.empty = bool(receipt.empty)
+                profile.empty = _settled_receipt(receipt)
             except BaseException:
                 profile.empty = False
         if capture is not None and (not publication_started or profile.empty):
@@ -256,16 +288,23 @@ def run_native_shell(spec, command, *, capture_factory, publish, excluded, audit
                 else:
                     capture.finish(committed=published)
             except Exception:
-                pass
+                cleanup_complete = False
         message = "\nworker error: " + redact_text(error) + "\n"
         if profile is not None and profile.child_started and not profile.empty:
             message += "native resources retained: " + str(profile.root) + " profile=" + profile.name + "\n"
         with log_path.open("ab") as log:
             log.write(message.encode("utf-8")[:4096])
     finally:
+        control_stop.set()
+        if control_thread is not None:
+            control_thread.join(5)
+            if control_thread.is_alive() or control_failed.is_set(): cleanup_complete = False
         stop_input.set()
         if listener is not None:
             listener.close()
+        if input_thread is not None:
+            input_thread.join(5)
+            if input_thread.is_alive(): cleanup_complete = False
         if endpoint is not None:
             endpoint.close()
         if process is not None:
@@ -277,6 +316,7 @@ def run_native_shell(spec, command, *, capture_factory, publish, excluded, audit
                 profile.cleanup()
             except Exception as error:
                 code = 1
+                cleanup_complete = False
                 with log_path.open("ab") as log:
                     log.write(("\nnative cleanup pending: " + redact_text(error) + " " + str(profile.root) + "\n").encode()[:4096])
         for name in ("child_pid_path", "stdin_ready_path"):
@@ -285,4 +325,14 @@ def run_native_shell(spec, command, *, capture_factory, publish, excluded, audit
     audit(command=command, workspace=str(workspace), containment=CONTAINMENT,
           network=network, event="exit", actions=list(spec.get("destructive_actions") or ()),
           owner=spec.get("owner"), session_id=spec.get("session_id"))
+    if bound:
+        from src.bg_jobs import close_bound_shell_terminate, settle_bound_shell
+        if control_thread is None or not control_thread.is_alive():
+            close_bound_shell_terminate(str(spec["job_id"]), str(spec["bound_shell_nonce"]))
+        else:
+            cleanup_complete = False
+        waited = bool(_settled_receipt(receipt) and drain_complete and cleanup_complete)
+        settle_bound_shell(str(spec["job_id"]), str(spec["bound_shell_nonce"]), command.encode("utf-8"),
+                           child_waited=waited, child_exit_code=receipt.direct_exit_code if waited else None,
+                           worker_exit_code=code)
     return code

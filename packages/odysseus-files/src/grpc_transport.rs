@@ -49,8 +49,8 @@ use wire::{
 };
 
 pub const SESSION_HEADER: &str = "x-open-clank-session";
-pub const GRPC_SOCKET_ENV: &str = "ODYSSEUS_FILES_GRPC_SOCKET";
-pub const GRPC_SESSION_ENV: &str = "ODYSSEUS_FILES_GRPC_SESSION";
+pub const GRPC_SOCKET_ENV: &str = "OPEN_CLANK_FILES_GRPC_SOCKET";
+pub const GRPC_SESSION_ENV: &str = "OPEN_CLANK_FILES_GRPC_SESSION";
 pub const MIN_CHUNK_BYTES: u32 = 64 * 1024;
 pub const MAX_CHUNK_BYTES: u32 = 256 * 1024;
 pub const MAX_STREAM_BYTES: u64 = 250 * 1024 * 1024;
@@ -413,6 +413,7 @@ fn read_page(service: &FileService, request: ClientRequest) -> Result<ReadPage, 
 
 fn dispatch_json(service: &FileService, bytes: &[u8]) -> Vec<u8> {
     let response = match serde_json::from_slice::<ClientRequest>(bytes) {
+        Ok(request) if request.operation.is_worktree_stage() && bytes.len()>4*1024*1024 => json!({"code":"malformed_request","message":"worktree stage frame exceeds limit"}),
         Ok(request) => match service.dispatch(request) {
             Ok(value) => value,
             Err(error) => serde_json::to_value(error).unwrap_or_else(

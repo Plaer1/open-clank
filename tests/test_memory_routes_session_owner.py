@@ -176,7 +176,7 @@ def test_provider_memory_list_stays_on_request_event_loop(monkeypatch):
     expected_loop = None
 
     class Provider:
-        provider_id = "frankenmemory"
+        provider_id = "memery"
 
         async def list_memories(self, *, owner=None, limit=1000):
             assert asyncio.get_running_loop() is expected_loop
@@ -514,7 +514,7 @@ def test_import_preserves_actionable_managed_model_failure(monkeypatch):
     _allow_memory_management(monkeypatch)
     _configure_memory_route(monkeypatch)
     monkeypatch.setattr(
-        "src.frankenmemory_v2.mirror_import_job",
+        "src.memery_v2.mirror_import_job",
         MagicMock(),
     )
     completion = AsyncMock(
@@ -554,7 +554,7 @@ def test_import_empty_model_output_is_typed_and_uses_large_extraction_budget(mon
     _configure_memory_route(monkeypatch)
     mirror_import_job = MagicMock()
     monkeypatch.setattr(
-        "src.frankenmemory_v2.mirror_import_job",
+        "src.memery_v2.mirror_import_job",
         mirror_import_job,
     )
     completion = AsyncMock(return_value="")

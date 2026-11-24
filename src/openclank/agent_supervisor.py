@@ -86,6 +86,8 @@ class AgentRuntime(Protocol):
 
     async def refresh_model_catalog(self, *, owner: str | None = None) -> list: ...
 
+    def supports_provider_method_policy(self) -> bool: ...
+
     async def managed_control_call(
         self,
         method: str,
@@ -169,6 +171,8 @@ class AgentSupervisor(Protocol):
         provider_id: str,
         model_id: str,
     ) -> RuntimeLease: ...
+
+    async def admit_private_agent(self, owner: str, ghost_id: str, provider_id: str, model_id: str) -> RuntimeLease: ...
 
     async def admit_provider_control(self, owner: str | None) -> RuntimeLease: ...
 

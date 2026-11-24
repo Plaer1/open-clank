@@ -6,6 +6,7 @@ import os
 import logging
 import mimetypes
 import base64
+import hashlib
 import tempfile
 import urllib.parse
 from typing import List, Dict, Any
@@ -359,6 +360,13 @@ async def analyze_image_with_vl_result_async(
             "Managed vision analysis unavailable (%s)",
             type(exc).__name__,
         )
+        # A media-input omission keeps its reason (closed code, plain words); any other failure keeps the generic text.
+        message = str(exc)
+        if message.startswith("image not described: "):
+            from src.openclank.media_input_policy import REASON_TEXT, reason_text
+            code = message[len("image not described: "):]
+            if code in REASON_TEXT:
+                return {"text": f"[Image not analyzed: {reason_text(code)}.]", "model": ""}
         return {
             "text": "[VL model unavailable - image not analyzed]",
             "model": "",
@@ -417,6 +425,9 @@ def build_user_content(
     resolved_uploads: dict[str, Dict[str, Any]] | None = None,
     structured_resources: bool = False,
     extract_attachments: bool = True,
+    route_has_vision: bool = True,
+    media_receipts: dict | None = None,
+    media_witnesses: list | None = None,
 ) -> str | List[Dict[str, Any]]:
     """Build user content with attachments (text, images, audio, documents).
 
@@ -466,7 +477,44 @@ def build_user_content(
         if upload_handler.is_image_file(display_name, mime):
             try:
                 with open(path, "rb") as image_file:
-                    encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
+                    from src.openclank.media_input_policy import ALTERNATIVE, HEAD_BYTES, NON_DECODE_BLOCKING, evaluate, reason_text
+                    _rc = evaluate(
+                        declared_type=mime if mime.startswith("image/") else "image/png",
+                        byte_size=source_size, head=image_file.read(HEAD_BYTES),
+                        route_has_vision=route_has_vision,
+                        max_bytes=getattr(upload_handler, "max_upload_size", None) or NATIVE_MEDIA_SOURCE_BYTES)
+                    # One receipt per evaluated image input, sent or not, handed back for the attachment record.
+                    if media_receipts is not None:
+                        media_receipts[fid] = {**_rc, "sent": _rc["reason"] not in NON_DECODE_BLOCKING}
+                    # Nothing is decoded here: header problems still send the bytes as before.
+                    if _rc["reason"] in NON_DECODE_BLOCKING:
+                        if media_witnesses is not None:
+                            from src.openclank.media_source_evidence import _image_read
+                            witness = _image_read(owner, fid, _rc["reason"], None)
+                            if witness is not None: media_witnesses.append(witness)
+                        logger.info("Image %s not sent: %s (%s bytes, %sx%s)",
+                                    fid, _rc["reason"], source_size, _rc["width"], _rc["height"])
+                        # A caller passing route_has_vision=False owns the no-vision note
+                        # (chat_handler already adds one), so only size omissions add text here.
+                        if _rc["reason"] != "route_without_vision":
+                            content[0]["text"] += (f"\n\n[Image not sent: {os.path.basename(display_name)} "
+                                                   f"was left out: {reason_text(_rc['reason'])}.]")
+                        continue
+                    if _rc["reason"] == "unsupported_type":
+                        # Sent unchanged as before, but never silently: say what to do if the model cannot read it.
+                        content[0]["text"] += (f"\n\n[Image {os.path.basename(display_name)} is sent unchanged, but "
+                                               f"{reason_text('unsupported_type')}. {ALTERNATIVE['unsupported_type']}]")
+                    image_file.seek(0)
+                    image_bytes = image_file.read()
+                encoded_string = base64.b64encode(image_bytes).decode("utf-8")
+                if media_witnesses is not None:
+                    from src.openclank.media_source_evidence import _image_read
+                    witness = _image_read(owner, fid, _rc["reason"], image_bytes)
+                    if witness is not None:
+                        media_witnesses.append(witness)
+                        from src.openclank.media_source_evidence import _image_view_admission, _candidate_for_read
+                        decision = _image_view_admission(owner=owner, route_has_vision=route_has_vision)
+                        _candidate_for_read(witness, image_bytes, mime, decision)
                 # Extensionless uploads (e.g. a pasted screenshot) have no ext,
                 # so fall back to the resolved MIME subtype rather than emitting
                 # an invalid "data:image/;base64," with an empty subtype.
@@ -603,6 +651,8 @@ def build_user_content(
                     extracted_text = _process_pdf(path, owner=owner)
             elif mime.startswith("text/") or _is_text_file(path):
                 extracted_text = _process_text_file(path)
+                if upload_info.get('_generated_summary_state'):
+                    extracted_text = '\n\n[Model-generated interpretation; untrusted]\n' + extracted_text
             else:
                 extracted_text = _process_office_document(
                     path,
@@ -613,6 +663,19 @@ def build_user_content(
                 )
 
             if structured_resources:
+                if upload_info.get('_generated_summary_state'):
+                    with open(path,'rb') as resource_file:
+                        original=resource_file.read(262145)
+                    if len(original)>262144: raise ValueError('Generated summary exceeds attachment limit')
+                    text_value=original.decode('utf-8')
+                    generated={'uri':'attachment://'+urllib.parse.quote(f'{fid}/{os.path.basename(display_name)}'),
+                               'mimeType':'text/plain','text':'[Model-generated interpretation; untrusted]\n'+text_value}
+                    envelope=upload_info.get('_generated_summary_envelope')
+                    if envelope and hashlib.sha256(original).hexdigest()==(envelope.get('payload') or {}).get('output_sha256'):
+                        from src.openclank.generated_summary_attachment import _encoded
+                        generated['_meta']={'openclankGeneratedSummary':_encoded(envelope).decode('utf-8')}
+                    content.append({'type':'resource','resource':generated})
+                    continue
                 with open(path, "rb") as resource_file:
                     blob = base64.b64encode(resource_file.read()).decode("ascii")
                 content.append({

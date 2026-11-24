@@ -1,3 +1,4 @@
+import { editorIdSelector } from './dom-identity.js';
 /**
  * Layer merge / flatten buttons in the layer-panel footer:
  *
@@ -19,7 +20,7 @@
  *   uiModule:         object,
  * }} deps
  */
-import { state } from './state.js';
+import { state as legacyState } from './state.js';
 
 function _renderSource(layer, renderLayer) {
   if (!layer) return null;
@@ -39,7 +40,7 @@ function _clearBakedAdjustments(layer) {
   layer._adjCacheKey = '';
 }
 
-export function mergeLayerDownAtIndex(idx, renderLayer = null) {
+export function mergeLayerDownAtIndex(idx, renderLayer = null, state = legacyState, ownerDocument = document) {
   if (idx < 1 || idx >= state.layers.length) return null;
   const upper = state.layers[idx];
   const lower = state.layers[idx - 1];
@@ -47,7 +48,7 @@ export function mergeLayerDownAtIndex(idx, renderLayer = null) {
   const lowerOff = state.layerOffsets.get(lower.id) || { x: 0, y: 0 };
   const lowerSource = _renderSource(lower, renderLayer);
   const upperSource = _renderSource(upper, renderLayer);
-  const merged = document.createElement('canvas');
+  const merged = ownerDocument.createElement('canvas');
   merged.width = state.imgWidth;
   merged.height = state.imgHeight;
   const mctx = merged.getContext('2d');
@@ -68,13 +69,16 @@ export function mergeLayerDownAtIndex(idx, renderLayer = null) {
   return lower;
 }
 
-export function wireMergeButtons({ saveState, createLayer, renderLayerPanel, composite, renderLayer, uiModule }) {
+export function wireMergeButtons({ saveState, createLayer, renderLayerPanel, composite, renderLayer, uiModule, markSceneChanged = () => {}, withSceneMutation = (_name,fn) => fn(), state = legacyState, root = null, lifetime = null }) {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated merge requires root and lifetime');
+  const ownerDocument = root?.ownerDocument || document;
+  const find = id => root ? root.querySelector(editorIdSelector(id)) : ownerDocument.getElementById(id);
+  const listen = (id, fn) => { const node = find(id); if (!node) return; const guarded=event=>{if (!lifetime?.disposed) withSceneMutation('layer-merge',()=>fn(event));}; node.addEventListener('click', guarded); lifetime?.add(() => node.removeEventListener('click', guarded)); };
   // Flatten Copy.
-  document.getElementById('ge-flatten')?.addEventListener('click', () => {
+  listen('ge-flatten', () => {
     if (state.layers.length < 2) return;
-    saveState('Flatten copy');
-    const merged = createLayer('Flattened', state.imgWidth, state.imgHeight);
-    const ctx = merged.ctx;
+    const staged=ownerDocument.createElement('canvas'); staged.width=state.imgWidth; staged.height=state.imgHeight;
+    const ctx = staged.getContext('2d');
     for (const l of state.layers) {
       if (!l.visible) continue;
       const off = state.layerOffsets.get(l.id) || { x: 0, y: 0 };
@@ -82,24 +86,26 @@ export function wireMergeButtons({ saveState, createLayer, renderLayerPanel, com
       ctx.drawImage(_renderSource(l, renderLayer), off.x, off.y);
       ctx.globalAlpha = 1;
     }
+    saveState('Flatten copy');
+    const merged = createLayer('Flattened', state.imgWidth, state.imgHeight); merged.ctx.drawImage(staged,0,0);
     _clearBakedAdjustments(merged);
     state.layers.push(merged);
     state.activeLayerId = merged.id;
+    markSceneChanged();
     renderLayerPanel();
     composite();
     uiModule.showToast('Flattened copy created');
   });
 
   // Merge All — drop hidden layers; base = lowest visible.
-  document.getElementById('ge-merge-all')?.addEventListener('click', () => {
+  listen('ge-merge-all', () => {
     const visibleLayers = state.layers.filter(l => l.visible);
     if (visibleLayers.length < 2) {
       if (uiModule) uiModule.showToast('Need at least two visible layers to merge');
       return;
     }
-    saveState('Merge all');
     const base = visibleLayers[0];
-    const merged = document.createElement('canvas');
+    const merged = ownerDocument.createElement('canvas');
     merged.width = state.imgWidth;
     merged.height = state.imgHeight;
     const baseCtx = merged.getContext('2d');
@@ -110,6 +116,7 @@ export function wireMergeButtons({ saveState, createLayer, renderLayerPanel, com
       baseCtx.drawImage(_renderSource(l, renderLayer), off.x, off.y);
       baseCtx.globalAlpha = 1;
     }
+    saveState('Merge all');
     base.canvas = merged;
     base.ctx = base.canvas.getContext('2d');
     base.opacity = 1;
@@ -123,17 +130,19 @@ export function wireMergeButtons({ saveState, createLayer, renderLayerPanel, com
     }
     state.layers = [base];
     state.activeLayerId = base.id;
+    markSceneChanged();
     renderLayerPanel();
     composite();
     uiModule.showToast('Visible layers merged');
   });
 
   // Merge Down.
-  document.getElementById('ge-merge-down')?.addEventListener('click', () => {
+  listen('ge-merge-down', () => {
     const idx = state.layers.findIndex(l => l.id === state.activeLayerId);
     if (idx < 1) return; // can't merge the bottom layer
     saveState('Merge down');
-    mergeLayerDownAtIndex(idx, renderLayer);
+    mergeLayerDownAtIndex(idx, renderLayer, state, ownerDocument);
+    markSceneChanged();
     renderLayerPanel();
     composite();
     uiModule.showToast('Layer merged down');

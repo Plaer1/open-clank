@@ -1356,13 +1356,13 @@ def test_bwrap_hides_app_control_data_outside_workspace(
     workspace.mkdir()
     control.mkdir()
     app_db = control / "app.db"
-    runtime_cache = control / "mimocode" / "cache"
+    runtime_cache = control / "openclank-engine" / "cache"
     runtime_tool = runtime_cache / "bin" / "tool"
     runtime_tool.parent.mkdir(parents=True)
     app_db.write_text("secret", encoding="utf-8")
     runtime_tool.write_text("runtime", encoding="utf-8")
     monkeypatch.setenv("OPEN_CLANK_SHELL_SANDBOX", "required")
-    monkeypatch.setenv("MIMOCODE_HOME", str(control / "mimocode"))
+    monkeypatch.setenv("OPENCLANK_HOME", str(control / "openclank-engine"))
     monkeypatch.setattr("src.constants.DATA_DIR", str(control))
     monkeypatch.setattr("src.constants.AUTH_FILE", str(control / "auth.json"))
     monkeypatch.setattr("src.constants.FM_DB_PATH", str(control / "frankenmemory.db"))
@@ -1402,7 +1402,7 @@ def test_bwrap_restores_symlinked_mimo_cache_at_configured_path(
 ):
     workspace = tmp_path / "workspace"
     control = tmp_path / "control"
-    runtime_home = control / "mimocode"
+    runtime_home = control / "openclank-engine"
     external_cache = tmp_path / "external-cache"
     runtime_tool = external_cache / "bin" / "tool"
     sibling_secret = control / "secret"
@@ -1413,7 +1413,7 @@ def test_bwrap_restores_symlinked_mimo_cache_at_configured_path(
     sibling_secret.write_text("secret", encoding="utf-8")
     (runtime_home / "cache").symlink_to(external_cache, target_is_directory=True)
     monkeypatch.setenv("OPEN_CLANK_SHELL_SANDBOX", "required")
-    monkeypatch.setenv("MIMOCODE_HOME", str(runtime_home))
+    monkeypatch.setenv("OPENCLANK_HOME", str(runtime_home))
     monkeypatch.setattr("src.constants.DATA_DIR", str(control))
     monkeypatch.setattr("src.constants.AUTH_FILE", str(control / "auth.json"))
     monkeypatch.setattr("src.constants.FM_DB_PATH", str(control / "frankenmemory.db"))

@@ -12,12 +12,16 @@
  *   syncToolClearIndicators:   () => void,
  * }} deps
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 import { canvasCoords } from '../canvas-coords.js';
 
-export function createLassoTool({ composite, drawLassoOverlay, syncToolClearIndicators }) {
-  return {
+export function createLassoTool({ state = legacyState, root = null, lifetime = null, composite, drawLassoOverlay, syncToolClearIndicators, capturePreview = () => {} }) {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated tool requires root and lifetime');
+  let disposed = false;
+  lifetime?.add(() => { disposed = true; state.lassoActive = false; });
+  const tool = {
     begin(e) {
+      capturePreview();
       state.lassoPoints = [];
       state.lassoActive = true;
       const coords = canvasCoords(e, state.mainCanvas);
@@ -62,4 +66,9 @@ export function createLassoTool({ composite, drawLassoOverlay, syncToolClearIndi
       syncToolClearIndicators();
     },
   };
+  for (const key of Object.keys(tool)) {
+    const invoke = tool[key];
+    tool[key] = (...args) => disposed ? false : invoke(...args);
+  }
+  return tool;
 }

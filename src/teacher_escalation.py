@@ -263,8 +263,14 @@ portable across users / hosts.
 
 async def _call_teacher(teacher_model_spec: str, prompt: str,
                         owner: Optional[str] = None,
-                        root_operation_id: Optional[str] = None) -> Optional[str]:
+                        root_operation_id: Optional[str] = None, *,
+                        max_output_tokens: int = 16384, timeout_seconds: int = 120,
+                        expected_model_route_id: Optional[str] = None,
+                        expected_grant_id: Optional[str] = None) -> Optional[str]:
     """Call the configured teacher through the managed utility operation."""
+    if (type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 16384
+            or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120):
+        return None
     from src.agent_tools.model_interaction_tools import _TEACHER_SYSTEM_PROMPT
     from src.openclank.chat_routing import resolve_chat_model_spec
     from src.openclank.modality_facade import complete_text
@@ -273,6 +279,10 @@ async def _call_teacher(teacher_model_spec: str, prompt: str,
         route = resolve_chat_model_spec(owner=owner, model_spec=teacher_model_spec)
     except Exception as e:
         logger.warning(f"teacher route not resolvable ({teacher_model_spec!r}): {e}")
+        return None
+    if (expected_grant_id is not None and expected_model_route_id is None
+            or expected_model_route_id is not None and (route.model_route_id != expected_model_route_id
+                or route.provider_grant_id != expected_grant_id)):
         return None
     try:
         operation_root = root_operation_id or f"teacher-call-{uuid.uuid4().hex}"
@@ -291,9 +301,9 @@ async def _call_teacher(teacher_model_spec: str, prompt: str,
                 grant_id=route.provider_grant_id,
                 root_operation_id=operation_root,
                 idempotency_key=f"teacher-distill-{digest}",
-                max_output_tokens=16384,
+                max_output_tokens=max_output_tokens,
             ),
-            timeout=120,
+            timeout=timeout_seconds,
         )
     except Exception as e:
         logger.warning(f"teacher call failed: {e}")

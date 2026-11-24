@@ -1,16 +1,17 @@
+import { hostRasterMime } from './editor/hostRasterOriginal.js';
+import { registerAdapter } from './custom-context-menu.js';
 import { recordPresentation, achievementOwner } from './achievementProducer.js';
+import { openArtProjectDialog } from './editor/artProjectDialog.js';
+import { cloneArtProject, artProjectEqual } from './editor/artProjectMetadata.js';
+import { selectArtProjectReference, checkArtProjectReference } from './editor/artProjectReferences.js';
 import { uiIcon } from './uiIcons.js';
-/**
- * Imps — canvas-based image editor with layers, brush, eraser, text, crop, and inpaint mask.
- */
-
 import uiModule from './ui.js';
 import dragSortModule from './dragSort.js';
 import spinnerModule from './spinner.js';
-import { attachColorPicker } from './colorPicker.js';
-import modalManager from './modalManager.js';
+import { createColorPicker } from './colorPicker.js';
+import { namespaceEditorIds, editorIdSelector } from './editor/dom-identity.js';
+import legacyModalManager from './modalManager.js';
 import { createOpenClankWindow } from './copal/windows.js';
-let _editorWindow = null;
 import { canvasCoords as _canvasCoords } from './editor/canvas-coords.js';
 import { drawCheckerboard as _drawCheckerboard } from './editor/checkerboard.js';
 import { dilateMask as _dilateMask, applyInpaintFeather as _applyInpaintFeather } from './editor/mask-utils.js';
@@ -73,9 +74,9 @@ import {
   historyPanelHTML as _historyPanelHTMLImpl,
   canvasSizePromptHTML as _canvasSizePromptHTML,
 } from './editor/build/popups.js';
-import { state } from './editor/state.js';
-let _openGeneration = 0;
-let _managedEditEpoch = 0;
+import { state as legacyState, createImageStateParts, createEditorLifetime } from './editor/state.js';
+import { createImageScene } from './editor/imageScene.js';
+import { createImageSessionPersistence, editableImageMetadata, serializeEditableImageScene, decodeInpaintSidecar, flattenImageScene } from './editor/imageSessionPersistence.js';
 import { createMoveTool } from './editor/tools/move.js';
 import { createCropTool } from './editor/tools/crop.js';
 import { createLassoTool } from './editor/tools/lasso.js';
@@ -84,11 +85,7 @@ import { createCloneTool } from './editor/tools/clone.js';
 import { createTransformDragTool } from './editor/tools/transform-drag.js';
 import { createStrokeTool } from './editor/tools/stroke.js';
 import { createLayerPanelRenderer } from './editor/layer-panel.js';
-import {
-  syncOverlay as _syncTransformOverlayImpl,
-  drawHandles as _drawTransformHandlesImpl,
-  getHandleAt as _getTransformHandleImpl,
-} from './editor/tools/transform-handles.js';
+import { createTransformHandles } from './editor/tools/transform-handles.js';
 import { createCanvasTransforms } from './editor/canvas-transforms.js';
 import { createApplyImageTool } from './editor/ai-tool-runner.js';
 import { createStrokePipeline } from './editor/stroke-pipeline.js';
@@ -100,7 +97,7 @@ import { buildRightPanel } from './editor/build/right-panel.js';
 import { wireSliderUx } from './editor/slider-ux.js';
 import { createShortcutsPopover } from './editor/shortcuts-popover.js';
 import { wireKeyboardShortcuts } from './editor/keyboard-shortcuts.js';
-import { wireClipboardAndDrop } from './editor/clipboard-and-drop.js';
+import { wireClipboardAndDrop, CANVAS_MAX_IMPORT_BYTES, CANVAS_MAX_IMPORT_DIMENSION, CANVAS_MAX_IMPORT_PIXELS } from './editor/clipboard-and-drop.js';
 import { filesFacadeClient } from './filesFacadeClient.js';
 import { wireAIModelSelectors } from './editor/ai-models.js';
 import { wireInpaintButtons } from './editor/ai-inpaint.js?v=20260708match1';
@@ -115,7 +112,68 @@ import { wireTopbar, closeOtherTopbarMenus as _closeOtherTopbarMenus } from './e
 import { wireTopbarOverflow } from './editor/wire-topbar-overflow.js';
 import { wireTopbarMenus } from './editor/wire-topbar-menus.js';
 
+const activeImageStates = new WeakSet();
+const readOnlyImageScenes = new WeakSet();
+let imageRuntimeIdentity = 0;
+export function createImageRuntime({ session = null, root = null, lifetime = null, authority = null, persistence = null, modalManager = null, viewId = null, onContextFeedback = null, hostOriginal = null, requestHostSave = null, state: injectedState = null, legacy = false } = {}) {
+  if (!legacy && (!session?.captureTarget || typeof session?.attachRuntime !== 'function' || typeof session?.attachSceneAuthority !== 'function' || !root?.ownerDocument || typeof lifetime?.add !== 'function' || typeof authority?.validate !== 'function' || typeof authority?.validateScope !== 'function' || !persistence || !modalManager || lifetime.disposed)) throw new TypeError('image runtime ownership dependencies required');
+  if (!legacy && (authority.validate(session.captureTarget()) !== true || session.captureTarget()?.scope?.accountId !== document.body.dataset.accountId)) throw new Error('image authority unavailable');
+  const retainedScene = !legacy ? session.getSceneAuthority?.() : null;
+  const retainedPersistence = !legacy ? session.getPersistenceController?.() : null;
+  if (!legacy && Boolean(retainedScene) !== Boolean(retainedPersistence)) throw new Error('retained image ownership is incomplete');
+  if (retainedPersistence) persistence=retainedPersistence.adapter;
+  if (retainedScene && injectedState) throw new Error('retained image requires its own scene state');
+  const stateParts = !legacy && !injectedState ? createImageStateParts({scene:retainedScene?.state || null}) : null;
+  const state = legacy ? legacyState : (injectedState || stateParts.state);
+  const runtimePrefix = `ge-runtime-${++imageRuntimeIdentity}`;
+  let openIdentity = 0;
+  const scopeIds = node => legacy ? node : namespaceEditorIds(node, `${runtimePrefix}-${openIdentity}`);
+  const isolatedSourceToken = Symbol('isolated-source');
+  let runtimeAttachment = null, sessionPersistence = null, sceneReady = false, initialOpenPending = false;
+  let isolatedVisible = true, isolatedFocused = true;
+  if (!legacy && (state === legacyState || activeImageStates.has(state))) throw new TypeError('isolated runtime requires independent state');
+  modalManager ||= legacyModalManager;
+  if (!legacy) { activeImageStates.add(state); lifetime.add(() => activeImageStates.delete(state)); }
+  if (!legacy && retainedPersistence) { sessionPersistence=retainedPersistence; sessionPersistence.setHostSaveHandler(requestHostSave); }
+  else if (!legacy) { sessionPersistence = createImageSessionPersistence({session,scene:stateParts?.scene || state,adapter:persistence,authority,hostOriginal,requestHostSave}); const owner = session.attachPersistenceController(sessionPersistence); sessionPersistence.setReceiptOwner(owner); lifetime.add(() => { if (!state.layers.length && sessionPersistence.canDispose()) owner.detach(); }); }
+/**
+ * Imps — canvas-based image editor with layers, brush, eraser, text, crop, and inpaint mask.
+ */
+
+let _editorWindow = null;
+let _openGeneration = 0;
+let _impsAccountEpoch = 0;
+let _saveSequence = 0;
+const _draftFlights = new Map();
+const _managedSaveFlights = new Map();
+const _managedSaveReceipts = new Map();
+const _captureOrigin = () => Object.freeze({ generation: _openGeneration, accountEpoch: _impsAccountEpoch, owner: document.body.dataset.accountId || null, target: legacy ? null : JSON.stringify([session.captureTarget().sessionId, session.captureTarget().scope, session.captureTarget().sourceKey]) });
+const _accountCurrent = origin => {
+  if (!origin?.owner || origin.accountEpoch !== _impsAccountEpoch || origin.owner !== (document.body.dataset.accountId || null)) return false;
+  if (legacy) return true;
+  try { const target = session.captureTarget(); return !lifetime.disposed && target?.scope?.accountId === origin.owner && JSON.stringify([target.sessionId, target.scope, target.sourceKey]) === origin.target && authority.validateScope(target) === true; } catch (_) { return false; }
+};
+const _originCurrent = origin => _accountCurrent(origin) && origin.generation === _openGeneration;
+const _onAuthContextChanged = () => { _impsAccountEpoch += 1; if (legacy) { _managedSaveReceipts.clear(); _draftFlights.clear(); _managedSaveFlights.clear(); } else if (state.editorOpen) _closeEditorContent(); };
+document.addEventListener('openclank:auth-context-changed', _onAuthContextChanged);
+if (!legacy) lifetime.add(() => document.removeEventListener('openclank:auth-context-changed', _onAuthContextChanged));
 const API_BASE = window.location.origin;
+let _coreLifetime = null, _flushSceneProjection = () => {}, _clipboardWiring = null;
+let _editorPortal = null;
+const _ownedPortals = new Set();
+function _registerEditorPortal(node) { if (node) _ownedPortals.add(node); return node; }
+function _editorFind(id) {
+  const selector = editorIdSelector(id);
+  return state.container?.querySelector(selector) || [..._ownedPortals].map(node => node.matches?.(selector) ? node : node.querySelector?.(selector)).find(Boolean) || null;
+}
+function _editorQuery(selector) { return state.container?.querySelector(selector) || [..._ownedPortals].map(node => node.querySelector?.(selector)).find(Boolean) || null; }
+function _editorQueryAll(selector) { return [...(state.container?.querySelectorAll(selector) || []), ...[..._ownedPortals].flatMap(node => [...(node.querySelectorAll?.(selector) || [])])]; }
+const _coreFocused = () => {
+  if (!legacy) { try { if (!isolatedVisible || !isolatedFocused || authority.isActive?.() === false || lifetime.disposed || authority.validateScope(session.captureTarget()) !== true) return false; } catch (_) { return false; } }
+  const root = state.container;
+  const active = root?.ownerDocument?.activeElement;
+  return Boolean(root && ((legacy && active === root.ownerDocument.body) || root.contains(active) || state.historyPanelEl?.contains(active)));
+};
 
 async function _confirmedImpsOwner() {
   try {
@@ -132,12 +190,12 @@ async function _confirmedImpsOwner() {
 function _clearPendingSaveCopy() {
   state.pendingSaveCopy = null;
   try { localStorage.removeItem('imps.pendingSaveCopy'); } catch (_) {}
-  const retryButton = document.getElementById('ge-retry-save-copy');
+  const retryButton = _editorFind('ge-retry-save-copy');
   if (retryButton) retryButton.hidden = true;
 }
 
 async function _hydratePendingSaveCopy() {
-  const button = document.getElementById('ge-retry-save-copy');
+  const button = _editorFind('ge-retry-save-copy');
   if (!button) return;
   let pending;
   try { pending = JSON.parse(localStorage.getItem('imps.pendingSaveCopy') || 'null'); } catch (_) { _clearPendingSaveCopy(); return; }
@@ -151,7 +209,7 @@ async function _hydratePendingSaveCopy() {
   button.hidden = false;
 }
 
-if (!window.__impsPendingOwnerGuard) {
+if (legacy && !window.__impsPendingOwnerGuard) {
   window.__impsPendingOwnerGuard = true;
   document.addEventListener('openclank:auth-user-ready', (event) => {
     const announced = String(event?.detail?.username || '').trim().toLowerCase();
@@ -169,14 +227,16 @@ const _TRANSFORM_OVERLAY_MARGIN = 60; // image-space px of slack on each side
 // imported them under *Impl aliases but several call sites still use
 // the bare names. Without these, _startTransform threw a ReferenceError
 // before opening the popup, so Transform showed no handles / no popup.
-function _drawTransformHandles() { _drawTransformHandlesImpl(_TRANSFORM_OVERLAY_MARGIN); }
-function _getTransformHandle(x, y) { return _getTransformHandleImpl(x, y); }
-function _syncTransformOverlay() { _syncTransformOverlayImpl(_TRANSFORM_OVERLAY_MARGIN); }
+let _transformHandles = null;
+function _drawTransformHandles() { _transformHandles?.drawHandles(_TRANSFORM_OVERLAY_MARGIN); }
+function _getTransformHandle(x, y) { return _transformHandles?.getHandleAt(x, y); }
+function _syncTransformOverlay() { _transformHandles?.syncOverlay(_TRANSFORM_OVERLAY_MARGIN); }
 // Inpaint uses a much bigger default brush — when the user enters
 // the inpaint tool for the first time in this editor session we bump
 // the slider to this value (without touching other tools).
 const _INPAINT_DEFAULT_BRUSH = 100;
 let _samAbortController = null;
+let _syncInpaintControls = () => {};
 
 function _cancelSamQuery(showToast = true) {
   if (!_samAbortController) return false;
@@ -186,12 +246,13 @@ function _cancelSamQuery(showToast = true) {
 }
 
 function _impsEditMounted() {
-  return !!document.querySelector('#imps-editor-container.imps-editor');
+  return !!state.container?.matches('#imps-editor-container.imps-editor');
 }
 
-if (!window.__impsEditEscHardGuardInstalled) {
+if (legacy && !window.__impsEditEscHardGuardInstalled) {
   window.__impsEditEscHardGuardInstalled = true;
   window.addEventListener('keydown', (e) => {
+    if (!_coreLifetime || _coreLifetime.disposed || !state.editorOpen || !_coreFocused()) return;
     const isSamCancel = !!_samAbortController
       && (e.key === 'Escape' || ((e.ctrlKey || e.metaKey) && String(e.key || '').toLowerCase() === 'c'));
     if (isSamCancel) {
@@ -281,14 +342,14 @@ const MAX_HISTORY = 20;
 function _getSelectedAIEndpoint(type) {
   let raw = '';
   if (type === 'inpaint') {
-    raw = document.getElementById('ge-ai-inpaint')?.value || '';
+    raw = _editorFind('ge-ai-inpaint')?.value || '';
   } else if (type) {
     // Per-tool dropdowns (harmonize/upscale/style). Each lives in its
     // own section's panel and is marked with data-ge-tool-model="<name>".
-    const sel = document.querySelector(`select[data-ge-tool-model="${type}"]`);
+    const sel = _editorQuery(`select[data-ge-tool-model="${type}"]`);
     raw = sel?.value || '';
   }
-  if (!raw && !type) raw = document.getElementById('ge-ai-model')?.value || '';
+  if (!raw && !type) raw = _editorFind('ge-ai-model')?.value || '';
   return { modelRouteId: raw };
 }
 
@@ -316,7 +377,18 @@ function _deriveBusyLabel(layerName) {
 // runner.js; instantiated lazily (so it can reference function decls
 // that haven't hoisted at module load time? — actually all named
 // function decls hoist, so we instantiate at module top).
-const _applyImageTool = createApplyImageTool({
+let _aiLifetime = null;
+let _ownedApplyImageTool;
+const _applyImageTool = (...args) => _ownedApplyImageTool?.(...args);
+function _initApplyImageTool() { _ownedApplyImageTool = createApplyImageTool({
+  markSceneChanged: _markSceneChanged,
+  resultHooks:legacy ? null : {
+    reserve:() => sessionPersistence.reserveResult({kind:'ai',epoch:String(_impsAccountEpoch),generation:_sceneAuthority.revision}),
+    submit:id => sessionPersistence.submitResult(id), receive:(id,result) => sessionPersistence.receiveResult(id,result),
+    reject:id => sessionPersistence.rejectResult(id), unknown:id => sessionPersistence.markResultUnknown(id), resolve:id => sessionPersistence.resolveResult(id),
+  },
+  beginMutation:() => _sceneAuthority.beginGesture(_gestureView,'ai-result'), endMutation:token => _sceneAuthority.endGesture(token),
+  state, root: state.container, lifetime: _aiLifetime, captureOrigin: () => { const check=_captureAIOperation(), revision=_sceneAuthority.revision; return () => { const status=check(); return status==='current' && !_sceneAuthority.canApplyAt(revision) ? 'changed' : status; }; },
   flatten: () => flatten(),
   saveState: _saveState,
   createLayer,
@@ -328,10 +400,17 @@ const _applyImageTool = createApplyImageTool({
   openCookbookForImg2img: () => _openCookbookForImg2img(),
   spinnerModule,
   uiModule,
-});
+}); }
+
+function _captureAIOperation() {
+  const lifetime = _aiLifetime, generation = _openGeneration, edit = state.editEpoch, origin = _captureOrigin();
+  const owner = document.body.dataset.accountId, resource = state.managedResourceId, provider = state.managedProvider;
+  const project = state.projectId, revision = state.projectRevision, imageRevision = state.expectedImageRevision, layer = state.activeLayerId;
+  return () => !lifetime || lifetime.disposed || generation !== _openGeneration || owner !== document.body.dataset.accountId || !_originCurrent(origin) ? 'retired' : edit !== state.editEpoch || resource !== state.managedResourceId || provider !== state.managedProvider || project !== state.projectId || revision !== state.projectRevision || imageRevision !== state.expectedImageRevision || layer !== state.activeLayerId ? 'changed' : 'current';
+}
 
 function _setAiCommandStatus(text, kind = '') {
-  const el = document.getElementById('ge-ai-command-status');
+  const el = _editorFind('ge-ai-command-status');
   if (!el) return;
   el.textContent = text || '';
   el.dataset.kind = kind || '';
@@ -353,7 +432,7 @@ function _clickToolButton(toolId) {
 }
 
 function _runExistingButton(id, status) {
-  const btn = document.getElementById(id);
+  const btn = _editorFind(id);
   if (!btn) {
     _setAiCommandStatus('That edit is not available in this editor state.', 'error');
     return false;
@@ -367,12 +446,12 @@ function _openSamPrompt() {
   if (state.tool !== 'sam') {
     _clickToolButton('sam');
   } else {
-    const controls = document.getElementById('ge-controls') || document.querySelector('.ge-controls');
+    const controls = _editorFind('ge-controls') || _editorQuery('.ge-controls');
     controls?.classList.remove('dismissed');
-    document.getElementById('ge-sam-section')?.style.removeProperty('display');
+    _editorFind('ge-sam-section')?.style.removeProperty('display');
   }
   requestAnimationFrame(() => {
-    const input = document.getElementById('ge-sam-query');
+    const input = _editorFind('ge-sam-query');
     input?.focus();
     input?.select?.();
   });
@@ -435,13 +514,13 @@ function _matchAiCommandSuggestions(query) {
 }
 
 function _wireAiCommandBox() {
-  const wrap = document.getElementById('ge-ai-command');
-  const toggle = document.getElementById('ge-ai-command-toggle');
-  const closeBtn = document.getElementById('ge-ai-command-close');
-  const form = document.getElementById('ge-ai-command-form');
-  const input = document.getElementById('ge-ai-command-input');
-  const runBtn = document.getElementById('ge-ai-command-run');
-  const suggestions = document.getElementById('ge-ai-command-suggestions');
+  const wrap = _editorFind('ge-ai-command');
+  const toggle = _editorFind('ge-ai-command-toggle');
+  const closeBtn = _editorFind('ge-ai-command-close');
+  const form = _editorFind('ge-ai-command-form');
+  const input = _editorFind('ge-ai-command-input');
+  const runBtn = _editorFind('ge-ai-command-run');
+  const suggestions = _editorFind('ge-ai-command-suggestions');
   if (!wrap || !form || !input || !runBtn) return;
   let suggestionItems = [];
   let suggestionIndex = 0;
@@ -535,33 +614,23 @@ function _wireAiCommandBox() {
     const p = prompt.toLowerCase();
     try {
       if (/\brotate\b.*\b180\b|\bupside\s*down\b/.test(p)) {
-        _saveState('Rotate 180');
-        _rotateAllLayers(180);
-        _setAiCommandStatus('Rotated 180.', 'done');
+        _setAiCommandStatus(_rotateAllLayers(180) ? 'Rotation scheduled.' : 'Rotation was not scheduled.', 'done');
         return;
       }
       if (/\brotate\b.*\b(left|ccw|counter)\b|\bturn\s+left\b/.test(p)) {
-        _saveState('Rotate left');
-        _rotateAllLayers(270);
-        _setAiCommandStatus('Rotated left.', 'done');
+        _setAiCommandStatus(_rotateAllLayers(270) ? 'Rotation scheduled.' : 'Rotation was not scheduled.', 'done');
         return;
       }
       if (/\brotate\b|\bturn\s+right\b|\bclockwise\b/.test(p)) {
-        _saveState('Rotate 90');
-        _rotateAllLayers(90);
-        _setAiCommandStatus('Rotated 90.', 'done');
+        _setAiCommandStatus(_rotateAllLayers(90) ? 'Rotation scheduled.' : 'Rotation was not scheduled.', 'done');
         return;
       }
       if (/\bflip\b.*\b(vertical|v)\b|\bmirror\b.*\b(vertical|v)\b/.test(p)) {
-        _saveState('Flip vertical');
-        _flipAllLayers('v');
-        _setAiCommandStatus('Flipped vertical.', 'done');
+        _setAiCommandStatus(_flipAllLayers('v') ? 'Flipped vertical.' : 'Flip was not applied.', 'done');
         return;
       }
       if (/\bflip\b|\bmirror\b/.test(p)) {
-        _saveState('Flip horizontal');
-        _flipAllLayers('h');
-        _setAiCommandStatus('Flipped horizontal.', 'done');
+        _setAiCommandStatus(_flipAllLayers('h') ? 'Flipped horizontal.' : 'Flip was not applied.', 'done');
         return;
       }
       if (/\b(remove|erase|cut\s*out|transparent)\b.*\b(bg|background)\b|\b(bg|background)\b.*\b(remove|erase|transparent)\b/.test(p)) {
@@ -587,7 +656,7 @@ function _wireAiCommandBox() {
         return;
       }
       if (/\b(sharpen|sharp|crisp|clearer|make it look better|enhance|improve|better)\b/.test(p)) {
-        const amount = document.getElementById('ge-sharpen-amount');
+        const amount = _editorFind('ge-sharpen-amount');
         if (amount) {
           amount.value = '65';
           amount.dispatchEvent(new Event('input', { bubbles: true }));
@@ -597,8 +666,8 @@ function _wireAiCommandBox() {
         return;
       }
 
-      const stylePrompt = document.getElementById('ge-style-prompt');
-      const styleStrength = document.getElementById('ge-style-strength');
+      const stylePrompt = _editorFind('ge-style-prompt');
+      const styleStrength = _editorFind('ge-style-strength');
       if (stylePrompt) stylePrompt.value = prompt;
       if (styleStrength) {
         styleStrength.value = /\b(subtle|slight|small)\b/.test(p) ? '35' : '55';
@@ -658,6 +727,7 @@ function createLayer(name, width, height) {
     },
   };
   state.layerOffsets.set(layer.id, { x: 0, y: 0 });
+  _markSceneChanged();
   return layer;
 }
 
@@ -709,6 +779,7 @@ function _ensureActiveMaskLayer() {
   };
   parent.masks.push(mask);
   parent.activeMaskId = mask.id;
+  _markSceneChanged();
   return mask;
 }
 
@@ -753,21 +824,26 @@ function _renderLayerPixelAdjustments(layer) {
 // editor/fx/adj-popup.js. Wrappers preserve the legacy names that
 // every layer-row FX button, panel-row click, and undo/redo path
 // already references.
-const _adjPopupSystem = createAdjPopupSystem({
+let _adjPopupSystem;
+function _initAdjPopupSystem() { _adjPopupSystem = createAdjPopupSystem({
+  markSceneChanged: _markSceneChanged,
+  withSceneMutation: _withSceneMutation, captureOrigin: () => ({view:_previewOrigin(), source:legacy ? null : JSON.stringify(session.captureTarget())}),
+  originCurrent: value => !!value && _previewCurrent(value.view) && (legacy || value.source === JSON.stringify(session.captureTarget())), onRefused: () => uiModule?.showToast('The image changed; reopen the adjustment.'),
+  state, root: state.container, lifetime: _coreLifetime, modalManager,
   composite,
   saveState: _saveState,
   renderLayerPanel: () => _renderLayerPanel(),
-});
-const _closeFxPopup                     = _adjPopupSystem.closeFxPopup;
-const _ensureAdjustments                = _adjPopupSystem.ensureAdjustments;
-const _ensureFxDock                     = _adjPopupSystem.ensureFxDock;
-const _closeFxMenu                      = _adjPopupSystem.closeFxMenu;
-const _openFxPopup                      = _adjPopupSystem.openFxPopup;
-const _openAdjPopup                     = _adjPopupSystem.openAdjPopup;
-const _editAdjLayer                     = _adjPopupSystem.editAdjLayer;
-const _closeAdjPopup                    = _adjPopupSystem.closeAdjPopup;
-const _minimiseAdjPopup                 = _adjPopupSystem.minimiseAdjPopup;
-const _syncFxPanelToActiveLayerIfPresent = _adjPopupSystem.syncFxPanelToActiveLayerIfPresent;
+}); }
+const _closeFxPopup = (...args) => _adjPopupSystem?.closeFxPopup(...args);
+const _ensureAdjustments = (...args) => _adjPopupSystem?.ensureAdjustments(...args);
+const _ensureFxDock = (...args) => _adjPopupSystem?.ensureFxDock(...args);
+const _closeFxMenu = (...args) => _adjPopupSystem?.closeFxMenu(...args);
+const _openFxPopup = (...args) => _adjPopupSystem?.openFxPopup(...args);
+const _openAdjPopup = (...args) => _adjPopupSystem?.openAdjPopup(...args);
+const _editAdjLayer = (...args) => _adjPopupSystem?.editAdjLayer(...args);
+const _closeAdjPopup = (...args) => _adjPopupSystem?.closeAdjPopup(...args);
+const _minimiseAdjPopup = (...args) => _adjPopupSystem?.minimiseAdjPopup(...args);
+const _syncFxPanelToActiveLayerIfPresent = (...args) => _adjPopupSystem?.syncFxPanelToActiveLayerIfPresent(...args);
 
 function activeLayer() {
   return state.layers.find(l => l.id === state.activeLayerId) || null;
@@ -840,11 +916,13 @@ function _showCanvasLoading(message) {
     state.container.appendChild(overlay);
   }
   overlay.querySelector('.ge-canvas-loading-msg').textContent = message || 'Working…';
+  overlay._loadingOwner = Symbol('canvas loading');
   overlay.style.display = '';
+  return overlay._loadingOwner;
 }
-function _hideCanvasLoading() {
+function _hideCanvasLoading(owner) {
   const overlay = state.container && state.container.querySelector('.ge-canvas-loading');
-  if (overlay) overlay.style.display = 'none';
+  if (overlay && (!owner || overlay._loadingOwner === owner)) overlay.style.display = 'none';
 }
 
 // Cheap "is this mask canvas blank?" check. Used to suffix "(empty)" on
@@ -855,13 +933,150 @@ function _hideCanvasLoading() {
 // Document-wide rotate / flip — implementations in
 // editor/canvas-transforms.js. Wrappers preserve the legacy names that
 // the topbar Image menu and shortcuts already wire to.
-const _canvasTransforms = createCanvasTransforms({
+const _sceneAuthority = retainedScene || createImageScene({state:stateParts?.scene || state, document, limit:MAX_HISTORY, sceneKey:stateParts?.scene || state,
+  ...(legacy ? {onChange:() => _schedulePersist()} : {persistence:sessionPersistence})});
+if (!legacy && !retainedScene) { const releaseScene = session.attachSceneAuthority(_sceneAuthority); lifetime.add(() => { if (!state.layers.length && _sceneAuthority.canDispose()) releaseScene(); }); }
+if (!legacy && !retainedScene) sessionPersistence.setResultSceneAuthority(_sceneAuthority);
+let _feedbackSourceWitness = null;
+const _markSceneChanged = () => { _feedbackSourceWitness = null; return _sceneAuthority.markChanged(); };
+// Each mounted view owns separate gesture tokens; only the scene can grant them.
+const _gestureView = {};
+function _makeGesture(operation) {
+  let token = null;
+  const gesture = {
+    begin() { if (token) return false; token = _sceneAuthority.beginGesture(_gestureView, operation); return !!token; },
+    owns() { return _sceneAuthority.ownsGesture(token); },
+    end() { if (!token) return false; const old = token; token = null; return _sceneAuthority.endGesture(old); },
+  };
+  lifetime?.add(() => gesture.end());
+  return gesture;
+}
+const _strokeGesture = _makeGesture('stroke'), _transformGesture = _makeGesture('transform'), _moveGesture = _makeGesture('move');
+function _withSceneMutation(operation, action) {const token=_sceneAuthority.beginGesture(_gestureView,operation); if (!token) {uiModule?.showToast('Finish the current image edit first.'); return false;} try {return action();} finally {_sceneAuthority.endGesture(token);}}
+function _canvasContextReady() {
+  return state.editorOpen && (legacy ? state.layers.length > 0 : sceneReady && isolatedVisible && authority.isActive?.() !== false)
+    && state.container?.isConnected && !state.container.inert && _originCurrent(_captureOrigin());
+}
+
+function _canvasContextWritable() {
+  return _canvasContextReady() && _sceneAuthority.canApplyAt(_sceneAuthority.revision)
+    && !readOnlyImageScenes.has(_sceneAuthority)
+    && (legacy || sessionPersistence.recoveryStatus().state === 'ready');
+}
+
+function _captureFeedbackRegion() {
+  if (legacy) return null;
+  const target = session.captureTarget(), rect = state.cropRect, witness = _feedbackSourceWitness;
+  if (!sceneReady || !state.editorOpen || !isolatedVisible || !witness
+    || witness.revision !== _sceneAuthority.revision || witness.target !== JSON.stringify(target)
+    || authority.validate(target) !== true || target.draftId || !_previewCurrent(_cropPreview)
+    || !rect || !state.imgWidth || !state.imgHeight) return null;
+  const {x,y,w,h} = rect;
+  if (![x,y,w,h].every(Number.isFinite) || x < 0 || y < 0 || w <= 0 || h <= 0
+    || x + w > state.imgWidth || y + h > state.imgHeight) return null;
+  return Object.freeze({
+    resourceRef:target.opaqueRef, expectedRevision:target.sourceRevision,
+    anchor:{kind:'image',x:x/state.imgWidth,y:y/state.imgHeight,width:w/state.imgWidth,height:h/state.imgHeight},
+    witness:JSON.stringify([witness,rect]),
+  });
+}
+
+function _wireCanvasContext(canvas, area) {
+  const canvasCurrent = ({ adapterContext:target } = {}) => Boolean(target && canvas === state.mainCanvas
+    && _canvasContextReady() && _previewCurrent(target.origin)
+    && (!target.feedback || _captureFeedbackRegion()?.witness === target.feedback.witness
+      && String(window.sessionModule?.getCurrentSessionId?.() || '') === target.chat)
+    && (!target.selection || (target.kind === 'wand'
+      ? target.selection === state.wandMask && target.layer.id === state.wandLayerId
+      : target.selection === state.lassoPoints && !state.lassoActive && _previewCurrent(_lassoPreview))));
+  registerAdapter(area, {
+    hitTest:(node, event) => event.pointerType !== 'touch' && (node === canvas || node === area) ? true : 'native',
+    capture:(node, event) => {
+      if (!_canvasContextReady()) return null;
+      const target = { origin:_previewOrigin() };
+      if (node !== canvas) return target;
+      const keyboard = event.detail === 0 && event.button !== 2 && !event.pointerType;
+      const {x,y} = keyboard ? {} : _canvasCoords(event, canvas);
+      if (onContextFeedback) {
+        const feedback = _captureFeedbackRegion();
+        const chat = String(window.sessionModule?.getCurrentSessionId?.() || '');
+        const box = state.cropRect;
+        if (feedback && chat && box && (keyboard || x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h)) {
+          Object.assign(target, { feedback, chat });
+        }
+      }
+      if (!_canvasContextWritable()) return target;
+      const points = state.lassoPoints;
+      const insideLasso = () => {
+        if (keyboard) return true;
+        let inside = false;
+        for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+          const a = points[i], b = points[j];
+          if ((a.y > y) !== (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+        }
+        return inside;
+      };
+      const wandLayer = state.layers.find(layer => layer.id === state.wandLayerId);
+      if (state.wandMask) {
+        if (wandLayer && !wandLayer.locked && (keyboard || _wandHits(x,y))) {
+          Object.assign(target, { kind:'wand', selection:state.wandMask, layer:wandLayer });
+        }
+      } else if (points.length >= 3 && !state.lassoActive && _previewCurrent(_lassoPreview)
+        && target.origin.layer && !target.origin.layer.locked && insideLasso()) {
+        Object.assign(target, { kind:'lasso', selection:points, layer:target.origin.layer });
+      }
+      return target;
+    },
+    isCurrent:canvasCurrent,
+    commands:request => {
+      if (!canvasCurrent(request)) return [];
+      const selection = request.adapterContext.selection;
+      return [
+        ...(request.adapterContext.feedback ? [{ id:'image-region-feedback', label:'Feedback on image region…', dialog:true }] : []),
+        ...(selection && _canvasContextWritable() ? [
+          { id:'image-selection-copy', label:'Copy selection to layer' },
+          { id:'image-selection-invert', label:'Invert selection' },
+          { id:'image-selection-delete', label:'Delete selected pixels', destructive:true },
+        ] : []),
+        { id:'image-zoom-fit', label:'Fit image' },
+        { id:'image-zoom-actual', label:'Actual size' },
+      ];
+    },
+    execute:(command, request) => {
+      if (!canvasCurrent(request)) return false;
+      if (command === 'image-zoom-fit') { _fitZoom(); return true; }
+      if (command === 'image-zoom-actual') { state.zoom = 1; _applyZoom(); return true; }
+      const { kind, layer, feedback, chat } = request.adapterContext;
+      if (command === 'image-region-feedback' && feedback) return onContextFeedback(feedback, chat, () => canvasCurrent(request));
+      if (!kind || !state.layers.includes(layer) || layer.locked || !_canvasContextWritable()) return false;
+      if (command === 'image-selection-invert') _invertSelection();
+      else if (command === 'image-selection-copy') (kind === 'wand' ? _wandCopyToNewLayer : _lassoCopyToLayer)();
+      else if (command === 'image-selection-delete') (kind === 'wand' ? _wandDeleteSelection : _lassoDeleteSelection)();
+      else return false;
+      return true;
+    },
+  });
+}
+
+function _previewOrigin() {return {revision:_sceneAuthority.revision,width:state.imgWidth,height:state.imgHeight,layer:activeLayer(),view:_coreLifetime,origin:_captureOrigin()};}
+function _previewCurrent(value) {return !!value && !value.view?.disposed && value.view===_coreLifetime && _originCurrent(value.origin) && value.revision===_sceneAuthority.revision && value.width===state.imgWidth && value.height===state.imgHeight && value.layer===activeLayer() && (!value.layer || state.layers.includes(value.layer));}
+const _writerOrigin = () => ({view:_previewOrigin(), source:legacy ? null : JSON.stringify(session.captureTarget())});
+const _writerCurrent = value => !!value && _previewCurrent(value.view) && (legacy || value.source === JSON.stringify(session.captureTarget()));
+let _cropPreview=null, _lassoPreview=null;
+
+let _canvasTransforms;
+function _initCanvasTransforms(container) { _canvasTransforms = createCanvasTransforms({
+  root: container,
+  state, lifetime: () => _coreLifetime, markSceneChanged: _markSceneChanged,
+  withSceneMutation: _withSceneMutation, captureOrigin: _writerOrigin, originCurrent: _writerCurrent,
+  onResize: () => _syncInpaintControls?.(),
+  clearPreview: () => { state.lassoPoints = []; state.lassoActive = false; _lassoPreview = null; _cropPreview = null; },
   saveState: _saveState,
   composite,
   fitZoom: () => _fitZoom(),
   showCanvasLoading: (label) => _showCanvasLoading(label),
-  hideCanvasLoading: () => _hideCanvasLoading(),
-});
+  hideCanvasLoading: (owner) => _hideCanvasLoading(owner),
+}); }
 function _rotateAllLayers(deg) { return _canvasTransforms.rotateAll(deg); }
 function _flipAllLayers(axis)  { return _canvasTransforms.flipAll(axis); }
 
@@ -870,6 +1085,7 @@ function _flipAllLayers(axis)  { return _canvasTransforms.flipAll(axis); }
 // ── Composite ──
 
 function composite() {
+  if (!legacy && (!isolatedVisible || authority.isActive?.() === false)) return;
   if (!state.mainCtx) return;
   state.mainCtx.clearRect(0, 0, state.mainCanvas.width, state.mainCanvas.height);
   // Checkerboard background
@@ -881,7 +1097,7 @@ function composite() {
     // Source = layer.canvas walked through all its adjustment
     // sub-layers (plus any staged-in-progress edit). Falls back to
     // raw layer.canvas when no adjustments are present.
-    const source = _renderLayerWithAdjLayers(layer);
+    const source = _renderLayerWithAdjLayers(layer, _adjPopupSystem?.previewFor(layer));
     state.mainCtx.drawImage(source, off.x, off.y);
     state.mainCtx.globalAlpha = 1;
   }
@@ -1005,72 +1221,10 @@ function _drawCropOverlay() {
 
 // ── History ──
 
-function _snapshotState() {
-  let wand = null;
-  if (state.wandMask) {
-    try {
-      const wctx = state.wandMask.getContext('2d');
-      wand = {
-        layerId: state.wandLayerId,
-        w: state.wandMask.width,
-        h: state.wandMask.height,
-        imageData: wctx.getImageData(0, 0, state.wandMask.width, state.wandMask.height),
-        seed: state.wandLastSeed ? { ...state.wandLastSeed } : null,
-      };
-    } catch {}
-  }
-  return {
-    imgWidth: state.imgWidth,
-    imgHeight: state.imgHeight,
-    wand,
-    layers: state.layers.map(l => {
-      // getImageData throws on a 0-sized canvas — guard so a single
-      // broken layer/mask can't take down the whole snapshot (which
-      // would silently break undo/redo for brush strokes etc.).
-      let imageData = null;
-      try {
-        if (l.canvas.width > 0 && l.canvas.height > 0) {
-          imageData = l.ctx.getImageData(0, 0, l.canvas.width, l.canvas.height);
-        }
-      } catch (_) { /* keep imageData=null, restore will skip */ }
-      return {
-        id: l.id, name: l.name, visible: l.visible, opacity: l.opacity, locked: l.locked,
-        canvasW: l.canvas.width,
-        canvasH: l.canvas.height,
-        imageData,
-        offset: { ...(state.layerOffsets.get(l.id) || { x: 0, y: 0 }) },
-        // Deep-clone defensively — a non-serializable / circular value here
-        // would throw out of the whole snapshot (and historically aborted
-        // every mutating op). Fall back to [] rather than blow up.
-        adjLayers: (() => {
-          try { return l.adjLayers ? JSON.parse(JSON.stringify(l.adjLayers)) : []; }
-          catch (e) { console.error('[imps] adjLayers not serializable, dropping from snapshot:', e); return []; }
-        })(),
-        masks: (l.masks || []).map(m => {
-          let mImageData = null;
-          try {
-            if (m.canvas.width > 0 && m.canvas.height > 0) {
-              mImageData = m.ctx.getImageData(0, 0, m.canvas.width, m.canvas.height);
-            }
-          } catch (_) {}
-          return {
-            id: m.id,
-            name: m.name,
-            visible: m.visible !== false,
-            canvasW: m.canvas.width,
-            canvasH: m.canvas.height,
-            imageData: mImageData,
-          };
-        }),
-        activeMaskId: l.activeMaskId || null,
-        isBase: !!l.isBase,
-      };
-    }),
-  };
-}
+const _coreHistory = _sceneAuthority.history;
 
 function _saveState(label) {
-  _managedEditEpoch += 1;
+  state.editEpoch += 1;
   // saveState() runs FIRST in every mutating op (import, paste, copy,
   // merge, mask, delete, brush, …). If anything here throws, the whole
   // operation aborts before its real work runs — which silently breaks
@@ -1078,18 +1232,37 @@ function _saveState(label) {
   // isolated: a history-snapshot failure must degrade (lose one undo
   // step) rather than kill the user's action.
   try {
-    const snap = _snapshotState();
-    snap._label = label || 'Edit';
-    snap._ts = Date.now();
-    state.undoStack.push(snap);
-    if (state.undoStack.length > MAX_HISTORY) state.undoStack.shift();
-    state.redoStack = [];
+    _coreHistory.save(label);
   } catch (e) {
     console.error('[imps] saveState snapshot failed (continuing without this undo step):', e);
   }
   try { _invalidateWandCache(); } catch (e) { console.error('[imps] invalidateWandCache:', e); }
   try { _schedulePersist(); } catch (e) { console.error('[imps] schedulePersist:', e); }
   try { _refreshHistoryPanelIfOpen(); } catch (e) { console.error('[imps] refreshHistoryPanel:', e); }
+}
+
+async function _openProjectMetadata() {
+  if (!state.editorOpen || !state.layers.length) throw new Error('Open an image first.');
+  const origin=_writerOrigin(), identity=JSON.stringify([state.managedProvider,state.managedResourceId,state.projectId,state.projectRevision,state.expectedImageRevision]);
+  const accountId=document.body.dataset.accountId || null;
+  const recoveryClear=()=>legacy ? !state._legacyProjectPending && !state._legacyCreatePending && !state._legacyImportPending && !state.pendingSaveCopy && ![..._managedSaveFlights.values()].some(flight=>flight.uncertain) : sessionPersistence.recoveryStatus().state==='ready';
+  const current=()=>Boolean(accountId && _writerCurrent(origin) && document.body.dataset.accountId===accountId && identity===JSON.stringify([state.managedProvider,state.managedResourceId,state.projectId,state.projectRevision,state.expectedImageRevision]) && recoveryClear());
+  if (!current()) throw new Error('The image or its recovery operation is unavailable.');
+  const extras=state._editableExtras, present=extras!=null && Object.prototype.hasOwnProperty.call(extras,'artProject');
+  const original=present ? cloneArtProject(extras.artProject) : undefined;
+  const abort=new AbortController(); lifetime?.add(()=>abort.abort());
+  let next; try { next=await openArtProjectDialog({value:original,present,current,accountId,signal:abort.signal,selectReference:selectArtProjectReference,checkReference:checkArtProjectReference}); } finally { abort.abort(); }
+  if (next===null) return;
+  if (!current()) throw new Error('The image changed; reopen metadata.');
+  if (present && artProjectEqual(original,next)) return;
+  const prepared=cloneArtProject(next), token=_sceneAuthority.beginGesture(_gestureView,'project-metadata');
+  if (!token) throw new Error('Finish the current image edit first.');
+  try {
+    if (!current()) throw new Error('The image changed; reopen metadata.');
+    _coreHistory.save('Project metadata');
+    state._editableExtras={...(state._editableExtras || {}),artProject:prepared};
+    state.editEpoch+=1; _markSceneChanged(); _schedulePersist();
+  } finally { _sceneAuthority.endGesture(token); }
 }
 
 // ────────── Persistent edit drafts (server-backed) ──────────
@@ -1103,90 +1276,71 @@ const PERSIST_DEBOUNCE_MS = 800;
 const THUMB_MAX = 160;
 
 function _schedulePersist() {
+  if (!legacy) return;
   if (!state.editorOpen || !state.layers.length) return;
   if (state.persistTimer) clearTimeout(state.persistTimer);
   state.persistTimer = setTimeout(() => { state.persistTimer = null; _persistDraft(); }, PERSIST_DEBOUNCE_MS);
 }
 
 function _editableMetadata(node) {
-  const value = { ...(node?._editableExtras || {}) };
-  for (const [key, item] of Object.entries(node || {})) {
-    if (key.startsWith('_') || ['canvas', 'ctx', 'masks', 'dataUrl', 'canvasW', 'canvasH'].includes(key)
-      || typeof item === 'function' || item === undefined) continue;
-    value[key] = JSON.parse(JSON.stringify(item));
-  }
-  return value;
-}
-
-function _serializeEditableNode(node) {
-  return {
-    ..._editableMetadata(node),
-    canvasW: node.canvas.width, canvasH: node.canvas.height,
-    dataUrl: node.canvas.toDataURL('image/png'),
-    ...(node.masks ? { masks: node.masks.map(_serializeEditableNode) } : {}),
-  };
+  return editableImageMetadata(node);
 }
 
 function _buildDraftPayload() {
-  return { ..._serializeEditableState(), imageId: state.imageId };
+  return { ..._serializeEditableState(), imageId: state.imageId, ...(state._legacyProjectPending ? {_imageProjectOperation:state._legacyProjectPending} : {}) };
 }
 
 function _buildThumbnail() {
   return _buildThumbnailImpl(state.layers, state.imgWidth, state.imgHeight, state.layerOffsets, THUMB_MAX, 0.6);
 }
 
-async function _persistDraft() {
+async function _persistDraft(pendingCopy = null) {
   if (!state.editorOpen || !state.layers.length) return;
-  // Coalesce concurrent saves — if one's already in-flight, mark dirty
-  // and let the running call kick off another when it returns.
-  if (state.persistInFlight) { state.persistDirty = true; return; }
-  const payload = _buildDraftPayload();
-  const thumbnail = _buildThumbnail();
-  const body = {
-    name: state.draftName || 'Untitled',
-    source_image_id: state.imageId || null,
-    width: state.imgWidth,
-    height: state.imgHeight,
-    payload,
-    thumbnail,
-  };
-  const doRequest = async () => {
-    if (state.draftId) {
-      const res = await fetch(`/api/editor-drafts/${encodeURIComponent(state.draftId)}`, {
-        method: 'PUT', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      // 404 means our row was deleted while editing — fall through to
-      // create a fresh one so the user doesn't lose work.
-      if (res.status === 404) {
-        state.draftId = null;
-        return doRequest();
-      }
-      if (!res.ok) throw new Error(`PUT failed: ${res.status}`);
-      return res.json();
-    } else {
-      const res = await fetch('/api/editor-drafts', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(`POST failed: ${res.status}`);
-      const out = await res.json();
-      if (out && out.id) state.draftId = out.id;
-      return out;
+  if (legacy && _activeFilterPreview) { _activeFilterPreview.deferredDraft = true; return; }
+  if (!legacy) return sessionPersistence.saveDraft(_captureManagedSaveSnapshot(),pendingCopy,_buildThumbnail());
+  const origin = _captureOrigin();
+  const content = { name: state.draftName || 'Untitled', source_image_id: state.imageId || null, width: state.imgWidth, height: state.imgHeight, payload: _buildDraftPayload() };
+  if (!legacy) content.payload._imageSessionRecovery = {...session.captureTarget(), draftId:null};
+  if (!legacy && pendingCopy) content.payload._imagePendingCopy = pendingCopy;
+  const snapshot = Object.freeze({ origin, draftId: state.draftId, editEpoch: state.editEpoch, sceneRevision: state.sceneRevision, name: content.name, imageId: content.source_image_id,
+    body: JSON.stringify({ ...content, thumbnail: _buildThumbnail() }) });
+  let flight = _draftFlights.get(origin.generation);
+  if (!flight) { flight = { tail: Promise.resolve(), draftId: snapshot.draftId }; _draftFlights.set(origin.generation, flight); }
+  const run = async () => {
+    if (!_accountCurrent(origin)) return { status: 'superseded' };
+    if (flight.uncertain) throw new Error('draft creation outcome requires reconciliation');
+    let id = flight.draftId;
+    let res;
+    try { res = await fetch(id ? `/api/editor-drafts/${encodeURIComponent(id)}` : '/api/editor-drafts', {
+      method: id ? 'PUT' : 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: snapshot.body,
+    }); } catch (error) { if (!id) flight.uncertain = true; throw error; }
+    if (id && res.status === 404 && _accountCurrent(origin)) {
+      id = null;
+      try { res = await fetch('/api/editor-drafts', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: snapshot.body }); }
+      catch (error) { flight.uncertain = true; throw error; }
     }
+    if (!res.ok) { if (!id && res.status >= 500) flight.uncertain = true; throw new Error(`draft save failed (${res.status})`); }
+    let receipt;
+    try { receipt = await res.json(); } catch (error) { if (!id) flight.uncertain = true; throw error; }
+    if (id == null) {
+      if (typeof receipt?.id !== 'string' || !receipt.id.trim()) { flight.uncertain = true; throw new Error('draft creation receipt is missing an ID; reconciliation required'); }
+      flight.draftId = receipt.id;
+    }
+    if (_originCurrent(origin)) {
+      if (state.draftId === snapshot.draftId || state.draftId === id || state.draftId === flight.draftId) state.draftId = flight.draftId;
+      state.persistDirty = state.sceneRevision !== snapshot.sceneRevision || (state.draftName || 'Untitled') !== snapshot.name || (state.imageId || null) !== snapshot.imageId;
+      if (state.persistDirty && state.editorOpen) _schedulePersist();
+    }
+    return {status:'saved', receipt, origin, editEpoch:snapshot.editEpoch, sceneRevision:snapshot.sceneRevision};
   };
-  state.persistInFlight = doRequest()
-    .catch((e) => { console.warn('[ge] draft save failed', e); })
-    .then(() => {
-      state.persistInFlight = null;
-      if (state.persistDirty) {
-        state.persistDirty = false;
-        _schedulePersist();
-      }
-    });
-  return state.persistInFlight;
+  const result = flight.tail.catch(() => {}).then(run);
+  flight.tail = result;
+  state.persistInFlight = result;
+  result.catch(error => console.warn('[ge] draft save failed', error)).finally(() => {
+    if (_originCurrent(origin) && state.persistInFlight === result) state.persistInFlight = null;
+    if (flight.tail === result && !flight.uncertain) _draftFlights.delete(origin.generation);
+  });
+  return result;
 }
 
 async function _loadDraftById(draftId) {
@@ -1233,18 +1387,33 @@ async function _clearDraftServer(draftId) {
 // raw payload (v1 localStorage shape) or a server response with
 // {payload: {...}}. Returns a promise that resolves once every layer's
 // dataURL has decoded into its canvas.
-async function _restoreDraft(draft, expectedGeneration = null) {
+async function _restoreDraft(draft, expectedGeneration = _openGeneration, expectedOrigin = _captureOrigin(), validateTarget = () => true, allowRetainedResults = false, importRevision = null) {
+  _feedbackSourceWitness = null;
+  expectedGeneration ??= _openGeneration;
   const data = draft.payload && draft.payload.layers ? draft.payload : draft;
+  if (!allowRetainedResults && data._imageRetainedResults?.length) throw new Error('Retained image results require their original session recovery');
   if (!Array.isArray(data.layers) || !data.layers.length || !Number.isInteger(data.imgWidth)
     || !Number.isInteger(data.imgHeight) || data.imgWidth <= 0 || data.imgHeight <= 0) {
     throw new Error('Invalid editable project dimensions or layers');
   }
   const identities = new Set();
+  let importPixels=0, importEncoded=0;
+  const checkImport = () => { if (importRevision !== null && (!state.editorOpen || expectedGeneration !== _openGeneration || !_originCurrent(expectedOrigin) || !validateTarget() || !_sceneAuthority.canApplyAt(importRevision))) throw new Error('Image import origin changed'); };
+  if (importRevision !== null && (data.imgWidth>CANVAS_MAX_IMPORT_DIMENSION || data.imgHeight>CANVAS_MAX_IMPORT_DIMENSION || data.imgWidth*data.imgHeight>CANVAS_MAX_IMPORT_PIXELS)) throw new Error('Image project dimensions exceed import limits');
+  if (importRevision !== null && (data._imageHostOriginal || data._imageSessionRecovery || data._imageProjectOperation || data._imagePendingCopy || data._imageAttachmentApply || data._imageSourceProvenance || (data._imageRetainedResults != null && (!Array.isArray(data._imageRetainedResults) || data._imageRetainedResults.length)))) throw new Error('This draft has recovery operations that require its original session');
   async function decode(node, fallbackW, fallbackH) {
+    checkImport();
     const id = String(node.id ?? '');
     if (!id || identities.has(id)) throw new Error('Missing or duplicate layer/mask identity');
     identities.add(id);
     const width = node.canvasW || fallbackW, height = node.canvasH || fallbackH;
+    if (importRevision !== null) {
+      const payloads=[node.dataUrl,...(node.inpaintSource?.v===1 ? ['ai','base','mask'].map(key=>node.inpaintSource[key]?.dataUrl) : [])];
+      const dimensions=[[width,height],...(node.inpaintSource?.v===1 ? ['ai','base','mask'].map(key=>[node.inpaintSource[key]?.width,node.inpaintSource[key]?.height]) : [])];
+      for (const [w,h] of dimensions) { if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w<1 || h<1 || w>CANVAS_MAX_IMPORT_DIMENSION || h>CANVAS_MAX_IMPORT_DIMENSION) throw new Error('Image project dimensions exceed import limits'); importPixels+=w*h; }
+      for (const payload of payloads) { if (typeof payload!=='string') throw new Error('Image project pixels are unavailable'); importEncoded+=payload.length; }
+      if (importPixels>CANVAS_MAX_IMPORT_PIXELS || importEncoded>Math.ceil(CANVAS_MAX_IMPORT_BYTES/3)*4+payloads.length*64) throw new Error('Image project exceeds import limits');
+    }
     const image = await new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => resolve(img);
@@ -1252,29 +1421,53 @@ async function _restoreDraft(draft, expectedGeneration = null) {
       if (!String(node.dataUrl || '').startsWith('data:image/')) return reject(new Error('Project pixels are unavailable'));
       img.src = node.dataUrl;
     });
+    checkImport();
     if (image.naturalWidth !== width || image.naturalHeight !== height) throw new Error('Project pixel dimensions disagree');
     const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
     const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+    const inpaintSource=await decodeInpaintSidecar(node.inpaintSource,document);
+    checkImport();
     const masks = await Promise.all((node.masks || []).map(mask => decode(mask, data.imgWidth, data.imgHeight)));
     if (node.activeMaskId != null && !masks.some(mask => mask.id === node.activeMaskId)) throw new Error('Project active mask is unavailable');
-    return { ..._editableMetadata(node), _editableExtras: { ...node }, id: node.id, canvas, ctx, masks,
+    return { ..._editableMetadata(node), _editableExtras: { ...node }, id: node.id, canvas, ctx, masks, inpaintSource,
       visible: node.visible !== false, opacity: typeof node.opacity === 'number' ? node.opacity : 1,
       locked: !!node.locked, activeMaskId: node.activeMaskId ?? null };
   }
   // Prepare every canvas before changing the open document. One bad layer
   // rejects the restore and cannot become a successful reopen receipt.
   const layers = await Promise.all(data.layers.map(layer => decode(layer, data.imgWidth, data.imgHeight)));
-  if (!state.editorOpen || (expectedGeneration != null && expectedGeneration !== _openGeneration)) throw new Error('Project restore superseded');
+  checkImport();
+  if (!state.editorOpen || expectedGeneration !== _openGeneration || !_originCurrent(expectedOrigin) || !validateTarget()) throw new Error('Project restore superseded');
+  if (legacy && data._imageProjectOperation) {
+    const pending=data._imageProjectOperation;
+    if (Object.keys(pending).sort().join(',')!=='kind,operationId,owner,phase,projectId,provider,resourceId' || !/^imps:[0-9a-f-]{36}$/.test(pending.operationId || '') || !['create','save','import'].includes(pending.kind) || pending.phase!=='issued' || pending.owner!==expectedOrigin.owner || pending.provider!==state.managedProvider || pending.resourceId!==state.managedResourceId || pending.projectId!==state.projectId) throw new Error('Project operation recovery source changed');
+    state._legacyProjectPending=Object.freeze(pending);
+  }
   if (data.activeLayerId != null && !layers.some(layer => layer.id === data.activeLayerId)) throw new Error('Project active layer is unavailable');
-  _initCanvasFromDims(data.imgWidth, data.imgHeight);
+  const offsets=new Map(layers.map((layer,index)=>[layer.id,{...(data.layers[index].offset || {x:0,y:0})}]));
+  const nextLayerId=data.nextLayerId || (Math.max(0,...[...identities].map(id=>Number(id.match(/(\d+)$/)?.[1]) || 0))+1);
+  const inpaintLayer=layers.find(layer=>layer.id===data.lastInpaintLayerId && layer.inpaintSource && ['ai','base','mask'].every(key=>layer.inpaintSource[key].width===data.imgWidth && layer.inpaintSource[key].height===data.imgHeight) && layer.canvas.width===data.imgWidth && layer.canvas.height===data.imgHeight);
+  const extras={...data}; for (const key of ['layers','_imageHostPixelsPending','_imageHostPixelsSaved','_imageHostOriginal','_imageSessionRecovery','_imageProjectOperation','_imagePendingCopy','_imageSceneRevision','_imageRetainedResults','_imageAttachmentApply','_imageSourceProvenance']) delete extras[key];
+  const maskCanvas=document.createElement('canvas'); maskCanvas.width=data.imgWidth; maskCanvas.height=data.imgHeight; const maskCtx=maskCanvas.getContext('2d');
+  if (!maskCtx) throw new Error('Image project canvas is unavailable');
+  const activeId=data.activeLayerId ?? layers[layers.length-1].id, active=layers.find(layer=>layer.id===activeId), activeMask=active?.masks?.find(mask=>mask.id===active.activeMaskId);
+  checkImport();
+  const importToken=importRevision === null ? null : _sceneAuthority.beginGesture(_gestureView,'import-project');
+  if (importRevision !== null && !importToken) throw new Error('Another image edit is active');
+  try {
+  state.imgWidth=data.imgWidth; state.imgHeight=data.imgHeight;
+  state.maskCanvas=activeMask?.canvas || maskCanvas; state.maskCtx=activeMask?.ctx || maskCtx;
   state.layers = layers;
-  state.layerOffsets.clear();
-  layers.forEach((layer, index) => state.layerOffsets.set(layer.id, { ...(data.layers[index].offset || { x: 0, y: 0 }) }));
-  state.nextLayerId = data.nextLayerId || (Math.max(0, ...[...identities].map(id => Number(id.match(/(\d+)$/)?.[1]) || 0)) + 1);
-  state.activeLayerId = data.activeLayerId ?? layers[layers.length - 1].id;
-  state._editableExtras = { ...data }; delete state._editableExtras.layers;
-  const mask = _getActiveMaskLayer();
-  if (mask) { state.maskCanvas = mask.canvas; state.maskCtx = mask.ctx; }
+  state.layerOffsets=offsets;
+  state.nextLayerId = nextLayerId;
+  state.activeLayerId = activeId;
+  state.lastInpaintLayerId=inpaintLayer?.id || null;
+  state._editableExtras = extras;
+  if (importRevision !== null) { state.undoStack=[]; state.redoStack=[]; }
+  _markSceneChanged();
+  } finally { if (importToken) _sceneAuthority.endGesture(importToken); }
+  try { if (state.mainCanvas) { state.mainCanvas.width=data.imgWidth; state.mainCanvas.height=data.imgHeight; } _syncInpaintControls(); }
+  catch (error) { console.error('[imps] project view refresh failed',error); uiModule?.showToast?.('Image imported, but its view could not be refreshed.'); }
   return { decoded: true, layerIds: layers.map(layer => String(layer.id)), payloadCount: identities.size };
 }
 
@@ -1293,135 +1486,33 @@ function _initCanvasFromDims(w, h) {
   state.maskCtx = state.maskCanvas.getContext('2d');
 }
 
-function _restoreState(snap) {
-  // Restore canvas dimensions first so layer imageData fits cleanly. This
-  // is what makes Ctrl+Z work for crops (which change the main canvas
-  // size) in addition to paint strokes.
-  const dimsChanged = snap.imgWidth && snap.imgHeight &&
-    (snap.imgWidth !== state.imgWidth || snap.imgHeight !== state.imgHeight);
+function _restoreViewAfterHistory(snap, dimsChanged) {
   if (snap.imgWidth && snap.imgHeight) {
-    state.imgWidth = snap.imgWidth;
-    state.imgHeight = snap.imgHeight;
-    if (state.mainCanvas) {
-      state.mainCanvas.width = snap.imgWidth;
-      state.mainCanvas.height = snap.imgHeight;
-    }
-    if (state.maskCanvas) {
-      state.maskCanvas.width = snap.imgWidth;
-      state.maskCanvas.height = snap.imgHeight;
-    }
-  }
-  const layerStates = snap.layers || snap;
-  // Rebuild the state.layers array from the snapshot order. This lets Ctrl+Z
-  // restore deleted layers (previously the loop only updated existing
-  // ones and silently dropped any layer the snapshot still knew about).
-  // Layers absent from the snapshot are dropped — that's the desired
-  // behavior for undoing an "+Add" or a paste.
-  const _existingById = new Map(state.layers.map(l => [l.id, l]));
-  const _rebuilt = [];
-  for (const s of layerStates) {
-    let layer = _existingById.get(s.id);
-    if (!layer) {
-      // Layer was deleted (or merged away). Recreate it from the
-      // snapshot's ImageData so Ctrl+Z brings it back.
-      const c = document.createElement('canvas');
-      c.width = s.canvasW || state.imgWidth;
-      c.height = s.canvasH || state.imgHeight;
-      layer = { id: s.id, name: s.name, canvas: c, ctx: c.getContext('2d'),
-                visible: true, opacity: 1, locked: false };
-    } else {
-      _existingById.delete(s.id);
-    }
-    layer.name = s.name;
-    layer.visible = s.visible;
-    layer.opacity = s.opacity;
-    layer.locked = s.locked;
-    if (s.canvasW && s.canvasH) {
-      layer.canvas.width = s.canvasW;
-      layer.canvas.height = s.canvasH;
-    }
-    try { if (s.imageData) layer.ctx.putImageData(s.imageData, 0, 0); } catch (_) {}
-    state.layerOffsets.set(layer.id, { ...s.offset });
-    // Restore adjustment sub-layers + invalidate the composite cache
-    // so the live render reflects the rolled-back FX state.
-    layer.adjLayers = s.adjLayers ? JSON.parse(JSON.stringify(s.adjLayers)) : [];
-    if (s.isBase !== undefined) layer.isBase = s.isBase;
-    // Restore mask sub-layers — rebuild each mask's canvas from the
-    // snapshot's imageData. We don't reuse old mask canvases (snapshot
-    // dims might differ after a transform) so a fresh canvas is safer.
-    layer.masks = (s.masks || []).map(ms => {
-      const mc = document.createElement('canvas');
-      mc.width = ms.canvasW || state.imgWidth;
-      mc.height = ms.canvasH || state.imgHeight;
-      const mctx = mc.getContext('2d');
-      try { if (ms.imageData) mctx.putImageData(ms.imageData, 0, 0); } catch {}
-      return { id: ms.id, name: ms.name, canvas: mc, ctx: mctx, visible: ms.visible !== false };
-    });
-    layer.activeMaskId = s.activeMaskId || (layer.masks[0]?.id ?? null);
-    layer._adjFinal = null;
-    layer._adjFinalKey = null;
-    layer._stagedAdj = null;
-    layer._editingAdjId = null;
-    _rebuilt.push(layer);
-  }
-  // Drop any layer that's no longer in the snapshot.
-  for (const lost of _existingById.values()) state.layerOffsets.delete(lost.id);
-  state.layers = _rebuilt;
-  if (!state.layers.find(l => l.id === state.activeLayerId) && state.layers.length) {
-    state.activeLayerId = state.layers[state.layers.length - 1].id;
+    if (state.mainCanvas) { state.mainCanvas.width = snap.imgWidth; state.mainCanvas.height = snap.imgHeight; }
   }
   // Repoint the global mask plumbing at the active parent's active
   // mask sub-layer (if any) — undo can swap the actual canvas object.
   {
     const m = _getActiveMaskLayer();
     if (m) { state.maskCanvas = m.canvas; state.maskCtx = m.ctx; }
-  }
-  // Restore wand selection (or clear it if the snapshot had none).
-  if (snap.wand && snap.wand.imageData) {
-    const mc = document.createElement('canvas');
-    mc.width = snap.wand.w;
-    mc.height = snap.wand.h;
-    mc.getContext('2d').putImageData(snap.wand.imageData, 0, 0);
-    state.wandMask = mc;
-    state.wandLayerId = snap.wand.layerId;
-    state.wandLastSeed = snap.wand.seed ? { ...snap.wand.seed } : null;
-  } else {
-    state.wandMask = null;
-    state.wandLayerId = null;
-    state.wandLastSeed = null;
+    else { state.maskCanvas = null; state.maskCtx = null; }
   }
   composite();
   _renderLayerPanel();
   _syncToolClearIndicators();
+  _syncInpaintControls();
   // Refit the viewport when canvas size changed (crop undo/redo) so the
   // user sees the full restored image, not the zoomed-in upper-left
   // corner left over from the previous fit.
   if (dimsChanged) _fitZoom();
   // Update the topbar canvas-size badge directly (the helper is scoped
   // inside _buildEditor, so we touch the DOM here).
-  const sizeLabel = document.getElementById('ge-canvas-size');
+  const sizeLabel = state.container?.querySelector(':is(#ge-canvas-size,[data-ge-id="ge-canvas-size"])');
   if (sizeLabel) sizeLabel.textContent = `${state.imgWidth}×${state.imgHeight}`;
 }
 
-function undo() {
-  if (state.undoStack.length === 0) return;
-  const cur = _snapshotState();
-  cur._label = 'Current';
-  cur._ts = Date.now();
-  state.redoStack.push(cur);
-  _restoreState(state.undoStack.pop());
-  _refreshHistoryPanelIfOpen();
-}
-
-function redo() {
-  if (state.redoStack.length === 0) return;
-  const cur = _snapshotState();
-  cur._label = 'Current';
-  cur._ts = Date.now();
-  state.undoStack.push(cur);
-  _restoreState(state.redoStack.pop());
-  _refreshHistoryPanelIfOpen();
-}
+function undo() { return _sceneAuthority.undo(); }
+function redo() { return _sceneAuthority.redo(); }
 
 // Jump to any state in the labeled history. Negative offsets go back
 // (into state.undoStack), positive go forward (into state.redoStack). 0 = current.
@@ -1429,10 +1520,11 @@ function redo() {
 // History panel — full implementation in editor/history-panel.js.
 // Wrappers preserve the legacy names that the topbar History button
 // + undo/redo paths already reference.
-const _historyPanel = createHistoryPanel({ undo, redo });
-const _jumpToHistory             = _historyPanel.jumpToHistory;
-const _toggleHistoryPanel        = _historyPanel.toggleHistoryPanel;
-const _refreshHistoryPanelIfOpen = _historyPanel.refreshHistoryPanelIfOpen;
+let _historyPanel;
+function _initHistoryPanel(container) { _historyPanel = createHistoryPanel({ scopeIds, undo, redo, state, root: container, lifetime: () => _coreLifetime, isFocused: _coreFocused, modalManager }); }
+const _jumpToHistory = (...args) => _historyPanel?.jumpToHistory(...args);
+const _toggleHistoryPanel = (...args) => _historyPanel?.toggleHistoryPanel(...args);
+const _refreshHistoryPanelIfOpen = (...args) => _historyPanel?.refreshHistoryPanelIfOpen(...args);
 
 // _relTime lives in editor/layer-helpers.js.
 
@@ -1458,7 +1550,7 @@ function _beginDraw(e) {
   // "no active layer → bail" gate for it specifically.
   if (state.tool !== 'inpaint' && (!layer || layer.locked)) return;
   // Keep activeLayerId in sync so downstream lookups resolve.
-  if (layer && state.activeLayerId !== layer.id) state.activeLayerId = layer.id;
+  if (layer && state.activeLayerId !== layer.id && !_withSceneMutation('active-layer',() => {state.activeLayerId = layer.id; _markSceneChanged(); return true;})) return;
   if (state.tool === 'move') return _beginMove(e);
   if (state.tool === 'crop') return _beginCrop(e);
   if (state.tool === 'lasso') return _beginLasso(e);
@@ -1528,7 +1620,8 @@ function _endDraw() {
 // Stroke pipeline — paints one segment last→current onto the active
 // layer (or active mask sub-layer). Full implementation in
 // editor/stroke-pipeline.js.
-const _strokePipeline = createStrokePipeline({
+let _strokePipeline;
+function init_strokePipeline() { _strokePipeline = createStrokePipeline({ state, root: state.container, lifetime: _coreLifetime,
   // Use the fallback-capable parent resolver so the stroke pipeline
   // and _getActiveMaskLayer() agree on which layer is active. Plain
   // activeLayer() returns null when activeLayerId is stale, which made
@@ -1537,9 +1630,9 @@ const _strokePipeline = createStrokePipeline({
   activeLayer: () => activeLayer() || _activeParentLayer(),
   getActiveMaskLayer: () => _getActiveMaskLayer(),
   composite,
-});
-const _strokeTo      = _strokePipeline.strokeTo;
-const _cloneStrokeTo = _strokePipeline.cloneStrokeTo;
+}); }
+const _strokeTo = (...args) => _strokePipeline?.strokeTo(...args);
+const _cloneStrokeTo = (...args) => _strokePipeline?.cloneStrokeTo(...args);
 
 // ── Brush cursor overlay ──
 
@@ -1553,14 +1646,14 @@ function _updateBrushCursor(e) {
   if (!state.cursorEl) {
     state.cursorEl = document.createElement('div');
     state.cursorEl.className = 'ge-brush-cursor';
-    document.body.appendChild(state.cursorEl);
+    _editorPortal?.appendChild(state.cursorEl);
   }
 
   // Lasso uses the feather radius (or a sensible default) so the circle
   // shows the area that will be selected. Other tools use the brush size.
   let basePx;
   if (state.tool === 'lasso') {
-    const f = parseInt(document.getElementById('ge-lasso-feather')?.value || '0');
+    const f = parseInt(_editorFind('ge-lasso-feather')?.value || '0');
     basePx = Math.max(10, f * 2);
   } else {
     basePx = state.brushSize;
@@ -1603,20 +1696,22 @@ function _updateBrushCursor(e) {
 // `_beginMove` / `_continueMove` / `_endMove` to the factory output so
 // the existing dispatcher (_beginDraw / _continueDraw / _endDraw) keeps
 // working without changes.
-const _moveTool = createMoveTool({ activeLayer, saveState: _saveState, composite });
-const _beginMove    = _moveTool.begin;
-const _continueMove = _moveTool.drag;
-const _endMove      = _moveTool.end;
+let _moveTool;
+function init_moveTool() { _moveTool = createMoveTool({ state, root: state.container, lifetime: _coreLifetime, activeLayer, saveState: _saveState, composite, markSceneChanged: _markSceneChanged, gesture:_moveGesture, sceneRevision:()=>_sceneAuthority.revision, borrowTransform:layer=>_transformSession?.borrowMove(layer) }); }
+const _beginMove = (...args) => _moveTool?.begin(...args);
+const _continueMove = (...args) => _moveTool?.drag(...args);
+const _endMove = (...args) => _moveTool?.end(...args);
 
 // ── Crop tool ──
 
 // Crop tool — full implementation in editor/tools/crop.js. Wire
 // `_beginCrop` / `_continueCrop` / `_endCrop` to the factory output so
 // the existing dispatcher keeps working without changes.
-const _cropTool = createCropTool({ composite, showCropApply: () => _showCropApply() });
-const _beginCrop    = _cropTool.begin;
-const _continueCrop = _cropTool.drag;
-const _endCrop      = _cropTool.end;
+let _cropTool;
+function init_cropTool() { _cropTool = createCropTool({ state, root: state.container, lifetime: _coreLifetime, composite, showCropApply: () => _showCropApply(), capturePreview:() => {_cropPreview=_previewOrigin();} }); }
+const _beginCrop = (...args) => _cropTool?.begin(...args);
+const _continueCrop = (...args) => _cropTool?.drag(...args);
+const _endCrop = (...args) => _cropTool?.end(...args);
 
 function _showCropApply() {
   let pop = state.container.querySelector('.ge-crop-apply');
@@ -1686,13 +1781,17 @@ function _showCropApply() {
 
 function _applyCrop() {
   if (!state.cropRect) return;
-  _saveState('Crop');
+  if (!_previewCurrent(_cropPreview)) {uiModule?.showToast('The image changed; draw the crop again.'); return;}
+  return _withSceneMutation('crop',() => {
   const { x, y, w, h } = state.cropRect;
   const cw = Math.round(w);
   const ch = Math.round(h);
-  for (const layer of state.layers) {
+  const pixels=state.layers.map(layer => {
     const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
-    const data = layer.ctx.getImageData(x - off.x, y - off.y, cw, ch);
+    return {layer,data:layer.ctx.getImageData(x - off.x, y - off.y, cw, ch)};
+  });
+  _saveState('Crop');
+  for (const {layer,data} of pixels) {
     layer.canvas.width = cw;
     layer.canvas.height = ch;
     layer.ctx.putImageData(data, 0, 0);
@@ -1704,10 +1803,13 @@ function _applyCrop() {
   state.imgHeight = ch;
   if (state.maskCanvas) { state.maskCanvas.width = cw; state.maskCanvas.height = ch; }
   state.cropRect = null;
+  _markSceneChanged();
   const btn = state.container.querySelector('.ge-crop-apply');
   if (btn) btn.remove();
   composite();
   _fitZoom();
+  _cropPreview=null;
+  });
 }
 
 // Text tool was removed from the toolbar; the _placeText implementation
@@ -1719,7 +1821,8 @@ function _applyCrop() {
 // Transform session — full implementation in
 // editor/tools/transform-session.js. Wrappers preserve the legacy
 // names that the dispatcher / toolbar / shortcuts already reference.
-const _transformSession = createTransformSession({
+let _transformSession;
+function init_transformSession() { _transformSession = createTransformSession({ scopeIds, state, root: state.container, lifetime: _coreLifetime, markSceneChanged: _markSceneChanged, sceneRevision: () => _sceneAuthority.revision, gesture: _transformGesture,
   activeLayer,
   saveState: _saveState,
   composite,
@@ -1729,62 +1832,71 @@ const _transformSession = createTransformSession({
   hideCanvasLoading: () => _hideCanvasLoading(),
   undo,
   uiModule,
-});
-const _startTransform      = _transformSession.startTransform;
-const _openTransformPopup  = _transformSession.openTransformPopup;
-const _closeTransformPopup = _transformSession.closeTransformPopup;
-const _reapplyTransform    = _transformSession.reapplyTransform;
-const _confirmTransform    = _transformSession.confirmTransform;
-const _cancelTransform     = _transformSession.cancelTransform;
+}); }
+const _startTransform = (...args) => _transformSession?.startTransform(...args);
+const _openTransformPopup = (...args) => _transformSession?.openTransformPopup(...args);
+const _closeTransformPopup = (...args) => _transformSession?.closeTransformPopup(...args);
+const _reapplyTransform = (...args) => _transformSession?.reapplyTransform(...args);
+const _confirmTransform = (...args) => _transformSession?.confirmTransform(...args);
+const _cancelTransform = (...args) => _transformSession?.cancelTransform(...args);
 
 // ── Lasso tool ──
 
 // Lasso tool — full implementation in editor/tools/lasso.js.
-const _lassoTool = createLassoTool({
+let _lassoTool;
+function init_lassoTool() { _lassoTool = createLassoTool({ state, root: state.container, lifetime: _coreLifetime,
+  capturePreview:() => {_lassoPreview=_previewOrigin();},
   composite,
   drawLassoOverlay: () => _drawLassoOverlay(),
   syncToolClearIndicators: () => _syncToolClearIndicators(),
-});
-const _beginLasso    = _lassoTool.begin;
-const _continueLasso = _lassoTool.drag;
-const _endLasso      = _lassoTool.end;
+}); }
+const _beginLasso = (...args) => _lassoTool?.begin(...args);
+const _continueLasso = (...args) => _lassoTool?.drag(...args);
+const _endLasso = (...args) => _lassoTool?.end(...args);
 
 // Magic wand — selection-only click handler in editor/tools/wand.js.
-const _wandTool = createWandTool({
+let _wandTool;
+function init_wandTool() { _wandTool = createWandTool({ state, root: state.container, lifetime: _coreLifetime,
+  clearWand:options => _wandClear(options),
   activeLayer,
   saveState: _saveState,
   composite,
   wandHits: (x, y) => _wandHits(x, y),
   runMagicWand: (x, y, mode) => _runMagicWand(x, y, mode),
-});
+}); }
 
 // Clone-stamp tool — source-pick + stroke-start handler in
 // editor/tools/clone.js. Per-sample stamping still runs through the
 // shared stroke pipeline (`_strokeTo`) since clone-mode is detected
 // there from state.cloneSourceSnapshot.
-const _cloneTool = createCloneTool({
+let _cloneTool;
+function init_cloneTool() { _cloneTool = createCloneTool({ state, root: state.container, lifetime: _coreLifetime,
+  gesture: _strokeGesture,
   activeLayer,
   saveState: _saveState,
   strokeTo: (x, y) => _strokeTo(x, y),
   showToast: (msg) => { if (uiModule) uiModule.showToast(msg); },
-});
+}); }
 
 // Transform-tool drag interactions (handle picking, rotation, resize)
 // in editor/tools/transform-drag.js. The dispatcher calls
 // `tryBegin/tryContinue/tryEnd` and short-circuits when they return true.
-const _transformDragTool = createTransformDragTool({
-  beginMove: (e) => _beginMove(e),
+let _transformDragTool;
+function init_transformDragTool() { _transformDragTool = createTransformDragTool({ state, root: state.container, lifetime: _coreLifetime,
+  beginMove: (e,options) => _beginMove(e,options),
   composite,
   drawTransformHandles: () => _drawTransformHandles(),
   reapplyTransform: () => _reapplyTransform(),
   getTransformHandle: (x, y) => _getTransformHandle(x, y),
   cursorForHandle: _cursorForHandle,
-});
+}); }
 
 // Shared stroke pipeline (brush / eraser / inpaint) in
 // editor/tools/stroke.js. Clone reuses tryContinue / tryEnd via the
 // shared drawing flag; clone's own begin is in editor/tools/clone.js.
-const _strokeTool = createStrokeTool({
+let _strokeTool;
+function init_strokeTool() { _strokeTool = createStrokeTool({ state, root: state.container, lifetime: _coreLifetime, markSceneChanged: _markSceneChanged,
+  gesture: _strokeGesture,
   saveState: _saveState,
   strokeTo: (x, y) => _strokeTo(x, y),
   composite,
@@ -1794,7 +1906,7 @@ const _strokeTool = createStrokeTool({
   createLayer,
   renderLayerPanel: () => _renderLayerPanel(),
   syncToolClearIndicators: () => _syncToolClearIndicators(),
-});
+}); }
 
 // Compute the outward-normal offset of the lasso polygon by `grow`
 // pixels at each vertex. Lets the Edge stroke slider visually move
@@ -1810,8 +1922,8 @@ function _drawLassoOverlay() {
   // Read live slider values so the overlay shows the actual edge that
   // will be committed: Edge stroke shifts the polygon outline in/out;
   // Feather draws a soft red halo to suggest the alpha fade.
-  const featherEl = document.getElementById('ge-lasso-feather');
-  const growEl = document.getElementById('ge-lasso-grow');
+  const featherEl = _editorFind('ge-lasso-feather');
+  const growEl = _editorFind('ge-lasso-grow');
   const feather = featherEl ? parseInt(featherEl.value || '0', 10) : 0;
   const grow = growEl ? parseInt(growEl.value || '0', 10) : 0;
   const ringPts = grow ? _lassoOffsetPoints(grow) : state.lassoPoints;
@@ -1906,13 +2018,17 @@ function _wandHits(cx, cy) {
   } catch { return false; }
 }
 
+function _captureWandOrigin() {const layer=activeLayer(), activeMask=_getActiveMaskLayer(), sourceCanvas=activeMask?.canvas || layer?.canvas; return {..._previewOrigin(),activeMask,sourceCanvas,sourceWidth:sourceCanvas?.width,sourceHeight:sourceCanvas?.height,selection:state.wandMask,seed:state.wandLastSeed};}
+function _wandOriginCurrent(value) {return _previewCurrent(value) && value.activeMask===_getActiveMaskLayer() && value.sourceCanvas===(value.activeMask?.canvas || value.layer?.canvas) && value.sourceWidth===value.sourceCanvas?.width && value.sourceHeight===value.sourceCanvas?.height && value.selection===state.wandMask && value.seed===state.wandLastSeed;}
 function _runMagicWand(cx, cy, mode = 'replace', opts = {}) {
+  const expected=opts.expected || _captureWandOrigin();
+  if (!_wandOriginCurrent(expected)) return;
   if (!opts.retune && !opts.deferred) {
     const cleanup = _showWandLoading();
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         try {
-          _runMagicWand(cx, cy, mode, { ...opts, deferred: true });
+          _runMagicWand(cx, cy, mode, { ...opts, expected, deferred: true });
         } finally {
           cleanup();
         }
@@ -1920,6 +2036,8 @@ function _runMagicWand(cx, cy, mode = 'replace', opts = {}) {
     });
     return;
   }
+  return _withSceneMutation('wand-selection',() => {
+  if (!_wandOriginCurrent(expected)) return;
   const layer = activeLayer();
   if (!layer || layer.locked) return;
   // If an active mask sub-layer is selected, the wand operates on the
@@ -1933,9 +2051,6 @@ function _runMagicWand(cx, cy, mode = 'replace', opts = {}) {
   // Snapshot current state to undo BEFORE mutating the selection, but
   // skip when called via the tolerance slider (`opts.retune`) so dragging
   // the slider doesn't fill the undo stack with intermediate states.
-  if (!opts.retune) _saveState();
-  // Remember the seed so the tolerance slider can re-run the wand live.
-  state.wandLastSeed = { x: cx, y: cy, mode };
   const off = activeMask ? { x: 0, y: 0 } : (state.layerOffsets.get(layer.id) || { x: 0, y: 0 });
   const lx = Math.floor(cx - off.x);
   const ly = Math.floor(cy - off.y);
@@ -1951,6 +2066,8 @@ function _runMagicWand(cx, cy, mode = 'replace', opts = {}) {
   // Returns a mask canvas at (w × h) with white where the fill landed.
   const mask = _floodFillMask(src, w, h, lx, ly, state.wandTolerance);
   if (!mask) return;
+  if (!opts.retune) _saveState();
+  state.wandLastSeed = { x: cx, y: cy, mode };
   // Merge with existing selection per `mode`. If the existing mask is
   // for a different layer or has different dimensions, treat as replace
   // since merging doesn't make sense across canvases.
@@ -1970,8 +2087,10 @@ function _runMagicWand(cx, cy, mode = 'replace', opts = {}) {
     state.wandMask = mask;
     state.wandLayerId = layer.id;
   }
+  _markSceneChanged();
   composite();
   _syncToolClearIndicators();
+  });
 }
 
 async function _runSamSelection(e) {
@@ -1993,17 +2112,19 @@ async function _runSamSelection(e) {
   _cancelSamQuery(false);
   const controller = new AbortController();
   _samAbortController = controller;
+  const view=_coreLifetime, origin=_captureOrigin(), unregister=view?.add(() => controller.abort()) || (() => {});
   const cleanup = _showWandLoading();
   try {
     await _requestAndApplySamMask(layer, {
       points: [{ x: lx, y: ly, label: 1 }],
     }, mode, { x: coords.x, y: coords.y }, { signal: controller.signal });
   } catch (err) {
-    if (err?.name !== 'AbortError' && uiModule) {
+    if (!view?.disposed && _originCurrent(origin) && err?.name !== 'AbortError' && uiModule) {
       uiModule.showToast(err.message || String(err), 7000);
     }
   } finally {
     cleanup();
+    unregister();
     if (_samAbortController === controller) _samAbortController = null;
   }
 }
@@ -2014,14 +2135,14 @@ async function _runSamTextSelection() {
     if (uiModule) uiModule.showToast('Select an unlocked layer');
     return;
   }
-  const input = document.getElementById('ge-sam-query');
+  const input = _editorFind('ge-sam-query');
   const text = (input?.value || '').trim();
   if (!text) {
     if (uiModule) uiModule.showToast('Type an object to find');
     input?.focus();
     return;
   }
-  const btn = document.getElementById('ge-sam-find');
+  const btn = _editorFind('ge-sam-find');
   const old = btn?.innerHTML;
   if (btn) {
     btn.disabled = true;
@@ -2030,17 +2151,19 @@ async function _runSamTextSelection() {
   _cancelSamQuery(false);
   const controller = new AbortController();
   _samAbortController = controller;
+  const view=_coreLifetime, origin=_captureOrigin(), unregister=view?.add(() => controller.abort()) || (() => {});
   const cleanup = _showWandLoading();
   try {
     await _requestAndApplySamMask(layer, { text }, state.wandMode || 'replace', null, { signal: controller.signal });
   } catch (err) {
-    if (err?.name !== 'AbortError' && uiModule) {
+    if (!view?.disposed && _originCurrent(origin) && err?.name !== 'AbortError' && uiModule) {
       uiModule.showToast(err.message || String(err), 7000);
     }
   } finally {
     cleanup();
+    unregister();
     if (_samAbortController === controller) _samAbortController = null;
-    if (btn) {
+    if (btn && !view?.disposed && _originCurrent(origin)) {
       btn.disabled = false;
       btn.innerHTML = old || '<span class="ge-btn-ai-mark" aria-hidden="true">✦</span>Find';
     }
@@ -2048,32 +2171,49 @@ async function _runSamTextSelection() {
 }
 
 async function _requestAndApplySamMask(layer, payload, mode, seedPoint, opts = {}) {
+  const view=_coreLifetime, origin=_captureOrigin(), revision=_sceneAuthority.revision, width=layer.canvas.width, height=layer.canvas.height, layerId=String(layer.id);
+  if (!view || view.disposed || !_originCurrent(origin) || !_sceneAuthority.canApplyAt(revision) || activeLayer()!==layer || !state.layers.includes(layer) || !Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width<1 || height<1 || width>16384 || height>16384 || width*height>67108864 || !layerId || layerId.length>256 || !['replace','add','subtract'].includes(mode)) throw new Error('Finish the current image edit before selecting.');
+  const current = () => !view.disposed && !opts.signal?.aborted && _originCurrent(origin) && state.editorOpen && _sceneAuthority.canApplyAt(revision) && state.layers.includes(layer) && activeLayer()===layer && String(layer.id)===layerId && layer.canvas.width===width && layer.canvas.height===height;
+  let resultId=null, submitted=false, received=false, applied=false;
+  try {
+  if (!legacy) resultId=sessionPersistence.reserveResult({kind:'ai',epoch:String(_impsAccountEpoch),generation:revision});
+  const image=layer.canvas.toDataURL('image/png').split(',')[1];
+  if (resultId) {sessionPersistence.submitResult(resultId); submitted=true;}
   const res = await fetch('/api/image/mask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: opts.signal,
       body: JSON.stringify({
-        image: layer.canvas.toDataURL('image/png').split(',')[1],
+        image,
         ...payload,
       }),
     });
-  const data = await res.json().catch(() => ({}));
+  let data;
+  try { data=await res.json(); } catch(error) {if (!res.ok && resultId) {sessionPersistence.rejectResult(resultId); submitted=false;} throw error;}
   if (!res.ok || !data.mask) {
+    if (resultId) {sessionPersistence.rejectResult(resultId); submitted=false;}
     throw new Error(data.detail || data.error || `Mask failed (${res.status})`);
   }
+  if (resultId) {sessionPersistence.receiveResult(resultId,{bytes:data.mask,mime:'image/png',metadata:{label:'Selection mask',mask:{layerId,width,height,mode}}}); received=true;}
+  if (!current()) {if (!view.disposed && _originCurrent(origin)) uiModule?.showToast(resultId ? 'Selection mask retained for this image.' : 'Selection could not be applied; run it again.'); return;}
   if (!data.bbox) {
     throw new Error(data.grounding ? `Found ${data.grounding.label || 'object'}, but SAM returned an empty mask` : 'SAM returned an empty mask');
   }
 
   const img = new Image();
   await new Promise((resolve, reject) => {
-    img.onload = resolve;
-    img.onerror = () => reject(new Error('Failed to decode mask'));
+    const finish=error => {opts.signal?.removeEventListener('abort',abort); img.onload=null; img.onerror=null; if (error) reject(error); else resolve();};
+    const abort=() => {img.src=''; finish(Object.assign(new Error('Selection retired'),{name:'AbortError'}));};
+    if (opts.signal?.aborted) return abort();
+    opts.signal?.addEventListener('abort',abort,{once:true});
+    img.onload = () => finish();
+    img.onerror = () => finish(new Error('Failed to decode mask'));
     img.src = 'data:image/png;base64,' + data.mask;
   });
+  if (!current()) {if (!view.disposed && _originCurrent(origin)) uiModule?.showToast(resultId ? 'Selection mask retained for this image.' : 'Selection could not be applied; run it again.'); return;}
   const mask = document.createElement('canvas');
-  mask.width = layer.canvas.width;
-  mask.height = layer.canvas.height;
+  mask.width = width;
+  mask.height = height;
   const mctx = mask.getContext('2d');
   mctx.drawImage(img, 0, 0, mask.width, mask.height);
   const maskData = mctx.getImageData(0, 0, mask.width, mask.height);
@@ -2087,6 +2227,9 @@ async function _requestAndApplySamMask(layer, payload, mode, seedPoint, opts = {
   }
   mctx.putImageData(maskData, 0, 0);
 
+  const token=_sceneAuthority.beginGesture(_gestureView,'sam-selection');
+  if (!token) {uiModule?.showToast(resultId ? 'Selection mask retained for this image.' : 'Selection could not be applied; run it again.'); return;}
+  try {
   _saveState();
   const compatible = state.wandMask && state.wandLayerId === layer.id &&
     state.wandMask.width === mask.width && state.wandMask.height === mask.height;
@@ -2106,11 +2249,21 @@ async function _requestAndApplySamMask(layer, payload, mode, seedPoint, opts = {
     ? { x: seedPoint.x, y: seedPoint.y, mode, source: 'sam' }
     : { x: 0, y: 0, mode, source: 'sam-text' };
   state.wandMaskVisible = true;
+  _markSceneChanged();
+  if (resultId) sessionPersistence.resolveResult(resultId);
+  applied=true;
   composite();
   _syncToolClearIndicators();
   if (data.grounding && uiModule) {
     const pct = Math.round((data.grounding.score || 0) * 100);
     uiModule.showToast(`Selected ${data.grounding.label || 'object'}${pct ? ` (${pct}%)` : ''}`, 2500);
+  }
+  } finally {_sceneAuthority.endGesture(token);}
+  } catch(error) {
+    if (applied) throw error;
+    if (resultId && !received) {try {if (submitted) sessionPersistence.markResultUnknown(resultId); else sessionPersistence.resolveResult(resultId);} catch (_) {}}
+    if (received) {if (!view.disposed && _originCurrent(origin)) uiModule?.showToast('Selection mask retained for this image.'); return;}
+    throw error;
   }
 }
 
@@ -2157,7 +2310,7 @@ function _drawWandOverlay() {
   state.mainCtx.restore();
 }
 
-function _wandClear() {
+function _wandClearOwned() {
   state.wandMask = null;
   state.wandLayerId = null;
   state.wandLastSeed = null;
@@ -2165,6 +2318,7 @@ function _wandClear() {
   composite();
   _syncToolClearIndicators();
 }
+function _wandClear({history=true}={}) {if (!state.wandMask) return false; return _withSceneMutation('wand-clear',() => {if (history) _saveState('Clear selection'); _wandClearOwned(); _markSceneChanged(); return true;});}
 
 // Hover thumbnail — generated by downscaling the layer's canvas into a
 // small floating panel. Lives in document.body so panel `overflow:
@@ -2174,7 +2328,7 @@ function _showLayerThumb(rowEl, layer) {
   if (!state.layerThumbEl) {
     state.layerThumbEl = document.createElement('div');
     state.layerThumbEl.className = 'ge-layer-thumb';
-    document.body.appendChild(state.layerThumbEl);
+    _editorPortal?.appendChild(state.layerThumbEl);
   }
   const SIZE = 120;
   // Downscale layer onto a small canvas, preserving aspect.
@@ -2208,8 +2362,9 @@ function _hideLayerThumb() {
 // Shift+click on a layer row → use that layer's opaque pixels as a
 // wand-style selection. Lifts pixel alpha > 0 into the wand mask so the
 // user can immediately Bg-Remove / Erase / Copy through the layer.
-function _loadLayerAlphaAsSelection(layer) {
-  if (!layer || !layer.canvas) return;
+function _loadLayerAlphaAsSelection(layer) {return _withSceneMutation('layer-alpha-selection',()=>_loadLayerAlphaAsSelectionOwned(layer));}
+function _loadLayerAlphaAsSelectionOwned(layer) {
+  if (!layer || !layer.canvas || !state.layers.includes(layer)) return;
   const w = layer.canvas.width, h = layer.canvas.height;
   const src = layer.ctx.getImageData(0, 0, w, h).data;
   const mask = document.createElement('canvas');
@@ -2229,6 +2384,7 @@ function _loadLayerAlphaAsSelection(layer) {
   state.wandMask = mask;
   state.wandLayerId = layer.id;
   state.wandLastSeed = null;
+  _markSceneChanged();
   composite();
   if (uiModule) uiModule.showToast('Layer pixels selected');
 }
@@ -2236,7 +2392,8 @@ function _loadLayerAlphaAsSelection(layer) {
 // Invert the active selection: lasso (point list — turn into a polygon
 // covering the canvas with the lasso polygon as a hole) or wand (flip
 // the mask alpha). Wired to Ctrl+Alt+I.
-function _invertSelection() {
+function _invertSelection() {if (!state.wandMask && state.lassoPoints.length>=3 && !_previewCurrent(_lassoPreview)) {uiModule?.showToast('The image changed; draw the selection again.'); return false;} return _withSceneMutation('invert-selection',_invertSelectionOwned);}
+function _invertSelectionOwned() {
   if (state.wandMask && state.wandLayerId) {
     _saveState();
     const w = state.wandMask.width, h = state.wandMask.height;
@@ -2248,6 +2405,7 @@ function _invertSelection() {
       d[i] = 255; d[i + 1] = 255; d[i + 2] = 255; d[i + 3] = a;
     }
     ctx.putImageData(data, 0, 0);
+    _markSceneChanged();
     composite();
     if (uiModule) uiModule.showToast('Selection inverted');
     return true;
@@ -2273,6 +2431,7 @@ function _invertSelection() {
     state.wandLastSeed = null;
     state.lassoPoints = [];
     state.lassoActive = false;
+    _markSceneChanged();
     composite();
     if (uiModule) uiModule.showToast('Selection inverted (converted to wand)');
     return true;
@@ -2282,10 +2441,12 @@ function _invertSelection() {
 
 // Convert the wand selection into the inpaint mask, mirroring _lassoToMask.
 // Switches to the inpaint tool so the user sees the result right away.
-function _wandToMask() {
+function _wandToMask() {return _withSceneMutation('wand-to-mask',_wandToMaskOwned);}
+function _wandToMaskOwned({skipHistory=false}={}) {
   if (!state.wandMask || !state.wandLayerId) return;
   const layer = state.layers.find(l => l.id === state.wandLayerId);
   if (!layer) return;
+  if (!skipHistory) _saveState('Selection to mask');
   const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
   // Make the wand's parent active so the mask is attached to it, then
   // get-or-create a mask sub-layer on it. Repoint the global mask
@@ -2299,8 +2460,8 @@ function _wandToMask() {
   // before merging into the inpaint mask. Grow/shrink uses the same
   // blur+threshold dilate/erode as the lasso path; feather blurs the
   // result's alpha for a soft edge.
-  const wFeather = parseInt(document.getElementById('ge-wand-feather')?.value || '0', 10);
-  const wGrow = parseInt(document.getElementById('ge-wand-grow')?.value || '0', 10);
+  const wFeather = parseInt(_editorFind('ge-wand-feather')?.value || '0', 10);
+  const wGrow = parseInt(_editorFind('ge-wand-grow')?.value || '0', 10);
   let refinedWand = state.wandMask;
   if (wGrow !== 0) {
     const c = document.createElement('canvas');
@@ -2358,14 +2519,17 @@ function _wandToMask() {
   mask.visible = true;
   layer.activeMaskId = mask.id;
   state.maskVisible = true;
+  _markSceneChanged();
   composite();
   _renderLayerPanel();
   if (uiModule) uiModule.showToast('Selection added to mask');
 }
 
 function _autoMatchLastInpaintLayer() {
+  const origin=_writerOrigin();
   const layer = state.layers.find(l => l.id === state.lastInpaintLayerId);
   const src = layer?.inpaintSource;
+  if (layer?.locked) { uiModule?.showToast('Select an unlocked layer'); return; }
   if (!layer || !src?.base || !src?.mask) {
     if (uiModule) uiModule.showToast('Run inpaint first');
     return;
@@ -2427,9 +2591,8 @@ function _autoMatchLastInpaintLayer() {
   const dg = clamp((outside.g - inside.g) * 0.55, -55, 55);
   const db = clamp((outside.b - inside.b) * 0.55, -55, 55);
   const dy = clamp((outside.y - inside.y) * 0.35, -35, 35);
-  if (!layer.adjLayers) layer.adjLayers = [];
-  layer.adjLayers = layer.adjLayers.filter(a => a.id !== 'auto-match-color' && a.id !== 'auto-match-light');
-  layer.adjLayers.push({
+  const staged = (layer.adjLayers || []).filter(a => a.id !== 'auto-match-color' && a.id !== 'auto-match-light');
+  staged.push({
     id: 'auto-match-light',
     type: 'brightness-contrast',
     params: {
@@ -2439,7 +2602,7 @@ function _autoMatchLastInpaintLayer() {
     opacity: 0.7,
     visible: true,
   });
-  layer.adjLayers.push({
+  staged.push({
     id: 'auto-match-color',
     type: 'color-balance',
     params: {
@@ -2450,10 +2613,11 @@ function _autoMatchLastInpaintLayer() {
     opacity: 0.75,
     visible: true,
   });
-  _saveState('Auto match inpaint color');
-  composite();
-  _renderLayerPanel();
-  if (uiModule) uiModule.showToast('Auto matched color');
+  return _withSceneMutation('inpaint-auto-match', () => {
+    if (!_writerCurrent(origin) || !state.layers.includes(layer) || layer.locked || layer.inpaintSource !== src) return false;
+    _saveState('Auto match inpaint color'); layer.adjLayers=staged; layer._adjFinalKey=null;
+    _markSceneChanged(); composite(); _renderLayerPanel(); uiModule?.showToast('Auto matched color'); return true;
+  });
 }
 
 // Reveal/hide the small "X" badge on the Lasso, Wand, and SAM tool buttons
@@ -2470,12 +2634,12 @@ function _syncToolClearIndicators() {
   const wandHasSel = !!state.wandMask;
   const hasMaskTarget = !!_getActiveMaskLayer();
   const hasSel = lassoHasSel || wandHasSel;
-  document.querySelectorAll('.ge-layer-mask-btn').forEach(b => {
+  _editorQueryAll('.ge-layer-mask-btn').forEach(b => {
     b.classList.toggle('from-selection', hasSel);
   });
   // Fill action now lives in the Image menu — enable when there's
   // something fillable (selection or active mask).
-  const fillItem = document.getElementById('ge-image-action-fill');
+  const fillItem = _editorFind('ge-image-action-fill');
   if (fillItem) {
     fillItem.disabled = !(hasSel || hasMaskTarget);
     fillItem.title = fillItem.disabled
@@ -2483,14 +2647,14 @@ function _syncToolClearIndicators() {
       : 'Fill the active selection / mask with the current color';
   }
   // Topbar Selection button only makes sense with an active selection.
-  const edgeWrap = document.getElementById('ge-edge-wrap');
+  const edgeWrap = _editorFind('ge-edge-wrap');
   if (edgeWrap) edgeWrap.hidden = !hasSel;
-  const lFeather = document.getElementById('ge-lasso-refine-feather');
-  const lGrow = document.getElementById('ge-lasso-refine-grow');
+  const lFeather = _editorFind('ge-lasso-refine-feather');
+  const lGrow = _editorFind('ge-lasso-refine-grow');
   if (lFeather) lFeather.style.display = lassoHasSel ? '' : 'none';
   if (lGrow) lGrow.style.display = lassoHasSel ? '' : 'none';
-  const wFeather = document.getElementById('ge-wand-refine-feather');
-  const wGrow = document.getElementById('ge-wand-refine-grow');
+  const wFeather = _editorFind('ge-wand-refine-feather');
+  const wGrow = _editorFind('ge-wand-refine-grow');
   if (wFeather) wFeather.style.display = wandHasSel ? '' : 'none';
   if (wGrow) wGrow.style.display = wandHasSel ? '' : 'none';
   if (!state.container) return;
@@ -2515,7 +2679,8 @@ function _hasMaskPixels() {
   return false;
 }
 
-function _wandDeleteSelection() {
+function _wandDeleteSelection() {return _withSceneMutation('wand-delete',_wandDeleteSelectionOwned);}
+function _wandDeleteSelectionOwned() {
   if (!state.wandMask) return;
   const layer = state.layers.find(l => l.id === state.wandLayerId);
   if (!layer || layer.locked) return;
@@ -2525,10 +2690,12 @@ function _wandDeleteSelection() {
   layer.ctx.globalCompositeOperation = 'destination-out';
   layer.ctx.drawImage(state.wandMask, 0, 0);
   layer.ctx.restore();
-  _wandClear();
+  _wandClearOwned();
+  _markSceneChanged();
 }
 
-function _wandCopyToNewLayer() {
+function _wandCopyToNewLayer() {return _withSceneMutation('wand-copy',_wandCopyToNewLayerOwned);}
+function _wandCopyToNewLayerOwned() {
   if (!state.wandMask) return;
   const src = state.layers.find(l => l.id === state.wandLayerId);
   if (!src) return;
@@ -2548,17 +2715,37 @@ function _wandCopyToNewLayer() {
   const idx = state.layers.findIndex(l => l.id === src.id);
   state.layers.splice(idx + 1, 0, newLayer);
   state.activeLayerId = newLayer.id;
+  _markSceneChanged();
   composite();
   _renderLayerPanel();
   _revealLayerPanel();
   if (uiModule) uiModule.showToast('Copied to new layer');
 }
 
-function _lassoDeleteSelection() {
+function _cutSelectionAtomic(kind, layer, clipped, origin) {
+  return _withSceneMutation('cut-selection', () => {
+    if (!_writerCurrent(origin) || !state.layers.includes(layer) || layer.locked) return false;
+    if (kind === 'wand' && (!state.wandMask || state.wandLayerId !== layer.id)) return false;
+    if (kind === 'lasso' && (!_previewCurrent(_lassoPreview) || state.lassoPoints.length < 3)) return false;
+    const w=layer.canvas.width,h=layer.canvas.height, staged=document.createElement('canvas'); staged.width=w; staged.height=h;
+    const ctx=staged.getContext('2d'); ctx.drawImage(layer.canvas,0,0);
+    if (kind === 'wand') { ctx.globalCompositeOperation='destination-out'; ctx.drawImage(state.wandMask,0,0); ctx.globalCompositeOperation='source-over'; }
+    else { const off=state.layerOffsets.get(layer.id) || {x:0,y:0}; const feather=parseInt(_editorFind('ge-lasso-feather')?.value || '0'), grow=parseInt(_editorFind('ge-lasso-grow')?.value || '0'); const mask=_buildLassoMask(w,h,off.x,off.y,feather,grow), pixels=ctx.getImageData(0,0,w,h), alpha=mask.getContext('2d').getImageData(0,0,w,h).data; for(let i=0;i<w*h;i++) pixels.data[i*4+3]=Math.round(pixels.data[i*4+3]*(1-alpha[i*4]/255)); ctx.putImageData(pixels,0,0); }
+    _saveState('Cut selection');
+    if (kind === 'wand') { const copy=createLayer('Wand copy',w,h); copy.ctx.drawImage(clipped,0,0); state.layerOffsets.set(copy.id,{...(state.layerOffsets.get(layer.id)||{x:0,y:0})}); state.layers.splice(state.layers.indexOf(layer)+1,0,copy); state.activeLayerId=copy.id; _wandClearOwned(); }
+    else state.lassoPoints=[];
+    layer.ctx.clearRect(0,0,w,h); layer.ctx.drawImage(staged,0,0); layer._adjCacheKey=null; layer._adjFinalKey=null;
+    _markSceneChanged(); composite(); _renderLayerPanel(); return true;
+  });
+}
+function _clearSelectionAtomic() { return _withSceneMutation('clear-selection',()=>{ if (state.wandMask) { _saveState('Clear selection'); _wandClearOwned(); _markSceneChanged(); } state.lassoPoints=[]; state.lassoActive=false; composite(); return true; }); }
+
+function _lassoDeleteSelection() {if (!_previewCurrent(_lassoPreview)) {uiModule?.showToast('The image changed; draw the selection again.'); return;} return _withSceneMutation('lasso-delete',_lassoDeleteSelectionOwned);}
+function _lassoDeleteSelectionOwned() {
   const layer = activeLayer();
   if (!layer || state.lassoPoints.length < 3) return;
-  const feather = parseInt(document.getElementById('ge-lasso-feather')?.value || '0');
-  const grow = parseInt(document.getElementById('ge-lasso-grow')?.value || '0');
+  const feather = parseInt(_editorFind('ge-lasso-feather')?.value || '0');
+  const grow = parseInt(_editorFind('ge-lasso-grow')?.value || '0');
   _saveState();
   const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
   const w = layer.canvas.width, h = layer.canvas.height;
@@ -2575,17 +2762,19 @@ function _lassoDeleteSelection() {
     }
   }
   layer.ctx.putImageData(imgData, 0, 0);
+  _markSceneChanged();
 
   state.lassoPoints = [];
   composite();
   uiModule.showToast('Selection deleted');
 }
 
-function _lassoCopyToLayer() {
+function _lassoCopyToLayer() {if (!_previewCurrent(_lassoPreview)) {uiModule?.showToast('The image changed; draw the selection again.'); return;} return _withSceneMutation('lasso-copy',_lassoCopyToLayerOwned);}
+function _lassoCopyToLayerOwned() {
   const layer = activeLayer();
   if (!layer || state.lassoPoints.length < 3) return;
-  const feather = parseInt(document.getElementById('ge-lasso-feather')?.value || '0');
-  const grow = parseInt(document.getElementById('ge-lasso-grow')?.value || '0');
+  const feather = parseInt(_editorFind('ge-lasso-feather')?.value || '0');
+  const grow = parseInt(_editorFind('ge-lasso-grow')?.value || '0');
   _saveState();
   const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
   const w = layer.canvas.width, h = layer.canvas.height;
@@ -2611,6 +2800,7 @@ function _lassoCopyToLayer() {
   newLayer.ctx.putImageData(outData, 0, 0);
 
   state.layers.push(newLayer);
+  _markSceneChanged();
   state.activeLayerId = newLayer.id;
   state.lassoPoints = [];
   _renderLayerPanel();
@@ -2619,8 +2809,10 @@ function _lassoCopyToLayer() {
   uiModule.showToast('Selection copied to new layer');
 }
 
-function _lassoToMask() {
+function _lassoToMask() {if (!_previewCurrent(_lassoPreview)) {uiModule?.showToast('The image changed; draw the selection again.'); return;} return _withSceneMutation('lasso-to-mask',_lassoToMaskOwned);}
+function _lassoToMaskOwned({skipHistory=false}={}) {
   if (state.lassoPoints.length < 3) return;
+  if (!skipHistory) _saveState('Selection to mask');
   // Get-or-create a mask sub-layer on the active parent layer and
   // repoint the global mask plumbing at it.
   const mask = _ensureActiveMaskLayer();
@@ -2629,8 +2821,8 @@ function _lassoToMask() {
   state.maskCtx = mask.ctx;
 
   // Fill selection into the mask with feather + grow/shrink applied.
-  const feather = parseInt(document.getElementById('ge-lasso-feather')?.value || '0');
-  const grow = parseInt(document.getElementById('ge-lasso-grow')?.value || '0');
+  const feather = parseInt(_editorFind('ge-lasso-feather')?.value || '0');
+  const grow = parseInt(_editorFind('ge-lasso-grow')?.value || '0');
   const lassoFill = _buildLassoMask(state.maskCanvas.width, state.maskCanvas.height, 0, 0, feather, grow);
   const maskData = lassoFill.getContext('2d').getImageData(0, 0, state.maskCanvas.width, state.maskCanvas.height);
   const curData = state.maskCtx.getImageData(0, 0, state.maskCanvas.width, state.maskCanvas.height);
@@ -2645,6 +2837,7 @@ function _lassoToMask() {
     }
   }
   state.maskCtx.putImageData(curData, 0, 0);
+  _markSceneChanged();
 
   // Stay on the Lasso tool — just bake the selection into the mask.
   // Keep the lasso points so the user can keep tweaking; clear the
@@ -2708,16 +2901,20 @@ function _filterSliderPrompt(title, params, onPreview) {
         try { onPreview(values); } catch {}
       });
     });
+    let settled = false;
     const cleanup = (result) => {
+      if (settled) return; settled = true;
       try { overlay.remove(); } catch {}
       document.removeEventListener('keydown', onKey, true);
       resolve(result);
     };
     const onKey = (e) => {
+      if (!_coreFocused() && !overlay.contains(document.activeElement)) return;
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cleanup(null); }
       else if (e.key === 'Enter') { e.preventDefault(); cleanup(values); }
     };
     document.addEventListener('keydown', onKey, true);
+    _coreLifetime?.add(() => cleanup(null));
     overlay.querySelector('[data-action="apply"]').addEventListener('click', () => cleanup(values));
     overlay.querySelector('[data-action="cancel"]').addEventListener('click', () => cleanup(null));
     // Click outside the modal (on the dim backdrop) = cancel.
@@ -2725,42 +2922,43 @@ function _filterSliderPrompt(title, params, onPreview) {
   });
 }
 
-// Generic helper for live-preview blur filters. Saves the PRE-blur
-// state to the undo stack first (so Ctrl-Z reverts cleanly), snapshots
-// the layer for re-rendering, applies `renderer(snap, values)` into
-// the layer on every slider change for instant feedback. Apply keeps
-// the result; Cancel / Esc restores the snapshot AND pops the undo
-// entry we pre-saved so the canceled run leaves no trace.
+// A preview owns the scene until it either restores its baseline or commits.
+let _activeFilterPreview = null;
 async function _applyLiveBlur({ title, params, label, renderer }) {
-  const layer = activeLayer();
-  if (!layer || layer.locked) { if (uiModule) uiModule.showToast('Select an unlocked layer'); return; }
-  const w = layer.canvas.width, h = layer.canvas.height;
-  const snap = document.createElement('canvas');
-  snap.width = w; snap.height = h;
-  snap.getContext('2d').drawImage(layer.canvas, 0, 0);
-  // Save state BEFORE any preview — the undo stack now holds the
-  // pre-blur pixels. Apply leaves it; Cancel pops it.
-  _saveState(label);
-  const draw = (values) => {
-    layer.ctx.clearRect(0, 0, w, h);
-    try { renderer(snap, values, layer.ctx); } catch (_) { layer.ctx.drawImage(snap, 0, 0); }
-    composite();
-  };
-  const result = await _filterSliderPrompt(title, params, draw);
-  if (result === null) {
-    layer.ctx.clearRect(0, 0, w, h);
-    layer.ctx.drawImage(snap, 0, 0);
-    composite();
-    // Drop the snapshot we pushed — there's nothing to undo to.
-    if (state.undoStack.length) state.undoStack.pop();
-    _refreshHistoryPanelIfOpen();
-    return;
+  const origin = _previewOrigin(), layer = activeLayer(), view = _coreLifetime;
+  if (!layer || layer.locked) { uiModule?.showToast('Select an unlocked layer'); return; }
+  const token = _sceneAuthority.beginGesture(_gestureView, 'filter-preview');
+  if (!token) { uiModule?.showToast('Finish the current image edit first.'); return; }
+  const w = layer.canvas.width, h = layer.canvas.height, originalCanvas = layer.canvas;
+  let snap, release, settled = false, previewed = false;
+  const preview = {deferredDraft:false, finish:null}; _activeFilterPreview = preview;
+  const ownsBaseline = () => _sceneAuthority.ownsGesture(token) && _sceneAuthority.revision === origin.revision && state.layers.includes(layer) && layer.canvas === originalCanvas && layer.canvas.width === w && layer.canvas.height === h;
+  const invalidatePixels = () => { layer._adjCacheKey = null; layer._adjFinalKey = null; _adjPopupSystem?.invalidatePreview(layer); };
+  const restore = () => { if (previewed && snap && ownsBaseline()) { layer.ctx.clearRect(0, 0, w, h); layer.ctx.drawImage(snap, 0, 0); invalidatePixels(); previewed = false; if (!view?.disposed) composite(); } };
+  const finish = () => { if (settled) return; settled = true; restore(); _sceneAuthority.endGesture(token); if (_activeFilterPreview === preview) _activeFilterPreview = null; if (preview.deferredDraft) _schedulePersist(); };
+  preview.finish = finish;
+  try {
+    snap = document.createElement('canvas'); snap.width = w; snap.height = h;
+    snap.getContext('2d').drawImage(layer.canvas, 0, 0);
+    release = view?.add(finish);
+    const stage = values => { const output = document.createElement('canvas'); output.width = w; output.height = h; renderer(snap, values, output.getContext('2d')); return output; };
+    const draw = values => {
+      if (settled || !_previewCurrent(origin) || !ownsBaseline()) return;
+      const output = stage(values);
+      layer.ctx.clearRect(0, 0, w, h); layer.ctx.drawImage(output, 0, 0); invalidatePixels(); previewed = true; composite();
+    };
+    const result = await _filterSliderPrompt(title, params, draw);
+    if (settled || result === null || !_previewCurrent(origin) || !ownsBaseline()) return;
+    // Stage first, then snapshot the original pixels exactly once for undo.
+    const output = stage(result);
+    restore();
+    if (!_previewCurrent(origin) || !ownsBaseline()) return;
+    _saveState(label);
+    layer.ctx.clearRect(0, 0, w, h); layer.ctx.drawImage(output, 0, 0); invalidatePixels();
+    _markSceneChanged(); composite(); uiModule?.showToast(label + ' applied');
+  } finally {
+    finish(); release?.();
   }
-  // Final render from snapshot for a clean commit.
-  layer.ctx.clearRect(0, 0, w, h);
-  renderer(snap, result, layer.ctx);
-  composite();
-  if (uiModule) uiModule.showToast(label + ' applied');
 }
 
 function _applyGaussianBlur() {
@@ -2794,11 +2992,16 @@ function _applyMotionBlur() {
 }
 
 function _applyEdgeFeather(layer, width, hardDelete) {
-  const w = layer.canvas.width;
-  const h = layer.canvas.height;
-  const imgData = layer.ctx.getImageData(0, 0, w, h);
-  _edgeFeather(imgData, width, hardDelete);
-  layer.ctx.putImageData(imgData, 0, 0);
+  return _withSceneMutation('edge-feather', () => {
+    if (!state.layers.includes(layer) || layer !== activeLayer() || layer.locked) return false;
+    const w = layer.canvas.width, h = layer.canvas.height;
+    const imgData = layer.ctx.getImageData(0, 0, w, h);
+    _edgeFeather(imgData, width, hardDelete);
+    _saveState(hardDelete ? 'Delete edges' : 'Feather edges');
+    layer.ctx.putImageData(imgData, 0, 0);
+    layer._adjCacheKey = null; layer._adjFinalKey = null;
+    _markSceneChanged(); return true;
+  });
 }
 
 // ── Zoom ──
@@ -2831,8 +3034,8 @@ function _applyZoom() {
 }
 
 function _syncZoomControls() {
-  const fitBtn = document.getElementById('ge-zoom-fit');
-  const actualBtn = document.getElementById('ge-zoom-100');
+  const fitBtn = _editorFind('ge-zoom-fit');
+  const actualBtn = _editorFind('ge-zoom-100');
   const fit = _getFitZoom();
   const isFit = fit !== null && Math.abs(state.zoom - fit) < 0.001;
   const isActual = !isFit && Math.abs(state.zoom - 1) < 0.001;
@@ -2847,7 +3050,7 @@ function _syncZoomControls() {
 }
 
 function _positionInpaintPanel(anchorBtn) {
-  const panel = document.getElementById('ge-inpaint-section');
+  const panel = _editorFind('ge-inpaint-section');
   if (!panel || window.innerWidth <= 820) return;
   if (panel.dataset.userMoved === '1') {
     panel.classList.add('ge-inpaint-popover');
@@ -2860,8 +3063,8 @@ function _positionInpaintPanel(anchorBtn) {
   // to land in different spots on each open and look "jumpy" when the
   // user grabbed it to move. Anchoring to the right panel — which has
   // a stable position — keeps the docked appearance steady.
-  const layersHeader = document.querySelector('.ge-layers-header');
-  const rightPanel = document.querySelector('.ge-right-panel');
+  const layersHeader = _editorQuery('.ge-layers-header');
+  const rightPanel = _editorQuery('.ge-right-panel');
   const ref = layersHeader || rightPanel;
   if (!ref) {
     // Fallback to the old toolbar-button anchor if the layers panel
@@ -2896,16 +3099,16 @@ function _positionInpaintPanel(anchorBtn) {
 }
 
 function _wireInpaintPopoverWindow() {
-  const panel = document.getElementById('ge-inpaint-section');
+  const panel = _editorFind('ge-inpaint-section');
   if (!panel || panel.dataset.windowWired === '1') return;
   panel.dataset.windowWired = '1';
-  const closeBtn = document.getElementById('ge-inpaint-popover-close');
+  const closeBtn = _editorFind('ge-inpaint-popover-close');
   closeBtn?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
     panel.classList.add('dismissed');
     panel.style.display = 'none';
-    document.getElementById('ge-controls')?.classList.remove('ge-inpaint-popover-host');
+    _editorFind('ge-controls')?.classList.remove('ge-inpaint-popover-host');
   });
   const head = panel.querySelector('[data-inpaint-drag]');
   if (!head) return;
@@ -2942,7 +3145,65 @@ function _wireInpaintPopoverWindow() {
 // ── Build DOM ──
 
 function _buildEditor(container) {
-  document.querySelectorAll('body > #ge-save-menu').forEach(el => el.remove());
+  _closeTransformPopup();
+  _coreLifetime?.dispose();
+  _coreLifetime = createEditorLifetime();
+  const renderLifetime = _coreLifetime;
+  let sceneFrame = null, sceneDirty = false, structureDirty = false, historyRestore = null;
+  const win=container.ownerDocument.defaultView || window;
+  const flush = () => {
+    sceneFrame=null; if (renderLifetime.disposed || !state.editorOpen || (!legacy && !isolatedVisible)) return;
+    if (historyRestore) { const event=historyRestore; historyRestore=null; _restoreViewAfterHistory(event.snapshot,event.dimsChanged); structureDirty=false; sceneDirty=false; return; }
+    if (sceneDirty) {
+      if (state.mainCanvas && (state.mainCanvas.width !== state.imgWidth || state.mainCanvas.height !== state.imgHeight)) { state.mainCanvas.width=state.imgWidth; state.mainCanvas.height=state.imgHeight; structureDirty=true; }
+      for (const layer of state.layers) _adjPopupSystem?.invalidatePreview(layer);
+      composite(); sceneDirty=false;
+    }
+    if (structureDirty) { const mask=_getActiveMaskLayer(); state.maskCanvas=mask?.canvas || null; state.maskCtx=mask?.ctx || null; _renderLayerPanel(); _refreshHistoryPanelIfOpen(); _syncToolClearIndicators(); _syncInpaintControls?.(); structureDirty=false; }
+  };
+  const schedule = () => { if (sceneFrame != null || renderLifetime.disposed || (!legacy && !isolatedVisible)) return; sceneFrame=win.requestAnimationFrame(flush); };
+  _flushSceneProjection = () => { if (sceneDirty || structureDirty || historyRestore) schedule(); };
+  renderLifetime.add(() => { if (sceneFrame != null) win.cancelAnimationFrame(sceneFrame); sceneFrame=null; _flushSceneProjection=()=>{}; });
+  renderLifetime.add(_sceneAuthority.subscribeView((_revision,event) => {
+    if (event?.kind === 'historyRestore') { historyRestore=event; structureDirty=true; sceneDirty=true; }
+    else if (event?.kind === 'historyChanged') structureDirty=true;
+    else sceneDirty=true;
+    schedule();
+  }));
+  renderLifetime.add(_sceneAuthority.subscribeGestureEnd(() => { structureDirty=true; sceneDirty=true; schedule(); }));
+  openIdentity += 1;
+  if (!legacy) {
+    const rejectUnauthorized = event => { let ok = false; try { ok = !lifetime.disposed && authority.validateScope(session.captureTarget()) === true; } catch (_) {} if (!ok) { event.preventDefault(); event.stopImmediatePropagation(); } };
+    for (const event of ['pointerdown','mousedown','touchstart','click','input','change','keydown']) _coreLifetime.listen(container, event, rejectUnauthorized, true);
+  }
+  _initCanvasTransforms(container);
+  _initHistoryPanel(container);
+  _initLayerPanel(container);
+  state.container = container;
+  _aiLifetime = createEditorLifetime();
+  const aiLifetime = _aiLifetime;
+  _coreLifetime.add(() => aiLifetime.dispose());
+  _coreLifetime.listen(document, 'openclank:auth-context-changed', () => aiLifetime.dispose());
+  _initApplyImageTool();
+  _initAdjPopupSystem();
+  _transformHandles = createTransformHandles({state, root: container, lifetime: _coreLifetime});
+  init_strokePipeline();
+  init_moveTool();
+  init_cropTool();
+  init_transformSession();
+  init_lassoTool();
+  init_wandTool();
+  init_cloneTool();
+  init_transformDragTool();
+  init_strokeTool();
+  _ownedPortals.clear();
+  _editorPortal = document.createElement('div');
+  _editorPortal.className = 'ge-owned-portals';
+  _editorPortal.style.display = legacy || isolatedVisible ? 'contents' : 'none';
+  if (legacy) document.body.appendChild(_editorPortal);
+  _registerEditorPortal(_editorPortal);
+  const ownedPortal = _editorPortal;
+  _coreLifetime.add(() => { ownedPortal.remove(); _ownedPortals.clear(); if (_editorPortal === ownedPortal) _editorPortal = null; });
   container.innerHTML = '';
   container.className = 'imps-editor';
 
@@ -2972,7 +3233,7 @@ function _buildEditor(container) {
       // controls live in the right panel.
       const reactivated = state.tool === toolId;
       state.tool = toolId;
-      const controls = document.getElementById('ge-controls') || document.querySelector('.ge-controls');
+      const controls = _editorFind('ge-controls') || _editorQuery('.ge-controls');
       if (controls) {
         if (reactivated) controls.classList.toggle('dismissed');
         else controls.classList.remove('dismissed');
@@ -2984,7 +3245,7 @@ function _buildEditor(container) {
       const hasToolControls = ['brush', 'eraser', 'clone', 'inpaint', 'sam'].includes(toolId);
       const controlsVisible = controls && !controls.classList.contains('dismissed');
       if (isMobile && hasToolControls && controlsVisible) {
-        const rp = document.querySelector('.ge-right-panel');
+        const rp = _editorQuery('.ge-right-panel');
         if (rp) {
           rp.classList.remove('expanded');
           rp.classList.add('minimized');
@@ -2995,11 +3256,11 @@ function _buildEditor(container) {
       if (toolId === 'transform' && !state.transformActive) _startTransform();
       // Show/hide brush controls. Brush, Eraser AND Clone use the
       // shared size+color row; Inpaint has its OWN size slider.
-      const brushControls = document.getElementById('ge-brush-controls');
+      const brushControls = _editorFind('ge-brush-controls');
       const needsBrush = ['brush', 'eraser', 'clone'].includes(toolId);
       if (brushControls) brushControls.style.display = needsBrush ? '' : 'none';
       // Eraser and Clone don't care about color — hide the color row.
-      const colorRow = document.getElementById('ge-color-row');
+      const colorRow = _editorFind('ge-color-row');
       if (colorRow) colorRow.style.display = (toolId === 'eraser' || toolId === 'clone') ? 'none' : '';
       const colorLabel = colorRow?.querySelector('label');
       if (colorLabel) colorLabel.textContent = 'Color';
@@ -3008,17 +3269,17 @@ function _buildEditor(container) {
         sizeLabelEl.firstChild.nodeValue = (toolId === 'eraser') ? 'Brush Size ' : 'Size ';
       }
       // Per-tool stroke-modifier sections (opacity / flow / softness).
-      const brushSection = document.getElementById('ge-brush-section');
+      const brushSection = _editorFind('ge-brush-section');
       if (brushSection) brushSection.style.display = toolId === 'brush' ? '' : 'none';
-      const cloneSection = document.getElementById('ge-clone-section');
+      const cloneSection = _editorFind('ge-clone-section');
       if (cloneSection) cloneSection.style.display = toolId === 'clone' ? '' : 'none';
-      const lassoSection = document.getElementById('ge-lasso-section');
+      const lassoSection = _editorFind('ge-lasso-section');
       if (lassoSection) lassoSection.style.display = state.tool === 'lasso' ? '' : 'none';
-      const wandSection = document.getElementById('ge-wand-section');
+      const wandSection = _editorFind('ge-wand-section');
       if (wandSection) wandSection.style.display = state.tool === 'wand' ? '' : 'none';
-      const samSection = document.getElementById('ge-sam-section');
+      const samSection = _editorFind('ge-sam-section');
       if (samSection) samSection.style.display = state.tool === 'sam' ? '' : 'none';
-      const inpaintSection = document.getElementById('ge-inpaint-section');
+      const inpaintSection = _editorFind('ge-inpaint-section');
       if (inpaintSection) {
         if (state.tool === 'inpaint') {
           if (reactivated) inpaintSection.classList.toggle('dismissed');
@@ -3051,11 +3312,11 @@ function _buildEditor(container) {
         if (!state.inpaintBrushInitialised) {
           state.brushSize = _INPAINT_DEFAULT_BRUSH;
           state.inpaintBrushInitialised = true;
-          const inp = document.getElementById('ge-inpaint-brush-slider');
+          const inp = _editorFind('ge-inpaint-brush-slider');
           if (inp) {
             const pos = Math.round(Math.log(Math.max(1, state.brushSize)) / Math.log(800) * 1000);
             inp.value = String(pos);
-            const lbl = document.getElementById('ge-inpaint-brush-label');
+            const lbl = _editorFind('ge-inpaint-brush-label');
             if (lbl) lbl.textContent = `${state.brushSize}px`;
           }
         }
@@ -3066,6 +3327,7 @@ function _buildEditor(container) {
         if (parent && parent.masks && parent.masks.length) {
           if (!parent.activeMaskId) {
             parent.activeMaskId = parent.masks[parent.masks.length - 1].id;
+            _markSceneChanged();
           }
           const m = _getActiveMaskLayer();
           if (m) { state.maskCanvas = m.canvas; state.maskCtx = m.ctx; }
@@ -3080,7 +3342,7 @@ function _buildEditor(container) {
         }
         if (!state.maskVisible) {
           state.maskVisible = true;
-          const maskBtn = document.getElementById('ge-mask-vis');
+          const maskBtn = _editorFind('ge-mask-vis');
           if (maskBtn) {
             maskBtn.innerHTML = uiIcon("eye", 14);
             maskBtn.title = 'Hide mask';
@@ -3088,23 +3350,23 @@ function _buildEditor(container) {
           }
         }
       }
-      const eraserSection = document.getElementById('ge-eraser-section');
+      const eraserSection = _editorFind('ge-eraser-section');
       if (eraserSection) eraserSection.style.display = state.tool === 'eraser' ? '' : 'none';
-      const sharpenSection = document.getElementById('ge-sharpen-section');
+      const sharpenSection = _editorFind('ge-sharpen-section');
       if (sharpenSection) sharpenSection.style.display = state.tool === 'sharpen' ? '' : 'none';
-      const rembgSection = document.getElementById('ge-rembg-section');
+      const rembgSection = _editorFind('ge-rembg-section');
       if (rembgSection) {
         const show = state.tool === 'rembg';
         rembgSection.style.display = show ? '' : 'none';
         if (show) _checkRembgInstalled();
       }
-      const importSection = document.getElementById('ge-import-section');
+      const importSection = _editorFind('ge-import-section');
       if (importSection) importSection.style.display = state.tool === 'import' ? '' : 'none';
-      const harmonizeSection = document.getElementById('ge-harmonize-section');
+      const harmonizeSection = _editorFind('ge-harmonize-section');
       if (harmonizeSection) harmonizeSection.style.display = state.tool === 'harmonize' ? '' : 'none';
-      const upscaleSection = document.getElementById('ge-upscale-section');
+      const upscaleSection = _editorFind('ge-upscale-section');
       if (upscaleSection) upscaleSection.style.display = state.tool === 'upscale' ? '' : 'none';
-      const styleSection = document.getElementById('ge-style-section');
+      const styleSection = _editorFind('ge-style-section');
       if (styleSection) styleSection.style.display = state.tool === 'style' ? '' : 'none';
       // Toggle cursor — hide native cursor for tools that draw via our
       // own circle overlay (brush/eraser/inpaint/lasso); for other tools
@@ -3141,6 +3403,9 @@ function _buildEditor(container) {
   canvasArea.className = 'ge-canvas-area';
   state.mainCanvas = document.createElement('canvas');
   state.mainCanvas.className = 'ge-main-canvas';
+  state.mainCanvas.tabIndex = 0;
+  state.mainCanvas.setAttribute('aria-label', 'Image canvas');
+  _wireCanvasContext(state.mainCanvas, canvasArea);
   state.mainCtx = state.mainCanvas.getContext('2d');
   // Initial cursor matches the default tool (move) so the user sees the
   // four-arrow icon as soon as the editor opens. Uses a filled white
@@ -3175,6 +3440,7 @@ function _buildEditor(container) {
   // Canvas events (mouse + touch + pinch-zoom + pan) — full
   // implementation in editor/canvas-events.js.
   wireCanvasEvents({
+    state, root:container, lifetime:_coreLifetime,
     canvasArea,
     beginDraw: _beginDraw,
     continueDraw: _continueDraw,
@@ -3188,6 +3454,7 @@ function _buildEditor(container) {
   // Right panel (controls + layers + resize handle) — full
   // implementation in editor/build/right-panel.js.
   const { rightPanel, controls, layerPanel } = buildRightPanel({
+    state, root: container, lifetime: _coreLifetime,
     controlsHTML: _controlsHTML,
     layerPanelHTML: _layerPanelHTML,
   });
@@ -3197,14 +3464,14 @@ function _buildEditor(container) {
 
   // Slider UX (expand-while-using, floating bubble, click-to-type) —
   // full implementation in editor/slider-ux.js.
-  wireSliderUx({ registerDocClickAway: _registerDocClickAway });
+  wireSliderUx({ state, root: container, lifetime: _coreLifetime });
 
   // Shortcuts cheatsheet popover — full implementation in
   // editor/shortcuts-popover.js. (Dead `_makeShortcutsDraggable`
   // helper for the old centered-modal version was dropped.)
-  const _shortcutsPopover = createShortcutsPopover();
+  const _shortcutsPopover = createShortcutsPopover({root: container, portal: _editorPortal, lifetime: _coreLifetime, scopeIds});
   const _toggleShortcuts = _shortcutsPopover.toggleShortcuts;
-  document.getElementById('ge-shortcuts-btn')?.addEventListener('click', () => _toggleShortcuts());
+  _editorFind('ge-shortcuts-btn')?.addEventListener('click', () => _toggleShortcuts());
 
   // Dismiss-listeners for the inpaint popup are attached lazily by
   // _showInpaintPrompt() and removed by _dismissInpaintPrompt(), so the
@@ -3219,13 +3486,15 @@ function _buildEditor(container) {
   // we built in the theme system — eyedropper, suggestions, recents,
   // no native OS dialog. Each picker keeps its existing `input` event
   // wiring so callers just keep reading `e.target.value`.
+  const editorColorPicker = createColorPicker({root: container, lifetime: _coreLifetime});
+  const attachColorPicker = editorColorPicker.attach;
   controls.querySelectorAll('.ge-color-picker').forEach(attachColorPicker);
   controls.querySelectorAll('.ge-color-picker').forEach(el => {
     // Set the initial swatch background so it reflects the starting value.
     el.value = el.value;
   });
   // Hide brush controls initially (default tool is Move)
-  const initBrushCtrl = document.getElementById('ge-brush-controls');
+  const initBrushCtrl = _editorFind('ge-brush-controls');
   if (initBrushCtrl) initBrushCtrl.style.display = 'none';
   // Brush-size slider is exponential — slider position 0..1000 maps to
   // brush size 1..800 via Math.pow(800, pos/1000). This gives fine
@@ -3236,8 +3505,8 @@ function _buildEditor(container) {
   function _brushSizeSync(source) {
     const globalLabel = controls.querySelector('.ge-size-label');
     const globalInput = controls.querySelector('.ge-size-slider');
-    const inpaintLabel = document.getElementById('ge-inpaint-brush-label');
-    const inpaintInput = document.getElementById('ge-inpaint-brush-slider');
+    const inpaintLabel = _editorFind('ge-inpaint-brush-label');
+    const inpaintInput = _editorFind('ge-inpaint-brush-slider');
     const pos = Math.round(Math.log(Math.max(1, state.brushSize)) / Math.log(800) * 1000);
     if (globalLabel) globalLabel.textContent = state.brushSize + 'px';
     if (inpaintLabel) inpaintLabel.textContent = state.brushSize + 'px';
@@ -3253,11 +3522,13 @@ function _buildEditor(container) {
     });
   }
   _wireBrushSlider(controls.querySelector('.ge-size-slider'));
-  _wireBrushSlider(document.getElementById('ge-inpaint-brush-slider'));
+  _wireBrushSlider(_editorFind('ge-inpaint-brush-slider'));
   // Topbar wiring (undo/redo/history, Save dropdown, zoom buttons,
   // Export/Download/Project, Edge popup, cross-dropdown coordination) —
   // full implementation in editor/wire-topbar.js.
   wireTopbar({
+    registerPortal: _registerEditorPortal, portal: _editorPortal,
+    state, root: container, lifetime: _coreLifetime,
     undo, redo,
     toggleHistoryPanel: _toggleHistoryPanel,
     fitZoom: () => _fitZoom(),
@@ -3272,7 +3543,7 @@ function _buildEditor(container) {
     registerDocClickAway: _registerDocClickAway,
     uiModule,
   });
-  void _hydratePendingSaveCopy();
+  if (legacy) void _hydratePendingSaveCopy();
   // Fill — visible only when a selection or active mask exists. Pours
   // the current colour into whichever target is live:
   //   - active mask sub-layer → fills the layer's pixels clipped by
@@ -3285,7 +3556,8 @@ function _buildEditor(container) {
   //     the mask (uses mask alpha as a stencil).
   //   - lasso closed → fills the polygon area on the active layer.
   //   - wand selection → fills the wand mask area on the active layer.
-  function _doFillSelection() {
+  function _doFillSelection() { return _withSceneMutation('fill-selection', _doFillSelectionOwned); }
+  function _doFillSelectionOwned() {
     const layer = activeLayer();
     if (!layer || layer.locked) return;
     const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
@@ -3293,26 +3565,30 @@ function _buildEditor(container) {
     const h = layer.canvas.height;
     const mask = _getActiveMaskLayer();
     const hasLasso = state.lassoPoints.length >= 3 && !state.lassoActive;
+    if (!mask && hasLasso && !_previewCurrent(_lassoPreview)) return false;
+    if (!mask && !hasLasso && state.wandMask && state.wandLayerId !== layer.id) return false;
     const stencil = document.createElement('canvas');
     stencil.width = w; stencil.height = h;
     const sctx = stencil.getContext('2d');
     if (mask) {
       sctx.drawImage(mask.canvas, -off.x, -off.y);
     } else if (hasLasso) {
-      const feather = parseInt(document.getElementById('ge-lasso-feather')?.value || '0');
-      const grow = parseInt(document.getElementById('ge-lasso-grow')?.value || '0');
+      const feather = parseInt(_editorFind('ge-lasso-feather')?.value || '0');
+      const grow = parseInt(_editorFind('ge-lasso-grow')?.value || '0');
       sctx.drawImage(_buildLassoMask(w, h, off.x, off.y, feather, grow), 0, 0);
     } else if (state.wandMask) {
       sctx.drawImage(state.wandMask, 0, 0);
     } else {
       return;
     }
-    _saveState('Fill selection');
     sctx.globalCompositeOperation = 'source-in';
     sctx.fillStyle = state.color;
     sctx.fillRect(0, 0, w, h);
     sctx.globalCompositeOperation = 'source-over';
+    _saveState('Fill selection');
     layer.ctx.drawImage(stencil, 0, 0);
+    layer._adjCacheKey=null; layer._adjFinalKey=null;
+    _markSceneChanged();
     composite();
     _renderLayerPanel();
     if (uiModule) uiModule.showToast('Filled');
@@ -3321,12 +3597,35 @@ function _buildEditor(container) {
   // AI model selectors (Gen, Inpaint, per-tool) — full
   // implementation in editor/ai-models.js.
   wireAIModelSelectors({
-    container,
+    container, lifetime: _coreLifetime,
     apiBase: API_BASE,
     openCookbookForImg2img: () => _openCookbookForImg2img(),
   });
 
-  document.getElementById('ge-save').addEventListener('click', async () => {
+  if (legacy) {
+    const menu=_editorFind('ge-save-menu'), trigger=_editorFind('ge-save-menu-btn');
+    const checkItem=document.createElement('button');
+    checkItem.type='button'; checkItem.className='dropdown-item-compact'; checkItem.textContent='Check original save'; checkItem.hidden=true;
+    menu?.appendChild(checkItem);
+    const metadataItem=document.createElement('button'); metadataItem.type='button'; metadataItem.className='dropdown-item-compact'; metadataItem.textContent='Project metadata…'; menu?.appendChild(metadataItem);
+    metadataItem.addEventListener('click',()=>{_openProjectMetadata().catch(error=>uiModule?.showToast(error.message || 'Project metadata unavailable.',6000));});
+    trigger?.addEventListener('click',()=>{checkItem.hidden=!state._legacyProjectPending;});
+    checkItem.addEventListener('click',async()=>{
+      const pending=state._legacyProjectPending, origin=_captureOrigin();
+      const current=()=>pending && _originCurrent(origin) && state._legacyProjectPending===pending && pending.owner===origin.owner && pending.provider===state.managedProvider && pending.resourceId===state.managedResourceId && pending.projectId===state.projectId;
+      if (!current()) return;
+      let message='Original save outcome is unknown; the draft remains available.';
+      try {
+        const result=await _impsRequest('/api/imps/project-operations/status',{method:'POST',body:JSON.stringify({operation_id:pending.operationId})});
+        if (!current()) return;
+        if (result?.state==='available' && result.action_id===pending.operationId && result.outcome==='not_committed') message='Original save was not committed; the draft remains available.';
+        else if (result?.state==='available' && result.action_id===pending.operationId && result.outcome==='committed' && ['complete','skipped','unavailable'].includes(result.history_status)) message=result.history_status==='unavailable' ? 'Original save committed; History recovery is unavailable. The draft remains available.' : 'Original save committed; the draft remains available.';
+      } catch (_) {}
+      if (current()) uiModule?.showToast(message,7000);
+    });
+  }
+  _editorFind('ge-save').addEventListener('click', async () => {
+    if (!legacy) { try { const receipt=await session.save(); if (state.editorOpen && receipt?.status!=='cancelled') uiModule?.showToast(receipt?.destinationLabel ? 'Saved to '+receipt.destinationLabel : receipt?.status==='unavailable' ? receipt.reason : receipt?.status==='saved_copy' ? 'Image copy saved in Files.' : receipt?.lore_receipt?.history_status==='unavailable' ? 'Saved, but History recovery is unavailable for this change.' : 'Image saved.'); } catch (error) { if (state.editorOpen) uiModule?.showToast(error?.message || 'Image save failed.',6000); } return; }
     if (!state.managedResourceId && !state.imageId) {
       await exportToGallery();
       return;
@@ -3351,14 +3650,15 @@ function _buildEditor(container) {
       const flat = flatten();
       const ext = (state.originalExt || 'png').toLowerCase();
       const isJpeg = ext === 'jpg' || ext === 'jpeg';
-      const mime = isJpeg ? 'image/jpeg' : 'image/png';
+      const mime = state._legacyRasterMime;
+      if (!mime) throw Error('Original encoding or write access is unavailable. Use Save as copy.');
       const quality = isJpeg ? 0.92 : undefined;
       blob = await new Promise((resolve, reject) => {
         flat.toBlob(b => b ? resolve(b) : reject(new Error('Canvas encode failed')), mime, quality);
       });
       const body = await _managedSave({ blob, operation: saveOperation });
       const totalMs = Math.round(performance.now() - t0);
-      if (uiModule) uiModule.showToast(`Saved over original (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, 4000);
+      if (uiModule) uiModule.showToast(body?.lore_receipt?.history_status==='unavailable' ? 'Saved, but History recovery is unavailable for this change.' : `Saved over original (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, body?.lore_receipt?.history_status==='unavailable' ? 6000 : 4000);
       window.dispatchEvent(new CustomEvent('imps-refresh'));
       savedOk = true;
     } catch (e) {
@@ -3380,19 +3680,22 @@ function _buildEditor(container) {
 
   // Topbar overflow + canvas-size badge — full implementation in
   // editor/wire-topbar-overflow.js.
-  wireTopbarOverflow({ container, registerDocClickAway: _registerDocClickAway });
+  wireTopbarOverflow({ container, state, lifetime: _coreLifetime });
 
   // Topbar dropdown menus (Image, Filter, Resize) + the resize-canvas
   // helpers — full implementation in editor/wire-topbar-menus.js. The
   // returned `_resizeCustomPrompt` is consumed by the keyboard
   // shortcuts module (Ctrl+Shift+T).
   const { resizeCustomPrompt: _resizeCustomPrompt } = wireTopbarMenus({
-    closeOtherTopbarMenus: _closeOtherTopbarMenus,
+    markSceneChanged: _markSceneChanged,
+    state, root: container, lifetime: _coreLifetime,
+    closeOtherTopbarMenus: (id) => _closeOtherTopbarMenus(id, container),
     registerDocClickAway: _registerDocClickAway,
     saveState: _saveState,
     composite,
     fitZoom: () => _fitZoom(),
     promptCanvasSize: (opts) => _promptCanvasSize(opts),
+    captureResizeOrigin: () => _canvasTransforms.captureBounds(), resizeBounds: (w,h,origin) => _canvasTransforms.resizeBounds(w,h,origin),
     doFillSelection: () => _doFillSelection(),
     rotateAllLayers: (deg) => _rotateAllLayers(deg),
     flipAllLayers: (axis) => _flipAllLayers(axis),
@@ -3404,18 +3707,32 @@ function _buildEditor(container) {
   // Inpaint side-panel controls (Feather/Strength previews, post-gen
   // edge tuner, mask vis/invert/clear, paint-erase toggle, mask tint
   // pickers) — full implementation in editor/wire-inpaint-controls.js.
-  wireInpaintControls({
+  ({syncInpaintAvailability:_syncInpaintControls} = wireInpaintControls({
+    scopeIds,
+    markSceneChanged: _markSceneChanged,
+    state, root: container, lifetime: _coreLifetime,
+    captureOrigin:_writerOrigin, originCurrent:_writerCurrent, withSceneMutation:_withSceneMutation, saveState:_saveState,
     composite,
     applyInpaintFeather: _applyInpaintFeather,
     autoMatchInpaint: _autoMatchLastInpaintLayer,
     syncToolClearIndicators: () => _syncToolClearIndicators(),
     attachColorPicker,
     uiModule,
-  });
+  }));
 
   // AI inpaint (Generate / Remove / Outpaint) — full implementation
   // in editor/ai-inpaint.js.
   wireInpaintButtons({
+    markSceneChanged: _markSceneChanged,
+    state, root: container, lifetime: _aiLifetime, captureOrigin: () => {const check=_captureAIOperation(), revision=_sceneAuthority.revision; return () => {const status=check(); return status==='current' && !_sceneAuthority.canApplyAt(revision) ? 'changed' : status;};},
+    sceneRevision:() => _sceneAuthority.revision,
+    canCapture:() => _sceneAuthority.canApplyAt(_sceneAuthority.revision),
+    beginMutation:() => _sceneAuthority.beginGesture(_gestureView,'inpaint-result'), endMutation:token => _sceneAuthority.endGesture(token),
+    resultHooks:legacy ? null : {
+      reserve:() => sessionPersistence.reserveResult({kind:'ai',epoch:String(_impsAccountEpoch),generation:_sceneAuthority.revision}),
+      submit:id => sessionPersistence.submitResult(id), receive:(id,result) => sessionPersistence.receiveResult(id,result),
+      reject:id => sessionPersistence.rejectResult(id), unknown:id => sessionPersistence.markResultUnknown(id), resolve:id => sessionPersistence.resolveResult(id),
+    },
     buildMergedMaskCanvas: () => _buildMergedMaskCanvas(),
     dilateMask: _dilateMask,
     applyInpaintFeather: _applyInpaintFeather,
@@ -3431,12 +3748,16 @@ function _buildEditor(container) {
 
   // Per-tool Opacity / Flow / Softness sliders (Eraser / Brush /
   // Clone) — full implementation in editor/stroke-tool-sliders.js.
-  wireStrokeToolSliders();
+  wireStrokeToolSliders({state, root: container, lifetime: _coreLifetime});
 
   // Sharpen + Bg Remove + edge cleanup — full implementation in
   // editor/ai-rembg.js. Returns the selection-hint-mask builder so
   // the wand-rembg button (in the wand controls section) can reuse it.
   const { buildSelectionHintMask: _buildSelectionHintMask } = wireRembgAndSharpen({
+    markSceneChanged: _markSceneChanged,
+    canCapture:() => _sceneAuthority.canApplyAt(_sceneAuthority.revision),
+    beginMutation:() => _sceneAuthority.beginGesture(_gestureView,'rembg-edge'), endMutation:token => _sceneAuthority.endGesture(token),
+    state, root: container, lifetime: _aiLifetime, captureOrigin: _captureAIOperation,
     applyImageTool: _applyImageTool,
     openCookbookForDependency: (pkg) => _openCookbookForDependency(pkg),
     composite,
@@ -3447,8 +3768,26 @@ function _buildEditor(container) {
   // Image import (topbar / panel File / Clipboard / Files picker) —
   // full implementation in editor/wire-import.js. Returns the shared
   // handleImportedImage sink so drag-drop wires through the same path.
+  const captureImport = () => {
+    const generation = _openGeneration, edit = state.editEpoch, revision = _sceneAuthority.revision, owner = document.body.dataset.accountId, origin=_captureOrigin();
+    const sourceIdentity=target => JSON.stringify([target.sessionId,target.scope,target.sourceKey,target.sourceRevision,target.sourceDigest,target.projectId,target.projectRevision]);
+    const source=legacy ? null : sourceIdentity(session.captureTarget());
+    const lifetime = _coreLifetime;
+    const check=() => !lifetime || lifetime.disposed || generation !== _openGeneration || owner !== document.body.dataset.accountId || !_originCurrent(origin) ? 'retired' : edit !== state.editEpoch || !_sceneAuthority.canApplyAt(revision) || (!legacy && source!==sourceIdentity(session.captureTarget())) ? 'edited' : 'current';
+    check.revision=revision; return check;
+  };
+  const startImport = legacy ? null : check => {
+    const id=sessionPersistence.reserveResult({kind:'import',epoch:String(_impsAccountEpoch),generation:check.revision}); let received=false, receiving=false;
+    return {
+      get received() { return received; },
+      async receive(blob,metadata={}) { receiving=true; try {const data=new Uint8Array(await blob.arrayBuffer()); let binary=''; for (let i=0;i<data.length;i+=32768) binary+=String.fromCharCode(...data.subarray(i,i+32768)); sessionPersistence.receiveResult(id,{bytes:btoa(binary),mime:blob.type || 'image/png',metadata}); received=true;} catch(error) {try {sessionPersistence.cancelLocalReservation(id);} catch (_) {} throw error;} finally {receiving=false;} },
+      apply(fn) { if (!received || check()!=='current') return false; const token=_sceneAuthority.beginGesture(_gestureView,'import'); if (!token) return false; try {fn(); sessionPersistence.resolveResult(id); return true;} finally {_sceneAuthority.endGesture(token);} },
+      cancel(knownFailure=false) { try {if (!received && !receiving) sessionPersistence.cancelLocalReservation(id); else if (received && knownFailure) sessionPersistence.resolveResult(id);} catch (_) {} },
+    };
+  };
   const { handleImportedImage: _handleImportedImage } = wireImport({
-    container,
+    markSceneChanged: _markSceneChanged,
+    state, container, lifetime: _coreLifetime, captureImport, startImport,
     saveState: _saveState,
     createLayer,
     composite,
@@ -3459,6 +3798,15 @@ function _buildEditor(container) {
   // Harmonize / Canvas Upscale / AI Upscale / Style Transfer +
   // Add-Empty-Layer — full implementation in editor/ai-tools-misc.js.
   const { addEmptyLayer: _addEmptyLayer } = wireAIToolsMisc({
+    markSceneChanged: _markSceneChanged, scaleCanvas: factor => _canvasTransforms.scaleAll(factor), withSceneMutation:_withSceneMutation,
+    state, root: container, lifetime: _aiLifetime, captureOrigin: () => {const check=_captureAIOperation(), revision=_sceneAuthority.revision; return () => {const status=check(); return status==='current' && !_sceneAuthority.canApplyAt(revision) ? 'changed' : status;};},
+    canCapture:() => _sceneAuthority.canApplyAt(_sceneAuthority.revision),
+    beginMutation:() => _sceneAuthority.beginGesture(_gestureView,'ai-result'), endMutation:token => _sceneAuthority.endGesture(token),
+    resultHooks:legacy ? null : {
+      reserve:() => sessionPersistence.reserveResult({kind:'ai',epoch:String(_impsAccountEpoch),generation:_sceneAuthority.revision}),
+      submit:id => sessionPersistence.submitResult(id), receive:(id,result) => sessionPersistence.receiveResult(id,result),
+      reject:id => sessionPersistence.rejectResult(id), unknown:id => sessionPersistence.markResultUnknown(id), resolve:id => sessionPersistence.resolveResult(id),
+    },
     apiBase: API_BASE,
     buildLayerBodyMask: _buildLayerBodyMask,
     buildSeamMask: _buildSeamMask,
@@ -3479,12 +3827,14 @@ function _buildEditor(container) {
   // Lasso + Magic Wand panel controls — full implementation in
   // editor/wire-selection-controls.js.
   wireSelectionControls({
+    state, root: container, lifetime: _coreLifetime,
     composite,
     invertSelection: _invertSelection,
     lassoDeleteSelection: _lassoDeleteSelection,
     lassoCopyToLayer: _lassoCopyToLayer,
     lassoToMask: _lassoToMask,
     runMagicWand: (x, y, mode, opts) => _runMagicWand(x, y, mode, opts),
+    captureWandOrigin:() => _captureWandOrigin(),
     wandClear: _wandClear,
     wandDeleteSelection: _wandDeleteSelection,
     wandCopyToNewLayer: _wandCopyToNewLayer,
@@ -3493,18 +3843,18 @@ function _buildEditor(container) {
     applyImageTool: _applyImageTool,
     uiModule,
   });
-  document.getElementById('ge-sam-find')?.addEventListener('click', () => _runSamTextSelection());
-  document.getElementById('ge-sam-query')?.addEventListener('keydown', (e) => {
+  _editorFind('ge-sam-find')?.addEventListener('click', () => _runSamTextSelection());
+  _editorFind('ge-sam-query')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
       _runSamTextSelection();
     }
   });
-  document.getElementById('ge-sam-clear')?.addEventListener('click', () => _wandClear());
-  document.getElementById('ge-sam-mask')?.addEventListener('click', () => _wandToMask());
-  document.getElementById('ge-sam-vis')?.addEventListener('click', () => {
+  _editorFind('ge-sam-clear')?.addEventListener('click', () => _wandClear());
+  _editorFind('ge-sam-mask')?.addEventListener('click', () => _wandToMask());
+  _editorFind('ge-sam-vis')?.addEventListener('click', () => {
     state.wandMaskVisible = !state.wandMaskVisible;
-    const btn = document.getElementById('ge-sam-vis');
+    const btn = _editorFind('ge-sam-vis');
     if (btn) {
       btn.innerHTML = state.wandMaskVisible
         ? uiIcon("eye", 14)
@@ -3519,6 +3869,9 @@ function _buildEditor(container) {
   // Merge / Flatten buttons (layer-panel footer) — full
   // implementation in editor/wire-merge-buttons.js.
   wireMergeButtons({
+    markSceneChanged: _markSceneChanged,
+    withSceneMutation:_withSceneMutation,
+    state, root: state.container, lifetime: _coreLifetime,
     saveState: _saveState,
     createLayer,
     renderLayerPanel: () => _renderLayerPanel(),
@@ -3531,8 +3884,8 @@ function _buildEditor(container) {
   // handler (keyboard shortcuts, etc.) so cancelling a
   // crop / lasso / transform inside the editor can't ever bubble up and
   // close the editor host.
-  document.addEventListener('keydown', (e) => {
-    if (!state.editorOpen || !state.container?.getClientRects().length) return;
+  _coreLifetime.listen(document, 'keydown', (e) => {
+    if (!state.editorOpen || !_coreFocused() || !state.container?.getClientRects().length) return;
     // Esc on the shortcuts overlay closes it; takes priority over the
     // other modal cancels so the cheatsheet feels responsive AND so the
     // a stale handler does not close the editor.
@@ -3564,6 +3917,8 @@ function _buildEditor(container) {
   // Keyboard shortcuts — full implementation in
   // editor/keyboard-shortcuts.js.
   wireKeyboardShortcuts({
+    state, root:container, lifetime:_coreLifetime, isFocused:_coreFocused,
+    captureLassoPreview:()=>{_lassoPreview=_previewOrigin();}, captureClipboardOrigin:_writerOrigin, clipboardOriginCurrent:value=>_writerCurrent(value) && _sceneAuthority.canApplyAt(value.view.revision), cutSelection:_cutSelectionAtomic, clearSelection:_clearSelectionAtomic,
     toolbar, toolKeyMap: _toolKeyMap,
     composite, saveState: _saveState, undo, redo,
     toggleShortcuts: _toggleShortcuts,
@@ -3588,8 +3943,11 @@ function _buildEditor(container) {
 
   // Paste + drag-and-drop image import — full implementation in
   // editor/clipboard-and-drop.js.
-  wireClipboardAndDrop({
-    container,
+  const clipboardWiring = _clipboardWiring = wireClipboardAndDrop({
+    markSceneChanged: _markSceneChanged,
+    state, container, captureImport, startImport, acceptLegacyBroadcast:legacy,
+    isFocused: _coreFocused, capturePaste: () => ({view:_previewOrigin(), source:legacy ? null : JSON.stringify(session.captureTarget())}),
+    pasteCurrent: value => !!value && _previewCurrent(value.view) && (legacy || value.source === JSON.stringify(session.captureTarget())), withSceneMutation: _withSceneMutation,
     saveState: _saveState,
     createLayer,
     renderLayerPanel: () => _renderLayerPanel(),
@@ -3599,6 +3957,9 @@ function _buildEditor(container) {
     filesClient: filesFacadeClient,
     getContext: () => window.__openClankFilesTransferContext?.() || null,
   });
+  _coreLifetime.add(() => { clipboardWiring.dispose(); if (_clipboardWiring===clipboardWiring) _clipboardWiring=null; });
+  scopeIds(container);
+  for (const portal of _ownedPortals) scopeIds(portal);
 }
 
 // ── Layer panel rendering ──
@@ -3606,7 +3967,17 @@ function _buildEditor(container) {
 // Layer-panel renderer — implementation in editor/layer-panel.js.
 // Wrap to the legacy name so the dozens of `_renderLayerPanel()` call
 // sites scattered across the file keep working unchanged.
-const _layerPanelRenderer = createLayerPanelRenderer({
+let _layerPanelRenderer;
+function _initLayerPanel(container) { _layerPanelRenderer = createLayerPanelRenderer({
+  root: container,
+  withSceneMutation:_withSceneMutation, captureOrigin:_previewOrigin, originCurrent:_previewCurrent,
+  canEditLayerContext:_canvasContextWritable,
+  convertSelectionToMask:(layer,kind) => {
+    if (!state.layers.includes(layer) || (kind==='lasso' && !_previewCurrent(_lassoPreview)) || (kind==='wand' && state.wandLayerId!==layer.id)) {uiModule?.showToast('The selection or target layer changed.'); return false;}
+    return _withSceneMutation('selection-to-layer-mask',() => {if (!state.layers.includes(layer)) return false; _saveState('Selection to mask'); state.activeLayerId=layer.id; layer.activeMaskId=null; if (kind==='lasso') _lassoToMaskOwned({skipHistory:true}); else _wandToMaskOwned({skipHistory:true}); return true;});
+  },
+  markSceneChanged: _markSceneChanged,
+  state, lifetime: () => _coreLifetime,
   composite,
   saveState: _saveState,
   showLayerThumb: (row, layer) => _showLayerThumb(row, layer),
@@ -3622,13 +3993,13 @@ const _layerPanelRenderer = createLayerPanelRenderer({
   syncFxPanelToActiveLayerIfPresent: () => _syncFxPanelToActiveLayerIfPresent(),
   dragSortModule,
   uiModule,
-});
-function _renderLayerPanel() { return _layerPanelRenderer.render(); }
+}); }
+function _renderLayerPanel() { return _layerPanelRenderer?.render(); }
 
 function _revealLayerPanel() {
   requestAnimationFrame(() => {
     const panel = state.container?.querySelector?.('.ge-right-panel') ||
-      document.querySelector('.ge-right-panel');
+      _editorQuery('.ge-right-panel');
     if (!panel) return;
     panel.classList.remove('minimized');
     panel.classList.add('expanded');
@@ -3638,18 +4009,7 @@ function _revealLayerPanel() {
 // ── Flatten / Export ──
 
 function flatten() {
-  const out = document.createElement('canvas');
-  out.width = state.imgWidth;
-  out.height = state.imgHeight;
-  const ctx = out.getContext('2d');
-  for (const layer of state.layers) {
-    if (!layer.visible) continue;
-    ctx.globalAlpha = layer.opacity;
-    const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
-    ctx.drawImage(_renderLayerWithAdjLayers(layer), off.x, off.y);
-  }
-  ctx.globalAlpha = 1;
-  return out;
+  return flattenImageScene(state,document);
 }
 
 // Build the union of all "foreground" visible-layer alphas (binary).
@@ -3672,7 +4032,7 @@ function _buildLayerUnionAlpha() { return _layerUnionAlphaImpl(state.imgWidth, s
 function _buildSeamMask(featherPx = 12) { return _seamMaskImpl(state.imgWidth, state.imgHeight, _harmonizeLayerList(), featherPx); }
 function _buildLayerBodyMask(featherPx = 12) { return _layerBodyMaskImpl(state.imgWidth, state.imgHeight, _harmonizeLayerList(), featherPx); }
 
-export function exportPNG() {
+function exportPNG() {
   return flatten().toDataURL('image/png');
 }
 
@@ -3680,7 +4040,7 @@ export function exportPNG() {
 // miss a successful save (the toast alone is easy to miss on remote
 // connections where focus drifts during the upload).
 function _flashSaveButtonOk() {
-  const btn = document.getElementById('ge-save-menu-btn');
+  const btn = _editorFind('ge-save-menu-btn');
   if (!btn) return;
   const origHTML = btn.innerHTML;
   const origBg = btn.style.background;
@@ -3697,7 +4057,7 @@ function _flashSaveButtonOk() {
 // Show whirlpool + label on the visible "Save ▾" topbar button while a
 // save operation runs. Returns a function to call when done (or in finally).
 function _saveButtonBusy(label) {
-  const btn = document.getElementById('ge-save-menu-btn');
+  const btn = _editorFind('ge-save-menu-btn');
   if (!btn) return () => {};
   const origHTML = btn.innerHTML;
   const origWidth = btn.offsetWidth;
@@ -3745,15 +4105,7 @@ async function _impsRequest(path, options = {}) {
 }
 
 function _serializeEditableState() {
-  return {
-    ...(state._editableExtras || {}),
-    v: 2, imgWidth: state.imgWidth, imgHeight: state.imgHeight,
-    activeLayerId: state.activeLayerId, nextLayerId: state.nextLayerId,
-    layers: state.layers.map(layer => ({
-      ..._serializeEditableNode(layer),
-      offset: { ...(state.layerOffsets.get(layer.id) || { x: 0, y: 0 }) },
-    })),
-  };
+  return serializeEditableImageScene(state);
 }
 
 async function _blobToBase64(blob) {
@@ -3779,9 +4131,10 @@ function _bindManagedIdentity(provider, resourceId) {
   state.imageId = m ? m[1] : state.imageId || null;
 }
 
-async function _ensureManagedProject(expectedGeneration = null, expectedProvider = null, expectedResource = null, { forceLookup = false } = {}) {
-  const stillCurrent = () => expectedGeneration == null
-    || (expectedGeneration === _openGeneration && state.managedProvider === expectedProvider && state.managedResourceId === expectedResource);
+async function _ensureManagedProject(expectedGeneration = null, expectedProvider = null, expectedResource = null, { forceLookup = false, identityOnly = false, saveSnapshot = null } = {}) {
+  const origin = _captureOrigin();
+  const stillCurrent = () => _originCurrent(origin) && (expectedGeneration == null
+    || (expectedGeneration === _openGeneration && state.managedProvider === expectedProvider && state.managedResourceId === expectedResource));
   if (!stillCurrent()) throw new Error('managed project open superseded');
   const achievementAccount = achievementOwner();
   const observedImageRevision = state.expectedImageRevision || '';
@@ -3805,8 +4158,8 @@ async function _ensureManagedProject(expectedGeneration = null, expectedProvider
     // revision must never replace that observed hash and authorize a write
     // against different pixels.
     state.expectedImageRevision = observedImageRevision || storedRevision;
-    if (lookup.project.name) state.draftName = lookup.project.name;
-    if (lookup.project.state && lookup.project.state.layers?.length) {
+    if (!identityOnly && lookup.project.name) state.draftName = lookup.project.name;
+    if (!identityOnly && lookup.project.state && lookup.project.state.layers?.length) {
       const restored = await _restoreDraft(lookup.project.state, expectedGeneration);
       if (!stillCurrent()) throw new Error('managed project restore superseded');
       composite();
@@ -3820,19 +4173,31 @@ async function _ensureManagedProject(expectedGeneration = null, expectedProvider
     }
     return state.projectId;
   }
-  const created = await _impsRequest('/api/imps/projects', {
+  if (state._legacyProjectPending || state._legacyCreatePending) throw new Error('project creation outcome requires reconciliation');
+  const createOperationId = `imps:${crypto.randomUUID()}`;
+  state._legacyCreatePending = { operationId:createOperationId, origin };
+  state._legacyProjectPending=Object.freeze({operationId:createOperationId,kind:'create',phase:'issued',owner:origin.owner,provider:state.managedProvider,resourceId:state.managedResourceId,projectId:state.projectId});
+  const createDraft=await _persistDraft(); if (createDraft?.status!=='saved' || !stillCurrent()) throw new Error('project operation draft unavailable');
+  let created;
+  try { created = await _impsRequest('/api/imps/projects', {
     method: 'POST',
     body: JSON.stringify({
+      operation_id: createOperationId,
       provider: state.managedProvider,
       resource_id: state.managedResourceId,
-      name: state.draftName || 'Untitled',
-      width: state.imgWidth || null,
-      height: state.imgHeight || null,
-      state: _serializeEditableState(),
+      name: saveSnapshot?.name || state.draftName || 'Untitled',
+      width: saveSnapshot?.width || state.imgWidth || null,
+      height: saveSnapshot?.height || state.imgHeight || null,
+      state: saveSnapshot?.stateDoc || _serializeEditableState(),
       expected_image_revision: observedImageRevision || state.expectedImageRevision || '',
     }),
-  });
-  if (!stillCurrent()) throw new Error('managed project creation superseded');
+  }); } catch (error) { if (/^HTTP 4\d{2}\b/.test(String(error?.message || ''))) state._legacyCreatePending=null; throw error; }
+  const createLore=created?.lore_receipt;
+  if (createLore?.action_id!==createOperationId || createLore?.outcome!=='committed' || !['complete','skipped','unavailable'].includes(createLore?.history_status)) throw new Error('project creation receipt requires reconciliation');
+  if (!stillCurrent()) throw new Error('managed project creation superseded; reconciliation required');
+  state._legacyCreatePending=null; state._legacyProjectPending=null;
+  if ((await _persistDraft())?.status!=='saved') throw new Error('project created; draft reconciliation required');
+  if (createLore.history_status==='unavailable') uiModule?.showToast('Project created, but History recovery is unavailable for this change.',6000);
   state.projectId = created.id;
   state.projectRevision = created.project_revision;
   state.expectedImageRevision = created.expected_image_revision || observedImageRevision || '';
@@ -3840,56 +4205,85 @@ async function _ensureManagedProject(expectedGeneration = null, expectedProvider
 }
 
 function _captureManagedSaveSnapshot({ stateDoc = null, name = null } = {}) {
-  return {
+  if (!legacy && !stateDoc && !name) return Object.freeze({...sessionPersistence.captureSnapshot(),origin:_captureOrigin()});
+  const capturedState = JSON.parse(JSON.stringify(stateDoc || _serializeEditableState()));
+  const capturedName = name || state.draftName || undefined;
+  return Object.freeze({
     generation: _openGeneration,
-    editEpoch: _managedEditEpoch,
+    origin: _captureOrigin(),
+    target: legacy ? null : session.captureTarget(),
+    operationId: `imps-save-${++_saveSequence}`,
+    editEpoch: state.editEpoch,
+    sceneRevision: state.sceneRevision,
     provider: state.managedProvider,
     resource: state.managedResourceId,
     projectId: state.projectId,
     projectRevision: state.projectRevision,
     expectedImageRevision: state.expectedImageRevision || '',
     draftId: state.draftId,
-    stateDoc: stateDoc || _serializeEditableState(),
-    name: name || state.draftName || undefined,
+    stateDoc: capturedState,
+    name: capturedName,
     width: state.imgWidth || undefined,
     height: state.imgHeight || undefined,
-  };
+  });
 }
 
 async function _managedSave({ blob = null, stateDoc = null, name = null, operation = null } = {}) {
+  if (!legacy) { const snapshot = operation || _captureManagedSaveSnapshot({stateDoc,name}); return sessionPersistence.save(snapshot,blob); }
   const snapshot = operation || _captureManagedSaveSnapshot({ stateDoc, name });
-  const sameResource = () => snapshot.generation === _openGeneration
-    && state.managedProvider === snapshot.provider
-    && state.managedResourceId === snapshot.resource;
-  const sameEdits = () => _managedEditEpoch === snapshot.editEpoch;
-  const projectId = snapshot.projectId || await _ensureManagedProject(
-    snapshot.generation, snapshot.provider, snapshot.resource,
-  );
-  if (!sameResource() || !sameEdits()) throw new Error('managed save superseded before publication');
-  if (!projectId) throw new Error('No managed image resource is bound to this editor session');
-  const payload = {
-    expected_project_revision: snapshot.projectId ? snapshot.projectRevision : state.projectRevision,
-    expected_image_revision: snapshot.expectedImageRevision || state.expectedImageRevision || '',
-    new_image_revision: snapshot.expectedImageRevision || state.expectedImageRevision || 'uncommitted',
-    state: snapshot.stateDoc,
-    name: snapshot.name,
-    width: snapshot.width,
-    height: snapshot.height,
-  };
-  if (blob) payload.image_bytes = await _blobToBase64(blob);
-  if (!sameResource() || !sameEdits()) throw new Error('managed save superseded during encoding');
-  const body = await _impsRequest(`/api/imps/projects/${encodeURIComponent(projectId)}/save`, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-  if (!sameResource() || state.projectId !== projectId) {
-    throw new Error('managed save completed for a superseded editor');
+  const origin = snapshot.origin;
+  const key = `${origin.accountEpoch}:${origin.generation}`;
+  let flight = _managedSaveFlights.get(key);
+  if (!flight) {
+    const sameProject = _originCurrent(origin) && snapshot.projectId && state.projectId === snapshot.projectId;
+    flight = { tail: Promise.resolve(), projectId: snapshot.projectId, revision: sameProject ? state.projectRevision : snapshot.projectRevision, imageRevision: sameProject ? state.expectedImageRevision : snapshot.expectedImageRevision };
+    _managedSaveFlights.set(key, flight);
   }
-  state.projectRevision = body.project_revision;
-  state.expectedImageRevision = (body.refresh_receipt && body.refresh_receipt.image_revision)
-    || body.refresh_receipt?.image?.revision
-    || state.expectedImageRevision;
-  return body;
+  const run = async () => {
+    if (flight.uncertain || state._legacyProjectPending) throw new Error('managed save outcome unknown; reconcile the project before retrying');
+    const sameResource = () => _originCurrent(origin) && state.editorOpen && state.managedProvider === snapshot.provider && state.managedResourceId === snapshot.resource;
+    if (!sameResource()) throw new Error('managed save superseded before publication');
+    if (readOnlyImageScenes.has(_sceneAuthority) || blob && (!state._legacyRasterMime || blob.type!==state._legacyRasterMime)) throw Error('Original encoding or write access is unavailable. Use Save as copy.');
+    const projectId = flight.projectId || await _ensureManagedProject(snapshot.generation, snapshot.provider, snapshot.resource, {identityOnly:true, saveSnapshot:snapshot});
+    if (!sameResource() || !projectId) throw new Error('managed save superseded before publication');
+    if (!flight.projectId) { flight.projectId = projectId; flight.revision = state.projectRevision; flight.imageRevision = state.expectedImageRevision; }
+    if (flight.projectId !== projectId) throw new Error('managed save project changed');
+    const saveOperationId = `imps:${crypto.randomUUID()}`;
+    const payload = { operation_id:saveOperationId, expected_project_revision: flight.revision, expected_image_revision: flight.imageRevision || '', new_image_revision: flight.imageRevision || 'uncommitted', state: snapshot.stateDoc, name: snapshot.name, width: snapshot.width, height: snapshot.height };
+    if (blob) payload.image_bytes = await _blobToBase64(blob);
+    if (!sameResource()) throw new Error('managed save superseded during encoding');
+    let body;
+    flight.operationId = saveOperationId;
+    state._legacyProjectPending=Object.freeze({operationId:saveOperationId,kind:'save',phase:'issued',owner:origin.owner,provider:snapshot.provider,resourceId:snapshot.resource,projectId});
+    const saveDraft=await _persistDraft(); if (saveDraft?.status!=='saved' || !sameResource()) throw new Error('project operation draft unavailable');
+    try { body = await _impsRequest(`/api/imps/projects/${encodeURIComponent(projectId)}/save`, { method:'POST', body:JSON.stringify(payload) }); }
+    catch (error) { if (!/^HTTP 4\d{2}\b/.test(String(error?.message || ''))) flight.uncertain = true; throw error; }
+    if (body?.lore_receipt?.action_id!==saveOperationId || body.lore_receipt.outcome!=='committed' || !['complete','skipped','unavailable'].includes(body.lore_receipt.history_status) || !Number.isSafeInteger(body.project_revision) || body.project_revision<=flight.revision) { flight.uncertain=true; throw new Error('save receipt requires reconciliation'); }
+    flight.revision = body.project_revision;
+    flight.imageRevision = body.refresh_receipt?.image_revision || body.refresh_receipt?.image?.revision || flight.imageRevision;
+    if (!sameResource() || state.projectId !== projectId) {
+      if (_accountCurrent(origin)) {
+        _managedSaveReceipts.set(snapshot.operationId, {origin, projectId, revision:flight.revision, imageRevision:flight.imageRevision, editEpoch:snapshot.editEpoch, receipt:body});
+        while (_managedSaveReceipts.size > 16) _managedSaveReceipts.delete(_managedSaveReceipts.keys().next().value);
+      }
+      throw new Error(`managed save committed for a previous editor (local receipt ${snapshot.operationId})`);
+    }
+    state.projectRevision = flight.revision;
+    state.expectedImageRevision = flight.imageRevision;
+    state._legacyProjectPending=null; if ((await _persistDraft())?.status!=='saved') {flight.uncertain=true; throw new Error('save committed; draft reconciliation required');}
+    if (state.sceneRevision !== snapshot.sceneRevision || (state.draftName || undefined) !== snapshot.name) { state.persistDirty = true; _schedulePersist(); }
+    return body;
+  };
+  const result = flight.tail.catch(() => {}).then(run);
+  flight.tail = result;
+  result.finally(() => { if (flight.tail === result && !flight.uncertain && _managedSaveFlights.get(key) === flight) _managedSaveFlights.delete(key); }).catch(() => {});
+  return result;
+}
+
+function getManagedSaveReceipt(operationId) {
+  const record = _managedSaveReceipts.get(operationId);
+  if (!record || !record.origin.owner || record.origin.owner !== (document.body.dataset.accountId || null)) return null;
+  return Object.freeze({ operationId, projectId:record.projectId, projectRevision:record.revision, imageRevision:record.imageRevision, editEpoch:record.editEpoch, receipt:record.receipt });
 }
 
 async function _filesGalleryDestination(signal = null) {
@@ -3922,40 +4316,49 @@ async function _resolveImportedImpsResource(resourceRef, signal = null) {
 }
 
 async function _bindSaveCopy(pending) {
-  const resource = pending.resource_id && pending.expected_image_revision
-    ? {
-      provider: String(pending.provider || 'files'),
-      resourceId: String(pending.resource_id),
-      revision: String(pending.expected_image_revision),
-      resourceRef: String(pending.resource_ref || ''),
-    }
-    : await _resolveImportedImpsResource(pending.resource_ref);
-  if (!pending.source_project_id && pending.unbound !== true) throw new Error('Copy source project is unavailable');
-  const copyBody = await _impsRequest(
-    pending.source_project_id ? `/api/imps/projects/${encodeURIComponent(pending.source_project_id)}/save-copy` : '/api/imps/projects/save-copy',
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        provider: resource.provider,
-        resource_id: resource.resourceId,
-        operation_key: pending.operation_id,
-        expected_image_revision: resource.revision,
-        state: pending.state,
-        name: pending.name,
-        width: pending.width,
-        height: pending.height,
-      }),
-    },
-  );
-  return { copyBody, resource };
+  if (!/^imps:[0-9a-f-]{36}$/.test(pending.binding_operation_id || '') || !['unissued','issued'].includes(pending.binding_phase)) throw new Error('Copy binding identity unavailable; reconciliation required');
+  const origin=_captureOrigin();
+  const current=()=>_originCurrent(origin) && state.editorOpen && _openGeneration===pending.source_generation && state.editEpoch===pending.source_edit_epoch && state.projectRevision===pending.source_project_revision && state.expectedImageRevision===pending.source_image_revision && state.projectId===pending.source_project_id && state.managedProvider===pending.source_provider && state.managedResourceId===pending.source_resource_id;
+  if (!current()) throw new Error('Copy source changed; reconciliation required');
+  const resource=await _resolveImportedImpsResource(pending.resource_ref);
+  if (!current()) throw new Error('Copy source changed; reconciliation required');
+  if (!pending.source_project_id && pending.unbound!==true) throw new Error('Copy source project is unavailable');
+  let copyBody;
+  if (pending.binding_phase==='issued') {
+    const status=await _impsRequest('/api/imps/project-operations/status',{method:'POST',body:JSON.stringify({operation_id:pending.binding_operation_id})});
+    if (!current() || status?.state!=='available' || status.action_id!==pending.binding_operation_id || status.outcome!=='committed' || !['complete','skipped','unavailable'].includes(status.history_status) || !status.project_id || !Number.isSafeInteger(status.project_revision)) throw new Error('Copy binding outcome remains unknown');
+    const record=await _impsRequest(`/api/imps/projects/${encodeURIComponent(status.project_id)}`);
+    const confirmed=await _resolveImportedImpsResource(pending.resource_ref);
+    if (!current() || record?.id!==status.project_id || record.project_revision!==status.project_revision || record.image?.provider!=='files' || record.image?.resource_id!==resource.resourceId || record.expected_image_revision!==resource.revision || confirmed.resourceId!==resource.resourceId || confirmed.revision!==resource.revision) throw new Error('Copy binding identity changed');
+    copyBody={project_id:status.project_id,project_revision:status.project_revision,lore_receipt:{action_id:status.action_id,outcome:status.outcome,history_status:status.history_status}};
+  } else {
+    pending.binding_phase='issued';
+    // The durable marker precedes the effect; a storage failure refuses dispatch.
+    localStorage.setItem('imps.pendingSaveCopy',JSON.stringify(pending));
+    state.pendingSaveCopy=pending;
+    if (!current()) throw new Error('Copy source changed; reconciliation required');
+    copyBody=await _impsRequest(pending.source_project_id ? `/api/imps/projects/${encodeURIComponent(pending.source_project_id)}/save-copy` : '/api/imps/projects/save-copy', {
+      method:'POST',body:JSON.stringify({operation_id:pending.binding_operation_id,provider:resource.provider,resource_id:resource.resourceId,operation_key:pending.operation_id,expected_image_revision:resource.revision,state:pending.state,name:pending.name,width:pending.width,height:pending.height}),
+    });
+    if (!current() || copyBody?.lore_receipt?.action_id!==pending.binding_operation_id || copyBody.lore_receipt.outcome!=='committed' || !['complete','skipped','unavailable'].includes(copyBody.lore_receipt.history_status) || !copyBody.project_id || !Number.isSafeInteger(copyBody.project_revision)) throw new Error('Copy binding receipt requires reconciliation');
+  }
+  return {copyBody,resource};
 }
+
+async function isolatedSaveCopy() {
+  if (sessionPersistence.saveCount || sessionPersistence.draftCount || sessionPersistence.copyBusy || sessionPersistence.pendingCopy || !state.editorOpen) return {status:'unavailable',reason:'copy_pending_or_unavailable'};
+  return sessionPersistence.saveCopyCurrent();
+}
+
+async function isolatedRetryCopy() { return sessionPersistence.retryCopy(); }
 
 // Save a copy: allocate through the Files-owned Gallery provider, then bind
 // the resulting provider identity to a separate managed Imps project.
-export async function exportToGallery() {
+async function exportToGallery() {
+  if (!legacy) return isolatedSaveCopy();
   const endBusy = _saveButtonBusy('Saving copy…');
   let blob = null;
-  let savedOk = false;
+  let savedOk = false, copyRecoveryUnavailable = false;
   const t0 = performance.now();
   try {
     // toBlob() avoids the 2x peak memory of dataURL → fetch → blob. JPEG
@@ -3967,12 +4370,12 @@ export async function exportToGallery() {
       throw new Error('Open an editable Imps project before saving a copy');
     }
     const snapshot = {
-      generation: _openGeneration, editEpoch: _managedEditEpoch,
+      generation: _openGeneration, editEpoch: state.editEpoch,
       projectId: sourceProjectId, provider: state.managedProvider, resourceId: state.managedResourceId,
       state: _serializeEditableState(), name: `${state.draftName || 'Untitled'} copy`,
       width: state.imgWidth || null, height: state.imgHeight || null, draftId: state.draftId,
     };
-    const currentSnapshot = () => snapshot.generation === _openGeneration && snapshot.editEpoch === _managedEditEpoch
+    const currentSnapshot = () => snapshot.generation === _openGeneration && snapshot.editEpoch === state.editEpoch
       && snapshot.projectId === state.projectId && snapshot.provider === state.managedProvider && snapshot.resourceId === state.managedResourceId;
     const flat = flatten();
     const ext = (state.originalExt || 'png').toLowerCase();
@@ -4008,6 +4411,9 @@ export async function exportToGallery() {
     const pending = {
       owner, unbound,
       source_project_id: sourceProjectId || null,
+      source_provider: snapshot.provider, source_resource_id: snapshot.resourceId,
+      source_generation:snapshot.generation, source_edit_epoch:snapshot.editEpoch, source_project_revision:state.projectRevision, source_image_revision:state.expectedImageRevision,
+      binding_operation_id: `imps:${crypto.randomUUID()}`, binding_phase:'unissued',
       operation_id: operationId,
       item_id: itemId,
       resource_ref: importedItem.resource_ref,
@@ -4020,6 +4426,7 @@ export async function exportToGallery() {
     };
     try {
       const { copyBody, resource } = await _bindSaveCopy(pending);
+      copyRecoveryUnavailable=copyBody.lore_receipt.history_status==='unavailable';
       _clearPendingSaveCopy();
       if (currentSnapshot()) {
         _bindManagedIdentity(resource.provider, resource.resourceId);
@@ -4032,18 +4439,17 @@ export async function exportToGallery() {
       }
     } catch (e) {
       // The Files-owned image is durable, but the Imps project bind is a
-      // separate idempotent step. Keep the opaque ref and operation identity
-      // so a retry binds the same resource instead of allocating another.
+      // separate operation. Keep its original identity for status-only reconciliation.
       state.pendingSaveCopy = pending;
       try { localStorage.setItem('imps.pendingSaveCopy', JSON.stringify(pending)); } catch (_) {}
-      const retryButton = document.getElementById('ge-retry-save-copy');
+      const retryButton = _editorFind('ge-retry-save-copy');
       if (retryButton) retryButton.hidden = false;
-      if (uiModule) uiModule.showToast('Image imported; project binding is pending. Retry to finish saving.', 5000);
+      if (uiModule) uiModule.showToast('Image imported; project binding requires reconciliation.', 5000);
       return;
     }
     const totalMs = Math.round(performance.now() - t0);
     window.dispatchEvent(new CustomEvent('imps-refresh'));
-    if (uiModule) uiModule.showToast(`Saved copy to Gallery (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, 4000);
+    if (uiModule) uiModule.showToast(copyRecoveryUnavailable ? 'Copy saved, but History recovery is unavailable for this change.' : `Saved copy to Gallery (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, copyRecoveryUnavailable ? 6000 : 4000);
     savedOk = true;
   } catch (e) {
     console.error('[save-as-copy] error:', e);
@@ -4061,7 +4467,8 @@ export async function exportToGallery() {
   }
 }
 
-export async function retryPendingSaveCopy() {
+async function retryPendingSaveCopy() {
+  if (!legacy) return isolatedRetryCopy();
   const pending = state.pendingSaveCopy || (() => {
     try { return JSON.parse(localStorage.getItem('imps.pendingSaveCopy') || 'null'); } catch (_) { return null; }
   })();
@@ -4072,6 +4479,7 @@ export async function retryPendingSaveCopy() {
     throw new Error('Pending copy belongs to another signed-in owner');
   }
   const { copyBody: body, resource } = await _bindSaveCopy(pending);
+  if (body.lore_receipt.history_status==='unavailable') uiModule?.showToast('Copy saved, but History recovery is unavailable for this change.',6000);
   _clearPendingSaveCopy();
   _bindManagedIdentity(resource.provider, resource.resourceId);
   state.projectId = body.project_id;
@@ -4138,8 +4546,8 @@ function _openCookbookForDependency(pkgName) {
 // Toggles the "install rembg" notice + the Bg Remove run button. The
 // `/api/cookbook/packages` endpoint is cheap (importlib calls only).
 async function _checkRembgInstalled() {
-  const noticeEl = document.getElementById('ge-rembg-dep-missing');
-  const runRow = document.getElementById('ge-rembg-run-row');
+  const noticeEl = _editorFind('ge-rembg-dep-missing');
+  const runRow = _editorFind('ge-rembg-run-row');
   if (!noticeEl || !runRow) return;
   // Use cached result if we already checked this editor session.
   if (state.rembgInstalledCache !== null) {
@@ -4209,7 +4617,7 @@ function _openCookbookForImg2img() {
   if (uiModule) uiModule.showToast('Open Cookbook from the sidebar to serve an img2img model', 6000);
 }
 
-export function downloadPNG() {
+function downloadPNG() {
   const dataUrl = exportPNG();
   const a = document.createElement('a');
   a.href = dataUrl;
@@ -4222,6 +4630,7 @@ export function downloadPNG() {
 // encoded as a base64 PNG so transparency / partial alpha survives the
 // round-trip. Use Load Project to restore.
 async function _saveProject() {
+  if (!legacy) return {status:'unavailable', reason:'isolated_save_pending'};
   if (!state.layers.length) {
     if (uiModule) uiModule.showToast('Nothing to save');
     return;
@@ -4230,7 +4639,7 @@ async function _saveProject() {
     _bindManagedIdentity('files', `image:${state.imageId}`);
   }
   try {
-    const projectId = await _ensureManagedProject();
+    const projectId = await _ensureManagedProject(null, null, null, {identityOnly:true});
     if (!projectId) {
       // Blank canvas with no bound resource: persist as a portable managed
       // export only — the caller decides where the bytes go.
@@ -4261,12 +4670,12 @@ async function _saveProject() {
   }
 }
 
-async function _downloadJson(value, filename) {
+async function _downloadJson(value, filename, isCurrent = () => true) {
   const json = JSON.stringify(value);
   const blob = new Blob([json], { type: 'application/json' });
   JSON.parse(await blob.text());
   const container = state.container?.querySelector('.ge-topbar-right');
-  if (!state.editorOpen || !container?.isConnected) throw new Error('Editor closed before the export was ready');
+  if (!state.editorOpen || !container?.isConnected || !isCurrent()) throw new Error('Editor changed before the export was ready');
   state._projectDownloadRelease?.();
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -4274,12 +4683,27 @@ async function _downloadJson(value, filename) {
   a.textContent = 'Download project'; a.title = filename;
   container.appendChild(a);
   state._projectDownloadRelease = () => { a.remove(); URL.revokeObjectURL(url); state._projectDownloadRelease = null; };
+  if (!isCurrent()) { state._projectDownloadRelease(); throw new Error('Editor changed before the export was ready'); }
   a.click();
+}
+
+async function _exportIsolatedProject() {
+  if (legacy || !state.editorOpen || !state.layers.length) return {status:'unavailable',reason:'image_project_export_unavailable'};
+  const snapshot = _captureManagedSaveSnapshot(), target = JSON.stringify(session.captureTarget());
+  const current = () => _originCurrent(snapshot.origin) && state.editorOpen && state.sceneRevision === snapshot.sceneRevision && JSON.stringify(session.captureTarget()) === target;
+  const bundle = {kind:'imps-project',schema_version:1,name:snapshot.name || 'Untitled',width:snapshot.width,height:snapshot.height,
+    image:{provider:snapshot.provider || '',resource_id:snapshot.resource || '',revision:snapshot.expectedImageRevision || ''},
+    project_revision:snapshot.projectRevision || 1,state:snapshot.stateDoc,assets:[]};
+  const artifact = await _impsRequest('/api/imps/projects/export-bundle',{method:'POST',body:JSON.stringify(bundle)});
+  if (!current()) throw new Error('Image changed before the project export was ready');
+  await _downloadJson(artifact,`${(snapshot.name || 'project').replace(/[^\w.-]+/g,'_')}.imps.json`,current);
+  return {status:'exported'};
 }
 
 // Open-file picker for Load Project. Accepts the managed Imps export and
 // the legacy ``project.geproj.json`` format. Restores layers + canvas size.
 function _loadProjectPrompt() {
+  if (!legacy) return {status:'unavailable', reason:'isolated_project_open_pending'};
   const inp = document.createElement('input');
   inp.type = 'file';
   inp.accept = 'application/json,.json';
@@ -4307,15 +4731,27 @@ function _loadProjectPrompt() {
           if (uiModule) uiModule.showToast('Project loaded', 3000);
           return;
         }
-        const imported = await _impsRequest('/api/imps/projects/import', {
+        if (state._legacyProjectPending || state._legacyImportPending) throw new Error('Project import outcome requires reconciliation');
+        const importOperationId=`imps:${crypto.randomUUID()}`;
+        state._legacyImportPending={operationId:importOperationId,origin:_captureOrigin()};
+        state._legacyProjectPending=Object.freeze({operationId:importOperationId,kind:'import',phase:'issued',owner:state._legacyImportPending.origin.owner,provider:state.managedProvider,resourceId:state.managedResourceId,projectId:state.projectId});
+        const importDraft=await _persistDraft(); if (importDraft?.status!=='saved' || !_originCurrent(state._legacyImportPending.origin)) throw new Error('project operation draft unavailable');
+        let imported;
+        try { imported = await _impsRequest('/api/imps/projects/import', {
           method: 'POST',
           body: JSON.stringify({
+            operation_id:importOperationId,
             provider: identity.provider,
             resource_id: identity.resource_id,
             bundle: proj,
             expected_image_revision: image.revision || '',
           }),
-        });
+        }); } catch (error) { if (/^HTTP 4\d{2}\b/.test(String(error?.message || ''))) state._legacyImportPending=null; throw error; }
+        const importLore=imported?.lore_receipt;
+        if (importLore?.action_id!==importOperationId || importLore?.outcome!=='committed' || !['complete','skipped','unavailable'].includes(importLore?.history_status) || !_originCurrent(state._legacyImportPending.origin)) throw new Error('Project import receipt requires reconciliation');
+        state._legacyImportPending=null; state._legacyProjectPending=null;
+        if ((await _persistDraft())?.status!=='saved') throw new Error('project imported; draft reconciliation required');
+        if (importLore.history_status==='unavailable') uiModule?.showToast('Project imported, but History recovery is unavailable for this change.',6000);
         _bindManagedIdentity(identity.provider, identity.resource_id);
         state.projectId = imported.id;
         state.projectRevision = imported.project_revision;
@@ -4327,7 +4763,7 @@ function _loadProjectPrompt() {
         if (uiModule) uiModule.showToast('Project loaded', 3000);
         return;
       }
-      if (proj.type !== 'odysseus-imps-editor-project') {
+      if (proj.type !== 'openclank-imps-editor-project') {
         if (uiModule) uiModule.showToast('Not a project file', 5000);
         return;
       }
@@ -4356,27 +4792,31 @@ function _promptCanvasSize(opts) {
   const initialW = opts.initialW || 1024;
   const initialH = opts.initialH || 1024;
   return new Promise(resolve => {
-    let overlay = document.getElementById('ge-canvas-size-overlay');
+    let overlay = _editorFind('ge-canvas-size-overlay');
     if (!overlay) {
       overlay = document.createElement('div');
       overlay.id = 'ge-canvas-size-overlay';
       overlay.className = 'modal';
       overlay.innerHTML = _canvasSizePromptHTML();
-      document.body.appendChild(overlay);
+      scopeIds(overlay);
+      _editorPortal?.appendChild(overlay);
     }
     overlay.style.display = '';
     overlay.classList.remove('hidden');
-    const wInput = document.getElementById('ge-canvas-prompt-w');
-    const hInput = document.getElementById('ge-canvas-prompt-h');
-    const okBtn = document.getElementById('ge-canvas-prompt-ok');
-    const cancelBtn = document.getElementById('ge-canvas-prompt-cancel');
-    const titleEl = document.getElementById('ge-canvas-prompt-title');
+    const ownerLifetime = _coreLifetime;
+    const wInput = overlay.querySelector(':is(#ge-canvas-prompt-w,[data-ge-id="ge-canvas-prompt-w"])');
+    const hInput = overlay.querySelector(':is(#ge-canvas-prompt-h,[data-ge-id="ge-canvas-prompt-h"])');
+    const okBtn = overlay.querySelector(':is(#ge-canvas-prompt-ok,[data-ge-id="ge-canvas-prompt-ok"])');
+    const cancelBtn = overlay.querySelector(':is(#ge-canvas-prompt-cancel,[data-ge-id="ge-canvas-prompt-cancel"])');
+    const titleEl = overlay.querySelector(':is(#ge-canvas-prompt-title,[data-ge-id="ge-canvas-prompt-title"])');
     if (titleEl) titleEl.textContent = title;
     if (okBtn) okBtn.textContent = okLabel;
     wInput.value = String(initialW);
     hInput.value = String(initialH);
-    setTimeout(() => { wInput.focus(); wInput.select(); }, 0);
+    let settled = false;
+    const timer = setTimeout(() => { if (!settled && !ownerLifetime?.disposed) { wInput.focus(); wInput.select(); } }, 0);
     function cleanup(result) {
+      if (settled) return; settled = true; clearTimeout(timer);
       overlay.style.display = 'none';
       okBtn.removeEventListener('click', onOk);
       cancelBtn.removeEventListener('click', onCancel);
@@ -4392,6 +4832,7 @@ function _promptCanvasSize(opts) {
     function onCancel() { cleanup(null); }
     function onBackdrop(e) { if (e.target === overlay) cleanup(null); }
     function onKey(e) {
+      if (ownerLifetime?.disposed || !overlay.contains(document.activeElement)) return;
       if (e.key === 'Enter') { e.preventDefault(); onOk(); }
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cleanup(null); }
     }
@@ -4399,6 +4840,7 @@ function _promptCanvasSize(opts) {
     cancelBtn.addEventListener('click', onCancel);
     overlay.addEventListener('click', onBackdrop);
     document.addEventListener('keydown', onKey);
+    ownerLifetime?.add(() => cleanup(null));
   });
 }
 
@@ -4486,11 +4928,18 @@ function _unmountEditorLoading() {
   state.editorLoadingEl = null;
 }
 
-export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, openGeneration = null) {
+function openEditor(imageUrl, imageId, presetSize, displayName, draftId, openGeneration = null, sourceToken = null) {
+  if (!legacy && (lifetime.disposed || authority.validate(session.captureTarget()) !== true || draftId || (imageUrl && sourceToken !== isolatedSourceToken))) return Promise.resolve({status:'unavailable', reason:'isolated_source_open_pending'});
+  if (!legacy && retainedScene) return Promise.resolve({status:'unavailable', reason:'retained_scene_requires_mount'});
+  if (!legacy && state.editorOpen) return Promise.resolve({status:'unavailable', reason:'close_current_image_first'});
   const generation = openGeneration ?? ++_openGeneration;
+  for (const key of _managedSaveFlights.keys()) if (key !== `${_impsAccountEpoch}:${generation}`) _managedSaveFlights.delete(key);
+  for (const key of _draftFlights.keys()) if (key !== generation) _draftFlights.delete(key);
+  const openOrigin = _captureOrigin();
   state._projectDownloadRelease?.();
-  _managedEditEpoch += 1;
+  state.editEpoch += 1;
   state.imageId = imageId || null;
+  if (legacy) state._legacyRasterMime=null;
   // Legacy image opens still receive a raw image id; normalize them onto
   // the managed identity so Save uses /api/imps/projects/*.
   if (imageId && !state.managedResourceId) {
@@ -4524,12 +4973,14 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
   state.cropRect = null;
   state.lassoPoints = [];
   state.lassoActive = false;
-  window.__impsEditLive = true;
+  if (legacy) window.__impsEditLive = true;
   if (state.persistTimer) { clearTimeout(state.persistTimer); state.persistTimer = null; }
   state.persistDirty = false;
+  state.persistInFlight = null;
 
   // Keep the canvas in the shared applet frame. Minimize hides the window
   // without rebuilding the editor, preserving layers, history and selection.
+  if (legacy) {
   if (!_editorWindow) {
     _editorWindow = createOpenClankWindow({
       id: 'imps-editor-window',
@@ -4545,16 +4996,24 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
     container.id = 'imps-editor-container';
     _editorWindow.body.append(container);
   }
-  state.container = document.getElementById('imps-editor-container');
+  state.container = _editorWindow.body.querySelector('#imps-editor-container');
   _editorWindow.setSubtitle(state.draftName);
   _editorWindow.show();
+  } else {
+    const container = root.ownerDocument.createElement('div');
+    container.className = 'imps-runtime-container';
+    state.container = container;
+  }
   state.container.style.display = 'flex';
 
   try {
     _buildEditor(state.container);
+    if (!legacy) { document.body.appendChild(_editorPortal); root.appendChild(state.container); }
+    if (!legacy) for (const id of [...(typeof persistence.save === 'function' && typeof persistence.bindReceipt === 'function' ? [] : ['ge-save']), ...(typeof persistence.startCopy === 'function' && typeof persistence.retryCopy === 'function' ? [] : ['ge-export-gallery','ge-retry-save-copy']), 'ge-save-project','ge-load-project']) { const button = _editorFind(id); if (button) { button.disabled = true; button.title = 'Unavailable until session persistence is connected'; } }
   } catch (e) {
     console.error('[openEditor] _buildEditor threw:', e);
     if (uiModule) uiModule.showError('Editor failed to build: ' + (e?.message || 'unknown'));
+    if (!legacy) { _coreLifetime?.dispose(); state.container?.remove(); state.container = null; state.editorOpen = false; }
     return;
   }
 
@@ -4579,7 +5038,7 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
     // leaving "stuck" preview artefacts on the next open.
     return _loadDraftById(draftId)
       .then(d => {
-        if (!state.editorOpen) return;
+        if (!state.editorOpen || !_originCurrent(openOrigin)) return;
         if (!d) {
           _unmountEditorLoading();
           if (uiModule) uiModule.showToast('Draft not found');
@@ -4589,19 +5048,19 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
         state.draftId = d.id;
         state.draftName = d.name || 'Untitled';
         state.imageId = d.source_image_id || null;
-        return _restoreDraft(d).then(() => {
-          if (!state.editorOpen) return;
+        return _restoreDraft(d, generation, openOrigin).then(() => {
+          if (!state.editorOpen || !_originCurrent(openOrigin)) return;
           composite();
           _renderLayerPanel();
           _fitZoom();
-          const sizeLabel = document.getElementById('ge-canvas-size');
+          const sizeLabel = _editorFind('ge-canvas-size');
           if (sizeLabel) sizeLabel.textContent = `${state.imgWidth}×${state.imgHeight}`;
           _unmountEditorLoading();
           if (uiModule) uiModule.showToast('Resumed draft');
         });
       })
       .catch(err => {
-        if (!state.editorOpen) return;
+        if (!state.editorOpen || !_originCurrent(openOrigin)) return;
         _unmountEditorLoading();
         console.warn('[ge] draft load failed', err);
         if (uiModule) uiModule.showToast('Failed to load draft');
@@ -4614,6 +5073,7 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
     // styled prompt. Asynchronous: we promise-chain so callers can await
     // openEditor() and still rely on isEditorOpen() afterwards.
     const _finishBlank = (w, h) => {
+      if (!state.editorOpen || !_originCurrent(openOrigin)) return;
       _initCanvas(w, h);
       // White-filled Background so the canvas is visible, then a separate
       // transparent Edit layer on top — keeps user's work isolated from
@@ -4625,19 +5085,21 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
       state.layers.push(bgLayer);
       state.layers.push(editLayer);
       state.activeLayerId = editLayer.id;
+      _markSceneChanged();
       composite();
       _renderLayerPanel();
       _fitZoom();
       // First persist creates the server-side row (blank-canvas drafts).
       _schedulePersist();
+      if (!legacy) sceneReady=true;
     };
     if (presetSize && presetSize.w > 0 && presetSize.h > 0) {
       _finishBlank(presetSize.w, presetSize.h);
       return;
     }
     return _promptCanvasSize().then(size => {
-      if (!state.editorOpen || generation !== _openGeneration) return;
-      if (!size) { closeEditor(); return; }
+      if (!state.editorOpen || generation !== _openGeneration || !_originCurrent(openOrigin)) return;
+      if (!size) { if (legacy) closeEditor(); else _closeEditorContent(); return {status:'cancelled'}; }
       _finishBlank(size.w, size.h);
     });
   }
@@ -4646,15 +5108,15 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
   // way closing the editor mid-edit doesn't lose progress.
   // (Server-backed: look up by source_image_id.)
   _mountEditorLoading('Looking up draft…');
-  return _findDraftForImage(imageId).then(_draft => {
-    if (!state.editorOpen || generation !== _openGeneration) return Promise.reject(new Error('editor open superseded'));
+  return (legacy ? _findDraftForImage(imageId) : Promise.resolve(null)).then(_draft => {
+    if (!state.editorOpen || generation !== _openGeneration || !_originCurrent(openOrigin)) return Promise.reject(new Error('editor open superseded'));
     if (!_draft) return null;
     state.draftId = _draft.id;
     state.draftName = _draft.name || displayName || 'Untitled';
     const innerLabel = state.editorLoadingEl?.querySelector('.ge-loading-text');
     if (innerLabel) innerLabel.textContent = 'Resuming draft…';
-    return _restoreDraft(_draft).then(() => {
-      if (!state.editorOpen || generation !== _openGeneration) return Promise.reject(new Error('editor open superseded'));
+    return _restoreDraft(_draft, generation, openOrigin).then(() => {
+      if (!state.editorOpen || generation !== _openGeneration || !_originCurrent(openOrigin)) return Promise.reject(new Error('editor open superseded'));
       // If the draft was broken/empty (0 layers reconstructed), fall
       // through to loading the source image as a normal edit. Without
       // this guard the editor would sit empty and the user would be
@@ -4666,18 +5128,18 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
       composite();
       _renderLayerPanel();
       _fitZoom();
-      const sizeLabel = document.getElementById('ge-canvas-size');
+      const sizeLabel = _editorFind('ge-canvas-size');
       if (sizeLabel) sizeLabel.textContent = `${state.imgWidth}×${state.imgHeight}`;
       _unmountEditorLoading();
       if (uiModule) uiModule.showToast('Resumed previous edit');
       return 'restored';
     });
   }).then(restored => {
-    if (!state.editorOpen || generation !== _openGeneration) return Promise.reject(new Error('editor open superseded'));
+    if (!state.editorOpen || generation !== _openGeneration || !_originCurrent(openOrigin)) return Promise.reject(new Error('editor open superseded'));
     if (restored) return;
     return _loadSourceImage();
   }).catch(err => {
-    if (!state.editorOpen || generation !== _openGeneration) throw err;
+    if (!state.editorOpen || generation !== _openGeneration || !_originCurrent(openOrigin)) throw err;
     _unmountEditorLoading();
     console.warn('[openEditor] draft lookup failed', err);
     return _loadSourceImage();
@@ -4700,13 +5162,14 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
   const img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload = () => {
-    if (!state.editorOpen) return;
+    if (!state.editorOpen || !_originCurrent(openOrigin)) return;
     _initCanvas(img.naturalWidth, img.naturalHeight);
     const photoLayer = createLayer('Photo', state.imgWidth, state.imgHeight);
     photoLayer.ctx.drawImage(img, 0, 0);
     photoLayer.isBase = true;
     state.layers.push(photoLayer);
     state.activeLayerId = photoLayer.id;
+    _markSceneChanged();
     composite();
     _renderLayerPanel();
     _fitZoom();
@@ -4723,11 +5186,12 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
     const loaded = img.onload;
     const failed = img.onerror;
     img.onload = (...args) => {
-      if (!state.editorOpen || generation !== _openGeneration) return reject(new Error('editor open superseded'));
-      loaded(...args); resolve();
+      if (!state.editorOpen || generation !== _openGeneration || !_originCurrent(openOrigin)) return reject(new Error('editor open superseded'));
+      if (!legacy && (!img.naturalWidth || !img.naturalHeight || img.naturalWidth > CANVAS_MAX_IMPORT_DIMENSION || img.naturalHeight > CANVAS_MAX_IMPORT_DIMENSION || img.naturalWidth * img.naturalHeight > CANVAS_MAX_IMPORT_PIXELS)) return reject(new Error('image dimensions exceed import limits'));
+      try { loaded(...args); resolve(); } catch (error) { reject(error); }
     };
     img.onerror = (...args) => {
-      if (!state.editorOpen || generation !== _openGeneration) return reject(new Error('editor open superseded'));
+      if (!state.editorOpen || generation !== _openGeneration || !_originCurrent(openOrigin)) return reject(new Error('editor open superseded'));
       failed(...args); reject(new Error('failed to load image'));
     };
     img.src = imageUrl;
@@ -4735,21 +5199,36 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, 
   }
 }
 
-export function closeEditor() {
-  return _editorWindow ? _editorWindow.requestClose() : _closeEditorContent();
+function closeEditor() {
+  return legacy && _editorWindow ? _editorWindow.requestClose() : {status:'choice_required'};
+}
+
+function _clearSceneState() {
+  if (state.persistTimer) { clearTimeout(state.persistTimer); state.persistTimer = null; }
+  state.layers = []; state.undoStack = []; state.redoStack = []; state.layerOffsets.clear();
+  if (!legacy) { state.wandMask = null; state.wandLayerId = null; state.wandLastSeed = null; }
+  state._editableExtras = null; state.imageId = null; state.imageRef = null; state.managedProvider = null; state.managedResourceId = null;
+  state.projectId = null; state.projectRevision = 0; state.expectedImageRevision = '';
+  if (!legacy) { _draftFlights.clear(); _managedSaveFlights.clear(); _managedSaveReceipts.clear(); }
 }
 
 function _closeEditorContent() {
-  _openGeneration += 1;
+  if (legacy) readOnlyImageScenes.delete(_sceneAuthority);
+  _activeFilterPreview?.finish();
+  if (state.transformActive) _cancelTransform();
   // Flush any pending debounced persist + fire one final save so closing
   // the editor mid-stroke doesn't lose work. The call is fire-and-forget;
   // the server commit lands shortly after the modal hides.
-  if (state.persistTimer) { clearTimeout(state.persistTimer); state.persistTimer = null; }
-  if (state.layers.length) {
+  if (legacy && state.persistTimer) { clearTimeout(state.persistTimer); state.persistTimer = null; }
+  if (legacy && state.layers.length) {
     try { _persistDraft(); } catch {}
   }
+  _openGeneration += 1;
   _unmountEditorLoading();
   state.editorOpen = false;
+  _closeTransformPopup();
+  _coreLifetime?.dispose();
+  _coreLifetime = null;
   // Drop every document-level click-away handler registered by this
   // openEditor invocation. Without this, dropdown closers accumulated
   // across reopens (six handlers × N opens).
@@ -4762,79 +5241,99 @@ function _closeEditorContent() {
   // doesn't leave stale chips/panels behind on top of Imps.
   try { _closeFxMenu(); } catch {}
   try { _closeAdjPopup(); } catch {}
-  try { _closeHistoryPanel(); } catch {}
-  try {
-    const dock = document.getElementById('ge-fx-dock');
-    if (dock) dock.remove();
-  } catch {}
-  try {
-    document.querySelectorAll('.ge-inpaint-popup, .ge-fx-popup, .ge-adj-popup').forEach(el => {
-      if (el._escHandler) {
-        document.removeEventListener('keydown', el._escHandler, true);
-      }
-      // v2 review HIGH-2/3: unregister any modalManager entry left over
-      // from FX-popup / History-panel minimise so _state and _LABELS
-      // don't grow unboundedly across editor opens.
-      if (el._modalId) {
-        try { modalManager.unregister(el._modalId); } catch {}
-      }
-      el.remove();
-    });
-  } catch {}
-  try {
-    document.querySelectorAll('body > #ge-save-menu').forEach(el => el.remove());
-  } catch {}
-  // Belt-and-suspenders: scrub any minimized-dock chip + modalManager
-  // entry whose id matches our ephemeral popups (in case the DOM node
-  // was already removed when the user dragged the chip to trash).
-  try {
-    const dock = document.getElementById('minimized-dock');
-    if (dock) {
-      dock.querySelectorAll('[data-modal-id^="ge-fx-popup-"], [data-modal-id="ge-history-panel-min"]').forEach(c => {
-        const mid = c.dataset.modalId;
-        try { modalManager.unregister(mid); } catch {}
-        c.remove();
-      });
-    }
-  } catch {}
+  try { _historyPanel?.closeOwnedPanels(); } catch {}
   if (state.container) {
     state.container.style.display = 'none';
     state.container.innerHTML = '';
+    if (!legacy) state.container.remove();
   }
   state._projectDownloadRelease?.();
-  state.layers = [];
-  state.undoStack = [];
-  state.redoStack = [];
-  state.layerOffsets.clear();
+  if (legacy) _clearSceneState();
   state.mainCanvas = null;
   state.mainCtx = null;
-  state._editableExtras = null;
   state.maskCanvas = null;
   state.maskCtx = null;
-  state.imageId = null;
-  state.imageRef = null;
-  state.managedProvider = null;
-  state.managedResourceId = null;
-  state.projectId = null;
-  state.projectRevision = 0;
-  state.expectedImageRevision = '';
   state.container = null;
-  window.__impsEditLive = false;
+  if (legacy) window.__impsEditLive = false;
   return true;
 }
 
-export function isEditorOpen() {
+function isEditorOpen() {
   return state.editorOpen;
+}
+
+async function mountRetainedScene() {
+  if (legacy || !retainedScene || !state.layers.length || lifetime.disposed || state.editorOpen) return {status:'unavailable',reason:'retained_scene_unavailable'};
+  const target = session.captureTarget(), sibling = session.hasOpenRuntime();
+  if (sibling && !session.hasReadyRuntime()) return {status:'unavailable',reason:'initial_scene_loading'};
+  const proof = sibling ? {target} : await sessionPersistence.verifySource();
+  if (proof.source?.readOnly) readOnlyImageScenes.add(_sceneAuthority);
+  if (lifetime.disposed || authority.validate(target) !== true || authority.validateScope(session.captureTarget()) !== true || JSON.stringify(session.captureTarget()) !== JSON.stringify(proof.target)) throw new Error('retained image authority changed');
+  const generation = ++_openGeneration, container = root.ownerDocument.createElement('div');
+  state.container = container; state.editorOpen = true; container.style.display = 'flex';
+  try {
+    _buildEditor(container);
+    document.body.appendChild(_editorPortal); root.appendChild(container);
+    state.mainCanvas.width = state.imgWidth; state.mainCanvas.height = state.imgHeight;
+    const mask = _getActiveMaskLayer();
+    if (mask) { state.maskCanvas=mask.canvas; state.maskCtx=mask.ctx; }
+    else { state.maskCanvas=document.createElement('canvas'); state.maskCanvas.width=state.imgWidth; state.maskCanvas.height=state.imgHeight; state.maskCtx=state.maskCanvas.getContext('2d'); }
+    composite(); _renderLayerPanel(); _fitZoom();
+    if (lifetime.disposed || generation !== _openGeneration || authority.validateScope(session.captureTarget()) !== true) throw new Error('retained image view superseded');
+    if (!sibling) sessionPersistence.resumeResultPersistence();
+    sceneReady=true; return {status:'mounted'};
+  } catch (error) { if (state.editorOpen) _closeEditorContent(); throw error; }
 }
 
 // Exact-open entry for Files/Imps. Resolves an opaque Files resource ref to a
 // preview URL and loads it into the editor. Legacy image links resolve here
 // through the Files `imps` open target.
-export async function openResource(resourceRef) {
+async function openResource(resourceRef) {
+  if (legacy) return openResourceOwned(resourceRef);
+  if (initialOpenPending || state.editorOpen || state.layers.length) return {status:'unavailable',reason:'image_scene_already_open'};
+  initialOpenPending=true; try { return await openResourceOwned(resourceRef); } finally { initialOpenPending=false; }
+}
+async function openResourceOwned(resourceRef) {
+  _feedbackSourceWitness = null;
+  if (!legacy) {
+    if (retainedScene) return {status:'unavailable',reason:'retained_scene_requires_mount'};
+    const target = session.captureTarget();
+    if (!persistence?.openSource || !target.opaqueRef || resourceRef !== target.opaqueRef) return {status:'unavailable', reason:'isolated_resource_open_pending'};
+    const origin = _captureOrigin();
+    const source = await persistence.openSource(target);
+    if (!_originCurrent(origin)) throw new Error('resource open superseded');
+    if (typeof persistence.openProject !== 'function') return {status:'unavailable', reason:'isolated_project_open_pending'};
+    const project = await persistence.openProject(target, source);
+    if (!_originCurrent(origin)) throw new Error('resource open superseded');
+    // A first Save may have created the project after this draft was captured.
+    // Bind the draft to its original identity until a new Save supplies its receipt.
+    const projectIdentity=target.draftId ? {} : {projectId:project?.id,projectRevision:project?.project_revision};
+    runtimeAttachment?.refresh(target, {key:target.sourceKey, opaqueRef:source.resourceRef, sourceRevision:source.revision, sourceDigest:source.digest,...projectIdentity});
+    const blobUrl = URL.createObjectURL(new Blob([source.bytes], {type:source.mime}));
+    const generation = ++_openGeneration;
+    try {
+      await openEditor(blobUrl, null, null, source.name, null, generation, isolatedSourceToken);
+      if (!state.editorOpen || !_originCurrent(_captureOrigin())) throw new Error('resource open superseded');
+      if (source.readOnly) readOnlyImageScenes.add(_sceneAuthority);
+      state.imageRef = source.resourceRef; state.managedProvider = 'files'; state.managedResourceId = source.resourceId;
+      const mime = String(source.mime || '').toLowerCase(); state.originalExt = mime.includes('jpeg') ? 'jpg' : mime.includes('webp') ? 'webp' : 'png';
+      const refreshed = session.captureTarget(); state.projectId = refreshed.projectId; state.projectRevision = refreshed.projectRevision || 0; state.expectedImageRevision = refreshed.sourceDigest;
+      if (project?.state?.layers?.length) {
+        const restoreOrigin = _captureOrigin(); await _restoreDraft(project.state, generation, restoreOrigin);
+        if (!_originCurrent(restoreOrigin)) throw new Error('project restore superseded');
+        composite(); _renderLayerPanel(); _fitZoom();
+      }
+      sessionPersistence.savedRevision = state.sceneRevision; sceneReady=true;
+      if (!project?.state?.layers?.length && !session.captureTarget().draftId) _feedbackSourceWitness = {revision:_sceneAuthority.revision,target:JSON.stringify(session.captureTarget())};
+      return Object.freeze({resourceRef:source.resourceRef, name:source.name, projectId:state.projectId});
+    } catch (error) { if (state.editorOpen && generation === _openGeneration) _closeEditorContent(); throw error; }
+    finally { URL.revokeObjectURL(blobUrl); }
+  }
   const generation = ++_openGeneration;
+  const origin = _captureOrigin();
   const { filesFacadeClient } = await import('./filesFacadeClient.js');
   const response = await filesFacadeClient.openResource(resourceRef);
-  if (generation !== _openGeneration) throw new Error('resource open superseded');
+  if (generation !== _openGeneration || !_originCurrent(origin)) throw new Error('resource open superseded');
   const app = response?.target?.app;
   if ((app !== 'imps' && app !== 'files') || !response?.resource?.ref) {
     throw new Error('Imps resource response is invalid');
@@ -4844,16 +5343,16 @@ export async function openResource(resourceRef) {
   const exactName = String(response.resource.name || payload.filename || payload.name || 'image');
   const previewUrl = filesFacadeClient.contentUrl(currentRef, { purpose: 'preview' });
   const sourceResponse = await fetch(previewUrl, { credentials: 'same-origin' });
-  if (generation !== _openGeneration) throw new Error('resource open superseded');
+  if (generation !== _openGeneration || !_originCurrent(origin)) throw new Error('resource open superseded');
   if (!sourceResponse.ok) throw new Error(`Unable to read image resource (${sourceResponse.status})`);
   const sourceBytes = await sourceResponse.arrayBuffer();
   const digest = await crypto.subtle.digest('SHA-256', sourceBytes);
-  if (generation !== _openGeneration) throw new Error('resource open superseded');
+  if (generation !== _openGeneration || !_originCurrent(origin)) throw new Error('resource open superseded');
   const observedRevision = `sha256:${[...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
   const sourceUrl = URL.createObjectURL(new Blob([sourceBytes], { type: sourceResponse.headers.get('content-type') || 'image/*' }));
   const sourceMime = String(sourceResponse.headers.get('content-type') || '').toLowerCase();
-  const originalExt = sourceMime.includes('jpeg') || sourceMime.includes('jpg') ? 'jpg'
-    : sourceMime.includes('webp') ? 'webp' : sourceMime.includes('png') ? 'png' : state.originalExt;
+  const originalMime=payload.read_only===false ? hostRasterMime(sourceBytes,sourceMime) : null;
+  const originalExt=originalMime==='image/jpeg' ? 'jpg' : originalMime==='image/webp' ? 'webp' : 'png';
   // Bind the managed image identity BEFORE openEditor so Save/Load address
   // /api/imps/projects/* using the Files-owned resource identity.
   _bindManagedIdentity(
@@ -4864,11 +5363,12 @@ export async function openResource(resourceRef) {
   state.expectedImageRevision = observedRevision;
   try {
     await openEditor(sourceUrl, null, null, exactName, null, generation);
-    if (generation !== _openGeneration) throw new Error('resource open superseded');
+    if (generation !== _openGeneration || !_originCurrent(origin)) throw new Error('resource open superseded');
+    if (payload.read_only) readOnlyImageScenes.add(_sceneAuthority);
     state.imageRef = currentRef;
-    state.originalExt = originalExt;
+    state.originalExt = originalExt; state._legacyRasterMime=originalMime;
     await _ensureManagedProject(generation, payload.provider || 'files', payload.resource_id || null, { forceLookup: true });
-    if (generation !== _openGeneration) throw new Error('resource open superseded');
+    if (generation !== _openGeneration || !_originCurrent(origin)) throw new Error('resource open superseded');
     return Object.freeze({
       resourceRef: currentRef,
       name: exactName,
@@ -4890,6 +5390,148 @@ const impsModule = {
   exportToGallery,
   retryPendingSaveCopy,
   downloadPNG,
+  getManagedSaveReceipt,
 };
 
-export default impsModule;
+
+
+  if (!legacy) lifetime.add(() => { if (state.editorOpen) _closeEditorContent(); else _coreLifetime?.dispose(); });
+  if (!legacy) {
+    const unavailable = () => Object.freeze({status:'unavailable', reason:'isolated_save_copy_pending'});
+    const validClose = token => state.editorOpen && sessionPersistence.validateToken(token);
+    const sharedControls = ['ge-undo','ge-redo','ge-history-btn','ge-zoom-out','ge-zoom-in','ge-zoom-fit','ge-zoom-100','ge-save-menu-btn','ge-image-menu-btn','ge-filter-menu-btn'];
+    const commandSelectors = {history:'ge-history-btn','zoom-in':'ge-zoom-in','zoom-out':'ge-zoom-out','zoom-fit':'ge-zoom-fit','zoom-actual':'ge-zoom-100','layer-add':'ge-add-layer','layer-merge-down':'ge-merge-down','layer-merge-all':'ge-merge-all'};
+    const runtime = Object.freeze({ session, root,
+      retainedResultStatus:() => sessionPersistence.retainedResultStatus(),
+      keepRetainedResult:() => sessionPersistence.persistRetainedResults(),
+      discardRetainedResult:id => { sessionPersistence.resolveResult(id); return true; },
+      exportRetainedResult:id => { const result=sessionPersistence.readRetainedResult(id), link=document.createElement('a'), ext=({'image/jpeg':'jpg','image/webp':'webp','image/gif':'gif','image/png':'png'})[result.mime.toLowerCase()] || 'image'; link.href=`data:${result.mime};base64,${result.bytes}`; link.download=`retained-image.${ext}`; link.click(); return true; },
+      applyRetainedResult:async id => {
+        const result=sessionPersistence.readRetainedResult(id), revision=_sceneAuthority.revision, origin=_captureOrigin();
+        if (!state.editorOpen || !isolatedVisible || authority.isActive?.()===false || !_originCurrent(origin) || !_sceneAuthority.canApplyAt(revision)) throw new Error('Image is not ready to apply the retained result.');
+        const img=await new Promise((resolve,reject)=>{const image=new Image(); image.onload=()=>resolve(image); image.onerror=()=>reject(new Error('Retained image could not be decoded.')); image.src=`data:${result.mime};base64,${result.bytes}`;});
+        if (!state.editorOpen || !isolatedVisible || authority.isActive?.()===false || !_originCurrent(origin) || !_sceneAuthority.canApplyAt(revision)) throw new Error('Image changed before the result could be applied.');
+        sessionPersistence.readRetainedResult(id);
+        const token=_sceneAuthority.beginGesture(_gestureView,'apply-retained-result'); if (!token) throw new Error('Another image edit is active.');
+        try { const width=img.naturalWidth || img.width, height=img.naturalHeight || img.height, fullSize=result.metadata?.inpaint || result.metadata?.mask || result.metadata?.fullSize; if (fullSize && (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width<1 || height<1 || width>16384 || height>16384 || width*height>67108864)) throw new Error('Retained image dimensions exceed the editor limit.'); _saveState('Apply retained result'); const layer=createLayer(result.metadata?.label || 'Retained result',fullSize ? width : state.imgWidth,fullSize ? height : state.imgHeight); if (result.kind==='import') { let w=width, h=height; if (w>state.imgWidth || h>state.imgHeight) {const scale=Math.min(state.imgWidth/w,state.imgHeight/h); w=Math.round(w*scale); h=Math.round(h*scale);} layer.ctx.drawImage(img,Math.round((state.imgWidth-w)/2),Math.round((state.imgHeight-h)/2),w,h); if (result.metadata?.provenance) layer.provenance=Object.freeze(result.metadata.provenance); } else layer.ctx.drawImage(img,0,0); state.layers.push(layer); state.activeLayerId=layer.id; _markSceneChanged(); sessionPersistence.resolveResult(id); composite(); _renderLayerPanel(); return true; }
+        finally { _sceneAuthority.endGesture(token); }
+      },
+      capabilities: () => Object.freeze({runtime:true, canUndo:state.undoStack.length > 0, canRedo:state.redoStack.length > 0, exportProject:state.editorOpen && state.layers.length > 0, save:sessionPersistence.needsHostSaveDestination || sessionPersistence.canSaveHostOriginal || sessionPersistence.canSaveRecoveredCopy || sessionPersistence.canSaveManagedOriginal && session.captureTarget().sourceKey?.provider === 'files' && typeof persistence.save === 'function' && typeof persistence.bindReceipt === 'function' && typeof persistence.openProject === 'function', saveCopy:!sessionPersistence.pendingCopy && !sessionPersistence.copyBusy && typeof persistence.startCopy === 'function' && typeof persistence.retryCopy === 'function', retrySaveCopy:Boolean(sessionPersistence.pendingCopy) && !sessionPersistence.copyBusy && typeof persistence.retryCopy === 'function', sourceOpen:typeof persistence.openSource === 'function' && typeof persistence.openProject === 'function'}),
+      openAttachmentSource:async (blob,name,provenance) => { const target=session.captureTarget(); if (!(blob instanceof Blob) || blob.size<1 || blob.size>CANVAS_MAX_IMPORT_BYTES || !/^image\//i.test(blob.type) || target.sourceKey || state.editorOpen || authority.validate(target)!==true) throw new Error('Attachment image is unavailable'); const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await blob.arrayBuffer())),byte=>byte.toString(16).padStart(2,'0')).join(''); if (digest!==provenance?.digest || authority.validate(target)!==true || JSON.stringify(session.captureTarget())!==JSON.stringify(target)) throw new Error('Attachment image origin changed'); const url=URL.createObjectURL(blob); try { await openEditor(url,null,null,name,null,null,isolatedSourceToken); if (!state.editorOpen || authority.validate(target)!==true || JSON.stringify(session.captureTarget())!==JSON.stringify(target)) throw new Error('Attachment image origin changed'); if (state.container) state.container.inert=true; sessionPersistence.setImageSourceProvenance(provenance); await sessionPersistence.saveDraft({...sessionPersistence.captureSnapshot(),confirmedHostPixels:Boolean(sessionPersistence.hostOriginal)}); if (authority.validate(session.captureTarget())!==true) throw new Error('Attachment image authority changed'); sessionPersistence.savedRevision=state.sceneRevision; sceneReady=true; return {status:'opened'}; } finally { if (state.container && state.editorOpen) state.container.inert=false; URL.revokeObjectURL(url); } },
+      captureAttachmentImage:async () => { const target=session.captureTarget(), revision=_sceneAuthority.revision, origin=_captureOrigin(); if (!state.editorOpen || authority.validate(target)!==true || !_sceneAuthority.canApplyAt(revision)) throw new Error('Finish the current image edit first'); const token=_sceneAuthority.beginGesture(_gestureView,'attachment-snapshot'); if (!token) throw new Error('Another image edit is active'); let canvas; try {canvas=flatten();} finally {_sceneAuthority.endGesture(token);} const blob=await new Promise((resolve,reject)=>canvas.toBlob(value=>value ? resolve(value) : reject(new Error('Image encoding failed')),'image/png')); if (!_originCurrent(origin) || authority.validate(target)!==true || JSON.stringify(session.captureTarget())!==JSON.stringify(target) || !_sceneAuthority.canApplyAt(revision)) throw new Error('Image changed before attachment preparation'); return {blob,revision,target}; },
+      isAttachmentSnapshotCurrent:snapshot => { const now=session.captureTarget(); return state.editorOpen && authority.validate(now)===true && JSON.stringify([now.sessionId,now.scope,now.sourceKey])===JSON.stringify([snapshot?.target?.sessionId,snapshot?.target?.scope,snapshot?.target?.sourceKey]) && _sceneAuthority.canApplyAt(snapshot?.revision); },
+      attachmentApplyStatus:() => sessionPersistence.attachmentApply,
+      persistAttachmentApply:async descriptor => { sessionPersistence.setAttachmentApply(descriptor); return sessionPersistence.saveDraft(sessionPersistence.captureSnapshot()); },
+      createAttachmentOutcomeRecorder:descriptor => sessionPersistence.createAttachmentOutcomeRecorder(descriptor),
+      persistRecordedAttachment:() => sessionPersistence.saveDraft(sessionPersistence.captureSnapshot()),
+      cancelUnsubmittedAttachmentApply:async id => { sessionPersistence.clearUnsubmittedAttachmentApply(id); return sessionPersistence.saveDraft(sessionPersistence.captureSnapshot()); },
+      importFilesImage:(payload,context,readContext) => { if (!state.editorOpen || !sceneReady || !_originCurrent(_captureOrigin()) || !_clipboardWiring) throw new Error('The target image view is unavailable.'); return _clipboardWiring.deliverFilesImage(payload,context,readContext); },
+      importEditableCopy:async (payload, isCurrent) => {
+        const target=session.captureTarget(), origin=_captureOrigin(), generation=_openGeneration, revision=_sceneAuthority.revision;
+        const current=() => typeof isCurrent==='function' && isCurrent() && authority.validate(target)===true && JSON.stringify(session.captureTarget())===JSON.stringify(target);
+        if (target.sourceKey || target.draftId || target.projectId || !sceneReady || !current() || !_sceneAuthority.canApplyAt(revision)) throw new Error('Image copy target is unavailable');
+        await _restoreDraft(payload,generation,origin,current,false,revision);
+        composite(); _renderLayerPanel(); _fitZoom();
+        return {status:'imported'};
+      },
+      openEditor, openResource, mountRetained:mountRetainedScene, isSceneReady:() => sceneReady && state.editorOpen, closeEditor, exportPNG, exportProject:_exportIsolatedProject, exportToGallery, retryPendingSaveCopy, downloadPNG, isEditorOpen,
+      setFocused:focused => {
+        const wasFocused=isolatedFocused;
+        isolatedFocused=focused === true;
+        for (const controls of state.container?.querySelectorAll('.ge-topbar, .ge-toolbar, .ge-right-panel') || []) {
+          controls.style.display=isolatedFocused ? '' : 'none';
+        }
+        if (wasFocused && !isolatedFocused) {
+          _historyPanel?.closeOwnedPanels();
+          _closeFxMenu(); _closeAdjPopup();
+        }
+        if (_editorPortal) _editorPortal.style.display=isolatedVisible && isolatedFocused ? 'contents' : 'none';
+      },
+      setVisible:visible => {
+        const wasVisible = isolatedVisible;
+        isolatedVisible = visible === true;
+        if (_editorPortal) _editorPortal.style.display = isolatedVisible && isolatedFocused ? 'contents' : 'none';
+        if (wasVisible && !isolatedVisible) {
+          _closeTransformPopup(); _closeFxMenu(); _closeAdjPopup();
+          _historyPanel?.closeOwnedPanels();
+        } else if (!wasVisible && isolatedVisible && state.editorOpen) {
+          _flushSceneProjection();
+          composite();
+        }
+        return isolatedVisible;
+      },
+      setSharedCommands:enabled => { for (const id of sharedControls) { const node = _editorFind(id); if (node) node.style.display = enabled ? 'none' : ''; } },
+      command:name => {
+        if (!state.editorOpen || !isolatedVisible || !isolatedFocused || authority.isActive?.() === false || !_originCurrent(_captureOrigin())) return false;
+        if (name === 'project-metadata') { _openProjectMetadata().catch(error=>uiModule?.showToast(error.message || 'Project metadata unavailable.',6000)); return true; }
+        if (name === 'undo') return undo(); if (name === 'redo') return redo(); if (name === 'selection-invert') return _invertSelection();
+        let node = commandSelectors[name] ? _editorFind(commandSelectors[name]) : null;
+        if (!node && /^image-(resize|rotate-90|rotate-180|flip-h|flip-v)$/.test(name)) node = state.container.querySelector(`[data-image-action="${name.slice(6)}"]`);
+        if (!node && /^filter-(blur-gaussian|blur-zoom)$/.test(name)) node = state.container.querySelector(`[data-filter-action="${name.slice(7)}"]`);
+        if (!node && /^selection-(delete|copy|mask)$/.test(name)) node = _editorFind(`ge-${state.wandMask ? 'wand' : 'lasso'}-${name.slice(10)}`);
+        if (!node || node.disabled) return false;
+        if (name === 'history' && node.style.display === 'none') { node.style.display = ''; try { node.click(); } finally { node.style.display = 'none'; } }
+        else node.click();
+        return true;
+      },
+      projectOperationStatus:() => sessionPersistence.recoveryStatus().state==='save_uncertain',
+      observeProjectOperation:() => sessionPersistence.observeSaveOutcome(),
+      captureFeedbackRegion:_captureFeedbackRegion,
+      isDirty:() => _sceneAuthority.dirty,
+      prepareClose:async choice => {
+        if (!state.editorOpen) return {status:'unavailable',reason:'image_not_open'};
+        return sessionPersistence.prepareClose(choice,{save:() => runtime.save(),draft:() => _persistDraft()});
+      },
+      validateClose:validClose,
+      commitClose:token => { if (!validClose(token) || !sessionPersistence.commitToken(token)) return false; _closeEditorContent(); return true; },
+      beforeClose:async choice => { const token = await runtime.prepareClose(choice); return token?.status === 'prepared' && runtime.commitClose(token) ? {status:'closed'} : token; },
+      restoreDraft:async () => {
+        const target = session.captureTarget();
+        if (!state.editorOpen || !target.draftId || authority.validate(target) !== true) return {status:'unavailable', reason:'draft_authority_unavailable'};
+        const origin = _captureOrigin(), generation = _openGeneration;
+        const draft = await _loadDraftById(target.draftId);
+        const savedTarget = draft?.payload?._imageSessionRecovery;
+        if (!draft || draft.id !== target.draftId || !_originCurrent(origin) || authority.validate(target) !== true || JSON.stringify(session.captureTarget()) !== JSON.stringify(target) || JSON.stringify({...savedTarget,opaqueRef:null}) !== JSON.stringify({...target,draftId:null,opaqueRef:null})) throw new Error('draft identity or authority changed');
+        const source=draft.payload._imageSourceProvenance, apply=draft.payload._imageAttachmentApply;
+        if (source && apply && Object.hasOwn(apply,'sourceKind') && (apply.sourceKind!==source.kind || apply.sourceId!==source.id || apply.sourceDigest!==source.digest)) throw new Error('Attachment source and receipt disagree');
+        const restoreResults = sessionPersistence.prepareRestoreResults(draft.payload._imageRetainedResults || []);
+        const restoreAttachment = sessionPersistence.prepareRestoreAttachmentApply(draft.payload._imageAttachmentApply || null);
+        const restoreSource = sessionPersistence.prepareRestoreSourceProvenance(draft.payload._imageSourceProvenance || null);
+        const restoreProjectOperation = sessionPersistence.prepareRestoreProjectOperation(draft.payload._imageProjectOperation || null);
+        await _restoreDraft(draft, generation, origin, () => authority.validate(target) === true && JSON.stringify(session.captureTarget()) === JSON.stringify(target), true);
+        sessionPersistence.pendingCopy = draft.payload._imagePendingCopy || null;
+        restoreResults();
+        restoreAttachment();
+        restoreSource();
+        restoreProjectOperation();
+        state.draftId = target.draftId; state.draftName = draft.name || 'Untitled';
+        await sessionPersistence.restoreHostOriginal(draft.payload._imageHostOriginal,target,draft.payload._imageHostPixelsSaved===true,draft.payload._imageHostPixelsPending===true);
+        sessionPersistence.markRestoredDraft(target);
+        composite(); _renderLayerPanel(); _fitZoom();
+        return {status:'restored'};
+      },
+      save:async () => { if (!session.captureTarget().sourceKey && !sessionPersistence.canSaveHostOriginal && !sessionPersistence.canSaveRecoveredCopy && !sessionPersistence.needsHostSaveDestination) return {status:'unavailable',reason:'This image has no original. Use Save as copy.'}; if (!state.editorOpen || !_originCurrent(_captureOrigin()) || (typeof persistence.save !== 'function' || typeof persistence.bindReceipt !== 'function')) return unavailable();
+        return sessionPersistence.saveCurrent(); },
+      render:() => { if (!state.editorOpen || !_originCurrent(_captureOrigin())) return false; composite(); return true; },
+      undo:() => state.editorOpen && _originCurrent(_captureOrigin()) ? undo() : false,
+      redo:() => state.editorOpen && _originCurrent(_captureOrigin()) ? redo() : false,
+      dispose:() => sessionPersistence.saveCount || sessionPersistence.draftCount || sessionPersistence.copyBusy ? false : lifetime.dispose?.(),
+      retireView:() => { if (state.editorOpen) _closeEditorContent(); lifetime.dispose?.(); return true; },
+    });
+    runtimeAttachment = session.attachRuntime(runtime, {viewId:viewId || runtimePrefix});
+    lifetime.add(() => runtimeAttachment?.detach());
+    return runtime;
+  }
+  return Object.freeze({ ...impsModule, capabilities: () => ({runtime:true}) });
+}
+const defaultRuntime = createImageRuntime({legacy:true});
+export const openEditor = (...args) => defaultRuntime.openEditor(...args);
+export const closeEditor = (...args) => defaultRuntime.closeEditor(...args);
+export const isEditorOpen = (...args) => defaultRuntime.isEditorOpen(...args);
+export const openResource = (...args) => defaultRuntime.openResource(...args);
+export const exportPNG = (...args) => defaultRuntime.exportPNG(...args);
+export const exportToGallery = (...args) => defaultRuntime.exportToGallery(...args);
+export const retryPendingSaveCopy = (...args) => defaultRuntime.retryPendingSaveCopy(...args);
+export const downloadPNG = (...args) => defaultRuntime.downloadPNG(...args);
+export const getManagedSaveReceipt = (...args) => defaultRuntime.getManagedSaveReceipt(...args);
+export default defaultRuntime;

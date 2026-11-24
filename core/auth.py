@@ -4,6 +4,7 @@ Config stored in data/auth.json. Uses bcrypt directly.
 """
 
 import enum
+import copy
 import importlib
 import json
 import math
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 from core.atomic_io import atomic_write_json as _atomic_write_json  # noqa: E402
 from core.middleware import INTERNAL_TOOL_USER  # noqa: E402
 
-DEFAULT_PRIVILEGES = {
+_LEGACY_DEFAULT_PRIVILEGES = {
     "can_use_agent": True,
     "can_use_browser": True,
     "can_use_bash": False,
@@ -44,13 +45,53 @@ DEFAULT_PRIVILEGES = {
     "block_all_models": False,
 }
 
-# Admins get everything
-ADMIN_PRIVILEGES = {k: (True if isinstance(v, bool) else (0 if isinstance(v, int) else [])) for k, v in DEFAULT_PRIVILEGES.items()}
-ADMIN_PRIVILEGES["allowed_models_restricted"] = False
-# Admins must never be blocked from using models — the generic dict
-# comprehension above flips every boolean default to True, which would be
-# backwards for this sentinel.
-ADMIN_PRIVILEGES["block_all_models"] = False
+_OPTIONAL_FEATURES = tuple(key for key in _LEGACY_DEFAULT_PRIVILEGES if key.startswith("can_"))
+DEFAULT_PRIVILEGES = {
+    **_LEGACY_DEFAULT_PRIVILEGES,
+    **dict.fromkeys(_OPTIONAL_FEATURES, False),
+    "block_all_models": True,
+}
+ADMIN_PRIVILEGES = {
+    **DEFAULT_PRIVILEGES,
+    **dict.fromkeys(_OPTIONAL_FEATURES, True),
+    "block_all_models": False,
+}
+
+
+def _saved_privileges(user: dict) -> dict:
+    stored = user.get("privileges")
+    if user.get("privilege_policy") != 1:
+        if user.get("is_admin") is True and stored == ADMIN_PRIVILEGES:
+            stored = user.get("privileges_before_admin")
+        if stored == _LEGACY_DEFAULT_PRIVILEGES:
+            return {}
+    if not isinstance(stored, dict):
+        return {}
+    return {key: value for key, value in stored.items() if key in DEFAULT_PRIVILEGES}
+
+
+def _effective_privileges(user: dict, owner_id: str | None) -> dict:
+    if owner_id and user.get("account_id") == owner_id and user.get("full_access") is True:
+        return copy.deepcopy(ADMIN_PRIVILEGES)
+    saved = _saved_privileges(user)
+    effective = {**DEFAULT_PRIVILEGES, **saved}
+    if (user.get("privilege_policy") != 1
+            and user.get("is_admin") is True
+            and user.get("privileges") == ADMIN_PRIVILEGES
+            and user.get("privileges_before_admin") is None):
+        # Pre-policy admins already had chat and model access. A bootstrap
+        # owner ID was not recorded, so dropping both would strand the account.
+        # The compatibility grant is effective only while this legacy record
+        # qualifies. It does not become a saved grant on role changes.
+        effective.update(can_use_agent=True, block_all_models=False)
+    if "block_all_models" not in saved and (
+        saved.get("allowed_models") or saved.get("allowed_models_restricted") is True
+    ):
+        effective["block_all_models"] = False
+    for key in _OPTIONAL_FEATURES:
+        effective[key] = effective[key] is True
+    return copy.deepcopy(effective)
+
 
 from src.constants import AUTH_FILE, PASSWORD_MIN_LENGTH
 from src.owner_identity import (
@@ -254,8 +295,47 @@ class AuthManager:
 
 
 
-    def _save(self):
-        _atomic_write_json(self.auth_path, self._config, indent=2)
+    def _save(self, config=None):
+        from src.openclank.memory_policy_projection import policy_coordinator
+        config = self._config if config is None else config
+        coordinator = policy_coordinator()
+        if coordinator is not None:
+            try:
+                try:
+                    with open(self.auth_path, 'r', encoding='utf-8') as stream:
+                        previous = json.load(stream)
+                except FileNotFoundError:
+                    # First save on a fresh data dir: no previous users to compare.
+                    previous = {'users': {}}
+                old_users, new_users = previous['users'], config['users']
+                if type(old_users) is not dict or type(new_users) is not dict:
+                    raise ValueError('authentication policy unavailable')
+                for name in old_users.keys() & new_users.keys():
+                    old, new = old_users[name], new_users[name]
+                    if type(old) is not dict or type(new) is not dict:
+                        raise ValueError('authentication policy unavailable')
+                    old_allowed = _effective_privileges(old, previous.get("first_run_owner"))["can_manage_memory"]
+                    new_allowed = _effective_privileges(new, config.get("first_run_owner"))["can_manage_memory"]
+                    if old_allowed != new_allowed:
+                        coordinator.validate_authority(name)
+            except (OSError, KeyError, json.JSONDecodeError) as exc:
+                raise ValueError('authentication policy unavailable') from exc
+        _atomic_write_json(self.auth_path, config, indent=2)
+
+    def _commit_config(self, candidate: dict) -> None:
+        try:
+            self._save(candidate)
+        except BaseException:
+            # A late Lore publication failure can follow the atomic live write.
+            # Keep in-memory reads aligned with a positively identified commit.
+            try:
+                with open(self.auth_path, encoding="utf-8") as saved:
+                    if json.load(saved) == candidate:
+                        self._config = candidate
+            except (OSError, ValueError):
+                pass
+            raise
+        self._config = candidate
 
     @property
     def users(self) -> Dict[str, Any]:
@@ -298,10 +378,12 @@ class AuthManager:
         with self._setup_lock:
             if self.is_configured:
                 return False
-            return self.create_user(username, password, is_admin=True)
+            return self._create_user(username, password, is_admin=True, bootstrap=True)
 
     def create_user(self, username: str, password: str, is_admin: bool = False) -> bool:
-        """Create a new user account."""
+        return self._create_user(username, password, is_admin=is_admin, bootstrap=False)
+
+    def _create_user(self, username: str, password: str, *, is_admin: bool, bootstrap: bool) -> bool:
         username = username.strip().lower()
         if not username:
             return False
@@ -309,18 +391,22 @@ class AuthManager:
             logger.warning("Refused to create reserved username '%s'", username)
             return False
         with self._config_lock:
-            if username in self.users:
+            if username in self.users or (bootstrap and self.users):
                 return False
-            if "users" not in self._config:
-                self._config["users"] = {}
-            self._config["users"][username] = {
-                "account_id": f"account-{uuid.uuid4().hex}",
+            candidate = copy.deepcopy(self._config)
+            account_id = f"account-{uuid.uuid4().hex}"
+            candidate.setdefault("users", {})[username] = {
+                "account_id": account_id,
                 "password_hash": _hash_password(password),
                 "created": time.time(),
                 "is_admin": is_admin,
-                "privileges": dict(ADMIN_PRIVILEGES if is_admin else DEFAULT_PRIVILEGES),
+                "privilege_policy": 1,
+                "privileges": {},
             }
-            self._save()
+            if bootstrap:
+                candidate["first_run_owner"] = account_id
+                candidate["users"][username]["full_access"] = False
+            self._commit_config(candidate)
         logger.info(f"Created user '{username}' (admin={is_admin})")
         return True
 
@@ -528,96 +614,170 @@ class AuthManager:
         ]
 
     def get_privileges(self, username: str) -> Dict[str, Any]:
-        """Get privileges for a user. Admins get all privileges."""
-        key = normalize_known_username(self.users, username)
+        config = self._config
+        users = config.get("users", {})
+        key = normalize_known_username(users, username)
         if key is None:
             return {}
-        user = self.users[key]
-        if user.get("is_admin") is True:
-            return dict(ADMIN_PRIVILEGES)
-        # Merge stored privileges with defaults (in case new privileges were added)
-        stored = user.get("privileges", {})
-        return {**DEFAULT_PRIVILEGES, **stored}
+        return _effective_privileges(users[key], config.get("first_run_owner"))
+
+    def full_access_status(self, username: str) -> dict:
+        config = self._config
+        users = config.get("users", {})
+        key = normalize_known_username(users, username)
+        owner_id = config.get("first_run_owner")
+        user = users.get(key, {})
+        eligible = bool(owner_id and user.get("account_id") == owner_id)
+        return {
+            "eligible": eligible,
+            "enabled": eligible and user.get("full_access") is True,
+        }
+
+    def filesystem_access_eligible(self, username: str, account_id: str) -> bool:
+        config = self._config
+        users = config.get("users", {})
+        key = normalize_known_username(users, username)
+        user = users.get(key, {})
+        return bool(account_id and user.get("account_id") == account_id and
+                    (user.get("is_admin") is True or config.get("first_run_owner") == account_id))
+
+    def set_filesystem_access(self, username: str, account_id: str, scope: str, enabled: bool, *, repository):
+        with self._config_lock:
+            if self._is_account_lifecycle_fenced(username) or not self.filesystem_access_eligible(username, account_id):
+                return None
+            return repository.set_full_filesystem_access(account_id, scope, enabled)
+
+    def set_owner_full_access(self, username: str, account_id: str, enabled: bool) -> bool:
+        from src.openclank.memory_policy_projection import policy_coordinator
+        username = username.strip().lower()
+        if type(enabled) is not bool:
+            raise ValueError("Full access requires a boolean")
+
+        def owner_snapshot():
+            if self._is_account_lifecycle_fenced(username):
+                return None
+            user = self.users.get(username)
+            if (not user or not account_id or self._config.get("first_run_owner") != account_id
+                    or user.get("account_id") != account_id):
+                return None
+            return user
+
+        def commit():
+            candidate = copy.deepcopy(self._config)
+            candidate["users"][username]["full_access"] = enabled
+            self._commit_config(candidate)
+            return True
+
+        with self._config_lock:
+            user = owner_snapshot()
+            if user is None:
+                return False
+            if (user.get("full_access") is True) == enabled:
+                return True
+            coordinator = policy_coordinator()
+            if coordinator is None or _effective_privileges(user, None)["can_manage_memory"] is True:
+                return commit()
+            expected = copy.deepcopy(user)
+
+        from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
+        with PREFERENCE_LOCK:
+            before = copy.deepcopy(_load_for_user(username))
+        token = coordinator.begin(username, before)
+        try:
+            with self._config_lock:
+                if owner_snapshot() != expected:
+                    raise ValueError("Authentication changed during access transition")
+                commit()
+            with PREFERENCE_LOCK:
+                after = copy.deepcopy(_load_for_user(username))
+            coordinator.finish(token, username, after)
+            return True
+        finally:
+            coordinator.close(token)
 
     def set_privileges(self, username: str, privileges: Dict[str, Any]) -> bool:
+        from src.openclank.memory_policy_projection import policy_coordinator
+        coordinator = policy_coordinator()
+        name = username.strip().lower()
+        if coordinator is None:
+            return self._set_privileges_inner(name, privileges)
+        with self._config_lock:
+            current = copy.deepcopy(self.users.get(name))
+            if not current or current.get('is_admin') or 'can_manage_memory' not in privileges:
+                return self._set_privileges_inner_unlocked(name, privileges)
+            old = _effective_privileges(current, self._config.get("first_run_owner"))["can_manage_memory"]
+            if old == (privileges["can_manage_memory"] is True):
+                return self._set_privileges_inner_unlocked(name, privileges)
+        from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
+        with PREFERENCE_LOCK:
+            before = copy.deepcopy(_load_for_user(name))
+        token = coordinator.begin(name, before)
+        try:
+            result = self._set_privileges_inner(name, privileges, expected=current)
+            with PREFERENCE_LOCK:
+                after = copy.deepcopy(_load_for_user(name))
+            coordinator.finish(token, name, after)
+            return result
+        finally:
+            coordinator.close(token)
+
+    def _set_privileges_inner(self, username: str, privileges: Dict[str, Any], *, expected=None) -> bool:
         """Update privileges for a user. Can't modify admin privileges."""
         username = username.strip().lower()
         with self._config_lock:
-            if username not in self.users:
-                return False
-            if self.users[username].get("is_admin"):
-                return False  # admins always have full access
-            # Only allow known privilege keys
-            current = self.get_privileges(username)
-            for k, v in privileges.items():
-                if k in DEFAULT_PRIVILEGES:
-                    current[k] = v
-            self._config["users"][username]["privileges"] = current
-            self._save()
-        logger.info(f"Updated privileges for '{username}': {current}")
+            if expected is not None and json.dumps(self.users.get(username), sort_keys=True, allow_nan=False) != json.dumps(expected, sort_keys=True, allow_nan=False):
+                raise ValueError('authentication changed during policy transition')
+            return self._set_privileges_inner_unlocked(username, privileges)
+
+    def _set_privileges_inner_unlocked(self, username: str, privileges: Dict[str, Any]) -> bool:
+        if username not in self.users:
+            return False
+        if self.users[username].get("is_admin") or self.full_access_status(username)["eligible"]:
+            return False
+        current = _saved_privileges(self.users[username])
+        updated = {**current, **{key: value for key, value in privileges.items() if key in DEFAULT_PRIVILEGES}}
+        if json.dumps(current, sort_keys=True, allow_nan=False) == json.dumps(updated, sort_keys=True, allow_nan=False):
+            return True
+        candidate = copy.deepcopy(self._config)
+        user = candidate["users"][username]
+        user["privileges"] = updated
+        user["privilege_policy"] = 1
+        self._commit_config(candidate)
+        logger.info("Updated privileges for %r", username)
         return True
 
-    def set_admin(self, username: str, is_admin: bool,
-                  requesting_user: str) -> SetAdminResult:
-        """Promote/demote an existing user to/from admin. Admin only.
-
-        Refuses to remove the last remaining admin so the instance can never
-        be locked out of admin access; self-demotion is allowed as long as
-        another admin remains. Admin status is re-checked live on every
-        request, so unlike delete/rename no session or token revocation is
-        needed — a demoted admin simply fails the next is_admin() gate.
-
-        Promotion stashes the user's current privilege map and demotion
-        restores it, so a temporary admin stint can't silently broaden a
-        user's non-admin access; users without a stash (created as admin,
-        or promoted before stashing existed) demote to DEFAULT_PRIVILEGES.
-
-        Counting admins and flipping the flag happen in one critical section
-        so two concurrent demotions can't race the admin count to zero.
-        """
+    def set_admin(self, username: str, is_admin: bool, requesting_user: str) -> SetAdminResult:
+        """Change the durable role without changing optional self capabilities."""
         username = (username or "").strip().lower()
         requesting_user = (requesting_user or "").strip().lower()
         is_admin = bool(is_admin)
         with self._config_lock:
-            target = self._config.get("users", {}).get(username)
+            target = self.users.get(username)
             if target is None:
                 return SetAdminResult.USER_NOT_FOUND
             if not self.users.get(requesting_user, {}).get("is_admin"):
                 return SetAdminResult.NOT_AUTHORIZED
-            currently_admin = bool(target.get("is_admin"))
-            if currently_admin == is_admin:
-                return SetAdminResult.OK  # no-op; leave privileges untouched
-            if currently_admin and not is_admin:
-                admin_count = sum(1 for d in self.users.values() if d.get("is_admin"))
-                if admin_count <= 1:
-                    return SetAdminResult.LAST_ADMIN
-            # Write order matters for lock-free readers: get_privileges()
-            # reads without _config_lock and trusts is_admin, so the admin
-            # flag must be flipped while the stored map is safe to expose —
-            # before writing admin privileges on promote, after restoring
-            # the pre-admin map on demote.
-            if is_admin:
-                target["is_admin"] = True
-                # Stash the pre-admin map so a later demotion can restore it.
-                # While is_admin is set the stored map is inert: get_privileges
-                # short-circuits to ADMIN_PRIVILEGES and set_privileges refuses
-                # admins, so only set_admin ever touches the stash.
-                target["privileges_before_admin"] = dict(
-                    target.get("privileges") or DEFAULT_PRIVILEGES
-                )
-                target["privileges"] = dict(ADMIN_PRIVILEGES)
-            else:
-                # Restore the stashed pre-admin map. Fall back to defaults for
-                # users created as admins (their stored map is ADMIN_PRIVILEGES,
-                # which must not leak past demotion — e.g. can_use_bash) and
-                # for admins promoted before the stash existed.
-                target["privileges"] = dict(
-                    target.pop("privileges_before_admin", None)
-                    or DEFAULT_PRIVILEGES
-                )
-                target["is_admin"] = False
-            self._save()
-        logger.info("Set is_admin=%s for '%s' (by '%s')", is_admin, username, requesting_user)
+            if bool(target.get("is_admin")) == is_admin:
+                return SetAdminResult.OK
+            if not is_admin and sum(bool(user.get("is_admin")) for user in self.users.values()) <= 1:
+                return SetAdminResult.LAST_ADMIN
+            candidate = copy.deepcopy(self._config)
+            updated = candidate["users"][username]
+            updated["privileges"] = _saved_privileges(target)
+            updated["privilege_policy"] = 1
+            updated["is_admin"] = is_admin
+            account_id = str(target.get("account_id") or "")
+            retire_files = bool(not is_admin and account_id and account_id != self._config.get("first_run_owner"))
+            if retire_files:
+                from src.openclank.file_policy import FilePolicyRepository
+
+                FilePolicyRepository().retire_full_filesystem_access(account_id)
+            self._commit_config(candidate)
+        if retire_files:
+            from src.openclank.files_service_client import close_clients_for_owner
+
+            close_clients_for_owner(username)
+        logger.info("Set is_admin=%s for %r (by %r)", is_admin, username, requesting_user)
         return SetAdminResult.OK
 
     def change_password(self, username: str, current_password: str, new_password: str) -> bool:
@@ -663,7 +823,7 @@ class AuthManager:
     def totp_get_provisioning_uri(self, username: str, secret: str) -> str:
         """Get the otpauth:// URI for QR code generation."""
         totp = pyotp.TOTP(secret)
-        return totp.provisioning_uri(name=username, issuer_name="Odysseus")
+        return totp.provisioning_uri(name=username, issuer_name="Open Clank")
 
     def totp_confirm_enable(self, username: str, code: str) -> bool:
         """Verify a TOTP code against the pending secret, then enable 2FA."""
@@ -965,4 +1125,5 @@ class AuthManager:
         }
         if authenticated:
             result["privileges"] = self.get_privileges(username)
+            result["full_access"] = self.full_access_status(username)
         return result

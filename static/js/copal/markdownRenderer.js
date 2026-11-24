@@ -68,7 +68,7 @@ export async function openAppDestination(destination, event = null, { sourceKind
  * @param {function} options.documents - returns the visible document list
  * @param {function} [options.findByName] - resolve a short name to a document
  * @param {function} [options.assetUrl] - map an asset target to a URL
- * @param {function} options.openTarget - (target, fragment, event) navigation
+ * @param {function} options.openTarget - (target, fragment, event, context) navigation
  * @param {function} [options.openAppDestination] - (destination, event) override
  * @param {function} [options.onConvertPluginBlock] - inert-block conversion hook
  * @returns {{ renderMarkdown: function, renderPreview: function, renderReference: function, appendMarkdownInline: function }}
@@ -82,12 +82,18 @@ export function createMarkdownRenderer({
   openTarget,
   openAppDestination: appOpen = openAppDestination,
   onConvertPluginBlock = null,
+  openCodeMention = null,
 }) {
   const resolveName = (name) => (typeof findByName === 'function' ? findByName(name) : (documents() || []).find((doc) => doc.name === name) || null);
 
   async function navigateReference(target, fragment, event, context = {}) {
     const source = context.origin;
     const accountId = achievementOwner();
+    const initiatingLink = event?.currentTarget;
+    const isCurrent = () => achievementOwner() === accountId &&
+      (!context.navigation || context.navigation.isCurrent()) &&
+      (!initiatingLink || initiatingLink.isConnected);
+    if (!isCurrent()) return null;
     let link = null;
     if (source?.id && source?.head && Number.isInteger(context.reference?.sourceStart)) {
       try {
@@ -96,8 +102,10 @@ export function createMarkdownRenderer({
         if (String(proof?.revisionId) === String(context.sourceRevision || source.head)) link = proof.links.find(item => item.start === context.reference.sourceStart && item.targetDocumentId === target.id);
       } catch (_) { /* Navigation remains available without qualification. */ }
     }
-    const destination = await openTarget(target, fragment, event);
-    if (link && destination?.documentId === target.id && await visiblePresentation(destination.element)) {
+    if (!isCurrent()) return null;
+    const destination = await openTarget(target, fragment, event, context);
+    if (link && destination?.documentId === target.id && await visiblePresentation(destination.element) &&
+        achievementOwner() === accountId && (!context.navigation || context.navigation.isCurrent())) {
       const occurrenceId = crypto.randomUUID();
       await queueReceipt(`link:${occurrenceId}`, { linkId:link.linkId, targetDocumentId:target.id, sourceRevisionId:link.sourceRevisionId, occurrenceId },
         { accountId, url:`/api/copal/documents/${encodeURIComponent(source.id)}/link-navigation?workspace=${encodeURIComponent(source.resource?.key?.workspaceId || source.workspaceId || 'default')}` });
@@ -110,15 +118,17 @@ export function createMarkdownRenderer({
     assetUrl,
     resolveAsset,
     openTarget:navigateReference,
-    openAppDestination:async (destination, event) => {
-      const result = await appOpen(destination, event);
-      if (result && result.ok === false && result.error && typeof openTarget === 'function') {
-        // Surface a useful error without executing anything else.
-        openTarget({ kind:'app-destination-error', name:result.error, id:null }, null, event);
+    openAppDestination:async (destination, event, navigation) => {
+      if (navigation && !navigation.isCurrent()) return null;
+      const result = await appOpen(destination, event, navigation
+        ? { sourceKind:navigation.presentation === 'wiki' ? 'wiki' : 'editor', workspaceId:navigation.workspaceId }
+        : undefined);
+      if (result?.ok === false && result.error && (!navigation || navigation.isCurrent())) {
+        openTarget?.({ kind:'app-destination-error', name:result.error, id:null }, null, event, { navigation });
       }
       return result;
     },
-    renderDocument:(text, seen, origin) => renderMarkdown(text, seen, origin),
+    renderDocument:(text, seen, origin, navigation) => renderMarkdown(text, seen, origin, { navigation }),
   });
 
   function appendMarkdownInline(parent, value, context = {}) {
@@ -136,16 +146,42 @@ export function createMarkdownRenderer({
         appendText(rest.slice(0, reference.index));
         const exact = rest.slice(reference.index, reference.index + reference.length);
         const sourceStart = context.locateReference?.(exact);
-        parent.append(renderReference({ ...reference, sourceStart }, context));
+        const memory = !reference.embed && reference.syntax === 'wiki' && /^memory:([A-Za-z0-9][A-Za-z0-9._~-]{0,255})$/.exec(reference.target);
+        if (memory) {
+          const button = h('button', { type:'button', class:'copal-chip', text:reference.label || 'Memory' });
+          button.addEventListener('click', () => { void window.memoryModule?.openReference?.(memory[1]); });
+          parent.append(button);
+        } else if (reference.embed && context.treeHouseImageUrls?.has(reference.target)) {
+          parent.append(renderReference({ ...reference, sourceStart }, {
+            ...context, authorizedMedia:{ url:reference.target, media_type:'image/png' },
+          }));
+        } else parent.append(renderReference({ ...reference, sourceStart }, context));
         rest = rest.slice(reference.index + reference.length); continue;
       }
       if (!match) { appendText(rest); return; }
       appendText(rest.slice(0, match.index));
       if (match[2]) {
         const target = resolveName(match[2]);
-        parent.append(h('button', { class:'copal-chip', type:'button', text:match[3] || match[2], onclick:(event) => openFromEvent(target, event) }));
-      } else if (match[4]) parent.append(h('code', { text:match[4] }));
-      else if (match[5]) parent.append(h('strong', { text:match[5] }));
+        parent.append(h('button', { class:'copal-chip', type:'button', disabled:!target, 'data-copal-reading-link':'', text:match[3] || match[2], onclick:(event) => openFromEvent(target, event) }));
+      } else if (match[4]) {
+        const spelling = match[4];
+        const code = h('code', { text:spelling });
+        if (typeof openCodeMention === 'function' && context.origin?.id && context.codeRevision
+            && /^[A-Za-z0-9._:$#/-]{1,160}$/.test(spelling) && /[A-Za-z]/.test(spelling)) {
+          const button = h('button', {type:'button', class:'copal-chip', title:'Resolve this code reference'}, code);
+          button.addEventListener('click', async () => {
+            const block = button.closest('[data-md-start][data-md-end]');
+            if (!block || button.disabled) return;
+            const isCurrent = () => button.isConnected && (!context.navigation || context.navigation.isCurrent());
+            button.disabled = true;
+            try {
+              await openCodeMention({document:context.origin, revisionId:String(context.codeRevision),
+                spelling, startLine:Number(block.dataset.mdStart), endLine:Number(block.dataset.mdEnd), isCurrent});
+            } finally { if (button.isConnected) button.disabled = false; }
+          });
+          parent.append(button);
+        } else parent.append(code);
+      } else if (match[5]) parent.append(h('strong', { text:match[5] }));
       else if (match[6]) parent.append(h('del', { text:match[6] }));
       else if (match[7]) parent.append(h('mark', { text:match[7] }));
       else if (match[8]) parent.append(h('em', { text:match[8] }));
@@ -156,10 +192,10 @@ export function createMarkdownRenderer({
         if(context.treeHouseTopicLinks && /^#treehouse-unit=/.test(match[10]))try {const target=decodeURIComponent(match[10].slice('#treehouse-unit='.length));if(/^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,200}$/.test(target))topicTarget=target;}catch{/* invalid fragment stays unresolved */}
         if(topicTarget)parent.append(h('a',{href:`#treehouse-unit=${encodeURIComponent(topicTarget)}`,text:match[9]}));
         else if (isExternal) parent.append(h('a', { href:match[10], target:'_blank', rel:'noopener noreferrer', text:match[9] }));
-        else if (isApp) parent.append(h('button', { class:'copal-chip copal-app-link', type:'button', 'data-app-destination':match[10].replace(/^clank:\/\//i, ''), text:match[9], onclick:async (event) => { const result = await appOpen(match[10], event); if (result && result.ok === false) openTarget({ kind:'app-destination-error', name:result.error, id:null }, null, event); } }));
+        else if (isApp) parent.append(h('button', { class:'copal-chip copal-app-link', type:'button', 'data-copal-reading-link':'', 'data-app-destination':match[10].replace(/^clank:\/\//i, ''), text:match[9], onclick:async (event) => { const result = await appOpen(match[10], event); if (result && result.ok === false) openTarget({ kind:'app-destination-error', name:result.error, id:null }, null, event); } }));
         else {
           const target = resolveName(match[10]);
-          parent.append(h('button', { class:`copal-chip${target ? '' : ' unresolved'}`, type:'button', disabled:!target, text:match[9], onclick:(event) => openFromEvent(target, event) }));
+          parent.append(h('button', { class:`copal-chip${target ? '' : ' unresolved'}`, type:'button', disabled:!target, 'data-copal-reading-link':'', text:match[9], onclick:(event) => openFromEvent(target, event) }));
         }
       } else if (match[11]) parent.append(h('span', { class:'copal-inline-math', text:match[11] }));
       else if (match[12]) parent.append(h('code', { class:'copal-templater-block', text:match[12] }));
@@ -173,7 +209,12 @@ export function createMarkdownRenderer({
     const acceptedSource = String(text || '');
     const sourceRevision = origin?.head;
     const locateReference = createReferenceSourceLocator(acceptedSource);
-    const inline = (parent, value) => appendMarkdownInline(parent, value, { origin, seen, locateReference, sourceRevision, treeHouseTopicLinks:options.treeHouseTopicLinks===true });
+    const inline = (parent, value) => appendMarkdownInline(parent, value, {
+      origin, seen, locateReference, sourceRevision, navigation:options.navigation,
+      codeRevision:origin?.text === acceptedSource && ['note','wiki'].includes(origin?.kind) ? sourceRevision : null,
+      treeHouseTopicLinks:options.treeHouseTopicLinks === true,
+      treeHouseImageUrls:options.treeHouseImageUrls,
+    });
     const lines = String(text || '').split('\n');
     let lineOffset = 0;
     if (lines[0]?.trim() === '---') {
@@ -215,16 +256,16 @@ export function createMarkdownRenderer({
     for (let index = 0; index < lines.length; index += 1) {
       const blockStart = index;
       const raw = lines[index].replace(/%%[^%\n]*(?:%(?!%)[^%\n]*)*%%/g, '');
-      const fence = /^\s*```\s*([^\s`]*)/.exec(raw);
-      if (fence) {
+      const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
+      if (fence && (!codeBlock || (fence[1][0] === codeBlock.marker[0] && fence[1].length >= codeBlock.marker.length && !fence[2].trim()))) {
         if (codeBlock) { appendBlock(codeBlock.wrapper, codeBlock.start, index); codeBlock = null; }
         else {
-          const lang = fence[1] || '';
+          const lang = fence[2].trim().split(/\s+/, 1)[0] || '';
           const isPluginBlock = /^(dataview|tasks|dataviewjs|tasksjs)$/i.test(lang);
           const code = h('code', { 'data-language':lang });
           const pre = h('pre', { class:'copal-markdown-code' }, code);
           const copy = h('button', { type:'button', class:'copal-btn copal-code-copy', text:'Copy', onclick:async() => navigator.clipboard.writeText(code.textContent || '') });
-          const header = fence[1] ? h('figcaption', { text:fence[1] }) : null;
+          const header = lang ? h('figcaption', { text:lang }) : null;
           if (isPluginBlock) {
             const banner = h('div', { class:'copal-plugin-block-banner' },
               h('span', { class:'copal-plugin-block-badge', text:`${lang} block` }),
@@ -232,9 +273,9 @@ export function createMarkdownRenderer({
             const convertBtn = onConvertPluginBlock
               ? h('button', { type:'button', class:'copal-btn copal-plugin-convert', text:'Convert to Base', onclick:() => onConvertPluginBlock(code.textContent || '', lang) })
               : null;
-            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block copal-plugin-block' }, header, banner, copy, convertBtn, pre), start:index };
+            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block copal-plugin-block' }, header, banner, copy, convertBtn, pre), start:index, marker:fence[1] };
           } else {
-            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block' }, header, copy, pre), start:index };
+            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block' }, header, copy, pre), start:index, marker:fence[1] };
           }
         }
         continue;
@@ -293,15 +334,15 @@ export function createMarkdownRenderer({
     return root;
   }
 
-  function renderPreview(source, origin = null) {
+  function renderPreview(source, origin = null, { navigation } = {}) {
     const reference = findReferenceToken(String(source || ''));
-    return reference ? renderReference(reference, { origin, seen:new Set(origin?.id ? [origin.id] : []) }) : null;
+    return reference ? renderReference(reference, { origin, seen:new Set(origin?.id ? [origin.id] : []), navigation }) : null;
   }
 
   // Comment regions contain complete prose, code samples and multiple references.
   // Standalone embed widgets deliberately retain their smaller renderPreview path.
-  function renderComment(source, origin = null) {
-    const node = renderMarkdown(String(source || ''), new Set(origin?.id ? [origin.id] : []), origin);
+  function renderComment(source, origin = null, options = {}) {
+    const node = renderMarkdown(String(source || ''), new Set(origin?.id ? [origin.id] : []), origin, options);
     node.classList.add('cm-rich-comment-prose');
     return node;
   }

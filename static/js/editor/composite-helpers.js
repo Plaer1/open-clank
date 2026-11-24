@@ -20,13 +20,13 @@
  * @param {number} quality         JPEG quality 0..1.
  * @returns {string|null}
  */
-export function buildThumbnail(layers, imgW, imgH, offsets, maxDim, quality = 0.6) {
+export function buildThumbnail(layers, imgW, imgH, offsets, maxDim, quality = 0.6, ownerDocument = globalThis.document) {
   if (!imgW || !imgH) return null;
   try {
     const scale = Math.min(1, maxDim / Math.max(imgW, imgH));
     const tw = Math.max(1, Math.round(imgW * scale));
     const th = Math.max(1, Math.round(imgH * scale));
-    const c = document.createElement('canvas');
+    const c = ownerDocument.createElement('canvas');
     c.width = tw; c.height = th;
     const ctx = c.getContext('2d');
     for (const layer of layers) {
@@ -61,9 +61,9 @@ export function buildThumbnail(layers, imgW, imgH, offsets, maxDim, quality = 0.
  * @param {number} imgH
  * @returns {HTMLCanvasElement|null}
  */
-export function buildMergedMaskCanvas(layers, imgW, imgH) {
+export function buildMergedMaskCanvas(layers, imgW, imgH, ownerDocument = globalThis.document) {
   if (!imgW || !imgH) return null;
-  const out = document.createElement('canvas');
+  const out = ownerDocument.createElement('canvas');
   out.width = imgW;
   out.height = imgH;
   const ctx = out.getContext('2d');

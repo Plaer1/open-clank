@@ -97,9 +97,9 @@ def test_linux_musl_is_not_mislabeled_as_a_supported_glibc_target(monkeypatch):
 
 
 def test_build_generation_is_offline_and_bun_version_is_exact():
-    generate = (ROOT / "packages/mimo-code/packages/opencode/script/generate.ts").read_text(encoding="utf-8")
-    version = (ROOT / "packages/mimo-code/packages/script/src/index.ts").read_text(encoding="utf-8")
-    build = (ROOT / "packages/mimo-code/packages/opencode/script/build.ts").read_text(encoding="utf-8")
+    generate = (ROOT / "packages/mimo-code/packages/cli/script/generate.ts").read_text(encoding="utf-8")
+    version = (ROOT / "packages/mimo-code/script/meta.ts").read_text(encoding="utf-8")
+    build = (ROOT / "packages/mimo-code/packages/cli/script/build.ts").read_text(encoding="utf-8")
 
     assert "fetch(" not in generate
     assert '"test", "tool", "fixtures", "models-api.json"' in generate
@@ -122,9 +122,9 @@ def test_engine_smoke_uses_the_generated_managed_protocol_binding():
 
 
 def test_upstream_engine_update_channels_are_not_reachable():
-    source = (ROOT / "packages/mimo-code/packages/opencode/src/cli/upgrade.ts").read_text(encoding="utf-8")
-    entrypoint = (ROOT / "packages/mimo-code/packages/opencode/src/index.ts").read_text(encoding="utf-8")
-    installation = (ROOT / "packages/mimo-code/packages/opencode/src/installation/index.ts").read_text(encoding="utf-8")
+    source = (ROOT / "packages/mimo-code/packages/cli/src/cli/upgrade.ts").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "packages/mimo-code/packages/cli/src/index.ts").read_text(encoding="utf-8")
+    installation = (ROOT / "packages/mimo-code/packages/cli/src/installation/index.ts").read_text(encoding="utf-8")
 
     assert "svc.latest" not in source
     assert "svc.upgrade" not in source
@@ -187,23 +187,23 @@ def test_ci_covers_every_tier_one_target_twice_and_signs_release_payloads():
 
 def test_source_fingerprint_ignores_local_and_generated_state(tmp_path):
     source = tmp_path / "vendor"
-    (source / "packages/opencode/src/provider").mkdir(parents=True)
-    (source / "packages/opencode/src/code.ts").write_text("export const value = 1\n", encoding="utf-8")
+    (source / "packages/cli/src/provider").mkdir(parents=True)
+    (source / "packages/cli/src/code.ts").write_text("export const value = 1\n", encoding="utf-8")
     initial = engine_build.source_fingerprint(source)
 
     incidental_directories = [
         ".git",
-        ".mimocode",
+        ".openclank",
         ".turbo",
         "dist",
         "dist-darwin-arm64",
         "experiment",
         "mimoapi",
         "node_modules",
-        "packages/opencode/.mimocode-test-fixtures-one",
-        "packages/opencode/research",
-        "packages/opencode/src/ext",
-        "packages/opencode/tmp",
+        "packages/cli/.openclank-test-fixtures-one",
+        "packages/cli/research",
+        "packages/cli/src/ext",
+        "packages/cli/tmp",
         "packages/sdk/ts-dist",
         "target",
     ]
@@ -219,8 +219,8 @@ def test_source_fingerprint_ignores_local_and_generated_state(tmp_path):
         "app.log": "runtime log",
         "daemon.pid": "123",
         "openclank-vendor.json": "manifest hashes separately",
-        "packages/opencode/script/build-darwin.ts": "generated build entrypoint",
-        "packages/opencode/src/provider/models-snapshot.js": "generated model catalogue",
+        "packages/cli/script/build-darwin.ts": "generated build entrypoint",
+        "packages/cli/src/provider/models-snapshot.js": "generated model catalogue",
         "packages/sdk/js/openapi.json": "generated OpenAPI document",
         "packages/sdk/tsconfig.tsbuildinfo": "compiler state",
         "scratch.bun-build": "package output",
@@ -232,14 +232,14 @@ def test_source_fingerprint_ignores_local_and_generated_state(tmp_path):
         path.write_text(content, encoding="utf-8")
     assert engine_build.source_fingerprint(source) == initial
 
-    (source / "packages/opencode/src/code.ts").write_text("export const value = 2\n", encoding="utf-8")
+    (source / "packages/cli/src/code.ts").write_text("export const value = 2\n", encoding="utf-8")
     assert engine_build.source_fingerprint(source) != initial
 
 
 def test_source_fingerprint_distinguishes_admitted_config_and_similar_directory_names(tmp_path):
     source = tmp_path / "vendor"
-    (source / "packages/opencode/src").mkdir(parents=True)
-    admitted = source / "packages/opencode/src/distribution"
+    (source / "packages/cli/src").mkdir(parents=True)
+    admitted = source / "packages/cli/src/distribution"
     admitted.mkdir()
     (admitted / "config.ts").write_text("export const value = 1\n", encoding="utf-8")
     (source / ".env.example").write_text("PLACEHOLDER=value\n", encoding="utf-8")

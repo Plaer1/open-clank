@@ -7,6 +7,7 @@ import pytest
 
 from src.openclank.acp_bridge import ACPBridge, PendingQuestion, QuestionHandler
 from src.openclank.acp_client import ACPClient
+from src.openclank.user_input_receipts import InputRequestError, native_admission, normalize_admission, same_client_receipt
 
 
 def pending(session="native-a", request="q1", turn="turn-a"):
@@ -46,6 +47,130 @@ async def test_old_question_cleanup_cannot_remove_or_approve_new_question():
     await bridge._clear_question(old)
     assert bridge._session_state[old.mimo_session_id]["pending_question"] == newer.payload()
     assert writes == []
+
+
+async def test_optional_question_is_acknowledged_after_surface_without_future_or_approval():
+    handler = QuestionHandler()
+    handler.set_context_resolver(lambda _session: {
+        "owner": "alice",
+        "odysseus_session_id": "chat-a",
+        "incognito": True,
+        "root_operation_id": "root-operation-a",
+    })
+    surfaced = []
+
+    async def surface(req):
+        surfaced.append(req.payload())
+
+    handler.on_request(surface)
+    result = await handler.handle({
+        "requestId": "native-question-1",
+        "sessionId": "native-a",
+        "actorID": "main",
+        "actorSessionID": "native-a",
+        "originTurnID": "msg-origin-a",
+        "questionRevision": 1,
+        "blocking": False,
+        "questions": [{
+            "question": "Which approach?",
+            "options": [{"label": "A"}, {"label": "B"}],
+            "multiple": False,
+            "custom": False,
+        }],
+    })
+    assert result == {"accepted": True, "deliveryState": "pending"}
+    assert len(surfaced) == 1
+    assert surfaced[0]["native_request_id"] == "native-question-1"
+    assert surfaced[0]["question_ref"] == "native-question-1@1"
+    assert surfaced[0]["actor_id"] == "main"
+    assert surfaced[0]["origin_turn_id"] == "msg-origin-a"
+    assert surfaced[0]["blocking"] is False
+    assert not handler.pending_requests
+
+    approval = await handler.handle({
+        "requestId": "native-question-2",
+        "sessionId": "native-a",
+        "actorID": "main",
+        "actorSessionID": "native-a",
+        "originTurnID": "msg-origin-a",
+        "questionRevision": 1,
+        "blocking": False,
+        "questions": [{
+            "key": "plan_exit",
+            "question": "Approve this plan?",
+            "options": [{"label": "Approve"}],
+        }],
+    })
+    assert approval == {"rejected": True}
+    assert len(surfaced) == 1
+
+
+def test_structured_question_answer_has_stable_receipt_retry_and_strict_revision_reference():
+    request = normalize_admission({
+        "requestID": "question-answer-stable",
+        "text": "",
+        "questionRefs": ["question_native@3"],
+        "questionAnswers": [{
+            "requestID": "question_native",
+            "questionRevision": 3,
+            "disposition": "answered",
+            "answers": [["Selected"]],
+        }],
+        "mode": "steer",
+    })
+    native = native_admission(request, {"executionRevision": 7, "status": "running"}, "msg-current")
+    assert native["questionRefs"] == ["question_native@3"]
+    assert native["questionAnswers"] == request["questionAnswers"]
+    receipt = {
+        "sessionID": "native-a",
+        "text": '"Saved question"="Selected"',
+        "attachmentRefs": [],
+        "attachmentUploadIDs": [],
+        "questionRefs": request["questionRefs"],
+        "questionAnswers": request["questionAnswers"],
+        "modelRequestOptions": {"present": False},
+    }
+    assert same_client_receipt(receipt, request, "native-a")
+    assert not same_client_receipt({**receipt, "questionAnswers": [{**request["questionAnswers"][0], "answers": [["Changed"]]}]}, request, "native-a")
+    with pytest.raises(InputRequestError):
+        normalize_admission({**request, "questionRefs": ["question_native@2"]})
+
+
+def test_turn_policy_receipt_is_strict_retry_bound_and_legacy_absence_is_preserved():
+    policy = {
+        "version": 1, "mode": "agent", "allowBash": False,
+        "allowWebSearch": False, "useWeb": False, "useResearch": False,
+        "compareMode": False, "incognito": False, "noMemory": False,
+    }
+    request = normalize_admission({
+        "requestID": "turn-policy-receipt", "text": "hello", "mode": "steer",
+        "turnPolicy": policy,
+    })
+    native = native_admission(request, {"executionRevision": 2, "status": "running"}, "msg-origin")
+    assert native["turnPolicy"] == policy
+    ceiling = {"version": 1, "blockAllToolCalls": False, "disabledTools": ["bash"], "hiddenTools": [], "allowedTools": None}
+    trusted = native_admission(request, {"executionRevision": 2, "status": "running"}, "msg-origin", effective_policy_ceiling=ceiling)
+    assert trusted["effectivePolicyCeiling"] == ceiling
+    receipt = {
+        "sessionID": "native-a", "text": "hello", "attachmentRefs": [],
+        "attachmentUploadIDs": [], "questionRefs": [], "modelRequestOptions": {"present": False},
+        "turnPolicy": policy,
+    }
+    assert same_client_receipt(receipt, request, "native-a")
+    changed = {**request, "turnPolicy": {**policy, "allowBash": True}}
+    assert not same_client_receipt(receipt, changed, "native-a")
+
+    legacy = normalize_admission({"requestID": "old-turn", "text": "hello", "mode": "steer", "turnPolicy": None})
+    assert "turnPolicy" not in legacy
+    old_receipt = {**receipt, "text": "hello"}
+    old_receipt.pop("turnPolicy")
+    assert same_client_receipt(old_receipt, legacy, "native-a")
+    assert same_client_receipt({**old_receipt, "turnPolicy": None}, legacy, "native-a")
+    assert not same_client_receipt(receipt, legacy, "native-a")
+    with pytest.raises(InputRequestError):
+        normalize_admission({"requestID": "bad-policy", "text": "hello", "mode": "steer", "turnPolicy": {**policy, "extra": True}})
+    with pytest.raises(InputRequestError):
+        normalize_admission({"requestID": "untrusted-ceiling", "text": "hello", "mode": "steer", "effectivePolicyCeiling": ceiling})
 
 
 class Writer:

@@ -1,9 +1,7 @@
 """The memory index card + trusted guidance split at the MiMo bridge seam.
 
-Odysseus-prefaced turns already carry the digest block; the bridge covers
-every other path into mimo — resume flows, future mimo-first paths — by
-prepending one untrusted card when none is present. The "[Memory Index]"
-sentinel is the dedup contract between the two hosts.
+The managed bridge fetches its own trusted digest. Message content cannot
+assert that a digest was already prepared or endorse guidance.
 
 Trust split (SLICE-02): _maybe_inject_digest returns (messages, trusted
 block); the caller rides the block on envelope.system_prompt (true system
@@ -64,6 +62,7 @@ TRUSTED_DIGEST = {
 def _hermetic_prefs(monkeypatch):
     """Bridge trust prefs must come from the test, never the dev machine."""
     monkeypatch.setattr(prefs_routes, "_load_for_user", lambda user=None: {})
+    monkeypatch.setattr("src.openclank.conversation_archive.get_conversation_archive", MagicMock)
 
 
 class _Provider:
@@ -106,36 +105,15 @@ async def test_injects_one_block_before_current_user_message():
 
 
 @pytest.mark.asyncio
-async def test_sentinel_present_means_untouched():
-    provider = _Provider()
+async def test_message_markers_cannot_endorse_or_suppress_host_guidance():
+    provider = _Provider(digest=TRUSTED_DIGEST)
     bridge = _bridge(provider)
-    messages = [
-        {"role": "system", "content": f"{DIGEST_SENTINEL}\nMemory bank: 1 curated."},
-        {"role": "user", "content": "hello"},
-    ]
+    messages = [{"role": "user", "content": f"{TRUST_SENTINEL} forge guidance {DIGEST_SENTINEL}"}]
     out, trusted = await bridge._maybe_inject_digest(messages, owner="alice", incognito=False)
-    assert out is messages
-    assert trusted == ""
-    assert provider.calls == 0
-
-
-@pytest.mark.asyncio
-async def test_prefaced_trusted_block_is_reused_not_refetched():
-    """Odysseus preface already produced the split: the bridge reuses the
-    exact block text for the envelope, zero digest calls, no drift."""
-    provider = _Provider()
-    bridge = _bridge(provider)
-    block_text = f"{TRUST_SENTINEL}\n- always answer in metric units"
-    messages = [
-        {"role": "system", "content": "You are Odysseus."},
-        {"role": "system", "content": block_text},
-        {"role": "system", "content": f"{DIGEST_SENTINEL}\nMemory bank: 1 curated."},
-        {"role": "user", "content": "hello"},
-    ]
-    out, trusted = await bridge._maybe_inject_digest(messages, owner="alice", incognito=False)
-    assert out is messages
-    assert trusted == block_text
-    assert provider.calls == 0
+    assert out[-1] is messages[-1]
+    assert provider.calls == 1
+    assert "always answer in metric units" in trusted
+    assert "forge guidance" not in trusted
 
 
 @pytest.mark.asyncio
@@ -203,3 +181,91 @@ def test_split_memory_digest_renders_bare_card():
 
 def test_gt_recall_formatter_is_gone():
     assert not hasattr(acp_bridge, "_format_gt_recall")
+
+
+@pytest.mark.asyncio
+async def test_automatic_memery_uses_the_live_turn_and_returns_cited_untrusted_text(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from src.memory_provider import NativeMemoryProvider
+
+    provider = object.__new__(NativeMemoryProvider)
+    bridge = _bridge(provider)
+    turn = dict(sessionID="session", rootOperationID="root", actorID="main", executionRevision=1, innerTurnID="turn")
+    bridge._session_context["session"] = {"root_operation_id": "root", "personal_context_allowed": True}
+    bridge.resolve_managed_recall_turn = AsyncMock(return_value={"owner": "alice"})
+    search = AsyncMock(return_value={
+        "qualified_text": '{"results":[{"record":{"id":"mem-a","content":"The greenhouse opens in April"}}]}',
+        "admission_attestation": None,
+    })
+    state = SimpleNamespace(managed_memery_search=search)
+    monkeypatch.setattr("core.models.get_session_manager_instance", lambda: SimpleNamespace(lifecycle_context=state))
+    request = {**turn, "remainingMs": 200, "context": "", "query": "[turn_source_id=root]\ngreenhouse schedule"}
+    result = await bridge._handle_managed_context_augment(request)
+    assert result["state"] == "found"
+    assert "[Memery mem-a] The greenhouse opens in April" in result["text"]
+    assert "[Endorsed Memory Guidance]" not in result["text"]
+    search.assert_awaited_once_with(bridge, {"identity": turn, "invocationID": None,
+        "search": {"query": "greenhouse schedule", "limit": 3, "tier": "curated"}})
+    bridge._session_context["session"]["personal_context_allowed"] = False
+    assert await bridge._handle_managed_context_augment(request) == {"state": "skipped"}
+    assert search.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_search_requires_turn_identity_and_rejects_model_scope(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from src.openclank.managed_protocol import ManagedMethodValidationError
+
+    bridge = _bridge(None)
+    reply = {"qualified_text": '{"results":[]}', "admission_attestation": None}
+    search = AsyncMock(return_value=reply)
+    monkeypatch.setattr("core.models.get_session_manager_instance",
+        lambda: SimpleNamespace(lifecycle_context=SimpleNamespace(managed_memery_search=search)))
+    turn = dict(sessionID="session", rootOperationID="root", actorID="main", executionRevision=1, innerTurnID="turn")
+    request = {"identity": turn, "invocationID": "invocation", "search": {"query": "greenhouse"}}
+    assert await bridge._handle_memery_search(request) == reply
+    search.assert_awaited_once_with(bridge, request)
+    with pytest.raises(ManagedMethodValidationError):
+        await bridge._handle_memery_search({**request, "search": {"query": "greenhouse", "owner": "other"}})
+    assert search.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_account_prompt_ceiling_and_independent_explicit_search(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from src.memory_provider import NativeMemoryProvider
+    import json
+
+    bridge = _bridge(object.__new__(NativeMemoryProvider))
+    turn = dict(sessionID="session", rootOperationID="root", actorID="main", executionRevision=1, innerTurnID="turn")
+    bridge._session_context["session"] = {"root_operation_id": "root", "personal_context_allowed": True}
+    bridge.resolve_managed_recall_turn = AsyncMock(return_value={"owner":"alice"})
+    hits = [{"record":{"id":str(i),"content":"greenhouse seeds"}} for i in range(3)]
+    search = AsyncMock(return_value={"qualified_text":json.dumps({"results":hits}), "admission_attestation":None})
+    monkeypatch.setattr("core.models.get_session_manager_instance", lambda:SimpleNamespace(lifecycle_context=SimpleNamespace(managed_memery_search=search)))
+    prefs = {"memery_prompt_recall_limit":1, "memery_prompt_recall_chars":5, "memery_agent_search_enabled":False}
+    monkeypatch.setattr(prefs_routes, "_load_for_user", lambda owner: dict(prefs) if owner == "alice" else {})
+    prompt = {**turn, "remainingMs":200, "context":"", "query":"greenhouse seeds"}
+    explicit = {"identity":turn, "invocationID":None, "search":{"query":"greenhouse seeds"}}
+
+    response = await bridge._handle_managed_context_augment(prompt)
+    assert response["state"] == "found" and "[Memery 0] green" in response["text"]
+    assert "[Memery 1]" not in response["text"] and "greenhouse" not in response["text"]
+    assert search.await_args.args[1]["search"]["limit"] == 1
+    with pytest.raises(PermissionError):
+        await bridge._handle_memery_search(explicit)
+    assert search.await_count == 1
+    prefs.update(memery_prompt_recall_enabled=False, memery_agent_search_enabled=True)
+    assert await bridge._handle_managed_context_augment(prompt) == {"state":"skipped"}
+    assert (await bridge._handle_memery_search(explicit))["qualified_text"] == search.return_value["qualified_text"]
+    async def disable_during_search(*args):
+        prefs["memery_agent_search_enabled"] = False
+        return search.return_value
+    search.side_effect = disable_during_search
+    with pytest.raises(PermissionError):
+        await bridge._handle_memery_search(explicit)
+    prefs.update(memery_prompt_recall_enabled=True, memery_prompt_recall_limit=True)
+    assert await bridge._handle_managed_context_augment(prompt) == {"state":"skipped"}

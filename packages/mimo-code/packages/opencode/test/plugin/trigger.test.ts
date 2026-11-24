@@ -8,6 +8,7 @@ const disableDefault = process.env.MIMOCODE_DISABLE_DEFAULT_PLUGINS
 process.env.MIMOCODE_DISABLE_DEFAULT_PLUGINS = "1"
 
 const { Plugin } = await import("../../src/plugin/index")
+const { Snapshot } = await import("../../src/snapshot/index")
 const { Instance } = await import("../../src/project/instance")
 
 afterEach(async () => {
@@ -43,6 +44,37 @@ async function project(source: string) {
 }
 
 describe("plugin.trigger", () => {
+  test("verified built-in request shaping does not require a workspace snapshot", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => Bun.write(path.join(dir, "mimocode.json"), "{}"),
+    })
+    const events: string[] = []
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () =>
+        Effect.gen(function* () {
+          const plugin = yield* Plugin.Service
+          yield* plugin
+            .trigger(
+              "chat.params",
+              {
+                sessionID: "ses_builtin_snapshot_fixture",
+                model: {
+                  providerID: "openai",
+                  api: { npm: "@ai-sdk/openai" },
+                },
+                provider: { options: {} },
+              } as any,
+              { maxOutputTokens: 100 },
+            )
+            .pipe(Effect.provideService(Snapshot.CaptureBarrier, () => Effect.sync(() => events.push("capture"))))
+        }).pipe(Effect.provide(Plugin.defaultLayer), Effect.runPromise),
+    })
+
+    expect(events).toEqual([])
+  })
+
   test("runs synchronous hooks without crashing", async () => {
     await using tmp = await project(
       [

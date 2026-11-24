@@ -1,8 +1,10 @@
+import {responseStyle, RESPONSE_STYLES} from './responseStyle.js';
 import { uiIcon } from './uiIcons.js';
 // Moves the one live chat root between the workspace and an applet window.
 // The conversation tree and its controllers never get cloned or re-mounted.
 import modalManager from './modalManager.js';
 import { makeWindowDraggable } from './windowDrag.js';
+import { resetInlineChatPosition } from './tileManager.js';
 
 const POPUP_ID = 'chat-window-modal';
 const WORKSPACE_ID = 'chat-workspace';
@@ -72,6 +74,50 @@ function updateRestoreControl() {
 }
 
 let menuActions = null;
+let standaloneDrafts = { owner:null, authEpoch:null, drafts:new Map() };
+
+async function shareStandaloneText() {
+  const scope=responseStyle.capture();
+  const root=chatRoot(), capturedMode=mode, capturedPopup=popupShell;
+  const workspace=() => String(window.__odysseusGetActiveCopalContext?.()?.workspace ||
+    localStorage.getItem('openclank-copal-workspace') || 'default');
+  const chatWorkspace=() => String(scope?.s.getSessions?.().find(row=>row.id===scope.sid)?.workspace_id || 'default');
+  const workspaceId=workspace(), chatWorkspaceId=chatWorkspace();
+  const current=()=>!!scope?.sid && responseStyle.current(scope) && chatRoot()===root &&
+    !!root?.isConnected && mode===capturedMode && popupShell===capturedPopup &&
+    workspace()===workspaceId && chatWorkspace()===chatWorkspaceId;
+  const [{default:ui}, {filesFacadeClient:client}, {openStandaloneTextShare}] = await Promise.all([
+    import('./ui.js'), import('./filesFacadeClient.js'), import('./editor/standaloneTextShare.js'),
+  ]);
+  if (!current()) { ui.showToast('Open a current chat to prepare a standalone share.'); return; }
+  if (standaloneDrafts.owner !== scope.owner || standaloneDrafts.authEpoch !== scope.authEpoch) {
+    standaloneDrafts={owner:scope.owner,authEpoch:scope.authEpoch,drafts:new Map()};
+  }
+  const key=JSON.stringify([scope.sid,chatWorkspaceId,workspaceId]);
+  let draft=standaloneDrafts.drafts.get(key);
+  if (!draft) {
+    draft={name:'share.txt',text:'',attempt:null,saved:null,busy:false};
+    standaloneDrafts.drafts.set(key,draft);
+  }
+  const chooseParent=async () => {
+    const {createResourcePicker}=await import('./copal/resourcePicker.js');
+    if (!current()) return null;
+    return new Promise((resolve,reject) => {
+      let parentRef=null;
+      const picker=createResourcePicker({
+        client, purpose:'folder', accountScope:scope.owner, workspaceScope:workspaceId,
+        getAccountScope:()=>document.body.dataset.accountId, getWorkspaceScope:workspace,
+        isOriginCurrent:current, rootLabel:'Private copy destination',
+        isCompatible:item=>item.provider==='host' && item.capabilities?.write === true ? '' : 'Choose a writable Host folder.',
+        onSelect:item=>{ if (!current()) return false; parentRef=item.ref; return true; },
+        onClose:cancelled=>resolve(cancelled ? null : parentRef),
+      });
+      void picker.open().catch(error=>{reject(error); picker.destroy();});
+    });
+  };
+  openStandaloneTextShare({draft,client,current,chooseParent,status:message=>ui.showToast(message)});
+}
+
 function ensureMenuActions() {
   const menu = document.getElementById('export-dropdown-menu');
   if (!menu || menu.dataset.chatWorkspaceBound) return;
@@ -99,10 +145,37 @@ function ensureMenuActions() {
     return row;
   };
 
+  const styleMenu=document.createElement('details'); styleMenu.className='export-dropdown-item response-style-menu';
+  const styleTitle=document.createElement('summary'); styleTitle.textContent='Response style'; styleMenu.append(styleTitle);
+  const styleStatus=document.createElement('span'); styleStatus.setAttribute('role','status'); styleMenu.append(styleStatus);
+  let styleEpoch=0;
+  for (const eventName of ['odysseus:session-selected','openclank:auth-context-changed']) document.addEventListener(eventName,()=>{styleEpoch++;styleStatus.textContent='';styleMenu.open=false;});
+  styleMenu.addEventListener('click',event=>event.stopPropagation());
+  styleMenu.addEventListener('toggle',async()=>{if(!styleMenu.open)return;const epoch=++styleEpoch, scope=responseStyle.capture();styleStatus.textContent='Loading…';const value=await responseStyle.read(scope);if(epoch!==styleEpoch || !styleMenu.open || !responseStyle.current(scope))return;styleStatus.textContent=value.state==='unknown' ? `Chat creation outcome unknown; ${value.requested} remains your choice.` : value.mode ? `Current: ${value.mode}.${value.requested ? ` Unsaved choice: ${value.requested}.` : ''} A response already in progress keeps its style.` : 'Response style unavailable.';});
+  for(const mode of RESPONSE_STYLES){const button=document.createElement('button');button.type='button';button.textContent=mode[0].toUpperCase()+mode.slice(1);button.addEventListener('click',async event=>{event.stopPropagation();const epoch=++styleEpoch, scope=responseStyle.capture();styleStatus.textContent='Saving…';const result=await responseStyle.set(mode,scope);if(epoch!==styleEpoch || !styleMenu.open || !responseStyle.current(scope))return;styleStatus.textContent=result.state==='saved' ? `Saved: ${result.mode}. A response already in progress keeps its style.` : result.state==='draft' ? `New chat: ${result.mode}.` : result.state==='conflict' ? `Style changed elsewhere; ${mode} was not saved. Choose again.` : result.state==='unknown' ? `Save outcome unknown; ${mode} is retained as your choice. Check before choosing again.` : 'Response style unavailable; your choice was not saved.';});styleMenu.append(button);}
+  menu.append(styleMenu);
+
   menuActions = {
     popout: add('chat-popout-btn', 'Pop out chat', '↗', (row, focus) => popOutChat(row, focus)),
     dock: add('chat-dock-btn', 'Dock chat', '↙', (row, focus) => dockChat(row, focus)),
+    resetPosition: add('chat-reset-position-btn', 'Reset chat position', '↔', resetInlineChatPosition),
   };
+  add('chat-share-artifact-btn', 'Share standalone text…', '↗', () => {
+    void shareStandaloneText().catch(async () => {
+      const {default:ui}=await import('./ui.js');
+      ui.showToast('Standalone text review is unavailable.');
+    });
+  });
+  add('chat-share-snapshot-btn', 'Share supported chat text…', '↗', async () => {
+    const scope=responseStyle.capture(), root=chatRoot(), capturedMode=mode, capturedPopup=popupShell;
+    const current=()=>!!scope?.sid && responseStyle.current(scope) && chatRoot()===root && !!root?.isConnected && mode===capturedMode && popupShell===capturedPopup;
+    const ui=await import('./ui.js');
+    if(!current()){ui.showToast('Open a current chat to share.');return;}
+    const sharing=await import('./filesShare.js');
+    if(!current())return;
+    try {await sharing.openChatSnapshotShare({chatID:scope.sid,current,ui,status:message=>ui.showToast(message)});}
+    catch(_){if(current())ui.showToast('Supported chat text is unavailable.');}
+  });
   add('chat-minimize-btn', 'Minimize chat', '−', (row, focus) => minimizeChat(row, focus));
   add('chat-close-btn', 'Close chat', '×', (row, focus) => closeChat(row, focus));
   updateMenuActions();
@@ -113,6 +186,7 @@ function updateMenuActions() {
   const inPopup = !!(popupShell && popupShell.contains(chatRoot()));
   menuActions.popout.style.display = inPopup ? 'none' : '';
   menuActions.dock.style.display = inPopup ? '' : 'none';
+  menuActions.resetPosition.style.display = inPopup || window.innerWidth <= 768 ? 'none' : '';
 }
 
 function emitWorkspaceChange() {
@@ -405,6 +479,7 @@ export function chatWorkspaceMode() {
 
 ensureMenuActions();
 observeChatFocus();
+window.matchMedia('(min-width: 769px)').addEventListener('change',updateMenuActions);
 if (!document.getElementById('export-dropdown-menu') && document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', ensureMenuActions, { once: true });
 }

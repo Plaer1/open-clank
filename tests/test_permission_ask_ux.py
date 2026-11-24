@@ -4,7 +4,7 @@ e's rulings (2026-07-09): durable always-allow grants surviving restarts;
 file grants cover the directory subtree; ALL permission types route through
 safe-dirs -> stored grants -> prompt; the prompt waits forever (no 300s
 auto-reject). mimo's optionIds are exactly 'once' | 'always' | 'reject'
-(packages/opencode/src/acp/agent.ts:147-150).
+(packages/cli/src/acp/agent.ts:147-150).
 """
 
 import asyncio

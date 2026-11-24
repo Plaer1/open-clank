@@ -338,7 +338,7 @@ mod native {
         Ok(pixels)
     }
     pub fn run() -> io::Result<()> {
-        let encoded = std::env::var("ODYSSEUS_QUICKLOOK_SESSION_TOKEN").map_err(|_| {
+        let encoded = std::env::var("OPEN_CLANK_QUICKLOOK_SESSION_TOKEN").map_err(|_| {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "private helper session missing",
@@ -362,7 +362,7 @@ mod native {
         if unsafe { CoInitializeEx(null_mut(), 2) } < 0 {
             return Err(io::Error::other("Shell COM initialization failed"));
         }
-        let icon = match std::env::var("ODYSSEUS_SHELL_IMAGE_KIND").as_deref() {
+        let icon = match std::env::var("OPEN_CLANK_SHELL_IMAGE_KIND").as_deref() {
             Ok("icon") => true,
             Ok("thumbnail") | Err(_) => false,
             _ => return Err(io::Error::other("invalid Shell image kind")),

@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import queue
+import re
 import secrets
 import stat
 import struct
@@ -23,7 +25,6 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from src.openclank.filesystem_registry import FilesystemRootRegistry, FilesystemRegistryError
-from src.tool_security import owner_is_admin_or_single_user
 
 
 _FRAME = struct.Struct("!I")
@@ -38,6 +39,66 @@ class FilesServiceError(RuntimeError):
     def __init__(self, message: str, *, code: str = "root_unavailable") -> None:
         super().__init__(message)
         self.code = code
+
+
+class _PreparedCheckpoint:
+    """Process-local custody, never serialized or accepted from a caller."""
+    __slots__ = ("client", "process", "selector", "used")
+    def __init__(self, client, process, selector):
+        self.client, self.process, self.selector, self.used = client, process, selector, False
+
+
+class _PreparedOrdinaryReplace:
+    """One original framed process, binding and single write attempt."""
+    __slots__ = ("client", "process", "path", "binding_json", "history", "used", "settled")
+
+    def __init__(self, client, process, path, binding_json, history):
+        self.client, self.process, self.path = client, process, path
+        self.binding_json, self.history = binding_json, history
+        self.used = False
+        self.settled = False
+
+    @property
+    def capture_identity(self) -> dict[str, str]:
+        """Content-free original capture principal for the durable Host receipt."""
+        return {name: str(self.history.get(env) or "") for name, env in (
+            ("account_id", "OPENCLANK_HISTORY_ACCOUNT_ID"),
+            ("actor_id", "OPENCLANK_HISTORY_ACTOR_ID"),
+            ("workspace_id", "OPENCLANK_HISTORY_WORKSPACE_ID"),
+        )}
+
+
+class _PreparedOrdinaryCreate:
+    """One original framed process, binding and single create attempt."""
+    __slots__ = ("client", "process", "path", "binding_json", "history", "used", "settled")
+
+    def __init__(self, client, process, path, binding_json, history):
+        self.client, self.process, self.path = client, process, path
+        self.binding_json, self.history = binding_json, history
+        self.used = False
+        self.settled = False
+
+    @property
+    def capture_identity(self) -> dict[str, str]:
+        """Content-free original capture principal for the durable Host receipt."""
+        return {name: str(self.history.get(env) or "") for name, env in (
+            ("account_id", "OPENCLANK_HISTORY_ACCOUNT_ID"),
+            ("actor_id", "OPENCLANK_HISTORY_ACTOR_ID"),
+            ("workspace_id", "OPENCLANK_HISTORY_WORKSPACE_ID"),
+        )}
+
+
+async def _checkpoint_owned_thread(call):
+    task = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try: await asyncio.shield(task)
+            except asyncio.CancelledError: continue
+            except Exception: break
+        if task.done() and not task.cancelled(): task.exception()
+        raise
 
 
 def set_history_binding_provider(provider: Any) -> None:
@@ -79,8 +140,8 @@ class OdysseusFilesClient:
         self.history_actor_id = history_actor_id
         self.history_account_id = history_account_id
         self.history_token = history_token
-        self.binary = binary or os.environ.get("ODYSSEUS_FILES_SERVICE_BIN")
-        selected_transport = (transport or os.environ.get("ODYSSEUS_FILES_TRANSPORT") or "framed").strip().lower()
+        self.binary = binary or os.environ.get("OPEN_CLANK_FILES_SERVICE_BIN")
+        selected_transport = (transport or os.environ.get("OPEN_CLANK_FILES_TRANSPORT") or "framed").strip().lower()
         self.transport = {
             "framed": "framed",
             "stdio": "framed",
@@ -96,17 +157,7 @@ class OdysseusFilesClient:
             "generation": 0,
             "active_folder": None,
         })
-        self._policy_generation = (
-            int(self.app_scope.get("generation") or 0)
-            if (
-                not self.app_scope.get("host")
-                and (
-                    self.app_scope.get("visible_root_ids")
-                    or int(self.app_scope.get("generation") or 0) > 0
-                )
-            )
-            else None
-        )
+        self._policy_generation = int(self.app_scope.get("generation") or 0) or None
         self._process: subprocess.Popen[bytes] | None = None
         self._ready = False
         self._lock = threading.RLock()
@@ -145,7 +196,7 @@ class OdysseusFilesClient:
             if candidate and candidate.is_file():
                 return str(candidate)
         raise FilesServiceError(
-            "Rust filesystem service is not packaged or built; set ODYSSEUS_FILES_SERVICE_BIN",
+            "Rust filesystem service is not packaged or built; set OPEN_CLANK_FILES_SERVICE_BIN",
             code="root_unavailable",
         )
 
@@ -217,8 +268,8 @@ class OdysseusFilesClient:
         environment = self._service_environment()
         environment.update(
             {
-                "ODYSSEUS_FILES_GRPC_SOCKET": str(socket_path),
-                "ODYSSEUS_FILES_GRPC_SESSION": session_binding,
+                "OPEN_CLANK_FILES_GRPC_SOCKET": str(socket_path),
+                "OPEN_CLANK_FILES_GRPC_SESSION": session_binding,
             }
         )
         try:
@@ -258,7 +309,7 @@ class OdysseusFilesClient:
         return socket_path, session_binding
 
     def _registry(self) -> FilesystemRootRegistry:
-        registry_path = os.environ.get("ODYSSEUS_FILES_REGISTRY")
+        registry_path = os.environ.get("OPEN_CLANK_FILES_REGISTRY")
         return FilesystemRootRegistry(registry_path) if registry_path else FilesystemRootRegistry()
 
     def _assert_policy_generation(self) -> None:
@@ -285,21 +336,29 @@ class OdysseusFilesClient:
     def _history_environment(self) -> dict[str, str]:
         """Resolve the current trusted History binding for this Files scope."""
         environment: dict[str, str] = {}
+        required = isinstance(self, AgentFilesClient) and os.environ.get("OPEN_CLANK_MANAGED_AGENT_HISTORY_REQUIRED") == "1"
+        unavailable = {"OPENCLANK_HISTORY_SOCKET": "history-binding-unavailable"} if required else environment
         if not callable(_HISTORY_BINDING_PROVIDER):
-            return environment
+            return unavailable
         try:
-            binding = history_binding_for(
-                self.owner,
-                "agent" if isinstance(self, AgentFilesClient) else "human",
-                self.app_scope,
-            )
+            lane = "agent" if isinstance(self, AgentFilesClient) else "human"
+            try:
+                binding = _HISTORY_BINDING_PROVIDER(self.owner, lane, dict(self.app_scope or {}), files_child=True)
+            except TypeError:
+                binding = history_binding_for(self.owner, lane, self.app_scope)
         except Exception:
             # A configured lookup outage must not masquerade as intentionally
             # unconfigured capture. The native engine keeps reads available,
             # but its required-capture admission blocks every live mutation.
             return {"OPENCLANK_HISTORY_SOCKET": "history-binding-unavailable"}
         if not binding:
-            return environment
+            return unavailable
+        if required and (not isinstance(binding, dict) or
+                not all(isinstance(binding.get(key), str) and binding[key].strip() for key in
+                        ("socket", "account_id", "actor_id", "token", "workspace_id", "workspace_root")) or
+                not os.path.isabs(binding["socket"]) or not os.path.isabs(binding["workspace_root"]) or
+                not isinstance(binding.get("root_bindings"), list) or not binding["root_bindings"]):
+            return unavailable
         environment.update(
             {
                 "OPENCLANK_HISTORY_SOCKET": str(binding["socket"]),
@@ -314,6 +373,16 @@ class OdysseusFilesClient:
         if isinstance(root_bindings, list) and root_bindings:
             environment["OPENCLANK_HISTORY_ROOT_BINDINGS"] = json.dumps(
                 root_bindings, separators=(",", ":"), sort_keys=True
+            )
+        checkpoint_tokens = binding.get("checkpoint_tokens")
+        if isinstance(checkpoint_tokens, dict) and checkpoint_tokens:
+            environment["OPENCLANK_HISTORY_CHECKPOINT_TOKENS"] = json.dumps(
+                checkpoint_tokens, separators=(",", ":"), sort_keys=True
+            )
+        worktree_tokens = binding.get("worktree_tokens")
+        if isinstance(worktree_tokens, dict) and worktree_tokens:
+            environment["OPENCLANK_HISTORY_WORKTREE_TOKENS"] = json.dumps(
+                worktree_tokens, separators=(",", ":"), sort_keys=True
             )
         return environment
 
@@ -371,16 +440,22 @@ class OdysseusFilesClient:
 
     def _service_environment(self) -> dict[str, str]:
         environment = os.environ.copy()
+        # Private one-invocation provenance is injected only by its Host owner.
+        environment.pop("OPENCLANK_GRAPH_CAPTURE_CONTEXT", None)
+        environment.pop("OPENCLANK_ORDINARY_WRITER_CONTEXT", None)
+        from src.constants import DATA_DIR
+        owner_key = hashlib.sha256(str(self.owner).encode("utf-8")).hexdigest()
+        environment["OPEN_CLANK_FILES_MANAGED_JOURNAL_ROOT"] = str(Path(DATA_DIR) / "files-transactions-v1" / owner_key)
         environment.update(
             {
-                "ODYSSEUS_FILES_LANE": "app",
-                "ODYSSEUS_FILES_OWNER_ID": self.owner,
-                "ODYSSEUS_FILES_PRINCIPAL_ID": "odysseus-app",
-                "ODYSSEUS_FILES_SESSION_ID": uuid.uuid4().hex,
+                "OPEN_CLANK_FILES_LANE": "app",
+                "OPEN_CLANK_FILES_OWNER_ID": self.owner,
+                "OPEN_CLANK_FILES_PRINCIPAL_ID": "odysseus-app",
+                "OPEN_CLANK_FILES_SESSION_ID": uuid.uuid4().hex,
                 # The signed scope contains root IDs, so the Rust process
                 # must load the same server-owned snapshot to resolve those
                 # IDs. It is never accepted from a browser request.
-                "ODYSSEUS_FILES_APP_SCOPE": json.dumps(self.app_scope, separators=(",", ":"), sort_keys=True),
+                "OPEN_CLANK_FILES_APP_SCOPE": json.dumps(self.app_scope, separators=(",", ":"), sort_keys=True),
             }
         )
         try:
@@ -391,9 +466,9 @@ class OdysseusFilesClient:
         # omitting a not-yet-created snapshot also lets an unassigned user
         # start and receive a typed deny instead of a transport failure.
         if not self.app_scope.get("host") and Path(registry_path).is_file():
-            environment["ODYSSEUS_FILES_REGISTRY"] = registry_path
+            environment["OPEN_CLANK_FILES_REGISTRY"] = registry_path
         else:
-            environment.pop("ODYSSEUS_FILES_REGISTRY", None)
+            environment.pop("OPEN_CLANK_FILES_REGISTRY", None)
         history_names = (
             "OPENCLANK_HISTORY_SOCKET",
             "OPENCLANK_HISTORY_ACCOUNT_ID",
@@ -402,6 +477,8 @@ class OdysseusFilesClient:
             "OPENCLANK_HISTORY_WORKSPACE_ID",
             "OPENCLANK_HISTORY_WORKSPACE_ROOT",
             "OPENCLANK_HISTORY_ROOT_BINDINGS",
+            "OPENCLANK_HISTORY_CHECKPOINT_TOKENS",
+            "OPENCLANK_HISTORY_WORKTREE_TOKENS",
         )
         for name in history_names:
             environment.pop(name, None)
@@ -457,9 +534,266 @@ class OdysseusFilesClient:
             )
         return response
 
-    async def request(self, operation: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        request = self._request_envelope(operation, path=path, payload=payload)
+    async def request(self, operation: str, path: str, payload: dict[str, Any] | None = None, *, root_operation_id: str | None = None) -> dict[str, Any]:
+        request = self._request_envelope(operation, path=path, payload=payload, root_operation_id=root_operation_id)
         return await self._dispatch_request(request)
+
+    async def prepare_ordinary_replace(self, path: str, *, binding: dict[str, Any]) -> _PreparedOrdinaryReplace:
+        """Negotiate the original framed process before the Host issues an effect."""
+        if self.transport != "framed" or not isinstance(binding, dict):
+            raise FilesServiceError("ordinary write unavailable", code="ordinary_write_unsent")
+        try:
+            frozen = json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise FilesServiceError("ordinary write unavailable", code="ordinary_write_unsent") from error
+        def run():
+            with self._lock:
+                try:
+                    self._assert_policy_generation()
+                    self._refresh_history_binding_locked()
+                    self._start_locked()
+                    process = self._process
+                    history = dict(self._history_environment_snapshot or {})
+                    caps = self._exchange_locked(self._request_envelope("capabilities", path=path, payload={}))
+                    if (process is None or process.poll() is not None or self._process is not process
+                            or self._history_environment() != history
+                            or not {"ordinary_replace", "ordinary_replace_status"}.issubset(set(caps.get("operations") or ()))):
+                        raise ValueError("unsupported or changed")
+                    self._assert_policy_generation()
+                    return _PreparedOrdinaryReplace(self, process, str(path), frozen, history)
+                except Exception as error:
+                    raise FilesServiceError("ordinary write unavailable", code="ordinary_write_unsent") from error
+        return await _checkpoint_owned_thread(run)
+
+    async def ordinary_replace(self, prepared: _PreparedOrdinaryReplace, *, content: bytes) -> dict[str, Any]:
+        """Consume one original process handle immediately before the actual exchange."""
+        if not isinstance(prepared, _PreparedOrdinaryReplace) or prepared.client is not self:
+            raise FilesServiceError("ordinary write unavailable", code="ordinary_write_unsent")
+        def run():
+            with self._lock:
+                if prepared.used:
+                    raise FilesServiceError("ordinary write already issued; inspect original status", code="ordinary_write_already_issued")
+                try:
+                    self._assert_policy_generation()
+                    if (self._history_environment() != prepared.history or self._process is not prepared.process
+                            or prepared.process.poll() is not None):
+                        raise ValueError("original process changed")
+                    binding = json.loads(prepared.binding_json)
+                    request = self._request_envelope("ordinary_replace", path=prepared.path,
+                        payload={"binding": binding, "bytes": list(content)}, root_operation_id=binding["operation_id"])
+                except Exception as error:
+                    prepared.used = True
+                    prepared.settled = True
+                    raise FilesServiceError("ordinary write unavailable", code="ordinary_write_unsent") from error
+                prepared.used = True
+                try:
+                    return self._exchange_locked(request)
+                finally:
+                    prepared.settled = True
+        return await _checkpoint_owned_thread(run)
+
+    async def ordinary_replace_status(self, prepared: _PreparedOrdinaryReplace) -> dict[str, Any]:
+        """Only read the original receipt after the owned exchange settles or process exits."""
+        if (not isinstance(prepared, _PreparedOrdinaryReplace) or prepared.client is not self
+                or not prepared.used or (not prepared.settled and prepared.process.poll() is None)):
+            raise FilesServiceError("original write remains in flight", code="ordinary_write_unknown")
+        return await self.ordinary_replace_status_exact(
+            prepared.path, binding=json.loads(prepared.binding_json), capture_identity=prepared.capture_identity)
+
+    async def ordinary_replace_status_exact(self, path: str, *, binding: dict[str, Any],
+                                            capture_identity: dict[str, str]) -> dict[str, Any]:
+        """Read only an original action after caller-proven IO settlement or process exit.
+
+        The caller owns that custody proof and its durable operation receipt. Missing
+        or unavailable status never grants permission to issue the original write.
+        """
+        names = {"account_id": "OPENCLANK_HISTORY_ACCOUNT_ID", "actor_id": "OPENCLANK_HISTORY_ACTOR_ID",
+                 "workspace_id": "OPENCLANK_HISTORY_WORKSPACE_ID"}
+        if (self.transport != "framed" or type(capture_identity) is not dict
+                or set(capture_identity) != set(names)
+                or any(type(capture_identity[k]) is not str or not capture_identity[k] for k in names)
+                or type(binding) is not dict):
+            raise FilesServiceError("original write status unavailable", code="ordinary_write_unknown")
+        try:
+            frozen = json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise FilesServiceError("original write status unavailable", code="ordinary_write_unknown") from error
+        original = dict(capture_identity)
+        def run():
+            with self._lock:
+                try:
+                    def matches():
+                        current = self._history_environment()
+                        return all(current.get(env) == original[name] for name, env in names.items())
+                    self._assert_policy_generation()
+                    if not matches(): raise ValueError("capture owner changed")
+                    self._refresh_history_binding_locked()
+                    self._start_locked()
+                    if not matches(): raise ValueError("capture owner changed")
+                    caps = self._exchange_locked(self._request_envelope("capabilities", path=path, payload={}))
+                    if not {"ordinary_replace", "ordinary_replace_status"}.issubset(set(caps.get("operations") or ())):
+                        raise ValueError("capture status unsupported")
+                    if not matches(): raise ValueError("capture owner changed")
+                    self._assert_policy_generation()
+                    exact_binding = json.loads(frozen)
+                    request = self._request_envelope("ordinary_replace_status", path=path,
+                        payload={"binding": exact_binding}, root_operation_id=exact_binding["operation_id"])
+                    response = self._exchange_locked(request)
+                    self._assert_policy_generation()
+                    if not matches(): raise ValueError("capture owner changed")
+                    return response
+                except Exception as error:
+                    raise FilesServiceError("original write status unavailable", code="ordinary_write_unknown") from error
+        return await _checkpoint_owned_thread(run)
+
+    async def prepare_ordinary_create(self, path: str, *, binding: dict[str, Any]) -> _PreparedOrdinaryCreate:
+        """Negotiate the original framed process before the Host issues an effect."""
+        if self.transport != "framed" or not isinstance(binding, dict):
+            raise FilesServiceError("ordinary create unavailable", code="ordinary_create_unsent")
+        try:
+            frozen = json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise FilesServiceError("ordinary create unavailable", code="ordinary_create_unsent") from error
+        def run():
+            with self._lock:
+                try:
+                    self._assert_policy_generation()
+                    self._refresh_history_binding_locked()
+                    self._start_locked()
+                    process = self._process
+                    history = dict(self._history_environment_snapshot or {})
+                    caps = self._exchange_locked(self._request_envelope("capabilities", path=path, payload={}))
+                    if (process is None or process.poll() is not None or self._process is not process
+                            or self._history_environment() != history
+                            or not {"ordinary_create", "ordinary_create_status"}.issubset(set(caps.get("operations") or ()))):
+                        raise ValueError("unsupported or changed")
+                    self._assert_policy_generation()
+                    return _PreparedOrdinaryCreate(self, process, str(path), frozen, history)
+                except Exception as error:
+                    raise FilesServiceError("ordinary create unavailable", code="ordinary_create_unsent") from error
+        return await _checkpoint_owned_thread(run)
+
+    async def ordinary_create(self, prepared: _PreparedOrdinaryCreate, *, content: bytes) -> dict[str, Any]:
+        """Consume one original process handle immediately before the actual exchange."""
+        if not isinstance(prepared, _PreparedOrdinaryCreate) or prepared.client is not self:
+            raise FilesServiceError("ordinary create unavailable", code="ordinary_create_unsent")
+        def run():
+            with self._lock:
+                if prepared.used:
+                    raise FilesServiceError("ordinary create already issued; inspect original status", code="ordinary_create_already_issued")
+                try:
+                    self._assert_policy_generation()
+                    if (self._history_environment() != prepared.history or self._process is not prepared.process
+                            or prepared.process.poll() is not None):
+                        raise ValueError("original process changed")
+                    binding = json.loads(prepared.binding_json)
+                    request = self._request_envelope("ordinary_create", path=prepared.path,
+                        payload={"binding": binding, "bytes": list(content)}, root_operation_id=binding["operation_id"])
+                except Exception as error:
+                    prepared.used = True
+                    prepared.settled = True
+                    raise FilesServiceError("ordinary create unavailable", code="ordinary_create_unsent") from error
+                prepared.used = True
+                try:
+                    return self._exchange_locked(request)
+                finally:
+                    prepared.settled = True
+        return await _checkpoint_owned_thread(run)
+
+    async def ordinary_create_status(self, prepared: _PreparedOrdinaryCreate) -> dict[str, Any]:
+        """Only read the original receipt after the owned exchange settles or process exits."""
+        if (not isinstance(prepared, _PreparedOrdinaryCreate) or prepared.client is not self
+                or not prepared.used or (not prepared.settled and prepared.process.poll() is None)):
+            raise FilesServiceError("original create remains in flight", code="ordinary_create_unknown")
+        return await self.ordinary_create_status_exact(
+            prepared.path, binding=json.loads(prepared.binding_json), capture_identity=prepared.capture_identity)
+
+    async def ordinary_create_status_exact(self, path: str, *, binding: dict[str, Any],
+                                            capture_identity: dict[str, str]) -> dict[str, Any]:
+        """Read only an original action after caller-proven IO settlement or process exit.
+
+        The caller owns that custody proof and its durable operation receipt. Missing
+        or unavailable status never grants permission to issue the original create.
+        """
+        names = {"account_id": "OPENCLANK_HISTORY_ACCOUNT_ID", "actor_id": "OPENCLANK_HISTORY_ACTOR_ID",
+                 "workspace_id": "OPENCLANK_HISTORY_WORKSPACE_ID"}
+        if (self.transport != "framed" or type(capture_identity) is not dict
+                or set(capture_identity) != set(names)
+                or any(type(capture_identity[k]) is not str or not capture_identity[k] for k in names)
+                or type(binding) is not dict):
+            raise FilesServiceError("original create status unavailable", code="ordinary_create_unknown")
+        try:
+            frozen = json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise FilesServiceError("original create status unavailable", code="ordinary_create_unknown") from error
+        original = dict(capture_identity)
+        def run():
+            with self._lock:
+                try:
+                    def matches():
+                        current = self._history_environment()
+                        return all(current.get(env) == original[name] for name, env in names.items())
+                    self._assert_policy_generation()
+                    if not matches(): raise ValueError("capture owner changed")
+                    self._refresh_history_binding_locked()
+                    self._start_locked()
+                    if not matches(): raise ValueError("capture owner changed")
+                    caps = self._exchange_locked(self._request_envelope("capabilities", path=path, payload={}))
+                    if not {"ordinary_create", "ordinary_create_status"}.issubset(set(caps.get("operations") or ())):
+                        raise ValueError("capture status unsupported")
+                    if not matches(): raise ValueError("capture owner changed")
+                    self._assert_policy_generation()
+                    exact_binding = json.loads(frozen)
+                    request = self._request_envelope("ordinary_create_status", path=path,
+                        payload={"binding": exact_binding}, root_operation_id=exact_binding["operation_id"])
+                    response = self._exchange_locked(request)
+                    self._assert_policy_generation()
+                    if not matches(): raise ValueError("capture owner changed")
+                    return response
+                except Exception as error:
+                    raise FilesServiceError("original create status unavailable", code="ordinary_create_unknown") from error
+        return await _checkpoint_owned_thread(run)
+
+    async def prepare_selected_checkpoint(self, *, request_id: str, root_id: str, items: list[dict[str, str]]) -> _PreparedCheckpoint:
+        """Claim and stage once; returned selector stays in this exact process."""
+        if self.transport != "framed" or not items:
+            raise FilesServiceError("selected checkpoint unavailable", code="root_unavailable")
+        request = self._request_envelope("checkpoint_prepare", path=items[0]["path"], payload={"request_id":request_id,"root_id":root_id,"items":items})
+        def run():
+            with self._lock:
+                try:
+                    self._assert_policy_generation(); self._refresh_history_binding_locked(); self._start_locked()
+                    process = self._process
+                    caps=self._exchange_locked(self._request_envelope("capabilities",path=items[0]["path"],payload={}))
+                    if not {"checkpoint_prepare","checkpoint_finalize"}.issubset(set(caps.get("operations") or ())):
+                        raise ValueError("unsupported")
+                except Exception as error:
+                    raise FilesServiceError("selected checkpoint unavailable",code="checkpoint_unsent") from error
+                try:
+                    response = self._exchange_locked(request)
+                    self._assert_policy_generation()
+                except Exception as error:
+                    raise FilesServiceError("checkpoint outcome unavailable",code="checkpoint_unknown") from error
+                data = response.get("data") or {}
+                selector = data.get("selector")
+                if data.get("state") != "prepared" or not isinstance(selector,str) or not re.fullmatch(r"[0-9a-f]{64}",selector) or self._process is not process:
+                    raise FilesServiceError("checkpoint outcome unavailable", code="checkpoint_unknown")
+                return _PreparedCheckpoint(self,process,selector)
+        return await _checkpoint_owned_thread(run)
+
+    async def finalize_selected_checkpoint(self, prepared: _PreparedCheckpoint, *, target_path: str) -> dict[str, Any]:
+        if not isinstance(prepared,_PreparedCheckpoint) or prepared.client is not self or prepared.used:
+            raise FilesServiceError("selected checkpoint unavailable", code="root_unavailable")
+        def run():
+            with self._lock:
+                if prepared.used: raise FilesServiceError("selected checkpoint unavailable", code="root_unavailable")
+                self._assert_policy_generation(); self._refresh_history_binding_locked()
+                if self._process is not prepared.process or prepared.process is None or prepared.process.poll() is not None:
+                    raise FilesServiceError("selected checkpoint unavailable", code="root_unavailable")
+                prepared.used = True
+                request=self._request_envelope("checkpoint_finalize",path=target_path,payload={"selector":prepared.selector})
+                return self._exchange_locked(request)
+        return await _checkpoint_owned_thread(run)
 
     async def stage_begin(self, path: str) -> dict[str, Any]:
         """Begin an identity-bound service-owned upload stage."""
@@ -473,11 +807,12 @@ class OdysseusFilesClient:
             "chunk": base64.b64encode(chunk).decode("ascii"),
         })
 
-    async def stage_finish(self, stage_id: str, target: str, *, length: int, digest: str) -> dict[str, Any]:
+    async def stage_finish(self, stage_id: str, target: str, *, length: int, digest: str, root_operation_id: str | None = None, expected_fingerprint: str | None = None) -> dict[str, Any]:
         return await self.request("stage_finish", stage_id, {
             "stage_id": str(stage_id), "target": str(target),
             "length": int(length), "digest": str(digest),
-        })
+            **({"expected_fingerprint": {"algorithm": "sha256", "value": expected_fingerprint}} if expected_fingerprint is not None else {}),
+        }, root_operation_id=root_operation_id)
 
     async def stage_abort(self, stage_id: str) -> dict[str, Any]:
         return await self.request("stage_abort", stage_id, {"stage_id": str(stage_id)})
@@ -508,6 +843,7 @@ class OdysseusFilesClient:
         payload: dict[str, Any] | None = None,
         *,
         handle: dict[str, Any] | None = None,
+        root_operation_id: str | None = None,
     ) -> dict[str, Any]:
         if (path is None) == (handle is None):
             raise FilesServiceError("exactly one filesystem target is required", code="malformed_request")
@@ -515,7 +851,7 @@ class OdysseusFilesClient:
             "protocol": {"major": 1, "minor": 0},
             "request_id": uuid.uuid4().hex,
             "session_id": "odysseus-http",
-            "root_operation_id": uuid.uuid4().hex,
+            "root_operation_id": str(root_operation_id) if root_operation_id is not None else uuid.uuid4().hex,
             "operation": operation,
             "target": {
                 "kind": "handle" if handle is not None else "path",
@@ -651,7 +987,7 @@ class OdysseusFilesClient:
         """
         if self.transport != "grpc":
             raise FilesServiceError(
-                "streaming reads require ODYSSEUS_FILES_TRANSPORT=grpc",
+                "streaming reads require OPEN_CLANK_FILES_TRANSPORT=grpc",
                 code="protocol_mismatch",
             )
         if offset < 0 or length <= 0 or length > 250 * 1024 * 1024:
@@ -960,7 +1296,7 @@ def _scope_cache_key(app_scope: dict[str, Any] | None) -> str:
 
 
 def _transport_cache_key(transport: str | None = None) -> str:
-    return (transport or os.environ.get("ODYSSEUS_FILES_TRANSPORT") or "framed").strip().lower()
+    return (transport or os.environ.get("OPEN_CLANK_FILES_TRANSPORT") or "framed").strip().lower()
 
 
 def client_for_owner(
@@ -981,6 +1317,23 @@ def client_for_owner(
     with _CLIENTS_LOCK:
         for old_key in list(_CLIENTS):
             if old_key[0] == key[0] and old_key != key:
+                old_scope = json.loads(old_key[1])
+                new_scope = json.loads(key[1])
+                # Files can use gRPC while legacy app reads use framed with
+                # identical authority. Keeping each transport's process also
+                # keeps a live directory watch from being disconnected by a
+                # read in the other transport.
+                if old_scope == new_scope:
+                    continue
+                # Explicit root-bound clients may coexist with other scopes
+                # at the same generation; do not cancel unrelated in-flight
+                # requests merely because one move chose a History root.
+                root_bound = old_scope.get("selected_history_root_id") or new_scope.get("selected_history_root_id")
+                old_generation = int(old_scope.get("generation") or 0)
+                new_generation = int(new_scope.get("generation") or 0)
+                same_epoch = old_generation == new_generation or (old_scope.get("host") and old_generation == 0) or (new_scope.get("host") and new_generation == 0)
+                if root_bound and same_epoch:
+                    continue
                 stale.append(_CLIENTS.pop(old_key))
         client = _CLIENTS.get(key)
         if client is None:
@@ -994,12 +1347,15 @@ def client_for_owner(
 class AgentFilesClient(OdysseusFilesClient):
     """Rust service client bound to one agent owner and workspace folder."""
 
-    def __init__(self, owner: str, active_workspace: str | None, *, binary: str | None = None, workspace_id: str = "", chat_id: str = "") -> None:
+    def __init__(self, owner: str, active_workspace: str | None, *, binary: str | None = None,
+                 workspace_id: str = "", chat_id: str = "", policy_generation: int | None = None,
+                 registered_only: bool = False) -> None:
         super().__init__(owner, binary=binary)
+        self._registered_only = registered_only
         self.workspace_id = str(workspace_id)
         self.chat_id = str(chat_id)
         self.active_workspace = str(Path(active_workspace).expanduser().resolve(strict=False)) if active_workspace else None
-        self._agent_policy_generation: int | None = None
+        self._agent_policy_generation = policy_generation
 
     def _assert_policy_generation(self) -> None:
         expected = self._agent_policy_generation
@@ -1023,14 +1379,16 @@ class AgentFilesClient(OdysseusFilesClient):
 
     def _service_environment(self) -> dict[str, str]:
         registry = self._registry()
-        is_admin = owner_is_admin_or_single_user(self.owner)
-        app_visibility = None if is_admin else registry.visibility_for_subject(self.owner)
         try:
-            scope = registry.agent_scope(self.owner, self.active_workspace, app_visibility=app_visibility,
-                workspace_id=self.workspace_id, chat_id=self.chat_id)
-            self._agent_policy_generation = int(scope.pop("generation"))
-            self._policy_generation = self._agent_policy_generation
-            registry_path = registry.rust_snapshot_path(expected_generation=self._agent_policy_generation)
+            scope = registry.agent_scope(self.owner, self.active_workspace,
+                workspace_id=self.workspace_id, chat_id=self.chat_id, registered_only=self._registered_only)
+            generation = int(scope.pop("generation"))
+            if self._agent_policy_generation is not None and self._agent_policy_generation != generation:
+                raise FilesServiceError("Filesystem access changed", code="policy_generation_changed")
+            self._agent_policy_generation = self._policy_generation = generation
+            registry_path = registry.rust_snapshot_path(
+                expected_generation=self._agent_policy_generation, full_agent_roots=scope.pop("full_agent_roots", None),
+            )
         except FilesystemRegistryError as error:
             raise FilesServiceError(str(error), code=error.code) from error
         # Compute the signed root scope before asking the base client for its
@@ -1056,17 +1414,17 @@ class AgentFilesClient(OdysseusFilesClient):
         environment = super()._service_environment()
         environment.update(
             {
-                "ODYSSEUS_FILES_LANE": "agent",
-                "ODYSSEUS_FILES_PRINCIPAL_ID": "odysseus-agent",
-                "ODYSSEUS_FILES_REGISTRY": registry_path,
-                "ODYSSEUS_FILES_SCOPE": json.dumps(scope, separators=(",", ":"), sort_keys=True),
+                "OPEN_CLANK_FILES_LANE": "agent",
+                "OPEN_CLANK_FILES_PRINCIPAL_ID": "odysseus-agent",
+                "OPEN_CLANK_FILES_REGISTRY": registry_path,
+                "OPEN_CLANK_FILES_SCOPE": json.dumps(scope, separators=(",", ":"), sort_keys=True),
             }
         )
         return environment
 
 
 def agent_client_for(owner: str, active_workspace: str | None, *, workspace_id: str = "", chat_id: str = "") -> AgentFilesClient:
-    registry_path = os.environ.get("ODYSSEUS_FILES_REGISTRY")
+    registry_path = os.environ.get("OPEN_CLANK_FILES_REGISTRY")
     registry = FilesystemRootRegistry(registry_path) if registry_path else FilesystemRootRegistry()
     generation = registry.generation()
     key = (
@@ -1084,7 +1442,7 @@ def agent_client_for(owner: str, active_workspace: str | None, *, workspace_id: 
                 stale.append(_AGENT_CLIENTS.pop(old_key))
         client = _AGENT_CLIENTS.get(key)
         if client is None:
-            client = AgentFilesClient(key[0], key[1], workspace_id=key[2], chat_id=key[3])
+            client = AgentFilesClient(key[0], key[1], workspace_id=key[2], chat_id=key[3], policy_generation=generation)
             _AGENT_CLIENTS[key] = client
     for old_client in stale:
         old_client.close()
@@ -1115,3 +1473,71 @@ def close_clients_for_owner(owner: str) -> int:
     for client in clients:
         client.close()
     return len(clients)
+
+class _WorktreeStageCustody:
+    """One private Files process and original stage, never a reusable client token."""
+    def __init__(self, client, process, path, history, operation_id, before_issue, profile):
+        self.client,self.process,self.path=client,process,path
+        self.history,self.operation_id,self.before_issue,self.profile=history,operation_id,before_issue,profile
+        self.issued=False;self.uncertain=False;self.inflight=False;self.prepared=False
+
+    @classmethod
+    async def acquire(cls, client, path, operation_id, *, before_issue, profile='stage'):
+        if (profile not in ('stage','inverse','redo','lookup') or client.transport!='framed' or type(path) is not str or not path.startswith('/')
+                or type(operation_id) is not str or not operation_id or not callable(before_issue)):
+            raise FilesServiceError('worktree stage unavailable',code='worktree_unsent')
+        def run():
+            with client._lock:
+                try:
+                    client._assert_policy_generation();client._refresh_history_binding_locked();client._start_locked()
+                    process=client._process;history=dict(client._history_environment_snapshot or {})
+                    if process is None or process.poll() is not None or client._history_environment()!=history: raise ValueError('original process changed')
+                    client._assert_policy_generation();return cls(client,process,path,history,operation_id,before_issue,profile)
+                except Exception as error: raise FilesServiceError('worktree stage unavailable',code='worktree_unsent') from error
+        return await _checkpoint_owned_thread(run)
+
+    async def exchange(self, operation, payload, *, target=None):
+        allowed={'worktree_stage_begin','worktree_stage_chunk','worktree_stage_end','worktree_stage_seal','worktree_stage_status','worktree_private_prepare','worktree_private_accept','worktree_private_materialize','worktree_private_prepare_history','worktree_private_begin_publication','worktree_private_publish','worktree_private_check_published','worktree_private_finish_publication'}
+        if self.profile=='inverse':
+            allowed={'worktree_inverse_begin','worktree_inverse_prepare_history','worktree_inverse_stage_history','worktree_inverse_verify','worktree_inverse_quarantine','worktree_inverse_relocate_admin','worktree_inverse_finish','worktree_stage_status'}
+        if self.profile=='redo':
+            allowed={'worktree_redo_begin','worktree_redo_prepare_history','worktree_redo_restore_admin','worktree_redo_restore_tree','worktree_redo_finish','worktree_stage_status'}
+        if self.profile=='lookup':
+            allowed={'worktree_lookup'}
+        else:
+            allowed.add('worktree_release_completed')
+        begin='worktree_lookup' if self.profile=='lookup' else 'worktree_redo_begin' if self.profile=='redo' else 'worktree_inverse_begin' if self.profile=='inverse' else 'worktree_stage_begin'
+        if operation not in allowed or type(payload) is not dict or payload.get('operation_id')!=self.operation_id:
+            raise FilesServiceError('worktree stage unavailable',code='worktree_unsent')
+        try: frozen=json.dumps(payload,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
+        except (TypeError,ValueError) as error: raise FilesServiceError('worktree stage unavailable',code='worktree_unsent') from error
+        if target is not None and (operation!='worktree_private_prepare' or type(target) is not str or not target.startswith('/') or len(target.encode('utf-8','strict'))>4096):
+            raise FilesServiceError('worktree target unavailable',code='worktree_unsent')
+        status=operation=='worktree_stage_status'
+        if self.inflight or (status and not self.issued) or (not status and self.uncertain):
+            raise FilesServiceError('inspect original worktree stage',code='worktree_unknown')
+        if not status and ((operation==begin)==self.prepared):
+            raise FilesServiceError('worktree phase unavailable',code='worktree_unsent')
+        self.inflight=True
+        if not status: self.issued=True;self.uncertain=True
+        def run():
+            with self.client._lock:
+                try:
+                    self.client._assert_policy_generation()
+                    if (self.client._process is not self.process or self.process.poll() is not None
+                            or self.client._history_environment()!=self.history): raise ValueError('original process changed')
+                    if self.before_issue() is not True: raise ValueError('worktree authority changed')
+                    request=self.client._request_envelope(operation,path=target or self.path,payload=json.loads(frozen),root_operation_id=self.operation_id)
+                    if len(json.dumps(request,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode('utf-8'))>4*1024*1024:
+                        raise ValueError('worktree frame bound')
+                    return self.client._exchange_locked(request)
+                except Exception as error: raise FilesServiceError('original worktree stage outcome unavailable',code='worktree_unknown') from error
+        try:
+            result=await _checkpoint_owned_thread(run)
+            if not status:
+                data=result.get('data') if type(result) is dict else None
+                if type(data) is dict and data.get('state') in ('accepted','sealed','ready','proceed','registered','materialized','history_prepared','verified','quarantined','admin_relocated','admin_restored','tree_restored','published','completed','released'):
+                    self.uncertain=False
+                    if operation==begin:self.prepared=True
+            return result
+        finally: self.inflight=False

@@ -12,6 +12,8 @@ import { Instruction } from "../session/instruction"
 import { Provider } from "@/provider"
 import { isImageAttachment, isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 import { fileResult, type FileResult } from "./file-contract"
+import { markReadView } from "../session/tool-view-read"
+import { toolViewProducerCurrent } from "../session/tool-view-producer-admission"
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
@@ -37,7 +39,7 @@ type ReadMetadata = {
   media_type: string
   bytes_considered?: number
   lines_considered?: number
-  truncation_reason?: "byte_limit" | "line_limit"
+  truncation_reason?: "byte_limit" | "line_limit" | "character_limit"
   file: FileResult
   page: {
     cursor: number
@@ -490,7 +492,8 @@ export const ReadTool = Tool.define(
 
       const last = file.offset + file.raw.length - 1
       const next = last + 1
-      const truncated = file.more || file.cut
+      const hasMore = file.more || file.cut
+      const truncated = hasMore || file.shortened
       if (file.cut) {
         output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
       } else if (file.more) {
@@ -498,6 +501,7 @@ export const ReadTool = Tool.define(
       } else {
         output += `\n\n(End of file - total ${file.count} lines)`
       }
+      if (file.shortened) output += "\n\n(Some displayed lines were shortened at 2000 UTF-16 code units; the missing characters cannot be recovered by changing the line offset.)"
       output += "\n</content>"
 
       yield* warm(filepath)
@@ -506,7 +510,7 @@ export const ReadTool = Tool.define(
         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
       }
 
-      return {
+      const result = {
         title,
         output,
         metadata: {
@@ -520,7 +524,7 @@ export const ReadTool = Tool.define(
           media_type: mime,
           bytes_considered: snapshot.size,
           lines_considered: file.raw.length,
-          truncation_reason: file.cut ? "byte_limit" : file.more ? "line_limit" : undefined,
+          truncation_reason: file.cut ? "byte_limit" : file.more ? "line_limit" : file.shortened ? "character_limit" : undefined,
           file: fileResult({
             operation: "read",
             path: filepath,
@@ -529,30 +533,34 @@ export const ReadTool = Tool.define(
             page: {
               unit: "line",
               cursor: file.offset,
-              next_cursor: truncated ? next : null,
-              has_more: truncated,
+              next_cursor: hasMore ? next : null,
+              has_more: hasMore,
               returned: file.raw.length,
               total: file.count,
             },
             bytes_considered: snapshot.size,
             lines_considered: file.raw.length,
-            truncation_reason: file.cut ? "byte_limit" : file.more ? "line_limit" : null,
+            truncation_reason: file.cut ? "byte_limit" : file.more ? "line_limit" : file.shortened ? "character_limit" : null,
             encoding: snapshot.encoding,
             newline: snapshot.newline === "\n" ? "lf" : snapshot.newline === "\r\n" ? "crlf" : "cr",
             media_type: mime,
             fingerprint: snapshot.fingerprint,
-            diagnostics: truncated
-              ? [{ code: "truncated", message: `Continue at line cursor ${next}.` }]
-              : [],
+            diagnostics: [
+              ...(hasMore ? [{ code: "truncated", message: `Continue at line cursor ${next}.` }] : []),
+              ...(file.shortened ? [{ code: "character_limit", message: "Some displayed lines were shortened; changing the line offset cannot recover their missing characters." }] : []),
+            ],
           }),
           page: {
             cursor: file.offset,
-            next_cursor: truncated ? next : undefined,
-            has_more: truncated,
+            next_cursor: hasMore ? next : undefined,
+            has_more: hasMore,
             total: file.count,
           },
         } as ReadMetadata,
       }
+      if (toolViewProducerCurrent(ctx,"read-unnumbered-v1") || toolViewProducerCurrent(ctx,"npm-lockfile-versions-v1") || toolViewProducerCurrent(ctx,"read-json-whitespace-v1") || toolViewProducerCurrent(ctx,"read-repeated-lines-v1"))
+        return markReadView(result,ctx,{snapshotText:snapshot.text,raw:file.raw,offset:file.offset,count:file.count,cut:file.cut,more:file.more,loaded:result.metadata.loaded})
+      return result
     })
 
     return {
@@ -577,6 +585,7 @@ function lines(text: string, opts: { limit: number; offset: number }) {
   let count = 0
   let cut = false
   let more = false
+  let shortened = false
   const source = text ? text.split(/\r\n|\n|\r/) : []
   if (source.length && source.at(-1) === "") source.pop()
   for (const textLine of source) {
@@ -599,8 +608,9 @@ function lines(text: string, opts: { limit: number; offset: number }) {
     }
 
     raw.push(line)
+    if (textLine.length > MAX_LINE_LENGTH) shortened = true
     bytes += size
   }
 
-  return { raw, count, cut, more, offset: opts.offset }
+  return { raw, count, cut, more, shortened, offset: opts.offset }
 }

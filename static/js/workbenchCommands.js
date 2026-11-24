@@ -2,23 +2,20 @@
 // Surface owners keep document/workspace capabilities and captured mutations.
 import * as Modals from './modalManager.js';
 import { applyEdgeDock, clearRightDock } from './modalSnap.js';
+import { isAppletMaximized, toggleAppletMaximize } from './tileManager.js';
 import { IS_MAC } from './platform.js';
 import {
   captureContextCommandTarget, capturedEditingCommands,
-  executeCapturedContextCommand, isCapturedContextCurrent, restoreCapturedContext,
+  executeCapturedContextCommand, isCapturedContextCurrent, restoreCapturedContext, editingShortcutHints,
 } from './custom-context-menu.js';
 
 export const WORKBENCH_MENUS = Object.freeze(['File', 'Edit', 'Selection', 'View', 'Go', 'Tools', 'Window', 'Help']);
+export const IMAGE_WORKBENCH_MENUS = Object.freeze(['Image', 'Layer', 'Filter']);
 export const GRAPH_WORKBENCH_MENUS = Object.freeze(['File', 'View', 'Graph']);
 export const FILES_WORKBENCH_MENUS = Object.freeze(['File', 'Edit', 'View', 'Go', 'Window', 'Help']);
 const surfaces = new WeakMap();
 let operations = {};
 const mod = IS_MAC ? 'Cmd' : 'Ctrl';
-const keyHints = {
-  undo:`${mod}+Z`, redo:IS_MAC ? 'Cmd+Shift+Z' : 'Ctrl+Y', cut:`${mod}+X`, copy:`${mod}+C`, paste:`${mod}+V`,
-  'select-all':`${mod}+A`, 'select-next-match':`${mod}+D`, 'select-all-matches':`${mod}+Shift+L`,
-  'add-cursor-above':`${mod}+Alt+↑`, 'add-cursor-below':`${mod}+Alt+↓`, 'collapse-selections':'Escape',
-};
 const selectionIds = new Set(['select-all', 'select-next-match', 'select-all-matches', 'add-cursor-above', 'add-cursor-below', 'collapse-selections']);
 
 export function configureWorkbenchCommands(value) { operations = value || {}; }
@@ -92,7 +89,7 @@ const editorSlots = [
 ];
 
 export function workbenchCommandDescriptors(captured) {
-  const graph=captured.kind==='graph',allowedMenus=graph?GRAPH_WORKBENCH_MENUS:WORKBENCH_MENUS;
+  const graph=captured.kind==='graph',allowedMenus=graph?GRAPH_WORKBENCH_MENUS:captured.kind === 'editor' && captured.surfaceTarget?.image ? [...WORKBENCH_MENUS,...IMAGE_WORKBENCH_MENUS] : WORKBENCH_MENUS;
   const byId = new Map();
   const add = (descriptor) => {
     if (!descriptor?.id || !descriptor.label || !allowedMenus.includes(descriptor.menu)) return;
@@ -127,7 +124,7 @@ export function workbenchCommandDescriptors(captured) {
     if (['copy', 'cut'].includes(item.id) && !navigator.clipboard?.writeText) disabledReason = 'Clipboard writing is unavailable in this browser.';
     if (['paste', 'paste-plain'].includes(item.id) && !navigator.clipboard?.readText) disabledReason = 'Clipboard reading is unavailable in this browser.';
     add({ id:`edit.${item.id}`, label:item.label, menu:!files && selectionIds.has(item.id) ? 'Selection' : item.id === 'see-source' ? 'View' : !files && ['insert-template', 'new-from-template', 'spellcheck', 'retry-spelling'].includes(item.id) ? 'Tools' : 'Edit',
-      shortcut:keyHints[item.id] || '', disabledReason, current:() => isCapturedContextCurrent(captured.editing),
+      shortcut:editingShortcutHints[item.id] || '', disabledReason, current:() => isCapturedContextCurrent(captured.editing),
       run:() => executeCapturedContextCommand(item.id, captured.editing) });
   }
   app('app.palette', 'Command palette…', 'View', 'palette', `${mod}+Shift+P`);
@@ -141,18 +138,24 @@ export function workbenchCommandDescriptors(captured) {
     current:() => isWindowCurrent(captured), run:() => Modals.minimize(captured.modal.id) });
   add({ id:'window.close', label:'Close this window', menu:'File', disabledReason:windowReason,
     current:() => isWindowCurrent(captured), run:() => Modals.close(captured.modal.id) });
-  if (captured.modal?.dataset.chatVisibleMaximize === 'true') {
-    const api = captured.modal.__openClankWindow;
-    const maximized = !!captured.modal.querySelector('.modal-content')?._chatVisibleMaximized;
-    add({id:'window.maximize', label:maximized ? 'Restore floating window' : 'Maximize beside chat', menu:'View', disabledReason:windowReason,
-      current:() => isWindowCurrent(captured), run:() => maximized ? api?.restorePlacement() : api?.maximize()});
+  const frame = captured.modal?.querySelector(':scope > .oc-applet-frame');
+  if (frame) {
+    add({id:'window.maximize', label:isAppletMaximized(frame) ? 'Restore this window' : 'Maximize this window',
+      menu:'View', disabledReason:windowReason,
+      current:() => isWindowCurrent(captured), run:() => toggleAppletMaximize(frame)});
   }
   for (const side of ['left', 'right']) add({ id:`window.dock-${side}`, label:`Dock this window ${side}`, menu:graph?'View':'Window', disabledReason:windowReason,
     checked:!!captured.modal?.classList.contains(`modal-${side}-docked`),
-    current:() => isWindowCurrent(captured), run:() => applyEdgeDock(captured.modal, side, undefined, {maximized:false}) });
+    current:() => isWindowCurrent(captured), run:() => {
+      if (isAppletMaximized(frame)) toggleAppletMaximize(frame);
+      return applyEdgeDock(captured.modal, side, undefined, {maximized:false});
+    } });
   const docked = captured.modal?.classList.contains('modal-left-docked') || captured.modal?.classList.contains('modal-right-docked');
   add({ id:'window.undock', label:'Undock this window', menu:graph?'View':'Window', disabledReason:windowReason || (docked ? '' : 'This window is already floating.'),
-    current:() => isWindowCurrent(captured), run:() => clearRightDock(captured.modal) });
+    current:() => isWindowCurrent(captured), run:() => {
+      if (isAppletMaximized(frame)) toggleAppletMaximize(frame);
+      clearRightDock(captured.modal);
+    } });
   return [...byId.values()].filter((item) => graph?GRAPH_WORKBENCH_MENUS.includes(item.menu):!files || FILES_WORKBENCH_MENUS.includes(item.menu));
 }
 

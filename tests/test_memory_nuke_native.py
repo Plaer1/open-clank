@@ -1,6 +1,6 @@
 """Actual native ingest reset + Python batch/skills convergence.
 
-Opt in with OPEN_CLANK_TEST_FM_MCP_BIN; never builds a binary or touches a
+Opt in with OPEN_CLANK_TEST_MEMERY_WORKER_BIN; never builds a binary or touches a
 running application's stores. This is not browser/auth or LLM qualification.
 """
 
@@ -14,10 +14,10 @@ import pytest
 from services.memory.import_batch import ImportBatchError, MemoryImportBatchStore
 from services.memory.nuke_coordinator import MemoryNukeCoordinator
 from services.memory.skills import SkillsManager
-from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memery_provider import MemeryProvider
 
 
-FM_BIN = os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN", "")
+FM_BIN = os.environ.get("OPEN_CLANK_TEST_MEMERY_WORKER_BIN", "")
 pytestmark = pytest.mark.skipif(
     not FM_BIN or not Path(FM_BIN).is_file(), reason="explicit native test binary required"
 )
@@ -30,7 +30,7 @@ async def test_native_ingest_and_skills_reset_removes_queue_not_saved_memory(tmp
     workspace = "nuke-queue-native-test"
 
     def make_provider(owner):
-        return FrankenmemoryProvider(
+        return MemeryProvider(
             command=FM_BIN,
             workspace_id=workspace,
             env={"FM_DB_PATH": db_path, "FM_OWNER": owner, "FM_WORKSPACE_ID": workspace},

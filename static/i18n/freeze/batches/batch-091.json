@@ -1,0 +1,35 @@
+{
+  "id": "batch-091",
+  "group": "docs.openclank-docs-deliverables",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 3072,
+  "complexity": "prose",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-deliverables.title",
+      "source": "Deliverables",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual title",
+      "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-deliverables.body",
+      "source": "# Deliverables\n\nYou can hand back a chart with its source, a PDF ready to send, or feedback attached to one frame of a recording. Start a workbook or slide deck in a writable folder in [[Editor]].\n\n## Build a workbook and a chart\n\n**File → New workbook…** creates a `.clankbook`. Under **Ranges and charts**, use **Add range** to choose the source cells by ID, then **Add chart** to set the range and chart type. The chart and its data table share that range.\n\n## Edit a slide deck\n\n**File → New slide deck…** creates a `.clankslides` file. For a chart already embedded in a slide, **Open source** takes you to its workbook. The reference names the workbook revision and chart ID. If the chart is unavailable, check access and the saved reference before exporting. A new workbook or deck takes its colors from your theme. **Tools → Apply current theme** updates an existing one.\n\n## Export to PDF\n\nSave the editable original, then choose **File → Export PDF to Files…**. Keep both if someone will revise the chart or slides later. A pending export can be checked from the same command.\n\n![Save the workbook or deck in Editor, choose Export PDF to Files and select a destination. Files holds the separate PDF and the editable source remains available.](/static/docs/media/manual-workbook-to-pdf/preview.webp)\n\n*Export an editable workbook or deck to PDF.*\n\n## Keep report or widget progress\n\nOpen a saved HTML report with **Files → Open in Browser**. Reports that support progress can **Export JSON backup** or **Export Markdown backup**. **Import progress backup → Apply compatible items** restores answers against the current report.\n\nFor an interactive widget, **Widget state… → Capture current state** lets you save selected fields to Files. **Load from Files…** previews which fields can be restored. Both workflows preserve the report’s source HTML.\n\n## Hand off an edit\n\nOpen the saved file and the original chat’s feedback panel. Pick the smallest useful target: **Feedback on image region…**, **Feedback on file or selection…** for a workbook cell or slide object, or **HTML source Properties → Feedback on source element…**. For saved HTML or SVG, **Design handoff to an actor…** includes the destination, appearance and assets. Review the revision and recipient before sending.\n\n## Review a recording\n\nFrom the saved recording in Files, choose **Review in Editor…**. Under **Recording actions**, mark a start and end. **Annotate selection…** prepares feedback in the original task. **Save displayed frame…** saves a PNG; **Trim selected range…** produces a separate clip when supported. Check the trim’s actual coverage before sharing it.\n\n![In Editor, Mark start and Mark end define a playback range. Annotating opens a draft in the original task. Trimming creates a separate output and reports observed coverage.](/static/docs/media/manual-recording-review/preview.webp)\n\n*Mark a range in a saved recording.*\n",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs_content.py"
+      ],
+      "context": "manual body",
+      "complexity": "prose"
+    }
+  ]
+}

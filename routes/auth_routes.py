@@ -1,9 +1,10 @@
 """Authentication routes — login, logout, signup, status, user management."""
 
 from fastapi import APIRouter, Request, Response, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictBool
 from typing import Optional
 import asyncio
+import copy
 from contextvars import ContextVar
 from functools import wraps
 import hashlib
@@ -43,6 +44,7 @@ from routes.prefs_routes import (
     PREFERENCE_LOCK,
     _load as _load_prefs,
     _load_for_user,
+    _mutate_user,
     _save as _save_prefs,
     _save_for_user,
 )
@@ -114,6 +116,8 @@ def _register_account_claim_cleanup(coordinator, operation_id, claim_token, requ
             if callable(release):
                 release(operation["source_owner"])
     _account_claim_cleanup.set(cleanup)
+
+_ACCOUNT_REQUEST_DRAIN_SECONDS = 30.0
 
 _MODEL_SETTING_PAIRS = (
     ("default_endpoint_id", "default_model"),
@@ -339,6 +343,15 @@ def _settings_for_user(settings: dict, user: str) -> dict:
         scoped[key] = prefs[key] if key in prefs else DEFAULT_SETTINGS[key]
     scoped["agent_settings_override"] = bool(user and "agent_settings" in prefs and prefs["agent_settings"] is not None)
     scoped["agent_settings_saved"] = prefs.get("agent_settings") or {}
+    saved_agent = prefs.get("agent_settings") if isinstance(prefs.get("agent_settings"), dict) else {}
+    saved_distill = saved_agent.get("distill") if isinstance(saved_agent.get("distill"), dict) else None
+    activated = type(prefs.get("_skill_draft_policy_version")) is int and prefs["_skill_draft_policy_version"] == 1
+    scoped["agent_settings_distill_intent"] = {
+        "version": 1,
+        "state": ("active" if saved_distill and saved_distill.get("auto") is True else "off") if activated
+                 else ("legacy_unactivated" if saved_distill is not None else "off"),
+        "eligibility": "not_evaluated",
+    }
     scoped["agent_settings_revision"] = agent_settings_revision(prefs.get("agent_settings"))
     scoped["agent_settings_schema"] = agent_settings_schema()
     return scoped
@@ -411,6 +424,12 @@ def _inventory_present(payload) -> bool:
     if isinstance(payload, (int, float)):
         return payload != 0
     return False
+
+
+def _semantic_inventory_present(payload) -> bool:
+    if type(payload) is not dict or type(payload.get('count')) is not int or type(payload.get('tables')) is not dict:
+        raise RuntimeError('memory semantic inventory unavailable')
+    return bool(payload['count'] or _inventory_present(payload['tables']))
 
 
 def _account_memory_domain_stores(memory_provider):
@@ -502,6 +521,471 @@ async def _drain_owner_provider_flows(request: Request, owner: str) -> None:
 
     supervisor = getattr(request.app.state, "mimo_supervisor", None)
     await purge_owner_provider_flows(supervisor, owner)
+
+
+async def _memory_owner_transition(provider, *, action, owner, new_owner=None, lifecycle, operation_id, claim_token, state, _joined=False):
+    """Carry the exact claimed source-fence capability to guarded FM only."""
+    from src.memery_provider import MemeryProvider
+    from src.openclank.chat_source_bridge import canonical_source_provider
+    canonical = canonical_source_provider(state)
+    if canonical is not None and canonical is not provider and not _joined:
+        raise RuntimeError('canonical memory owner transition requires reconciliation')
+    kwargs = {'owner': owner}
+    if isinstance(provider, MemeryProvider) and provider._guarded_v17:
+        from src.openclank.chat_source_bridge import issue_account_source_transition
+        kwargs['_source_capability'] = issue_account_source_transition(lifecycle=lifecycle,
+            operation_id=operation_id, claim_token=claim_token, provider=provider,
+            action=action, owner=owner, new_owner=new_owner)
+    if action == 'rename':
+        return await provider.rename_owner(new_owner, **kwargs)
+    if action == 'purge':
+        return await provider.purge_owner(**kwargs)
+    raise ValueError('unsupported memory owner transition')
+
+
+def _claimed_memory_assessment_guard(*,state,lifecycle,operation_id,claim_token,account_id,host_owner,provider):
+    """Current named account, existing claim and exact prepared FM lifetime."""
+    from src.openclank.chat_source_bridge import canonical_source_provider
+    from src.memery_database import GuardedStorePreparation
+    preparation=getattr(provider,'_guarded_preparation',None);auth=getattr(state,'auth_manager',None)
+    def current():
+        try:
+            if (type(preparation) is not GuardedStorePreparation or provider._guarded_preparation is not preparation
+                or canonical_source_provider(state) is not provider or getattr(state,'auth_manager',None) is not auth
+                or getattr(state,'account_owner_lifecycle',None) is not lifecycle or auth is None
+                or auth.account_id(host_owner)!=account_id or auth.username_for_account_id(account_id)!=host_owner
+                or os.path.realpath(provider._local_db_path() or '')!=preparation.database_path):return False
+            operation=lifecycle.get_operation(operation_id);claim=(operation.get('receipt') or {}).get('claim') or {}
+            if (operation.get('operation_id')!=operation_id or operation.get('subject_id')!=account_id
+                or operation.get('source_owner')!=host_owner or operation.get('kind') not in ('rename','delete')
+                or claim.get('token')!=claim_token or not claim_token or not lifecycle.owner_has_active_operation(host_owner)):return False
+            preparation.assert_valid()
+            return (provider._guarded_preparation is preparation and canonical_source_provider(state) is provider
+                and getattr(state,'auth_manager',None) is auth and auth.account_id(host_owner)==account_id
+                and auth.username_for_account_id(account_id)==host_owner)
+        except Exception:return False
+    return current
+
+
+async def _assess_claimed_memory_source(provider,inventory,*,state,lifecycle,operation_id,claim_token,account_id,host_owner,source_owner,phase=None):
+    from src.memery_provider import MemeryProvider
+    if not isinstance(provider,MemeryProvider) or not getattr(provider,'_guarded_v17',False):
+        _require_s02_rename_safe(provider,inventory);return
+    if (type(inventory) is not dict or type(inventory.get('s02_rename_blocked')) is not bool
+        or type(inventory.get('selective_rename_blocked')) is not bool or type(inventory.get('fingerprint')) is not str):
+        raise RuntimeError('memory source assessment unavailable')
+    if phase is None:
+        if source_owner!=host_owner:raise RuntimeError('memory source assessment unavailable')
+        guard=_claimed_memory_assessment_guard(state=state,lifecycle=lifecycle,operation_id=operation_id,claim_token=claim_token,
+            account_id=account_id,host_owner=host_owner,provider=provider)
+    else:
+        from src.openclank.chat_source_bridge import issue_account_source_prefence_transition
+        if type(phase) is not dict or phase.get('owner')!=source_owner or phase.get('account_id')!=account_id:
+            raise RuntimeError('memory source assessment unavailable')
+        capability=issue_account_source_prefence_transition(state=state,lifecycle=lifecycle,operation_id=operation_id,
+            claim_token=claim_token,provider=provider,phase=phase,host_owner=host_owner)
+        def guard():
+            try:
+                capability.assert_prefence_current(provider=provider,phase=phase,account_id=account_id,sql_owner=source_owner)
+                return True
+            except Exception:return False
+    request={'version':1,'owner':source_owner,'workspace_id':provider._workspace_id,'account_id':account_id,
+        'expected_source_fingerprint':inventory['fingerprint'],'phase':phase}
+    await provider._host_s02_rename_assessment(request,current_guard=guard)
+
+
+async def _verify_completed_fm_move(state,provider,operation,*,lifecycle,operation_id,claim_token,account_id,source,target,current_phase):
+    """Read the exact already-applied original; this never issues a move."""
+    from src.memery_provider import _HostOwnerTransition
+    from src.openclank.chat_source_bridge import issue_account_source_transition
+    manifest=operation.get('manifest') or {};participants=manifest.get('memory_participants') or {};fm=participants.get('fm') or {}
+    snapshot=manifest.get('memory_fm');step=(operation.get('steps') or {}).get('memory_fm') or {}
+    if (type(snapshot) is not dict or set(snapshot)!={'source','target','generation','prior_receipt_id','prior_receipt_hash','rag_relocation'}
+        or type(fm) is not dict or type(fm.get('database_id')) is not str or step.get('state') not in ('applying','applied')
+        or (step.get('state')=='applied' and type(step.get('receipt')) is not dict)):
+        raise RuntimeError('memory transition original unavailable')
+    request=_HostOwnerTransition(database_id=fm['database_id'],account_id=account_id,operation_id=operation_id,step='memory_fm',
+        generation=snapshot['generation'],action='forward',owner=source,new_owner=target,
+        expected_source_fingerprint=snapshot['source']['fingerprint'],expected_target_fingerprint=snapshot['target']['fingerprint'],
+        prior_receipt_id=snapshot['prior_receipt_id'],prior_receipt_hash=snapshot['prior_receipt_hash'],rag_relocation=snapshot['rag_relocation'])
+    phase_name='memory_fm_source_phase_'+str(request.generation);phase=manifest.get(phase_name);phase_step=(operation.get('steps') or {}).get(phase_name) or {}
+    expected={key:getattr(request,key) for key in ('database_id','account_id','operation_id','step','generation','action','owner','new_owner')}
+    if phase!=expected or current_phase!=expected or phase_step.get('state')!='applied' or phase_step.get('receipt')!=phase:
+        raise RuntimeError('memory transition original phase unavailable')
+    capability=issue_account_source_transition(lifecycle=lifecycle,operation_id=operation_id,claim_token=claim_token,
+        provider=provider,action='rename',owner=source,new_owner=target)
+    result=await provider._host_owner_transition(request,capability=capability,status=True)
+    current=lifecycle.get_operation(operation_id);claim=(current.get('receipt') or {}).get('claim') or {}
+    current_step=(current.get('steps') or {}).get('memory_fm') or {}
+    if (result.get('state')!='applied' or (step.get('state')=='applied' and result!=step['receipt']) or claim.get('token')!=claim_token
+        or current.get('subject_id')!=account_id or current_step!=step or (current.get('manifest') or {}).get('memory_fm')!=snapshot):
+        raise RuntimeError('memory transition original changed')
+    return result
+
+
+def _require_s02_rename_safe(provider, inventory):
+    from src.memery_provider import MemeryProvider
+    if isinstance(provider, MemeryProvider):
+        if type(inventory) is not dict or type(inventory.get('s02_rename_blocked')) is not bool:
+            raise RuntimeError('S02 rename preflight unavailable')
+        if inventory['s02_rename_blocked']:
+            raise RuntimeError('S02 owner rename requires a reviewed provenance transition')
+        _require_selective_rename_safe(provider, inventory)
+
+
+def _require_selective_rename_safe(provider, inventory):
+    from src.memery_provider import MemeryProvider
+    if isinstance(provider, MemeryProvider) and getattr(provider, '_guarded_v17', False):
+        if type(inventory) is not dict or type(inventory.get('selective_rename_blocked')) is not bool:
+            raise RuntimeError('selective Memory rename preflight unavailable')
+        if inventory['selective_rename_blocked']:
+            raise RuntimeError('Memory owner rename requires a pending provenance transition')
+
+
+async def _freeze_memory_participants(state, source, target, *, lifecycle, operation_id, claim_token, account_id, host_owner):
+    """Freeze only the supported Native plus retained guarded-FM pair."""
+    from src.memory_provider import NativeMemoryProvider
+    from src.memery_provider import MemeryProvider
+    from src.openclank.chat_source_bridge import canonical_source_provider
+    selected = getattr(state, 'memory_provider', None)
+    canonical = canonical_source_provider(state)
+    if type(selected) is not NativeMemoryProvider or not isinstance(canonical, MemeryProvider) or canonical is selected:
+        raise RuntimeError('retained memory participants unavailable')
+    _require_owner_transition_capability(canonical)
+    native_source = selected.lifecycle_snapshot(source)
+    native_target = selected.lifecycle_snapshot(target)
+    if native_target['count']:
+        raise RuntimeError('native memory target already contains state')
+    identity = canonical.persisted_database_identity()
+    fm_source = await canonical.owner_stats(owner=source)
+    fm_target = await canonical.owner_stats(owner=target)
+    await _assess_claimed_memory_source(canonical,fm_source,state=state,lifecycle=lifecycle,operation_id=operation_id,claim_token=claim_token,account_id=account_id,host_owner=host_owner,source_owner=source)
+    _require_s02_rename_safe(canonical, fm_target)
+    if any(type(value.get('code_epoch_count')) is not int or value['code_epoch_count'] < 0 for value in (fm_source, fm_target)):
+        raise RuntimeError('retained memory epoch inventory unavailable')
+    if _inventory_present(fm_target):
+        raise RuntimeError('retained memory target already contains state')
+    return {'version': 1, 'native': {'source': native_source, 'target': native_target},
+            'fm': {'database_id': identity['database_id'], 'source': fm_source, 'target': fm_target}}
+
+
+async def _freeze_primary_guarded_memory(state, source, target, *, lifecycle, operation_id, claim_token, account_id, host_owner):
+    """Freeze the existing primary FM owner for a typed guarded move."""
+    from src.memery_provider import MemeryProvider
+    from src.openclank.chat_source_bridge import canonical_source_provider
+    selected=getattr(state,'memory_provider',None)
+    if not isinstance(selected,MemeryProvider) or canonical_source_provider(state) is not selected:
+        raise RuntimeError('guarded primary memory unavailable')
+    _require_owner_transition_capability(selected)
+    identity=selected.persisted_database_identity()
+    before=await selected.owner_stats(owner=source); after=await selected.owner_stats(owner=target)
+    await _assess_claimed_memory_source(selected,before,state=state,lifecycle=lifecycle,operation_id=operation_id,claim_token=claim_token,account_id=account_id,host_owner=host_owner,source_owner=source)
+    _require_s02_rename_safe(selected,after)
+    if _inventory_present(after): raise RuntimeError('guarded memory target already contains state')
+    return {'version':1,'native':None,'fm':{'database_id':identity['database_id'],'source':before,'target':after}}
+
+
+def _require_owner_transition_capability(provider):
+    from src.memery_database import GuardedStorePreparation
+    preparation = getattr(provider, '_guarded_preparation', None)
+    ready = getattr(provider, '_ready', None)
+    task = getattr(provider, '_owner_task', None)
+    if (not getattr(provider, '_guarded_v17', False) or type(preparation) is not GuardedStorePreparation
+            or preparation.capabilities.get('owner_transition') is not True or task is None or task.done()
+            or ready is None or not ready.done() or ready.cancelled() or ready.exception() is not None):
+        raise RuntimeError('retained memory owner capability unavailable')
+    preparation.assert_valid()
+
+
+def _memory_participants_current(state, manifest, *, status_only=False):
+    from src.memory_provider import NativeMemoryProvider
+    from src.memery_provider import MemeryProvider
+    from src.openclank.chat_source_bridge import canonical_source_provider
+    selected = getattr(state, 'memory_provider', None)
+    canonical = canonical_source_provider(state)
+    primary = type(manifest) is dict and manifest.get('native') is None
+    if (type(manifest) is not dict or set(manifest) != {'version', 'native', 'fm'} or manifest['version'] != 1
+            or not isinstance(canonical, MemeryProvider)
+            or (primary and selected is not canonical)
+            or (not primary and (type(selected) is not NativeMemoryProvider or canonical is selected
+                or type(manifest['native']) is not dict or set(manifest['native']) != {'source', 'target'}))
+            or type(manifest['fm']) is not dict or set(manifest['fm']) != {'database_id', 'source', 'target'}):
+        raise RuntimeError('retained memory manifest changed')
+    if status_only:
+        from src.memery_database import GuardedStorePreparation
+        preparation=getattr(canonical,'_guarded_preparation',None)
+        if type(preparation) is not GuardedStorePreparation or preparation.database_id!=manifest['fm']['database_id']:
+            raise RuntimeError('retained memory original identity unavailable')
+        preparation._owned_move_schema_cookie()
+    else:
+        if canonical.persisted_database_identity()['database_id']!=manifest['fm']['database_id']:
+            raise RuntimeError('retained memory manifest changed')
+        _require_owner_transition_capability(canonical)
+    if primary:
+        return selected, canonical
+    original = manifest['native']['source']
+    if type(original) is not dict or type(original.get('owner')) is not str:
+        raise RuntimeError('native memory manifest unavailable')
+    current = selected.lifecycle_identity(original['owner'])
+    if any(current.get(key) != original.get(key) for key in ('version', 'kind', 'root', 'device', 'inode')):
+        raise RuntimeError('native memory domain changed')
+    return selected, canonical
+
+
+def _verify_guarded_delete_staging(*, store, provider, lifecycle, operation_id, claim_token,
+                                   account_id, source, target, phase):
+    """Check current typed custody and existing deletion staging checkpoints."""
+    from src.openclank.chat_source_bridge import issue_account_source_transition
+    from src.openclank.import_staging_custody import verified_staging_relocations
+    if phase not in ('before_move','before_purge'):
+        raise RuntimeError('staging delete phase unavailable')
+    action='rename' if phase=='before_move' else 'purge'
+    capability=issue_account_source_transition(lifecycle=lifecycle,operation_id=operation_id,
+        claim_token=claim_token,provider=provider,action=action,
+        owner=source if phase=='before_move' else target,new_owner=target if phase=='before_move' else None)
+    def current():
+        try:
+            capability.assert_current(provider=provider,action=action,owner=source if phase=='before_move' else target,
+                new_owner=target if phase=='before_move' else None)
+            operation=lifecycle.get_operation(operation_id)
+            return operation.get('subject_id')==account_id
+        except Exception:
+            return False
+    prepared=getattr(provider,'_guarded_preparation',None)
+    if (prepared is None or os.path.realpath(store.db_path)!=prepared.database_path
+        or os.path.realpath(os.fspath(store.data_dir))!=os.path.dirname(prepared.database_path)
+        or current() is not True):
+        raise RuntimeError('staging delete authority unavailable')
+    prepared.assert_valid()
+    with store._connect() as db:
+        db.execute('BEGIN')
+        verified_staging_relocations(db,database_id=prepared.database_id,account_id=account_id,
+            current_owner=target,lifecycle=lifecycle,current=current,delete_capability=capability,delete_phase=phase)
+        db.commit()
+    prepared.assert_valid()
+    if current() is not True: raise RuntimeError('staging delete authority changed')
+
+
+def _next_fm_generation(operation, step):
+    """Advance only after a durable exact reverse and completed compensation."""
+    manifests, steps = operation.get('manifest') or {}, operation.get('steps') or {}
+    previous = manifests.get(step)
+    if previous is None:
+        return 1, None, None
+    if type(previous) is not dict or type(previous.get('generation')) is not int or previous['generation'] < 1:
+        raise RuntimeError('retained memory generation unavailable')
+    generation = previous['generation']
+    forward = (steps.get(f'memory_fm_forward_{generation}') or {}).get('receipt')
+    reverse_step = steps.get(f'memory_fm_reverse_{generation}') or {}
+    reverse = reverse_step.get('receipt')
+    reverse_manifest = manifests.get(f'memory_fm_reverse_{generation}') or {}
+    compensation = steps.get(f'memory_compensation_complete_{generation}') or {}
+    if (type(forward) is not dict or forward.get('state') != 'applied' or type(reverse) is not dict
+            or reverse_step.get('state') != 'applied' or reverse.get('state') != 'applied'
+            or reverse_manifest.get('prior_receipt_id') != forward.get('receipt_id')
+            or reverse_manifest.get('prior_receipt_hash') != forward.get('receipt_hash')
+            or compensation.get('state') != 'applied' or (compensation.get('receipt') or {}).get('state') != 'complete'
+            or ((compensation.get('receipt') or {}).get('results') or {}).get('memory_fm_tombstoned') != reverse):
+        raise RuntimeError('retained memory compensation proof unavailable')
+    return generation + 1, reverse.get('receipt_id'), reverse.get('receipt_hash')
+
+
+def _claimed_fm_source_phase(*, operation, claim_token, database_id, account_id, operation_id,
+                             step, generation, owner, new_owner, action='forward'):
+    """Freeze only existing claimed pre-fence phase data; no future receipt."""
+    claim=(operation.get('receipt') or {}).get('claim') if type(operation) is dict else None
+    if (type(operation) is not dict or operation.get('operation_id')!=operation_id
+        or operation.get('subject_id')!=account_id or type(claim) is not dict or claim.get('token')!=claim_token
+        or type(generation) is not int or generation<1 or owner==new_owner or action not in ('forward','reverse')
+        or any(type(v) is not str or not v or v!=v.strip() or len(v)>512
+               for v in (database_id,account_id,operation_id,step,owner,new_owner))):
+        raise RuntimeError('memory source phase unavailable')
+    return {'database_id':database_id,'account_id':account_id,'operation_id':operation_id,
+            'step':step,'generation':generation,'action':action,'owner':owner,'new_owner':new_owner}
+
+
+async def _move_memory_participant(state, manifest, kind, source, target, *, lifecycle, operation_id, claim_token, started=False, reverse=False, fm_snapshot=None, step=None, cleanup_receipt=None):
+    selected, canonical = _memory_participants_current(state, manifest, status_only=(kind=='fm' and started))
+    if kind == 'native':
+        frozen = manifest['native']
+        if reverse:
+            now_source, now_target = selected.lifecycle_snapshot(source), selected.lifecycle_snapshot(target)
+            original = frozen['source']
+            if now_source == frozen['target'] and now_target == original:
+                return {'state': 'not_applied'}
+            if (now_source['ids'] != original['ids'] or now_source['content_fingerprint'] != original['content_fingerprint']
+                    or now_target['count'] != 0):
+                raise RuntimeError('native memory compensation changed')
+            return selected.lifecycle_rename(source, target, original=now_source, target_before=now_target)
+        return selected.lifecycle_rename(source, target, original=frozen['source'], target_before=frozen['target'])
+    if kind != 'fm':
+        raise RuntimeError('unknown memory participant')
+    before, destination = (None,None) if started else (await canonical.owner_stats(owner=source), await canonical.owner_stats(owner=target))
+    frozen = manifest['fm']
+    if reverse:
+        if started:
+            from src.memery_provider import _HostOwnerTransition
+            from src.openclank.chat_source_bridge import issue_account_source_transition
+            operation=lifecycle.get_operation(operation_id); manifests=operation.get('manifest') or {}; steps=operation.get('steps') or {}
+            if type(fm_snapshot) is not dict or type(fm_snapshot.get('generation')) is not int:
+                raise RuntimeError('retained memory reverse snapshot unavailable')
+            generation=fm_snapshot['generation']; reverse_step='memory_fm_reverse_'+str(generation)
+            snapshot=manifests.get(reverse_step); saved=steps.get(reverse_step) or {}
+            if (type(snapshot) is not dict or saved.get('state') not in ('applying','applied')
+                or type(step) is not str or not step):
+                raise RuntimeError('retained memory reverse original unavailable')
+            relocation=fm_snapshot.get('rag_relocation')
+            inverse={'from':relocation['to'],'to':relocation['from']} if relocation is not None else None
+            request=_HostOwnerTransition(database_id=manifest['fm']['database_id'],account_id=operation['subject_id'],
+                operation_id=operation_id,step=step,generation=generation,action='reverse',owner=source,new_owner=target,
+                expected_source_fingerprint=snapshot['source_fingerprint'],expected_target_fingerprint=snapshot['target_fingerprint'],
+                prior_receipt_id=snapshot['prior_receipt_id'],prior_receipt_hash=snapshot['prior_receipt_hash'],rag_relocation=inverse)
+            capability=issue_account_source_transition(lifecycle=lifecycle,operation_id=operation_id,claim_token=claim_token,
+                provider=canonical,action='rename',owner=source,new_owner=target)
+            receipt=await canonical._host_owner_transition(request,capability=capability,status=True)
+            if receipt.get('state')!='applied' or (saved.get('state')=='applied' and saved.get('receipt')!=receipt):
+                raise RuntimeError('retained memory reverse original unavailable')
+            if cleanup_receipt is not None:
+                if saved.get('state')!='applied' or saved.get('receipt')!=cleanup_receipt or receipt!=cleanup_receipt:
+                    raise RuntimeError('retained memory reverse cleanup receipt changed')
+                await canonical._host_owner_transition_cache_cleanup(request,capability=capability,receipt=receipt)
+            return receipt
+        baseline = fm_snapshot if type(fm_snapshot) is dict and {'source', 'target'} <= set(fm_snapshot) else frozen
+        if before == baseline['target'] and destination == baseline['source']:
+            return {'state': 'not_applied'}
+        raise RuntimeError('retained memory compensation receipt unavailable')
+    elif type(fm_snapshot) is not dict or set(fm_snapshot) != {'source', 'target', 'generation', 'prior_receipt_id', 'prior_receipt_hash', 'rag_relocation'}:
+        raise RuntimeError('retained memory transition snapshot unavailable')
+    elif not started and not (before == fm_snapshot['source'] and destination == fm_snapshot['target']):
+        raise RuntimeError('retained memory transition state changed')
+    from src.memery_provider import _HostOwnerTransition
+    from src.openclank.chat_source_bridge import issue_account_source_transition
+    if type(step) is not str or not step:
+        raise RuntimeError('retained memory transition step unavailable')
+    operation = lifecycle.get_operation(operation_id)
+    request = _HostOwnerTransition(database_id=manifest['fm']['database_id'], account_id=operation['subject_id'],
+        operation_id=operation_id, step=step, generation=fm_snapshot['generation'], action='forward', owner=source, new_owner=target,
+        expected_source_fingerprint=fm_snapshot['source']['fingerprint'], expected_target_fingerprint=fm_snapshot['target']['fingerprint'],
+        prior_receipt_id=fm_snapshot['prior_receipt_id'], prior_receipt_hash=fm_snapshot['prior_receipt_hash'],
+        rag_relocation=fm_snapshot['rag_relocation'])
+    phase_name='memory_fm_source_phase_'+str(request.generation)
+    phase=(operation.get('manifest') or {}).get(phase_name)
+    phase_step=(operation.get('steps') or {}).get(phase_name) or {}
+    expected_phase={key:getattr(request,key) for key in ('database_id','account_id','operation_id','step','generation','action','owner','new_owner')}
+    if type(phase) is not dict or phase!=expected_phase or phase_step.get('state')!='applied' or phase_step.get('receipt')!=phase:
+        raise RuntimeError('original memory source phase unavailable')
+    capability = issue_account_source_transition(lifecycle=lifecycle, operation_id=operation_id, claim_token=claim_token,
+        provider=canonical, action='rename', owner=source, new_owner=target)
+    receipt = await canonical._host_owner_transition(request, capability=capability, status=started)
+    if receipt.get('state') != 'applied':
+        # A started original has no positive not-issued proof. Never send it again.
+        raise RuntimeError('retained memory transition original unavailable')
+    if cleanup_receipt is not None:
+        saved=(lifecycle.get_operation(operation_id).get('steps') or {}).get(step) or {}
+        if saved.get('state')!='applied' or saved.get('receipt')!=cleanup_receipt or receipt!=cleanup_receipt:
+            raise RuntimeError('retained memory transition cleanup receipt changed')
+        await canonical._host_owner_transition_cache_cleanup(request,capability=capability,receipt=receipt)
+    return receipt
+
+
+async def _verify_fm_move_after(provider, source, target, receipt):
+    """Check current inventory only after the original receipt is durable."""
+    after_source,after_target=await provider.owner_stats(owner=source),await provider.owner_stats(owner=target)
+    if (after_source.get('fingerprint')!=receipt['result']['source_after_fingerprint']
+        or after_target.get('fingerprint')!=receipt['result']['target_after_fingerprint']):
+        raise RuntimeError('retained memory transition receipt changed')
+    return {'receipt_id':receipt['receipt_id'],'receipt_hash':receipt['receipt_hash']}
+
+
+async def _claimed_fm_purge_stats(provider, owner, *, lifecycle, operation_id, claim_token):
+    """Read the exact account-bound inventory under the active delete claim."""
+    from src.openclank.chat_source_bridge import issue_account_source_transition
+    capability=issue_account_source_transition(lifecycle=lifecycle,operation_id=operation_id,claim_token=claim_token,
+        provider=provider,action='purge',owner=owner)
+    return await provider._host_owner_purge_stats(owner=owner,capability=capability)
+
+
+async def _purge_memory_participant(state, manifest, kind, owner, snapshot, *, lifecycle, operation_id, claim_token, started=False, step=None, cleanup_receipt=None):
+    selected, canonical = _memory_participants_current(state, manifest, status_only=(kind=='fm' and started))
+    if kind == 'native':
+        receipt = selected.lifecycle_clear(owner, original=snapshot)
+        if selected.lifecycle_snapshot(owner)['count']:
+            raise RuntimeError('native memory purge remains incomplete')
+        return receipt
+    if kind != 'fm' or type(snapshot) is not dict:
+        raise RuntimeError('retained memory purge snapshot unavailable')
+    current = None if started else await _claimed_fm_purge_stats(canonical,owner,lifecycle=lifecycle,operation_id=operation_id,claim_token=claim_token)
+    if not started and current != snapshot:
+        raise RuntimeError('retained memory purge receipt unavailable')
+    from src.memery_provider import _HostOwnerPurge
+    from src.openclank.chat_source_bridge import issue_account_source_transition
+    if type(step) is not str or not step:
+        raise RuntimeError('retained memory purge step unavailable')
+    operation = lifecycle.get_operation(operation_id)
+    request = _HostOwnerPurge(database_id=manifest['fm']['database_id'], account_id=operation['subject_id'],
+        operation_id=operation_id, step=step, generation=1, action='purge', owner=owner,
+        expected_source_fingerprint=snapshot['fingerprint'])
+    capability = issue_account_source_transition(lifecycle=lifecycle, operation_id=operation_id, claim_token=claim_token,
+        provider=canonical, action='purge', owner=owner)
+    receipt = await canonical._host_owner_purge(request, capability=capability, status=started)
+    if receipt.get('state') != 'applied':
+        raise RuntimeError('retained memory purge receipt unavailable')
+    if cleanup_receipt is not None:
+        saved=(lifecycle.get_operation(operation_id).get('steps') or {}).get(step) or {}
+        if saved.get('state')!='applied' or saved.get('receipt')!=cleanup_receipt or receipt!=cleanup_receipt:
+            raise RuntimeError('retained memory purge cleanup receipt changed')
+        await canonical._host_owner_purge_cache_cleanup(request,capability=capability,receipt=receipt)
+    return receipt
+
+
+async def _personal_native_relocation_proof(state, *, lifecycle, operation_id, claim_token, step, personal_manifest, source, target):
+    operation = lifecycle.get_operation(operation_id)
+    manifests, steps = operation.get('manifest') or {}, operation.get('steps') or {}
+    snapshot = manifests.get(step)
+    saved = steps.get(step) or {}
+    if (type(snapshot) is not dict or saved.get('state') != 'applied'
+            or type(personal_manifest) is not dict or 'rag_relocation' not in personal_manifest
+            or snapshot.get('rag_relocation') != personal_manifest['rag_relocation']):
+        raise RuntimeError('personal native relocation receipt unavailable')
+    receipt = await _move_memory_participant(state, manifests['memory_participants'], 'fm', source, target,
+        lifecycle=lifecycle, operation_id=operation_id, claim_token=claim_token, started=True, fm_snapshot=snapshot, step=step)
+    if receipt != saved.get('receipt'):
+        raise RuntimeError('personal native relocation receipt changed')
+    _, provider = _memory_participants_current(state, manifests['memory_participants'])
+    from src.openclank.chat_source_bridge import issue_account_source_transition
+    from routes.personal_routes import _issue_native_relocation_proof
+    capability = issue_account_source_transition(lifecycle=lifecycle, operation_id=operation_id, claim_token=claim_token,
+        provider=provider, action='rename', owner=source, new_owner=target)
+    return _issue_native_relocation_proof(capability=capability, provider=provider, step=step, receipt=receipt,
+        relocation=snapshot['rag_relocation'], source=source, target=target, manifest=personal_manifest)
+
+
+def _require_memory_participant_join(state):
+    """Admit only the supported two-store profile to the joined workflow."""
+    from src.memory_provider import NativeMemoryProvider
+    from src.memery_provider import MemeryProvider
+    from src.openclank.chat_source_bridge import canonical_source_provider
+    selected = getattr(state, 'memory_provider', None)
+    canonical = canonical_source_provider(state)
+    if canonical is not None and canonical is not selected:
+        try:
+            if type(selected) is not NativeMemoryProvider or selected.memory_vector is not None or not isinstance(canonical, MemeryProvider):
+                raise ValueError('unsupported memory participants')
+            _require_owner_transition_capability(canonical)
+            return True
+        except Exception as exc:
+            raise HTTPException(503, 'Retained memory account lifecycle is unavailable') from exc
+    return False
+
+
+def _account_domain_provider(state, selected, joined):
+    if not joined:
+        return selected
+    from src.openclank.chat_source_bridge import canonical_source_provider
+    canonical = canonical_source_provider(state)
+    if canonical is None:
+        raise RuntimeError('canonical memory domain unavailable')
+    return canonical
 
 
 def _sync_account_skill_runtime(*owners):
@@ -610,10 +1094,15 @@ class SetAdminRequest(BaseModel):
     is_admin: bool
 
 
+class FullAccessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+
+
 class SetOpenRegistrationRequest(BaseModel):
     enabled: bool
 
-SESSION_COOKIE = "odysseus_session"
+SESSION_COOKIE = "open_clank_session"
 
 
 def _is_loopback_address(value: object) -> bool:
@@ -695,6 +1184,17 @@ def _mimo_lifecycle_supervisor(request: Request):
     return supervisor
 
 
+def _tombstone_inventory(steps, step, field, owner):
+    """Bind a destructive purge to the partition actually staged by this operation."""
+    checkpoint = steps.get(step)
+    receipt = checkpoint.get("receipt") if isinstance(checkpoint, dict) else None
+    inventory = receipt.get(field) if isinstance(receipt, dict) else None
+    if (not isinstance(inventory, dict) or checkpoint.get("state") != "applied"
+            or inventory.get("owner") != owner):
+        raise RuntimeError("Staged tombstone inventory unavailable")
+    return inventory
+
+
 async def _call_copal_lifecycle(bridge, operation: str, args: dict):
     if bridge is None:
         return None
@@ -734,6 +1234,9 @@ def _move_common_owner_rows(source_owner: str, target_owner: str) -> dict[str, i
     counts: dict[str, int] = {}
     db = SessionLocal()
     try:
+        from core.database import ScheduledTask
+        if db.query(ScheduledTask.id).filter(func.lower(ScheduledTask.owner).in_((source_owner, target_owner)), ScheduledTask.host_account_id.isnot(None)).first():
+            raise RuntimeError('bound task requires account-scoped SQL lifecycle')
         for mapper in Base.registry.mappers:
             model = mapper.class_
             if not hasattr(model, "owner"):
@@ -779,6 +1282,9 @@ def _purge_common_owner_rows(owner: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     db = SessionLocal()
     try:
+        from core.database import ScheduledTask
+        if db.query(ScheduledTask.id).filter(func.lower(ScheduledTask.owner) == owner, ScheduledTask.host_account_id.isnot(None)).first():
+            raise RuntimeError('bound task requires account-scoped SQL lifecycle')
         for mapper in Base.registry.mappers:
             model = mapper.class_
             if hasattr(model, "owner"):
@@ -818,6 +1324,7 @@ def setup_auth_routes(
         else None
     )
     first_run_setup_lock = asyncio.Lock()
+    full_access_lock = asyncio.Lock()
 
     _login_limiter = RateLimiter(max_requests=15, window_seconds=60)
     _signup_limiter = RateLimiter(max_requests=3, window_seconds=300)
@@ -851,6 +1358,18 @@ def setup_auth_routes(
                     logger.exception("Failed to stop history worker after credential rotation failure")
                 raise HTTPException(503, "History credential rotation unavailable") from exc
 
+    def _wake_memory_provisioning(request: Request) -> None:
+        # No-op on the legacy profile (request_completed_turn_wake is itself a no-op until a guarded registry is
+        # configured); must never fail account creation. New accounts get their policy projection sooner this way,
+        # but provisioning still completes asynchronously (G-DEF decision 4).
+        try:
+            scheduler = getattr(request.app.state, "task_scheduler", None)
+            wake = getattr(scheduler, "request_completed_turn_wake", None)
+            if callable(wake):
+                wake()
+        except Exception:
+            logger.warning("Memory provisioning wake unavailable after account creation")
+
     def _reject_active_lifecycle_owner(username: str) -> None:
         checker = getattr(account_lifecycle, "owner_has_active_operation", None)
         if callable(checker) and checker(username):
@@ -880,6 +1399,7 @@ def setup_auth_routes(
             ok = await asyncio.to_thread(auth_manager.setup, username, body.password)
             if ok:
                 await _sync_history_accounts(request)
+                _wake_memory_provisioning(request)
                 return {"ok": True, "message": "Admin account created"}
             raise HTTPException(500, "Setup failed")
 
@@ -903,6 +1423,7 @@ def setup_auth_routes(
         if not ok:
             raise HTTPException(409, "Username already taken")
         await _sync_history_accounts(request)
+        _wake_memory_provisioning(request)
         return {"ok": True, "message": "Account created"}
 
     @router.post("/login")
@@ -950,21 +1471,64 @@ def setup_auth_routes(
         token = request.cookies.get(SESSION_COOKIE)
         result = auth_manager.status(token)
         result["signup_enabled"] = auth_manager.signup_enabled
-        # Include the caller's effective privileges so the frontend can
-        # hide / dim UI controls the user isn't allowed to use. Admins get
-        # ADMIN_PRIVILEGES (everything on), regular users get their stored
-        # set merged with DEFAULT_PRIVILEGES.
-        try:
-            u = result.get("username")
-            if u:
-                result["privileges"] = auth_manager.get_privileges(u)
-                # Expose the immutable account partition alongside the
-                # display username so browser clients can invalidate cached
-                # owner-scoped state on an account switch or rename.
-                result["account_id"] = auth_manager.account_id(u)
-        except Exception as auth_exc:
-            pass
+        if result["authenticated"]:
+            result["account_id"] = auth_manager.account_id(result["username"])
         return result
+
+    @router.put("/full-access")
+    async def update_full_access(body: FullAccessRequest, request: Request):
+        username = _get_current_user(request)
+        if not username or getattr(request.state, "api_token", False) or getattr(request.state, "internal_tool_authenticated", False):
+            raise HTTPException(401, "Browser session required")
+        account_id = auth_manager.account_id(username)
+        if not account_id or request.headers.get("X-Openclank-Account") != account_id:
+            raise HTTPException(409, "The active account changed")
+
+        async with full_access_lock:
+            if not auth_manager.full_access_status(username)["eligible"]:
+                raise HTTPException(403, "Full access is unavailable for this account")
+            if _get_current_user(request) != username or auth_manager.account_id(username) != account_id:
+                raise HTTPException(409, "The active account changed")
+            repository = getattr(request.app.state, "files_policy_repository", None)
+            supervisor = getattr(request.app.state, "mimo_supervisor", None)
+            invalidate_worker = getattr(supervisor, "invalidate_owner_projection", None)
+            if repository is None or not callable(invalidate_worker):
+                raise HTTPException(503, "Access transition is unavailable")
+
+            async def persist():
+                if not await asyncio.to_thread(auth_manager.set_owner_full_access, username, account_id, body.enabled):
+                    raise HTTPException(409, "The active account changed")
+
+            try:
+                if not body.enabled:
+                    # New admissions see the narrower authority before draining older work.
+                    await persist()
+                await asyncio.to_thread(repository.invalidate_account_access, account_id)
+                from src.agent_tools.filesystem_tools import reject_file_approval_scope
+                from src.shell_policy import reject_shell_approval_scope
+                from src.openclank.files_service_client import close_clients_for_owner
+                close_clients_for_owner(username)
+                handler = supervisor.permission_handler_for(username)
+                if handler is not None:
+                    handler.reject_scope(all_pending=True)
+                reject_file_approval_scope(owner=username, all_pending=True)
+                reject_shell_approval_scope(owner=username, all_pending=True)
+                await invalidate_worker(username)
+                if body.enabled:
+                    if _get_current_user(request) != username or auth_manager.account_id(username) != account_id:
+                        raise HTTPException(409, "The active account changed")
+                    await persist()
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.exception("Could not confirm owner access transition")
+                raise HTTPException(503, "Access transition could not be confirmed. Check the current mode before retrying.") from exc
+
+            return {
+                "account_id": account_id,
+                "full_access": auth_manager.full_access_status(username),
+                "privileges": auth_manager.get_privileges(username),
+            }
 
     @router.get("/policy")
     async def auth_policy():
@@ -1069,6 +1633,7 @@ def setup_auth_routes(
         if not ok:
             raise HTTPException(409, "Username already taken")
         await _sync_history_accounts(request)
+        _wake_memory_provisioning(request)
         return {"ok": True}
 
     @router.put("/users/{username}/privileges")
@@ -1077,7 +1642,11 @@ def setup_auth_routes(
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
         body = await request.json()
-        ok = auth_manager.set_privileges(username, body)
+        from src.openclank.memory_policy_projection import PolicyTransitionUnavailable
+        try:
+            ok = auth_manager.set_privileges(username, body)
+        except PolicyTransitionUnavailable as exc:
+            raise HTTPException(503, "Memory policy is temporarily unavailable") from exc
         if not ok:
             raise HTTPException(404, "User not found or is admin")
         return {"ok": True, "privileges": auth_manager.get_privileges(username)}
@@ -1088,11 +1657,20 @@ def setup_auth_routes(
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
+        joined_memory = _require_memory_participant_join(request.app.state)
         old_username = (username or "").strip().lower()
         new_username = (body.username or "").strip().lower()
         durable_rename = account_lifecycle is not None and callable(
             getattr(type(account_lifecycle), "begin_rename_operation", None)
         )
+        from src.memery_provider import MemeryProvider
+        selected_memory = getattr(request.app.state,'memory_provider',None)
+        guarded_primary = (not joined_memory and isinstance(selected_memory,MemeryProvider)
+            and getattr(selected_memory,'_guarded_v17',False) is True)
+        if guarded_primary and not durable_rename:
+            raise HTTPException(503, 'Guarded memory account lifecycle is unavailable')
+        typed_primary = guarded_primary and durable_rename
+        typed_memory = joined_memory or typed_primary
         rename_operation = None
         requested_operation_id = getattr(body, "operation_id", None)
         if durable_rename and requested_operation_id:
@@ -1253,12 +1831,9 @@ def setup_auth_routes(
                     "Account rename cannot quiesce active requests",
                 ) from exc
             try:
-                # The durable claim activates the admission fence first.  This
-                # wait is intentionally unbounded: streamed chat/tool work has
-                # no truthful fixed completion time.  Repeat it on every resume
-                # because a persisted old receipt cannot prove that another
-                # process did not admit work before recovering the claim.
-                await drain_owner_requests(old_username)
+                # A timeout cancels only this waiter, not admitted work. Retry
+                # the durable operation rather than treating timeout as drain.
+                await asyncio.wait_for(drain_owner_requests(old_username), timeout=_ACCOUNT_REQUEST_DRAIN_SECONDS)
             except Exception as exc:
                 if rename_steps:
                     _rename_fail(exc)
@@ -1292,7 +1867,7 @@ def setup_auth_routes(
                     "Account rename cannot quiesce background writers",
                 ) from exc
             try:
-                await quiesce_owner_writers(old_username)
+                await quiesce_owner_writers(old_username, subject_id=(rename_operation or {}).get('subject_id'))
             except Exception as exc:
                 if rename_steps:
                     _rename_fail(exc)
@@ -1340,8 +1915,8 @@ def setup_auth_routes(
                 if normalized_source["count"] and normalized_target["count"]:
                     raise RuntimeError("normalized rename target already contains state")
                 sql_preflight = _account_sql_domain_store()
-                sql_source = sql_preflight.owner_inventory(old_username)
-                sql_target = sql_preflight.owner_inventory(new_username)
+                sql_source = sql_preflight.owner_inventory(old_username, account_id=rename_subject_id)
+                sql_target = sql_preflight.owner_inventory(new_username, account_id=rename_subject_id)
                 if sql_source["count"] and sql_target["count"]:
                     raise RuntimeError("SQL rename target already contains state")
                 file_preflight = _account_file_domain_store().preview_rename(
@@ -1358,6 +1933,7 @@ def setup_auth_routes(
                 ancillary_preflight = ancillary_lifecycle.preview_owner_rename(
                     old_username,
                     new_username,
+                    account_id=(rename_operation or {}).get('subject_id'),
                 )
                 upload_preflight_store = getattr(request.app.state, "upload_handler", None)
                 uploads_preflight = (
@@ -1405,18 +1981,20 @@ def setup_auth_routes(
                 if memory_preflight is not None:
                     memory_source = await memory_preflight.owner_stats(owner=old_username)
                     memory_target = await memory_preflight.owner_stats(owner=new_username)
+                    await _assess_claimed_memory_source(memory_preflight,memory_source,state=request.app.state,lifecycle=account_lifecycle,operation_id=rename_operation_id,claim_token=rename_claim_token,account_id=rename_subject_id,host_owner=old_username,source_owner=old_username)
+                    _require_s02_rename_safe(memory_preflight, memory_target)
                     if _inventory_present(memory_source) and _inventory_present(memory_target):
                         raise RuntimeError("Memory rename target already contains state")
                     media_preflight_store, staging_preflight_store = (
-                        _account_memory_domain_stores(memory_preflight)
+                        _account_memory_domain_stores(_account_domain_provider(request.app.state, memory_preflight, joined_memory))
                     )
                     media_preflight = {
                         "source": media_preflight_store.preview_owner_purge(old_username),
                         "target": media_preflight_store.preview_owner_purge(new_username),
                     }
                     staging_preflight = {
-                        "source": staging_preflight_store.preview_owner_staging(old_username),
-                        "target": staging_preflight_store.preview_owner_staging(new_username),
+                        "source": staging_preflight_store.preview_owner_staging(old_username,guarded=typed_memory),
+                        "target": staging_preflight_store.preview_owner_staging(new_username,guarded=typed_memory),
                     }
                     if media_preflight["source"]["count"] and media_preflight["target"]["count"]:
                         raise RuntimeError("Memory media rename target already contains state")
@@ -1456,6 +2034,11 @@ def setup_auth_routes(
                     "import_staging": staging_preflight,
                     "copal": copal_preflight or {"available": False},
                 }
+                from src.openclank.chat_source_bridge import canonical_source_provider
+                if canonical_source_provider(request.app.state) is not None and canonical_source_provider(request.app.state) is not memory_preflight:
+                    manifest['memory_participants'] = await _freeze_memory_participants(request.app.state, old_username, new_username,lifecycle=account_lifecycle,operation_id=rename_operation_id,claim_token=rename_claim_token,account_id=rename_subject_id,host_owner=old_username)
+                elif typed_primary:
+                    manifest['memory_participants'] = await _freeze_primary_guarded_memory(request.app.state, old_username, new_username,lifecycle=account_lifecycle,operation_id=rename_operation_id,claim_token=rename_claim_token,account_id=rename_subject_id,host_owner=old_username)
                 rename_operation = account_lifecycle.freeze_operation_manifest(
                     rename_operation_id,
                     manifest,
@@ -1472,6 +2055,56 @@ def setup_auth_routes(
                 if callable(release):
                     release(old_username)
                 raise HTTPException(409, f"Account rename preflight failed: {exc}") from exc
+        # Recheck the originally frozen inventory even on resumed operations.
+        # Old manifests without the selective proof cannot authorize a move.
+        if durable_rename:
+            try:
+                from src.openclank.chat_source_bridge import canonical_source_provider
+                saved_manifest = rename_operation.get('manifest') or {}
+                selected_provider = getattr(request.app.state, 'memory_provider', None)
+                saved_memory = saved_manifest.get('memory') or {}
+                _require_s02_rename_safe(selected_provider, saved_memory.get('target'))
+                canonical = canonical_source_provider(request.app.state)
+                if canonical is not None and canonical is not selected_provider:
+                    saved_fm = (saved_manifest.get('memory_participants') or {}).get('fm') or {}
+                    _require_s02_rename_safe(canonical, saved_fm.get('target'))
+                # A saved preflight is not current evidence on recovery.
+                from src.memery_provider import MemeryProvider
+                from src.openclank.chat_source_bridge import _account_source_saved_phase
+                phase=_account_source_saved_phase(rename_operation)
+                source_owner=phase['owner'] if phase is not None else old_username
+                target_owner=phase['new_owner'] if phase is not None else new_username
+                current_host=auth_manager.username_for_account_id(rename_subject_id)
+                for participant in (selected_provider, canonical if canonical is not selected_provider else None):
+                    if isinstance(participant, MemeryProvider) and getattr(participant, '_guarded_v17', False):
+                        fm_step=(rename_steps.get('memory_fm') or {})
+                        if type(fm_step) is dict and fm_step.get('state') in ('applying','applied'):
+                            original=await _verify_completed_fm_move(request.app.state,participant,rename_operation,lifecycle=account_lifecycle,
+                                operation_id=rename_operation_id,claim_token=rename_claim_token,account_id=rename_subject_id,
+                                source=old_username,target=new_username,current_phase=phase)
+                            if fm_step.get('state')=='applying': _rename_checkpoint('memory_fm',original)
+                            if not _rename_applied('memory_fm_after_verified'):
+                                _rename_start('memory_fm_after_verified')
+                                await _move_memory_participant(request.app.state,saved_manifest['memory_participants'],'fm',old_username,new_username,
+                                    lifecycle=account_lifecycle,operation_id=rename_operation_id,claim_token=rename_claim_token,
+                                    started=True,fm_snapshot=saved_manifest['memory_fm'],step='memory_fm',cleanup_receipt=original)
+                                verified=await _verify_fm_move_after(participant,old_username,new_username,original)
+                                _rename_checkpoint('memory_fm_after_verified',verified)
+                            continue
+                        source_inventory=await participant.owner_stats(owner=source_owner)
+                        await _assess_claimed_memory_source(participant,source_inventory,state=request.app.state,lifecycle=account_lifecycle,
+                            operation_id=rename_operation_id,claim_token=rename_claim_token,account_id=rename_subject_id,
+                            host_owner=current_host,source_owner=source_owner,phase=phase)
+                        target_inventory=await participant.owner_stats(owner=target_owner)
+                        _require_s02_rename_safe(participant,target_inventory)
+            except Exception as exc:
+                _rename_fail_or_rewind(exc)
+                raise HTTPException(409, f'Account rename preflight failed: {exc}') from exc
+        if typed_memory and (not durable_rename or not (rename_operation.get('manifest') or {}).get('memory_participants') or rename_steps.get('memory')):
+            exc = RuntimeError('ambiguous legacy memory checkpoint')
+            if durable_rename:
+                _rename_fail(exc)
+            raise HTTPException(503, 'Retained memory account manifest unavailable') from exc
         if durable_rename and not _rename_applied("research_fenced"):
             try:
                 _rename_start("research_fenced")
@@ -1489,6 +2122,44 @@ def setup_auth_routes(
                 ),
             )
         await _drain_owner_provider_flows(request, old_username)
+        # Freeze the exact current claimed phase before any paired source fence.
+        phase=None
+        if typed_memory:
+            try:
+                phase_name='memory_fm_source_phase_1'
+                saved=(rename_operation.get('manifest') or {}).get(phase_name)
+                expected=_claimed_fm_source_phase(operation=rename_operation,claim_token=rename_claim_token,
+                    database_id=rename_operation['manifest']['memory_participants']['fm']['database_id'],
+                    account_id=rename_subject_id,operation_id=rename_operation_id,step='memory_fm',generation=1,
+                    owner=old_username,new_owner=new_username)
+                if saved is None:
+                    if rename_steps.get('host_sources_fenced'): raise RuntimeError('original source phase unavailable')
+                    _rename_start(phase_name,manifest=expected)
+                    _rename_checkpoint(phase_name,expected)
+                elif saved!=expected or (rename_steps.get(phase_name) or {}).get('receipt')!=expected:
+                    raise RuntimeError('original source phase changed')
+                phase=expected
+            except Exception as exc:
+                _rename_fail(exc)
+                raise HTTPException(503,'Account memory source phase unavailable') from exc
+        # The claimed account operation blocks new source publication. Fence
+        # its exact old-account FM projections before changing auth identity.
+        try:
+            from src.openclank.chat_source_bridge import fence_account_host_sources, validate_account_source_fence_receipt, account_source_summary_step
+            summary_step=account_source_summary_step(phase)
+            if durable_rename and _rename_applied(summary_step):
+                saved = (rename_steps[summary_step] or {}).get("receipt")
+                validate_account_source_fence_receipt(saved, owner=old_username, account_id=rename_subject_id, kind='rename', operation_id=rename_operation_id, lifecycle=account_lifecycle,phase=phase)
+            else:
+                _rename_start(summary_step)
+                source_receipt = await fence_account_host_sources(state=request.app.state, lifecycle=account_lifecycle,
+                    operation_id=rename_operation_id, claim_token=rename_claim_token, owner=old_username,
+                    account_id=rename_subject_id, kind="rename",phase=phase)
+                validate_account_source_fence_receipt(source_receipt, owner=old_username, account_id=rename_subject_id, kind='rename', operation_id=rename_operation_id, lifecycle=account_lifecycle,phase=phase)
+                _rename_checkpoint(summary_step, source_receipt)
+        except Exception as exc:
+            _rename_fail(exc)
+            raise HTTPException(503, "Account memory source transition is unavailable") from exc
         # Do this before the first mutation. A later partial failure or rollback
         # must not leave either ownership key serving a pre-rename catalogue.
         copal_bridge = _copal_lifecycle_bridge(request)
@@ -1563,6 +2234,7 @@ def setup_auth_routes(
                     old_username,
                     new_username,
                     (rename_operation.get("manifest") or {})["ancillary"],
+                    account_id=(rename_operation or {}).get('subject_id'),
                 )
                 _rename_checkpoint("ancillary", receipt)
             except Exception as exc:
@@ -1617,7 +2289,49 @@ def setup_auth_routes(
 
         memory_provider = getattr(request.app.state, "memory_provider", None)
         provider_renamed = False
-        if memory_provider and not _rename_applied("memory"):
+        if typed_memory:
+            manifest = (rename_operation.get('manifest') or {}).get('memory_participants') if durable_rename else None
+            if not durable_rename or not manifest or rename_steps.get('memory'):
+                _rename_fail(RuntimeError('ambiguous legacy memory checkpoint'))
+                raise HTTPException(503, 'Retained memory account manifest unavailable')
+            try:
+                _memory_participants_current(request.app.state, manifest)
+                for kind in (('native', 'fm') if joined_memory else ('fm',)):
+                    step = 'memory_' + kind
+                    if _rename_applied(step):
+                        continue
+                    started = bool(rename_steps.get(step))
+                    fm_snapshot = (rename_operation.get('manifest') or {}).get(step) if started and kind == 'fm' else None
+                    if kind == 'fm' and not started:
+                        _, canonical = _memory_participants_current(request.app.state, manifest)
+                        personal = (rename_operation.get('manifest') or {}).get('personal_rag')
+                        if type(personal) is not dict or 'rag_relocation' not in personal:
+                            raise RuntimeError('personal RAG relocation manifest unavailable')
+                        _account_personal_rag_store(request).assert_relocation_current(old_username, new_username, personal)
+                        fm_snapshot = {'source': await canonical.owner_stats(owner=old_username), 'target': await canonical.owner_stats(owner=new_username),
+                            'generation': 1, 'prior_receipt_id': None, 'prior_receipt_hash': None,
+                            'rag_relocation': personal['rag_relocation']}
+                        if _inventory_present(fm_snapshot['target']): raise RuntimeError('retained memory target changed')
+                    if kind == 'fm':
+                        _account_personal_rag_store(request).assert_relocation_current(old_username, new_username,
+                            (rename_operation.get('manifest') or {}).get('personal_rag'))
+                    _rename_start(step, manifest=fm_snapshot if kind == 'fm' and not started else None)
+                    receipt = await _move_memory_participant(request.app.state, manifest, kind, old_username, new_username,
+                        lifecycle=account_lifecycle, operation_id=rename_operation_id, claim_token=rename_claim_token, started=started, fm_snapshot=fm_snapshot, step=step)
+                    _rename_checkpoint(step, receipt)
+                    if kind=='fm' and not _rename_applied('memory_fm_after_verified'):
+                        _rename_start('memory_fm_after_verified')
+                        _, canonical = _memory_participants_current(request.app.state, manifest)
+                        await _move_memory_participant(request.app.state,manifest,'fm',old_username,new_username,
+                            lifecycle=account_lifecycle,operation_id=rename_operation_id,claim_token=rename_claim_token,
+                            started=True,fm_snapshot=fm_snapshot,step=step,cleanup_receipt=receipt)
+                        verified=await _verify_fm_move_after(canonical,old_username,new_username,receipt)
+                        _rename_checkpoint('memory_fm_after_verified',verified)
+                provider_renamed = True
+            except Exception as exc:
+                _rename_fail(exc)
+                raise HTTPException(503, 'Retained memory owner transition unavailable') from exc
+        elif memory_provider and not _rename_applied("memory"):
             try:
                 _rename_start("memory")
                 if durable_rename:
@@ -1628,9 +2342,9 @@ def setup_auth_routes(
                     if source_present and target_present:
                         raise RuntimeError("source and target memory both contain durable state")
                     if source_present:
-                        await memory_provider.rename_owner(new_username, owner=old_username)
+                        await _memory_owner_transition(memory_provider, action='rename', owner=old_username, new_owner=new_username, lifecycle=account_lifecycle, operation_id=rename_operation_id, claim_token=rename_claim_token, state=request.app.state)
                 else:
-                    await memory_provider.rename_owner(new_username, owner=old_username)
+                    await _memory_owner_transition(memory_provider, action='rename', owner=old_username, new_owner=new_username, lifecycle=account_lifecycle, operation_id=rename_operation_id, claim_token=rename_claim_token, state=request.app.state)
                 provider_renamed = True
                 _rename_checkpoint("memory", True)
             except Exception as e:
@@ -1644,7 +2358,7 @@ def setup_auth_routes(
                 raise HTTPException(500, "Failed to rename user memory")
 
         if durable_rename and memory_provider:
-            media_store, batch_store = _account_memory_domain_stores(memory_provider)
+            media_store, batch_store = _account_memory_domain_stores(_account_domain_provider(request.app.state, memory_provider, joined_memory))
             if not _rename_applied("memory_media"):
                 try:
                     _rename_start("memory_media")
@@ -1654,14 +2368,23 @@ def setup_auth_routes(
                     _rename_domain_error("Memory media", exc)
             if not _rename_applied("import_staging"):
                 try:
+                    if typed_memory:
+                        frozen=(rename_operation.get('manifest') or {}).get('import_staging')
+                        if (type(frozen) is not dict or set(frozen)!={'source','target'}
+                            or any(type(frozen.get(k)) is not dict or set(frozen[k])!={'count','bytes','fingerprint'} for k in ('source','target'))
+                            or frozen['target'].get('count')!=0 or frozen['target'].get('bytes')!=0):
+                            raise RuntimeError('original import staging manifest unavailable')
+                        source,target=frozen['source'],frozen['target']
+                    else:
+                        source = batch_store.preview_owner_staging(old_username,guarded=typed_memory)
+                        target = batch_store.preview_owner_staging(new_username,guarded=typed_memory)
                     _rename_start("import_staging")
-                    source = batch_store.preview_owner_staging(old_username)
-                    target = batch_store.preview_owner_staging(new_username)
                     receipt = batch_store.rename_owner_staging(
                         old_username,
                         new_username,
                         expected_source=source,
                         expected_target=target,
+                        guarded=typed_memory,
                     )
                     _rename_checkpoint("import_staging", receipt)
                 except Exception as exc:
@@ -1721,13 +2444,14 @@ def setup_auth_routes(
                 sql_store = _account_sql_domain_store()
                 sql_manifest = (
                     (rename_operation.get("manifest") or {}).get("common_sql")
-                    or sql_store.owner_inventory(old_username)
+                    or sql_store.owner_inventory(old_username, account_id=rename_subject_id)
                 )
                 _rename_start("common_sql", manifest=sql_manifest)
                 receipt = sql_store.reconcile_owner(
                     old_username,
                     new_username,
                     expected_source=sql_manifest,
+                    account_id=rename_subject_id,
                 )
                 _rename_checkpoint("common_sql", receipt.as_dict())
             except Exception as exc:
@@ -1744,6 +2468,9 @@ def setup_auth_routes(
             from core.database import Base, SessionLocal
             db = SessionLocal()
             try:
+                from core.database import ScheduledTask
+                if db.query(ScheduledTask.id).filter(func.lower(ScheduledTask.owner).in_((old_username, new_username)), ScheduledTask.host_account_id.isnot(None)).first():
+                    raise RuntimeError('bound task requires account-scoped SQL lifecycle')
                 _drop_copal_calendar_projections_for_owner(db, old_username)
                 for mapper in Base.registry.mappers:
                     model = mapper.class_
@@ -1788,9 +2515,15 @@ def setup_auth_routes(
             pass
         except Exception as e:
             logger.error("Failed to rename owner references %s -> %s: %s", old_username, new_username, e)
+            if typed_memory:
+                # Auth and staged stores remain under the durable claim;
+                # recovery resumes the same frozen operation instead of rolling
+                # back only a subset of the completed domains.
+                _rename_fail(e)
+                raise HTTPException(500, "Account rename remains pending recovery") from e
             if provider_renamed:
                 try:
-                    await memory_provider.rename_owner(old_username, owner=new_username)
+                    await _memory_owner_transition(memory_provider, action='rename', owner=new_username, new_owner=old_username, lifecycle=account_lifecycle, operation_id=rename_operation_id, claim_token=rename_claim_token, state=request.app.state)
                 except Exception as rollback_error:
                     logger.error("Failed to roll back memory owner rename: %s", rollback_error)
             await _rollback_copal_rename()
@@ -1808,17 +2541,18 @@ def setup_auth_routes(
                 raise _RenameDomainApplied()
             _rename_start("preferences")
             from routes.prefs_routes import _load as _load_prefs, _save as _save_prefs
-            prefs = _load_prefs()
-            users = prefs.get("_users") if isinstance(prefs, dict) else None
-            if isinstance(users, dict):
-                prefs_key = next(
-                    (k for k in users if str(k).strip().lower() == old_username),
-                    None,
-                )
-                new_taken = any(str(k).strip().lower() == new_username for k in users)
-                if prefs_key is not None and not new_taken:
-                    users[new_username] = users.pop(prefs_key)
-                    _save_prefs(prefs)
+            with PREFERENCE_LOCK:
+                prefs = _load_prefs()
+                users = prefs.get("_users") if isinstance(prefs, dict) else None
+                if isinstance(users, dict):
+                    prefs_key = next(
+                        (k for k in users if str(k).strip().lower() == old_username),
+                        None,
+                    )
+                    new_taken = any(str(k).strip().lower() == new_username for k in users)
+                    if prefs_key is not None and not new_taken:
+                        users[new_username] = users.pop(prefs_key)
+                        _save_prefs(prefs)
             _rename_checkpoint("preferences", True)
         except _RenameDomainApplied:
             pass
@@ -1956,10 +2690,15 @@ def setup_auth_routes(
                     or personal_store.preview_owner_rename(old_username, new_username)
                 )
                 _rename_start("personal_rag", manifest=personal_manifest)
+                personal_store.assert_relocation_current(old_username, new_username, personal_manifest)
+                personal_proof = await _personal_native_relocation_proof(request.app.state, lifecycle=account_lifecycle,
+                    operation_id=rename_operation_id, claim_token=rename_claim_token, step='memory_fm',
+                    personal_manifest=personal_manifest, source=old_username, target=new_username) if typed_memory else None
                 receipt = personal_store.reconcile_owner_rename(
                     old_username,
                     new_username,
                     personal_manifest,
+                    native_relocation_proof=personal_proof,
                 )
                 _rename_checkpoint("personal_rag", receipt)
             else:
@@ -2143,6 +2882,7 @@ def setup_auth_routes(
                     old_username,
                     new_username,
                     expected_source=manifests["common_sql"],
+                    account_id=rename_subject_id,
                 )
                 file_verify = _account_file_domain_store()
                 file_verify.verify(
@@ -2163,7 +2903,7 @@ def setup_auth_routes(
                 ]:
                     raise RuntimeError("shell audit source owner remains after rename")
                 ancillary_verify = ancillary_lifecycle
-                if ancillary_verify.owner_inventory(old_username)["count"]:
+                if ancillary_verify.owner_inventory(old_username,account_id=(rename_operation or {}).get('subject_id'))["count"]:
                     raise RuntimeError("ancillary source owner remains after rename")
                 if account_lifecycle.owner_inventory(old_username)["count"]:
                     raise RuntimeError("normalized source owner remains after rename")
@@ -2173,6 +2913,14 @@ def setup_auth_routes(
                     await memory_provider.owner_stats(owner=old_username)
                 ):
                     raise RuntimeError("Memory source owner remains after rename")
+                if joined_memory:
+                    selected, canonical = _memory_participants_current(request.app.state, manifests['memory_participants'])
+                    source_now, target_now = selected.lifecycle_snapshot(old_username), selected.lifecycle_snapshot(new_username)
+                    original = manifests['memory_participants']['native']['source']
+                    if (source_now['count'] or target_now['ids'] != original['ids'] or
+                            target_now['content_fingerprint'] != original['content_fingerprint'] or
+                            _inventory_present(await canonical.owner_stats(owner=old_username))):
+                        raise RuntimeError('retained memory rename verification failed')
                 upload_verify = getattr(request.app.state, "upload_handler", None)
                 if upload_verify is not None and manifests.get("uploads"):
                     if upload_verify.owner_inventory(old_username)["count"]:
@@ -2182,11 +2930,11 @@ def setup_auth_routes(
                     raise RuntimeError("personal RAG source owner remains after rename")
                 if memory_provider:
                     media_verify, staging_verify = _account_memory_domain_stores(
-                        memory_provider
+                        _account_domain_provider(request.app.state, memory_provider, joined_memory)
                     )
                     if media_verify.preview_owner_purge(old_username)["count"]:
                         raise RuntimeError("Memory media source remains after rename")
-                    if staging_verify.preview_owner_staging(old_username)["count"]:
+                    if staging_verify.preview_owner_staging(old_username,guarded=typed_memory)["count"]:
                         raise RuntimeError("import staging source remains after rename")
                 filesystem_verify = FilesystemRootRegistry().owner_inventory(old_username)
                 if filesystem_verify["count"]:
@@ -2206,11 +2954,28 @@ def setup_auth_routes(
             new_username,
             invalidate_tokens=False,
         )
+        source_summary = ((rename_steps.get(account_source_summary_step(phase)) or {}).get('receipt') or {}) if durable_rename else {}
+        if durable_rename and source_summary.get('renewal') == 'pending' and not _rename_applied('host_sources_renewed'):
+            try:
+                from src.openclank.chat_source_bridge import renew_account_host_sources
+                _rename_start('host_sources_renewed')
+                renewal = await renew_account_host_sources(state=request.app.state, lifecycle=account_lifecycle,
+                    operation_id=rename_operation_id, claim_token=rename_claim_token,
+                    old_owner=old_username, new_owner=new_username, account_id=rename_subject_id)
+                _rename_checkpoint('host_sources_renewed', renewal)
+            except Exception:
+                _rename_fail(RuntimeError('memory source revalidation pending'))
+                await _sync_history_accounts(request)
+                return {"ok":True, "username":new_username, "renamed_self":old_username == user,
+                        "operation_id":rename_operation_id, "memory_source_revalidation":"pending"}
         _rename_checkpoint("convergence_verified", True, complete=True)
         await _sync_history_accounts(request)
         result = {"ok": True, "username": new_username, "renamed_self": old_username == user}
         if durable_rename:
             result["operation_id"] = rename_operation_id
+            source_receipt = ((rename_steps.get(account_source_summary_step(phase)) or {}).get('receipt') or {})
+            if source_receipt.get('renewal') == 'pending':
+                result['memory_source_revalidation'] = 'complete' if _rename_applied('host_sources_renewed') else 'pending'
         return result
 
     @router.put("/users/{username}/admin")
@@ -2269,6 +3034,7 @@ def setup_auth_routes(
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
+        joined_memory = _require_memory_participant_join(request.app.state)
 
         def _invalidate_api_token_cache():
             try:
@@ -2287,6 +3053,12 @@ def setup_auth_routes(
         durable = account_lifecycle is not None and callable(
             getattr(account_lifecycle, "begin_delete_operation", None)
         )
+        from src.memery_provider import MemeryProvider
+        guarded_primary = (not joined_memory and isinstance(memory_provider,MemeryProvider)
+            and getattr(memory_provider,'_guarded_v17',False) is True)
+        if guarded_primary and not durable:
+            raise HTTPException(503, 'Guarded memory account lifecycle is unavailable')
+        typed_memory = joined_memory or (guarded_primary and durable)
         operation = None
         if durable and body.operation_id:
             try:
@@ -2440,9 +3212,9 @@ def setup_auth_routes(
                     "Account deletion cannot quiesce active requests",
                 ) from exc
             try:
-                # See rename above: every recovery repeats the unbounded drain
-                # after acquiring the durable fence and before any inventory.
-                await drain_owner_requests(target_owner)
+                # Repeat the bounded wait on recovery; timeout is not proof of
+                # quiescence and must precede destructive inventory changes.
+                await asyncio.wait_for(drain_owner_requests(target_owner), timeout=_ACCOUNT_REQUEST_DRAIN_SECONDS)
             except Exception as exc:
                 if steps:
                     _fail_operation(exc)
@@ -2476,7 +3248,7 @@ def setup_auth_routes(
                     "Account deletion cannot quiesce background writers",
                 ) from exc
             try:
-                await quiesce_owner_writers(target_owner)
+                await quiesce_owner_writers(target_owner, subject_id=(operation or {}).get('subject_id'))
             except Exception as exc:
                 if steps:
                     _fail_operation(exc)
@@ -2513,11 +3285,12 @@ def setup_auth_routes(
             try:
                 normalized_source = account_lifecycle.owner_inventory(target_owner)
                 normalized_target = account_lifecycle.owner_inventory(tombstone_owner)
+                media_artifacts_preflight = account_lifecycle.media_artifact_inventory(operation['subject_id'])
                 if normalized_source["count"] and normalized_target["count"]:
                     raise RuntimeError("normalized tombstone already contains state")
                 sql_preflight = _account_sql_domain_store()
-                sql_source = sql_preflight.owner_inventory(target_owner)
-                sql_target = sql_preflight.owner_inventory(tombstone_owner)
+                sql_source = sql_preflight.owner_inventory(target_owner, account_id=target_subject_id)
+                sql_target = sql_preflight.owner_inventory(tombstone_owner, account_id=target_subject_id)
                 if sql_source["count"] and sql_target["count"]:
                     raise RuntimeError("SQL tombstone already contains state")
                 file_preflight = _account_file_domain_store().preview_rename(
@@ -2534,6 +3307,7 @@ def setup_auth_routes(
                 ancillary_preflight = ancillary_lifecycle.preview_owner_rename(
                     target_owner,
                     tombstone_owner,
+                    account_id=(operation or {}).get('subject_id'),
                 )
                 upload_preflight_store = getattr(request.app.state, "upload_handler", None)
                 uploads_preflight = (
@@ -2572,16 +3346,15 @@ def setup_auth_routes(
                     "mimo_supervisor",
                     None,
                 )
-                mimo_preflight = (
-                    await mimo_preflight_store.preview_owner_rename(
-                        target_owner,
-                        tombstone_owner,
+                deletion_preview = getattr(mimo_preflight_store, "preview_owner_deletion", None)
+                if callable(deletion_preview):
+                    mimo_preflight = await deletion_preview(target_owner, tombstone_owner, tombstone_identity)
+                else:
+                    mimo_preflight = (
+                        await mimo_preflight_store.preview_owner_rename(target_owner, tombstone_owner)
+                        if callable(getattr(mimo_preflight_store, "preview_owner_rename", None))
+                        else {"available": False}
                     )
-                    if callable(
-                        getattr(mimo_preflight_store, "preview_owner_rename", None)
-                    )
-                    else {"available": False}
-                )
                 memory_source = memory_target = None
                 media_preflight = staging_preflight = None
                 if memory_provider is not None:
@@ -2590,15 +3363,15 @@ def setup_auth_routes(
                     if _inventory_present(memory_source) and _inventory_present(memory_target):
                         raise RuntimeError("Memory tombstone already contains state")
                     media_preflight_store, staging_preflight_store = (
-                        _account_memory_domain_stores(memory_provider)
+                        _account_memory_domain_stores(_account_domain_provider(request.app.state, memory_provider, joined_memory))
                     )
                     media_preflight = {
                         "source": media_preflight_store.preview_owner_purge(target_owner),
                         "target": media_preflight_store.preview_owner_purge(tombstone_owner),
                     }
                     staging_preflight = {
-                        "source": staging_preflight_store.preview_owner_staging(target_owner),
-                        "target": staging_preflight_store.preview_owner_staging(tombstone_owner),
+                        "source": staging_preflight_store.preview_owner_staging(target_owner,guarded=typed_memory),
+                        "target": staging_preflight_store.preview_owner_staging(tombstone_owner,guarded=typed_memory),
                     }
                     if media_preflight["source"]["count"] and media_preflight["target"]["count"]:
                         raise RuntimeError("Memory media tombstone already contains state")
@@ -2612,6 +3385,12 @@ def setup_auth_routes(
                         "new_owner": copal_owner_for_user(tombstone_owner),
                     },
                 )
+                from src.openclank.chat_source_bridge import canonical_source_provider
+                memory_participants = None
+                if canonical_source_provider(request.app.state) is not None and canonical_source_provider(request.app.state) is not memory_provider:
+                    memory_participants = await _freeze_memory_participants(request.app.state, target_owner, tombstone_owner,lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token,account_id=target_subject_id,host_owner=target_owner)
+                elif guarded_primary:
+                    memory_participants = await _freeze_primary_guarded_memory(request.app.state, target_owner, tombstone_owner,lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token,account_id=target_subject_id,host_owner=target_owner)
                 operation = account_lifecycle.freeze_operation_manifest(
                     operation_id,
                     {
@@ -2624,6 +3403,7 @@ def setup_auth_routes(
                             else {"available": False}
                         ),
                         "normalized": {"source": normalized_source, "target": normalized_target},
+                        "media_artifacts": media_artifacts_preflight,
                         "common_sql_tombstoned": sql_source,
                         "common_sql_target": sql_target,
                         "file_domains_tombstoned": file_preflight,
@@ -2636,6 +3416,7 @@ def setup_auth_routes(
                         "research_tombstoned": research_preflight,
                         "mimo_tombstoned": mimo_preflight,
                         "memory": {"source": memory_source, "target": memory_target},
+                        **({'memory_participants': memory_participants} if memory_participants is not None else {}),
                         "memory_media": media_preflight,
                         "import_staging": staging_preflight,
                         "copal": copal_preflight or {"available": False},
@@ -2651,6 +3432,48 @@ def setup_auth_routes(
                 )
                 raise HTTPException(409, f"Account deletion preflight failed: {exc}") from exc
 
+        if typed_memory and (not durable or not (operation.get('manifest') or {}).get('memory_participants')
+                or steps.get('memory_tombstoned') or steps.get('memory_purged')):
+            exc = RuntimeError('ambiguous legacy memory checkpoint')
+            if durable:
+                _fail_operation(exc)
+            raise HTTPException(503, 'Retained memory account manifest unavailable') from exc
+        # Reconcile the last issued guarded FM original before any resumed
+        # consumer can consult its old schema cookie or inventory.
+        if typed_memory:
+            manifest=(operation.get('manifest') or {})['memory_participants']
+            fm_snapshot=(operation.get('manifest') or {}).get('memory_fm_tombstoned')
+            purge_step=steps.get('memory_fm_purged') or {}
+            reverse_step=None
+            if type(fm_snapshot) is dict and type(fm_snapshot.get('generation')) is int:
+                reverse_step='memory_fm_reverse_'+str(fm_snapshot['generation'])
+            reverse_state=steps.get(reverse_step) if reverse_step else None
+            forward_state=steps.get('memory_fm_tombstoned')
+            try:
+                if type(purge_step) is dict and purge_step.get('state') in ('applying','applied'):
+                    frozen=(operation.get('manifest') or {}).get('memory_fm_purged')
+                    if type(frozen) is not dict or set(frozen)!={'snapshot'}:
+                        raise RuntimeError('memory purge original unavailable')
+                    receipt=await _purge_memory_participant(request.app.state,manifest,'fm',tombstone_owner,frozen['snapshot'],
+                        lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token,started=True,step='memory_fm_purged')
+                    if purge_step.get('state')=='applied' and purge_step.get('receipt')!=receipt:
+                        raise RuntimeError('memory purge original changed')
+                    if purge_step.get('state')=='applying': _checkpoint('memory_fm_purged',receipt)
+                elif type(reverse_state) is dict and reverse_state.get('state') in ('applying','applied'):
+                    receipt=await _move_memory_participant(request.app.state,manifest,'fm',tombstone_owner,target_owner,
+                        lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token,started=True,reverse=True,
+                        fm_snapshot=fm_snapshot,step='memory_fm_tombstoned')
+                    if reverse_state.get('state')=='applying': _checkpoint(reverse_step,receipt)
+                elif type(forward_state) is dict and forward_state.get('state') in ('applying','applied'):
+                    receipt=await _move_memory_participant(request.app.state,manifest,'fm',target_owner,tombstone_owner,
+                        lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token,started=True,
+                        fm_snapshot=fm_snapshot,step='memory_fm_tombstoned')
+                    if forward_state.get('state')=='applied' and forward_state.get('receipt')!=receipt:
+                        raise RuntimeError('memory transition original changed')
+                    if forward_state.get('state')=='applying': _checkpoint('memory_fm_tombstoned',receipt)
+            except Exception as exc:
+                _fail_operation(exc)
+                raise HTTPException(503,'Retained memory original status unavailable') from exc
         pre_auth_steps = (
             "provider_flows_drained",
             "runtime_caches_fenced",
@@ -2661,6 +3484,8 @@ def setup_auth_routes(
             "filesystem_registry_tombstoned",
             "mimo_tombstoned",
             "memory_tombstoned",
+            "memory_native_tombstoned",
+            "memory_fm_tombstoned",
             "uploads_tombstoned",
             "personal_rag_tombstoned",
             "copal_tombstoned",
@@ -2690,12 +3515,20 @@ def setup_auth_routes(
                 }
 
             rollback_errors: dict[str, str] = {}
+            rollback_results: dict[str, object] = {}
+            if typed_memory and (started('memory_native_tombstoned') or started('memory_fm_tombstoned')):
+                pending = stored_steps.get('memory_compensation_pending')
+                if not isinstance(pending, dict) or pending.get('state') != 'applying':
+                    account_lifecycle.start_operation_step(operation_id, 'memory_compensation_pending',
+                        claim_token=claim_token)
 
             async def attempt(name: str, action) -> None:
                 try:
                     result = action()
                     if inspect.isawaitable(result):
-                        await result
+                        result = await result
+                    if name in ('memory_native_tombstoned', 'memory_fm_tombstoned', 'import_staging_tombstoned'):
+                        rollback_results[name] = result
                 except Exception as rollback_exc:
                     rollback_errors[name] = (
                         " ".join(str(rollback_exc).split())[:200]
@@ -2724,18 +3557,37 @@ def setup_auth_routes(
                         tombstone_owner,
                         manifests["ancillary_tombstoned"],
                         operation_token=ancillary_token,
+                        account_id=(operation or {}).get('subject_id'),
                     ),
                 )
 
             if started("common_sql_tombstoned"):
-                await attempt(
-                    "common_sql_tombstoned",
-                    lambda: sql_rollback.compensate_owner(
-                        target_owner,
-                        tombstone_owner,
-                        expected_source=manifests["common_sql_tombstoned"],
-                    ),
-                )
+                async def restore_common_sql():
+                    expected = manifests.get("common_sql_default_seed_preflight", manifests["common_sql_tombstoned"])
+                    try:
+                        return sql_rollback.compensate_owner(target_owner, tombstone_owner,
+                            expected_source=expected, account_id=target_subject_id)
+                    except Exception as exc:
+                        from src.openclank.sql_owner_lifecycle import SqlOwnerLifecycleConflict
+                        if (not isinstance(exc, SqlOwnerLifecycleConflict)
+                            or stored_steps["common_sql_tombstoned"]["state"] != "applying"
+                            or started("auth_deleted") or "common_sql_default_seed_preflight" in manifests
+                            or account_id_for(target_owner) != target_subject_id):
+                            raise
+                        stopped = sql_rollback.stopped_default_seed_inventory(target_owner, tombstone_owner,
+                            account_id=target_subject_id, original=expected)
+                        _start_step("common_sql_default_seed_preflight", manifest=stopped)
+                        return sql_rollback.compensate_owner(target_owner, tombstone_owner,
+                            expected_source=stopped, account_id=target_subject_id)
+                await attempt("common_sql_tombstoned", restore_common_sql)
+                if (typed_memory and started("filesystem_registry_tombstoned") and started("memory_fm_tombstoned")
+                    and not started("auth_deleted") and account_id_for(target_owner) == target_subject_id
+                    and filesystem_rollback.repository.subject_for_username(target_owner) == target_subject_id
+                    and filesystem_rollback.repository.subject_for_username(tombstone_owner) == target_subject_id):
+                    await attempt("filesystem_registry_aliases", lambda:
+                        filesystem_rollback.repository.restore_duplicated_deletion_alias(
+                            target_owner, tombstone_owner, target_subject_id, operation_id=operation_id,
+                            claim_token=claim_token))
             if started("file_domains_tombstoned"):
                 await attempt(
                     "file_domains_tombstoned",
@@ -2774,21 +3626,22 @@ def setup_auth_routes(
                     ),
                 )
             if started("import_staging_tombstoned") and memory_rollback is not None:
-                _media, staging_rollback = _account_memory_domain_stores(memory_rollback)
+                _media, staging_rollback = _account_memory_domain_stores(_account_domain_provider(request.app.state, memory_rollback, joined_memory))
 
                 def restore_staging():
-                    source = staging_rollback.preview_owner_staging(tombstone_owner)
-                    target = staging_rollback.preview_owner_staging(target_owner)
+                    source = staging_rollback.preview_owner_staging(tombstone_owner,guarded=typed_memory)
+                    target = staging_rollback.preview_owner_staging(target_owner,guarded=typed_memory)
                     return staging_rollback.rename_owner_staging(
                         tombstone_owner,
                         target_owner,
                         expected_source=source,
                         expected_target=target,
+                        guarded=typed_memory,
                     )
 
                 await attempt("import_staging_tombstoned", restore_staging)
             if started("memory_media_tombstoned") and memory_rollback is not None:
-                media_rollback, _staging = _account_memory_domain_stores(memory_rollback)
+                media_rollback, _staging = _account_memory_domain_stores(_account_domain_provider(request.app.state, memory_rollback, joined_memory))
                 await attempt(
                     "memory_media_tombstoned",
                     lambda: media_rollback.rename_owner(tombstone_owner, target_owner),
@@ -2815,17 +3668,147 @@ def setup_auth_routes(
                         manifests["uploads_tombstoned"],
                     ),
                 )
-            if started("memory_tombstoned") and memory_rollback is not None:
+            if typed_memory:
+                async def restore_fm():
+                    snapshot = manifests.get('memory_fm_tombstoned')
+                    if type(snapshot) is not dict or type(snapshot.get('generation')) is not int:
+                        raise RuntimeError('retained memory forward snapshot unavailable')
+                    generation = snapshot['generation']
+                    relocation = snapshot.get('rag_relocation')
+                    inverse = {'from': relocation['to'], 'to': relocation['from']} if relocation is not None else None
+                    personal_rollback.assert_relocation_current(tombstone_owner, target_owner, {'rag_relocation': inverse})
+                    forward_step = f'memory_fm_forward_{generation}'
+                    forward = (stored_steps.get(forward_step) or {}).get('receipt')
+                    if forward is None:
+                        forward = await _move_memory_participant(request.app.state, manifests['memory_participants'],
+                            'fm', target_owner, tombstone_owner, lifecycle=account_lifecycle,
+                            operation_id=operation_id, claim_token=claim_token, started=True,
+                            fm_snapshot=snapshot, step='memory_fm_tombstoned')
+                        _checkpoint(forward_step, forward)
+                    verified_step=f'memory_fm_forward_verified_{generation}'
+                    if not _applied(verified_step):
+                        _start_step(verified_step)
+                        _, canonical = _memory_participants_current(request.app.state, manifests['memory_participants'])
+                        await _move_memory_participant(request.app.state,manifests['memory_participants'],'fm',target_owner,tombstone_owner,
+                            lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token,started=True,
+                            fm_snapshot=snapshot,step='memory_fm_tombstoned',cleanup_receipt=forward)
+                        verified=await _verify_fm_move_after(canonical,target_owner,tombstone_owner,forward)
+                        _checkpoint(verified_step,verified)
+                    result = forward.get('result') if type(forward) is dict else None
+                    if type(result) is not dict or forward.get('state') != 'applied':
+                        raise RuntimeError('retained memory forward receipt unavailable')
+                    reverse_step = f'memory_fm_reverse_{generation}'
+                    previous = stored_steps.get(reverse_step) or {}
+                    reverse_snapshot = manifests.get(reverse_step)
+                    _, canonical = _memory_participants_current(request.app.state, manifests['memory_participants'],
+                        status_only=previous.get('state') in ('applying','applied'))
+                    from src.openclank.chat_source_bridge import (fence_account_host_sources,
+                        validate_account_source_fence_receipt, account_source_summary_step)
+                    current_operation=account_lifecycle.get_operation(operation_id)
+                    reverse_phase=_claimed_fm_source_phase(operation=current_operation,claim_token=claim_token,
+                        database_id=manifests['memory_participants']['fm']['database_id'],account_id=stored['subject_id'],
+                        operation_id=operation_id,step='memory_fm_tombstoned',generation=generation,action='reverse',
+                        owner=tombstone_owner,new_owner=target_owner)
+                    phase_step='memory_fm_source_phase_'+str(generation)+'_reverse'
+                    frozen=(current_operation.get('manifest') or {}).get(phase_step)
+                    if frozen is None:
+                        if previous.get('state') in ('applying','applied'):
+                            raise RuntimeError('original reverse source phase unavailable')
+                        current_source = await canonical.owner_stats(owner=tombstone_owner)
+                        current_target = await canonical.owner_stats(owner=target_owner)
+                        if (current_source.get('fingerprint') != result['target_after_fingerprint']
+                                or current_target.get('fingerprint') != result['source_after_fingerprint']):
+                            raise RuntimeError('retained memory compensation state changed')
+                        _start_step(phase_step,manifest=reverse_phase); _checkpoint(phase_step,reverse_phase)
+                    elif frozen!=reverse_phase or ((current_operation.get('steps') or {}).get(phase_step) or {}).get('receipt')!=reverse_phase:
+                        raise RuntimeError('retained reverse source phase changed')
+                    summary_step=account_source_summary_step(reverse_phase)
+                    if _applied(summary_step):
+                        source_receipt=(steps[summary_step] or {}).get('receipt')
+                    else:
+                        if previous.get('state') in ('applying','applied'):
+                            raise RuntimeError('original reverse source summary unavailable')
+                        _start_step(summary_step)
+                        source_receipt=await fence_account_host_sources(state=request.app.state,lifecycle=account_lifecycle,
+                            operation_id=operation_id,claim_token=claim_token,owner=target_owner,
+                            account_id=stored['subject_id'],kind='delete',phase=reverse_phase)
+                        validate_account_source_fence_receipt(source_receipt,owner=target_owner,account_id=stored['subject_id'],
+                            kind='delete',operation_id=operation_id,lifecycle=account_lifecycle,phase=reverse_phase)
+                        _checkpoint(summary_step,source_receipt)
+                    validate_account_source_fence_receipt(source_receipt,owner=target_owner,account_id=stored['subject_id'],
+                        kind='delete',operation_id=operation_id,lifecycle=account_lifecycle,phase=reverse_phase)
+                    if previous.get('state') not in ('applying', 'applied'):
+                        current_source = await canonical.owner_stats(owner=tombstone_owner)
+                        current_target = await canonical.owner_stats(owner=target_owner)
+                        reverse_snapshot = {'source_fingerprint': current_source['fingerprint'],
+                            'target_fingerprint': current_target['fingerprint'],
+                            'prior_receipt_id': forward['receipt_id'], 'prior_receipt_hash': forward['receipt_hash']}
+                        _start_step(reverse_step, manifest=reverse_snapshot)
+                    elif (type(reverse_snapshot) is not dict
+                            or reverse_snapshot.get('prior_receipt_id') != forward['receipt_id']
+                            or reverse_snapshot.get('prior_receipt_hash') != forward['receipt_hash']):
+                        raise RuntimeError('retained memory compensation proof changed')
+                    from src.memery_provider import _HostOwnerTransition
+                    from src.openclank.chat_source_bridge import issue_account_source_transition
+                    transition = _HostOwnerTransition(database_id=manifests['memory_participants']['fm']['database_id'],
+                        account_id=stored['subject_id'], operation_id=operation_id, step='memory_fm_tombstoned',
+                        generation=generation, action='reverse', owner=tombstone_owner, new_owner=target_owner,
+                        expected_source_fingerprint=reverse_snapshot['source_fingerprint'],
+                        expected_target_fingerprint=reverse_snapshot['target_fingerprint'],
+                        prior_receipt_id=forward['receipt_id'], prior_receipt_hash=forward['receipt_hash'],
+                        rag_relocation=({'from': snapshot['rag_relocation']['to'], 'to': snapshot['rag_relocation']['from']}
+                            if snapshot['rag_relocation'] is not None else None))
+                    capability = issue_account_source_transition(lifecycle=account_lifecycle, operation_id=operation_id,
+                        claim_token=claim_token, provider=canonical, action='rename', owner=tombstone_owner, new_owner=target_owner)
+                    receipt = await canonical._host_owner_transition(transition, capability=capability,
+                        status=previous.get('state') in ('applying', 'applied'))
+                    if receipt.get('state') != 'applied':
+                        raise RuntimeError('retained memory reverse original unavailable')
+                    if previous.get('state')=='applied' and previous.get('receipt')!=receipt:
+                        raise RuntimeError('retained memory reverse receipt changed')
+                    if previous.get('state')!='applied': _checkpoint(reverse_step, receipt)
+                    cleanup_step='memory_fm_reverse_cache_'+str(generation)
+                    if not _applied(cleanup_step):
+                        _start_step(cleanup_step)
+                        await canonical._host_owner_transition_cache_cleanup(transition,capability=capability,receipt=receipt)
+                        _checkpoint(cleanup_step,{'receipt_id':receipt['receipt_id'],'receipt_hash':receipt['receipt_hash']})
+                    renewal_step='host_sources_renewed_'+summary_step.removeprefix('host_sources_fenced_')
+                    renewal_saved=steps.get(renewal_step)
+                    if renewal_saved:
+                        if (type(renewal_saved) is not dict or renewal_saved.get('state') not in ('applying','applied')
+                            or (steps.get(reverse_step) or {}).get('receipt')!=receipt):
+                            raise RuntimeError('retained reverse renewal checkpoint changed')
+                    else:
+                        source_now = await canonical.owner_stats(owner=tombstone_owner)
+                        target_now = await canonical.owner_stats(owner=target_owner)
+                        if (source_now.get('fingerprint') != receipt['result']['source_after_fingerprint']
+                                or target_now.get('fingerprint') != receipt['result']['target_after_fingerprint']):
+                            raise RuntimeError('retained memory reverse result changed')
+                    if source_receipt.get('renewal')=='pending':
+                        from src.openclank.chat_source_bridge import renew_account_host_sources
+                        if not _applied(renewal_step):
+                            _start_step(renewal_step)
+                            renewal=await renew_account_host_sources(state=request.app.state,lifecycle=account_lifecycle,
+                                operation_id=operation_id,claim_token=claim_token,old_owner=target_owner,
+                                new_owner=target_owner,account_id=stored['subject_id'])
+                            _checkpoint(renewal_step,renewal)
+                    return receipt
+
+                for kind in (('fm', 'native') if joined_memory else ('fm',)):
+                    step = 'memory_' + kind + '_tombstoned'
+                    if started(step):
+                        await attempt(step, restore_fm if kind == 'fm' else lambda kind=kind: _move_memory_participant(request.app.state,
+                            manifests['memory_participants'], kind, tombstone_owner, target_owner,
+                            lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, started=True, reverse=True,
+                            fm_snapshot=manifests.get('memory_fm_tombstoned') if kind == 'fm' else None))
+            elif started("memory_tombstoned") and memory_rollback is not None:
                 async def restore_memory():
                     source = await memory_rollback.owner_stats(owner=target_owner)
                     tombstone = await memory_rollback.owner_stats(owner=tombstone_owner)
                     if _inventory_present(source) and _inventory_present(tombstone):
                         raise RuntimeError("memory compensation found split owner state")
                     if _inventory_present(tombstone):
-                        await memory_rollback.rename_owner(
-                            target_owner,
-                            owner=tombstone_owner,
-                        )
+                        await _memory_owner_transition(memory_rollback, action='rename', owner=tombstone_owner, new_owner=target_owner, lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, state=request.app.state)
 
                 await attempt("memory_tombstoned", restore_memory)
             # Canonical RAG rows belong to the Memory provider while the
@@ -2833,13 +3816,28 @@ def setup_auth_routes(
             # the canonical owner first so the reverse Personal transition
             # can rewrite paths on rows that are visible under source_owner.
             if started("personal_rag_tombstoned"):
+                async def restore_personal():
+                    proof = None
+                    if typed_memory:
+                        receipt = rollback_results.get('memory_fm_tombstoned')
+                        snapshot = manifests.get('memory_fm_tombstoned') or {}
+                        if type(receipt) is not dict or receipt.get('state') != 'applied':
+                            raise RuntimeError('personal native reverse receipt unavailable')
+                        relocation = snapshot.get('rag_relocation')
+                        inverse = {'from': relocation['to'], 'to': relocation['from']} if relocation is not None else None
+                        _, provider = _memory_participants_current(request.app.state, manifests['memory_participants'])
+                        from src.openclank.chat_source_bridge import issue_account_source_transition
+                        from routes.personal_routes import _issue_native_relocation_proof
+                        capability = issue_account_source_transition(lifecycle=account_lifecycle, operation_id=operation_id,
+                            claim_token=claim_token, provider=provider, action='rename', owner=tombstone_owner, new_owner=target_owner)
+                        proof = _issue_native_relocation_proof(capability=capability, provider=provider,
+                            step=f"memory_fm_reverse_{snapshot['generation']}", receipt=receipt, relocation=inverse,
+                            source=tombstone_owner, target=target_owner, manifest={'rag_relocation': inverse})
+                    return personal_rollback.compensate(target_owner, tombstone_owner,
+                        manifests['personal_rag_tombstoned'], native_relocation_proof=proof)
                 await attempt(
                     "personal_rag_tombstoned",
-                    lambda: personal_rollback.compensate(
-                        target_owner,
-                        tombstone_owner,
-                        manifests["personal_rag_tombstoned"],
-                    ),
+                    restore_personal,
                 )
             if started("mimo_tombstoned") and callable(
                 getattr(mimo_rollback, "compensate_owner_rename", None)
@@ -2849,7 +3847,7 @@ def setup_auth_routes(
                     lambda: mimo_rollback.compensate_owner_rename(
                         target_owner,
                         tombstone_owner,
-                        manifests["mimo_tombstoned"],
+                        manifests.get("mimo_stopped_preflight", manifests["mimo_tombstoned"]),
                     ),
                 )
             if started("filesystem_registry_tombstoned"):
@@ -2885,6 +3883,9 @@ def setup_auth_routes(
                 # applied markers even when one reverse transition failed so
                 # the next request re-observes source/tombstone state instead
                 # of skipping domains that were successfully restored.
+                if typed_memory:
+                    _fail_operation(recovery_error)
+                    raise RuntimeError('account deletion compensation remains pending') from exc
                 account_lifecycle.rewind_operation_steps(
                     operation_id,
                     pre_auth_steps,
@@ -2895,6 +3896,15 @@ def setup_auth_routes(
                     "account deletion compensation did not restore every domain: "
                     + ", ".join(sorted(rollback_errors))
                 ) from exc
+            if typed_memory and (started('memory_native_tombstoned') or started('memory_fm_tombstoned')):
+                fm_snapshot = manifests.get('memory_fm_tombstoned')
+                if started('memory_fm_tombstoned'):
+                    generation = fm_snapshot['generation']
+                    _checkpoint(f'memory_compensation_complete_{generation}',
+                        {'state':'complete', 'results':rollback_results})
+                account_lifecycle.checkpoint_delete_operation(operation_id, 'memory_compensation_pending',
+                    {'state':'complete', 'generation': fm_snapshot.get('generation') if type(fm_snapshot) is dict else None,
+                     'results':rollback_results}, claim_token=claim_token)
             account_lifecycle.rewind_operation_steps(
                 operation_id,
                 pre_auth_steps,
@@ -2911,6 +3921,34 @@ def setup_auth_routes(
             await _compensate_delete_pre_auth(exc)
             raise HTTPException(status_code, label) from exc
 
+        if (durable and ((operation.get("receipt") or {}).get("error") == "pre-auth compensation failed in mimo_tombstoned"
+            or "mimo_stopped_preflight" in (operation.get("manifest") or {}))
+            and (steps.get("mimo_tombstoned") or {}).get("state") == "applying"
+            and not any(steps.get(name) for name in ("memory_native_tombstoned", "memory_fm_tombstoned", "auth_deleted"))):
+            manifests = operation["manifest"]
+            supervisor = _mimo_lifecycle_supervisor(request)
+            if "mimo_stopped_preflight" not in manifests:
+                if (account_id_for(target_owner) != tombstone_identity or operation["subject_id"] != tombstone_identity
+                    or operation["tombstone_owner"] != f"deleted:{tombstone_identity}"):
+                    raise HTTPException(409, "Account deletion subject changed during compensation")
+                try:
+                    stopped = await supervisor.preview_owner_deletion(
+                        target_owner, tombstone_owner, tombstone_identity, original=manifests["mimo_tombstoned"])
+                    _start_step("mimo_stopped_preflight", manifest=stopped)
+                except Exception as exc:
+                    _fail_operation(RuntimeError("pre-auth compensation failed in mimo_tombstoned"))
+                    raise HTTPException(409, "Cannot prove the Agent owner move was unapplied") from exc
+            await _compensate_delete_pre_auth(RuntimeError("Agent preflight revalidated after worker shutdown"))
+            raise HTTPException(409, "Account compensation completed; retry the operation")
+
+        if typed_memory and isinstance(steps.get('memory_compensation_pending'), dict) and (
+                steps['memory_compensation_pending'].get('state') == 'applying'
+                or (steps['memory_compensation_pending'].get('state') == 'applied'
+                    and (steps['memory_compensation_pending'].get('receipt') or {}).get('generation')
+                        == ((operation.get('manifest') or {}).get('memory_fm_tombstoned') or {}).get('generation')
+                    and any(steps.get(name) for name in ('memory_native_tombstoned', 'memory_fm_tombstoned')))):
+            await _compensate_delete_pre_auth(RuntimeError('resume pending account compensation'))
+            raise HTTPException(409, 'Account compensation completed; retry the operation')
         if durable and not _applied("provider_flows_drained"):
             try:
                 _start_step("provider_flows_drained")
@@ -2923,6 +3961,46 @@ def setup_auth_routes(
                 )
         elif not durable:
             await _drain_owner_provider_flows(request, target_owner)
+
+        phase=None
+        if typed_memory:
+            try:
+                snapshot=(operation.get('manifest') or {}).get('memory_fm_tombstoned')
+                if type(snapshot) is dict and (steps.get('memory_fm_tombstoned') or {}).get('state') in ('applying','applied'):
+                    generation=snapshot.get('generation')
+                else:
+                    generation,_,_=_next_fm_generation(operation,'memory_fm_tombstoned')
+                phase_name='memory_fm_source_phase_'+str(generation)
+                expected=_claimed_fm_source_phase(operation=operation,claim_token=claim_token,
+                    database_id=operation['manifest']['memory_participants']['fm']['database_id'],
+                    account_id=target_subject_id,operation_id=operation_id,step='memory_fm_tombstoned',generation=generation,
+                    owner=target_owner,new_owner=tombstone_owner)
+                saved=(operation.get('manifest') or {}).get(phase_name)
+                if saved is None:
+                    if generation==1 and steps.get('host_sources_fenced'): raise RuntimeError('original source phase unavailable')
+                    _start_step(phase_name,manifest=expected)
+                    _checkpoint(phase_name,expected)
+                elif saved!=expected or (steps.get(phase_name) or {}).get('receipt')!=expected:
+                    raise RuntimeError('original source phase changed')
+                phase=expected
+            except Exception as exc:
+                _fail_operation(exc)
+                raise HTTPException(503,'Account memory source phase unavailable') from exc
+        try:
+            from src.openclank.chat_source_bridge import fence_account_host_sources, validate_account_source_fence_receipt, account_source_summary_step
+            summary_step=account_source_summary_step(phase)
+            if durable and _applied(summary_step):
+                saved = (steps[summary_step] or {}).get("receipt")
+                validate_account_source_fence_receipt(saved, owner=target_owner, account_id=target_subject_id, kind='delete', operation_id=operation_id, lifecycle=account_lifecycle,phase=phase)
+            else:
+                _start_step(summary_step)
+                source_receipt = await fence_account_host_sources(state=request.app.state, lifecycle=account_lifecycle,
+                    operation_id=operation_id, claim_token=claim_token, owner=target_owner,
+                    account_id=target_subject_id, kind="delete",phase=phase)
+                validate_account_source_fence_receipt(source_receipt, owner=target_owner, account_id=target_subject_id, kind='delete', operation_id=operation_id, lifecycle=account_lifecycle,phase=phase)
+                _checkpoint(summary_step, source_receipt)
+        except Exception as exc:
+            await _delete_pre_auth_error("Cannot fence account memory sources for deletion", exc)
 
         if durable and not _applied("runtime_caches_fenced"):
             try:
@@ -2993,6 +4071,7 @@ def setup_auth_routes(
                     tombstone_owner,
                     ancillary_manifest,
                     operation_token=ancillary_token,
+                    account_id=(operation or {}).get('subject_id'),
                 )
                 _checkpoint("ancillary_tombstoned", receipt)
             except Exception as exc:
@@ -3065,12 +4144,14 @@ def setup_auth_routes(
         mimo_supervisor = getattr(request.app.state, "mimo_supervisor", None)
         if durable and not _applied("mimo_tombstoned"):
             try:
+                manifests = operation["manifest"]
+                expected = manifests.get("mimo_stopped_preflight", manifests["mimo_tombstoned"])
                 _start_step("mimo_tombstoned")
                 receipt = (
                     await mimo_supervisor.reconcile_owner_rename(
                         target_owner,
                         tombstone_owner,
-                        (operation.get("manifest") or {})["mimo_tombstoned"],
+                        expected,
                     )
                     if callable(
                         getattr(mimo_supervisor, "reconcile_owner_rename", None)
@@ -3085,7 +4166,55 @@ def setup_auth_routes(
                 )
 
         memory_tombstoned = False
-        if memory_provider and not _applied("memory_tombstoned"):
+        if typed_memory:
+            manifest = (operation.get('manifest') or {})['memory_participants']
+            try:
+                _memory_participants_current(request.app.state, manifest)
+                for kind in (('native', 'fm') if joined_memory else ('fm',)):
+                    step = 'memory_' + kind + '_tombstoned'
+                    if _applied(step):
+                        continue
+                    previously_started = bool(steps.get(step))
+                    fm_snapshot = (operation.get('manifest') or {}).get(step) if previously_started and kind == 'fm' else None
+                    if kind == 'fm' and not previously_started:
+                        _, canonical = _memory_participants_current(request.app.state, manifest)
+                        personal = (operation.get('manifest') or {}).get('personal_rag_tombstoned')
+                        if type(personal) is not dict or 'rag_relocation' not in personal:
+                            raise RuntimeError('personal RAG relocation manifest unavailable')
+                        _account_personal_rag_store(request).assert_relocation_current(target_owner, tombstone_owner, personal)
+                        generation, prior_id, prior_hash = _next_fm_generation(operation, step)
+                        fm_snapshot = {'source': await canonical.owner_stats(owner=target_owner), 'target': await canonical.owner_stats(owner=tombstone_owner),
+                            'generation': generation, 'prior_receipt_id': prior_id, 'prior_receipt_hash': prior_hash,
+                            'rag_relocation': personal['rag_relocation']}
+                        if _inventory_present(fm_snapshot['target']): raise RuntimeError('retained memory target changed')
+                    if kind == 'fm':
+                        _account_personal_rag_store(request).assert_relocation_current(target_owner, tombstone_owner,
+                            (operation.get('manifest') or {}).get('personal_rag_tombstoned'))
+                    _start_step(step, manifest=fm_snapshot if kind == 'fm' and not previously_started else None)
+                    receipt = await _move_memory_participant(request.app.state, manifest, kind, target_owner, tombstone_owner,
+                        lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, started=previously_started, fm_snapshot=fm_snapshot, step=step)
+                    if kind == 'fm':
+                        marker = f"memory_fm_forward_{fm_snapshot['generation']}"
+                        saved = (steps.get(marker) or {}).get('receipt')
+                        if saved is not None and saved != receipt:
+                            raise RuntimeError('retained memory forward receipt changed')
+                        if saved is None:
+                            _checkpoint(marker, receipt)
+                    _checkpoint(step, receipt)
+                    if kind=='fm':
+                        verified_step=f'memory_fm_forward_verified_{fm_snapshot["generation"]}'
+                        if not _applied(verified_step):
+                            _start_step(verified_step)
+                            _, canonical = _memory_participants_current(request.app.state, manifest)
+                            await _move_memory_participant(request.app.state,manifest,'fm',target_owner,tombstone_owner,
+                                lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token,started=True,
+                                fm_snapshot=fm_snapshot,step=step,cleanup_receipt=receipt)
+                            verified=await _verify_fm_move_after(canonical,target_owner,tombstone_owner,receipt)
+                            _checkpoint(verified_step,verified)
+                memory_tombstoned = True
+            except Exception as exc:
+                await _delete_pre_auth_error('Cannot stage retained memory for deletion', exc)
+        elif memory_provider and not _applied("memory_tombstoned"):
             try:
                 _start_step("memory_tombstoned")
                 if durable:
@@ -3098,12 +4227,9 @@ def setup_auth_routes(
                             "source and tombstone memory both contain durable state"
                         )
                     if source_present:
-                        await memory_provider.rename_owner(
-                            tombstone_owner,
-                            owner=target_owner,
-                        )
+                        await _memory_owner_transition(memory_provider, action='rename', owner=target_owner, new_owner=tombstone_owner, lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, state=request.app.state)
                 else:
-                    await memory_provider.rename_owner(tombstone_owner, owner=target_owner)
+                    await _memory_owner_transition(memory_provider, action='rename', owner=target_owner, new_owner=tombstone_owner, lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, state=request.app.state)
                 memory_tombstoned = True
                 _checkpoint("memory_tombstoned", True)
             except Exception as exc:
@@ -3147,10 +4273,15 @@ def setup_auth_routes(
                     or personal_store.preview_owner_rename(target_owner, tombstone_owner)
                 )
                 _start_step("personal_rag_tombstoned", manifest=personal_manifest)
+                personal_store.assert_relocation_current(target_owner, tombstone_owner, personal_manifest)
+                personal_proof = await _personal_native_relocation_proof(request.app.state, lifecycle=account_lifecycle,
+                    operation_id=operation_id, claim_token=claim_token, step='memory_fm_tombstoned',
+                    personal_manifest=personal_manifest, source=target_owner, target=tombstone_owner) if typed_memory else None
                 receipt = personal_store.stage_to_tombstone(
                     target_owner,
                     tombstone_owner,
                     personal_manifest,
+                    native_relocation_proof=personal_proof,
                 )
                 _checkpoint("personal_rag_tombstoned", receipt)
             except Exception as exc:
@@ -3186,7 +4317,7 @@ def setup_auth_routes(
 
         media_store = batch_store = None
         if durable and memory_provider:
-            media_store, batch_store = _account_memory_domain_stores(memory_provider)
+            media_store, batch_store = _account_memory_domain_stores(_account_domain_provider(request.app.state, memory_provider, joined_memory))
             if not _applied("memory_media_tombstoned"):
                 try:
                     _start_step("memory_media_tombstoned")
@@ -3199,14 +4330,31 @@ def setup_auth_routes(
                     )
             if not _applied("import_staging_tombstoned"):
                 try:
-                    _start_step("import_staging_tombstoned")
-                    source = batch_store.preview_owner_staging(target_owner)
-                    target = batch_store.preview_owner_staging(tombstone_owner)
+                    if typed_memory:
+                        prior=steps.get('import_staging_tombstoned')
+                        if prior:
+                            frozen=(operation.get('manifest') or {}).get('import_staging_tombstoned')
+                            if type(frozen) is not dict or set(frozen)!={'source','target'}:
+                                raise RuntimeError('original staging move unavailable')
+                        else:
+                            frozen={'source':batch_store.preview_owner_staging(target_owner,guarded=typed_memory),
+                                    'target':batch_store.preview_owner_staging(tombstone_owner,guarded=typed_memory)}
+                            _start_step('import_staging_tombstoned',manifest=frozen)
+                        _,canonical=_memory_participants_current(request.app.state,(operation.get('manifest') or {})['memory_participants'])
+                        _verify_guarded_delete_staging(store=batch_store,provider=canonical,lifecycle=account_lifecycle,
+                            operation_id=operation_id,claim_token=claim_token,account_id=target_subject_id,
+                            source=target_owner,target=tombstone_owner,phase='before_move')
+                        source,target=frozen['source'],frozen['target']
+                    else:
+                        _start_step("import_staging_tombstoned")
+                        source = batch_store.preview_owner_staging(target_owner,guarded=typed_memory)
+                        target = batch_store.preview_owner_staging(tombstone_owner,guarded=typed_memory)
                     receipt = batch_store.rename_owner_staging(
                         target_owner,
                         tombstone_owner,
                         expected_source=source,
                         expected_target=target,
+                        guarded=typed_memory,
                     )
                     _checkpoint("import_staging_tombstoned", receipt)
                 except Exception as exc:
@@ -3278,14 +4426,16 @@ def setup_auth_routes(
             try:
                 sql_store = _account_sql_domain_store()
                 sql_manifest = (
-                    (operation.get("manifest") or {}).get("common_sql_tombstoned")
-                    or sql_store.owner_inventory(target_owner)
+                    (operation.get("manifest") or {}).get("common_sql_default_seed_preflight")
+                    or (operation.get("manifest") or {}).get("common_sql_tombstoned")
+                    or sql_store.owner_inventory(target_owner, account_id=target_subject_id)
                 )
-                _start_step("common_sql_tombstoned", manifest=sql_manifest)
+                _start_step("common_sql_tombstoned", manifest=None if "common_sql_tombstoned" in operation["manifest"] else sql_manifest)
                 receipt = sql_store.reconcile_owner(
                     target_owner,
                     tombstone_owner,
                     expected_source=sql_manifest,
+                    account_id=target_subject_id,
                 )
                 sql_tombstoned = True
                 _checkpoint("common_sql_tombstoned", receipt.as_dict())
@@ -3297,9 +4447,8 @@ def setup_auth_routes(
         elif _applied("common_sql_tombstoned"):
             sql_tombstoned = True
             sql_store = _account_sql_domain_store()
-            sql_manifest = (operation.get("manifest") or {}).get(
-                "common_sql_tombstoned"
-            )
+            manifests = operation.get("manifest") or {}
+            sql_manifest = manifests.get("common_sql_default_seed_preflight", manifests.get("common_sql_tombstoned"))
 
         try:
             if not _applied("preferences_detached"):
@@ -3410,7 +4559,7 @@ def setup_auth_routes(
                     logger.exception("Failed to restore user prefs after user-delete failure")
                 if memory_tombstoned:
                     try:
-                        await memory_provider.rename_owner(target_owner, owner=tombstone_owner)
+                        await _memory_owner_transition(memory_provider, action='rename', owner=tombstone_owner, new_owner=target_owner, lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, state=request.app.state)
                     except Exception:
                         logger.exception("Failed to restore tombstoned memory after user-delete failure")
                 if lifecycle_tombstoned:
@@ -3426,6 +4575,7 @@ def setup_auth_routes(
                             target_owner,
                             tombstone_owner,
                             expected_source=sql_manifest,
+                            account_id=target_subject_id,
                         )
                     except Exception:
                         logger.exception(
@@ -3451,8 +4601,8 @@ def setup_auth_routes(
                         )
                 if batch_store is not None and _applied("import_staging_tombstoned"):
                     try:
-                        source = batch_store.preview_owner_staging(tombstone_owner)
-                        target = batch_store.preview_owner_staging(target_owner)
+                        source = batch_store.preview_owner_staging(tombstone_owner,guarded=typed_memory)
+                        target = batch_store.preview_owner_staging(target_owner,guarded=typed_memory)
                         batch_store.rename_owner_staging(
                             tombstone_owner,
                             target_owner,
@@ -3521,7 +4671,7 @@ def setup_auth_routes(
                 except Exception:
                     logger.exception("Failed to restore user prefs after rejected user delete")
                 if memory_tombstoned:
-                    await memory_provider.rename_owner(target_owner, owner=tombstone_owner)
+                    await _memory_owner_transition(memory_provider, action='rename', owner=tombstone_owner, new_owner=target_owner, lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, state=request.app.state)
                 if lifecycle_tombstoned:
                     account_lifecycle.rename_owner(tombstone_owner, target_owner)
             exc = HTTPException(400, "Cannot delete user")
@@ -3561,6 +4711,7 @@ def setup_auth_routes(
                 receipt = sql_store.purge_owner(
                     tombstone_owner,
                     expected_inventory=sql_manifest,
+                    account_id=target_subject_id,
                 )
                 _checkpoint("common_sql_purged", receipt.as_dict())
             except Exception as exc:
@@ -3591,6 +4742,7 @@ def setup_auth_routes(
                     tombstone_owner,
                     expected=ancillary_manifest["source"],
                     operation_token=ancillary_token,
+                    account_id=(operation or {}).get('subject_id'),
                 )
                 _checkpoint("ancillary_purged", receipt)
             except Exception as exc:
@@ -3687,9 +4839,8 @@ def setup_auth_routes(
                     "purge_owner",
                     {
                         "owner": copal_owner_for_user(tombstone_owner),
-                        "expected": (
-                            (operation.get("manifest") or {})["copal"]
-                        ).get("source"),
+                        "expected": _tombstone_inventory(steps, "copal_tombstoned", "target_after",
+                                                         copal_owner_for_user(tombstone_owner)) if copal_bridge else None,
                     },
                 )
                 _checkpoint("copal_purged", receipt or {"available": False})
@@ -3734,10 +4885,15 @@ def setup_auth_routes(
                 raise HTTPException(500, "User deleted; Memory media purge failed") from exc
         if durable and batch_store is not None and not _applied("import_staging_purged"):
             try:
+                if typed_memory:
+                    _,canonical=_memory_participants_current(request.app.state,(operation.get('manifest') or {})['memory_participants'])
+                    _verify_guarded_delete_staging(store=batch_store,provider=canonical,lifecycle=account_lifecycle,
+                        operation_id=operation_id,claim_token=claim_token,account_id=target_subject_id,
+                        source=target_owner,target=tombstone_owner,phase='before_purge')
                 _start_step("import_staging_purged")
                 expected = dict(
                     (steps.get("import_staging_tombstoned") or {}).get("receipt")
-                    or batch_store.preview_owner_staging(tombstone_owner)
+                    or batch_store.preview_owner_staging(tombstone_owner,guarded=typed_memory)
                 )
                 expected = {
                     key: expected[key]
@@ -3747,15 +4903,71 @@ def setup_auth_routes(
                 receipt = batch_store.purge_owner_staging(
                     tombstone_owner,
                     expected=expected,
+                    guarded=typed_memory,
                 )
                 _checkpoint("import_staging_purged", receipt)
             except Exception as exc:
                 _fail_operation(exc)
                 raise HTTPException(500, "User deleted; import staging purge failed") from exc
-        if memory_tombstoned and not _applied("memory_purged"):
+        if typed_memory and memory_tombstoned:
+            try:
+                manifest = (operation.get('manifest') or {})['memory_participants']
+                for kind in (('native', 'fm') if joined_memory else ('fm',)):
+                    step = 'memory_' + kind + '_purged'
+                    if _applied(step):
+                        if kind == 'fm':
+                            frozen = (operation.get('manifest') or {}).get(step)
+                            if type(frozen) is not dict or set(frozen) != {'snapshot'}:
+                                raise RuntimeError('memory purge checkpoint unavailable')
+                            receipt = await _purge_memory_participant(request.app.state, manifest, kind, tombstone_owner, frozen['snapshot'],
+                                lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, started=True, step=step)
+                            if receipt != (steps.get(step) or {}).get('receipt'):
+                                raise RuntimeError('memory purge receipt changed')
+                            if not _applied('memory_fm_purged_verified'):
+                                _start_step('memory_fm_purged_verified')
+                                _, canonical = _memory_participants_current(request.app.state, manifest)
+                                await _purge_memory_participant(request.app.state,manifest,'fm',tombstone_owner,frozen['snapshot'],
+                                    lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token,
+                                    started=True,step=step,cleanup_receipt=receipt)
+                                after = await canonical.owner_stats(owner=tombstone_owner)
+                                if (_semantic_inventory_present(after) or after.get('fingerprint') != receipt['result']['source_after_fingerprint']):
+                                    raise RuntimeError('retained memory purge remains incomplete')
+                                _checkpoint('memory_fm_purged_verified', {'receipt_id':receipt['receipt_id'], 'receipt_hash':receipt['receipt_hash']})
+                        continue
+                    previously_started = bool(steps.get(step))
+                    frozen = (operation.get('manifest') or {}).get(step) if previously_started else None
+                    if not previously_started:
+                        selected, canonical = _memory_participants_current(request.app.state, manifest)
+                        snapshot = selected.lifecycle_snapshot(tombstone_owner) if kind == 'native' else await _claimed_fm_purge_stats(canonical,tombstone_owner,lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token)
+                        if kind == 'native' and (snapshot['ids'] != manifest['native']['source']['ids'] or
+                                snapshot['content_fingerprint'] != manifest['native']['source']['content_fingerprint']):
+                            raise RuntimeError('native memory tombstone changed')
+                        frozen = {'snapshot': snapshot}
+                    if type(frozen) is not dict or set(frozen) != {'snapshot'}:
+                        raise RuntimeError('memory purge checkpoint unavailable')
+                    _start_step(step, manifest=frozen if not previously_started else None)
+                    receipt = await _purge_memory_participant(request.app.state, manifest, kind, tombstone_owner, frozen['snapshot'],
+                        lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, started=previously_started, step=step)
+                    _checkpoint(step, receipt)
+                    if kind == 'fm':
+                        verified_step = 'memory_fm_purged_verified'
+                        if not _applied(verified_step):
+                            _start_step(verified_step)
+                            _, canonical = _memory_participants_current(request.app.state, manifest)
+                            await _purge_memory_participant(request.app.state,manifest,'fm',tombstone_owner,frozen['snapshot'],
+                                lifecycle=account_lifecycle,operation_id=operation_id,claim_token=claim_token,
+                                started=True,step=step,cleanup_receipt=receipt)
+                            after = await canonical.owner_stats(owner=tombstone_owner)
+                            if (_semantic_inventory_present(after) or after.get('fingerprint') != receipt['result']['source_after_fingerprint']):
+                                raise RuntimeError('retained memory purge remains incomplete')
+                            _checkpoint(verified_step, {'receipt_id':receipt['receipt_id'], 'receipt_hash':receipt['receipt_hash']})
+            except Exception as exc:
+                _fail_operation(exc)
+                raise HTTPException(500, 'User deleted; retained memory purge remains pending') from exc
+        elif memory_tombstoned and not _applied("memory_purged"):
             try:
                 _start_step("memory_purged")
-                receipt = await memory_provider.purge_owner(owner=tombstone_owner)
+                receipt = await _memory_owner_transition(memory_provider, action='purge', owner=tombstone_owner, lifecycle=account_lifecycle, operation_id=operation_id, claim_token=claim_token, state=request.app.state)
                 _checkpoint("memory_purged", receipt)
             except Exception as exc:
                 _fail_operation(exc)
@@ -3764,7 +4976,8 @@ def setup_auth_routes(
         if lifecycle_tombstoned and not _applied("lifecycle_purged"):
             try:
                 _start_step("lifecycle_purged")
-                receipt = account_lifecycle.purge_owner(tombstone_owner)
+                receipt = account_lifecycle.purge_owner(tombstone_owner, subject_id=(operation or {}).get('subject_id'),
+                    expected_media_inventory=(operation.get('manifest') or {}).get('media_artifacts'))
                 _checkpoint(
                     "lifecycle_purged",
                     dict(receipt.stores) if durable else True,
@@ -3788,9 +5001,7 @@ def setup_auth_routes(
                 _start_step("supervisor_purged")
                 receipt = await mimo_supervisor.purge_owner_lifecycle(
                     tombstone_owner,
-                    expected=(
-                        (operation.get("manifest") or {})["mimo_tombstoned"]
-                    )["source"],
+                    expected=_tombstone_inventory(steps, "mimo_tombstoned", "target", tombstone_owner),
                 )
                 _checkpoint("supervisor_purged", receipt)
             except Exception as exc:
@@ -3840,8 +5051,8 @@ def setup_auth_routes(
                     ),
                     "normalized_source": account_lifecycle.owner_inventory(target_owner)["count"],
                     "normalized_tombstone": account_lifecycle.owner_inventory(tombstone_owner)["count"],
-                    "sql_source": sql_store.owner_inventory(target_owner)["count"],
-                    "sql_tombstone": sql_store.owner_inventory(tombstone_owner)["count"],
+                    "sql_source": sql_store.owner_inventory(target_owner, account_id=target_subject_id)["count"],
+                    "sql_tombstone": sql_store.owner_inventory(tombstone_owner, account_id=target_subject_id)["count"],
                     "files_source": file_store.owner_inventory(target_owner)["count"],
                     "files_tombstone": file_store.owner_inventory(tombstone_owner)["count"],
                     "skills_source": _account_skills_domain_store(
@@ -3856,8 +5067,8 @@ def setup_auth_routes(
                     "shell_audit_tombstone": _account_shell_audit_store().owner_inventory(
                         tombstone_owner
                     )["count"],
-                    "ancillary_source": ancillary_store.owner_inventory(target_owner)["count"],
-                    "ancillary_tombstone": ancillary_store.owner_inventory(tombstone_owner)["count"],
+                    "ancillary_source": ancillary_store.owner_inventory(target_owner,account_id=(operation or {}).get('subject_id'))["count"],
+                    "ancillary_tombstone": ancillary_store.owner_inventory(tombstone_owner,account_id=(operation or {}).get('subject_id'))["count"],
                     "uploads_source": (
                         upload_handler.owner_inventory(target_owner)["count"]
                         if upload_handler is not None else 0
@@ -3870,8 +5081,8 @@ def setup_auth_routes(
                     "personal_tombstone": personal_store.owner_inventory(tombstone_owner)["count"],
                     "media_source": media_store.preview_owner_purge(target_owner)["count"],
                     "media_tombstone": media_store.preview_owner_purge(tombstone_owner)["count"],
-                    "staging_source": batch_store.preview_owner_staging(target_owner)["count"],
-                    "staging_tombstone": batch_store.preview_owner_staging(tombstone_owner)["count"],
+                    "staging_source": batch_store.preview_owner_staging(target_owner,guarded=typed_memory)["count"],
+                    "staging_tombstone": batch_store.preview_owner_staging(tombstone_owner,guarded=typed_memory)["count"],
                     "filesystem_source": filesystem_registry.owner_inventory(target_owner)["count"],
                     "filesystem_tombstone": filesystem_registry.owner_inventory(tombstone_owner)["count"],
                     "mimo_source": (
@@ -3895,6 +5106,19 @@ def setup_auth_routes(
                         else 0
                     ),
                 }
+                if typed_memory:
+                    selected, canonical = _memory_participants_current(request.app.state, (operation.get('manifest') or {})['memory_participants'])
+                    fm_snapshot = (operation.get('manifest') or {}).get('memory_fm_tombstoned') or {}
+                    forward = (steps.get(f"memory_fm_forward_{fm_snapshot.get('generation')}") or {}).get('receipt') or {}
+                    purge = (steps.get('memory_fm_purged') or {}).get('receipt') or {}
+                    expected = {target_owner: (forward.get('result') or {}).get('source_after_fingerprint'),
+                                tombstone_owner: (purge.get('result') or {}).get('source_after_fingerprint')}
+                    for checked_owner in (target_owner, tombstone_owner):
+                        current = await canonical.owner_stats(owner=checked_owner)
+                        if ((joined_memory and selected.lifecycle_snapshot(checked_owner)['count'])
+                                or _semantic_inventory_present(current) or not expected[checked_owner]
+                                or current.get('fingerprint') != expected[checked_owner]):
+                            raise RuntimeError('retained memory owner remains after deletion')
                 if any(int(value) for value in remaining.values()):
                     raise RuntimeError("account lifecycle verification found retained owner state")
                 _checkpoint("closure_verified", {"remaining": remaining})
@@ -4117,8 +5341,15 @@ def setup_auth_routes(
             for key in DEFAULT_SETTINGS
             if key in body and key not in PER_USER_MODEL_SETTING_KEYS
         }
+        if "memory_graph" in body:
+            global_update["memory_graph"] = body["memory_graph"]
         if user and global_update and not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
+        if "memory_graph" in global_update:
+            from src.openclank.memory_policy import _graph_projection
+            graph = _graph_projection({"state":"available", "value":global_update["memory_graph"]})
+            if graph.get("state") != "available" or graph.get("unknown_fields_present") is True:
+                raise HTTPException(400, "Invalid memory graph settings")
 
         scoped = _settings_for_user(current, user) if user else current
         _validate_model_settings_update(model_update, scoped, request, user or "")
@@ -4142,47 +5373,108 @@ def setup_auth_routes(
         # overwrite each other or reuse a scheduler revision. No await or native
         # request is allowed while this lock is held. Preparation never mutates
         # load_settings' shared cached dict, including rejected/failed saves.
+        from src.settings import _read_persisted_settings, settings_policy_guard
+        # Reject deterministic settings errors before taking a durable policy fence.
         with SETTINGS_LOCK:
             try:
-                current = prepare_code_index_settings(_load_settings(), global_update)
+                prepare_code_index_settings(_load_settings(), global_update)
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
-            if user:
-                if model_update or "agent_settings_reset" in body:
-                    with PREFERENCE_LOCK:
-                        prefs = _load_for_user(user)
-                        if "agent_settings" in body or "agent_settings_reset" in body:
-                            revision = agent_settings_revision(prefs.get("agent_settings"))
-                            expected = body.get("agent_settings_expected_revision")
-                            if expected is not None and expected != revision:
-                                raise HTTPException(409, {"code": "AGENT_SETTINGS_CONFLICT", "revision": revision})
-                            if "agent_settings" in body and body["agent_settings"] is None:
-                                if body.get("agent_settings_reset"):
-                                    raise HTTPException(400, "Whole override reset cannot be combined with field resets")
-                                model_update.pop("agent_settings", None)
-                                prefs.pop("agent_settings", None)
-                            else:
-                                try:
-                                    merged = patch_agent_settings(prefs.get("agent_settings", {}), body.get("agent_settings", {}), reset=body.get("agent_settings_reset"))
-                                except ValueError as exc:
-                                    raise HTTPException(400, str(exc)) from exc
-                                if merged: model_update["agent_settings"] = merged
-                                else:
-                                    model_update.pop("agent_settings", None)
-                                    prefs.pop("agent_settings", None)
-                        prefs.update(model_update)
-                        _save_for_user(user, prefs)
-                if global_update:
-                    _save_settings(current)
-                result = _settings_for_user(current, user)
-            else:
-                # Historical explicit auth-disabled single-user behavior.
-                if "agent_settings" in body and body["agent_settings"] is None:
-                    model_update.pop("agent_settings", None)
-                    current.pop("agent_settings", None)
-                current.update(model_update)
-                _save_settings(current)
-                result = current
+        prepare_user_settings = current_account = None
+        before_preferences = proposed_preferences = None
+        if user:
+            account_id = auth_manager.account_id(user)
+            if not account_id:
+                raise HTTPException(409, "Account identity is unavailable; retry")
+            def current_account():
+                try:
+                    return (_get_current_user(request) == user and auth_manager.account_id(user) == account_id
+                        and auth_manager.username_for_account_id(account_id) == user
+                        and (not global_update or auth_manager.is_admin(user)))
+                except Exception:
+                    return False
+        if user and (model_update or "agent_settings_reset" in body):
+            def prepare_user_settings(prefs):
+                updates = dict(model_update)
+                incoming=body.get("agent_settings")
+                resets=body.get("agent_settings_reset")
+                distill_write=(isinstance(incoming,dict) and "distill" in incoming) or (
+                    isinstance(resets,list) and any(isinstance(path,str) and path.startswith("distill.") for path in resets))
+                prior=prefs.get("agent_settings", {})
+                if distill_write and not (type(prefs.get('_skill_draft_policy_version')) is int and prefs['_skill_draft_policy_version']==1):
+                    prior=dict(prior) if isinstance(prior,dict) else {}
+                    prior.pop('distill',None)
+                if "agent_settings" in body or "agent_settings_reset" in body:
+                    revision = agent_settings_revision(prefs.get("agent_settings"))
+                    expected = body.get("agent_settings_expected_revision")
+                    if expected is not None and expected != revision:
+                        raise HTTPException(409, {"code": "AGENT_SETTINGS_CONFLICT", "revision": revision})
+                    if "agent_settings" in body and body["agent_settings"] is None:
+                        if body.get("agent_settings_reset"):
+                            raise HTTPException(400, "Whole override reset cannot be combined with field resets")
+                        updates.pop("agent_settings", None)
+                        prefs.pop("agent_settings", None)
+                        prefs.pop('_skill_draft_policy_version',None)
+                    else:
+                        try:
+                            merged = patch_agent_settings(prior, body.get("agent_settings", {}), reset=body.get("agent_settings_reset"))
+                        except ValueError as exc:
+                            raise HTTPException(400, str(exc)) from exc
+                        if merged: updates["agent_settings"] = merged
+                        else:
+                            updates.pop("agent_settings", None)
+                            prefs.pop("agent_settings", None)
+                        if distill_write:
+                            if isinstance(merged.get('distill'),dict): prefs['_skill_draft_policy_version']=1
+                            else: prefs.pop('_skill_draft_policy_version',None)
+                prefs.update(updates)
+                return prefs, None
+            from routes.prefs_routes import _protected_preferences
+            with PREFERENCE_LOCK:
+                before_preferences = copy.deepcopy(_load_for_user(user))
+                proposed_preferences, _ = prepare_user_settings(copy.deepcopy(before_preferences))
+                proposed_preferences = _protected_preferences(before_preferences, proposed_preferences,
+                    allow_legacy_memory=True, allow_skill_draft_policy=True)
+                if current_account() is not True:
+                    raise HTTPException(409, "Account identity changed; retry")
+        try:
+            with settings_policy_guard(global_update, user=user, before_preferences=before_preferences,
+                                       proposed_preferences=proposed_preferences, before_save=current_account):
+                try:
+                    base = dict(_load_settings())
+                    if 'memory_graph' not in global_update:
+                        persisted = _read_persisted_settings()
+                        if 'memory_graph' in persisted: base['memory_graph'] = persisted['memory_graph']
+                        else: base.pop('memory_graph', None)
+                    current = prepare_code_index_settings(base, global_update)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                if user:
+                    if model_update or "agent_settings_reset" in body:
+                        try:
+                            _mutate_user(user, prepare_user_settings, allow_skill_draft_policy=True, before_save=current_account)
+                        except HTTPException:
+                            raise
+                        except ValueError as exc:
+                            raise HTTPException(409, "Settings or account changed; retry") from exc
+                    if global_update:
+                        if current_account is None or current_account() is not True:
+                            raise HTTPException(409, "Settings account or administrator authority changed")
+                        _save_settings(current, allow_memory_graph='memory_graph' in global_update)
+                    result = _settings_for_user(current, user)
+                else:
+                    # Historical explicit auth-disabled single-user behavior.
+                    if "agent_settings" in body and body["agent_settings"] is None:
+                        model_update.pop("agent_settings", None)
+                        current.pop("agent_settings", None)
+                    current.update(model_update)
+                    _save_settings(current, allow_memory_graph='memory_graph' in global_update)
+                    result = current
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(409, {"code":"POLICY_TRANSITION_UNCERTAIN",
+                "message":"Settings update did not complete; some values may have changed. Review current settings before taking further action."}) from exc
         result["code_index_scheduler"] = await code_index_settings_readback(
             getattr(request.app.state, "memory_provider", None), current,
             apply=any(key in global_update for key in CODE_INDEX_MANAGED_KEYS),

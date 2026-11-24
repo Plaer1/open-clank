@@ -62,9 +62,9 @@ _ACCOUNT_CACHE: dict = {}  # key = normalized account selector -> config dict
 _MCP_OWNER_ARG = "_odysseus_owner"
 _MCP_ROOT_OPERATION_ARG = "_open_clank_root_operation_id"
 _CURRENT_OWNER: ContextVar[str | None] = ContextVar("email_mcp_owner", default=None)
-_OWNER_ENV_KEYS = ("ODYSSEUS_MCP_EMAIL_OWNER", "ODYSSEUS_EMAIL_OWNER")
+_OWNER_ENV_KEYS = ("OPEN_CLANK_MCP_EMAIL_OWNER", "OPEN_CLANK_EMAIL_OWNER")
 _OWNER_SCOPE_ERROR = (
-    "Error: email MCP requires an authenticated owner or ODYSSEUS_MCP_EMAIL_OWNER "
+    "Error: email MCP requires an authenticated owner or OPEN_CLANK_MCP_EMAIL_OWNER "
     "when owner-scoped email accounts are configured."
 )
 
@@ -182,7 +182,7 @@ def _default_document_owner() -> str | None:
     but the document library is owner-filtered. Stamp drafts to the configured
     single/default admin so assistant-created email drafts are visible.
     """
-    owner = os.environ.get("ODYSSEUS_DOCUMENT_OWNER", "").strip()
+    owner = os.environ.get("OPEN_CLANK_DOCUMENT_OWNER", "").strip()
     if owner:
         return owner
     try:

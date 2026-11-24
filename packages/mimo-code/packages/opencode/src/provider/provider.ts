@@ -1,3 +1,9 @@
+import { noteSameRequestSDK, noteSameRequestModel } from './same-request-route'
+import { notePinnedResponsesSDK, notePinnedResponsesModel, notePinnedChatSDK, notePinnedChatModel, notePinnedCompatibleChatSDK, notePinnedCompatibleChatModel } from "./malformed-origin"
+import { notePinnedAnthropicSDK, notePinnedAnthropicModel } from "./anthropic-origin"
+import anthropicPackage from "@ai-sdk/anthropic/package.json"
+import openaiPackage from "@ai-sdk/openai/package.json"
+import compatiblePackage from "@ai-sdk/openai-compatible/package.json"
 import z from "zod"
 import os from "os"
 import fuzzysort from "fuzzysort"
@@ -17,7 +23,9 @@ import {
   type TranscriptionModelV3,
 } from "@ai-sdk/provider"
 import * as ModelsDev from "./models"
-import { Auth } from "../auth"
+import { declaredWindowFields } from "../config/model-window-declarations"
+import { recordDeclared, readWindowOrigin, snapshotDeclared, restoreDeclared, type WindowSnapshot, type WindowOrigin } from "./model-window-origin"
+import { Auth, OAUTH_DUMMY_KEY } from "../auth"
 import { Env } from "../env"
 import { InstallationVersion } from "../installation/version"
 import { Flag } from "../flag/flag"
@@ -28,6 +36,7 @@ import path from "path"
 import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema, Types } from "effect"
 import { EffectBridge } from "@/effect"
+import { transformXiaomiSearchRequestBody } from "@/acp/provider-capabilities"
 import { InstanceState } from "@/effect"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { isRecord } from "@/util/record"
@@ -39,7 +48,14 @@ import * as ProviderTransform from "./transform"
 import { ModelID, ProviderID } from "./schema"
 import { AccountSelection } from "./account-selection"
 import { ManagedProvider } from "@/acp/managed-provider"
-import { captureFetch } from "./logging-transport"
+import { scopeBinding } from "@/provider/logging-transport"
+import { captureFetch, observeCodexInnerSend } from "./logging-transport"
+import { CLAUDE_PROFILE, createManagedClaudeFetch } from "@/plugin/claude"
+import { getInstallationID } from "@/metrics/installation"
+import { resolveMimoEndpoint, type MimoBillingLane } from "./mimo-endpoint-policy"
+import { openCodeApiBaseURL, openCodeProtocol, type OpenCodeProtocol } from "./opencode-protocol"
+
+export { createManagedClaudeFetch } from "@/plugin/claude"
 
 const log = Log.create({ service: "provider" })
 const DEFAULT_CONTEXT_WINDOW = 1_000_000
@@ -211,6 +227,7 @@ type BundledSDK = {
 }
 
 const MANAGED_ADAPTER_FAMILIES: Record<string, readonly string[]> = {
+  "opencode-native": ["opencode-console", "opencode-go"],
   "anthropic-messages": ["anthropic"],
   "openai-responses": ["openai", "openai-compatible"],
   "openai-chat": ["openai", "openrouter", "openai-compatible", "deepseek"],
@@ -219,6 +236,7 @@ const MANAGED_ADAPTER_FAMILIES: Record<string, readonly string[]> = {
   "google-generative-ai": ["google"],
   "google-vertex": ["google"],
   "xai-responses": ["xai"],
+  "grok-cli-chat": ["grok"],
   ollama: ["ollama"],
 }
 
@@ -251,6 +269,17 @@ export type ManagedAdapterMetadata = {
   adapterID: string
   billingLane: Auth.BillingLane
   connectionID: string
+  apiProtocol?: OpenCodeProtocol
+  apiPackage?: string
+  apiBaseURL?: string
+}
+
+export type ManagedRequestContext = {
+  sessionID?: string
+  actorID?: string
+  executionRevision?: number
+  hostChatID?: string
+  auxiliaryClaude?: ManagedProvider.AuxiliaryClaudeOwner
 }
 
 function requiredManagedOption(options: Record<string, unknown>, key: string): string {
@@ -268,7 +297,7 @@ function requiredManagedOption(options: Record<string, unknown>, key: string): s
  */
 export function managedAdapterMetadata(
   provider: Pick<Info, "id" | "options">,
-  model?: Pick<Model, "providerID" | "options">,
+  model?: Pick<Model, "id" | "providerID" | "options" | "api">,
 ): ManagedAdapterMetadata {
   const familyID = requiredManagedOption(provider.options, "_openclankFamilyID")
   const adapterID = requiredManagedOption(provider.options, "_openclankAdapterID")
@@ -289,11 +318,29 @@ export function managedAdapterMetadata(
   if (modelAdapter !== undefined && modelAdapter !== adapterID) {
     throw new Error("Managed model route does not match its connection adapter")
   }
+  if (adapterID === "opencode-native") {
+    const protocol = openCodeProtocol(familyID, String(model?.id ?? ""))
+    if (!protocol || model?.options?.["_openclankApiProtocol"] !== protocol.protocol || model.api.npm !== protocol.sdkPackage) {
+      throw new Error("Managed OpenCode model route has no supported protocol descriptor")
+    }
+    const root = familyID === "opencode-console" ? "https://opencode.ai/inference" : "https://opencode.ai/inference/go"
+    const apiBaseURL = openCodeApiBaseURL(root, protocol.protocol)
+    if (model.api.url !== apiBaseURL) throw new Error("Managed OpenCode model route has an invalid API endpoint")
+    return { familyID, adapterID, billingLane, connectionID, apiProtocol: protocol.protocol, apiPackage: protocol.sdkPackage, apiBaseURL }
+  }
+  if (adapterID === "grok-cli-chat") {
+    if (
+      familyID !== "grok" || billingLane !== "subscription" ||
+      (model && (model.api.npm !== "@ai-sdk/openai-compatible" || model.api.url !== "https://cli-chat-proxy.grok.com/v1"))
+    ) {
+      throw new Error("Managed Grok projection has an invalid family, lane, or endpoint")
+    }
+  }
   return { familyID, adapterID, billingLane, connectionID }
 }
 
 /** The managed engine only loads checked-in, bundled adapter packages. */
-export function managedAdapterPackage(metadata: Pick<ManagedAdapterMetadata, "familyID" | "adapterID">): string {
+export function managedAdapterPackage(metadata: Pick<ManagedAdapterMetadata, "familyID" | "adapterID" | "apiPackage">): string {
   const modelsDevPackage = managedModelsDevAdapterPackage(metadata.adapterID)
   if (modelsDevPackage) {
     if (CURATED_MANAGED_FAMILIES.has(metadata.familyID)) {
@@ -302,6 +349,11 @@ export function managedAdapterPackage(metadata: Pick<ManagedAdapterMetadata, "fa
     return modelsDevPackage
   }
   switch (metadata.adapterID) {
+    case "opencode-native":
+      if (!metadata.apiPackage || !["@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/openai-compatible", "@ai-sdk/google"].includes(metadata.apiPackage)) {
+        throw new Error("Managed OpenCode model route uses an unsupported SDK package")
+      }
+      return metadata.apiPackage
     case "anthropic-messages":
       return "@ai-sdk/anthropic"
     case "openai-responses":
@@ -321,19 +373,41 @@ export function managedAdapterPackage(metadata: Pick<ManagedAdapterMetadata, "fa
       return "@ai-sdk/google-vertex"
     case "xai-responses":
       return "@ai-sdk/xai"
+    case "grok-cli-chat":
+      return "@ai-sdk/openai-compatible"
     default:
       throw new Error("Managed provider projection uses an unsupported adapter")
   }
 }
 
 function normalizedBaseURL(value: unknown): string | undefined {
-  if (typeof value !== "string" || value.trim() === "") return undefined
+  if (value === undefined || value === null || value === "") return undefined
+  if (typeof value !== "string") throw new Error("Managed provider projection has an invalid base URL")
+  if (value.trim() === "") return undefined
   try {
     const parsed = new URL(value)
     return parsed.toString().replace(/\/+$/, "")
   } catch {
     throw new Error("Managed provider projection has an invalid base URL")
   }
+}
+
+export function resolveManagedBaseURL(configured: unknown, catalog: unknown): {
+  readonly baseURL: string | undefined
+  readonly catalogFallback: boolean
+} {
+  const absent = configured === undefined || configured === null
+    || (typeof configured === "string" && configured.trim() === "")
+  if (!absent && typeof configured !== "string") {
+    throw new Error("Managed provider projection has an invalid base URL")
+  }
+  if (absent) {
+    if (catalog !== undefined && catalog !== null && typeof catalog !== "string") {
+      throw new Error("Managed provider catalog has an invalid base URL")
+    }
+    return { baseURL: typeof catalog === "string" ? catalog : undefined, catalogFallback: true }
+  }
+  return { baseURL: configured as string, catalogFallback: false }
 }
 
 function mergeFetchHeaders(input: RequestInfo | URL, init?: RequestInit): Headers {
@@ -393,7 +467,8 @@ export function createManagedCodexFetch(
       headers.set("referer", "https://chatgpt.com/codex")
       headers.set("User-Agent", `openclank/${InstallationVersion}`)
       if (current.accountId) headers.set("ChatGPT-Account-Id", current.accountId)
-      return upstream(replayableInput(url), { ...init, headers })
+      const request = { ...init, headers }
+      return observeCodexInnerSend(url, request, () => upstream(replayableInput(url), request))
     }
     let refreshedForRequest = false
     if (refresh && oauthNeedsRefresh(current)) {
@@ -452,9 +527,81 @@ export function createManagedXaiFetch(
   }) as typeof fetch
 }
 
+export function createManagedGrokFetch(
+  metadata: ManagedAdapterMetadata,
+  credential: Auth.Oauth,
+  upstream: typeof fetch = globalThis.fetch,
+  refresh?: ManagedOAuthRefresher,
+): typeof fetch {
+  const expected = new URL("https://cli-chat-proxy.grok.com/v1")
+  if (metadata.familyID !== "grok" || metadata.adapterID !== "grok-cli-chat" || metadata.billingLane !== "subscription") {
+    throw new Error("Managed Grok request has an invalid provider identity")
+  }
+  let current = credential
+  let inFlightRefresh: Promise<Auth.Oauth> | undefined
+  const refreshOnce = async () => {
+    if (!refresh) return current
+    if (!inFlightRefresh) {
+      inFlightRefresh = refresh(current)
+        .then((next) => {
+          current = next
+          return next
+        })
+        .finally(() => {
+          inFlightRefresh = undefined
+        })
+    }
+    return inFlightRefresh
+  }
+  const send = async (input: RequestInfo | URL, init: RequestInit | undefined, retry: boolean): Promise<Response> => {
+    const parsed = input instanceof URL ? new URL(input) : new URL(typeof input === "string" ? input : input.url)
+    if (parsed.origin !== expected.origin || parsed.pathname !== `${expected.pathname}/chat/completions`) {
+      throw new Error("Managed Grok request escaped its declared Chat Completions endpoint")
+    }
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (["key", "api_key", "token", "access_token"].includes(key.toLowerCase())) parsed.searchParams.delete(key)
+    }
+    const headers = mergeFetchHeaders(input, init)
+    for (const key of ["x-api-key", "api-key", "x-goog-api-key", "proxy-authorization"]) headers.delete(key)
+    headers.set("authorization", `Bearer ${current.access}`)
+    headers.set("x-xai-token-auth", "xai-grok-cli")
+    const body = typeof init?.body === "string" ? init.body : undefined
+    if (body) {
+      try {
+        const model = JSON.parse(body)?.model
+        if (typeof model === "string" && model.length > 0 && model.length <= 256) {
+          headers.set("x-grok-model-override", model)
+        } else {
+          throw new Error("missing model")
+        }
+      } catch {
+        throw new Error("Managed Grok request has no valid model identifier")
+      }
+    } else {
+      throw new Error("Managed Grok request has no replayable JSON body")
+    }
+    const response = await upstream(input instanceof Request ? new Request(parsed, input.clone()) : parsed, {
+      ...init,
+      headers,
+      redirect: "error",
+    })
+    if (retry && response.status === 401 && refresh) {
+      await response.body?.cancel().catch(() => {})
+      await refreshOnce()
+      return send(input, init, false)
+    }
+    return response
+  }
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (refresh && oauthNeedsRefresh(current)) await refreshOnce()
+    return send(input, init, true)
+  }) as typeof fetch
+}
+
 function managedOauthRefresher(
   metadata: ManagedAdapterMetadata,
   scope?: AccountSelection.Scope,
+  auxiliary?: ManagedProvider.AuxiliaryClaudeOwner,
 ): ManagedOAuthRefresher | undefined {
   if (
     !scope?.credentialRequired ||
@@ -466,7 +613,16 @@ function managedOauthRefresher(
   }
   let credentialRevision = scope.credentialRevision
   return async (credential) => {
+    const before = auxiliary?.bound
+    const binding = metadata.familyID === "anthropic" && metadata.billingLane === "subscription" ? scopeBinding(before?.scope ?? scope) : undefined
+    if (metadata.familyID === "anthropic" && metadata.billingLane === "subscription" && (!binding?.methodPolicy || !binding.bindingID))
+      throw new Error("Managed Claude refresh binding is unavailable")
+    auxiliary?.beginRefresh()
+    try {
     const refreshed = await ManagedProvider.refreshOAuthCredential({
+      ...(auxiliary ? {auxiliary} : {}),
+      ...(metadata.familyID === 'openai' && metadata.billingLane === 'subscription' && scope ? {captureScope:scope} : {}),
+      ...(binding ? { bindingID: binding.bindingID, methodPolicy: binding.methodPolicy } : {}),
       connectionID: scope.connectionID,
       accountID: scope.accountID!,
       expectedRevision: credentialRevision,
@@ -480,11 +636,30 @@ function managedOauthRefresher(
           const { refreshXaiOAuthCredential } = await import("@/plugin/xai")
           return refreshXaiOAuthCredential(current)
         }
+        if (metadata.adapterID === "grok-cli-chat") {
+          const { refreshGrokOAuthCredential } = await import("@/plugin/grok")
+          return refreshGrokOAuthCredential(current)
+        }
+        if (metadata.familyID === "kimi-code-plan-cn" || metadata.familyID === "kimi-code-plan-global") {
+          const { refreshKimiCodeOAuthCredential } = await import("@/plugin/kimi-code")
+          return refreshKimiCodeOAuthCredential(current)
+        }
+        if (metadata.familyID === "anthropic" && metadata.adapterID === "anthropic-messages" && metadata.billingLane === "subscription") {
+          const { refreshClaudeCredential } = await import("@/plugin/claude")
+          const refreshed = await refreshClaudeCredential({
+            refresh: current.refresh,
+            accountId: current.accountId,
+            ...(auxiliary ? {signal:auxiliary.signal} : {}),
+          })
+          return { ...current, ...refreshed, type: "oauth" as const }
+        }
         throw new Error("Managed provider adapter does not support OAuth refresh")
       },
     })
+    if (auxiliary && before) auxiliary.replace(before, refreshed.credential, refreshed.credentialRevision)
     credentialRevision = refreshed.credentialRevision
     return refreshed.credential
+    } catch (error) { auxiliary?.failRefresh(); throw error }
   }
 }
 
@@ -546,6 +721,130 @@ export function createManagedCopilotFetch(
   }) as typeof fetch
 }
 
+export function createManagedOpenCodeFetch(
+  metadata: ManagedAdapterMetadata,
+  credential: Auth.Info | undefined,
+  hostChatID: string,
+  upstream: typeof fetch = globalThis.fetch,
+): typeof fetch {
+  if (
+    metadata.adapterID !== "opencode-native" ||
+    credential?.type !== "api" ||
+    !metadata.apiBaseURL ||
+    !hostChatID ||
+    hostChatID.length > 512 ||
+    hostChatID.trim() !== hostChatID
+  ) {
+    throw new Error("Managed OpenCode request binding is incomplete")
+  }
+  const expected = new URL(metadata.apiBaseURL)
+  const endpointPath = expected.pathname.replace(/\/+$/, "")
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target = new URL(input instanceof Request ? input.url : String(input))
+    if (
+      target.origin !== expected.origin ||
+      (target.pathname !== endpointPath && !target.pathname.startsWith(`${endpointPath}/`))
+    ) {
+      throw new Error("Managed OpenCode request escaped its declared API route")
+    }
+    // Google SDK versions may encode their API key in the URL. OpenCode's
+    // inference contract requires one bearer credential for every protocol.
+    for (const key of [...target.searchParams.keys()]) {
+      if (["key", "api_key", "x-api-key", "x-goog-api-key"].includes(key.toLowerCase())) {
+        target.searchParams.delete(key)
+      }
+    }
+    const headers = new Headers(input instanceof Request ? input.headers : undefined)
+    new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
+    for (const key of ["x-api-key", "api-key", "x-goog-api-key"]) headers.delete(key)
+    headers.set("authorization", `Bearer ${credential.key}`)
+    headers.set("x-opencode-session", hostChatID)
+    headers.set("user-agent", `openclank/${InstallationVersion}`)
+    const requestInput = input instanceof Request ? new Request(target, input) : target
+    return upstream(requestInput, { ...init, headers, redirect: "error" })
+  }) as unknown as typeof fetch
+}
+
+export function createManagedKimiCodeFetch(
+  metadata: ManagedAdapterMetadata,
+  credential: Auth.Info,
+  upstream: typeof fetch = globalThis.fetch,
+  refresh?: ManagedOAuthRefresher,
+): typeof fetch {
+  const expectedURL = metadata.familyID === "kimi-code-plan-cn"
+    ? "https://api.kimi.com/coding/v1"
+    : metadata.familyID === "kimi-code-plan-global"
+      ? "https://api.kimi.ai/coding/v1"
+      : undefined
+  if (metadata.adapterID !== "models-dev-openai-compatible" || metadata.billingLane !== "subscription" || !expectedURL) {
+    throw new Error("Managed Kimi Code route is not supported")
+  }
+  let current = credential
+  let inFlightRefresh: Promise<Auth.Oauth> | undefined
+  const refreshOnce = async () => {
+    if (current.type !== "oauth" || !refresh) return
+    if (!inFlightRefresh) {
+      inFlightRefresh = refresh(current).then((next) => {
+        current = next
+        return next
+      }).finally(() => { inFlightRefresh = undefined })
+    }
+    await inFlightRefresh
+  }
+  const replayable = (input: RequestInfo | URL, init?: RequestInit) => {
+    if (input instanceof Request) return input.body === null && !input.bodyUsed && init?.body == null
+    const body = init?.body
+    return body == null || typeof body === "string" || body instanceof URLSearchParams || body instanceof Blob ||
+      body instanceof ArrayBuffer || ArrayBuffer.isView(body)
+  }
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const target = new URL(input instanceof Request ? input.url : String(input))
+    const expected = new URL(expectedURL)
+    const endpointPath = `${expected.pathname.replace(/\/+$/, "")}/chat/completions`
+    if (target.origin !== expected.origin || target.pathname !== endpointPath) {
+      throw new Error("Managed Kimi Code request escaped its declared endpoint")
+    }
+    for (const key of [...target.searchParams.keys()]) {
+      if (["key", "api_key", "x-api-key", "x-goog-api-key"].includes(key.toLowerCase())) target.searchParams.delete(key)
+    }
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    let refreshedForRequest = false
+    if (current.type === "oauth") {
+      const device = current.metadata?.device_id
+      if (!device || current.metadata?.credential_profile !== "kimi-code-device-v1") throw new Error("Managed Kimi Code device identity is missing")
+      const region = metadata.familyID === "kimi-code-plan-cn" ? "cn" : "global"
+      if (current.metadata.kimi_region !== region) throw new Error("Managed Kimi Code credential region does not match the selected endpoint")
+      if (oauthNeedsRefresh(current)) {
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+        await refreshOnce()
+        refreshedForRequest = true
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+      }
+    }
+    const send = () => {
+      const headers = mergeFetchHeaders(input, init)
+      for (const key of ["x-api-key", "api-key", "x-goog-api-key"]) headers.delete(key)
+      const token = current.type === "oauth" ? current.access : current.type === "api" ? current.key : current.token
+      headers.set("authorization", `Bearer ${token}`)
+      headers.set("user-agent", `openclank/${InstallationVersion}`)
+      if (current.type === "oauth") {
+        headers.set("X-Msh-Platform", "openclank")
+        headers.set("X-Msh-Version", String(InstallationVersion))
+        headers.set("X-Msh-Device-Id", current.metadata!.device_id)
+      }
+      const requestInput = input instanceof Request ? new Request(target, input) : target
+      return upstream(requestInput, { ...init, headers, redirect: "error" })
+    }
+    const response = await send()
+    if (response.status !== 401 || refreshedForRequest || current.type !== "oauth" || !refresh || !replayable(input, init)) return response
+    if (signal?.aborted) return response
+    void response.body?.cancel().catch(() => {})
+    await refreshOnce()
+    if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+    return send()
+  }) as typeof fetch
+}
+
 function assertManagedBaseURL(options: Record<string, any>, expected: string, label: string): void {
   const actual = normalizedBaseURL(options["baseURL"])
   if (actual && actual !== expected) {
@@ -554,12 +853,33 @@ function assertManagedBaseURL(options: Record<string, any>, expected: string, la
   options["baseURL"] = expected
 }
 
+function assertManagedClaudeScope(
+  metadata: ManagedAdapterMetadata,
+  credential: Auth.Info | undefined,
+  scope: AccountSelection.Scope | undefined,
+): asserts credential is Auth.Oauth {
+  if (
+    credential?.type !== "oauth" ||
+    !scope?.credentialRequired ||
+    scope.connectionID !== metadata.connectionID ||
+    !scope.accountID ||
+    scope.credentialRevision === undefined ||
+    scope.credential?.type !== "oauth" ||
+    scope.credential.access !== credential.access ||
+    scope.credential.refresh !== credential.refresh
+  ) {
+    throw new Error("Managed Claude subscription requires the matching leased OAuth scope")
+  }
+}
+
 export function applyManagedAdapterOptions(
   metadata: ManagedAdapterMetadata,
   credential: Auth.Info | undefined,
   input: Record<string, any>,
   scope?: AccountSelection.Scope,
-  operation?: { kind: "web.search"; count: number },
+  operation?: { kind: "web.search"; count: number; answer?: boolean },
+  configuredBaseURLIsCatalogFallback = false,
+  requestContext?: ManagedRequestContext,
 ): Record<string, any> {
   const options: Record<string, any> = { ...input, headers: { ...(input["headers"] ?? {}) } }
   for (const key of Object.keys(options)) {
@@ -579,11 +899,92 @@ export function applyManagedAdapterOptions(
     // can satisfy managed mode's no-env/no-file credential invariant.
     throw new Error("Managed Google Vertex requires a service-account adapter that is not available")
   }
+  if (metadata.adapterID === "opencode-native") {
+    if (
+      credential?.type !== "api" ||
+      (metadata.familyID === "opencode-console" && metadata.billingLane !== "metered_api") ||
+      (metadata.familyID === "opencode-go" && metadata.billingLane !== "subscription")
+    ) {
+      throw new Error("Managed OpenCode account credential does not match its billing lane")
+    }
+    if (!requestContext?.hostChatID || requestContext.hostChatID.length > 512 || requestContext.hostChatID.trim() !== requestContext.hostChatID) {
+      throw new Error("Managed OpenCode request requires the trusted host chat identity")
+    }
+    if (!metadata.apiBaseURL) throw new Error("Managed OpenCode model route has no validated endpoint")
+    assertManagedBaseURL(options, metadata.apiBaseURL, "OpenCode")
+    options["headers"]["x-opencode-session"] = requestContext.hostChatID
+    options["headers"]["User-Agent"] ??= `openclank/${InstallationVersion}`
+    options["fetch"] = createManagedOpenCodeFetch(metadata, credential, requestContext.hostChatID)
+  }
+  if (metadata.familyID === "kimi-code-plan-cn" || metadata.familyID === "kimi-code-plan-global") {
+    const expected = metadata.familyID === "kimi-code-plan-cn" ? "https://api.kimi.com/coding/v1" : "https://api.kimi.ai/coding/v1"
+    if (
+      metadata.adapterID !== "models-dev-openai-compatible" || metadata.billingLane !== "subscription" ||
+      (credential?.type !== "api" && credential?.type !== "oauth")
+    ) throw new Error("Managed Kimi Code credential does not match its selected plan route")
+    assertManagedBaseURL(options, expected, "Kimi Code")
+    if (credential.type === "oauth") {
+      if (!scope?.credentialRequired || scope.connectionID !== metadata.connectionID || !scope.accountID || scope.credentialRevision === undefined ||
+        scope.credential?.type !== "oauth" || scope.credential.access !== credential.access || scope.credential.refresh !== credential.refresh ||
+        scope.credential.metadata?.device_id !== credential.metadata?.device_id) {
+        throw new Error("Managed Kimi Code device login requires its matching leased OAuth credential")
+      }
+    }
+    const refresher = credential.type === "oauth" ? managedOauthRefresher(metadata, scope) : undefined
+    options["apiKey"] = OAUTH_DUMMY_KEY
+    options["fetch"] = createManagedKimiCodeFetch(metadata, credential, globalThis.fetch, refresher)
+  }
   if (metadata.adapterID === "anthropic-messages") {
     if (metadata.billingLane === "custom") {
       delete options.headers["anthropic-beta"]
     } else {
       options.headers["anthropic-beta"] ??= "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
+    }
+    if (metadata.familyID === "anthropic" && metadata.billingLane === "subscription") {
+      assertManagedClaudeScope(metadata, credential, scope)
+      assertManagedBaseURL(options, CLAUDE_PROFILE.apiBaseURL, "Claude")
+      delete options["apiKey"]
+      options["apiKey"] = ""
+      const refresher = managedOauthRefresher(metadata, scope, requestContext?.auxiliaryClaude)
+      options["fetch"] = createManagedClaudeFetch(
+        credential,
+        globalThis.fetch,
+        refresher
+          ? async (current) => {
+              const next = await refresher({ type: "oauth", ...current })
+              return { access: next.access, refresh: next.refresh, expires: next.expires, accountId: next.accountId }
+            }
+          : undefined,
+        async (current) => {
+          const profileID = requestContext?.auxiliaryClaude?.profileID ?? requestContext?.sessionID
+          requestContext?.auxiliaryClaude?.assertCurrent()
+          if (!profileID) {
+            throw new Error("Managed Claude subscription requires the trusted host session identity")
+          }
+          const platform = ({ darwin: "MacOS", win32: "Windows", linux: "Linux", freebsd: "FreeBSD", openbsd: "OpenBSD" } as Record<string, string>)[process.platform]
+            ?? `Other:${process.platform}`
+          const architecture = ({ x64: "x64", arm64: "arm64", ia32: "x86" } as Record<string, string>)[process.arch]
+            ?? `other::${process.arch}`
+          return {
+            ...(current.accountId ? { accountUUID: current.accountId } : {}),
+            sessionID: profileID,
+            deviceID: await getInstallationID(),
+            platform,
+            architecture,
+            runtime: "bun",
+            runtimeVersion: Bun.version,
+          }
+        },
+        async (current) => {
+          if (!scope) throw new Error("Managed Claude subscription scope is unavailable")
+          const identity = requestContext?.sessionID && requestContext.actorID && requestContext.executionRevision !== undefined
+            ? { sessionID: requestContext.sessionID, actorID: requestContext.actorID, executionRevision: requestContext.executionRevision }
+            : undefined
+          await ManagedProvider.admitClaudeDispatch(requestContext?.auxiliaryClaude?.bound.scope ?? scope, identity, current)
+          requestContext?.auxiliaryClaude?.assertCurrent()
+        },
+        requestContext?.auxiliaryClaude ? (retry) => requestContext.auxiliaryClaude!.beforeUpstream(retry) : undefined,
+      )
     }
   }
   if (metadata.familyID === "openrouter") {
@@ -593,17 +994,25 @@ export function applyManagedAdapterOptions(
   }
   if (metadata.adapterID === "mimo-native") {
     options.headers["X-Mimo-Source"] ??= "openclank"
-    const credentialURL = credential?.type === "api" ? normalizedBaseURL(credential.metadata?.base_url) : undefined
-    const configuredURL = normalizedBaseURL(options["baseURL"])
-    if (credentialURL && configuredURL && credentialURL !== configuredURL) {
-      throw new Error("Managed Xiaomi account route does not match its fixed connection")
+    const credentialURL = credential?.type === "api" ? credential.metadata?.base_url : undefined
+    const configuredURL = configuredBaseURLIsCatalogFallback ? undefined : options["baseURL"]
+    const endpoint = resolveMimoEndpoint({
+      lane: metadata.billingLane as MimoBillingLane,
+      credentialURL,
+      connectionURL: configuredURL,
+    })
+    if (!endpoint) {
+      throw new Error("Managed Xiaomi credential endpoint does not match its billing lane")
     }
-    if (credentialURL) options["baseURL"] = credentialURL
+    if (metadata.billingLane === "subscription" && credential?.type !== "api") {
+      throw new Error("Managed MiMo Token Plan requires an API credential")
+    }
+    options["baseURL"] = endpoint.url
     if (operation?.kind === "web.search") {
       const count = operation.count
-      options["transformRequestBody"] = (body: Record<string, any>) => ({
-        ...body,
-        tools: [{ type: "web_search", max_keyword: 1, force_search: true, limit: count }],
+      options["transformRequestBody"] = (body: Record<string, any>) => transformXiaomiSearchRequestBody(body, {
+        count,
+        answer: operation?.answer === true,
       })
     }
   }
@@ -626,14 +1035,43 @@ export function applyManagedAdapterOptions(
     options["apiKey"] = credential.access
     options["fetch"] = createManagedXaiFetch(credential, globalThis.fetch, managedOauthRefresher(metadata, scope))
   }
+  if (metadata.adapterID === "grok-cli-chat") {
+    if (
+      metadata.familyID !== "grok" || metadata.billingLane !== "subscription" ||
+      credential?.type !== "oauth" || !scope?.credentialRequired ||
+      scope.connectionID !== metadata.connectionID || !scope.accountID || scope.credentialRevision === undefined ||
+      scope.credential?.type !== "oauth" || scope.credential.access !== credential.access ||
+      scope.credential.refresh !== credential.refresh
+    ) {
+      throw new Error("Managed Grok subscription requires its matching leased OAuth credential")
+    }
+    const expected = "https://cli-chat-proxy.grok.com/v1"
+    assertManagedBaseURL(options, expected, "Grok")
+    options["apiKey"] = OAUTH_DUMMY_KEY
+    options["fetch"] = createManagedGrokFetch(metadata, credential, globalThis.fetch, managedOauthRefresher(metadata, scope))
+  }
   return options
 }
 
 export function selectManagedLanguageModel(
   sdk: BundledSDK & { chat?: (modelID: string) => LanguageModelV3; responses?: (modelID: string) => LanguageModelV3 },
-  metadata: Pick<ManagedAdapterMetadata, "adapterID">,
+  metadata: Pick<ManagedAdapterMetadata, "adapterID" | "apiProtocol">,
   modelID: string,
 ): LanguageModelV3 {
+  if (metadata.adapterID === "opencode-native") {
+    if (metadata.apiProtocol === "openai-responses") {
+      if (!sdk.responses) throw new Error("Managed OpenCode model requires the Responses API")
+      return sdk.responses(modelID)
+    }
+    if (metadata.apiProtocol === "openai-chat") return sdk.chat ? sdk.chat(modelID) : sdk.languageModel(modelID)
+    if (metadata.apiProtocol === "anthropic-messages" || metadata.apiProtocol === "google-generative-ai") {
+      return sdk.languageModel(modelID)
+    }
+    throw new Error("Managed OpenCode model has an unsupported protocol")
+  }
+  if (metadata.adapterID === "grok-cli-chat") {
+    return sdk.chat ? sdk.chat(modelID) : sdk.languageModel(modelID)
+  }
   if (metadata.adapterID === "openai-responses" || metadata.adapterID === "xai-responses") {
     if (!sdk.responses) throw new Error(`Managed adapter ${metadata.adapterID} does not expose the Responses API`)
     return sdk.responses(modelID)
@@ -955,6 +1393,17 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       }
     }),
     llmgateway: () =>
+      Effect.succeed({
+        autoload: false,
+        options: {
+          headers: {
+            "HTTP-Referer": "https://mimo.xiaomi.com/coder/",
+            "X-Title": "mimocode",
+            "X-Source": "mimocode",
+          },
+        },
+      }),
+    "llmgateway-devpass": () =>
       Effect.succeed({
         autoload: false,
         options: {
@@ -1520,8 +1969,8 @@ export interface Interface {
   readonly list: () => Effect.Effect<Record<ProviderID, Info>>
   readonly getProvider: (providerID: ProviderID) => Effect.Effect<Info>
   readonly getModel: (providerID: ProviderID, modelID: ModelID) => Effect.Effect<Model>
-  readonly getLanguage: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<LanguageModelV3>
-  readonly getSearchLanguage?: (model: Model, account: AccountSelection.Scope, count: number) => Effect.Effect<LanguageModelV3>
+  readonly getLanguage: (model: Model, account?: AccountSelection.Scope, requestContext?: ManagedRequestContext) => Effect.Effect<LanguageModelV3>
+  readonly getSearchLanguage?: (model: Model, account: AccountSelection.Scope, count: number, answer?: boolean) => Effect.Effect<LanguageModelV3>
   readonly getEmbedding: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<EmbeddingModelV3>
   readonly getImage: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<ImageModelV3>
   readonly getSpeech: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<SpeechModelV3>
@@ -1532,6 +1981,7 @@ export interface Interface {
   ) => Effect.Effect<{ providerID: ProviderID; modelID: string } | undefined>
   readonly getSmallModel: (providerID: ProviderID, caller?: Model) => Effect.Effect<Model | undefined>
   readonly getVisionModel: (caller?: Model) => Effect.Effect<Model | undefined>
+  readonly getVisionModelWithProvenance?: (caller?: Model) => Effect.Effect<{model:Model | undefined; current:()=>boolean}>
   readonly resolveModelRef: (ref: string, contextProviderID?: ProviderID) => Effect.Effect<Model>
   readonly defaultModel: () => Effect.Effect<{ providerID: ProviderID; modelID: ModelID }>
 }
@@ -1543,6 +1993,8 @@ interface State {
   modelLoaders: Record<string, CustomModelLoader>
   varsLoaders: Record<string, CustomVarsLoader>
 }
+
+const visionProviderLifetimes = new WeakMap<State, {alive:boolean}>()
 
 export function sdkCacheKey(
   model: Pick<Model, "providerID" | "api">,
@@ -1645,10 +2097,12 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
     variants: {},
   }
 
-  return {
+  const resolved = {
     ...base,
     variants: mapValues(ProviderTransform.variants(base), (v) => v),
   }
+  recordDeclared(resolved, { context: "catalog", input: "catalog" })
+  return resolved
 }
 
 export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
@@ -1674,6 +2128,7 @@ export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
           : base.options,
         headers: opts.provider?.headers ?? base.headers,
       }
+      recordDeclared(models[id]!, { context: "catalog", input: "catalog" })
     }
   }
   return {
@@ -1728,17 +2183,19 @@ const layer: Layer.Layer<
 
         log.info("init")
 
+        function snapshotOrigins(provider: Info | undefined): Map<string, WindowSnapshot | undefined> {
+          return new Map(Object.entries(provider?.models ?? {}).map(([id, model]) => [id, snapshotDeclared(model)]))
+        }
+        function restoreOrigins(provider: Info | undefined, snapshots: Map<string, WindowSnapshot | undefined>) {
+          for (const [id, model] of Object.entries(provider?.models ?? {})) restoreDeclared(snapshots.get(id), model)
+        }
         function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {
-          const existing = providers[providerID]
-          if (existing) {
-            // @ts-expect-error
-            providers[providerID] = mergeDeep(existing, provider)
-            return
-          }
-          const match = database[providerID]
-          if (!match) return
+          const source = providers[providerID] ?? database[providerID]
+          if (!source) return
+          const snapshots = snapshotOrigins(source)
           // @ts-expect-error
-          providers[providerID] = mergeDeep(match, provider)
+          providers[providerID] = mergeDeep(source, provider)
+          restoreOrigins(providers[providerID], snapshots)
         }
 
         // load plugins first so config() hook runs before reading cfg.provider
@@ -1775,6 +2232,7 @@ const layer: Layer.Layer<
 
           for (const [modelID, model] of Object.entries(provider.models ?? {})) {
             const existingModel = parsed.models[model.id ?? modelID]
+            const existingWindow = existingModel ? snapshotDeclared(existingModel) : undefined
             const apiID = model.id ?? existingModel?.api.id ?? modelID
             const apiNpm =
               model.provider?.npm ??
@@ -1860,6 +2318,17 @@ const layer: Layer.Layer<
               cachePromptTTL: model.cachePromptTTL ?? existingModel?.cachePromptTTL,
               variants: {},
             }
+            // Plugin config hooks can mutate the shared config object. A
+            // reconstructed model inherits evidence only on an exact identity
+            // and both-limit match; changed config values remain unknown.
+            const restoredWindow = restoreDeclared(existingWindow, parsedModel) ? readWindowOrigin(parsedModel) : undefined
+            const declaredFields = declaredWindowFields(cfg, providerID, modelID)
+            const inherited = (origin: WindowOrigin | undefined): WindowOrigin =>
+              origin === "catalog" || origin === "config" || origin === "inherited" ? "inherited" : origin ?? "unknown"
+            recordDeclared(parsedModel, {
+              context: declaredFields.context ? "config" : restoredWindow ? inherited(restoredWindow.context.origin) : model.limit?.context === undefined && !existingModel ? "fallback" : "unknown",
+              input: declaredFields.input ? "config" : restoredWindow ? inherited(restoredWindow.input.origin) : "unknown",
+            })
             // mimo-auto is a free-tier routing alias absent from models.dev; it routes to a
             // vision-capable model, so image input is supported.
             if (providerID === "mimo" && modelID === "mimo-auto") {
@@ -1921,12 +2390,16 @@ const layer: Layer.Layer<
           if (!stored) continue
           if (!plugin.auth.loader) continue
 
+          const authDatabaseOrigins = snapshotOrigins(database[providerID])
+          const authProviderOrigins = snapshotOrigins(providers[providerID])
           const options = yield* Effect.promise(() =>
             plugin.auth!.loader!(
               () => bridge.promise(auth.get(providerID).pipe(Effect.orDie)) as any,
               database[plugin.auth!.provider],
             ),
           )
+          restoreOrigins(database[providerID], authDatabaseOrigins)
+          restoreOrigins(providers[providerID], authProviderOrigins)
           const opts = options ?? {}
           const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
           mergeProvider(providerID, patch)
@@ -1940,7 +2413,11 @@ const layer: Layer.Layer<
             log.error("Provider does not exist in model list " + providerID)
             continue
           }
+          const customDatabaseOrigins = snapshotOrigins(data)
+          const customProviderOrigins = snapshotOrigins(providers[providerID])
           const result = yield* fn(data)
+          restoreOrigins(data, customDatabaseOrigins)
+          restoreOrigins(providers[providerID], customProviderOrigins)
           if (result && (result.autoload || providers[providerID])) {
             if (result.getModel) modelLoaders[providerID] = result.getModel
             if (result.vars) varsLoaders[providerID] = result.vars
@@ -1989,17 +2466,15 @@ const layer: Layer.Layer<
           if (!provider) continue
           const pluginAuth = yield* auth.get(providerID).pipe(Effect.orDie)
 
+          const pluginOrigins = snapshotOrigins(provider)
           provider.models = yield* Effect.promise(async () => {
             const next = await models(provider as any, { auth: pluginAuth })
             return Object.fromEntries(
-              Object.entries(next).map(([id, model]) => [
-                id,
-                {
-                  ...model,
-                  id: ModelID.make(id),
-                  providerID,
-                },
-              ]),
+              Object.entries(next).map(([id, model]) => {
+                const resolved = { ...model, id: ModelID.make(id), providerID }
+                restoreDeclared(pluginOrigins.get(id), resolved)
+                return [id, resolved]
+              }),
             )
           })
         }
@@ -2056,13 +2531,11 @@ const layer: Layer.Layer<
           log.info("found", { providerID })
         }
 
-        return {
-          models: languages,
-          providers,
-          sdk,
-          modelLoaders,
-          varsLoaders,
-        }
+        const result = {models:languages, providers, sdk, modelLoaders, varsLoaders}
+        const lifetime = {alive:true}
+        visionProviderLifetimes.set(result, lifetime)
+        yield* Effect.addFinalizer(() => Effect.sync(() => { lifetime.alive = false }))
+        return result
       }),
     )
 
@@ -2073,7 +2546,8 @@ const layer: Layer.Layer<
       s: State,
       envs: Record<string, string | undefined>,
       account?: AccountSelection.Scope,
-      operation?: { kind: "web.search"; count: number },
+      operation?: { kind: "web.search"; count: number; answer?: boolean },
+      requestContext?: ManagedRequestContext,
     ) {
       try {
         using _ = log.time("getSDK", {
@@ -2126,9 +2600,9 @@ const layer: Layer.Layer<
           options["includeUsage"] = true
         }
 
+        const baseURLChoice = resolveManagedBaseURL(options["baseURL"], model.api.url)
         const baseURL = iife(() => {
-          let url =
-            typeof options["baseURL"] === "string" && options["baseURL"] !== "" ? options["baseURL"] : model.api.url
+          let url = baseURLChoice.baseURL
           if (!url) return
 
           const loader = s.varsLoaders[model.providerID]
@@ -2158,13 +2632,23 @@ const layer: Layer.Layer<
             ...options["headers"],
             ...model.headers,
           }
-        if (metadata) options = applyManagedAdapterOptions(metadata, account?.credential, options, account, operation)
+        if (metadata) options = applyManagedAdapterOptions(metadata, account?.credential, options, account, operation, baseURLChoice.catalogFallback, requestContext)
 
         const key = sdkCacheKey(model, options, account)
         const existing = managedProviderMode ? undefined : s.sdk.get(key)
         if (existing) return existing
 
         const customFetch = options["fetch"]
+        // This binds the app-captured default function, not an attestation of pristine runtime intrinsics.
+        const appDefaultFetch = globalThis.fetch
+        const configuredHeaders = options["headers"]
+        const sameRequestDefault = managedProviderMode && model.api.npm === "@ai-sdk/openai-compatible" && compatiblePackage.version === "2.0.41" &&
+          metadata?.adapterID === "openai-chat" && metadata.familyID === "openai-compatible" && metadata.billingLane === "local" &&
+          account?.credentialRequired === false && customFetch === undefined &&
+          options["transformRequestBody"] === undefined && options["queryParams"] === undefined &&
+          options["apiKey"] === undefined && !account?.credential &&
+          (configuredHeaders === undefined || (configuredHeaders !== null && typeof configuredHeaders === 'object' &&
+            !Array.isArray(configuredHeaders) && Object.getPrototypeOf(configuredHeaders) === Object.prototype && Object.keys(configuredHeaders).length === 0))
         const userChunkTimeout = options["chunkTimeout"]
         const headerTimeout = options["headerTimeout"]
         const chunkTimeout =
@@ -2175,7 +2659,8 @@ const layer: Layer.Layer<
         delete options["headerTimeout"]
 
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
-          const fetchFn = managedProviderMode ? captureFetch(customFetch ?? fetch, account) : customFetch ?? fetch
+          const chosenFetch = sameRequestDefault ? appDefaultFetch : customFetch ?? fetch
+          const fetchFn = managedProviderMode ? captureFetch(chosenFetch, account) : chosenFetch
           const opts = init ?? {}
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
@@ -2212,6 +2697,26 @@ const layer: Layer.Layer<
             name: model.providerID,
             ...options,
           })
+          if (managedProviderMode && model.api.npm === "@ai-sdk/openai" && openaiPackage.version === "3.0.53"
+              && metadata?.adapterID === "openai-responses" && metadata.familyID === "openai" && metadata.billingLane === "subscription")
+            notePinnedResponsesSDK(loaded as object)
+          if (managedProviderMode && customFetch === undefined && model.api.npm === "@ai-sdk/openai" && openaiPackage.version === "3.0.53"
+              && metadata?.adapterID === "openai-chat" && metadata.familyID === "openai" && metadata.billingLane === "metered_api")
+            notePinnedChatSDK(loaded as object)
+          if (managedProviderMode && customFetch === undefined && options["transformRequestBody"] === undefined && options["queryParams"] === undefined
+              && model.api.npm === "@ai-sdk/openai-compatible" && compatiblePackage.version === "2.0.41"
+              && metadata?.adapterID === "openai-chat" && metadata.familyID === "openai-compatible" && metadata.billingLane === "local"
+              && account?.credentialRequired === false && typeof baseURL === "string") {
+            try {
+              const endpoint = new URL(baseURL.replace(/\/+$/, "") + "/chat/completions")
+              if ((endpoint.protocol === "http:" || endpoint.protocol === "https:") && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash)
+                { notePinnedCompatibleChatSDK(loaded as object, endpoint.toString())
+                  if (sameRequestDefault) noteSameRequestSDK(loaded as object, endpoint.toString(), appDefaultFetch) }
+            } catch { /* Unclassified routes cannot authorize context delivery. */ }
+          }
+          if (managedProviderMode && customFetch === undefined && model.api.npm === "@ai-sdk/anthropic" && anthropicPackage.version === "3.0.82"
+              && metadata?.adapterID === "anthropic-messages" && metadata.familyID === "anthropic" && metadata.billingLane === "metered_api")
+            notePinnedAnthropicSDK(loaded as object)
           if (!managedProviderMode) s.sdk.set(key, loaded)
           return loaded as SDK
         }
@@ -2266,10 +2771,17 @@ const layer: Layer.Layer<
         const matches = fuzzysort.go(modelID, available, { limit: 3, threshold: -10000 })
         throw new ModelNotFoundError({ providerID, modelID, suggestions: matches.map((m) => m.target) })
       }
+      // Recheck evidence against this exact selected object; no serialized
+      // model field or plugin-provided marker is accepted as provenance.
+      readWindowOrigin(info)
       return info
     })
 
-    const getLanguage = Effect.fn("Provider.getLanguage")(function* (model: Model, account?: AccountSelection.Scope) {
+    const getLanguage = Effect.fn("Provider.getLanguage")(function* (
+      model: Model,
+      account?: AccountSelection.Scope,
+      requestContext?: ManagedRequestContext,
+    ) {
       if (isFreeApiSunset() && isFreeApiModel({ providerID: model.providerID, modelID: model.id })) {
         throw new Error("MiMo free API service has ended. Sign in or configure a third-party API.")
       }
@@ -2280,7 +2792,7 @@ const layer: Layer.Layer<
 
       return yield* Effect.promise(async () => {
         const provider = s.providers[model.providerID]
-        const sdk = await resolveSDK(model, s, envs, account)
+        const sdk = await resolveSDK(model, s, envs, account, undefined, requestContext)
 
         try {
           const language = managedProviderMode
@@ -2291,6 +2803,11 @@ const layer: Layer.Layer<
                   ...model.options,
                 })
               : sdk.languageModel(model.api.id)
+          if (managedProviderMode) notePinnedResponsesModel(sdk as object, language as object)
+          if (managedProviderMode) notePinnedChatModel(sdk as object, language as object)
+          if (managedProviderMode) notePinnedCompatibleChatModel(sdk as object, language as object)
+          if (managedProviderMode) noteSameRequestModel(sdk as object, language as object, model.api.id)
+          if (managedProviderMode) notePinnedAnthropicModel(sdk as object, language as object)
           if (!managedProviderMode) s.models.set(key, language)
           return language
         } catch (e) {
@@ -2311,13 +2828,14 @@ const layer: Layer.Layer<
       model: Model,
       account: AccountSelection.Scope,
       count: number,
+      answer = false,
     ) {
       if (!Number.isSafeInteger(count) || count < 1 || count > 50) throw new Error("Managed search count is invalid")
       const s = yield* InstanceState.get(state)
       const envs = managedProviderMode ? {} : yield* env.all()
       return yield* Effect.promise(async () => {
         const provider = s.providers[model.providerID]
-        const sdk = await resolveSDK(model, s, envs, account, { kind: "web.search", count })
+        const sdk = await resolveSDK(model, s, envs, account, { kind: "web.search", count, answer })
         return selectManagedLanguageModel(sdk as BundledSDK, managedAdapterMetadata(provider, model), model.api.id)
       })
     })
@@ -2452,6 +2970,37 @@ const layer: Layer.Layer<
       return sortVisionModels(vision)[0]
     })
 
+    const getVisionModelWithProvenance = Effect.fn("Provider.getVisionModelWithProvenance")(function* (caller?:Model) {
+      const selection = config.visionSelectionWithProvenance ? yield* config.visionSelectionWithProvenance() : undefined
+      const callerInput = caller ? JSON.stringify([caller.providerID,caller.id,caller.capabilities.input.image]) : "null"
+      // The normal managed no-selection branch does not initialize Provider state.
+      const needsCatalog = !ManagedProvider.enabled() || !!selection?.vision_model || !!selection?.vision_group
+      const snapshot = needsCatalog ? yield* InstanceState.get(state) : undefined
+      const lifetime = snapshot && visionProviderLifetimes.get(snapshot)
+      const catalog = () => {
+        if (!snapshot) return ""
+        const providers = Object.entries(snapshot.providers)
+        if (providers.length > 128) return
+        let count=0
+        const rows = providers.sort(([a],[b])=>a.localeCompare(b)).map(([id,p]) => {
+          const models=Object.entries(p.models)
+          count += models.length
+          if (id.length>256 || count>2048 || models.some(([name,m])=>name.length>256 || String(m.providerID).length>256 || String(m.id).length>256)) return
+          return [id,models.sort(([a],[b])=>a.localeCompare(b)).map(([name,m])=>[name,m.providerID,m.id,m.capabilities.input.image])]
+        })
+        if (rows.some(row=>!row)) return
+        const value=JSON.stringify(rows)
+        return Buffer.byteLength(value,"utf8")<=131072 ? value : undefined
+      }
+      const before = catalog()
+      const model = yield* getVisionModel(caller)
+      const current = () => {
+        try { return !!selection?.current() && (!needsCatalog || !!lifetime?.alive) && before !== undefined && catalog() === before &&
+          (caller ? JSON.stringify([caller.providerID,caller.id,caller.capabilities.input.image]) : "null") === callerInput } catch { return false }
+      }
+      return {model,current}
+    })
+
     const defaultModel = Effect.fn("Provider.defaultModel")(function* () {
       const cfg = yield* config.get()
       const s = yield* InstanceState.get(state)
@@ -2511,6 +3060,7 @@ const layer: Layer.Layer<
       closest,
       getSmallModel,
       getVisionModel,
+      getVisionModelWithProvenance,
       defaultModel,
       resolveModelRef,
     })

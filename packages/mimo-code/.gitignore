@@ -35,7 +35,7 @@ tsconfig.tsbuildinfo
 # Local agent harness state
 .claude/
 *.pid
-.mimo-worktrees
+.openclank-worktrees
 .mimocde
 
 # experiment run artifacts (regenerated per run, not source)
@@ -43,14 +43,24 @@ experiment/*.log
 experiment/last-outcome.json
 /experiment
 
-/mimoapi/
-/packages/opencode/src/ext
-
 # temp
 temp/
 __pycache__
 Thumbs.db
 .playwright-cli/
-.mimocode/wiki
-.mimocode/wikis
-.mimocode/cache
+.openclank/wiki
+.openclank/wikis
+.openclank/cache
+
+# SDK codegen scratch: script/build.ts writes it, consumes it, then removes it.
+# A failed generation leaves it behind, where it is easy to commit by accident.
+/packages/sdk/openapi.json
+/packages/sdk/openapi-ts-error-*.log
+
+# others
+codex/
+# The bundled Codex skill is shipped source, not a local Codex workspace.
+!packages/cli/src/skill/builtin/.bundle/codex/
+!packages/cli/src/skill/builtin/.bundle/codex/**
+# local progress notes for agent worktrees
+/.scratch/

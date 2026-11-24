@@ -16,9 +16,10 @@ import hashlib
 import os
 import posixpath
 import re
+import tempfile
 import threading
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from src.openclank.files_facade import FilesFacadeError, ProviderContext, ProviderResource
 from src.openclank.history_capture import begin_file_capture, complete_file_capture
@@ -47,6 +48,27 @@ def _path_within(root: str, candidate: str) -> bool:
         return os.path.commonpath([os.path.realpath(root), os.path.realpath(candidate)]) == os.path.realpath(root)
     except ValueError:
         return False
+
+
+def _assert_workspace_media_path(root: str, candidate: str) -> None:
+    """Fail closed when an authorized workspace media path crosses symlinks."""
+    canonical_root = os.path.realpath(root)
+    absolute = os.path.abspath(candidate)
+    try:
+        relative = os.path.relpath(absolute, root)
+        if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+            raise FilesFacadeError("media path is outside the authorized workspace", code="invalid_destination")
+        cursor = os.path.abspath(root)
+        for part in relative.split(os.sep):
+            if part in {"", "."}:
+                continue
+            cursor = os.path.join(cursor, part)
+            if os.path.islink(cursor):
+                raise FilesFacadeError("media path contains a symlink", code="invalid_destination")
+        if not _path_within(canonical_root, absolute):
+            raise FilesFacadeError("media path is outside the authorized workspace", code="invalid_destination")
+    except ValueError as exc:
+        raise FilesFacadeError("media path is outside the authorized workspace", code="invalid_destination") from exc
 
 
 def _safe_receipt_path(root: str, value: Any, *, must_exist: bool = True) -> str | None:
@@ -117,7 +139,7 @@ class HostDocumentAttachmentTarget:
             phase=str(receipt.get("phase") or "complete"),
         )
 
-    def _registry_roots(self, owner_subject_id: str) -> list[WorkspaceRootRecord]:
+    def _registry_roots(self, owner_subject_id: str, *, require_complete: bool = False) -> list[WorkspaceRootRecord]:
         # A failed registry read is not an empty registry: classification must
         # see every root or it would absorb a neighbor.  Fail closed.
         if self._workspace_roots is not None:
@@ -127,6 +149,8 @@ class HostDocumentAttachmentTarget:
                 raise MediaOwnershipError(
                     "workspace registry is unavailable", code="provider_unavailable"
                 ) from exc
+            if require_complete and (not isinstance(rows, (list, tuple)) or any(not isinstance(row, Mapping) or not row.get("canonical_root", row.get("path")) for row in rows)):
+                raise MediaOwnershipError("workspace registry is incomplete", code="provider_unavailable")
             return [
                 WorkspaceRootRecord(
                     str(row.get("workspace_id") or row.get("id") or ""),
@@ -139,6 +163,8 @@ class HostDocumentAttachmentTarget:
             ]
         getter = getattr(self.operation_store, "list_workspaces", None)
         if not callable(getter):
+            if require_complete:
+                raise MediaOwnershipError("workspace registry is unavailable", code="provider_unavailable")
             return []
         location_getter = getattr(self.operation_store, "get_location", None)
         records: list[WorkspaceRootRecord] = []
@@ -155,13 +181,19 @@ class HostDocumentAttachmentTarget:
             location_id = getattr(workspace, "location_id", None)
             relative = str(getattr(workspace, "relative_folder", "") or "")
             if not location_id or not callable(location_getter):
+                if require_complete:
+                    raise MediaOwnershipError("workspace registry is incomplete", code="provider_unavailable")
                 continue
             try:
                 location = location_getter(str(location_id))
             except Exception:
+                if require_complete:
+                    raise MediaOwnershipError("workspace registry is incomplete", code="provider_unavailable")
                 continue
             root = os.path.normpath(str(getattr(location, "canonical_path", "") or ""))
             if not root:
+                if require_complete:
+                    raise MediaOwnershipError("workspace registry is incomplete", code="provider_unavailable")
                 continue
             if relative:
                 root = os.path.normpath(os.path.join(root, *relative.split("/")))
@@ -175,6 +207,12 @@ class HostDocumentAttachmentTarget:
             )
         return records
 
+    def _selected_roots(self, owner_subject_id: str) -> list[WorkspaceRootRecord]:
+        try:
+            return self._registry_roots(owner_subject_id, require_complete=True)
+        except MediaOwnershipError as exc:
+            raise FilesFacadeError("workspace registry is unavailable", code="provider_unavailable") from exc
+
     # -- typed attachment seam --------------------------------------------
 
     async def operation_status(self, context: ProviderContext, *, operation_id: str) -> Mapping[str, Any] | None:
@@ -186,6 +224,10 @@ class HostDocumentAttachmentTarget:
             or planned.get("account_id") != context.owner_subject_id
             or int(planned.get("generation", -1)) != int(context.policy_generation)
         ):
+            return None
+        # A pending name/hash does not prove that this operation published it.
+        # Legacy pending rows have no owned publication witness either.
+        if planned.get("phase") != "complete":
             return None
         asset_path = str(planned.get("asset_path") or "")
         if not asset_path or not os.path.isfile(asset_path):
@@ -220,6 +262,65 @@ class HostDocumentAttachmentTarget:
         source_origin_id: str | None = None,
         source_entry: ProviderResource | None = None,
         target_origin_id: str | None = None,
+        **extra: Any,
+    ) -> Mapping[str, Any]:
+        target_ref = str(target.get("resource_ref") or "").strip()
+        resolved = str(target_origin_id or "").strip() or _origin_from_ref(target_ref)
+        entry = await self.provider.stat(context, origin_id=resolved)
+        if entry.origin_id != resolved or "write" not in entry.capabilities:
+            raise FilesFacadeError("attachment target is not writable", code="resource_unavailable")
+        document = _document_path(entry, resolved)
+        roots = self._selected_roots(context.owner_subject_id) if extra.get("selected_root_current") is not None else self._registry_roots(context.owner_subject_id)
+        origin = classify_document_origin(
+            absolute_document_path=document,
+            registered_roots=roots,
+            owner_subject_id=context.owner_subject_id,
+        )
+        root_current = extra.get("selected_root_current")
+        if root_current is not None:
+            root_provider, root_ref, root_entry = await root_current()
+            if root_provider is not self.provider or origin.origin != "loose":
+                raise FilesFacadeError("selected root is unavailable", code="invalid_destination")
+            root = _document_path(root_entry, root_ref.origin_id)
+            if (os.path.realpath(root) != os.path.abspath(root) or not _path_within(root, document)
+                    or any(_path_within(record.canonical_root, document) for record in roots)):
+                raise FilesFacadeError("selected root does not own this document", code="invalid_destination")
+            _assert_workspace_media_path(root, document)
+            from src.openclank.media_ownership import DocumentOrigin
+            origin = DocumentOrigin("selected_root", root, os.path.relpath(document, root).replace(os.sep, "/"))
+        version = 2 if origin.origin in {"workspace", "selected_root"} else 1
+        layout = layout_for_absolute(absolute_document_path=document, canonical_root=origin.canonical_root,
+            origin=origin.origin, owner_subject_id=context.owner_subject_id, workspace_id=origin.workspace_id,
+            layout_version=version)
+        if root_current is not None and any(_path_within(record.canonical_root, layout.absolute_media_dir()) or _path_within(layout.absolute_media_dir(), record.canonical_root) for record in roots):
+            raise FilesFacadeError("selected media path overlaps a registered workspace", code="invalid_destination")
+        runner = getattr(self.provider, "_run_claimed_host_mutation", None)
+        if not callable(runner):
+            raise FilesFacadeError("Host mutation authority is unavailable", code="provider_unavailable")
+        return await runner(context, [document, layout.absolute_media_dir()],
+            lambda begin, _no_effect: self._prepare_attachment_claimed(context, source=source, target=target, mode=mode,
+                operation_id=operation_id, source_provider=source_provider, source_origin_id=source_origin_id,
+                source_entry=source_entry, target_origin_id=target_origin_id, _begin_mutation=begin,
+                _claimed_document=document, _claimed_media_dir=layout.absolute_media_dir(), _selected_origin=origin if root_current is not None else None, **extra),
+            delayed_start=True)
+
+    async def _prepare_attachment_claimed(
+        self,
+        context: ProviderContext,
+        *,
+        source: Mapping[str, Any],
+        target: Mapping[str, Any],
+        mode: str,
+        operation_id: str,
+        source_provider: Any | None = None,
+        source_origin_id: str | None = None,
+        source_entry: ProviderResource | None = None,
+        target_origin_id: str | None = None,
+        _begin_mutation: Callable[[], None],
+        _claimed_document: str,
+        _claimed_media_dir: str,
+        _selected_origin: Any = None,
+        selected_root_current: Any = None,
         **_: Any,
     ) -> Mapping[str, Any]:
         normalized_mode = str(mode or "").strip().lower()
@@ -243,6 +344,8 @@ class HostDocumentAttachmentTarget:
         if source_current.origin_id != source_origin_id:
             raise FilesFacadeError("attachment source is unavailable", code="resource_unavailable")
         expected_source_revision = source.get("expected_revision")
+        if _selected_origin is not None and (not expected_source_revision or not source_current.revision):
+            raise FilesFacadeError("selected root requires a current source revision", code="resource_changed")
         if expected_source_revision is not None and dict(source_current.revision or {}) != dict(expected_source_revision):
             raise FilesFacadeError("attachment source changed during materialization", code="resource_changed")
 
@@ -251,12 +354,12 @@ class HostDocumentAttachmentTarget:
             "workspace_id": str(context.workspace_id or "default"),
             "operation_id": str(operation_id),
             "generation": int(context.policy_generation),
-            "source": {
+            "source": ({key:source[key] for key in ('kind','name','mime','sha256','size','expected_revision')} if source.get('kind') == 'client_upload' else {
                 key: source.get(key)
                 for key in ("resource_ref", "import_receipt_id", "item_id", "expected_revision")
                 if source.get(key) is not None
-            },
-            "target": {"kind": "host_document", "resource_ref": target_ref, "expected_revision": target.get("expected_revision")},
+            }),
+            "target": {"kind": "host_document", "resource_ref": target_ref, "expected_revision": target.get("expected_revision"), **({"root_ref":target.get("root_ref"), "expected_root_revision":target.get("expected_root_revision")} if target.get("root_ref") is not None else {})},
             "mode": normalized_mode,
         })
         previous = self._load(context, str(operation_id))
@@ -283,23 +386,63 @@ class HostDocumentAttachmentTarget:
             registered_roots=self._registry_roots(context.owner_subject_id),
             owner_subject_id=context.owner_subject_id,
         )
+        if _selected_origin is not None:
+            root_provider, root_ref, root_entry = await selected_root_current()
+            root = _document_path(root_entry, root_ref.origin_id)
+            if (root_provider is not self.provider or origin.origin != "loose" or os.path.abspath(root) != os.path.normpath(_selected_origin.canonical_root)
+                    or os.path.realpath(root) != os.path.abspath(root) or not _path_within(root, document_path)
+                    or any(_path_within(record.canonical_root, document_path) for record in self._selected_roots(context.owner_subject_id))):
+                raise FilesFacadeError("selected root or document changed", code="resource_changed")
+            _assert_workspace_media_path(root, document_path)
+            origin = _selected_origin
+        # V2 is defined against an established project/workspace root. Loose
+        # documents retain their current containing-folder policy until the
+        # caller supplies an authorized destination root.
+        layout_version = 2 if origin.origin in {"workspace", "selected_root"} else 1
         layout = layout_for_absolute(
             absolute_document_path=document_path,
             canonical_root=origin.canonical_root,
             origin=origin.origin,
             owner_subject_id=context.owner_subject_id,
             workspace_id=origin.workspace_id,
+            layout_version=layout_version,
         )
         media_dir_abs = layout.absolute_media_dir()
+        if _selected_origin is not None and any(_path_within(record.canonical_root, media_dir_abs) or _path_within(media_dir_abs, record.canonical_root) for record in self._selected_roots(context.owner_subject_id)):
+            raise FilesFacadeError("selected media path overlaps a registered workspace", code="invalid_destination")
+        generation = getattr(self.operation_store, "generation", None)
+        if (os.path.normpath(document_path) != os.path.normpath(_claimed_document)
+                or os.path.normpath(media_dir_abs) != os.path.normpath(_claimed_media_dir)
+                or not callable(generation) or int(generation()) != int(context.policy_generation)):
+            raise FilesFacadeError("attachment authority changed", code="policy_generation_changed")
+        if layout_version == 2:
+            _assert_workspace_media_path(origin.canonical_root, media_dir_abs)
+        fresh_source = await source_provider.stat(context, origin_id=source_origin_id)
+        if fresh_source.origin_id != source_origin_id or dict(fresh_source.revision or {}) != dict(source_current.revision or {}) or not {"read", "download", "open", "copy"}.intersection(fresh_source.capabilities):
+            raise FilesFacadeError("attachment source changed", code="resource_changed")
+        fresh_target = await self.provider.stat(context, origin_id=resolved_target_origin)
+        if fresh_target.origin_id != resolved_target_origin or dict(fresh_target.revision or {}) != dict(target_entry.revision or {}) or "write" not in fresh_target.capabilities:
+            raise FilesFacadeError("attachment target changed", code="resource_changed")
+        if selected_root_current is not None:
+            await selected_root_current()
+        if int(generation()) != int(context.policy_generation):
+            raise FilesFacadeError("attachment authority changed", code="policy_generation_changed")
+        _begin_mutation()
         os.makedirs(media_dir_abs, exist_ok=True)
+        if layout_version == 2:
+            _assert_workspace_media_path(origin.canonical_root, media_dir_abs)
         existing = [entry for entry in os.listdir(media_dir_abs) if os.path.isfile(os.path.join(media_dir_abs, entry))]
         desired = _download_name(filename or source_current.name)
         asset_name = allocate_media_name(desired, existing)
         asset_path = os.path.join(media_dir_abs, asset_name)
+        if layout_version == 2:
+            _assert_workspace_media_path(origin.canonical_root, asset_path)
 
         source_revision = source_current.revision or {"kind": "contentDigest", "value": digest_hex}
         target_revision = target_entry.revision or {"kind": "hostFingerprint", "value": ""}
-        relative_link = f"{layout.media_dir}/{asset_name}"
+        relative_link = os.path.relpath(
+            asset_path, os.path.dirname(document_path) or origin.canonical_root
+        ).replace(os.sep, "/")
 
         provenance = MediaProvenance(
             canonical_root=origin.canonical_root,
@@ -311,6 +454,7 @@ class HostDocumentAttachmentTarget:
             asset_name=asset_name,
             asset_digest=digest,
             references=(target_ref,),
+            layout_version=layout.layout_version,
         )
         planned = {
             "operation_id": str(operation_id),
@@ -320,7 +464,7 @@ class HostDocumentAttachmentTarget:
             "workspace_id": str(context.workspace_id or "default"),
             "preparation_receipt_id": f"prep-{digest_hex[:32]}",
             "source_revision": dict(source_revision),
-            "target_identity": {"resource_ref": target_ref, "kind": "host_document"},
+            "target_identity": {"resource_ref": target_ref, "kind": "host_document", **({"root_ref":target["root_ref"], "root_revision":dict(target["expected_root_revision"])} if target.get("root_ref") is not None else {})},
             "target_revision": dict(target_revision),
             "insertion": {
                 "format": "markdown",
@@ -338,17 +482,22 @@ class HostDocumentAttachmentTarget:
             "request_digest": request_digest,
             "asset_size": len(data),
             "asset_path": asset_path,
+            "layout_version": layout.layout_version,
             "provenance": provenance.as_receipt(),
-            "source_identity": {
+            "source_identity": ({key:source[key] for key in ('kind','name','mime','sha256','size')} if source.get('kind') == 'client_upload' else {
                 "resource_ref": str(source.get("resource_ref") or ""),
                 "provider": str(getattr(source_provider, "name", "")),
-            },
+            }),
             "mode": normalized_mode,
         }
         self._save(context, str(operation_id), request_digest, planned)
         # Asset bytes are durable before the receipt is complete, so a link is
         # never reported ahead of the asset's durability.
-        _write_atomic(asset_path, data)
+        if layout_version == 2:
+            _assert_workspace_media_path(origin.canonical_root, asset_path)
+        def staged(stage_path: str, stat: os.stat_result) -> None:
+            self._save(context, str(operation_id), request_digest, {**planned, "stage_path":stage_path, "stage_device":stat.st_dev, "stage_inode":stat.st_ino})
+        stage_path, stage_identity = _publish_attachment(asset_path, data, staged=staged)
         receipt = {
             **planned,
             "phase": "complete",
@@ -359,7 +508,16 @@ class HostDocumentAttachmentTarget:
                 "durable": True,
             },
         }
-        self._save(context, str(operation_id), request_digest, receipt)
+        try:
+            self._save(context, str(operation_id), request_digest, receipt)
+        except Exception as exc:
+            raise FilesFacadeError('attachment publication requires reconciliation', code='operation_pending') from exc
+        try:
+            current_stage = os.lstat(stage_path)
+            if (current_stage.st_dev, current_stage.st_ino) == stage_identity:
+                os.unlink(stage_path)
+        except OSError:
+            pass
         return _public_receipt(receipt)
 
 
@@ -433,7 +591,49 @@ def _write_atomic(path: str, data: bytes) -> None:
     os.replace(temp, path)
 
 
-_INTERNAL_RECEIPT_KEYS = frozenset({"asset_path", "digest_hex", "phase"})
+def _publish_attachment(path: str, data: bytes, *, staged: Callable[[str, os.stat_result], None]) -> tuple[str, tuple[int, int]]:
+    directory = os.path.dirname(path) or "."
+    if not hasattr(os, 'O_DIRECTORY'):
+        raise FilesFacadeError('exclusive publication is unavailable', code='provider_unavailable')
+    fd, temp = tempfile.mkstemp(prefix='.openclank-attachment-', dir=directory)
+    entered = False
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            fd = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            info = os.fstat(handle.fileno())
+        staged(temp, info)
+        try:
+            os.link(temp, path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise FilesFacadeError('attachment destination already exists', code='destination_conflict') from exc
+        entered = True
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except FilesFacadeError:
+        raise
+    except Exception as exc:
+        if entered:
+            raise FilesFacadeError('attachment publication requires reconciliation', code='operation_pending') from exc
+        raise FilesFacadeError('exclusive publication is unavailable', code='provider_unavailable') from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if not entered:
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
+    # Keep the owned stage through the terminal receipt; it is not an asset.
+    return temp, (info.st_dev, info.st_ino)
+
+
+_INTERNAL_RECEIPT_KEYS = frozenset({"asset_path", "digest_hex", "phase", "stage_path", "stage_device", "stage_inode"})
 
 
 def _public_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -449,17 +649,20 @@ def _public_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
 def _document_path(entry: Any, target_origin_id: str | None = None) -> str:
     """Absolute filesystem path of a Host resource entry.
 
-    Host origin ids are ``host:<absolute path>``; a provider may also publish an
-    explicit path.  Synthetic Host ids are never presented as Copal ids.
+    Decode the provider's opaque Host origin; legacy absolute Host origins
+    remain readable. The caller must already have authorized the resource.
     """
     for candidate in (target_origin_id, getattr(entry, "origin_id", None)):
+        if isinstance(candidate, str) and candidate.startswith("host:v1:"):
+            from src.openclank.files_host_provider import _path
+            return os.path.normpath(_path(candidate))
         if isinstance(candidate, str) and candidate.startswith("host:"):
             path = candidate[len("host:") :]
-            if path and os.path.basename(path):
+            if path and os.path.isabs(path) and os.path.basename(path):
                 return os.path.normpath(path)
     for attribute in ("path", "absolute_path"):
         value = getattr(entry, attribute, None)
-        if isinstance(value, str) and value and os.path.basename(value):
+        if isinstance(value, str) and value and os.path.isabs(value) and os.path.basename(value):
             return os.path.normpath(value)
     raise FilesFacadeError("attachment target path is unavailable", code="resource_unavailable")
 
@@ -623,7 +826,7 @@ def _adopt_loose_media_for_workspace(
                 stored_adopted = list(existing_receipt.get("adopted") or [])
                 stored_conflicts = list(existing_receipt.get("conflicts") or [])
                 stored_rejected = list(existing_receipt.get("rejected") or [])
-                if bool(existing_receipt.get("history_expected")) and existing_receipt.get("history_state") != "complete":
+                if bool(existing_receipt.get("history_expected")) and existing_receipt.get("history_state") not in ("complete", "recovery_settled"):
                     history_conflict = {"code": "history_capture_failed", "reason": "history completion could not be resumed"}
                     recovery_conflicts = stored_conflicts if history_conflict in stored_conflicts else stored_conflicts + [history_conflict]
                     recovery = {**stored_resource, "status": "conflict", "phase": "recovery_required", "durable": False, "recovery": "history_capture_failed"}
@@ -1082,6 +1285,7 @@ def _adopt_loose_media_for_workspace(
                 handle = begin_file_capture(
                     document_abs,
                     operation="workspace-media-adoption",
+                    required_recovery=True,
                     context=history_context,
                     action_id=f"adopt-{op_id}-{hashlib.sha256(document_abs.encode()).hexdigest()[:16]}",
                 )
@@ -1252,7 +1456,7 @@ def _adopt_loose_media_for_workspace(
                     "resource_receipt": {**receipt, "status": "pending", "phase": "source_removal_pending", "durable": False},
                     "provenance_records": [
                         {
-                            **candidate.provenance.as_receipt(),
+                            **candidate.provenance.as_receipt(), **({"media_dir": posixpath.dirname(candidate.destination_rel)} if candidate.provenance.media_dir is not None else {}),
                             "canonical_root": os.path.realpath(root),
                             "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"),
                             "origin": "workspace",
@@ -1298,14 +1502,19 @@ def _adopt_loose_media_for_workspace(
                 history_results.append(complete_file_capture(handle, document_abs, committed=True))
             else:
                 history_results.append(handle.abort())
-    history_failure = any(str(result.get("history_status") or "") != "complete" for result in history_results)
+    recovery_settled = any(result.get("capture_phase") == "recovery_settled" for result in history_results)
+    history_failure = any(
+        result.get("history_status") != "complete"
+        and (result.get("history_status"), result.get("capture_phase")) != ("skipped", "recovery_settled")
+        for result in history_results
+    )
     if not removal_failures and not history_failure and history_handles and callable(recorder):
         recorder(
             owner_subject_id=str(owner_subject_id),
             operation_id=f"__host_media_adopt__{op_id}",
             request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
             generation=0,
-            receipt={"operation_id": op_id, "workspace_id": str(workspace_id), "workspace_root": os.path.realpath(root), "phase": "source_removal_pending", "history_state": "complete", "history_expected": True, "provenance_expected_count": len(pending), "adopted": adopted, "conflicts": conflicts, "rejected": list(plan.rejected), "resource_receipt": receipt, "provenance_records": [{**candidate.provenance.as_receipt(), "canonical_root": os.path.realpath(root), "origin": "workspace", "owner_subject_id": str(owner_subject_id), "workspace_id": str(workspace_id), "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"), "references": [str(item[0]) for item in edits]} for candidate, edits, _ in pending], "destinations": list(published_manifest), "assets": list(staged_assets), "documents": list(staged_documents), "preimages": preimages},
+            receipt={"operation_id": op_id, "workspace_id": str(workspace_id), "workspace_root": os.path.realpath(root), "phase": "source_removal_pending", "lease_owner": lease_owner, "history_state": "recovery_settled" if recovery_settled else "complete", "history_expected": True, "provenance_expected_count": len(pending), "adopted": adopted, "conflicts": conflicts, "rejected": list(plan.rejected), "resource_receipt": receipt, "provenance_records": [{**candidate.provenance.as_receipt(), **({"media_dir": posixpath.dirname(candidate.destination_rel)} if candidate.provenance.media_dir is not None else {}), "canonical_root": os.path.realpath(root), "origin": "workspace", "owner_subject_id": str(owner_subject_id), "workspace_id": str(workspace_id), "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"), "references": [str(item[0]) for item in edits]} for candidate, edits, _ in pending], "destinations": list(published_manifest), "assets": list(staged_assets), "documents": list(staged_documents), "preimages": preimages},
             phase="source_removal_pending",
         )
         if callable(phase_hook):
@@ -1318,7 +1527,7 @@ def _adopt_loose_media_for_workspace(
             request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
             records=[
                 {
-                    **candidate.provenance.as_receipt(),
+                    **candidate.provenance.as_receipt(), **({"media_dir": posixpath.dirname(candidate.destination_rel)} if candidate.provenance.media_dir is not None else {}),
                     "canonical_root": os.path.realpath(root),
                     "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"),
                     "origin": "workspace",
@@ -1355,7 +1564,7 @@ def _adopt_loose_media_for_workspace(
             request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
             records=[
                 {
-                    **candidate.provenance.as_receipt(),
+                    **candidate.provenance.as_receipt(), **({"media_dir": posixpath.dirname(candidate.destination_rel)} if candidate.provenance.media_dir is not None else {}),
                     "canonical_root": os.path.realpath(root),
                     "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"),
                     "origin": "workspace",
@@ -1369,8 +1578,8 @@ def _adopt_loose_media_for_workspace(
     if history_failure and not removal_failures:
         receipt = {**receipt, "status": "conflict", "durable": False, "recovery": "history_capture_failed"}
         if callable(recorder):
-            _persist_workspace_provenance(operation_store, owner_subject_id=str(owner_subject_id), operation_id=op_id, request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}), records=[{**candidate.provenance.as_receipt(), "canonical_root": os.path.realpath(root), "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"), "origin": "workspace", "owner_subject_id": str(owner_subject_id), "workspace_id": str(workspace_id), "references": [str(item[0]) for item in edits]} for candidate, edits, _ in pending])
-            recorder(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}", request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}), generation=0, receipt={"operation_id": op_id, "workspace_id": str(workspace_id), "workspace_root": os.path.realpath(root), "phase": "recovery_required", "lease_owner": lease_owner, "adopted": adopted, "conflicts": conflicts, "rejected": list(plan.rejected), "preimages": preimages, "destinations": list(published_manifest), "assets": list(staged_assets), "documents": list(staged_documents), "provenance_records": [{**candidate.provenance.as_receipt(), "canonical_root": os.path.realpath(root), "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"), "origin": "workspace", "owner_subject_id": str(owner_subject_id), "workspace_id": str(workspace_id), "references": [str(item[0]) for item in edits]} for candidate, edits, _ in pending], "resource_receipt": receipt, "history_results": history_results}, phase="recovery_required")
+            _persist_workspace_provenance(operation_store, owner_subject_id=str(owner_subject_id), operation_id=op_id, request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}), records=[{**candidate.provenance.as_receipt(), **({"media_dir": posixpath.dirname(candidate.destination_rel)} if candidate.provenance.media_dir is not None else {}), "canonical_root": os.path.realpath(root), "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"), "origin": "workspace", "owner_subject_id": str(owner_subject_id), "workspace_id": str(workspace_id), "references": [str(item[0]) for item in edits]} for candidate, edits, _ in pending])
+            recorder(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}", request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}), generation=0, receipt={"operation_id": op_id, "workspace_id": str(workspace_id), "workspace_root": os.path.realpath(root), "phase": "recovery_required", "lease_owner": lease_owner, "adopted": adopted, "conflicts": conflicts, "rejected": list(plan.rejected), "preimages": preimages, "destinations": list(published_manifest), "assets": list(staged_assets), "documents": list(staged_documents), "provenance_records": [{**candidate.provenance.as_receipt(), **({"media_dir": posixpath.dirname(candidate.destination_rel)} if candidate.provenance.media_dir is not None else {}), "canonical_root": os.path.realpath(root), "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"), "origin": "workspace", "owner_subject_id": str(owner_subject_id), "workspace_id": str(workspace_id), "references": [str(item[0]) for item in edits]} for candidate, edits, _ in pending], "resource_receipt": receipt, "history_results": history_results}, phase="recovery_required")
     elif removal_failures:
         receipt = {
             **receipt,
@@ -1410,8 +1619,31 @@ def adopt_loose_media_for_workspace(**kwargs: Any) -> dict[str, Any]:
     the same-process race between two workspace creation requests sharing one
     operation id, so the second caller observes the completed receipt.
     """
+    store = kwargs.get("operation_store")
+    owner = str(kwargs.get("owner_subject_id") or "")
+    workspace_id = str(kwargs.get("workspace_id") or "")
+    root = os.path.normpath(str(kwargs.get("workspace_root") or ""))
+    if not all(callable(getattr(store, name, None)) for name in
+               ("get_workspace", "get_location", "generation", "claim_host_mutation", "release_host_mutation")):
+        raise FilesFacadeError("workspace adoption authority is unavailable", code="provider_unavailable")
+    try:
+        workspace = store.get_workspace(workspace_id)
+        location = store.get_location(workspace.location_id)
+        canonical_root = os.path.normpath(os.path.join(str(location.canonical_path), str(workspace.relative_folder or "")))
+        if (not os.path.isabs(root) or root != canonical_root or str(workspace.owner_subject_id) != owner
+                or workspace.archived or not location.enabled or location.availability != "available"):
+            raise ValueError("workspace identity changed")
+        claim = store.claim_host_mutation(owner_subject_id=owner, workspace_id=workspace_id,
+                                          generation=int(store.generation()), paths=[root])
+    except Exception as exc:
+        raise FilesFacadeError("workspace adoption conflicts with another mutation", code=getattr(exc, "code", "provider_unavailable")) from exc
     with _ADOPTION_MUTEX:
-        return _adopt_loose_media_for_workspace(**kwargs)
+        result = _adopt_loose_media_for_workspace(**kwargs)
+    receipt = result.get("resource_receipt") if isinstance(result, Mapping) else None
+    if isinstance(receipt, Mapping) and (receipt.get("recovery") or receipt.get("phase") in {"recovery_required", "pending"}):
+        return result
+    store.release_host_mutation(owner_subject_id=owner, **claim)
+    return result
 
 
 def _write_atomic_text(path: str, text: str) -> None:

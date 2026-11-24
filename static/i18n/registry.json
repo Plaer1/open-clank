@@ -1,6 +1,7 @@
 {
   "version": 2,
   "default_locale": "en",
+  "released_locales": ["en", "ja", "zh-Hans", "zh-Hant", "ru", "hi", "es", "es-419"],
   "locales": {
     "en": {
       "name": "English",

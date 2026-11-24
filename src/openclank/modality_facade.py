@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -39,6 +40,7 @@ _TEXT_EXECUTION_MESSAGES: Mapping[str, str] = {
     "provider_transient": (
         "The selected model's provider is temporarily unavailable."
     ),
+    "provider_empty_completion": "The provider finished without returning any answer text.",
     "provider_unknown": (
         "The selected model failed with an unknown provider outcome."
     ),
@@ -49,12 +51,13 @@ _TEXT_EXECUTION_MESSAGES: Mapping[str, str] = {
 class ManagedTextCompletionError(ManagedOperationError):
     """Safe, typed failure returned by a terminal managed text operation."""
 
-    def __init__(self, *, code: str, committed: bool) -> None:
+    def __init__(self, *, code: str, committed: bool, outcome_unknown: bool = False) -> None:
         normalized = str(code or "managed_operation_failed").strip().lower()
         if not normalized.replace("_", "").isalnum():
             normalized = "managed_operation_failed"
         self.code = normalized
         self.committed = bool(committed)
+        self.outcome_unknown = bool(outcome_unknown)
         super().__init__(
             _TEXT_EXECUTION_MESSAGES.get(
                 normalized,
@@ -367,7 +370,10 @@ async def complete_text(
         raise ManagedTextCompletionError(
             code=str(result.output.get("errorCode") or "managed_operation_failed"),
             committed=result.committed,
+            outcome_unknown=result.commit_reason == "outcome_unknown",
         )
+    if not text.strip():
+        raise ManagedTextCompletionError(code="provider_empty_completion", committed=result.committed)
     return text
 
 
@@ -483,6 +489,17 @@ async def describe_image_path(
 ) -> ManagedOperationResult:
     path = Path(image_path)
     media_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    from src.document_processor import NATIVE_MEDIA_SOURCE_BYTES
+    from src.openclank.media_input_policy import HEAD_BYTES, NON_DECODE_BLOCKING, evaluate
+    with path.open("rb") as _f:
+        _head = _f.read(HEAD_BYTES)
+        _size = os.fstat(_f.fileno()).st_size
+    # vision.describe runs on a vision route by definition, so route_has_vision=True.
+    # No byte limit applied here before; use the largest existing media limit so nothing new fails.
+    _rc = evaluate(declared_type=media_type, byte_size=_size, head=_head, route_has_vision=True,
+                   max_bytes=NATIVE_MEDIA_SOURCE_BYTES)
+    if _rc["reason"] in NON_DECODE_BLOCKING:
+        raise ManagedOperationUnavailable(f"image not described: {_rc['reason']}")
     return await describe_image(
         owner=owner,
         image=path.read_bytes(),

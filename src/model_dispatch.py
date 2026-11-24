@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import inspect
 import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Iterable, Optional
@@ -31,6 +33,12 @@ class AgentRunRequest:
     cwd: Optional[str] = None
     supervisor: Any = None
     turn_envelope: Optional[dict] = None
+    execution_proof_callback: Any = None
+    foreground_account_context: Any = None
+    direct_settlement_callback: Any = None
+    direct_account_only: bool = False
+    provider_policy_selection: Any = None
+    provider_policy_intent: Any = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,7 @@ class AgentSessionLease:
         self.session_id = session_id
         self.ephemeral = ephemeral
         self._closed = False
+        self.cleanup_failed = False
 
     async def close(self) -> None:
         if self._closed:
@@ -64,6 +73,7 @@ class AgentSessionLease:
         try:
             await self.worker.delete_session(self.session_id)
         except Exception as exc:
+            self.cleanup_failed = True
             logger.debug("Open Clank agent ephemeral session cleanup %s: %s", self.session_id, exc)
 
 
@@ -322,6 +332,12 @@ async def stream_agent_target(
         relevant = kwargs.get("relevant_tools")
         if relevant is not None:
             kwargs["relevant_tools"] = set(relevant) - unavailable_tools
+    proof_callback = kwargs.pop("execution_proof_callback", None)
+    foreground_account_context = kwargs.pop("_foreground_account_context", None)
+    direct_settlement_callback = kwargs.pop("_direct_settlement_callback", None)
+    direct_account_only = kwargs.pop("_direct_account_only", False) is True
+    provider_policy_selection = kwargs.pop('_provider_policy_selection', None)
+    provider_policy_intent = kwargs.pop('_provider_policy_intent', None)
     turn_envelope = _agent_turn_envelope(
         messages, cwd, kwargs.pop("turn_envelope", None), kwargs,
     )
@@ -337,6 +353,12 @@ async def stream_agent_target(
         cwd=cwd,
         supervisor=supervisor,
         turn_envelope=turn_envelope,
+        execution_proof_callback=proof_callback,
+        foreground_account_context=foreground_account_context,
+        direct_settlement_callback=direct_settlement_callback,
+        direct_account_only=direct_account_only,
+        provider_policy_selection=provider_policy_selection,
+        provider_policy_intent=provider_policy_intent,
     )
     async for chunk in run_agent(request):
         yield chunk
@@ -344,7 +366,14 @@ async def stream_agent_target(
 
 async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
     """The only strict tool-bearing application door."""
+    incognito = bool((request.turn_envelope or {}).get("incognito"))
     pool = request.supervisor or _agent_supervisor
+    if (getattr(_agent_supervisor, '_s05_foreground_runtime', None) is not None
+        and pool is not _agent_supervisor):
+        exc = SupervisorAdmissionError("OCCUPANCY_UNAVAILABLE", "Foreground occupancy is unavailable", phase="admission", retryable=True)
+        for event in _typed_error_sse(exc):
+            yield event
+        return
     if pool is None or not callable(getattr(pool, "admit_agent", None)):
         exc = SupervisorAdmissionError(
             "SUPERVISOR_UNAVAILABLE", "The strict Open Clank agent coordinator is unavailable"
@@ -354,6 +383,9 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
         return
 
     try:
+        if not incognito:
+            from src.openclank.transcript_projection import assert_directory_execution_active
+            assert_directory_execution_active(request.session_id, request.owner)
         target = await mimo_agent_target(
             request.target,
             owner=request.owner,
@@ -361,9 +393,10 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
         )
         runtime_model = target.model_id
     except Exception as exc:
-        if not hasattr(exc, "as_dict") and not isinstance(exc, HTTPException):
+        if not incognito and not hasattr(exc, "as_dict") and not isinstance(exc, HTTPException):
             logger.exception("Unexpected strict Agent admission failure")
-        for event in _typed_error_sse(exc):
+        safe_exc = exc if not incognito or hasattr(exc, "as_dict") else SupervisorAdmissionError("PRIVATE_RUNTIME_UNAVAILABLE", "Private Agent runtime is unavailable", phase="admission", retryable=False)
+        for event in _typed_error_sse(safe_exc):
             yield event
         return
 
@@ -380,14 +413,76 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
     worker_lease = None
     session_lease = None
     successful_terminal = False
+    model_terminal_observed = False
+    saw_terminal_error = False
+    foreground_runtime = getattr(pool, "_s05_foreground_runtime", None)
+    foreground_handle = None
+    direct_admission = None
+    direct_attachment = None
+    direct_bridge = None
+    issued = False
     try:
-        worker_lease = await pool.admit_agent(
-            request.owner,
-            provider_id,
-            model_id,
-        )
+        selection = getattr(request, 'provider_policy_selection', None)
+        intent = getattr(request, 'provider_policy_intent', None)
+        if intent is not None:
+            from src.openclank.provider_human_policy import CapturedProviderPolicyIntent
+            if type(intent) is not CapturedProviderPolicyIntent or intent.selection is not selection:
+                raise ValueError('captured provider policy intent unavailable')
+            intent.assert_current()
+            context=request.foreground_account_context
+            if (not request.direct_account_only or type(context) is not tuple or len(context)!=4
+                    or intent.admission.owner!=request.owner or intent.admission.account_id!=context[0]
+                    or intent.admission._barrier is not context[2] or intent.admission._admission is not context[3]):
+                raise ValueError('captured provider policy intent changed')
+        if selection is not None:
+            from src.openclank.provider_human_policy import CapturedProviderPolicy
+            if type(selection) is not CapturedProviderPolicy:
+                raise ValueError('captured provider policy unavailable')
+            selection.assert_current()
+            context = request.foreground_account_context
+            if (not (foreground_runtime is not None or request.direct_account_only)
+                    or type(context) is not tuple or len(context) != 4
+                    or selection.owner != request.owner or selection.chat_id != request.session_id
+                    or selection.account_id != context[0] or selection._admission._barrier is not context[2]
+                    or selection._admission._admission is not context[3]):
+                raise ValueError('captured provider policy authority changed')
+        if foreground_runtime is not None or getattr(request,'direct_account_only',False) is True:
+            from src.openclank.memory_job_admission import ForegroundRuntime
+            if (foreground_runtime is not None and type(foreground_runtime) is not ForegroundRuntime) or not request.owner:
+                raise SupervisorAdmissionError("OCCUPANCY_UNAVAILABLE", "Foreground occupancy is unavailable", phase="admission", retryable=True)
+            context = request.foreground_account_context
+            if type(context) is not tuple or len(context) != 4:
+                raise SupervisorAdmissionError("OCCUPANCY_UNAVAILABLE", "Foreground account admission unavailable", phase="admission", retryable=True)
+            account, auth, barrier, admission = context
+            if (not account or auth.account_id(request.owner) != account
+                    or auth.username_for_account_id(account) != request.owner
+                    or not await barrier.is_live(request.owner, admission)):
+                raise SupervisorAdmissionError("OCCUPANCY_UNAVAILABLE", "Foreground account admission unavailable", phase="admission", retryable=True)
+            direct_admission = await barrier.acquire(request.owner)
+        if incognito:
+            admit = getattr(pool, "admit_private_agent", None)
+            if not callable(admit) or not request.owner:
+                raise SupervisorAdmissionError("PRIVATE_RUNTIME_UNAVAILABLE", "Private Agent runtime is unavailable", phase="admission", retryable=False)
+            worker_lease = await admit(request.owner, request.session_id, provider_id, model_id)
+        else:
+            worker_lease = await pool.admit_agent(request.owner, provider_id, model_id)
         worker = worker_lease.worker
-        incognito = bool((request.turn_envelope or {}).get("incognito"))
+        if foreground_runtime is not None or getattr(request,'direct_account_only',False) is True:
+            if (auth.account_id(request.owner) != account or auth.username_for_account_id(account) != request.owner
+                    or not await barrier.is_live(request.owner, direct_admission)):
+                raise SupervisorAdmissionError("OCCUPANCY_UNAVAILABLE", "Foreground account admission changed", phase="admission", retryable=True)
+            from src.memory_scope import memory_owner
+            if foreground_runtime is not None:
+                foreground_handle = foreground_runtime.enter(owner=memory_owner(request.owner), account_id=account, connection_id=provider_id)
+            direct_bridge = worker.bridge
+            if foreground_runtime is None:
+                direct_attachment = await worker_lease.attach_direct_foreground(barrier, direct_admission, account, None, None, account_only=True)
+            else:
+                direct_attachment = await worker_lease.attach_direct_foreground(barrier, direct_admission, account, foreground_runtime, foreground_handle)
+            if selection is not None:
+                await direct_bridge._bind_direct_provider_policy(direct_attachment, selection)
+            if intent is not None:
+                await direct_bridge._bind_direct_provider_policy_intent(direct_attachment, intent)
         session_lease = AgentSessionLease(
             worker,
             request.session_id,
@@ -400,6 +495,14 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
         envelope["lane"] = "agent"
         if target.capabilities.get("tools") is False:
             envelope["allowed_tools"] = []
+        from src.openclank.acp_supervisor_adapter import AcpRuntimeLease
+        if type(worker_lease) is AcpRuntimeLease:
+            private_agent_lease = worker_lease._private_agent_lease()
+            if private_agent_lease is None:
+                raise SupervisorAdmissionError('SUPERVISOR_UNAVAILABLE','Original Agent admission unavailable',phase='admission',retryable=True)
+        else:
+            private_agent_lease = worker_lease
+        issued = True
         async for chunk in worker.bridge.run_turn(
             request.session_id,
             request.messages,
@@ -407,20 +510,81 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
             cwd=request.cwd,
             owner=request.owner,
             turn_envelope=envelope,
+            _gcf_lease=private_agent_lease,
+            **({"_direct_attachment": direct_attachment} if direct_attachment is not None else {}),
+            **({"execution_proof_callback": request.execution_proof_callback} if request.execution_proof_callback is not None else {}),
         ):
+            if chunk.lstrip().startswith("event: error"):
+                saw_terminal_error = True
             if chunk.strip() == "data: [DONE]":
-                successful_terminal = True
+                successful_terminal = not saw_terminal_error
+                model_terminal_observed = successful_terminal
             yield chunk
     except Exception as exc:
-        if not hasattr(exc, "as_dict") and not isinstance(exc, HTTPException):
+        successful_terminal = False
+        if not incognito and not hasattr(exc, "as_dict") and not isinstance(exc, HTTPException):
             logger.exception("Unexpected strict Agent runtime failure")
-        for event in _typed_error_sse(exc):
+        safe_exc = exc if not incognito or hasattr(exc, "as_dict") else SupervisorAdmissionError("PRIVATE_RUNTIME_UNAVAILABLE", "Private Agent runtime is unavailable", phase="admission", retryable=False)
+        for event in _typed_error_sse(safe_exc):
             yield event
+    except BaseException:
+        successful_terminal = False
+        raise
     finally:
-        if session_lease is not None:
-            await session_lease.close()
-        if worker_lease is not None:
-            await worker_lease.release(successful_terminal=successful_terminal)
+        # Model completion and local cleanup are different facts.  Capture the
+        # former before session/worker teardown can change local state.
+        model_terminal = model_terminal_observed
+        direct_settled = False
+        try:
+            if session_lease is not None:
+                try:
+                    await session_lease.close()
+                    if session_lease.cleanup_failed:
+                        successful_terminal = False
+                except Exception:
+                    logger.warning("Agent session cleanup unavailable")
+                    successful_terminal = False
+        finally:
+            try:
+                if direct_attachment is not None and (model_terminal or not issued):
+                    settlement = asyncio.create_task(direct_bridge._finish_direct_foreground(direct_attachment, terminal=True))
+                    while not settlement.done():
+                        try:
+                            await asyncio.shield(settlement)
+                        except asyncio.CancelledError:
+                            successful_terminal = False
+                    direct_settled = settlement.result() is True
+                elif direct_attachment is None and direct_admission is not None:
+                    if foreground_handle is not None:
+                        foreground_runtime.leave(foreground_handle)
+                    await barrier.release(direct_admission)
+            finally:
+                if worker_lease is not None:
+                    cleanup = asyncio.create_task(worker_lease.release(successful_terminal=successful_terminal))
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        try:
+                            await cleanup
+                        except Exception:
+                            logger.warning("Agent worker cleanup unavailable")
+                    except Exception:
+                        logger.warning("Agent worker cleanup unavailable")
+                callback=getattr(request,'direct_settlement_callback',None)
+                if callable(callback):
+                    evidence={'direct_settled':direct_settled,'model_terminal':model_terminal,
+                        'session_closed':bool(session_lease is not None and getattr(session_lease,'_closed',False) and not session_lease.cleanup_failed),
+                        'worker_released':bool(worker_lease is not None and getattr(worker_lease,'_released',False))}
+                    try:
+                        outcome=callback(evidence)
+                        if inspect.isawaitable(outcome):
+                            task=asyncio.create_task(outcome)
+                            while not task.done():
+                                try: await asyncio.shield(task)
+                                except asyncio.CancelledError: continue
+                            task.result()
+                    except Exception:
+                        logger.warning('Agent direct settlement receipt unavailable')
 
 
 async def call_model_target(

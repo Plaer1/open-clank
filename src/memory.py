@@ -36,6 +36,20 @@ class MemoryManager:
     def __init__(self, data_dir: str):
         self.memory_file = os.path.join(data_dir, "memory.json")
         self.ensure_file_exists()
+
+    def commit_owner_snapshot(self, before: List[Dict], after: List[Dict], owners) -> None:
+        """Commit exact owner decisions while retaining concurrently changed other owners."""
+        from services.memory.skill_lifecycle import locked
+        owners = None if owners is None else frozenset(owners)
+        if owners is not None and not owners:
+            raise ValueError("memory snapshot scope is required")
+        def selected(rows):
+            return rows if owners is None else [entry for entry in rows if entry.get("owner") in owners]
+        with locked(self.memory_file):
+            current = self.load_all()
+            if selected(current) != selected(before):
+                raise ValueError("memory owner snapshot changed")
+            self.save(selected(after) if owners is None else [entry for entry in current if entry.get("owner") not in owners] + selected(after))
         
     def extract_memory_from_chat(self, chat_history: List[Dict], session_id: str = None) -> List[Dict]:
         """
@@ -137,17 +151,17 @@ class MemoryManager:
 
     def claim_ownerless(self, owner: str):
         """Assign all ownerless memory entries to the given owner."""
-        entries = self.load_all()
-        changed = False
-        claimed = 0
-        for entry in entries:
-            if not entry.get("owner"):
-                entry["owner"] = owner
-                changed = True
-                claimed += 1
-        if changed:
-            self.save(entries)
-            logger.info("Claimed %d ownerless memories for %s", claimed, owner)
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_file):
+            entries = self.load_all()
+            claimed = 0
+            for entry in entries:
+                if not entry.get("owner"):
+                    entry["owner"] = owner
+                    claimed += 1
+            if claimed:
+                self.save(entries)
+                logger.info("Claimed %d ownerless memories for %s", claimed, owner)
     
     def _validate_entries(self, entries: List[Dict]) -> List[Dict]:
         """Ensure all entries have required fields."""
@@ -208,15 +222,17 @@ class MemoryManager:
         actually been injected into a chat's context (not just retrieved)."""
         if not ids:
             return
-        id_set = set(ids)
-        entries = self.load_all()
-        changed = False
-        for e in entries:
-            if e.get("id") in id_set:
-                e["uses"] = int(e.get("uses", 0) or 0) + 1
-                changed = True
-        if changed:
-            self.save(entries)
+        from services.memory.skill_lifecycle import locked
+        with locked(self.memory_file):
+            id_set = set(ids)
+            entries = self.load_all()
+            changed = False
+            for e in entries:
+                if e.get("id") in id_set:
+                    e["uses"] = int(e.get("uses", 0) or 0) + 1
+                    changed = True
+            if changed:
+                self.save(entries)
     
     def find_duplicates(self, text: str, entries: List[Dict] = None) -> List[Dict]:
         """Find duplicate memory entries based on text content."""

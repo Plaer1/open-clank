@@ -217,3 +217,35 @@ def test_owner_purge_is_preview_bound_and_never_removes_foreign_blob(tmp_path):
     metadata, data = store.read_blob("bob", bob["asset_id"])
     assert metadata["asset_id"] == bob["asset_id"]
     assert data == shared.bytes
+
+
+def test_media_put_epoch_gate_preserves_existing_bytes(tmp_path, monkeypatch):
+    db = tmp_path / "fm.sqlite"
+    with sqlite3.connect(db) as conn:
+        conn.execute("PRAGMA user_version=16")
+    store = MemoryMediaStore(str(db), str(tmp_path))
+    result = _put(store)
+    before = store.read_blob("alice", result["asset_id"])[1]
+    with sqlite3.connect(db) as conn:
+        conn.execute("PRAGMA user_version=17")
+    def unexpected_stage(*args):
+        pytest.fail("unsupported epoch staged bytes")
+    monkeypatch.setattr(store, "_stage_blob", unexpected_stage)
+    with pytest.raises(MediaAssetError) as error:
+        _put(store, source_id="other", photo=_photo((90, 60, 30)))
+    assert error.value.code == "asset_store_unavailable"
+    assert store.read_blob("alice", result["asset_id"])[1] == before
+
+
+def test_owner_purge_preview_treats_missing_optional_tables_as_empty_without_creating_them(tmp_path):
+    db = tmp_path / "fm.db"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA user_version=18")  # not the v16 epoch: _connect() never bootstraps optional schema
+    conn.commit()
+    conn.close()
+    before = sqlite3.connect(db).execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
+    store = MemoryMediaStore(str(db), str(tmp_path))
+    assert store.preview_owner_purge("alice")["count"] == 0
+    assert store.purge_owner("alice", expected={}) == {"complete": True, "count": 0, "blobs_removed": 0}
+    assert sqlite3.connect(db).execute("SELECT name FROM sqlite_master ORDER BY name").fetchall() == before
+    assert not any("fm_v2_media" in row[0] for row in before)

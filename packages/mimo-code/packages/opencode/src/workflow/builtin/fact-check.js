@@ -1,7 +1,7 @@
 export const meta = {
   name: 'fact-check',
   description: 'Fact-check orchestrator — runs parallel web searches, reads the strongest sources, cross-checks each fact with an adversarial jury, and returns verified findings.',
-  whenToUse: 'Use when the user wants to verify specific claims or get a fact-checked answer to a precise question. Searches multiple sources, extracts checkable facts, then runs an adversarial jury that votes to keep or reject each one. Best for: "Is X true?", "Verify this claim", "What does the evidence actually say about Y?".',
+  whenToUse: 'Use when the user wants to verify specific claims or get a fact-checked answer to a precise question. Searches multiple sources, extracts checkable facts, then runs an adversarial jury that votes to keep or reject each one. Best for: "Is X true?", "Verify this claim", "What does the evidence actually say about Y?". The jury inherits the run model.',
   phases: [
     { title: "Plan", detail: "Break the question (from args) into several complementary search lines" },
     { title: "Search", detail: "One web-search agent per line, in parallel" },
@@ -299,7 +299,6 @@ const judged = (await parallel(
           label: "j" + n + ":" + fact.statement.slice(0, 40),
           phase: "Crosscheck",
           schema: RULING_SHAPE,
-          model: "lite",
         })
       )
     ).then(rulings => {

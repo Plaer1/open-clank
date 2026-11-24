@@ -2,21 +2,21 @@
   "id": "batch-030",
   "group": "docs.openclank-docs-limits",
   "surface": "docs",
-  "entry_count": 2,
-  "character_count": 1983,
+  "entry_count": 3,
+  "character_count": 3529,
   "complexity": "prose",
-  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "instruction": "-quiet, but with all required info. Preserve section order and levels, code examples, link and embed targets, and locked product names. Translate visible labels when supported.",
   "entries": [
     {
       "key": "docs.openclank-docs-limits.body",
-      "source": "# Limits and Platform Support\n\nHonest limits are part of the handbook. This page is where they live.\n\n## Data formats\n\n**Strict JSON has no comments.** Anything stored as strict JSON —\nconfiguration, project files, interchange bundles — cannot carry explanatory\ncomments. Use a Markdown page or a document property if you need to annotate\ndata.\n\n**Native notes are structured.** A Copal note is a document tree with typed\nblocks, properties and relations, not a plain `.md` file. Markdown is the\ninterchange and the editing projection; the stored record is richer.\n\n## Platform support\n\nOpen Clank runs natively on macOS, Windows and Linux. GPU-accelerated local\nmodels depend on the platform:\n\n- macOS: Metal through the local runtime. MLX-only models are not served.\n- Windows: native launcher binds loopback by default; LAN exposure is opt-in.\n- Linux: native packages; GPU support depends on the installed driver stack.\n\nContainerized deployment is documented for servers but is not the desktop\nexperience and is not what these desktop docs qualify.\n\n## Renderer scope\n\nThe Markdown renderer is not CommonMark-complete. It supports headings,\nemphasis, marks, inline code, fenced code, lists, task lists, quotes,\ndividers, tables, wikilinks, standard links, app links and embedded media.\nExotic constructs fall through as literal text rather than being mangled.\n\nThe formatting source-reveal inspector exists for\n[[Markdown Formatting Demo]] only. Normal documentation pages stay rendered.\n\n## What is not claimed here\n\n- No web or public documentation site is launched by this handbook.\n- No cross-account sharing of documents.\n- No automatic migration of personal files into Copal.\n\nIf something on this page is out of date relative to the running product,\nthe running product is right and this page will be updated with it.",
+      "source": "# Limits and Platform Support\n\nCheck your exact package and checksum. [Beta 2 release and artifact records](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2).\n\n| Platform | Support |\n| --- | --- |\n| macOS | Apple Silicon package for macOS 15 or later. Ad-hoc signed. |\n| Windows | Use an architecture offered by the release. Installed-package checks are recorded per artifact. |\n| Linux | Source setup is documented. App and package qualification remain open. |\n| Docker | Legacy files. Unsupported. |\n\nFor installation steps see [[Setup and First Run]]. For source and package evidence see the [known limits](https://github.com/Plaer1/open-clank/blob/main/docs/known-limits.md).\n\n## What depends on my installation?\n\n- **Host actions** depend on OS access and available handlers. See [[Desktop Capture and Host Opening]].\n- [[Graph|Code Graph]] shows the evidence for each indexed relationship. Check coverage when a call or dependency is missing.\n- **Remote services** receive the material you send and may charge for requests. Model and provider capabilities vary. See [[Accounts and Models]].\n- **Journal** uses Files-backed storage in the current hosted app. Preserve older stores using the upgrade and backup guides before switching. See [[Recovery]].\n\nThe service runs within its host OS account’s permissions. A link follows the reader’s existing grants. [Deployment security](https://github.com/Plaer1/open-clank/blob/main/SECURITY.md).\n",
       "placeholders": [],
       "kind": "structured-prose",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:687"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "body",
+      "context": "manual body",
       "complexity": "prose"
     },
     {
@@ -26,10 +26,20 @@
       "kind": "structured-label",
       "status": "live",
       "locations": [
-        "src/openclank/official_docs.py:687"
+        "src/openclank/official_docs_content.py"
       ],
-      "context": "title",
+      "context": "manual title",
       "complexity": "label"
+    },
+    {
+      "key": "docs.openclank-docs-limits.body.compat-22e146872a45",
+      "source": "# Limits and Platform Support\n\nHonest limits are part of the handbook. This page is where they live.\n\n## Data formats\n\n**Strict JSON has no comments.** Anything stored as strict JSON —\nconfiguration, project files, interchange bundles — cannot carry explanatory\ncomments. Use a Markdown page or a document property if you need to annotate\ndata.\n\n**Native notes are structured.** A journal page is a document tree with typed\nblocks, properties and relations, not a plain `.md` file. Markdown is the\ninterchange and the editing projection; the stored record is richer.\n\n## Platform support\n\nOpen Clank runs natively on macOS, Windows and Linux. GPU-accelerated local\nmodels depend on the platform:\n\n- macOS: Metal through the local runtime. MLX-only models are not served.\n- Windows: native launcher binds loopback by default; LAN exposure is opt-in.\n- Linux: native packages; GPU support depends on the installed driver stack.\n\nContainerized deployment is documented for servers but is not the desktop\nexperience and is not what these desktop docs qualify.\n\n## Renderer scope\n\nThe Markdown renderer is not CommonMark-complete. It supports headings,\nemphasis, marks, inline code, fenced code, lists, task lists, quotes,\ndividers, tables, wikilinks, standard links, app links and embedded media.\nExotic constructs fall through as literal text rather than being mangled.\n\nThe formatting source-reveal inspector exists for\n[[Markdown Formatting Demo]] only. Normal documentation pages stay rendered.\n\n## What is not claimed here\n\n- No web or public documentation site is launched by this handbook.\n- No cross-account sharing of documents.\n- No automatic migration of personal files into Copal.\n\nIf something on this page is out of date relative to the running product,\nthe running product is right and this page will be updated with it.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "previous manual wording and translations retained outside the live guide",
+      "complexity": "prose"
     }
   ]
 }

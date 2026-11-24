@@ -12,6 +12,31 @@ from core.database import Base, Session
 from src.openclank.session_map import OwnerSessionMap
 
 
+def test_private_binding_rejects_revoked_ghost_without_durable_revision(monkeypatch):
+    from src.openclank.acp_bridge import ACPBridge
+
+    async def inline(fn, *args):
+        return fn(*args)
+    monkeypatch.setattr(asyncio, "to_thread", inline)
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._owner = "alice"
+    bridge._managed_provider_generation = "holder"
+    bridge._turns = {"native": object()}
+    bridge._session_context = {"native": {"odysseus_session_id": "ghost", "root_operation_id": "root",
+        "private_authority": {"kind": "private", "generation": "a" * 64}, "physical_cwd": "/tmp",
+        "memory_workspace": "global", "copal_workspace": "default", "authority_workspace_id": ""}}
+    live = {"value": True}
+    bridge._private_ghost_is_current = lambda chat, owner, holder: live["value"] and (chat, owner, holder) == ("ghost", "alice", "holder")
+    async def check():
+        result = await bridge._handle_session_binding_read({"sessionID": "native"})
+        assert result["authority"]["generation"] == "a" * 64
+        assert result["memoryEnabled"] is False and "mapRevision" not in result and "mappingRevision" not in result
+        live["value"] = False
+        with pytest.raises(ValueError, match="private session authority"):
+            await bridge._handle_session_binding_read({"sessionID": "native"})
+    asyncio.run(check())
+
+
 @pytest.fixture
 def sqlite_projection(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'managed-binding.db'}")

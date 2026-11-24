@@ -43,7 +43,7 @@ def test_lifetools_direct_script_bootstraps_repository_imports(tmp_path):
 
 
 class _StubMemoryProvider:
-    provider_id = "frankenmemory"
+    provider_id = "memery"
 
     def __init__(self):
         self.records = [
@@ -124,119 +124,15 @@ class _StubMemoryProvider:
 
 
 @pytest.mark.asyncio
-async def test_lifetools_structured_memory_list_add_resolve_and_recall(monkeypatch):
-    import routes.prefs_routes as prefs_routes
-    import src.ai_interaction as ai_interaction
+async def test_memory_is_only_available_over_the_managed_channel():
     from src.openclank import lifetools_server
 
-    provider = _StubMemoryProvider()
-    monkeypatch.setattr(lifetools_server, "_OWNER", "alice")
-    monkeypatch.setattr(lifetools_server, "_SESSION_ID", "chat-1")
-    monkeypatch.setattr(lifetools_server, "_MEMORY_PROVIDER", provider)
-    monkeypatch.setattr(ai_interaction, "_memory_provider", provider)
-    monkeypatch.setattr(
-        prefs_routes,
-        "_load_for_user",
-        lambda _owner: {"memory_mode": "automatic"},
-    )
-
-    listed = _tool_result_text(
-        await lifetools_server.call_tool("manage_memory", {"action": "list"})
-    )
-    assert "What is the launch code?" in listed["results"]
-
-    added = _tool_result_text(
-        await lifetools_server.call_tool(
-            "manage_memory",
-            {
-                "action": "add",
-                "text": "The launch code is cobalt.",
-                "category": "fact",
-            },
-        )
-    )
-    assert "error" not in added, added
-    assert added["memory_id"] == "m_answer"
-    assert provider.remembered == [
-        {
-            "text": "The launch code is cobalt.",
-            "owner": "alice",
-            "session_id": "chat-1",
-            "category": "fact",
-            "source": "ai_agent",
-            "capture_mode": "manual",
-        }
-    ]
-
-    resolved = _tool_result_text(
-        await lifetools_server.call_tool(
-            "manage_memory",
-            {
-                "action": "resolve",
-                "memory_id": "q_1",
-                "answer_memory_id": "m_answer",
-            },
-        )
-    )
-    assert resolved["action"] == "resolve"
-    assert provider.resolved == [
-        {
-            "memory_id": "q_1",
-            "resolved_by": "m_answer",
-            "answer": None,
-            "expected_revision": None,
-            "owner": "alice",
-        }
-    ]
-
-    recalled = _tool_result_text(
-        await lifetools_server.call_tool(
-            "recall_memory",
-            {"query": "launch code"},
-        )
-    )
-    assert recalled == {"results": "No matching memories."}
-
-
-@pytest.mark.asyncio
-async def test_lifetools_search_renders_reviewed_handler_identity(monkeypatch):
-    from services.memory import principal_context
-    from src.openclank import lifetools_server
-
-    class Provider:
-        async def invoke_tool(self, name, arguments):
-            assert name == "search"
-            assert arguments["owner"] == "allie"
-            return {
-                "results": [
-                    {
-                        "record": {
-                            "id": "name-memory",
-                            "content": "%USER%'s name is Allie.",
-                        },
-                        "score": 1.0,
-                    }
-                ]
-            }
-
-    lifecycle = SimpleNamespace()
-    monkeypatch.setattr(lifetools_server, "_OWNER", "allie")
-    monkeypatch.setattr(lifetools_server, "_MEMORY_PROVIDER", Provider())
-    monkeypatch.setattr(lifetools_server, "_MEMORY_LIFECYCLE", lifecycle)
-    monkeypatch.setattr(lifetools_server, "_MEMORY_RECONCILED_LIFECYCLE", lifecycle)
-    monkeypatch.setattr(
-        principal_context,
-        "resolve_handler_display_label",
-        lambda *_args, **_kwargs: "Allie",
-    )
-    monkeypatch.setenv("FM_WORKSPACE_ID", "global")
-
-    result = _tool_result_text(
-        await lifetools_server.call_tool("search", {"query": "user name"})
-    )
-    record = result["results"][0]["record"]
-    assert record["content"] == "Allie's name is Allie."
-    assert record["raw_content"] == "%USER%'s name is Allie."
+    names = {tool.name for tool in await lifetools_server.list_tools()}
+    assert "record_skill_usage" in names
+    for name in ("recall_memory", "manage_memory", "search", "delete_memory", "memory_retention"):
+        assert name not in names
+        result = await lifetools_server.call_tool(name, {})
+        assert "not available" in _tool_result_text(result)["error"]
 
 
 @pytest.mark.asyncio
@@ -269,401 +165,7 @@ async def test_agent_delete_uses_the_shared_memory_lifecycle(monkeypatch):
     assert deleted == [("q_1", "alice", None)]
 
 
-@pytest.mark.asyncio
-async def test_lifetools_raw_delete_is_intercepted_by_shared_lifecycle(monkeypatch):
-    from src.openclank import lifetools_server
-
-    provider_calls = []
-    lifecycle_calls = []
-
-    class Provider:
-        async def invoke_tool(self, name, arguments):
-            provider_calls.append((name, arguments))
-            raise AssertionError("raw delete must not reach the provider")
-
-    class Lifecycle:
-        async def delete(self, memory_id, *, owner, workspace_id=None):
-            lifecycle_calls.append((memory_id, owner, workspace_id))
-            return {"tombstone_id": "coordinated"}
-
-    monkeypatch.setattr(lifetools_server, "_OWNER", "alice")
-    monkeypatch.setattr(lifetools_server, "_MEMORY_PROVIDER", Provider())
-    monkeypatch.setattr(lifetools_server, "_MEMORY_LIFECYCLE", Lifecycle())
-    monkeypatch.setenv("FM_WORKSPACE_ID", "global")
-
-    result = _tool_result_text(await lifetools_server.call_tool(
-        "delete_memory",
-        {"id": "memory-1"},
-    ))
-    assert result["deleted"] is True
-    assert lifecycle_calls == [("memory-1", "alice", "global")]
-    assert provider_calls == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("code", ["code_node_forget_requires_workspace_erase", None, "unknown_refusal"])
-async def test_lifetools_code_node_forget_refusal_is_actionable_not_transport(monkeypatch, code):
-    from src.openclank import lifetools_server
-    from src.memory_provider import MemoryRequestRejectedError
-    from mcp.types import CallToolResult
-    calls = []
-    class Lifecycle:
-        async def forget(self, action, **kwargs):
-            calls.append((action, kwargs))
-            raise MemoryRequestRejectedError("/private/root native detail", code=code)
-    lifecycle = Lifecycle()
-    monkeypatch.setattr(lifetools_server, "_OWNER", "alice")
-    monkeypatch.setattr(lifetools_server, "_MEMORY_PROVIDER", SimpleNamespace())
-    monkeypatch.setattr(lifetools_server, "_MEMORY_LIFECYCLE", lifecycle)
-    monkeypatch.setattr(lifetools_server, "_MEMORY_RECONCILED_LIFECYCLE", lifecycle)
-    monkeypatch.setenv("FM_WORKSPACE_ID", "s03-workspace")
-    result = await lifetools_server.call_tool("memory_forget", {"action": "preview", "selector_kind": "record_id", "selector": "code-1"})
-    assert isinstance(result, CallToolResult) and result.isError
-    detail = json.loads(result.content[0].text)
-    assert "/private/root" not in str(detail)
-    assert len(calls) == 1 and calls[0][0] == "preview"
-    assert calls[0][1]["owner"] == "alice" and calls[0][1]["workspace_id"] == "s03-workspace"
-    if code == "code_node_forget_requires_workspace_erase":
-        assert detail["code"] == code and "workspace-index erasure" in detail["error"]
-        assert "Nothing was deleted" in detail["error"]
-    else:
-        assert detail == {"error": "memory transport failed", "exit_code": 1}
-
-
-@pytest.mark.asyncio
-async def test_lifetools_typed_mutations_use_provider_lifecycle_not_raw_mcp(monkeypatch):
-    from src.openclank import lifetools_server
-
-    calls = []
-
-    class Provider:
-        async def invoke_tool(self, name, arguments):
-            raise AssertionError(f"raw {name} bypassed the provider lifecycle: {arguments}")
-
-        async def update_candidate(self, candidate_id, **kwargs):
-            calls.append(("update", candidate_id, kwargs))
-            return {"id": candidate_id, "content": kwargs["text"]}
-
-        async def review_candidate(self, candidate_id, **kwargs):
-            calls.append(("review", candidate_id, kwargs))
-            return {"reviewed": True, "accepted": kwargs["accept"]}
-
-        async def resolve_question(self, memory_id, **kwargs):
-            calls.append(("resolve", memory_id, kwargs))
-            return True
-
-        async def reopen_question(self, memory_id, **kwargs):
-            calls.append(("reopen", memory_id, kwargs))
-            return {"id": memory_id, "current_revision": 4}
-
-    lifecycle = SimpleNamespace()
-    monkeypatch.setattr(lifetools_server, "_OWNER", "alice")
-    monkeypatch.setattr(lifetools_server, "_MEMORY_PROVIDER", Provider())
-    monkeypatch.setattr(lifetools_server, "_MEMORY_LIFECYCLE", lifecycle)
-    monkeypatch.setattr(lifetools_server, "_MEMORY_RECONCILED_LIFECYCLE", lifecycle)
-    monkeypatch.setenv("FM_WORKSPACE_ID", "global")
-
-    assert _tool_result_text(await lifetools_server.call_tool(
-        "update_candidate",
-        {"id": "candidate-1", "content": "edited", "category": "fact"},
-    ))["updated"] is True
-    assert _tool_result_text(await lifetools_server.call_tool(
-        "review_candidate",
-        {"id": "candidate-1", "accept": True, "reason": "approved"},
-    ))["accepted"] is True
-    assert _tool_result_text(await lifetools_server.call_tool(
-        "resolve_memory",
-        {"id": "question-1", "answer": "E", "expected_revision": 2},
-    ))["resolved"] is True
-    assert _tool_result_text(await lifetools_server.call_tool(
-        "reopen_memory",
-        {"id": "question-1", "expected_revision": 3},
-    ))["memory"]["current_revision"] == 4
-
-    assert calls == [
-        (
-            "update",
-            "candidate-1",
-            {
-                "text": "edited",
-                "category": "fact",
-                "reason": "edited_by_agent",
-                "owner": "alice",
-                "workspace_id": "global",
-            },
-        ),
-        (
-            "review",
-            "candidate-1",
-            {
-                "accept": True,
-                "reason": "approved",
-                "owner": "alice",
-                "workspace_id": "global",
-            },
-        ),
-        (
-            "resolve",
-            "question-1",
-            {
-                "answer": "E",
-                "resolved_by": None,
-                "expected_revision": 2,
-                "owner": "alice",
-            },
-        ),
-        (
-            "reopen",
-            "question-1",
-            {"expected_revision": 3, "owner": "alice"},
-        ),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_lifetools_local_memory_scope_keeps_blank_artifact_owner(
-    monkeypatch,
-    tmp_path,
-):
-    from services.memory.forget_coordinator import (
-        unpack_forget_token,
-    )
-    from services.memory.skills import SkillsManager
-    from src.openclank import lifetools_server
-
-    class Provider:
-        def __init__(self):
-            self.calls = []
-            self.operations = {}
-
-        async def forget(self, action, **kwargs):
-            self.calls.append((action, kwargs))
-            operation_id = kwargs.get("operation_id")
-            closure = {
-                "raw_ids": [],
-                "candidate_ids": [],
-                "curated_ids": ["memory-1"],
-                "graph_node_ids": [],
-            }
-            if action == "preview":
-                return {"token": "preview-1", "closure": closure}
-            if action == "status":
-                return self.operations.get(operation_id, {"state": "absent"})
-            if action == "commit":
-                result = {
-                    "state": "committed",
-                    "tombstone_id": "provider-tombstone",
-                    "recover_until": "2099-01-01T00:00:00+00:00",
-                    "closure": closure,
-                }
-                self.operations[operation_id] = result
-                return result
-            raise AssertionError(action)
-
-    provider = Provider()
-    skills = SkillsManager(str(tmp_path))
-    created = skills.add_skill(
-        name="ownerless-derived-skill",
-        description="local-install artifact",
-        source="memory-promotion",
-        source_memory_ids=["memory-1"],
-        owner="",
-    )
-    monkeypatch.setattr(lifetools_server, "_OWNER", "local")
-    monkeypatch.setattr(lifetools_server, "_SKILL_OWNER", "")
-    monkeypatch.setattr(lifetools_server, "_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(lifetools_server, "_MEMORY_PROVIDER", provider)
-    monkeypatch.setattr(lifetools_server, "_MEMORY_LIFECYCLE", None)
-    monkeypatch.setattr(lifetools_server, "_MEMORY_RECONCILED_LIFECYCLE", None)
-    monkeypatch.setattr(lifetools_server, "_MEMORY_RECONCILE_LOCK", None)
-    monkeypatch.setenv("FM_WORKSPACE_ID", "global")
-
-    result = _tool_result_text(
-        await lifetools_server.call_tool(
-            "delete_memory",
-            {"id": "memory-1"},
-        )
-    )
-    assert result["deleted"] is True
-    assert lifetools_server._MEMORY_LIFECYCLE.skill_owner == ""
-    assert skills.load(owner="") == []
-    assert all(
-        call[1]["owner"] == "local"
-        and call[1]["workspace_id"] == "global"
-        for call in provider.calls
-    )
-    operation_id = unpack_forget_token(
-        result["result"]["tombstone_id"],
-        "tombstone",
-    )["operation"]
-    info = lifetools_server._MEMORY_LIFECYCLE.skill_forget.operation_info(
-        operation_id,
-        owner="",
-        workspace_id="global",
-    )
-    assert info["state"] == "committed"
-    assert info["skill_ids"] == [created["skill_id"]]
-    assert [
-        call[0]
-        for call in provider.calls
-    ] == [
-        "preview",
-        "status",
-        "preview",
-        "commit",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_lifetools_reconciles_memory_lifecycle_once(monkeypatch):
-    import src.ai_interaction as ai_interaction
-    from src.openclank import lifetools_server
-
-    class Lifecycle:
-        def __init__(self):
-            self.reconciliations = 0
-
-        async def reconcile(self):
-            self.reconciliations += 1
-            return {
-                "rolled_back": 0,
-                "committed": 0,
-                "restored": 0,
-                "errors": 0,
-            }
-
-    provider = object()
-    lifecycle = Lifecycle()
-    monkeypatch.setattr(lifetools_server, "_OWNER", "alice")
-    monkeypatch.setattr(lifetools_server, "_MEMORY_PROVIDER", provider)
-    monkeypatch.setattr(lifetools_server, "_MEMORY_LIFECYCLE", lifecycle)
-    monkeypatch.setattr(lifetools_server, "_MEMORY_RECONCILED_LIFECYCLE", None)
-    monkeypatch.setattr(lifetools_server, "_MEMORY_RECONCILE_LOCK", None)
-    monkeypatch.setattr(ai_interaction, "set_memory_manager", lambda *a, **k: None)
-
-    assert await lifetools_server._ensure_memory_provider() is provider
-    assert await lifetools_server._ensure_memory_provider() is provider
-    assert lifecycle.reconciliations == 1
-
-
-@pytest.mark.asyncio
-async def test_lifetools_retention_preserves_preview_and_operation_binding(
-    monkeypatch,
-):
-    from src.openclank import lifetools_server
-
-    calls = []
-
-    class Provider:
-        async def invoke_tool(self, name, arguments):
-            raise AssertionError(f"{name} must use the shared lifecycle")
-
-    class Lifecycle:
-        async def reconcile(self):
-            return {}
-
-        async def retention(
-            self,
-            action,
-            *,
-            owner,
-            workspace_id=None,
-            preview_token=None,
-            operation_id=None,
-        ):
-            calls.append(
-                {
-                    "action": action,
-                    "owner": owner,
-                    "workspace_id": workspace_id,
-                    "preview_token": preview_token,
-                    "operation_id": operation_id,
-                }
-            )
-            if action == "preview_expire":
-                return {
-                    "token": "composite-retention-token",
-                    "operation_id": "retention-operation-1",
-                    "closure": {},
-                }
-            if action == "expire":
-                return {"curated_ids": ["memory-1"]}
-            if action == "status":
-                return {
-                    "state": "committed",
-                    "operation_id": operation_id,
-                }
-            raise AssertionError(action)
-
-        async def expire_retention(self, **kwargs):
-            raise AssertionError("tokened expiry must not use the one-shot wrapper")
-
-    monkeypatch.setattr(lifetools_server, "_OWNER", "alice")
-    monkeypatch.setattr(lifetools_server, "_SKILL_OWNER", "alice")
-    monkeypatch.setattr(lifetools_server, "_MEMORY_PROVIDER", Provider())
-    monkeypatch.setattr(lifetools_server, "_MEMORY_LIFECYCLE", Lifecycle())
-    monkeypatch.setattr(
-        lifetools_server,
-        "_MEMORY_RECONCILED_LIFECYCLE",
-        lifetools_server._MEMORY_LIFECYCLE,
-    )
-    monkeypatch.setenv("FM_WORKSPACE_ID", "global")
-
-    preview = _tool_result_text(
-        await lifetools_server.call_tool(
-            "memory_retention",
-            {"action": "preview_expire"},
-        )
-    )
-    assert preview["token"] == "composite-retention-token"
-    operation_id = preview["operation_id"]
-    expired = _tool_result_text(
-        await lifetools_server.call_tool(
-            "memory_retention",
-            {
-                "action": "expire",
-                "preview_token": preview["token"],
-                "operation_id": operation_id,
-            },
-        )
-    )
-    assert expired["curated_ids"] == ["memory-1"]
-    status = _tool_result_text(
-        await lifetools_server.call_tool(
-            "memory_retention",
-            {
-                "action": "status",
-                "operation_id": operation_id,
-            },
-        )
-    )
-    assert status["state"] == "committed"
-    assert calls == [
-        {
-            "action": "preview_expire",
-            "owner": "alice",
-            "workspace_id": "global",
-            "preview_token": None,
-            "operation_id": None,
-        },
-        {
-            "action": "expire",
-            "owner": "alice",
-            "workspace_id": "global",
-            "preview_token": "composite-retention-token",
-            "operation_id": "retention-operation-1",
-        },
-        {
-            "action": "status",
-            "owner": "alice",
-            "workspace_id": "global",
-            "preview_token": None,
-            "operation_id": "retention-operation-1",
-        },
-    ]
-
-
-def test_agent_descriptors_scope_lifetools_and_mark_raw_bridge(monkeypatch, tmp_path):
+def test_agent_descriptor_scopes_lifetools_without_a_worker_command(monkeypatch, tmp_path):
     from src.openclank import acp_bridge
 
     db_path = str(tmp_path / "frankenmemory.db")
@@ -676,11 +178,10 @@ def test_agent_descriptors_scope_lifetools_and_mark_raw_bridge(monkeypatch, tmp_
     monkeypatch.setenv("FM_EMBED_TIMEOUT_MS", "45000")
     monkeypatch.setenv("FM_EMBED_FUTURE_SETTING", "future-value")
     monkeypatch.setenv("OPENAI_API_KEY", "unrelated-secret")
-    monkeypatch.setattr(acp_bridge, "_FM_MCP_COMMAND", "/opt/fm-mcp")
+    monkeypatch.setenv("OPEN_CLANK_MEMERY_WORKER", "/opt/memery-worker")
     canonical_env = {
         "FM_DB_PATH": db_path,
         "FM_DB_ID": "db-test",
-        "FM_MCP_COMMAND": "/opt/fm-mcp",
     }
 
     life = acp_bridge.lifetools_mcp_descriptor(
@@ -696,7 +197,7 @@ def test_agent_descriptors_scope_lifetools_and_mark_raw_bridge(monkeypatch, tmp_
     assert life_env["FM_MEMORY_ENABLED"] == "1"
     assert life_env["FM_DB_PATH"] == db_path
     assert life_env["FM_DB_ID"] == "db-test"
-    assert life_env["FM_MCP_COMMAND"] == "/opt/fm-mcp"
+    assert "OPEN_CLANK_MEMERY_WORKER" not in life_env
     assert {
         name: life_env[name]
         for name in canonical_env
@@ -704,30 +205,13 @@ def test_agent_descriptors_scope_lifetools_and_mark_raw_bridge(monkeypatch, tmp_
     assert "OPENAI_API_KEY" not in life_env
     assert not any(name.startswith("FM_EMBED_") for name in life_env)
 
-    raw = acp_bridge.frankenmemory_mcp_descriptor(
-        owner="alice",
-        session_id="chat-1",
-    )
-    raw_env = {item["name"]: item["value"] for item in raw["env"]}
-    assert raw_env["FM_AGENT_BRIDGE"] == "1"
-    assert {
-        name: raw_env[name]
-        for name in canonical_env
-    } == canonical_env
-    assert "OPENAI_API_KEY" not in raw_env
-    assert not any(name.startswith("FM_EMBED_") for name in raw_env)
-
     local_life = acp_bridge.lifetools_mcp_descriptor(owner=" ")
-    local_raw = acp_bridge.frankenmemory_mcp_descriptor(owner=" ")
     assert {item["name"]: item["value"] for item in local_life["env"]}[
         "FM_OWNER"
     ] == "local"
     assert {item["name"]: item["value"] for item in local_life["env"]}[
         "OPEN_CLANK_SKILL_OWNER"
     ] == ""
-    assert {item["name"]: item["value"] for item in local_raw["env"]}[
-        "FM_OWNER"
-    ] == "local"
 
 
 @pytest.mark.asyncio
@@ -739,6 +223,7 @@ async def test_agent_session_uses_lifetools_as_memory_scope_carrier(tmp_path, mo
     import src.openclank.transcript_projection as projection
     from src.openclank.acp_bridge import ACPBridge
 
+    monkeypatch.setattr("src.openclank.conversation_archive.get_conversation_archive", MagicMock)
     engine = create_engine(f"sqlite:///{tmp_path / 'managed-binding.db'}")
     database.Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine)
@@ -900,7 +385,8 @@ def test_turn_envelope_carries_resolved_memory_authority():
 
 
 @pytest.mark.asyncio
-async def test_bridge_skips_digest_when_memory_read_is_disabled():
+async def test_bridge_skips_digest_when_memory_read_is_disabled(monkeypatch):
+    monkeypatch.setattr("src.openclank.conversation_archive.get_conversation_archive", MagicMock)
     from src.openclank.acp_bridge import ACPBridge
 
     class _DigestProvider:
@@ -993,50 +479,104 @@ def test_manage_memory_is_owner_privileged_not_admin_only():
     assert "manage_memory" not in NON_ADMIN_BLOCKED_TOOLS
 
 
-_FM_DEBUG_BIN = (
-    Path(__file__).resolve().parents[1]
-    / "mcp_servers"
-    / "frankenmemory"
-    / "target"
-    / "debug"
-    / "fm-mcp"
-)
-
-
-@pytest.mark.skipif(not _FM_DEBUG_BIN.exists(), reason="fm-mcp debug binary not built")
 @pytest.mark.asyncio
-async def test_fm_agent_bridge_rejects_internal_tools_server_side(tmp_path):
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
-    from mcp.shared.exceptions import McpError
+async def test_native_manage_write_replays_one_durable_receipt(tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from core.operation_models import OperationBase
+    from src.openclank.managed_memery import _perform
+    from src.openclank.operation_journal import OperationJournalStore
+    from unittest.mock import AsyncMock
 
-    env = dict(os.environ)
-    env.update(
-        {
-            "FM_DB_PATH": str(tmp_path / "frankenmemory.db"),
-            "FM_OWNER": "alice",
-            "FM_WORKSPACE_ID": "global",
-            "FM_AGENT_BRIDGE": "1",
-        }
-    )
-    env.pop("FM_DB_ID", None)
-    params = StdioServerParameters(
-        command=str(_FM_DEBUG_BIN),
-        args=[],
-        env=env,
-    )
-    async with stdio_client(params) as streams:
-        async with ClientSession(*streams) as session:
-            await session.initialize()
-            with pytest.raises(McpError, match="not available through an Agent memory bridge"):
-                await session.call_tool("owner_lifecycle", {"action": "stats"})
-            with pytest.raises(McpError, match="not available through an Agent memory bridge"):
-                await session.call_tool(
-                    "memory_quality",
-                    {"rebuild_graph_fts": True},
-                )
-            healthy = await session.call_tool(
-                "memory_quality",
-                {"rebuild_graph_fts": False},
-            )
-            assert healthy.isError is not True
+    engine = create_engine(f"sqlite:///{tmp_path / 'operations.db'}")
+    OperationBase.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    execute = AsyncMock(return_value={"action": "add", "memory_id": "mem1", "results": "Private text."})
+    common = dict(identity={"actorID": "main", "rootOperationID": "root"}, account="acct", owner="alice",
+        chat="chat", model_route=SimpleNamespace(connection_id="connection", billing_lane="local", model_route_id="route"),
+        arguments={"action":"add", "text":"Private text."}, current=AsyncMock(return_value=True), execute=execute)
+    initial = await _perform(OperationJournalStore(sessions), **common)
+    replay = await _perform(OperationJournalStore(sessions), **common)
+    assert initial["state"] == replay["state"] == "complete"
+    assert replay["operationID"] == initial["operationID"]
+    assert json.loads(replay["text"]) == {"action":"add", "memory_id":"mem1"}
+    execute.assert_awaited_once()
+    uncertain = AsyncMock(side_effect=RuntimeError("reply lost"))
+    args = {**common, "arguments":{"action":"delete","memory_id":"mem1"}, "execute": uncertain}
+    assert (await _perform(OperationJournalStore(sessions), **args))["state"] == "outcome_unknown"
+    assert (await _perform(OperationJournalStore(sessions), **args))["state"] == "outcome_unknown"
+    uncertain.assert_awaited_once()
+    engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_manage_accepts_typed_arguments_for_all_six_verbs(monkeypatch):
+    from unittest.mock import AsyncMock
+    from src import ai_interaction
+    from src.openclank.managed_protocol import validate_managed_method_request
+
+    provider = _StubMemoryProvider()
+    provider.update = AsyncMock(return_value=provider.records[0])
+    provider.recall = AsyncMock(return_value=[])
+    monkeypatch.setattr(ai_interaction, "_memory_provider", provider)
+    monkeypatch.setattr(ai_interaction, "_memory_lifecycle", SimpleNamespace(delete=AsyncMock(return_value={"ok":True})))
+    monkeypatch.setattr(ai_interaction, "_resolve_handler_label", AsyncMock(return_value="Allie"))
+    monkeypatch.setattr("routes.prefs_routes._load_for_user", lambda owner: {"memory_mode": "automatic"})
+    turn = dict(sessionID="session", rootOperationID="root", actorID="main", executionRevision=1, innerTurnID="turn")
+    for args in ({"action":"list"}, {"action":"search","query":"question"}, {"action":"add","text":"line one\nline two"},
+            {"action":"edit","memory_id":"q_1","text":"line three\nline four"}, {"action":"resolve","memory_id":"q_1","answer":"cobalt"},
+            {"action":"delete","memory_id":"q_1"}):
+        request = {"identity":turn,"toolCallID":"call","messageID":"message","arguments":args}
+        validate_managed_method_request("_openclank/session/v1/memory/manage",request)
+        result = await ai_interaction.do_manage_memory(args["action"],"chat","alice",management_args=args)
+        assert "error" not in result, result
+    assert provider.remembered[0]["text"] == "line one\nline two"
+    assert provider.update.await_args.kwargs["text"] == "line three\nline four"
+    ai_interaction._memory_lifecycle.delete.assert_awaited_once_with("q_1", owner="alice")
+
+
+@pytest.mark.asyncio
+async def test_management_gateway_binds_exact_tool_and_refuses_guarded_mutation(monkeypatch):
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+    from src import ai_interaction
+    from src.openclank.managed_memery import manage
+
+    @asynccontextmanager
+    async def barrier(owner):
+        assert owner == "alice"
+        yield
+
+    identity = dict(sessionID="engine", actorID="main", rootOperationID="root", executionRevision=1, innerTurnID="turn")
+    binding = dict(owner="alice", stableChatID="chat", canonicalCwd="/ws", memoryEnabled=True)
+    entry = dict(owner="alice", ownerAccountID="acct", stableChatID="chat", authorityWorkspaceID="ws",
+        rootSessionID="engine", policyRevision=1)
+    provider = SimpleNamespace(_guarded_v17=False)
+    session = SimpleNamespace(owner="alice", workspace_id="ws", incognito=False, endpoint_id="endpoint", model="m", provider_model_route_id="route")
+    bridge = SimpleNamespace(_managed_turn_key=lambda identity: "key", _managed_actor_turns={"key":entry},
+        _turns={"engine":SimpleNamespace(original_credential_current=lambda:True,root_operation_id="root",
+            provider_root_closing=False,privacy_capture_veto=False)}, _memory_provider=provider,
+        _session_context={"engine":{"memory_read_allowed":True}},
+        _handle_session_binding_read=AsyncMock(return_value=binding),
+        resolve_managed_control_turn=AsyncMock(return_value={"owner":"alice","ownerAccountID":"acct"}))
+    async def source(chat, engine, workspace, proof, *, owner):
+        assert (owner, chat, engine, workspace, proof["toolCallID"], proof["messageID"]) == ("alice","chat","engine","/ws","call","message")
+        return {"state":"current","argsSHA256":proof["argsSHA256"]}
+    worker = SimpleNamespace(bridge=bridge,is_alive=lambda:True,session_memory_inferred_source_request=source)
+    state = SimpleNamespace(memory_provider=provider,account_request_barrier=SimpleNamespace(admitted=barrier),
+        mimo_supervisor=SimpleNamespace(worker_for_owner=lambda owner: worker),
+        auth_manager=SimpleNamespace(account_id=lambda owner:"acct", username_for_account_id=lambda account:"alice",
+            get_privileges=lambda owner: {"can_manage_memory":True}))
+    monkeypatch.setattr("core.models.get_session_manager_instance", lambda:SimpleNamespace(get_session=lambda chat:session,lifecycle_context=state))
+    monkeypatch.setattr("src.openclank.chat_routing.resolve_chat_route", lambda **kwargs:SimpleNamespace())
+    monkeypatch.setattr("routes.prefs_routes._load_for_user", lambda owner: {"memory_mode":"automatic"})
+    monkeypatch.setattr(ai_interaction, "_memory_provider", provider)
+    execute = AsyncMock(return_value={"results":"nothing"})
+    monkeypatch.setattr(ai_interaction,"do_manage_memory",execute)
+    request = {"identity":identity,"toolCallID":"call","messageID":"message","arguments":{"action":"list"}}
+    assert (await manage(bridge,request))["state"] == "complete"
+    provider._guarded_v17=True
+    assert (await manage(bridge,{**request,"arguments":{"action":"delete","memory_id":"m"}}))["state"] == "review_required"
+    worker.session_memory_inferred_source_request=AsyncMock(return_value={"state":"unavailable"})
+    assert (await manage(bridge,request))["state"] == "unavailable"
+    execute.assert_awaited_once()

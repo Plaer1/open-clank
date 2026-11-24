@@ -1,4 +1,4 @@
-"""Authenticated workspace events for the existing Frankenmemory index owner.
+"""Authenticated workspace events for the existing Memery index owner.
 
 This adapter owns no jobs or persistence. Roots and authority revisions are
 resolved from canonical FilePolicy state, never accepted from an index client.
@@ -6,6 +6,7 @@ resolved from canonical FilePolicy state, never accepted from an index client.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 
@@ -29,7 +30,7 @@ def _public_status(result, private_root):
         return value.replace(private_root, "[workspace]") if private_root and isinstance(value, str) else value
 
     fields = {"registration_id", "checkout_id", "admission_epoch", "run_id",
-        "head_generation", "lifecycle", "freshness", "config_fingerprint", "coverage_complete"}
+        "head_generation", "lifecycle", "freshness", "config_fingerprint", "coverage_complete", "budget_omitted_files"}
     public = {key: result[key] for key in fields if key in result}
     if "coverage" in result:
         coverage_fields = {"rel_path", "status", "detail", "hash", "generation", "source_hash", "source_generation"}
@@ -54,19 +55,47 @@ def _public_status(result, private_root):
         error = result["error"]
         public["error"] = {key: diagnostic(value) if key == "message" else value
             for key, value in error.items() if key in {"code", "message"}} if error is not None else None
+    if "removal_review" in result:
+        review = result["removal_review"]
+        keys = {"required", "prior_generation", "prior_files", "removed_files", "minimum_files",
+                "minimum_percent", "sample_paths", "confirmation"}
+        if not isinstance(review, dict) or set(review) != keys or type(review["required"]) is not bool:
+            raise CodeIndexLifecycleError("Invalid index removal preview", code="invalid_response")
+        if any(type(review[key]) is not int or not 0 <= review[key] <= 10_000
+               for key in ("prior_files", "removed_files", "minimum_files", "minimum_percent")):
+            raise CodeIndexLifecycleError("Invalid index removal counts", code="invalid_response")
+        samples = review["sample_paths"]
+        if not isinstance(samples, list) or len(samples) > 16 or any(
+                not isinstance(path, str) or not path or len(path) > 4096 or path.startswith(("/", "\\"))
+                for path in samples):
+            raise CodeIndexLifecycleError("Invalid index removal paths", code="invalid_response")
+        confirmation = review["confirmation"]
+        if review["required"]:
+            if not isinstance(confirmation, str) or len(confirmation) != 64 or any(c not in "0123456789abcdef" for c in confirmation):
+                raise CodeIndexLifecycleError("Invalid index removal confirmation", code="invalid_response")
+        elif confirmation is not None:
+            raise CodeIndexLifecycleError("Invalid index removal confirmation", code="invalid_response")
+        public["removal_review"] = dict(review)
     return public
 
 
 async def workspace_index_event(
     *, repository: FilePolicyRepository, provider: object, auth_manager: object,
     owner: str, workspace_id: str, subscriber_id: str, action: str = "ensure",
-    purpose: str = "agent_workspace", session: object | None = None,
+    purpose: str = "agent_workspace", session: object | None = None, removal_confirmation: str | None = None,
+    replace_stale_root: bool = False,
 ) -> dict:
     """Resolve current authority before calling and returning native status."""
-    if action not in {"ensure", "status", "release", "cancel", "remove", "admit"}:
+    if action not in {"ensure", "status", "release", "cancel", "remove", "admit", "preview_removals", "confirm_removals"}:
         raise CodeIndexLifecycleError("Unsupported index action", code="invalid_action")
     if purpose not in {"agent_workspace", "app_folder"}:
         raise CodeIndexLifecycleError("Unsupported workspace purpose", code="invalid_purpose")
+    if action in {"preview_removals", "confirm_removals"} and (purpose != "app_folder" or session is not None):
+        raise CodeIndexLifecycleError("Index removal review requires the app workspace", code="scope_denied")
+    if (action == "confirm_removals") != (removal_confirmation is not None):
+        raise CodeIndexLifecycleError("Index removal confirmation is required", code="invalid_action")
+    if replace_stale_root and (action != 'ensure' or purpose != 'app_folder' or session is not None):
+        raise CodeIndexLifecycleError('Root replacement requires an explicit app folder open', code='scope_denied')
     if session is not None:
         if getattr(session, "owner", None) != owner:
             raise CodeIndexLifecycleError("Chat is unavailable", code="scope_denied")
@@ -106,7 +135,10 @@ async def workspace_index_event(
         workspace_revision=workspace.revision, policy_generation=generation,
         subscriber_id=subscriber_id, origin="agent" if purpose == "agent_workspace" else "app",
     )
-    result = await invoke(action=action, root=root, **scope)
+    extra = {"removal_confirmation": removal_confirmation} if removal_confirmation is not None else {}
+    if replace_stale_root:
+        extra['replace_stale_root'] = True
+    result = await invoke(action=action, root=root, **scope, **extra)
     # A result that completed after revocation/rebinding cannot re-populate
     # this consumer. Native independently fences admission and publication.
     try:
@@ -118,7 +150,7 @@ async def workspace_index_event(
                         or (action in {"ensure", "status", "admit"} and getattr(session, "archived", False))))):
             raise CodeIndexLifecycleError("Workspace authority changed", code="stale_binding")
     except (CodeIndexLifecycleError, WorkspacePolicyServiceError, FilePolicyError, sqlite3.Error):
-        if action == "ensure":
+        if action in {"ensure", "confirm_removals"}:
             try:
                 # An earlier close/rebind may have released before the native
                 # open registered. Detach that exact old scope again on ACK.
@@ -135,6 +167,78 @@ async def workspace_index_event(
     # and retain only same-scope published metadata during verification.
     return {"workspace_id": workspace.id, "workspace_revision": workspace.revision,
             "policy_generation": generation, **_public_status(result, root)}
+
+
+def workspace_index_changes(*, repository, auth_manager, owner, workspace_id, session_current):
+    """Scope Files' existing path-free watch to the exact Graph Workspace."""
+    from src.openclank.files_service_client import FilesServiceError, client_for_owner
+
+    def resolve():
+        return resolve_owned_workspace(repository, workspace_id=workspace_id,
+            owner_username=owner, auth_manager=auth_manager, purpose="app_folder")
+
+    binding = resolve()
+    workspace, root = binding.workspace, binding.path
+    generation = repository.generation()
+    location = workspace.location_id
+    scope = dict(host=False, visible_root_ids=[location], capabilities=["read"],
+        root_capabilities={location: ["read"]}, generation=generation,
+        active_folder=dict(id="code-" + workspace.id, root_id=location, canonical_path=root, capabilities=["read"]))
+
+    def current():
+        try:
+            if not session_current():
+                return False
+            latest = resolve()
+            return (repository.generation() == generation and latest.path == root
+                and latest.workspace.revision == workspace.revision
+                and latest.workspace.owner_subject_id == workspace.owner_subject_id
+                and latest.workspace.location_id == location)
+        except (WorkspacePolicyServiceError, FilePolicyError, sqlite3.Error):
+            return False
+
+    async def changes():
+        # No second watcher implementation. Native Files owns the handle and
+        # drops it with this stream. Hints carry no paths, so authoritative
+        # reconciliation uses the normal bounded index owner.
+        if not current():
+            return
+        client = client_for_owner(owner, app_scope=scope, transport="grpc")
+        events = client.watch_path(root)
+        pending = asyncio.create_task(anext(events))
+        try:
+            while current():
+                done, _ = await asyncio.wait({pending}, timeout=15)
+                if not current():
+                    return
+                if not done:
+                    yield b": keepalive\n\n"
+                    continue
+                try:
+                    pending.result()
+                except (StopAsyncIteration, FilesServiceError):
+                    return
+                pending = asyncio.create_task(anext(events))
+                deadline = asyncio.get_running_loop().time() + .25
+                for _ in range(31):
+                    done, _ = await asyncio.wait({pending}, timeout=max(0, deadline-asyncio.get_running_loop().time()))
+                    if not done:
+                        break
+                    try:
+                        pending.result()
+                    except (StopAsyncIteration, FilesServiceError):
+                        if current():
+                            yield b"event: index-change\ndata: rescan\n\n"
+                        return
+                    pending = asyncio.create_task(anext(events))
+                if current():
+                    yield b"event: index-change\ndata: rescan\n\n"
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            await events.aclose()
+
+    return changes()
 
 
 async def session_workspace_index_event(request, session, *, action="ensure", workspace_id=None):

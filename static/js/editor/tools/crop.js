@@ -14,12 +14,15 @@
  *   showCropApply: () => void,
  * }} deps
  */
-import { state } from '../state.js';
+import { state as legacyState } from '../state.js';
 import { canvasCoords } from '../canvas-coords.js';
 import { drawCheckerboard } from '../checkerboard.js';
 
-export function createCropTool({ composite, showCropApply }) {
-  return {
+export function createCropTool({ state = legacyState, root = null, lifetime = null, composite, showCropApply, capturePreview = () => {} }) {
+  if (state !== legacyState && (!root || typeof lifetime?.add !== 'function')) throw new TypeError('isolated tool requires root and lifetime');
+  let disposed = false;
+  lifetime?.add(() => { disposed = true; state.cropping = false; state.cropMoving = false; state.cropMoveStart = null; });
+  const tool = {
     begin(e) {
       const coords = canvasCoords(e, state.mainCanvas);
       // Click inside an existing crop rect → switch to move-mode so
@@ -32,6 +35,7 @@ export function createCropTool({ composite, showCropApply }) {
         return;
       }
       state.cropping = true;
+      capturePreview();
       state.cropStart = coords;
       state.cropEnd = { ...state.cropStart };
       state.cropRect = null;
@@ -134,4 +138,9 @@ export function createCropTool({ composite, showCropApply }) {
       }
     },
   };
+  for (const key of Object.keys(tool)) {
+    const invoke = tool[key];
+    tool[key] = (...args) => disposed ? false : invoke(...args);
+  }
+  return tool;
 }

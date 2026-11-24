@@ -15,7 +15,7 @@ export function treeHouseCourseItems(state, course) {
 }
 
 export function renderTreeHouseLearner(root, context) {
-  const { h, ui, command, setStatus, learnerProjection, persistContext, renderLoaded, currentEnrollment } = context;
+  const { h, ui, command, setStatus, learnerProjection, persistContext, renderLoaded, currentEnrollment, registerTreeHouseAction } = context;
   if (context.topicWeb?.render(root)) return;
   const state = ui.snapshot.state; const progress = learnerProjection();
   const courses = list(state.courses).filter(course => course.status === 'published' && !course.deletedAt);
@@ -104,6 +104,10 @@ export function renderTreeHouseLearner(root, context) {
             h('h2', { text:course.title }), h('p', { text:course.description || (kind === 'tutorial' ? 'Explore the lessons, then continue to the next step.' : 'Learn the foundations and complete the required missions.') }),
             h('small', { text:`${course.moduleIds?.length || 0} chapters · ${items.length} steps` }), meter(cp, `${course.title} completion`),
             h('div', { class:'th-card-footer' }, h('small', { text:`${cp?.percent || 0}% complete` }), h('button', { class:'copal-btn primary', text:cp?.complete ? 'Revisit' : cp?.state === 'in-progress' || cp?.state === 'opened' ? 'Continue' : 'Explore', onclick:run(() => openCourse(course)) }))));
+        const command = { id:'open-treehouse-course', label:'Open course' };
+        const open = target => run(() => openCourse(course))({ currentTarget:target });
+        registerTreeHouseAction?.(card.querySelector('h2'), command, open);
+        registerTreeHouseAction?.(card.querySelector('.th-card-footer button'), command, open);
         if (locked.length) card.querySelector('.th-course-card-body').append(h('p', { class:'th-requirement', text:`Complete first: ${locked.join(', ')}.` }));
         grid.append(card);
       }
@@ -130,27 +134,46 @@ export function renderTreeHouseLearner(root, context) {
   for (const moduleId of selected.moduleIds || []) {
     const module = state.modules[moduleId]; if (!module) continue;
     const chapter = h('section', { class:'th-index-chapter' }, h('h3', { text:module.title }));
-    for (const item of items.filter(item => item.module.id === moduleId)) chapter.append(h('button', { class:`th-index-step${current?.id === item.id ? ' active' : ''}`, 'aria-current':current?.id === item.id ? 'step' : false, onclick:run(() => selectItem(item)) },
-      h('span', { class:'th-step-state', text:completed(item) ? '✓' : item.itemKind === 'assignment' ? '◇' : '○', 'aria-label':completed(item) ? 'Complete' : item.itemKind === 'assignment' ? 'Task' : 'Lesson' }), h('span', {}, h('strong', { text:item.title }), h('small', { text:item.itemKind === 'assignment' ? required(item) ? 'Required task' : 'Optional practice' : kind === 'tutorial' ? 'Read & continue' : required(item) ? 'Required mission' : 'Lesson' }))));
+    for (const item of items.filter(item => item.module.id === moduleId)) {
+      const step = h('button', { class:`th-index-step${current?.id === item.id ? ' active' : ''}`, 'aria-current':current?.id === item.id ? 'step' : false, onclick:run(() => selectItem(item)) },
+      h('span', { class:'th-step-state', text:completed(item) ? '✓' : item.itemKind === 'assignment' ? '◇' : '○', 'aria-label':completed(item) ? 'Complete' : item.itemKind === 'assignment' ? 'Task' : 'Lesson' }), h('span', {}, h('strong', { text:item.title }), h('small', { text:item.itemKind === 'assignment' ? required(item) ? 'Required task' : 'Optional practice' : kind === 'tutorial' ? 'Read & continue' : required(item) ? 'Required mission' : 'Lesson' })));
+      registerTreeHouseAction?.(step, { id:'open-treehouse-lesson', label:item.itemKind === 'assignment' ? 'Open task' : 'Open lesson' }, target => run(() => selectItem(item))({ currentTarget:target.closest('.th-index-step') }));
+      chapter.append(step);
+    }
     index.append(chapter);
   }
   layout.append(index);
   const lesson = h('article', { class:'th-lesson', 'data-copal-context-object':'treehouse', 'data-treehouse-id':current?.id || '', 'data-field-guide-lesson':current?.fieldGuideKey || current?.id || '' });
-  lesson.addEventListener('click',run(async event=>{
-    const anchor=event.target.closest?.('a[href^="#treehouse-unit="]');
-    if(!anchor || !lesson.contains(anchor))return;
-    event.preventDefault();
-    let target;try {target=decodeURIComponent(anchor.getAttribute('href').slice('#treehouse-unit='.length));}catch{return;}
-    const local=items.find(item=>item.id===target && item.itemKind==='activity');
-    if(local){await selectItem(local);return;}
-    if(!/^(cs|games|ai):[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/.test(target) || !context.topicWeb || !ui.snapshot.globalCatalogue)return;
-    const account=ui.snapshot.accountId,workspace=ui.snapshot.workspace,course=ui.selectedCourse;
-    const subject=target.split(':').slice(0,2).join(':');
-    const detail=await context.topicWeb.subjectDetail(subject);
-    if(ui.snapshot.accountId!==account || ui.snapshot.workspace!==workspace || ui.selectedCourse!==course || !detail?.units?.some(unit=>unit.id===target))return;
+  const lessonLink = target => {
+    const link = target.closest('a[href^="#treehouse-unit="]');
+    if (!link || !lesson.contains(link)) return null;
+    let id;
+    try { id = decodeURIComponent(link.getAttribute('href').slice('#treehouse-unit='.length)); } catch { return null; }
+    if (items.some(item => item.id === id && item.itemKind === 'activity')
+      || (/^(cs|games|ai):[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/.test(id) && context.topicWeb && ui.snapshot.globalCatalogue)) return link;
+    return null;
+  };
+  const openLessonLink = async anchor => {
+    const target = decodeURIComponent(anchor.getAttribute('href').slice('#treehouse-unit='.length));
+    const local = items.find(item => item.id === target && item.itemKind === 'activity');
+    if (local) return selectItem(local);
+    const { accountId, workspace } = ui.snapshot;
+    const { selectedCourse, token } = ui;
+    const subject = target.split(':').slice(0, 2).join(':');
+    const detail = await context.topicWeb.subjectDetail(subject);
+    if (ui.snapshot.accountId !== accountId || ui.snapshot.workspace !== workspace || ui.selectedCourse !== selectedCourse || ui.token !== token
+      || !anchor.isConnected || lessonLink(anchor) !== anchor || !detail?.units?.some(unit => unit.id === target)) return;
     setStatus('Opening a shared lesson. Your private course is unchanged.');
-    ui.selectedCourse=null;persistContext();await context.topicWeb.openSubject(subject,target);
-  }));
+    ui.selectedCourse = null; persistContext(); await context.topicWeb.openSubject(subject, target);
+  };
+  lesson.addEventListener('click', event => {
+    const href = event.target.closest?.('a[href^="#treehouse-unit="]');
+    if (!href || !lesson.contains(href)) return;
+    event.preventDefault();
+    if (lessonLink(event.target)) void run(() => openLessonLink(href))(event);
+  });
+  registerTreeHouseAction?.(lesson, { id:'open-treehouse-lesson', label:'Open lesson' }, target => run(() => openLessonLink(target))({ currentTarget:target }),
+    target => target.closest('img') ? null : lessonLink(target), target => target.getAttribute('href'));
   if (!current) { lesson.append(h('div', { class:'copal-empty', text:'This course has no published steps yet.' })); layout.append(lesson); root.append(layout); return; }
   lesson.append(h('span', { class:'th-eyebrow', text:`${current.module.title} · ${activeIndex + 1} OF ${items.length}` }), h('h2', { text:current.title }));
   if(current.contentDeferred && context.hydratePrivateItem){

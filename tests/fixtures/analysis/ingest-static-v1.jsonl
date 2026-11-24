@@ -1,0 +1,5 @@
+{"schema":"openclank.analysis-ingest.v1","kind":"static_db","provider":{"id":"fixture","version":"1.0"},"source":{"sha256":"f67df5136653f55f15ee5d007e35f2d41976cb123a60f24a2a1286ecbca4aca7","size":16,"arch":"synthetic","addressSpace":"provider_virtual"},"generation":1,"producedAt":1700000000}
+{"type":"function","name":"entry","address":4096,"size":32}
+{"type":"function","name":"helper","address":4128,"size":16}
+{"type":"xref","from":4100,"to":4128,"kind":"call"}
+{"type":"xref","from":4110,"to":null,"kind":"jump"}

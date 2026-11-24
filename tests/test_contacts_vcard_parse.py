@@ -1,13 +1,3 @@
-"""Regression: _parse_vcards must read Apple/iCloud item-grouped properties.
-
-RFC 6350 property groups (the default emitted by Apple Contacts.app / iCloud and
-many CardDAV servers) prefix the property name with a group token, e.g.
-`item1.EMAIL;type=pref:jane@example.com`. The parser matched property names with
-a bare `line.startswith("EMAIL")` / `"TEL"` / `"FN:"`, so grouped lines never
-matched and the email / phone were silently dropped — breaking contact search by
-email, the email-composer autocomplete, and vCard/CSV export round-trips for any
-address book synced from Apple.
-"""
 from routes.contacts_routes import _parse_vcards
 
 
@@ -36,3 +26,39 @@ def test_plain_ungrouped_properties_still_parsed():
     assert c["emails"] == ["john@example.com"]
     assert c["phones"] == ["+15550199"]
     assert c["uid"] == "xyz"
+
+
+def test_folded_email_is_reassembled():
+    vcard = (
+        "BEGIN:VCARD\r\n"
+        "VERSION:3.0\r\n"
+        "FN:John Doe\r\n"
+        "EMAIL;TYPE=INTERNET:john.doe.with.a.very.long.local.part@exampledomain\r\n"
+        " .com\r\n"
+        "END:VCARD\r\n"
+    )
+    contacts = _parse_vcards(vcard)
+    assert len(contacts) == 1
+    assert contacts[0]["emails"] == [
+        "john.doe.with.a.very.long.local.part@exampledomain.com"
+    ]
+
+
+def test_folded_display_name_is_reassembled():
+    vcard = (
+        "BEGIN:VCARD\n"
+        "FN:A Very Long Display Name That The Server\n"
+        "  Decided To Fold\n"
+        "EMAIL:x@y.com\n"
+        "END:VCARD\n"
+    )
+    c = _parse_vcards(vcard)[0]
+    assert c["name"] == "A Very Long Display Name That The Server Decided To Fold"
+
+
+def test_unfolded_vcard_still_parses():
+    vcard = "BEGIN:VCARD\nFN:Jane\nEMAIL:jane@z.com\nTEL:+15550001\nEND:VCARD\n"
+    c = _parse_vcards(vcard)[0]
+    assert c["name"] == "Jane"
+    assert c["emails"] == ["jane@z.com"]
+    assert c["phones"] == ["+15550001"]

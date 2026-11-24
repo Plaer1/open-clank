@@ -278,16 +278,8 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
   function releaseImagePages() {
     for (const page of imagePages) {
       gl.deleteTexture(page.texture);
-      page.canvas.width = page.canvas.height = 0;
     }
     imagePages.length = 0;
-  }
-
-  function uploadImagePage(page) {
-    if (!page?.dirty || !alive()) return;
-    gl.bindTexture(gl.TEXTURE_2D, page.texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, page.canvas);
-    page.dirty = false;
   }
 
   function imageAtlasEntry(source) {
@@ -304,25 +296,24 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
         releaseImagePages();
         currentTexture = null;
       }
-      const surface = canvas.ownerDocument.createElement('canvas');
-      surface.width = surface.height = imageAtlasSize;
-      const ctx = surface.getContext('2d');
       const texture = gl.createTexture();
-      if (!ctx || !texture) return null;
+      if (!texture) return null;
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      page = { canvas: surface, ctx, texture, x: 0, y: 0, row: 0, dirty: true };
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, imageAtlasSize, imageAtlasSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      page = { texture, x: 0, y: 0, row: 0 };
       imagePages.push(page);
     }
     const x = page.x + 1;
     const y = page.y + 1;
-    page.ctx.drawImage(source, x, y, sw, sh);
+    // Streaming one small sprite must not re-upload an entire atlas page.
+    gl.bindTexture(gl.TEXTURE_2D, page.texture);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, source);
     page.x += sw + 2;
     page.row = Math.max(page.row, sh + 2);
-    page.dirty = true;
     return { texture: page.texture, page, uv: [x / imageAtlasSize, y / imageAtlasSize,
       (x + sw) / imageAtlasSize, (y + sh) / imageAtlasSize] };
   }
@@ -349,8 +340,6 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
   function flushTexture() {
     if (!alive() || textureIndexCount === 0 || !currentTexture) return;
     if (currentTexture === atlasTexture) uploadDirtyAtlas();
-    const imagePage = imagePages.find(page => page.texture === currentTexture);
-    if (imagePage) uploadImagePage(imagePage);
     gl.useProgram(textureProgram);
     gl.uniform2f(textureUResolution, logicalWidth, logicalHeight);
     gl.activeTexture(gl.TEXTURE0);
@@ -779,7 +768,7 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
       }
     },
 
-    drawImage(source, dx, dy, dw, dh, alpha = 1, mediaShape = null) {
+    drawImage(source, dx, dy, dw, dh, alpha = 1, mediaShape = null, tint = null) {
       if (!alive() || !source) return false;
       if(mediaShape){
         const c=mediaShape.clip;
@@ -824,7 +813,7 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
         w,
         h,
         ...(mediaShape?.uv || entry.uv || [0, 0, 1, 1]),
-        [1, 1, 1],
+        tint ? hexToRgb(tint.color) : [1, 1, 1],
         clamp01(this.__globalAlpha == null ? 1 : this.__globalAlpha) * opacity,
         mediaShape?.clip || null,
       );

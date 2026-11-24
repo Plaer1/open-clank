@@ -31,6 +31,9 @@ message Endpoint {
   string lock_url = 5;
   // Notification service endpoint.
   string notification_url = 6;
+  // User directory endpoint: resolves user IDs to display names and back.
+  // Falls back to `auth_url` if empty.
+  string user_url = 7;
 }
 
 // Compression algorithm to use when storing payloads.
@@ -55,12 +58,45 @@ message Config {
   optional CompressionMode compression_mode = 2;
 }
 
+// The OpenID Connect provider clients log in at. An empty string means
+// "not set" for every string field.
+message Oidc {
+  // Issuer URL. Clients fetch `<issuer>/.well-known/openid-configuration`.
+  string issuer = 1;
+  // The public client ID clients present to the provider.
+  string client_id = 2;
+  // Default scopes to request at login.
+  repeated string scopes = 3;
+  // Whether the client should take the OIDC path rather than
+  // `Endpoint.auth_url`, if both are supported.
+  bool preferred = 4;
+  // Template for converting a partition into an RFC 8707 resource, with
+  // `{id}` standing for the partition ID. Exclusive with `scope_template`.
+  string resource_template = 5;
+  // Template for converting a partition into a scope value, with `{id}`
+  // standing for the partition ID. Exclusive with `resource_template`.
+  string scope_template = 6;
+  // The issuer of the RFC 8693 token-exchange endpoint that mints
+  // partition-scoped tokens.
+  string token_exchange_issuer = 7;
+  // Deprecated and left empty: the user identity is read from the token
+  // itself, its `identity` claim or else `sub`. Kept so older peers decode.
+  string identity_claim = 8 [deprecated = true];
+  // Scopes to request with the client credentials grant. Empty requests none,
+  // leaving the client's default scopes to the provider.
+  repeated string client_credentials_scopes = 9;
+}
+
 // Composite environment record returned by EnvironmentGet.
 message Environment {
   // Per-service endpoint URLs.
   Endpoint endpoint = 1;
   // Server-tunable configuration knobs.
   Config config = 2;
+  // The OpenID Connect provider. Unset when the server does not
+  // advertise OIDC login. In this case clients authenticate through
+  // `Endpoint.auth_url`.
+  Oidc oidc = 3;
 }
 
 // Empty request envelope (the call has no parameters).

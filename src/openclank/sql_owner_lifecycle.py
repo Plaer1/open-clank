@@ -18,9 +18,11 @@ from sqlalchemy import func, tuple_
 from core.database import (
     AgentTurn,
     Base,
+    _RETIRED_PROVIDER_TABLES,
     CalendarCal,
     CalendarEvent,
     ChatMessage,
+    CrewMember,
     Document,
     DocumentVersion,
     MimoProjectionState,
@@ -278,6 +280,9 @@ class CommonSqlOwnerLifecycle:
             dependent
             for dependent in _DEPENDENT_BINDINGS
             if dependent.model.__table__.metadata is base.metadata
+            and all(model.__table__.name not in _RETIRED_PROVIDER_TABLES
+                    for model in (dependent.model, dependent.root_model,
+                                  *(entry for join in dependent.joins for entry in (join[0], join[2]))))
         )
         if not self.bindings:
             raise SqlOwnerLifecycleError("common SQL owner registry is empty")
@@ -290,7 +295,7 @@ class CommonSqlOwnerLifecycle:
             table = mapper.local_table
             if table.metadata is not base.metadata:
                 continue
-            if table.name in _IMMUTABLE_BARRIER_TABLES:
+            if table.name in _IMMUTABLE_BARRIER_TABLES or table.name in _RETIRED_PROVIDER_TABLES:
                 continue
             column_name = _SPECIAL_OWNER_COLUMNS.get(table.name)
             if column_name is None and "owner" in table.c:
@@ -353,7 +358,7 @@ class CommonSqlOwnerLifecycle:
             )
         ).distinct()
 
-    def _inventory(self, db: Any, owner: str) -> dict[str, Any]:
+    def _inventory(self, db: Any, owner: str, account_id: str | None = None, *, validate_account: bool = False) -> dict[str, Any]:
         counts: dict[str, int] = {}
         fingerprints: dict[str, str] = {}
         for binding in self.bindings:
@@ -363,6 +368,8 @@ class CommonSqlOwnerLifecycle:
                 for table_column in binding.model.__table__.primary_key.columns
                 if table_column.name != binding.column_name
             ]
+            if getattr(binding.model, '__tablename__', None) == 'scheduled_tasks' and binding.column_name == 'owner':
+                identity_columns.append(binding.model.__table__.c.host_account_id)
             if identity_columns:
                 rows = db.query(*identity_columns).filter(
                     _owner_predicate(column, owner)
@@ -371,6 +378,17 @@ class CommonSqlOwnerLifecycle:
                     [str(value) if value is not None else None for value in row]
                     for row in rows
                 )
+                if getattr(binding.model, '__tablename__', None) == 'scheduled_tasks' and binding.column_name == 'owner':
+                    if validate_account:
+                        from core.database import TaskRun
+                        if db.query(TaskRun.id).join(binding.model, TaskRun.task_id == binding.model.id).filter(
+                                _owner_predicate(column, owner), TaskRun.status.in_(('running', 'waiting', 'resuming', 'outcome_unknown', 'issued_waiting', 'issued_resuming'))).first():
+                            raise SqlOwnerLifecycleConflict('scheduled task occurrence requires settlement')
+                    for row in rows:
+                        bound = row[-1]
+                        if bound is not None and (not isinstance(bound, str) or not bound.strip()
+                                or (validate_account and (not account_id or bound != account_id))):
+                            raise SqlOwnerLifecycleConflict('scheduled task account binding unavailable')
                 count = len(rows)
             else:
                 count = int(
@@ -410,11 +428,43 @@ class CommonSqlOwnerLifecycle:
             "fingerprint": hashlib.sha256(material.encode("utf-8")).hexdigest(),
         }
 
-    def owner_inventory(self, owner: str) -> dict[str, Any]:
+    def stopped_default_seed_inventory(self, owner, tombstone, *, account_id, original):
+        """Recognize only the startup defaults added to prior empty owner tables."""
+        from src.task_scheduler import HOUSEKEEPING_DEFAULTS
+        if not account_id or tombstone != f"deleted:{account_id}" or original.get("owner") != owner:
+            raise SqlOwnerLifecycleConflict("default seed recovery subject changed")
+        db = self._session_factory()
+        try:
+            if db.get_bind().dialect.name == "sqlite":
+                db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            current = self._inventory(db, owner, account_id, validate_account=True)
+            target = self._inventory(db, tombstone, account_id, validate_account=True)
+            keys = {"crew_members.owner", "sessions.owner", "scheduled_tasks.owner"}
+            tables = current["tables"]
+            if (target["count"] or tables.keys() != original["tables"].keys()
+                or any(original["tables"][key] for key in keys)
+                or any(current["table_fingerprints"][key] != original["table_fingerprints"][key]
+                       for key in tables.keys() - keys)):
+                raise SqlOwnerLifecycleConflict("original SQL rows changed during default seeding")
+            crew = db.query(CrewMember).filter_by(owner=owner).one_or_none()
+            chat = db.query(Session).filter_by(owner=owner).one_or_none()
+            tasks = db.query(ScheduledTask).filter_by(owner=owner).all()
+            if (crew is None or chat is None or not crew.is_default_assistant or crew.session_id != chat.id
+                or chat.crew_member_id != crew.id or chat.message_count or tables["crew_members.owner"] != 1
+                or tables["sessions.owner"] != 1 or len(tasks) != tables["scheduled_tasks.owner"]
+                or not tasks or len({task.action for task in tasks}) != len(tasks)
+                or any(task.action not in HOUSEKEEPING_DEFAULTS or task.name != HOUSEKEEPING_DEFAULTS[task.action]["name"]
+                       or task.host_account_id is not None or task.session_id is not None for task in tasks)):
+                raise SqlOwnerLifecycleConflict("SQL rows do not match startup defaults")
+            return current
+        finally:
+            db.close()
+
+    def owner_inventory(self, owner: str, *, account_id: str | None = None) -> dict[str, Any]:
         owner = _owner(owner)
         db = self._session_factory()
         try:
-            return self._inventory(db, owner)
+            return self._inventory(db, owner, account_id, validate_account=account_id is not None)
         finally:
             db.close()
 
@@ -441,13 +491,16 @@ class CommonSqlOwnerLifecycle:
         action: str,
         reconcile: bool,
         expected_source: Mapping[str, Any] | None,
+        account_id: str | None,
     ) -> SqlOwnerLifecycleReceipt:
         source_owner = _owner(source_owner)
         target_owner = _owner(target_owner)
         db = self._session_factory()
         try:
-            source_before = self._inventory(db, source_owner)
-            target_before = self._inventory(db, target_owner)
+            if db.get_bind().dialect.name == 'sqlite':
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+            source_before = self._inventory(db, source_owner, account_id, validate_account=True)
+            target_before = self._inventory(db, target_owner, account_id, validate_account=True)
             if source_owner == target_owner:
                 return SqlOwnerLifecycleReceipt(
                     action,
@@ -523,8 +576,8 @@ class CommonSqlOwnerLifecycle:
                 if count:
                     changed[binding.key] = count
             db.flush()
-            source_after = self._inventory(db, source_owner)
-            target_after = self._inventory(db, target_owner)
+            source_after = self._inventory(db, source_owner, account_id, validate_account=True)
+            target_after = self._inventory(db, target_owner, account_id, validate_account=True)
             if int(source_after["count"]):
                 raise SqlOwnerLifecycleError("source SQL owner remains after staging")
             if not _same_inventory(target_after, source_before):
@@ -553,6 +606,7 @@ class CommonSqlOwnerLifecycle:
         target_owner: str,
         *,
         expected_source: Mapping[str, Any] | None = None,
+        account_id: str | None = None,
     ) -> SqlOwnerLifecycleReceipt:
         """Atomically move a source owner to a rename key or tombstone."""
         return self._move(
@@ -561,6 +615,7 @@ class CommonSqlOwnerLifecycle:
             action="stage",
             reconcile=False,
             expected_source=expected_source,
+            account_id=account_id,
         )
 
     rename_owner = stage_owner
@@ -571,6 +626,7 @@ class CommonSqlOwnerLifecycle:
         target_owner: str,
         *,
         expected_source: Mapping[str, Any] | None = None,
+        account_id: str | None = None,
     ) -> SqlOwnerLifecycleReceipt:
         """Resume a stage, accepting only an exact already-applied inventory."""
         return self._move(
@@ -579,6 +635,7 @@ class CommonSqlOwnerLifecycle:
             action="reconcile",
             reconcile=True,
             expected_source=expected_source,
+            account_id=account_id,
         )
 
     reconcile_rename = reconcile_owner
@@ -589,6 +646,7 @@ class CommonSqlOwnerLifecycle:
         staged_owner: str,
         *,
         expected_source: Mapping[str, Any] | None = None,
+        account_id: str | None = None,
     ) -> SqlOwnerLifecycleReceipt:
         """Idempotently restore an exact staged/tombstoned inventory."""
         return self._move(
@@ -597,6 +655,7 @@ class CommonSqlOwnerLifecycle:
             action="compensate",
             reconcile=True,
             expected_source=expected_source,
+            account_id=account_id,
         )
 
     def purge_owner(
@@ -604,12 +663,15 @@ class CommonSqlOwnerLifecycle:
         owner: str,
         *,
         expected_inventory: Mapping[str, Any] | None = None,
+        account_id: str | None = None,
     ) -> SqlOwnerLifecycleReceipt:
         """Atomically purge one exact owner inventory; retries are empty no-ops."""
         owner = _owner(owner)
         db = self._session_factory()
         try:
-            before = self._inventory(db, owner)
+            if db.get_bind().dialect.name == 'sqlite':
+                db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+            before = self._inventory(db, owner, account_id, validate_account=True)
             if expected_inventory is not None and int(before["count"]):
                 self._require_expected(
                     before,
@@ -667,7 +729,7 @@ class CommonSqlOwnerLifecycle:
                 if count:
                     changed[binding.key] = count
             db.flush()
-            after = self._inventory(db, owner)
+            after = self._inventory(db, owner, account_id, validate_account=True)
             if int(after["count"]):
                 raise SqlOwnerLifecycleError("SQL owner remains after purge")
             db.commit()
@@ -688,9 +750,9 @@ class CommonSqlOwnerLifecycle:
         finally:
             db.close()
 
-    def verify_owner_absent(self, owner: str) -> dict[str, Any]:
+    def verify_owner_absent(self, owner: str, *, account_id: str | None = None) -> dict[str, Any]:
         """Return an empty inventory or fail closed with content-free evidence."""
-        inventory = self.owner_inventory(owner)
+        inventory = self.owner_inventory(owner, account_id=account_id)
         if int(inventory["count"]):
             raise SqlOwnerLifecycleConflict(
                 "SQL owner still contains state",
@@ -704,10 +766,11 @@ class CommonSqlOwnerLifecycle:
         target_owner: str,
         *,
         expected_source: Mapping[str, Any],
+        account_id: str | None = None,
     ) -> dict[str, Mapping[str, Any]]:
         """Verify source absence and an exact count-derived target fingerprint."""
-        source = self.verify_owner_absent(source_owner)
-        target = self.owner_inventory(target_owner)
+        source = self.verify_owner_absent(source_owner, account_id=account_id)
+        target = self.owner_inventory(target_owner, account_id=account_id)
         self._require_expected(
             target,
             expected_source,

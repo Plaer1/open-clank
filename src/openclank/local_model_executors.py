@@ -129,7 +129,12 @@ def _kokoro(
         raise LocalExecutorError("Kokoro recipe received an unsupported operation")
     text = _text(options.get("text"), "speech text", maximum=5_000)
     voice = _text(options.get("voice") or "af_heart", "voice", maximum=64)
-    _number(options.get("speed", 1), "speech speed", minimum=0.25, maximum=4)
+    speed = _number(options.get("speed", 1), "speech speed", minimum=0.25, maximum=4)
+    if speed != 1:
+        raise LocalExecutorError("Kokoro local executor does not support speech speed; use 1")
+    response_format = str(options.get("responseFormat") or "wav").strip().lower()
+    if response_format not in {"wav", "audio/wav"}:
+        raise LocalExecutorError("Kokoro local executor only supports WAV output")
 
     def create():
         from services.tts.tts_service import _KokoroPipeline

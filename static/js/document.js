@@ -1,3 +1,4 @@
+import { bindCardActionMenu } from './cardActionMenu.js';
 import { uiIcon } from './uiIcons.js';
 // static/js/document.js
 /**
@@ -89,7 +90,7 @@ function _wireExpandedDocumentEditor(textarea) {
   let _emailStreamTargetBody = '';
   let _emailLocalDraftDebounce = null;
   let _emailRichbodySaveDebounce = null;
-  const _EMAIL_LOCAL_DRAFT_PREFIX = 'odysseus.email.replyDraft.v1:';
+  const _EMAIL_LOCAL_DRAFT_PREFIX = 'openclank.email.replyDraft.v1:';
 
   // Diff mode state
   let _diffModeActive = false;
@@ -166,7 +167,7 @@ function _wireExpandedDocumentEditor(textarea) {
   {
     const s = document.createElement('style');
     s.id = 'doc-tab-menu-styles';
-    s.textContent = `.doc-tab-menu-btn{background:none!important;border:none!important;outline:none!important;box-shadow:none!important;color:var(--fg);opacity:0.25;cursor:pointer;padding:2px 4px!important;height:auto!important;line-height:1;transition:opacity .15s;flex-shrink:0;-webkit-appearance:none;appearance:none}.doc-tab-menu-btn:focus,.doc-tab-menu-btn:active{outline:none!important;box-shadow:none!important;background:none!important}.doc-tab:hover .doc-tab-menu-btn{opacity:.5}.doc-tab-menu-btn:hover{opacity:1!important}.doc-tab-dropdown .dropdown-item-compact{padding:6px 8px;border-radius:6px;cursor:pointer;white-space:nowrap;border-bottom:none;display:flex;align-items:center;gap:10px;font-size:11px}.doc-tab-dropdown .dropdown-item-compact:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}.doc-tab-dropdown .dropdown-item-compact .dropdown-icon{width:14px;height:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0;opacity:0.5}.doc-tab-dropdown .dropdown-divider{height:1px;margin:3px 0;background:color-mix(in srgb,var(--border) 40%,transparent)}.doc-tab-action-delete{color:var(--red,#e06c75)!important}.doc-tab-action-delete .dropdown-icon{opacity:0.7!important}`;
+    s.textContent = `.doc-tab-menu-btn{background:none!important;border:none!important;outline:none!important;box-shadow:none!important;color:var(--fg);opacity:0.25;cursor:pointer;padding:2px 4px!important;height:auto!important;line-height:1;transition:opacity .15s;flex-shrink:0;-webkit-appearance:none;appearance:none}.doc-tab-menu-btn:focus,.doc-tab-menu-btn:active{outline:none!important;box-shadow:none!important;background:none!important}.doc-tab:hover .doc-tab-menu-btn{opacity:.5}.doc-tab-menu-btn:hover{opacity:1!important}`;
     document.head.appendChild(s);
   }
 
@@ -177,8 +178,8 @@ function _wireExpandedDocumentEditor(textarea) {
   const _isResourceDocument = (doc = docs.get(activeDocId)) => !!(doc?.readOnly && doc?.resourceRef);
   let _emailSendInFlight = false;
 
-  const _docOpenKey = (sessionId) => 'odysseus-doc-open-' + sessionId;
-  const _docMinimizedKey = (sessionId) => 'odysseus-doc-minimized-' + sessionId;
+  const _docOpenKey = (sessionId) => 'openclank-doc-open-' + sessionId;
+  const _docMinimizedKey = (sessionId) => 'openclank-doc-minimized-' + sessionId;
 
   function _markDocVisibleState(sessionId, state) {
     if (!sessionId) return;
@@ -357,7 +358,7 @@ function _wireExpandedDocumentEditor(textarea) {
         : '';
       const langChip = `<span class="doc-tab-lang">${lic}</span>`;
       html += `<div class="doc-tab${isActive ? ' active' : ''}" draggable="true" data-doc-id="${id}" title="${_esc(title)}">
-        ${verChip}${langChip}<span class="doc-tab-title">${_esc(shortTitle)}</span>
+        ${verChip}${langChip}<span class="doc-tab-title">${_esc(shortTitle)}</span>${menuBtn}
         <button class="doc-tab-close" data-doc-id="${id}" title="Unlink from chat (kept in the Library)">&times;</button>
       </div>`;
     }
@@ -420,6 +421,7 @@ function _wireExpandedDocumentEditor(textarea) {
         }
       });
       tab.addEventListener('dblclick', (e) => {
+        if (e.target.closest('button')) return;
         clearTimeout(_tabClickTimer);
         const titleSpan = tab.querySelector('.doc-tab-title');
         if (!titleSpan) return;
@@ -452,13 +454,6 @@ function _wireExpandedDocumentEditor(textarea) {
         }
         return;
       }
-      const menuBtnEl = e.target.closest('.doc-tab-menu-btn');
-      if (menuBtnEl) {
-        e.stopPropagation();
-        const docId = menuBtnEl.dataset.docId;
-        if (docId) showDocTabMenu(menuBtnEl, docId);
-        return;
-      }
       const closeBtn = e.target.closest('.doc-tab-close');
       if (!closeBtn) return;
       e.stopPropagation();
@@ -466,6 +461,20 @@ function _wireExpandedDocumentEditor(textarea) {
       if (docId) closeTab(docId);
     };
     tabBar.addEventListener('click', tabBar._closeHandler);
+
+    for (const tab of tabBar.querySelectorAll('.doc-tab[data-doc-id]')) {
+      const docId = tab.dataset.docId;
+      const doc = docs.get(docId);
+      if (!doc) continue;
+      bindCardActionMenu(tab, {
+        button: tab.querySelector('.doc-tab-menu-btn'),
+        exclude: '.doc-tab-version',
+        allowGesture: e => e.pointerType !== 'touch',
+        current: () => docs.get(docId) === doc &&
+          (sessionModule?.getCurrentSessionId() || '') === curSession,
+        items: valid => docTabActions(docId, doc, valid),
+      });
+    }
 
     // Wire drag-to-reorder
     initTabDragReorder(tabBar);
@@ -4153,7 +4162,7 @@ function _wireExpandedDocumentEditor(textarea) {
   // Mirrors the email reader's AI reply choice popover: textarea for an
   // optional steering note, then one Submit button.
   let _docAiReplyChoiceMenu = null;
-  const _AI_REPLY_CONTEXT_STORE_PREFIX = 'odysseus:email-ai-reply-context:v1:';
+  const _AI_REPLY_CONTEXT_STORE_PREFIX = 'openclank:email-ai-reply-context:v1:';
   function _docAiReplyContextKey() {
     try {
       const sourceUid = document.getElementById('doc-email-source-uid')?.value?.trim() || '';
@@ -5786,7 +5795,7 @@ function _wireExpandedDocumentEditor(textarea) {
     const editorWrap = document.getElementById('doc-editor-wrap');
     const _fontSizes = ['s', 'm', 'l'];
     const _iconSizes = [12, 14, 16];
-    let _fontIdx = parseInt(localStorage.getItem('odysseus-doc-fontsize') || '0', 10);
+    let _fontIdx = parseInt(localStorage.getItem('openclank-doc-fontsize') || '0', 10);
     if (!(_fontIdx >= 0 && _fontIdx < 3)) _fontIdx = 0;
     function _applyDocFont() {
       const richEmailBody = document.getElementById('doc-email-richbody');
@@ -5806,7 +5815,7 @@ function _wireExpandedDocumentEditor(textarea) {
           el.style.display = active ? '' : 'none';
         });
       }
-      localStorage.setItem('odysseus-doc-fontsize', _fontIdx);
+      localStorage.setItem('openclank-doc-fontsize', _fontIdx);
     }
     _applyDocFont();
     // Click cycles through the sizes (S → M → L → S).
@@ -6765,7 +6774,7 @@ function _wireExpandedDocumentEditor(textarea) {
   }
 
   /** Collapse action buttons into overflow "..." menu (3 most-used visible) */
-  const _DOC_RECENTS_KEY = 'odysseus-doc-actions-recent';
+  const _DOC_RECENTS_KEY = 'openclank-doc-actions-recent';
   const _DOC_MAX_VISIBLE = 2;
 
   function _getDocRecent() {
@@ -7358,7 +7367,8 @@ function _wireExpandedDocumentEditor(textarea) {
   async function _autoCreateSession() {
     // Materialize pending chat first if one exists
     if (sessionModule && sessionModule.hasPendingChat && sessionModule.hasPendingChat()) {
-      await sessionModule.materializePendingSession();
+      const created = await sessionModule.materializePendingSession();
+      if (!created) throw new Error('Select a model first');
       const id = sessionModule.getCurrentSessionId();
       if (id) { _lastSessionId = id; return id; }
     }
@@ -8379,16 +8389,16 @@ function _wireExpandedDocumentEditor(textarea) {
     if (!activeDocId) return;
     const data = _activeSuggestions.map(s => ({ id: s.id, find: s.find, replace: s.replace, reason: s.reason }));
     if (data.length) {
-      localStorage.setItem('odysseus-suggestions-' + activeDocId, JSON.stringify(data));
+      localStorage.setItem('openclank-suggestions-' + activeDocId, JSON.stringify(data));
     } else {
-      localStorage.removeItem('odysseus-suggestions-' + activeDocId);
+      localStorage.removeItem('openclank-suggestions-' + activeDocId);
     }
   }
 
   /** Restore suggestions from localStorage for a doc */
   function _restoreSuggestionsFromStorage(docId) {
     try {
-      const raw = localStorage.getItem('odysseus-suggestions-' + docId);
+      const raw = localStorage.getItem('openclank-suggestions-' + docId);
       if (!raw) return;
       const data = JSON.parse(raw);
       if (!Array.isArray(data) || !data.length) return;
@@ -9295,160 +9305,61 @@ function _wireExpandedDocumentEditor(textarea) {
 
   /** Copy document content to clipboard */
   async function copyDocument() {
-    const textarea = document.getElementById('doc-editor-textarea');
-    if (!textarea || !textarea.value) return;
+    return copyDocumentText(document.getElementById('doc-editor-textarea')?.value);
+  }
+
+  async function copyDocumentText(text) {
+    if (!text) return;
     if (uiModule && uiModule.copyToClipboard) {
-      await uiModule.copyToClipboard(textarea.value);
+      await uiModule.copyToClipboard(text);
     } else {
       try {
-        await navigator.clipboard.writeText(textarea.value);
+        await navigator.clipboard.writeText(text);
       } catch (e) { /* ignore */ }
     }
     if (uiModule) uiModule.showToast('Copied to clipboard');
   }
 
-  /* ---- Per-tab context menu ---- */
-
-  let _docTabMenu = null; // singleton dropdown element
-
-  function _closeDocTabMenu() {
-    if (_docTabMenu) { _docTabMenu.style.display = 'none'; }
-  }
-
-  function showDocTabMenu(btnEl, docId) {
-    // Toggle off if already open for this doc
-    if (_docTabMenu && _docTabMenu.style.display === 'block' && _docTabMenu._docId === docId) {
-      _closeDocTabMenu();
-      return;
-    }
-
-    // Capture button position before any DOM changes
-    const _menuAnchorRect = btnEl.getBoundingClientRect();
-
-    // Switch to this doc if not already active
-    if (docId !== activeDocId) switchToDoc(docId);
-
-    const doc = docs.get(docId);
-    if (!doc) return;
-
-    // Create singleton menu container once
-    if (!_docTabMenu) {
-      _docTabMenu = document.createElement('div');
-      _docTabMenu.className = 'doc-tab-dropdown';
-      _docTabMenu.style.cssText = 'position:fixed;z-index:1000;min-width:0;width:max-content;padding:4px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3);backdrop-filter:blur(12px);font-size:12px;display:none;';
-      document.body.appendChild(_docTabMenu);
-      // Close on outside click
-      document.addEventListener('click', (e) => {
-        if (_docTabMenu && !_docTabMenu.contains(e.target) && !e.target.closest('.doc-tab-menu-btn')) {
-          _closeDocTabMenu();
-        }
-      });
-      document.addEventListener('keydown', (e) => {
-        if (e.key !== 'Escape' || !_docTabMenu || _docTabMenu.style.display !== 'block') return;
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation?.();
-        _closeDocTabMenu();
-      }, true);
-    }
-
-    const lang = (doc.language || '').toLowerCase();
+  function docTabActions(docId, doc, valid) {
+    const active = docId === activeDocId;
+    const lang = (active
+      ? document.getElementById('doc-language-select')?.value || doc.language || ''
+      : doc.language || '').toLowerCase();
     const canRun = _isRenderLang(lang) || ['javascript', 'js', 'python', 'py', 'bash', 'sh', 'shell', 'zsh'].includes(lang);
+    const withDocument = action => () => {
+      if (!valid()) return;
+      if (docId !== activeDocId) switchToDoc(docId);
+      if (activeDocId === docId && docs.get(docId) === doc) return action();
+    };
 
-    let previewIcon = '', previewLabel = '';
-    const _mdPreview = document.getElementById('doc-md-preview');
-    const _csvPreview = document.getElementById('doc-csv-preview');
-    const _htmlPreview = document.getElementById('doc-html-preview');
-    const _mdActive = _mdPreview && _mdPreview.style.display !== 'none';
-    const _csvActive = _csvPreview && _csvPreview.style.display !== 'none';
-    const _htmlActive = _htmlPreview && _htmlPreview.style.display !== 'none';
-    if (lang === 'markdown') { previewIcon = 'MD'; previewLabel = _mdActive ? 'Edit' : 'Preview'; }
-    else if (lang === 'csv') { previewIcon = '⊞'; previewLabel = _csvActive ? 'Edit' : 'Table View'; }
-    else if (_isRenderLang(lang)) { previewIcon = '▶'; previewLabel = _htmlActive ? 'Edit' : 'Run / Preview'; }
+    const items = [];
+    if (!doc.readOnly) items.push({ id: 'save', label: 'Save', icon: 'save', run: withDocument(saveDocument) });
+    items.push({ id: 'copy', label: 'Copy', icon: 'copy', run: () =>
+      docId === activeDocId ? copyDocument() : copyDocumentText(doc.content) });
+    if (canRun) items.push({ id: 'run', label: 'Run', icon: 'play', run: withDocument(runDocument) });
 
-    const _di = (svg) => `<span class="dropdown-icon">${svg}</span>`;
-    const _saveIco = uiIcon("save", 14);
-    const _copyIco = uiIcon("copy", 14);
-    const _runIco = uiIcon("play", 14);
-    const _previewIco = uiIcon("eye", 14);
-    const _deleteIco = uiIcon("trash", 14);
-
-    let items = '';
-    if (!doc.readOnly) items += `<div class="dropdown-item-compact doc-tab-action" data-action="save">${_di(_saveIco)}<span>Save</span></div>`;
-    items += `<div class="dropdown-item-compact doc-tab-action" data-action="copy">${_di(_copyIco)}<span>Copy</span></div>`;
-    if (canRun) {
-      items += `<div class="dropdown-item-compact doc-tab-action" data-action="run">${_di(_runIco)}<span>Run</span></div>`;
+    const preview = lang === 'markdown' ? ['doc-md-preview', 'Preview', toggleMarkdownPreview]
+      : lang === 'csv' ? ['doc-csv-preview', 'Table View', toggleCsvPreview]
+      : _isRenderLang(lang) ? ['doc-html-preview', 'Run / Preview', toggleHtmlPreview] : null;
+    if (preview) {
+      const [panelId, label, toggle] = preview;
+      const panel = document.getElementById(panelId);
+      const previewActive = active && panel && panel.style.display !== 'none';
+      items.push({ id: 'preview', label: previewActive ? 'Edit' : label, icon: 'eye', run: withDocument(toggle) });
     }
-    if (previewLabel) {
-      items += `<div class="dropdown-item-compact doc-tab-action" data-action="preview"><span class="dropdown-icon">${previewIcon}</span><span>${previewLabel}</span></div>`;
-    }
-    const _downloadIco = uiIcon("download", 14);
-    items += `<div class="dropdown-item-compact doc-tab-action" data-action="download">${_di(_downloadIco)}<span>Download</span></div>`;
-    // "Send signed reply" — only if this doc was opened from an email attachment
+    items.push({ id: 'download', label: 'Download', icon: 'download', run: withDocument(() => {
+      const button = document.getElementById('doc-fontsize-btn') || document.getElementById('doc-language-select');
+      showExportMenu(null, button?.getBoundingClientRect());
+    }) });
     if (doc.sourceEmailUid && doc.sourceEmailFolder) {
-      const _sendBackIco = uiIcon("reply", 14);
-      items += `<div class="dropdown-item-compact doc-tab-action" data-action="signed-reply">${_di(_sendBackIco)}<span>Send signed reply</span></div>`;
+      items.push({ id: 'signed-reply', label: 'Send signed reply', icon: 'reply', run: () => _sendSignedReply(docId, valid) });
     }
-    const _closeIco = uiIcon("close", 14);
-    items += `<div class="dropdown-item-compact doc-tab-action" data-action="close">${_di(_closeIco)}<span>Close</span></div>`;
+    items.push({ id: 'close', label: 'Close', icon: 'close', run: () => closeTab(docId) });
     if (!doc.readOnly) {
-      items += `<div class="dropdown-divider"></div>`;
-      items += `<div class="dropdown-item-compact doc-tab-action doc-tab-action-delete" data-action="delete">${_di(_deleteIco)}<span>Delete</span></div>`;
+      items.push({ separator: true }, { id: 'delete', label: 'Delete', icon: 'trash', destructive: true, dialog: true,
+        run: () => deleteDocumentById(docId, valid) });
     }
-
-    _docTabMenu.innerHTML = items;
-    _docTabMenu.style.display = 'block';
-    _docTabMenu._docId = docId;
-
-    // Position: anchor to the tab bar bottom, aligned to button horizontally
-    const rect = _menuAnchorRect;
-    const tabBar = document.getElementById('doc-tab-bar');
-    const barBottom = tabBar ? tabBar.getBoundingClientRect().bottom : rect.bottom;
-    _docTabMenu.style.position = 'fixed';
-    _docTabMenu.style.zIndex = '1000';
-    _docTabMenu.style.left = rect.left + 'px';
-    _docTabMenu.style.top = (barBottom + 2) + 'px';
-
-    // Clamp to viewport edges
-    requestAnimationFrame(() => {
-      const menuRect = _docTabMenu.getBoundingClientRect();
-      if (menuRect.right > window.innerWidth - 8) {
-        _docTabMenu.style.left = (window.innerWidth - menuRect.width - 8) + 'px';
-      }
-      if (menuRect.left < 8) {
-        _docTabMenu.style.left = '8px';
-      }
-      if (menuRect.bottom > window.innerHeight - 8) {
-        _docTabMenu.style.top = (barBottom - menuRect.height - 4) + 'px';
-      }
-    });
-
-    // Wire action clicks
-    _docTabMenu.querySelectorAll('.doc-tab-action').forEach(item => {
-      item.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const action = item.dataset.action;
-        _closeDocTabMenu();
-        switch (action) {
-          case 'save': saveDocument(); break;
-          case 'copy': copyDocument(); break;
-          case 'run': runDocument(); break;
-          case 'preview':
-            if (lang === 'markdown') toggleMarkdownPreview();
-            else if (lang === 'csv') toggleCsvPreview();
-            else if (_isRenderLang(lang)) toggleHtmlPreview();
-            break;
-          case 'download': {
-            const btn = document.getElementById('doc-fontsize-btn') || document.getElementById('doc-language-select');
-            showExportMenu(null, btn?.getBoundingClientRect());
-            break;
-          }
-          case 'signed-reply': _sendSignedReply(docId); break;
-          case 'close': closeTab(docId); break;
-          case 'delete': deleteActiveDocument(); break;
-        }
-      });
-    });
+    return items;
   }
 
   /**
@@ -9461,7 +9372,7 @@ function _wireExpandedDocumentEditor(textarea) {
    *      Subject / In-Reply-To / References and the first attachment.
    * Switches the doc panel to that draft so the user can review + send.
    */
-  async function _sendSignedReply(docId) {
+  async function _sendSignedReply(docId, valid = () => true) {
     const doc = docs.get(docId);
     if (!doc || !doc.sourceEmailUid) return;
     if (uiModule) uiModule.showToast('Preparing signed reply…');
@@ -9483,6 +9394,7 @@ function _wireExpandedDocumentEditor(textarea) {
       return;
     }
 
+    if (!valid()) return;
     const att = result.attachment;
     const reply = result.reply || {};
     const mid = reply.source_message_id || doc.sourceEmailMessageId || '';
@@ -9518,6 +9430,7 @@ function _wireExpandedDocumentEditor(textarea) {
       if (!sessionId) {
         try { sessionId = await _autoCreateSession(); } catch (_) {}
       }
+      if (!valid()) return;
       const cRes = await fetch(`${API_BASE}/api/document`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -9648,6 +9561,13 @@ function _wireExpandedDocumentEditor(textarea) {
       document.head.appendChild(s);
     });
     return _html2pdfReady;
+  }
+
+  /** Existing optional local PDF factory, shared with bounded deliverable exporters. */
+  export async function loadDocumentPdfRenderer() {
+    await ensureHtml2Pdf();
+    if (typeof window.html2pdf !== 'function') throw new Error('PDF renderer unavailable');
+    return window.html2pdf;
   }
 
   function _getExportBaseName() {
@@ -9961,8 +9881,15 @@ function _wireExpandedDocumentEditor(textarea) {
 
   /** Delete the active document */
   async function deleteActiveDocument() {
-    if (!activeDocId) return;
-    const doc = docs.get(activeDocId);
+    const docId = activeDocId;
+    const account = document.body?.dataset.accountId;
+    const sessionId = sessionModule?.getCurrentSessionId();
+    return deleteDocumentById(docId, () => document.body?.dataset.accountId === account && sessionModule?.getCurrentSessionId() === sessionId);
+  }
+
+  async function deleteDocumentById(docId, valid) {
+    const doc = docs.get(docId);
+    if (!doc || !valid()) return;
     if (doc?.readOnly) {
       if (uiModule) uiModule.showToast('This Files resource is open read-only');
       return;
@@ -9971,17 +9898,20 @@ function _wireExpandedDocumentEditor(textarea) {
     const ok = uiModule && uiModule.styledConfirm
       ? await uiModule.styledConfirm(`Delete "${name}"?`, { confirmText: 'Delete', danger: true })
       : confirm(`Delete "${name}"?`);
-    if (!ok) return;
+    if (!ok || !valid() || docs.get(docId) !== doc || doc.readOnly) return;
     try {
-      const res = await fetch(`${API_BASE}/api/document/${activeDocId}`, { method: 'DELETE' });
+      const res = await fetch(`${API_BASE}/api/document/${docId}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Delete failed');
+      if (docs.get(docId) !== doc) return;
       // Remove tab
-      const tab = document.querySelector(`.doc-tab[data-doc-id="${activeDocId}"]`);
+      const tab = document.querySelector(`.doc-tab[data-doc-id="${docId}"]`);
       if (tab) tab.remove();
-      docs.delete(activeDocId);
+      docs.delete(docId);
       // Switch to another doc or close panel
       const remaining = Array.from(docs.keys());
-      if (remaining.length > 0) {
+      if (activeDocId !== docId) {
+        renderTabs();
+      } else if (remaining.length > 0) {
         switchToDoc(remaining[0]);
       } else {
         activeDocId = null;

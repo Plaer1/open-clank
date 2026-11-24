@@ -27,14 +27,14 @@ import { uiIcon, hasUiIcon } from './uiIcons.js';
  *   }
  */
 
-import { previewZoneAt, clearPreview, snapModalToZone } from './tileManager.js';
+import { previewZoneAt, clearPreview, snapModalToZone, isAppletMaximized, toggleAppletMaximize } from './tileManager.js';
 import { suspendDock, resumeDock, clearRightDock, applyEdgeDock } from './modalSnap.js';
 import { dismissOrRemove } from './escMenuStack.js';
 import { nextToolWindowZ } from './toolWindowZOrder.js';
 
 const _state = new Map(); // id -> { restoreFn, closeFn, railBtnId, isMinimized, restoreMinHeight }
 
-const _rememberedDockKey = (id) => `odysseus-modal-remembered-dock-${id}`;
+const _rememberedDockKey = (id) => `openclank-modal-remembered-dock-${id}`;
 function _rememberDock(id, side) {
   if (!id || !side) return;
   try { localStorage.setItem(_rememberedDockKey(id), side); } catch (_) {}
@@ -182,7 +182,7 @@ let _dockOrder = [];
 // back into the shared row. Old preference coordinates remain recoverable.
 const _chipPositions = new Map();
 let _dockPos = null;
-const _DOCK_ORDER_KEY = 'odysseus.minimizedDockOrder.v1';
+const _DOCK_ORDER_KEY = 'openclank.minimizedDockOrder.v1';
 let _dockStateLoaded = false;
 
 function _saveDockState() {
@@ -1096,13 +1096,12 @@ export function minimize(id) {
   // and let the chip drive restore/close via the registered functions.
   const modal = document.getElementById(id);
   if (modal) {
-    _captureRestoreHeight(modal, s);
+    const maximized = isAppletMaximized(modal) || isAppletMaximized(modal.querySelector('.oc-applet-frame'));
+    if (!maximized) _captureRestoreHeight(modal, s);
     // If this window is edge-docked (right/left), SUSPEND the dock: release
     // the body push so the chat returns to full width while the window is
     // minimized, but keep the dock so restoring the chip snaps it back in.
-    if (modal.classList.contains('modal-right-docked')
-        || modal.classList.contains('modal-left-docked')
-        || modal.classList.contains('email-snap-left')) {
+    if (!maximized && modal.matches('.modal-right-docked,.modal-left-docked,.email-snap-left')) {
       try { suspendDock(modal); } catch (e) { console.warn('suspendDock on minimize failed', e); }
     }
     modal.classList.add('hidden');
@@ -1110,8 +1109,10 @@ export function minimize(id) {
     const content = modal.querySelector('.modal-content');
     if (content) {
       content.classList.remove('sheet-ready', 'modal-closing');
-      content.style.transform = '';
-      content.style.transition = '';
+      if (!maximized) {
+        content.style.transform = '';
+        content.style.transition = '';
+      }
       content.style.animation = '';
     }
   }
@@ -1130,7 +1131,7 @@ export function restore(id) {
   if (modal) {
     modal.classList.remove('hidden', 'modal-minimized');
     modal.style.display = '';
-    _applyRestoreHeight(modal, s);
+    if (!isAppletMaximized(modal.querySelector('.oc-applet-frame'))) _applyRestoreHeight(modal, s);
     // Surface above any already-open tool window — restoring from the dock
     // should bring this tool to the front, not leave it stuck behind one with
     // a higher static z-index.
@@ -1229,9 +1230,32 @@ export function close(id) {
 /** Inject a minimize (`_`) button next to the close button in a modal.
  * Skips if a minimize button already exists (any class containing "minimize"). */
 export function injectMinimizeButton(modal, modalId) {
-  markAppletFrame(modal, modal.querySelector(':scope > .modal-content, :scope > .research-pane') || (modal.matches('.notes-pane') ? modal : null));
-  const header = modal.querySelector('.modal-header');
+  const frame = modal.querySelector(':scope > .modal-content, :scope > .research-pane') || (modal.matches('.notes-pane') ? modal : null);
+  const isApplet = frame && markAppletFrame(modal, frame);
+  const header = modal.querySelector('.modal-header, .notes-pane-header');
   if (!header) return;
+  const closeBtn = header.querySelector('.close-btn, .modal-close, [data-close]');
+  if (isApplet && closeBtn && !header.querySelector('.modal-maximize-btn')) {
+    const maximize = document.createElement('button');
+    maximize.type = 'button';
+    maximize.className = 'modal-maximize-btn';
+    const sync = () => {
+      const active = isAppletMaximized(frame);
+      const action = active ? 'Restore' : 'Maximize';
+      maximize.title = action;
+      maximize.setAttribute('aria-label', action + ' ' + (modal.getAttribute('aria-label') || _LABELS[modalId]?.label || 'window'));
+      maximize.innerHTML = uiIcon(active ? 'collapse' : 'expand', 14);
+    };
+    maximize.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleAppletMaximize(frame);
+      sync();
+    });
+    modal.addEventListener('openclank:tile-placement',sync);
+    modal.addEventListener('openclank:window-placement',sync);
+    sync();
+    closeBtn.before(maximize);
+  }
   if (header.querySelector('.modal-minimize-btn, .minimize-btn, [data-minimize]')) {
     // An existing minimize button is present — wire it to the manager instead
     const existing = header.querySelector('.minimize-btn, [data-minimize]');
@@ -1244,7 +1268,6 @@ export function injectMinimizeButton(modal, modalId) {
     }
     return;
   }
-  const closeBtn = header.querySelector('.close-btn, .modal-close');
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'modal-minimize-btn';
@@ -1271,7 +1294,8 @@ export function injectMinimizeButton(modal, modalId) {
     e.stopPropagation();
     minimize(modalId);
   });
-  if (closeBtn && closeBtn.parentNode) closeBtn.parentNode.insertBefore(btn, closeBtn);
+  const next = header.querySelector('.modal-maximize-btn') || closeBtn;
+  if (next) next.before(btn);
   else header.appendChild(btn);
 }
 

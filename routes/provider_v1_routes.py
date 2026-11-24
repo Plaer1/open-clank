@@ -8,12 +8,13 @@ capability-bound managed-engine callback path.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import asyncio
 import html
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 from time import perf_counter
@@ -35,6 +36,7 @@ from src.openclank.provider_control import (
     OAuthHostFlow,
     OAuthHostFlowStore,
     ProviderEngineControlError,
+    ProviderEngineTimeoutError,
     ProviderEngineValidationError,
     ProviderOAuthFlowError,
 )
@@ -42,12 +44,15 @@ from src.openclank.provider_family_catalog import (
     ProviderFamilyCatalogError,
     bundled_provider_family_catalog,
 )
+from src.openclank.provider_request_options import project_request_options
+from src.openclank.generated.managed_provider_contract import PROVIDER_ENDPOINT_POLICIES
 from src.openclank.chat_routing import (
     ChatRouteUnavailable,
     MANAGED_ENGINE_PUBLIC_URL,
     group_chat_routes,
     list_chat_routes,
     normalized_provider_owner,
+    request_option_route_id,
     shared_provider_group_id,
 )
 from src.openclank.provider_store import (
@@ -150,7 +155,30 @@ _ACCOUNT_INVENTORY_CACHE: dict[tuple[str, str, str, int, str, str], dict[str, An
 _ACCOUNT_INVENTORY_LOCK = threading.RLock()
 _ACCOUNT_INVENTORY_FLIGHTS: dict[tuple[str, str, str, int, str, str], asyncio.Task] = {}
 _OAUTH_COMPLETION_LOCKS: dict[str, threading.Lock] = {}
+_OAUTH_COMPLETION_LOCK_REFS: dict[str, int] = {}
 _OAUTH_COMPLETION_LOCKS_GUARD = threading.Lock()
+_OAUTH_START_TIMEOUT_SECONDS = 15
+_OAUTH_VALIDATE_TIMEOUT_SECONDS = 10
+_OAUTH_POLL_TIMEOUT_SECONDS = 5
+_OAUTH_CANCEL_TIMEOUT_SECONDS = 3
+_OAUTH_CALLBACK_TIMEOUT_SECONDS = 20
+_OAUTH_FLOW_RETENTION_SECONDS = 10 * 60
+_OAUTH_SAFE_ERROR_CODES = frozenset(
+    {
+        "oauth_validation_failed",
+        "oauth_worker_lost",
+        "oauth_timeout",
+        "oauth_exchange_failed",
+        "oauth_credential_mismatch",
+        "oauth_endpoint_mismatch",
+        "oauth_completion_failed",
+        "oauth_revision_conflict",
+        "oauth_discovery_unavailable",
+        "oauth_reauth_required",
+        "oauth_cancelled",
+        "oauth_expired",
+    }
+)
 
 
 class _StrictModel(BaseModel):
@@ -195,6 +223,7 @@ class ConnectionUpdate(_StrictModel):
     label: Optional[str] = Field(default=None, min_length=1, max_length=160)
     url: Optional[str] = Field(default=None, max_length=2048)
     settings: Optional[dict[str, Any]] = None
+    account_pool_policy: Optional[dict[str, Any]] = None
     enabled: Optional[bool] = None
 
 
@@ -394,8 +423,11 @@ def _connection_json(row: Any) -> dict[str, Any]:
         "billing_lane": row.billing_lane,
         "label": row.label,
         "url": row.normalized_url,
-        "settings": _public_nonsecret_value(dict(row.settings or {})),
+        "settings": _public_nonsecret_value({k:v for k,v in dict(row.settings or {}).items() if (k in {"interface", "recipe"} if row.family_id in {"trellis", "hunyuan-shape"} else not (row.family_id == "blender" and k == "executablePath"))}),
         "rotation_policy": row.rotation_policy,
+        "account_pool_policy": _public_nonsecret_value(row.account_pool_policy)
+        if row.account_pool_policy is not None
+        else None,
         "enabled": bool(row.enabled),
         "revision": int(row.revision),
         "created_at": _iso(row.created_at),
@@ -409,6 +441,7 @@ def _account_json(row: Any) -> dict[str, Any]:
         "connection_id": row.connection_id,
         "label": row.label,
         "auth_method": row.auth_method,
+        "acquisition_method": row.acquisition_method,
         "auth_class": row.auth_class,
         "order": int(row.sort_order),
         "enabled": bool(row.enabled),
@@ -621,10 +654,13 @@ def _provider_catalog_auth_methods(raw_catalog: Any, *, family_id: str) -> list[
             "Managed engine returned an invalid provider catalogue"
         )
     families = raw_catalog.get("families")
-    if not isinstance(families, list) or len(families) > 256:
+    if not isinstance(families, list) or len(families) > 1024:
         raise ProviderEngineValidationError(
             "Managed engine returned an invalid provider catalogue"
         )
+    ids = [item.get("id") if isinstance(item, Mapping) else None for item in families]
+    if any(not isinstance(item, str) or re.fullmatch(_IDENTIFIER, item) is None for item in ids) or len(set(ids)) != len(ids):
+        raise ProviderEngineValidationError("Managed engine returned an invalid provider catalogue")
     family = next(
         (
             item
@@ -642,6 +678,20 @@ def _provider_catalog_auth_methods(raw_catalog: Any, *, family_id: str) -> list[
         raise ProviderEngineValidationError(
             "Managed engine returned invalid provider sign-in methods"
         )
+    family_lanes = family.get("billingLanes")
+    if (
+        not isinstance(family_lanes, list)
+        or not family_lanes
+        or any(lane not in {"metered_api", "subscription", "custom", "local"} for lane in family_lanes)
+    ):
+        raise ProviderEngineValidationError("Managed engine returned invalid provider billing lanes")
+    endpoint_policies = family.get("endpointPolicies", {})
+    expected_endpoint_policies = PROVIDER_ENDPOINT_POLICIES.get(family_id)
+    if expected_endpoint_policies is None:
+        if endpoint_policies:
+            raise ProviderEngineValidationError("Managed engine returned an unsupported provider endpoint policy")
+    elif endpoint_policies != expected_endpoint_policies:
+        raise ProviderEngineValidationError("Managed engine returned an invalid provider endpoint policy")
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw_method in methods:
@@ -672,6 +722,48 @@ def _provider_catalog_auth_methods(raw_catalog: Any, *, family_id: str) -> list[
             "type": method_type,
             "label": label,
         }
+        if method_type == "none":
+            declared_keyless = any(
+                item["id"] == family_id
+                and any(method.get("id") == "none" and method.get("type") == "none"
+                        for method in item["auth_methods"])
+                for item in bundled_provider_family_catalog()["families"]
+            )
+            if (method_id != "none" or set(raw_method) != {"id", "type", "label"}
+                    or not declared_keyless):
+                raise ProviderEngineValidationError("Managed engine returned an invalid keyless method")
+            result.append(method)
+            continue
+        acquisition_method = raw_method.get("acquisitionMethod")
+        credential_kinds = raw_method.get("credentialKinds")
+        billing_lanes = raw_method.get("billingLanes")
+        if acquisition_method not in {"manual-key", "browser", "device"}:
+            raise ProviderEngineValidationError("Managed engine returned an invalid provider acquisition method")
+        if (
+            not isinstance(credential_kinds, list)
+            or not credential_kinds
+            or len(credential_kinds) > 2
+            or any(kind not in {"api", "oauth"} for kind in credential_kinds)
+            or len(set(credential_kinds)) != len(credential_kinds)
+        ):
+            raise ProviderEngineValidationError("Managed engine returned invalid provider credential kinds")
+        if (
+            not isinstance(billing_lanes, list)
+            or not billing_lanes
+            or len(billing_lanes) > 4
+            or any(lane not in {"metered_api", "subscription", "custom", "local"} for lane in billing_lanes)
+            or len(set(billing_lanes)) != len(billing_lanes)
+        ):
+            raise ProviderEngineValidationError("Managed engine returned invalid provider method billing lanes")
+        if not set(billing_lanes).issubset(family_lanes):
+            raise ProviderEngineValidationError("Managed engine provider method exceeds its family billing lanes")
+        if method_type == "oauth" and acquisition_method not in {"browser", "device"}:
+            raise ProviderEngineValidationError("Managed engine returned an invalid OAuth acquisition method")
+        method["acquisitionMethod"] = acquisition_method
+        method["credentialKinds"] = list(credential_kinds)
+        method["billingLanes"] = list(billing_lanes)
+        if method_type == "api" and acquisition_method != "manual-key":
+            raise ProviderEngineValidationError("Managed engine returned an invalid API-key acquisition method")
         raw_prompts = raw_method.get("prompts")
         if raw_prompts is not None:
             if not isinstance(raw_prompts, list) or len(raw_prompts) > 32:
@@ -917,6 +1009,8 @@ def _account_validation_wire(
     credential: Mapping[str, Any],
     account_id: str,
     credential_revision: int,
+    acquisition_method: Optional[str] = None,
+    credential_kind: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build the host-bound v2 account validation request."""
 
@@ -930,6 +1024,8 @@ def _account_validation_wire(
             settings=dict(connection.settings or {}),
         ),
         "authMethod": auth_method,
+        **({"acquisitionMethod": acquisition_method} if acquisition_method is not None else {}),
+        "credentialKind": credential_kind or ("oauth" if auth_method == "oauth" else "api"),
         "credential": dict(credential),
         "accountID": str(account_id),
         "credentialRevision": int(credential_revision),
@@ -962,6 +1058,46 @@ def _validated_account_discovery(
     if status == "complete" and discovery.get("authoritative") is not True:
         raise HTTPException(502, "Managed provider account discovery is not authoritative")
     return discovery
+
+
+def _validate_account_auth_result(
+    result: Mapping[str, Any],
+    *,
+    connection: Any,
+    expected_acquisition_method: Optional[str] = None,
+    expected_credential_kind: Optional[str] = None,
+) -> None:
+    credential = result.get("credential")
+    credential_kind = credential.get("type") if isinstance(credential, Mapping) else None
+    auth_method = "api_key" if credential_kind == "api" else "oauth" if credential_kind == "oauth" else None
+    if (
+        auth_method is None
+        or result.get("authMethod") != auth_method
+        or result.get("credentialKind") != credential_kind
+        or result.get("acquisitionMethod") not in {"manual-key", "browser", "device", None}
+    ):
+        raise HTTPException(502, "Managed provider account validation changed its auth method")
+    if expected_acquisition_method is not None and result.get("acquisitionMethod") != expected_acquisition_method:
+        raise HTTPException(502, "Managed provider account acquisition method changed")
+    if expected_credential_kind is not None and credential_kind != expected_credential_kind:
+        raise HTTPException(502, "Managed provider credential kind changed")
+    endpoint_policies = PROVIDER_ENDPOINT_POLICIES.get(connection.family_id)
+    expected_endpoint_policy = None
+    if endpoint_policies is not None:
+        family = next((item for item in bundled_provider_family_catalog()["families"]
+                       if item["id"] == connection.family_id), None)
+        if (family is None or connection.adapter_id not in family["adapters"]
+                or connection.billing_lane not in endpoint_policies):
+            raise HTTPException(502, "Managed provider endpoint policy does not match its billing lane")
+        expected_endpoint_policy = endpoint_policies[connection.billing_lane]
+    if expected_endpoint_policy is not None:
+        expected_credential_kinds = {"oauth"} if connection.family_id == "grok" else {"api"}
+        if connection.family_id in {"kimi-code-plan-cn", "kimi-code-plan-global"}:
+            expected_credential_kinds = {"oauth", "api"}
+        if result.get("endpointPolicy") != expected_endpoint_policy or credential_kind not in expected_credential_kinds:
+            raise HTTPException(502, "Managed provider endpoint policy does not match its billing lane")
+    elif result.get("endpointPolicy") is not None:
+        raise HTTPException(502, "Managed provider returned an unsupported endpoint policy")
 
 
 def _discovery_error_code(discovery: Mapping[str, Any]) -> Optional[str]:
@@ -1041,7 +1177,6 @@ def _engine_model_routes(
             or any(value not in allowed_operations for value in operations)
             or not isinstance(capabilities, Mapping)
             or not isinstance(provenance, Mapping)
-            or provenance.get("authority") != "managed-engine"
         ):
             raise ProviderEngineValidationError(
                 "Managed engine returned an invalid model route"
@@ -1127,21 +1262,23 @@ def _safe_authorization_url(value: Any) -> str:
 
 
 def _oauth_page(success: bool, message: str, *, status_code: int = 200) -> HTMLResponse:
-    title = "Provider connected" if success else "Provider login failed"
+    title = "Authorization received" if success else "Provider login failed"
+    nonce = secrets.token_urlsafe(16)
+    close_script = f'<script nonce="{nonce}">setTimeout(() => window.close(), 2500)</script>' if success else ""
     safe_title = html.escape(title)
     safe_message = html.escape(str(message or "")[:512])
     color = "#5bd89a" if success else "#ff6b6b"
     return HTMLResponse(
         f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{safe_title}</title></head><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#181a20;color:#f5f1e8;font-family:system-ui,sans-serif">
-<main style="max-width:32rem;padding:2rem;text-align:center"><h1 style="color:{color}">{safe_title}</h1><p>{safe_message}</p><p>You can close this tab and return to Open Clank.</p></main></body></html>""",
+<main style="max-width:32rem;padding:2rem;text-align:center"><h1 style="color:{color}">{safe_title}</h1><p>{safe_message}</p><p>You can close this tab and return to Open Clank.</p></main>{close_script}</body></html>""",
         status_code=status_code,
         headers={
             "Cache-Control": "no-store",
             "Pragma": "no-cache",
             "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+            "Content-Security-Policy": f"default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'",
         },
     )
 
@@ -1149,26 +1286,77 @@ def _oauth_page(success: bool, message: str, *, status_code: int = 200) -> HTMLR
 _PROVIDER_OAUTH_FLOWS = OAuthHostFlowStore()
 
 
+async def _acquire_global_oauth_lock(flow_id: str) -> threading.Lock:
+    with _OAUTH_COMPLETION_LOCKS_GUARD:
+        lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow_id, threading.Lock())
+        _OAUTH_COMPLETION_LOCK_REFS[flow_id] = _OAUTH_COMPLETION_LOCK_REFS.get(flow_id, 0) + 1
+    try:
+        while not lock.acquire(blocking=False):
+            await asyncio.sleep(0.01)
+        return lock
+    except asyncio.CancelledError:
+        with _OAUTH_COMPLETION_LOCKS_GUARD:
+            _OAUTH_COMPLETION_LOCK_REFS[flow_id] = max(0, _OAUTH_COMPLETION_LOCK_REFS.get(flow_id, 1) - 1)
+        raise
+
+
+def _release_global_oauth_lock(flow_id: str, lock: threading.Lock) -> None:
+    lock.release()
+    with _OAUTH_COMPLETION_LOCKS_GUARD:
+        refs = _OAUTH_COMPLETION_LOCK_REFS.get(flow_id, 0) - 1
+        if refs <= 0 and not lock.locked():
+            _OAUTH_COMPLETION_LOCK_REFS.pop(flow_id, None)
+            if _OAUTH_COMPLETION_LOCKS.get(flow_id) is lock:
+                _OAUTH_COMPLETION_LOCKS.pop(flow_id, None)
+        else:
+            _OAUTH_COMPLETION_LOCK_REFS[flow_id] = refs
+
+
 async def purge_owner_provider_flows(_supervisor_pool, owner: str) -> None:
     """Cancel owner-bound managed OAuth flows before rename or deletion."""
     flows = _PROVIDER_OAUTH_FLOWS.remove_owner(owner)
     first_error: Exception | None = None
     for flow in flows:
+        flow.cancel_requested = True
+        lock = await _acquire_global_oauth_lock(flow.flow_id)
         try:
-            if flow.status not in {"complete", "failed", "cancelled", "expired"}:
-                await flow.engine.call(
-                    "_openclank/provider-control/v1/oauth/cancel",
-                    flow.completion_payload(),
+            if flow.status == "complete":
+                continue
+            if flow.status not in {"failed", "cancelled", "expired"}:
+                await asyncio.wait_for(
+                    flow.engine.call(
+                        "_openclank/provider-control/v1/oauth/cancel",
+                        flow.completion_payload(),
+                    ),
+                    timeout=_OAUTH_CANCEL_TIMEOUT_SECONDS,
                 )
         except Exception as exc:
             first_error = first_error or exc
         finally:
-            flow.status = "cancelled"
-            flow.error_code = "oauth_cancelled"
-            try:
-                await flow.engine.release(successful=False)
-            except Exception as exc:
-                first_error = first_error or exc
+            if flow.status != "complete":
+                flow.status = "cancelled"
+                flow.error_code = "oauth_cancelled"
+            if flow.status != "complete" and not flow.released:
+                flow.released = True
+                if flow.expiry_task is not None and flow.expiry_task is not asyncio.current_task():
+                    flow.expiry_task.cancel()
+                try:
+                    await flow.engine.release(successful=False)
+                except Exception as exc:
+                    first_error = first_error or exc
+            _release_global_oauth_lock(flow.flow_id, lock)
+    if first_error is not None:
+        raise first_error
+
+
+async def shutdown_provider_oauth_flows() -> None:
+    owners = {flow.owner for flow in _PROVIDER_OAUTH_FLOWS.snapshot()}
+    first_error: Exception | None = None
+    for owner in owners:
+        try:
+            await purge_owner_provider_flows(None, owner)
+        except Exception as exc:
+            first_error = first_error or exc
     if first_error is not None:
         raise first_error
 
@@ -1185,6 +1373,40 @@ def setup_provider_v1_routes(
         tags=["providers-v1"],
         route_class=_SecretSafeRoute,
     )
+
+    def _comfy_available(request: Request) -> bool:
+        state = request.app.state
+        return (callable(getattr(state, "media_human_service_factory", None))
+                and getattr(state, "provider_store", None) is store
+                and all(getattr(state, key, None) is not None for key in
+                        ("auth_manager", "account_request_barrier", "session_manager")))
+
+    def _require_comfy(request: Request, family_id: str) -> None:
+        if family_id == 'tripo' and (not callable(getattr(request.app.state, 'tripo_human_service_factory', None))
+                or getattr(request.app.state, 'provider_store', None) is not store
+                or not all(getattr(request.app.state, key, None) is not None for key in ('auth_manager','account_request_barrier','session_manager','media_artifact_store'))):
+            raise HTTPException(503, 'Tripo jobs unavailable')
+        if family_id == 'meshy' and (not callable(getattr(request.app.state, 'meshy_human_service_factory', None))
+                or getattr(request.app.state, 'provider_store', None) is not store
+                or not all(getattr(request.app.state, key, None) is not None for key in ('auth_manager','account_request_barrier','session_manager','media_artifact_store'))):
+            raise HTTPException(503, 'Meshy jobs unavailable')
+        if family_id == 'sprixen' and (not callable(getattr(request.app.state, 'sprixen_human_service_factory', None))
+                or getattr(request.app.state, 'provider_store', None) is not store
+                or not all(getattr(request.app.state, key, None) is not None for key in ('auth_manager','account_request_barrier','session_manager','media_artifact_store'))):
+            raise HTTPException(503, 'Sprixen jobs unavailable')
+        if family_id == "comfyui" and not _comfy_available(request):
+            raise HTTPException(503, "Media jobs unavailable")
+        if family_id in {"blender", "trellis", "hunyuan-shape"}:
+            from core.middleware import require_admin
+            from src.auth_helpers import require_user, is_internal_tool_identity
+            require_admin(request)
+            owner = require_user(request)
+            if is_internal_tool_identity(owner) or getattr(request.state, 'internal_tool_authenticated', False):
+                raise HTTPException(403, "A named administrator is required")
+            if (not callable(getattr(request.app.state, 'trellis_human_service_factory' if family_id == 'trellis' else 'hunyuan_human_service_factory' if family_id == 'hunyuan-shape' else 'blender_human_service_factory', None))
+                    or getattr(request.app.state, 'provider_store', None) is not store
+                    or not all(getattr(request.app.state, key, None) is not None for key in ('auth_manager','account_request_barrier','session_manager','media_artifact_store'))):
+                raise HTTPException(503, "Local media jobs unavailable")
 
     def _oauth_owner(request: Request, *, write: bool = False) -> str:
         if getattr(getattr(request, "state", None), "api_token", False):
@@ -1216,32 +1438,221 @@ def setup_provider_v1_routes(
     ) -> None:
         if remove:
             oauth_flows.remove(flow.flow_id)
+        if flow.released:
+            return
+        flow.released = True
+        expiry_task = flow.expiry_task
+        if expiry_task is not None and expiry_task is not asyncio.current_task():
+            expiry_task.cancel()
+        if not successful:
+            try:
+                await asyncio.wait_for(
+                    flow.engine.call(
+                        "_openclank/provider-control/v1/oauth/cancel",
+                        flow.completion_payload(),
+                    ),
+                    timeout=_OAUTH_CANCEL_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                pass
+            flow.cancel_requested = True
         try:
             await flow.engine.release(successful=successful)
         except Exception:
             pass
+        if flow.retention_task is None:
+            flow.retention_task = asyncio.create_task(_retain_terminal_flow(flow))
+
+    def _release_flow_lock(flow_id: str, lock: threading.Lock) -> None:
+        lock.release()
+        with _OAUTH_COMPLETION_LOCKS_GUARD:
+            refs = _OAUTH_COMPLETION_LOCK_REFS.get(flow_id, 0) - 1
+            if refs <= 0 and not lock.locked():
+                _OAUTH_COMPLETION_LOCK_REFS.pop(flow_id, None)
+                if _OAUTH_COMPLETION_LOCKS.get(flow_id) is lock:
+                    _OAUTH_COMPLETION_LOCKS.pop(flow_id, None)
+            else:
+                _OAUTH_COMPLETION_LOCK_REFS[flow_id] = refs
+
+    async def _acquire_flow_lock(flow_id: str) -> threading.Lock:
+        with _OAUTH_COMPLETION_LOCKS_GUARD:
+            lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow_id, threading.Lock())
+            _OAUTH_COMPLETION_LOCK_REFS[flow_id] = _OAUTH_COMPLETION_LOCK_REFS.get(flow_id, 0) + 1
+        try:
+            while not lock.acquire(blocking=False):
+                await asyncio.sleep(0.01)
+            return lock
+        except asyncio.CancelledError:
+            with _OAUTH_COMPLETION_LOCKS_GUARD:
+                refs = _OAUTH_COMPLETION_LOCK_REFS.get(flow_id, 1) - 1
+                if refs <= 0 and not lock.locked():
+                    _OAUTH_COMPLETION_LOCK_REFS.pop(flow_id, None)
+                    if _OAUTH_COMPLETION_LOCKS.get(flow_id) is lock:
+                        _OAUTH_COMPLETION_LOCKS.pop(flow_id, None)
+                else:
+                    _OAUTH_COMPLETION_LOCK_REFS[flow_id] = refs
+            raise
+
+    def _assert_claude_flow_policy(flow: OAuthHostFlow) -> None:
+        if flow.provider_id != "anthropic" or flow.billing_lane != "subscription":
+            return
+        from src.openclank.provider_method_policy import require_enabled, ProviderMethodPolicyError
+        if flow.method_policy_revision is None:
+            raise HTTPException(409, "Claude subscription Beta policy proof is missing")
+        try:
+            require_enabled(flow.owner, flow.method_policy_revision)
+        except ProviderMethodPolicyError as exc:
+            raise HTTPException(409, {"code":exc.code, "message":str(exc)}) from exc
+
+    async def _flow_call(
+        flow: OAuthHostFlow,
+        method: str,
+        payload: Mapping[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        if method != "_openclank/provider-control/v1/oauth/cancel":
+            _assert_claude_flow_policy(flow)
+        try:
+            return await asyncio.wait_for(
+                flow.engine.call(method, payload), timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError as exc:
+            raise ProviderEngineTimeoutError("managed provider operation timed out") from exc
+
+    def _safe_oauth_error(exc: Exception) -> str:
+        if isinstance(exc, ProviderEngineValidationError):
+            return "oauth_validation_failed"
+        if isinstance(exc, HTTPException) and exc.status_code == 502:
+            return "oauth_validation_failed"
+        if isinstance(exc, ProviderEngineTimeoutError):
+            return "oauth_timeout"
+        if isinstance(exc, asyncio.TimeoutError):
+            return "oauth_timeout"
+        if isinstance(exc, ProviderEngineControlError):
+            return "oauth_worker_lost"
+        return "oauth_completion_failed"
+
+    def _result_error_code(result: Mapping[str, Any]) -> str:
+        value = str(result.get("errorCode") or "").strip().lower()
+        return value if value in _OAUTH_SAFE_ERROR_CODES else "oauth_exchange_failed"
+
+    def _result_retry_after_ms(result: Mapping[str, Any]) -> Optional[int]:
+        value = result.get("retryAfterMs")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not 0 <= value <= 86_400_000 or int(value) != value:
+            return None
+        return int(value)
+
+    def _transient_provider_error(exc: Exception) -> bool:
+        return isinstance(exc, ProviderEngineTimeoutError)
+
+    def _schedule_transient_retry(flow: OAuthHostFlow, retry_after_ms: Optional[int] = None) -> bool:
+        now = datetime.now(timezone.utc)
+        if flow.transient_started_at is None:
+            flow.transient_started_at = now
+        elapsed = (now - flow.transient_started_at).total_seconds()
+        if flow.transient_failures >= 2 or elapsed >= 30 or flow.expired():
+            return False
+        flow.transient_failures += 1
+        remaining = min(30 - elapsed, max(0.0, (flow.expires_at - now).total_seconds()))
+        delay = (
+            retry_after_ms / 1000
+            if retry_after_ms is not None
+            else 1.0 * (2 ** (flow.transient_failures - 1))
+        )
+        if delay > remaining:
+            return False
+        flow.next_attempt_at = now + timedelta(seconds=max(0.0, delay))
+        flow.status = "running"
+        flow.retry_after_ms = int(delay * 1000)
+        return True
+
+    async def _fail_flow_locked(flow: OAuthHostFlow, exc: Exception) -> dict[str, Any]:
+        if flow.status not in {"complete", "failed", "cancelled", "expired"}:
+            flow.status = "failed"
+            flow.error_code = _safe_oauth_error(exc)
+            flow.retry_after_ms = None
+            await _release_terminal_flow(flow, successful=False)
+        return flow.public()
+
+    async def _fail_flow(flow: OAuthHostFlow, exc: Exception) -> dict[str, Any]:
+        lock = await _acquire_flow_lock(flow.flow_id)
+        try:
+            return await _fail_flow_locked(flow, exc)
+        finally:
+            _release_flow_lock(flow.flow_id, lock)
 
     async def _expire_oauth_flows() -> None:
         for flow in oauth_flows.expired():
-            with _OAUTH_COMPLETION_LOCKS_GUARD:
-                lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
-            acquired = await asyncio.to_thread(lock.acquire)
+            flow.cancel_requested = True
+            lock = await _acquire_flow_lock(flow.flow_id)
+            acquired = True
             try:
                 if flow.status in {"complete", "failed", "cancelled", "expired"}:
                     continue
                 flow.status = "expired"
                 flow.error_code = "oauth_expired"
+                flow.retry_after_ms = None
                 try:
-                    await flow.engine.call(
+                    await _flow_call(
+                        flow,
                         "_openclank/provider-control/v1/oauth/cancel",
                         flow.completion_payload(),
+                        _OAUTH_CANCEL_TIMEOUT_SECONDS,
                     )
                 except Exception:
                     pass
                 await _release_terminal_flow(flow, successful=False)
             finally:
                 if acquired:
-                    lock.release()
+                    _release_flow_lock(flow.flow_id, lock)
+
+    async def _flow_deadline(flow: OAuthHostFlow) -> None:
+        delay = max(
+            0.0,
+            (flow.expires_at - datetime.now(timezone.utc)).total_seconds(),
+        )
+        try:
+            await asyncio.sleep(delay)
+            await _expire_oauth_flows()
+        except asyncio.CancelledError:
+            return
+
+    async def _retain_terminal_flow(flow: OAuthHostFlow) -> None:
+        try:
+            await asyncio.sleep(_OAUTH_FLOW_RETENTION_SECONDS)
+            oauth_flows.remove(flow.flow_id)
+            with _OAUTH_COMPLETION_LOCKS_GUARD:
+                if _OAUTH_COMPLETION_LOCK_REFS.get(flow.flow_id, 0) == 0:
+                    _OAUTH_COMPLETION_LOCKS.pop(flow.flow_id, None)
+        except asyncio.CancelledError:
+            return
+
+    async def _shutdown_oauth_flows() -> None:
+        for flow in oauth_flows.snapshot():
+            if flow.status == "complete":
+                continue
+            lock = await _acquire_flow_lock(flow.flow_id)
+            try:
+                flow.cancel_requested = True
+                if flow.status not in {"failed", "cancelled", "expired"}:
+                    try:
+                        await _flow_call(
+                            flow,
+                            "_openclank/provider-control/v1/oauth/cancel",
+                            flow.completion_payload(),
+                            _OAUTH_CANCEL_TIMEOUT_SECONDS,
+                        )
+                    except Exception:
+                        pass
+                    flow.status = "cancelled"
+                    flow.error_code = "oauth_cancelled"
+                await _release_terminal_flow(flow, successful=False)
+            finally:
+                _release_flow_lock(flow.flow_id, lock)
+
+    router.add_event_handler("shutdown", _shutdown_oauth_flows)
 
     def _validate_engine_flow_result(
         flow: OAuthHostFlow,
@@ -1265,16 +1676,28 @@ def setup_provider_v1_routes(
         flow: OAuthHostFlow,
         result: Mapping[str, Any],
     ) -> dict[str, Any]:
-        with _OAUTH_COMPLETION_LOCKS_GUARD:
-            lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
-        acquired = await asyncio.to_thread(lock.acquire)
+        lock = await _acquire_flow_lock(flow.flow_id)
+        acquired = True
         try:
             if flow.status in {"complete", "failed", "cancelled", "expired"}:
                 return flow.public()
+            if flow.next_attempt_at is not None:
+                now = datetime.now(timezone.utc)
+                if now < flow.next_attempt_at:
+                    flow.retry_after_ms = max(
+                        0, int((flow.next_attempt_at - now).total_seconds() * 1000)
+                    )
+                    return flow.public()
+                flow.next_attempt_at = None
+                flow.retry_after_ms = None
             return await _persist_oauth_result_locked(flow, result)
+        except Exception as exc:
+            if _transient_provider_error(exc) and _schedule_transient_retry(flow):
+                return flow.public()
+            raise
         finally:
             if acquired:
-                lock.release()
+                _release_flow_lock(flow.flow_id, lock)
 
     async def _complete_oauth_callback(
         flow: OAuthHostFlow,
@@ -1283,20 +1706,25 @@ def setup_provider_v1_routes(
     ) -> dict[str, Any]:
         """Serialize callback exchange, validation, persistence, and release."""
 
-        with _OAUTH_COMPLETION_LOCKS_GUARD:
-            lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
-        acquired = await asyncio.to_thread(lock.acquire)
+        lock = await _acquire_flow_lock(flow.flow_id)
+        acquired = True
         try:
             if flow.status in {"complete", "failed", "cancelled", "expired"}:
                 return flow.public()
-            result = await flow.engine.call(
+            result = await _flow_call(
+                flow,
                 "_openclank/provider-control/v1/oauth/callback",
                 flow.completion_payload(code=code),
+                _OAUTH_CALLBACK_TIMEOUT_SECONDS,
             )
             return await _persist_oauth_result_locked(flow, result)
+        except (ProviderEngineControlError, ProviderEngineValidationError, HTTPException) as exc:
+            return await _fail_flow_locked(flow, exc)
+        except Exception as exc:
+            return await _fail_flow_locked(flow, exc)
         finally:
             if acquired:
-                lock.release()
+                _release_flow_lock(flow.flow_id, lock)
 
     async def _persist_oauth_result_locked(
         flow: OAuthHostFlow,
@@ -1304,20 +1732,57 @@ def setup_provider_v1_routes(
     ) -> dict[str, Any]:
         if flow.status in {"complete", "failed", "cancelled", "expired"}:
             return flow.public()
+        if flow.next_attempt_at is not None:
+            now = datetime.now(timezone.utc)
+            if now < flow.next_attempt_at:
+                flow.retry_after_ms = max(0, int((flow.next_attempt_at - now).total_seconds() * 1000))
+                return flow.public()
+            flow.next_attempt_at = None
+            flow.retry_after_ms = None
+        now = datetime.now(timezone.utc)
+        if flow.expired() or (
+            flow.transient_started_at is not None
+            and (now - flow.transient_started_at).total_seconds() >= 30
+        ):
+            flow.status = "expired" if flow.expired() else "failed"
+            flow.error_code = "oauth_expired" if flow.expired() else "oauth_discovery_unavailable"
+            await _release_terminal_flow(flow, successful=False)
+            return flow.public()
         _validate_engine_flow_result(flow, result)
+        if flow.cancel_requested or flow.expired():
+            flow.status = "expired" if flow.expired() else "cancelled"
+            flow.error_code = "oauth_expired" if flow.status == "expired" else "oauth_cancelled"
+            await _release_terminal_flow(flow, successful=False)
+            return flow.public()
         status = str(result.get("status") or "failed")
+        if status not in {"pending", "running", "complete", "failed", "cancelled", "expired"}:
+            flow.status = "failed"
+            flow.error_code = "oauth_validation_failed"
+            await _release_terminal_flow(flow, successful=False)
+            return flow.public()
         if status in {"pending", "running"}:
             flow.status = status
+            flow.retry_after_ms = _result_retry_after_ms(result)
             return flow.public()
         if status != "complete":
             flow.status = status
-            flow.error_code = str(result.get("errorCode") or "oauth_exchange_failed")
+            flow.error_code = _result_error_code(result)
+            flow.retry_after_ms = None
             await _release_terminal_flow(flow, successful=False)
             return flow.public()
 
         credential = result.get("credential")
         if not isinstance(credential, Mapping):
             raise HTTPException(502, "Managed provider OAuth credential is missing")
+        credential_kind = str(credential.get("type") or "")
+        expected_auth_method = "api_key" if credential_kind == "api" else "oauth" if credential_kind == "oauth" else ""
+        if (
+            credential_kind not in flow.expected_credential_kinds
+            or result.get("credentialKind") != credential_kind
+            or result.get("authMethod") != expected_auth_method
+            or result.get("acquisitionMethod") != flow.acquisition_method
+        ):
+            raise HTTPException(502, "Managed provider OAuth result disagrees with its selected auth method")
         try:
             connection = store.get_connection(
                 owner=flow.owner,
@@ -1339,29 +1804,81 @@ def setup_provider_v1_routes(
                     owner=flow.owner,
                     account_id=flow.target_account_id,
                 )
-                if current.connection_id != flow.connection_id or current.auth_method != "oauth":
+                if current.connection_id != flow.connection_id or current.auth_method not in {"oauth", "api_key"}:
                     raise HTTPException(409, "Provider OAuth target is no longer reconnectable")
+                if current.auth_method == "api_key" and not (
+                    connection.family_id == "xiaomi" and connection.adapter_id == "mimo-native"
+                ):
+                    raise HTTPException(409, "Provider account is no longer reconnectable")
                 host_account_id = current.id
                 expected_credential_revision = int(current.credential_version) + 1
 
-            validated = await flow.engine.call(
+            recovery_remaining = 30.0
+            if flow.transient_started_at is not None:
+                recovery_remaining = max(
+                    0.0,
+                    30.0 - (datetime.now(timezone.utc) - flow.transient_started_at).total_seconds(),
+                )
+            if recovery_remaining <= 0.0:
+                flow.status = "failed"
+                flow.error_code = "oauth_discovery_unavailable"
+                await _release_terminal_flow(flow, successful=False)
+                return flow.public()
+            validated = await _flow_call(
+                flow,
                 "_openclank/provider-control/v1/account/validate",
                 _account_validation_wire(
                     connection=connection,
-                    auth_method="oauth",
+                    auth_method=expected_auth_method,
                     credential=dict(credential),
                     account_id=host_account_id,
                     credential_revision=expected_credential_revision,
+                    acquisition_method=flow.acquisition_method,
+                    credential_kind=credential_kind,
                 ),
+                min(
+                    _OAUTH_VALIDATE_TIMEOUT_SECONDS,
+                    recovery_remaining,
+                    max(0.001, (flow.expires_at - datetime.now(timezone.utc)).total_seconds()),
+                ),
+            )
+            if flow.transient_started_at is not None and (
+                datetime.now(timezone.utc) - flow.transient_started_at
+            ).total_seconds() >= 30:
+                flow.status = "failed"
+                flow.error_code = "oauth_discovery_unavailable"
+                await _release_terminal_flow(flow, successful=False)
+                return flow.public()
+            _validate_account_auth_result(
+                validated,
+                connection=connection,
+                expected_acquisition_method=flow.acquisition_method,
+                expected_credential_kind=credential_kind,
             )
             discovery = _validated_account_discovery(
                 validated,
                 account_id=host_account_id,
                 credential_revision=expected_credential_revision,
             )
+            if discovery["status"] == "reauth_required":
+                flow.status = "failed"
+                flow.error_code = "oauth_reauth_required"
+                await _release_terminal_flow(flow, successful=False)
+                return flow.public()
             if discovery["status"] == "unavailable":
-                raise HTTPException(503, "Managed provider account discovery is unavailable")
-            if str(validated.get("authMethod") or "") != "oauth":
+                if discovery.get("retryable") and _schedule_transient_retry(
+                    flow, discovery.get("retryAfterMs")
+                ):
+                    return flow.public()
+                flow.status = "failed"
+                flow.error_code = "oauth_discovery_unavailable"
+                await _release_terminal_flow(flow, successful=False)
+                return flow.public()
+            if (
+                str(validated.get("authMethod") or "") != expected_auth_method
+                or validated.get("credentialKind") != credential_kind
+                or validated.get("acquisitionMethod") != flow.acquisition_method
+            ):
                 raise HTTPException(502, "Managed provider OAuth validation changed its method")
             declared_routes = _engine_model_routes(
                 store=store,
@@ -1370,28 +1887,38 @@ def setup_provider_v1_routes(
                 idempotency_key=flow.flow_id,
                 raw_routes=validated.get("modelRoutes") or [],
             )
-            row = store.persist_account_discovery(
-                owner=flow.owner,
-                account_id=host_account_id,
-                connection_id=flow.connection_id,
-                label=flow.label,
-                auth_method=str(validated["authMethod"]),
-                auth_class=str(validated["authClass"]),
-                credentials=dict(validated["credential"]),
-                safe_identity=dict(validated.get("safeIdentity") or {}),
-                model_routes=declared_routes,
-                status=str(discovery["status"]),
-                authoritative=bool(discovery.get("authoritative")),
-                error_code=_discovery_error_code(discovery),
-                provenance=discovery.get("provenance"),
-                expected_account_revision=(
-                    None if flow.mode == "add" else flow.expected_revision
-                ),
-                expected_credential_revision=expected_credential_revision,
-            )
-            _invalidate_inventory_cache(owner=flow.owner, connection_id=flow.connection_id)
+            if flow.cancel_requested or flow.expired():
+                flow.status = "expired" if flow.expired() else "cancelled"
+                flow.error_code = "oauth_expired" if flow.status == "expired" else "oauth_cancelled"
+                await _release_terminal_flow(flow, successful=False)
+                return flow.public()
+            from contextlib import nullcontext
+            from routes.prefs_routes import PREFERENCE_LOCK
+            guarded = flow.provider_id == "anthropic" and flow.billing_lane == "subscription"
+            with PREFERENCE_LOCK if guarded else nullcontext():
+                _assert_claude_flow_policy(flow)
+                row = store.persist_account_discovery(
+                    owner=flow.owner,
+                    account_id=host_account_id,
+                    connection_id=flow.connection_id,
+                    label=flow.label,
+                    auth_method=str(validated["authMethod"]),
+                    acquisition_method=flow.acquisition_method,
+                    auth_class=str(validated["authClass"]),
+                    credentials=dict(validated["credential"]),
+                    safe_identity=dict(validated.get("safeIdentity") or {}),
+                    model_routes=declared_routes,
+                    status=str(discovery["status"]),
+                    authoritative=bool(discovery.get("authoritative")),
+                    error_code=_discovery_error_code(discovery),
+                    provenance=discovery.get("provenance"),
+                    expected_account_revision=(
+                        None if flow.mode == "add" else flow.expected_revision
+                    ),
+                    expected_credential_revision=expected_credential_revision,
+                )
         except ProviderStoreError as exc:
-            if flow.target_account_id:
+            if flow.target_account_id and not isinstance(exc, ProviderConflict):
                 try:
                     store.set_account_health(
                         owner=flow.owner,
@@ -1413,15 +1940,41 @@ def setup_provider_v1_routes(
         flow.account_public = _account_json(row)
         flow.status = "complete"
         flow.error_code = None
+        flow.retry_after_ms = None
+        flow.transient_failures = 0
+        flow.transient_started_at = None
+        flow.next_attempt_at = None
         try:
-            await flow.engine.call(
+            _invalidate_inventory_cache(owner=flow.owner, connection_id=flow.connection_id)
+        except Exception:
+            # The durable account commit already won; cache cleanup cannot
+            # downgrade the committed flow or trigger a second persistence.
+            pass
+        try:
+            await _flow_call(
+                flow,
                 "_openclank/provider-control/v1/oauth/cancel",
                 flow.completion_payload(),
+                _OAUTH_CANCEL_TIMEOUT_SECONDS,
             )
         except Exception:
             pass
         await _release_terminal_flow(flow, successful=True)
         return flow.public()
+
+    def _check_claude_start(owner: str, connection: Any) -> Optional[int]:
+        if connection.family_id != "anthropic" or connection.billing_lane != "subscription":
+            return
+        from src.openclank.provider_method_policy import require_enabled, projection, ProviderMethodPolicyError
+        try:
+            revision = require_enabled(owner)
+        except ProviderMethodPolicyError as exc:
+            raise HTTPException(409, {"code": exc.code, "message": str(exc)}) from exc
+        # The projection permits actor execution only; the bound worker must
+        # still prove the method-policy capability before OAuth IPC.
+        if not projection(owner)["managed_admission"]["available"]:
+            raise HTTPException(503, {"code": "native_gate_unavailable", "message": "Claude subscription Beta admission is not available yet"})
+        return revision
 
     async def _start_oauth_flow(
         *,
@@ -1436,8 +1989,58 @@ def setup_provider_v1_routes(
         expected_revision: Optional[int] = None,
     ) -> tuple[OAuthHostFlow, dict[str, Any], dict[str, Any]]:
         await _expire_oauth_flows()
+        method_policy_revision = _check_claude_start(owner, connection)
         try:
             engine = await control.bind(request=request, owner=owner)
+            if method_policy_revision is not None:
+                engine.require_method_policy_contract()
+                # Recheck after worker acquisition and before any engine IPC.
+                from src.openclank.provider_method_policy import require_enabled, ProviderMethodPolicyError
+                try:
+                    require_enabled(owner, method_policy_revision)
+                except ProviderMethodPolicyError as exc:
+                    raise HTTPException(409, {"code": exc.code, "message": str(exc)}) from exc
+            if method_policy_revision is not None:
+                # The pinned Claude plugin publishes both methods locally. oauth/start
+                # still validates the selected method and lane against the live plugin.
+                family = next(f for f in bundled_provider_family_catalog()["families"]
+                              if f["id"] == "anthropic")
+                declared_methods = [
+                    {"id": m["id"], "type": m["type"], "billingLanes": m["billing_lanes"],
+                     "credentialKinds": m["credential_kinds"], "acquisitionMethod": m["acquisition_method"]}
+                    for m in family["auth_methods"] if m["type"] == "oauth"
+                ]
+            else:
+                raw_catalog = await engine.call("_openclank/provider-control/v1/catalog", {})
+                declared_methods = _provider_catalog_auth_methods(raw_catalog, family_id=connection.family_id)
+            selected = next(
+                (item for item in declared_methods if item.get("id") == f"oauth:{method}"),
+                None,
+            )
+            if (
+                not isinstance(selected, Mapping)
+                or selected.get("type") != "oauth"
+                or connection.billing_lane not in selected.get("billingLanes", ())
+            ):
+                raise HTTPException(422, "Selected provider sign-in method does not support this billing lane")
+            if (
+                connection.family_id == "kilo"
+                and selected.get("acquisitionMethod") == "device"
+                and connection.normalized_url != "https://ai-gateway.kilo.ai/api/v1"
+            ):
+                raise HTTPException(
+                    422,
+                    "Kilo device sign-in requires a connection using the canonical Gateway endpoint",
+                )
+            if (
+                connection.family_id in {"llmgateway", "llmgateway-devpass"}
+                and selected.get("acquisitionMethod") == "browser"
+                and connection.normalized_url != "https://api.llmgateway.io/v1"
+            ):
+                raise HTTPException(
+                    422,
+                    "LLM Gateway browser sign-in requires a connection using the canonical API endpoint",
+                )
             flow = OAuthHostFlow.create(
                 owner=owner,
                 connection_id=connection.id,
@@ -1449,9 +2052,14 @@ def setup_provider_v1_routes(
                 engine=engine,
                 target_account_id=target_account_id,
                 expected_revision=expected_revision,
+                expected_credential_kinds=tuple(selected["credentialKinds"]),
+                acquisition_method=str(selected["acquisitionMethod"]),
+                method_policy_revision=method_policy_revision,
             )
             oauth_flows.add(flow)
-            start = await flow.engine.call(
+            flow.expiry_task = asyncio.create_task(_flow_deadline(flow))
+            start = await _flow_call(
+                flow,
                 "_openclank/provider-control/v1/oauth/start",
                 flow.start_payload(
                     redirect_uri=(
@@ -1460,6 +2068,7 @@ def setup_provider_v1_routes(
                     ),
                     inputs=_oauth_inputs(inputs),
                 ),
+                _OAUTH_START_TIMEOUT_SECONDS,
             )
             if start.get("flowID") != flow.flow_id:
                 raise HTTPException(502, "Managed provider OAuth flow ID changed")
@@ -1483,6 +2092,34 @@ def setup_provider_v1_routes(
                 await engine.release(successful=False)
             raise
 
+    @router.get("/method-policy")
+    def get_method_policy(request: Request):
+        from src.openclank.provider_method_policy import projection, ProviderMethodPolicyError
+        owner = _oauth_owner(request)
+        try:
+            return projection(owner)
+        except ProviderMethodPolicyError as exc:
+            raise HTTPException(409, {"code":exc.code, "message":str(exc)}) from exc
+
+    @router.put("/method-policy")
+    async def put_method_policy(request: Request, body: dict):
+        from src.openclank.provider_method_policy import set_policy, projection, ProviderMethodPolicyError
+        owner = _oauth_owner(request, write=True)
+        if type(body) is not dict or set(body) != {"enabled", "expected_revision"}:
+            raise HTTPException(422, "Boolean enablement and expected revision are required")
+        try:
+            policy = set_policy(owner, enabled=body["enabled"], expected_revision=body["expected_revision"])
+        except ProviderMethodPolicyError as exc:
+            raise HTTPException(409 if exc.code == "revision_conflict" else 422, {"code":exc.code, "message":str(exc)}) from exc
+        affected = [flow for flow in oauth_flows.snapshot() if flow.owner == owner and flow.provider_id == "anthropic" and flow.billing_lane == "subscription" and flow.status in {"pending", "running"}]
+        if not body["enabled"]:
+            for flow in affected:
+                flow.cancel_requested = True
+            for flow in affected:
+                await _fail_flow(flow, HTTPException(409, "Claude subscription Beta disabled"))
+        return {**projection(owner), "flow_cancellation_requested":len(affected) if not body["enabled"] else 0,
+                "active_operation_cancellation":"cooperative_next_admission"}
+
     @router.get("/families")
     def families(request: Request, response: Response):
         _provider_owner(request)
@@ -1491,9 +2128,26 @@ def setup_provider_v1_routes(
         except ProviderFamilyCatalogError as exc:
             logger.error("Bundled provider family catalogue is invalid: %s", exc)
             raise HTTPException(503, "Provider family catalogue is unavailable") from exc
-        response.headers["Cache-Control"] = (
-            f"private, max-age={int(_PROVIDER_FAMILY_BROWSER_CACHE_SECONDS)}"
-        )
+        if not _comfy_available(request):
+            result = {**result, "families": [family for family in result["families"] if family.get("id") != "comfyui"]}
+        if not callable(getattr(request.app.state, 'blender_human_service_factory', None)):
+            result = {**result, "families": [family for family in result["families"] if family.get("id") != "blender"]}
+        if not callable(getattr(request.app.state, 'trellis_human_service_factory', None)):
+            result = {**result, "families": [family for family in result["families"] if family.get("id") != "trellis"]}
+        if not callable(getattr(request.app.state, 'hunyuan_human_service_factory', None)):
+            result = {**result, "families": [family for family in result["families"] if family.get("id") != "hunyuan-shape"]}
+        if not callable(getattr(request.app.state, 'sprixen_human_service_factory', None)):
+            result = {**result, "families": [family for family in result["families"] if family.get("id") != "sprixen"]}
+        if (not callable(getattr(request.app.state, 'tripo_human_service_factory', None))
+                or getattr(request.app.state, 'provider_store', None) is not store
+                or not all(getattr(request.app.state, key, None) is not None for key in ('auth_manager','account_request_barrier','session_manager','media_artifact_store'))):
+            result = {**result, "families": [family for family in result["families"] if family.get("id") != "tripo"]}
+        if (not callable(getattr(request.app.state, 'meshy_human_service_factory', None))
+                or getattr(request.app.state, 'provider_store', None) is not store
+                or not all(getattr(request.app.state, key, None) is not None for key in ('auth_manager','account_request_barrier','session_manager','media_artifact_store'))):
+            result = {**result, "families": [family for family in result["families"] if family.get("id") != "meshy"]}
+        # Availability follows the installed app-owned service and must not be cached across its lifetime.
+        response.headers["Cache-Control"] = "private, no-store"
         response.headers["Vary"] = "Cookie, Authorization"
         return result
 
@@ -1512,6 +2166,7 @@ def setup_provider_v1_routes(
         """
 
         owner = _oauth_owner(request, write=True)
+        _require_comfy(request, family_id)
         baseline = bundled_provider_family_catalog()
         known_ids = {item["id"] for item in baseline["families"]}
         if family_id not in known_ids:
@@ -1538,6 +2193,16 @@ def setup_provider_v1_routes(
             "auth_methods_complete": True,
         }
 
+    def _engine_installation_state(request: Request) -> str:
+        verification = getattr(request.app.state, "engine_verification", None)
+        if verification is None:
+            return "unverified"
+        if verification.ok:
+            return "verified"
+        if "managed engine binary is missing" in verification.errors:
+            return "missing"
+        return "unusable"
+
     @router.get("/management-snapshot")
     def management_snapshot(request: Request, response: Response):
         """Return all nonsecret Added Models state from one DB transaction."""
@@ -1550,10 +2215,12 @@ def setup_provider_v1_routes(
             _raise_store_error(exc)
         body = {
             "schema_version": 1,
+            "engine_installation": _engine_installation_state(request),
             "connections": [
                 {
                     **_connection_json(row),
                     "account_count": int(snapshot.account_counts.get(row.id, 0)),
+                    "reauth_count": int(snapshot.reauth_counts.get(row.id, 0)),
                 }
                 for row in snapshot.connections
             ],
@@ -1593,6 +2260,7 @@ def setup_provider_v1_routes(
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     ):
         owner = _provider_owner(request, write=True)
+        _require_comfy(request, payload.family_id)
         operation = "connections.create"
         try:
             key, digest, replay = _begin_idempotent(
@@ -1618,6 +2286,14 @@ def setup_provider_v1_routes(
                     settings=payload.settings,
                 ),
             )
+            if payload.family_id == 'trellis':
+                from src.openclank.trellis_runtime import validate_declaration
+                try: validated['settings'] = validate_declaration(validated['settings'])
+                except (ValueError, TypeError, UnicodeError, KeyError) as exc: raise ProviderValidationError('TRELLIS declaration unavailable') from exc
+            if payload.family_id == 'hunyuan-shape':
+                from src.openclank.hunyuan_runtime import validate_declaration
+                try: validated['settings'] = validate_declaration(validated['settings'])
+                except (ValueError, TypeError, UnicodeError, KeyError) as exc: raise ProviderValidationError('Hunyuan declaration unavailable') from exc
             declared_routes = _engine_model_routes(
                 store=store,
                 owner=owner,
@@ -1682,6 +2358,12 @@ def setup_provider_v1_routes(
         owner = _provider_owner(request, write=True)
         expected = _if_match(if_match)
         operation = f"connections.update:{connection_id}"
+        try:
+            early_connection = store.get_connection(owner=owner, connection_id=connection_id)
+        except ProviderStoreError as exc:
+            _raise_store_error(exc)
+        if early_connection.family_id in {'blender', 'trellis', 'hunyuan-shape'}:
+            _require_comfy(request, early_connection.family_id)
         material = _request_material(payload)
         material["expected_revision"] = expected
         try:
@@ -1695,6 +2377,7 @@ def setup_provider_v1_routes(
             if replay is not None:
                 return _mutation_response(replay, replayed=True)
             current = store.get_connection(owner=owner, connection_id=connection_id)
+            _require_comfy(request, current.family_id)
             kwargs: dict[str, Any] = {}
             fields = payload.model_fields_set
             if not fields:
@@ -1703,6 +2386,8 @@ def setup_provider_v1_routes(
                 kwargs["label"] = payload.label
             if "enabled" in fields:
                 kwargs["enabled"] = payload.enabled
+            if "account_pool_policy" in fields:
+                kwargs["account_pool_policy"] = payload.account_pool_policy
             candidate_settings = (
                 payload.settings or {}
                 if "settings" in fields
@@ -1724,6 +2409,14 @@ def setup_provider_v1_routes(
                 ),
             )
             if "settings" in fields:
+                if current.family_id == 'trellis':
+                    from src.openclank.trellis_runtime import validate_declaration
+                    try: validated['settings'] = validate_declaration(validated['settings'])
+                    except (ValueError, TypeError, UnicodeError, KeyError) as exc: raise ProviderValidationError('TRELLIS declaration unavailable') from exc
+                if current.family_id == 'hunyuan-shape':
+                    from src.openclank.hunyuan_runtime import validate_declaration
+                    try: validated['settings'] = validate_declaration(validated['settings'])
+                    except (ValueError, TypeError, UnicodeError, KeyError) as exc: raise ProviderValidationError('Hunyuan declaration unavailable') from exc
                 kwargs["settings"] = validated["settings"]
             if "url" in fields:
                 kwargs["normalized_url"] = validated.get("normalizedURL")
@@ -1837,10 +2530,17 @@ def setup_provider_v1_routes(
                 payload=_account_validation_wire(
                     connection=connection,
                     auth_method="api_key",
+                    acquisition_method="manual-key",
                     credential={"type": "api", "key": api_key_value},
                     account_id=account_id,
                     credential_revision=1,
                 ),
+            )
+            _validate_account_auth_result(
+                validated,
+                connection=connection,
+                expected_acquisition_method="manual-key",
+                expected_credential_kind="api",
             )
             discovery = _validated_account_discovery(
                 validated,
@@ -1862,6 +2562,7 @@ def setup_provider_v1_routes(
                 account_id=account_id,
                 label=payload.label,
                 auth_method=str(validated["authMethod"]),
+                acquisition_method="manual-key",
                 auth_class=str(validated["authClass"]),
                 credentials=validated["credential"],
                 safe_identity=dict(validated["safeIdentity"]),
@@ -1949,10 +2650,17 @@ def setup_provider_v1_routes(
                     payload=_account_validation_wire(
                         connection=connection,
                         auth_method="api_key",
+                        acquisition_method="manual-key",
                         credential={"type": "api", "key": api_key_value},
                         account_id=current.id,
                         credential_revision=int(current.credential_version) + 1,
                     ),
+                )
+                _validate_account_auth_result(
+                    validated,
+                    connection=connection,
+                    expected_acquisition_method="manual-key",
+                    expected_credential_kind="api",
                 )
                 discovery = _validated_account_discovery(
                     validated,
@@ -1979,6 +2687,7 @@ def setup_provider_v1_routes(
                     connection_id=current.connection_id,
                     label=str(kwargs.get("label", current.label)),
                     auth_method="api_key",
+                    acquisition_method="manual-key",
                     auth_class=str(validated["authClass"]),
                     credentials=dict(kwargs["credentials"]),
                     safe_identity=dict(kwargs["safe_identity"]),
@@ -2119,12 +2828,16 @@ def setup_provider_v1_routes(
                 key_header=idempotency_key,
                 payload=_request_material(payload),
             )
+            connection = store.get_connection(owner=owner, connection_id=connection_id)
+            _check_claude_start(owner, connection)
             if replay is not None:
+                if connection.family_id == "anthropic" and connection.billing_lane == "subscription":
+                    try:
+                        replay_flow = oauth_flows.get(replay.resource_id, owner=owner)
+                    except Exception as exc:
+                        raise HTTPException(409, "Claude subscription login replay is unavailable") from exc
+                    _assert_claude_flow_policy(replay_flow)
                 return _mutation_response(replay, replayed=True)
-            connection = store.get_connection(
-                owner=owner,
-                connection_id=connection_id,
-            )
             flow, _, body = await _start_oauth_flow(
                 request=request,
                 owner=owner,
@@ -2170,20 +2883,33 @@ def setup_provider_v1_routes(
                 key_header=idempotency_key,
                 payload=material,
             )
-            if replay is not None:
-                return _mutation_response(replay, replayed=True)
             account = store.get_account(owner=owner, account_id=account_id)
+            connection = store.get_connection(owner=owner, connection_id=account.connection_id)
+            _check_claude_start(owner, connection)
+            if replay is not None:
+                if connection.family_id == "anthropic" and connection.billing_lane == "subscription":
+                    try:
+                        replay_flow = oauth_flows.get(replay.resource_id, owner=owner)
+                    except Exception as exc:
+                        raise HTTPException(409, "Claude subscription login replay is unavailable") from exc
+                    _assert_claude_flow_policy(replay_flow)
+                return _mutation_response(replay, replayed=True)
             if account.revision != expected:
                 raise ProviderRevisionConflict(
                     expected=expected,
                     current=int(account.revision),
                 )
-            if account.auth_method != "oauth":
-                raise HTTPException(422, "Only OAuth accounts can be reconnected")
             connection = store.get_connection(
                 owner=owner,
                 connection_id=account.connection_id,
             )
+            reconnectable_api = (
+                account.auth_method == "api_key"
+                and connection.family_id == "xiaomi"
+                and connection.adapter_id == "mimo-native"
+            )
+            if account.auth_method != "oauth" and not reconnectable_api:
+                raise HTTPException(422, "Only OAuth or browser-issued MiMo API accounts can be reconnected")
             flow, _, body = await _start_oauth_flow(
                 request=request,
                 owner=owner,
@@ -2210,6 +2936,16 @@ def setup_provider_v1_routes(
         except Exception as exc:
             _raise_engine_error(exc)
 
+    @router.get("/oauth/active")
+    def active_browser_login(request: Request, response: Response):
+        owner = _oauth_owner(request)
+        response.headers["Cache-Control"] = "private, no-store"
+        for flow in reversed(oauth_flows.snapshot()):
+            if (flow.owner == owner and flow.status in {"pending", "running"}
+                    and not flow.expired() and flow.public_start is not None):
+                return {"flow": flow.public()}
+        return {"flow": None}
+
     @router.get("/oauth/flows/{flow_id}")
     async def oauth_poll(flow_id: str, request: Request):
         owner = _oauth_owner(request)
@@ -2218,11 +2954,23 @@ def setup_provider_v1_routes(
             flow = oauth_flows.get(flow_id, owner=owner)
             if flow.status in {"complete", "failed", "cancelled", "expired"}:
                 return flow.public()
-            result = await flow.engine.call(
-                "_openclank/provider-control/v1/oauth/poll",
-                flow.completion_payload(),
-            )
+            try:
+                result = await _flow_call(
+                    flow,
+                    "_openclank/provider-control/v1/oauth/poll",
+                    flow.completion_payload(),
+                    _OAUTH_POLL_TIMEOUT_SECONDS,
+                )
+            except ProviderEngineTimeoutError:
+                # A missed observation does not settle the provider's exchange.
+                # The normal flow deadline still releases an unresponsive worker.
+                public = flow.public()
+                if flow.status in {"pending", "running"}:
+                    public["retry_after_ms"] = 1500
+                return public
             return await _persist_oauth_result(flow, result)
+        except (ProviderEngineControlError, ProviderEngineValidationError, HTTPException) as exc:
+            return await _fail_flow(flow, exc)
         except Exception as exc:
             _raise_engine_error(exc)
 
@@ -2259,9 +3007,8 @@ def setup_provider_v1_routes(
             if not flow.state_matches(state):
                 return _oauth_page(False, "Provider OAuth state is invalid", status_code=400)
             if error:
-                with _OAUTH_COMPLETION_LOCKS_GUARD:
-                    lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
-                acquired = await asyncio.to_thread(lock.acquire)
+                lock = await _acquire_flow_lock(flow.flow_id)
+                acquired = True
                 try:
                     if flow.status not in {"complete", "failed", "cancelled", "expired"}:
                         flow.status = "failed"
@@ -2269,11 +3016,13 @@ def setup_provider_v1_routes(
                         await _release_terminal_flow(flow, successful=False)
                 finally:
                     if acquired:
-                        lock.release()
+                        _release_flow_lock(flow.flow_id, lock)
                 return _oauth_page(False, "The provider denied login", status_code=400)
             await _complete_oauth_callback(flow, code=code)
             if flow.status == "complete":
                 return _oauth_page(True, "Your provider account is connected")
+            if flow.status in {"pending", "running"}:
+                return _oauth_page(True, "Authorization received. Return to Open Clank.")
             return _oauth_page(False, "Provider login did not complete", status_code=400)
         except HTTPException as exc:
             return _oauth_page(False, str(exc.detail), status_code=exc.status_code)
@@ -2286,14 +3035,16 @@ def setup_provider_v1_routes(
         await _expire_oauth_flows()
         try:
             flow = oauth_flows.get(flow_id, owner=owner)
-            with _OAUTH_COMPLETION_LOCKS_GUARD:
-                lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
-            acquired = await asyncio.to_thread(lock.acquire)
+            flow.cancel_requested = True
+            lock = await _acquire_flow_lock(flow.flow_id)
+            acquired = True
             try:
                 if flow.status not in {"complete", "failed", "cancelled", "expired"}:
-                    await flow.engine.call(
+                    await _flow_call(
+                        flow,
                         "_openclank/provider-control/v1/oauth/cancel",
                         flow.completion_payload(),
+                        _OAUTH_CANCEL_TIMEOUT_SECONDS,
                     )
                     flow.status = "cancelled"
                     flow.error_code = "oauth_cancelled"
@@ -2301,7 +3052,7 @@ def setup_provider_v1_routes(
                 return flow.public()
             finally:
                 if acquired:
-                    lock.release()
+                    _release_flow_lock(flow.flow_id, lock)
         except Exception as exc:
             _raise_engine_error(exc)
 
@@ -2332,38 +3083,55 @@ def setup_provider_v1_routes(
                 owner=owner,
                 connection_id=connection_id,
             )
-            validated = await control.call(
-                request=request,
-                owner=owner,
-                method="_openclank/provider-control/v1/connection/validate",
-                payload=_connection_validation_wire(
-                    family_id=connection.family_id,
-                    adapter_id=connection.adapter_id,
-                    kind=connection.kind,
-                    billing_lane=connection.billing_lane,
-                    url=connection.normalized_url,
-                    settings=dict(connection.settings or {}),
-                ),
-            )
-            declared_routes = _engine_model_routes(
-                store=store,
-                owner=owner,
-                operation=operation,
-                idempotency_key=key,
-                raw_routes=validated.get("modelRoutes") or [],
-            )
-            if not declared_routes:
-                raise HTTPException(
-                    503,
-                    "Managed provider model discovery is temporarily unavailable; existing models were preserved",
+            if connection.billing_lane == "subscription":
+                if connection.revision != expected:
+                    raise ProviderRevisionConflict(expected=expected, current=connection.revision)
+                accounts = [a for a in store.list_accounts(owner=owner, connection_id=connection.id) if a.enabled]
+                if not accounts:
+                    raise HTTPException(409, "Sign in to this provider to refresh its models")
+                statuses = await asyncio.gather(*(
+                    _refresh_inventory_account(owner=owner, account=a, connection=connection, request=request, force=True)
+                    for a in accounts
+                ))
+                if all(status == "reauth_required" for status in statuses):
+                    raise HTTPException(409, "Sign in again to refresh this provider’s models")
+                if not any(status in {"complete", "partial"} for status in statuses):
+                    raise HTTPException(503, "Provider model discovery is temporarily unavailable")
+                updated = store.get_connection(owner=owner, connection_id=connection.id)
+                model_rows = store.list_model_routes(owner=owner, connection_id=connection.id)
+            else:
+                validated = await control.call(
+                    request=request,
+                    owner=owner,
+                    method="_openclank/provider-control/v1/connection/validate",
+                    payload=_connection_validation_wire(
+                        family_id=connection.family_id,
+                        adapter_id=connection.adapter_id,
+                        kind=connection.kind,
+                        billing_lane=connection.billing_lane,
+                        url=connection.normalized_url,
+                        settings=dict(connection.settings or {}),
+                    ),
                 )
-            updated, model_rows = store.sync_model_routes(
-                owner=owner,
-                connection_id=connection.id,
-                expected_revision=expected,
-                model_routes=declared_routes,
-                entitle_all_accounts=False,
-            )
+                declared_routes = _engine_model_routes(
+                    store=store,
+                    owner=owner,
+                    operation=operation,
+                    idempotency_key=key,
+                    raw_routes=validated.get("modelRoutes") or [],
+                )
+                if not declared_routes:
+                    raise HTTPException(
+                        503,
+                        "Managed provider model discovery is temporarily unavailable; existing models were preserved",
+                    )
+                updated, model_rows = store.sync_model_routes(
+                    owner=owner,
+                    connection_id=connection.id,
+                    expected_revision=expected,
+                    model_routes=declared_routes,
+                    entitle_all_accounts=False,
+                )
             _invalidate_inventory_cache(owner=owner, connection_id=connection.id)
             body = {
                 "connection_id": updated.id,
@@ -2418,6 +3186,50 @@ def setup_provider_v1_routes(
             _raise_store_error(exc)
         response.headers["ETag"] = _etag(row.revision)
         return _model_json(row)
+
+    @router.get('/models/{model_route_id}/cross-model-policy')
+    async def get_cross_model_policy(model_route_id: str, request: Request, response: Response):
+        from src.openclank.provider_human_policy import capture_human_provider_policy, run_human_provider_policy
+        admission = capture_human_provider_policy(request, store)
+        try:
+            result = await run_human_provider_policy(admission, lambda held: store.human_cross_model_policy(held, model_route_id))
+        except ProviderValidationError as exc:
+            if str(exc) == 'cross-model profile unavailable': raise HTTPException(503, str(exc)) from None
+            _raise_store_error(exc)
+        except ProviderStoreError as exc:
+            _raise_store_error(exc)
+        except ValueError:
+            raise HTTPException(409, 'Provider policy authority changed') from None
+        response.headers['ETag'] = _etag(result['route_revision'])
+        return result
+
+    @router.put('/models/{model_route_id}/cross-model-policy')
+    async def put_cross_model_policy(model_route_id: str, request: Request, response: Response,
+                                     if_match: Optional[str] = Header(default=None, alias='If-Match')):
+        from src.openclank.provider_human_policy import capture_human_provider_policy, run_human_provider_policy
+        admission = capture_human_provider_policy(request, store)
+        revision = _if_match(if_match)
+        import json
+        chunks = []; size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > 16384: raise HTTPException(413, 'Provider policy is too large')
+            chunks.append(chunk)
+        try: policy = json.loads(b''.join(chunks).decode('utf-8'))
+        except (ValueError, UnicodeError, RecursionError): raise HTTPException(400, 'Invalid provider policy') from None
+        try:
+            result = await run_human_provider_policy(admission,
+                lambda held: store.set_human_cross_model_policy(held, model_route_id, revision, policy))
+        except ProviderValidationError as exc:
+            if str(exc) == 'cross-model profile unavailable': raise HTTPException(503, str(exc)) from None
+            _raise_store_error(exc)
+        except ProviderStoreError as exc:
+            _raise_store_error(exc)
+        except ValueError as exc:
+            if str(exc) == 'cross-model policy unavailable': raise HTTPException(422, str(exc)) from None
+            raise HTTPException(409, 'Provider policy authority changed') from None
+        response.headers['ETag'] = _etag(result['route_revision'])
+        return result
 
     @router.get("/connections/{connection_id}/eligibility")
     def connection_eligibility(connection_id: str, request: Request):
@@ -3020,8 +3832,8 @@ def setup_provider_v1_routes(
         get_privileges = getattr(auth_manager, "get_privileges", None)
         if not callable(get_privileges):
             return None
-        privileges = get_privileges(owner) or {}
-        if privileges.get("block_all_models"):
+        privileges = get_privileges(owner)
+        if not privileges or privileges.get("block_all_models"):
             return frozenset()
         raw = privileges.get("allowed_models")
         allowed = (
@@ -3042,6 +3854,14 @@ def setup_provider_v1_routes(
             provider_display_name = provider_family_display_name(route.family_id)
             capabilities = dict(route.capabilities or {})
             capabilities["chat"] = True
+            request_options = project_request_options(
+                capabilities,
+                catalog_revision=route.catalog_revision,
+                source=("account-discovery" if "reasoning_effort" in capabilities else "engine-catalog"),
+            )
+            capabilities["request_options_state"] = "supported" if request_options else "undeclared"
+            if request_options:
+                capabilities["request_options"] = request_options
             record = build_model_catalog(
                 endpoint_id=endpoint_id,
                 endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
@@ -3061,6 +3881,8 @@ def setup_provider_v1_routes(
                     "provider_family_id": route.family_id,
                     "provider_display_name": provider_display_name,
                     "operations": list(route.operations),
+                    "catalog_revision": route.catalog_revision,
+                    "option_route_id": request_option_route_id(route),
                 }
             )
             if route.shared:
@@ -3155,7 +3977,7 @@ def setup_provider_v1_routes(
         connection: Any,
         request: Request,
         force: bool = False,
-    ) -> None:
+    ) -> str:
         key = _inventory_cache_key(owner=owner, connection=connection, account=account)
         now = time.monotonic()
         with _ACCOUNT_INVENTORY_LOCK:
@@ -3166,26 +3988,38 @@ def setup_provider_v1_routes(
             and now - float(previous.get("observed_at", 0.0))
             < _ACCOUNT_INVENTORY_FRESHNESS_SECONDS
         ):
-            return
+            return str(previous["status"])
         try:
             access = store.credential_access(owner=owner, account_id=account.id)
             result = await control.call(
                 request=request,
                 owner=owner,
                 method="_openclank/provider-control/v1/account/validate",
-                payload=_account_validation_wire(
+                payload=dict(allowCredentialRefresh=True, **_account_validation_wire(
                     connection=connection,
                     auth_method=account.auth_method,
+                    acquisition_method=account.acquisition_method,
                     credential=access.credentials,
                     account_id=account.id,
                     credential_revision=int(access.credential_version),
-                ),
+                )),
             )
+            _validate_account_auth_result(result, connection=connection)
             discovery = _validated_account_discovery(
                 result,
                 account_id=account.id,
                 credential_revision=int(access.credential_version),
             )
+            revision = int(access.credential_version)
+            if result.get("credentialRefreshed") is True:
+                rotated = result["credential"]
+                if (connection.family_id != "anthropic" or connection.billing_lane != "subscription"
+                        or rotated.get("type") != "oauth" or not rotated.get("access") or not rotated.get("refresh")
+                        or (access.credentials.get("accountId") and rotated.get("accountId") != access.credentials["accountId"])):
+                    raise ProviderConflict("Invalid refreshed provider identity")
+                saved = store.replace_account_credential(owner=owner, account_id=account.id,
+                    expected_credential_version=revision, credentials=rotated)
+                revision = int(saved.credential_version)
             declared_routes = _engine_model_routes(
                 store=store,
                 owner=owner,
@@ -3201,7 +4035,7 @@ def setup_provider_v1_routes(
                 authoritative=bool(discovery.get("authoritative")),
                 error_code=_discovery_error_code(discovery),
                 provenance=discovery.get("provenance"),
-                expected_credential_revision=int(access.credential_version),
+                expected_credential_revision=revision,
             )
             with _ACCOUNT_INVENTORY_LOCK:
                 _ACCOUNT_INVENTORY_CACHE[key] = {
@@ -3209,6 +4043,7 @@ def setup_provider_v1_routes(
                     "status": str(discovery["status"]),
                     "last_good": str(discovery["status"]) == "complete",
                 }
+            return str(discovery["status"])
         except Exception as exc:
             with _ACCOUNT_INVENTORY_LOCK:
                 _ACCOUNT_INVENTORY_CACHE[key] = {
@@ -3222,6 +4057,8 @@ def setup_provider_v1_routes(
                 type(exc).__name__,
             )
 
+            return "unavailable"
+
     async def _refresh_inventory_account(
         *,
         owner: str,
@@ -3229,7 +4066,7 @@ def setup_provider_v1_routes(
         connection: Any,
         request: Request,
         force: bool = False,
-    ) -> None:
+    ) -> str:
         key = _inventory_cache_key(owner=owner, connection=connection, account=account)
         with _ACCOUNT_INVENTORY_LOCK:
             flight = _ACCOUNT_INVENTORY_FLIGHTS.get(key)
@@ -3245,7 +4082,7 @@ def setup_provider_v1_routes(
                 )
                 _ACCOUNT_INVENTORY_FLIGHTS[key] = flight
         try:
-            await asyncio.shield(flight)
+            return await asyncio.shield(flight)
         finally:
             with _ACCOUNT_INVENTORY_LOCK:
                 if _ACCOUNT_INVENTORY_FLIGHTS.get(key) is flight:
@@ -3265,8 +4102,8 @@ def setup_provider_v1_routes(
                 request=request,
                 force=force,
             )
-            for connection in store.list_connections(owner=owner)
-            for account in store.list_accounts(owner=owner, connection_id=connection.id)
+            for connection in store.list_connections(owner=owner) if connection.enabled
+            for account in store.list_accounts(owner=owner, connection_id=connection.id) if account.enabled
         ]
         await asyncio.gather(*tasks)
 
@@ -3280,11 +4117,8 @@ def setup_provider_v1_routes(
         del background
         owner = _chat_owner(request)
         try:
-            await _refresh_inventory_on_open(
-                owner=owner,
-                request=request,
-                force=bool(refresh),
-            )
+            if refresh:
+                await _refresh_inventory_on_open(owner=owner, request=request, force=True)
             own_routes, shared_routes = list_chat_routes(
                 owner,
                 provider_store=store,
