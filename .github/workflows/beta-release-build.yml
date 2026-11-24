@@ -40,6 +40,7 @@ jobs:
             bun_sha256: f473bfe2df73ee770548c93dd5d380aea7120c218ec2aa1afdd0bbba7bf18c47
     defaults:
       run:
+        working-directory: clank-code
         shell: pwsh
     env:
       CARGO_BUILD_JOBS: '2'
@@ -49,6 +50,7 @@ jobs:
       EMOJI_RELEASE_TAG: ${{ inputs.emoji_release_tag || 'v1.0.2-beta.1-artwork-compact' }}
     steps:
       - name: Preserve real vendored symlinks before checkout
+        working-directory: .
         run: |
           git config --global core.symlinks true
           if ($LASTEXITCODE -ne 0) { throw 'Runner cannot enable the source symlink checkout contract.' }
@@ -271,9 +273,9 @@ jobs:
         with:
           name: Unqualified-portable-${{ matrix.target }}
           path: |
-            dist/Open-Clank-*-${{ matrix.target }}.zip
-            dist/Open-Clank-*-${{ matrix.target }}.zip.sha256
-            dist/portable-zip-${{ matrix.target }}.json
+            clank-code/dist/Open-Clank-*-${{ matrix.target }}.zip
+            clank-code/dist/Open-Clank-*-${{ matrix.target }}.zip.sha256
+            clank-code/dist/portable-zip-${{ matrix.target }}.json
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
@@ -281,14 +283,14 @@ jobs:
         with:
           name: Open-Clank-${{ matrix.target }}
           path: |
-            dist/Open-Clank-*-${{ matrix.target }}.zip
-            dist/Open-Clank-*-${{ matrix.target }}.zip.sha256
-            dist/qualification-${{ matrix.target }}/
-            dist/portable-zip-${{ matrix.target }}.json
-            dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.exe
-            dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.exe.sha256
-            dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.provenance.json
-            dist/installer-qualification-${{ matrix.target }}/
+            clank-code/dist/Open-Clank-*-${{ matrix.target }}.zip
+            clank-code/dist/Open-Clank-*-${{ matrix.target }}.zip.sha256
+            clank-code/dist/qualification-${{ matrix.target }}/
+            clank-code/dist/portable-zip-${{ matrix.target }}.json
+            clank-code/dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.exe
+            clank-code/dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.exe.sha256
+            clank-code/dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.provenance.json
+            clank-code/dist/installer-qualification-${{ matrix.target }}/
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

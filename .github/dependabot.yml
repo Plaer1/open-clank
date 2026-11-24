@@ -12,7 +12,7 @@ version: 2
 updates:
   # Python dependencies (requirements.txt + requirements-optional.txt).
   - package-ecosystem: pip
-    directory: "/"
+    directory: "/clank-code"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -22,7 +22,7 @@ updates:
 
   # Frontend / tooling npm packages (package.json).
   - package-ecosystem: npm
-    directory: "/"
+    directory: "/clank-code"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -42,7 +42,7 @@ updates:
 
   # The Docker base image in the Dockerfile.
   - package-ecosystem: docker
-    directory: "/"
+    directory: "/clank-code"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

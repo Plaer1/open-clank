@@ -65,6 +65,7 @@ jobs:
           python-version: '3.12'
 
       - name: Run pip-audit on requirements
+        working-directory: clank-code
         run: |
           set -euo pipefail
           pip install pip-audit==2.10.0

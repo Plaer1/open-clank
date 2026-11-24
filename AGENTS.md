@@ -28,16 +28,16 @@ Agents need owner authorization to change their governing rules. Executable chec
 - Keep the private .clanker/ workspace and historical reference directories out of Git, including force-added files and submodules. (in ./*)
 - Declared reference lifecycle records canonize durable provenance outside .clanker/references/ and use active, deferred, or retired state. (in ./.clanker/robonotes/references/lifecycle-*.md)
   ↳ Deferred material stays focused and resumable; active worktrees remain permitted; retired records prove their reference path is gone.
-- First-party runtime and build surfaces must not depend on reference payloads in .clanker/references/ or legacy .references/. (in ./src/openclank/**, ./routes/**, ./services/**, ./scripts/**, ./config/**, ./packages/**/src/**, ./package.json, ./pyproject.toml, ./setup.py, ./requirements*.txt, ./Dockerfile, ./docker-compose*.yml, ./*.plist)
+- First-party runtime and build surfaces must not depend on reference payloads in .clanker/references/ or legacy .references/. (in ./clank-code/src/openclank/**, ./clank-code/routes/**, ./clank-code/services/**, ./clank-code/scripts/**, ./clank-code/config/**, ./clank-code/packages/**/src/**, ./clank-code/package.json, ./clank-code/pyproject.toml, ./clank-code/setup.py, ./clank-code/requirements*.txt, ./clank-code/Dockerfile, ./clank-code/docker-compose*.yml, ./clank-code/*.plist)
   ↳ Reference material is temporary study input, never a runtime, build, or durable-evidence authority.
 - Process confinement is the OS boundary — no in-app sandbox broker or process-confinement gate. (in ./*)
   ↳ Compare the staged source against Git’s empty tree. A forbidden identifier or a failed scan blocks the commit.
 - Keep new Open Clank commits free of Claude co-author, generated-with and session trailers. Preserve original upstream author history. (in ./*)
   ↳ The two exclusions are the published Beta 2 ancestry and the immutable public MiMo import. First-party commits on merged branches are checked too.
-- No credentials in first-party code. (in ./src/*, ./routes/*, ./services/*, ./scripts/*, ./config/*) _(warn)_
-- Record glue and Memery design changes in the relevant private metaplan or robonotes. (in ./src/openclank/**, ./native/memery/**, ./src/memery*.py, ./mcp_servers/**)
+- No credentials in first-party code. (in ./clank-code/src/*, ./clank-code/routes/*, ./clank-code/services/*, ./clank-code/scripts/*, ./clank-code/config/*) _(warn)_
+- Record glue and Memery design changes in the relevant private metaplan or robonotes. (in ./clank-code/src/openclank/**, ./clank-code/native/memery/**, ./clank-code/src/memery*.py, ./clank-code/mcp_servers/**)
   ↳ Keep design evidence in the ignored .clanker/ workspace. The Git index cannot attest to private note updates.
-- Canvas backgrounds retain one running owner when an unchanged pattern is reapplied. (in ./static/js/theme.js, ./static/js/graphics/**, ./tests/theme_background_owner.mjs)
+- Canvas backgrounds retain one running owner when an unchanged pattern is reapplied. (in ./clank-code/static/js/theme.js, ./clank-code/static/js/graphics/**, ./clank-code/tests/theme_background_owner.mjs)
   ↳ Reapplying a live pattern must retain its actual canvas and scheduler. Exercise the public theme entry point in a disposable browser.
 - Retired plans, Clanker artifacts and explicitly archived material live in .clanker/archive/; preserve their workspace-relative structure and link to replacements when known. (in ./.clanker/archive/*)
   ↳ Archive deliberately; preserve provenance and do not delete old material automatically.
@@ -52,6 +52,8 @@ policy worker; explicit local checks/hooks execute repository-owned checks.
 # My Clanker workflow for Codex
 
 These are the owner’s standing working agreements for this repository. Use repository-relative paths. The generated Hex contract above remains the canonical project-policy digest.
+
+The application lives in `clank-code/`. Run source setup, development and packaging commands from that directory. GitHub configuration and the private `.clanker/` workspace are rooted at the Git checkout.
 
 ## Audit, plan, then implement
 

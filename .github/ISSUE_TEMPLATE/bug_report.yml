@@ -12,7 +12,7 @@ body:
 
         For security vulnerabilities, **do not open a public issue** —
         use [GitHub Security Advisories](https://github.com/Plaer1/open-clank/security/advisories/new)
-        and read [SECURITY.md](https://github.com/Plaer1/open-clank/blob/main/SECURITY.md) first.
+        and read [SECURITY.md](https://github.com/Plaer1/open-clank/blob/main/.github/SECURITY.md) first.
 
   - type: checkboxes
     id: prerequisites
@@ -21,7 +21,7 @@ body:
       options:
         - label: I searched [open issues](https://github.com/Plaer1/open-clank/issues?q=is%3Aissue+is%3Aopen) and [discussions](https://github.com/Plaer1/open-clank/discussions) and did not find an existing report of this bug.
           required: true
-        - label: This is **not** a security vulnerability. (Vulnerabilities go to [GitHub Security Advisories](https://github.com/Plaer1/open-clank/security/advisories/new) — see [SECURITY.md](https://github.com/Plaer1/open-clank/blob/main/SECURITY.md).)
+        - label: This is **not** a security vulnerability. (Vulnerabilities go to [GitHub Security Advisories](https://github.com/Plaer1/open-clank/security/advisories/new) — see [SECURITY.md](https://github.com/Plaer1/open-clank/blob/main/.github/SECURITY.md).)
           required: true
         - label: I am running the latest code from `main` and the bug still reproduces after `git pull`.
           required: true

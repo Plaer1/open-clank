@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 180
     defaults:
       run:
+        working-directory: clank-code
         shell: bash
     env:
       CARGO_BUILD_JOBS: '2'
@@ -109,11 +110,11 @@ jobs:
         with:
           name: Open-Clank-macos-arm64-build-unqualified
           path: |
-            dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg
-            dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg.sha256
-            dist/macos-provenance/build-provenance.json
-            dist/macos-provenance/package-manifest.json
-            dist/macos-provenance/build-identity.json
+            clank-code/dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg
+            clank-code/dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg.sha256
+            clank-code/dist/macos-provenance/build-provenance.json
+            clank-code/dist/macos-provenance/package-manifest.json
+            clank-code/dist/macos-provenance/build-identity.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -137,10 +138,10 @@ jobs:
         with:
           name: Open-Clank-macos-arm64
           path: |
-            dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg
-            dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg.sha256
-            dist/macos-provenance/*.json
-            dist/macos-qualification/receipt.json
+            clank-code/dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg
+            clank-code/dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg.sha256
+            clank-code/dist/macos-provenance/*.json
+            clank-code/dist/macos-qualification/receipt.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

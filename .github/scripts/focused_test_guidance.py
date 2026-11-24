@@ -34,6 +34,7 @@ def changed_paths_from_merge_base(base_sha: str, head_sha: str) -> list[str]:
             "git",
             "diff",
             "--name-only",
+            "--relative",
             "--diff-filter=ACMRT",
             "-z",
             os.fsdecode(merge_base),

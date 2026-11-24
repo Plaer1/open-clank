@@ -16,6 +16,9 @@ concurrency:
 
 jobs:
   history-service:
+    defaults:
+      run:
+        working-directory: clank-code
     name: Packaged history service (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -54,6 +57,7 @@ jobs:
             runner: windows-latest
     defaults:
       run:
+        working-directory: clank-code
         shell: bash
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -94,6 +98,9 @@ jobs:
           if-no-files-found: error
 
   windows-portable:
+    defaults:
+      run:
+        working-directory: clank-code
     name: Windows x64 portable server and TUI
     needs: managed-engine
     runs-on: windows-latest
@@ -109,7 +116,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: openclank-engine-windows-x64
-          path: libexec/openclank/engine
+          path: clank-code/libexec/openclank/engine
       - name: Build checksummed Windows portable payload
         shell: pwsh
         run: ./build-windows-portable.ps1 -UseExistingVerifiedEngine
@@ -160,7 +167,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: openclank-windows-x64-portable
-          path: dist/openclank
+          path: clank-code/dist/openclank
           if-no-files-found: error
           retention-days: 14
 
@@ -264,6 +271,9 @@ jobs:
           if-no-files-found: error
 
   focused-test-guidance:
+    defaults:
+      run:
+        working-directory: clank-code
     name: Focused test guidance (report-only)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -309,7 +319,7 @@ jobs:
             report_unavailable "The pull request head commit is unavailable locally."
           fi
 
-          if ! python3 .github/scripts/focused_test_guidance.py \
+          if ! python3 ../.github/scripts/focused_test_guidance.py \
             --base-sha "$BASE_SHA" \
             --head-sha "$HEAD_SHA" > "$report_file"; then
             report_unavailable "The focused test guidance helper could not produce a report."
@@ -318,6 +328,9 @@ jobs:
           publish_report
 
   python-syntax:
+    defaults:
+      run:
+        working-directory: clank-code
     name: Python syntax (compileall)
     runs-on: ubuntu-latest
     steps:
@@ -331,6 +344,9 @@ jobs:
       - run: python -m compileall -q app.py core routes src services scripts tests
 
   node-syntax:
+    defaults:
+      run:
+        working-directory: clank-code
     name: JS syntax (node --check)
     runs-on: ubuntu-latest
     steps:
@@ -349,6 +365,9 @@ jobs:
           done
 
   python-tests:
+    defaults:
+      run:
+        working-directory: clank-code
     name: Python tests (pytest)
     runs-on: ubuntu-latest
     # Informational for now: the suite has known flaky / environment-dependent
@@ -381,7 +400,7 @@ jobs:
           fi
           # List all changed files; if every file matches docs/markdown patterns, skip pytest.
           changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
-          non_docs=$(echo "$changed" | grep -Ev '^(docs/|.*\.md$|\.github/[^/]+\.md$)' || true)
+          non_docs=$(echo "$changed" | grep -Ev '^(clank-code/docs/|.*\.md$|\.github/[^/]+\.md$)' || true)
           if [ -z "$non_docs" ]; then
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
             echo "Docs-only change detected — skipping pytest."
@@ -394,6 +413,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: clank-code/requirements.txt
       - run: pip install -r requirements.txt
         if: steps.docs-check.outputs.docs_only != 'true'
       - run: mkdir -p data  # sqlite DB lives at ./data/app.db

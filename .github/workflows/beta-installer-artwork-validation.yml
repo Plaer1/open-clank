@@ -37,6 +37,7 @@ jobs:
             architecture: arm64
     defaults:
       run:
+        working-directory: clank-code
         shell: pwsh
     env:
       BUILD_RUN_ID: ${{ inputs.build_run_id || '' }}
@@ -104,8 +105,8 @@ jobs:
         with:
           name: Installer-artwork-${{ matrix.target }}
           path: |
-            dist/artifact-admission-${{ matrix.target }}.json
-            dist/artwork-qualification-${{ matrix.target }}/receipt.json
+            clank-code/dist/artifact-admission-${{ matrix.target }}.json
+            clank-code/dist/artwork-qualification-${{ matrix.target }}/receipt.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

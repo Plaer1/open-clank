@@ -1,0 +1,15 @@
+# Copy to /etc/systemd/system/open-clank.service and replace placeholders.
+[Unit]
+Description=Open Clank local AI workspace
+After=network.target
+
+[Service]
+Type=simple
+User=YOURUSER
+WorkingDirectory=/home/YOURUSER/open-clank/clank-code
+ExecStart=/usr/bin/python3 -I src/source_layout.py run scripts/openclank_bootstrap.py serve --port 7777 --host 127.0.0.1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

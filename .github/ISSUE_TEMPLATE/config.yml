@@ -10,4 +10,4 @@ contact_links:
 
   - name: Security Vulnerability
     url: https://github.com/Plaer1/open-clank/security/advisories/new
-    about: Report vulnerabilities privately via GitHub Security Advisories — never as a public issue. Read SECURITY.md before reporting.
+    about: Report vulnerabilities privately via GitHub Security Advisories — never as a public issue. Read the repository security policy before reporting.
