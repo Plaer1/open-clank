@@ -69,21 +69,33 @@ def compose_general_hexes(inputs, *, owner_id, workspace=None, budget_chars=2400
         seen.add(identity)
         decisions.append(decision)
     from src.openclank.planning_defaults import PLANNING_DEFAULT_ID, PLANNING_DEFAULT_VERSION, PLANNING_DEFAULT_BODY
-    product = dict(id=PLANNING_DEFAULT_ID, version=PLANNING_DEFAULT_VERSION, body=PLANNING_DEFAULT_BODY)
-    block = f"Product default: planning [version {PLANNING_DEFAULT_VERSION}]\n{PLANNING_DEFAULT_BODY}"
-    cost = len(block) + (2 if rendered else 0)
-    if any(entry['hex_id'] == PLANNING_DEFAULT_ID for entry in inputs['entries']):
-        product['state'] = 'deduplicated'
-    elif used + cost > budget_chars:
-        product['state'] = 'omitted-for-budget'
-    else:
-        product['state'] = 'included'
-        rendered.append(block)
-        used += cost
+    product_defaults = []
+    saved_ids = {entry['hex_id'] for entry in inputs['entries']}
+    for identifier, label, version, body in (
+        (PLANNING_DEFAULT_ID, 'planning', PLANNING_DEFAULT_VERSION, PLANNING_DEFAULT_BODY),
+        ('openclank.product.guidance-review', 'lasting guidance', 1,
+         'Follow the current Hex while working. Propose revising or retiring it only when evidence '
+         'shows its underlying requirement has changed. Cite the old rule, what changed and the '
+         'supporting sources. A blocked task, a failing check or convenience alone is insufficient. '
+         'Keep the current rule in force until the owner approves the change. Workspace contracts '
+         'and executable trust require their own authorization.'),
+    ):
+        product = dict(id=identifier, version=version, body=body)
+        product_defaults.append(product)
+        block = f"Product default: {label} [version {version}]\n{body}"
+        cost = len(block) + (2 if rendered else 0)
+        if identifier in saved_ids:
+            product['state'] = 'deduplicated'
+        elif used + cost > budget_chars:
+            product['state'] = 'omitted-for-budget'
+        else:
+            product['state'] = 'included'
+            rendered.append(block)
+            used += cost
     snapshot = dict(schema='open-clank.hex-composition.v1', owner_id=owner_id,
-                    context_tags=contexts, workspace=workspace, entries=decisions, product_defaults=[product],
+                    context_tags=contexts, workspace=workspace, entries=decisions, product_defaults=product_defaults,
                     budget=dict(limit_chars=budget_chars, used_chars=used,
-                                omitted_count=sum(item['state']=='omitted-for-budget' for item in decisions) + int(product['state']=='omitted-for-budget')),
+                                omitted_count=sum(item['state']=='omitted-for-budget' for item in decisions + product_defaults)),
                     defaults='\n\n'.join(rendered),
                     precedence='Current user instructions and workspace authority take precedence over saved General defaults; saved General defaults take precedence over product defaults.')
     snapshot['snapshot_hash'] = hashlib.sha256(_json(snapshot).encode()).hexdigest()

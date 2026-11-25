@@ -21,6 +21,10 @@ Hexes was inspired by [Henxels](https://github.com/benquemax/henxels) v0.11.1; s
 
 Logging design studies: [llm_intercept](https://github.com/mlech26l/llm_intercept/tree/f5c5a11aa3d257c94c42699f79803375c7140dc4), Mathias Lechner 2025 MIT; [llm.log](https://github.com/lanesket/llm.log/tree/9b292ebee2f613e8a0a61df9713bd0aebc645914), lanesket 2025 MIT. The current source/ledger does not establish substantial copied code from either. They are credited as study inputs, not distributed interception/CA tooling. If a future path-level copying record establishes incorporation, retain its exact applicable notice then.
 
+### PLwC Personal
+
+Mirco Hoedt’s PLwC Personal 1.0.0 was a design reference for Memery. The reference checkout stays outside the application and installer. The current PLwC-owned material carries the PolyForm Internal Use License 1.0.0, with additional permissions for personal use and redistribution of complete, unmodified official releases. Earlier Apache-2.0 material has its own terms. [Inspected source](https://github.com/mhoedt-ai/PLwC-Personal/tree/c8f21edfdfeda9b9dba71733a6ca066c8f95f531) · [Upstream licensing and permissions](https://github.com/mhoedt-ai/PLwC-Personal/blob/c8f21edfdfeda9b9dba71733a6ca066c8f95f531/LICENSING.md)
+
 ## Google artwork and catalogue
 
 [Local bundle manifest](../static/vendor/google-emoji/bundle-manifest.json): Noto source `e20cbc2bbec1926686be9f9bee7d1d2cfa1fea0e`; Xavier Salazar Kitchen catalogue source `062ffca53643d36946336cdc2c7655e2576f0a42`. Local `static/vendor/google-emoji/emoji-assets.pack` and associated index serve acquired artwork, with no runtime CDN fallback. 146,983 of 147,000 Kitchen combinations are available; 17 recorded upstream 404 exceptions mean `complete:false`. Google source acquisition records 4,038, resolvable runtime identities 1,924, and sampler 1,916 are different counts.

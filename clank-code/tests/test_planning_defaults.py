@@ -13,6 +13,11 @@ def test_planning_default_is_versioned_budgeted_and_subordinate():
     assert '.clanker/futures/' in result['defaults'] and '.clanker/robonotes/' in result['defaults']
     short = compose_general_hexes(inputs, owner_id='alice', budget_chars=100)
     assert short['product_defaults'][0]['state'] == 'omitted-for-budget'
+    assert short['budget']['omitted_count'] == 2
+    guidance = result['product_defaults'][1]
+    assert guidance['state'] == 'included' and guidance['id'] == 'openclank.product.guidance-review'
+    assert guidance['body'] in defaults_instruction(result)
+    assert 'owner approves' in guidance['body']
     assert short['budget']['used_chars'] <= 100 and short['snapshot_hash'] != result['snapshot_hash']
     duplicate = compose_general_hexes({'entries':[dict(saved, hex_id=PLANNING_DEFAULT_ID)], 'workspace_tags':None, 'task_tags':None}, owner_id='alice')
     assert duplicate['product_defaults'][0]['state'] == 'deduplicated'

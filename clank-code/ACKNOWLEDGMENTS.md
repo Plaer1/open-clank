@@ -15,6 +15,8 @@ Open Clank is distributed under **AGPL-3.0-or-later**; see [LICENSE](../LICENSE)
 
 ## Inspiration and studies
 
+Thanks to Mirco Hoedt for **[PLwC Personal](https://github.com/mhoedt-ai/PLwC-Personal)**. Its workflow for reviewing observations before they change an assistant’s lasting behavior informed our Memery design study. [Study and upstream license](licenses/BUNDLED-COMPONENTS.md#plwc-personal)
+
 **[AgentsView](https://github.com/kenn-io/agentsview)**, Kenn Software LLC, informed Usage/activity interface layout and workflows. **[llm_intercept](https://github.com/mlech26l/llm_intercept)**, Mathias Lechner, and **[llm.log](https://github.com/lanesket/llm.log)**, lanesket, informed logging design studies. These credits describe the established study/design relationship; current records do not establish a substantial copied-source ledger or shipment of their proxy/telemetry products. Immutable inspected pins and distinctions are in the [study record](licenses/BUNDLED-COMPONENTS.md#adapted-code-and-design-studies).
 
 Open Clank Hexes was inspired by **[Henxels](https://github.com/benquemax/henxels)**. The first-party implementation has no runtime Henxels dependency; its [existing MIT notice](licenses/henxels-MIT-LICENSE.txt) is preserved.
