@@ -83,6 +83,17 @@ def test_only_current_owned_live_memory_can_support_guidance(context):
             svc.propose("alice", **dict(req, evidence_ids=[key]))
 
 
+def test_erasure_revokes_evidence_before_review(context):
+    path, svc, req = context
+    draft = svc.propose("alice", **req)
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO fm_v2_privacy_erasure_context VALUES(?, ?, NULL, ?, ?, ?)",
+                   ("alice", "request-1", "alice", "remove", "1"))
+    assert svc.evidence("alice", "repo", account_id="a1")["items"] == []
+    with pytest.raises(GeneralHexConflict):
+        svc.decide("alice", "a1", draft["draft_id"], accept=True)
+
+
 def test_pending_decision_revalidates_parent_and_target(context):
     _, svc, req = context
     parent = svc.repo.create("alice", title="Parent", body="Original")

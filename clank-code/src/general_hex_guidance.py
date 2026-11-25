@@ -176,7 +176,7 @@ class GeneralHexGuidance:
         old, selected = _guidance(before), _guidance(restored)
         if not selected and not old:
             return
-        if not selected or selected.get("action") != "revise":
+        if old.get("action") == "retire" or not selected or selected.get("action") != "revise":
             raise GeneralHexConflict("Create a fresh guidance proposal with current evidence to reactivate this Hex")
         row = conn.execute("""
             SELECT payload_json FROM fm_general_hex_exchange_drafts
